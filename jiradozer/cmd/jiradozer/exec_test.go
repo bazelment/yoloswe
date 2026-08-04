@@ -831,9 +831,9 @@ func TestAPanicIsWorthAnAlertButACancellationIsNot(t *testing.T) {
 	assert.Len(t, sent(), 1, "only the crash was worth an alert")
 }
 
-// alertingExecRun returns a factory for execRuns whose Slack webhook points at
-// a recording test server, plus a reader for the alert texts it received.
-func alertingExecRun(t *testing.T) (newRun func() *execRun, sent func() []string) {
+// recordingSlackServer stands in for the Slack webhook, returning its URL and a
+// reader for the alert texts it received.
+func recordingSlackServer(t *testing.T) (webhookURL string, sent func() []string) {
 	t.Helper()
 
 	var mu sync.Mutex
@@ -849,20 +849,29 @@ func alertingExecRun(t *testing.T) (newRun func() *execRun, sent func() []string
 	}))
 	t.Cleanup(srv.Close)
 
+	return srv.URL, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), posted...)
+	}
+}
+
+// alertingExecRun returns a factory for execRuns whose Slack webhook points at
+// a recording test server, plus a reader for the alert texts it received.
+func alertingExecRun(t *testing.T) (newRun func() *execRun, sent func() []string) {
+	t.Helper()
+
+	url, sent := recordingSlackServer(t)
+
 	newRun = func() *execRun {
 		cfg := &jiradozer.Config{}
-		cfg.Notify.SlackWebhook = srv.URL
+		cfg.Notify.SlackWebhook = url
 		return &execRun{
 			app:    execTestApp(t),
 			logger: testMainLogger(t),
 			cfg:    cfg,
 			args:   execArgs{issueID: "INF-1"},
 		}
-	}
-	sent = func() []string {
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]string(nil), posted...)
 	}
 	return newRun, sent
 }
@@ -909,6 +918,46 @@ func TestACrashedRunAlertsOnItsWayOut(t *testing.T) {
 	}
 	require.NoError(t, clean(newRun()))
 	assert.Len(t, sent(), 2, "a run that worked has nothing to report")
+}
+
+// The hook being right is only half of it: runExec has to actually install it.
+//
+// TestACrashedRunAlertsOnItsWayOut defers reportExit the way runExec does, so it
+// covers the hook but not the one line that arms it — deleting
+// `defer x.reportExit(...)` from runExec left every test green. This drives the
+// real runExec, so the alert can only arrive if that line is there.
+//
+// The run is failed by the cheapest honest means: a github tracker asked for an
+// issue that is not owner/repo#N. That passes config validation — which runs
+// before the defer is installed and so cannot be the failure under test — and
+// is then rejected by createTracker with no network and no worktree, at the
+// first step after the defer is installed.
+func TestRunExecInstallsTheFailureReporter(t *testing.T) {
+	// HOME scopes the lease dir, WT_ROOT the worktree root, so this test's
+	// lease cannot collide with a sibling's. Both preclude t.Parallel().
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("WT_ROOT", t.TempDir())
+	t.Setenv(jiradozer.OrchestratedEnvVar, "")
+
+	webhookURL, sent := recordingSlackServer(t)
+
+	// The real starter config, so this fails where the test says it does rather
+	// than in validation over a hand-rolled stub missing a required field.
+	cfgPath := writeRunConfig(t, "github", t.TempDir())
+	cfg, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath,
+		append(cfg, []byte("\nnotify:\n  slack_webhook: "+webhookURL+"\n")...), 0o600))
+
+	err = runExec(context.Background(), execTestApp(t), execArgs{
+		issueID:    "INF-77",
+		repo:       "kernel",
+		configPath: cfgPath,
+	})
+	require.ErrorContains(t, err, "github tracker", "the run has to fail for there to be anything to report")
+
+	require.Len(t, sent(), 1, "a fleet worker's failure reaches the operator through this alert or not at all")
+	assert.Contains(t, sent()[0], "INF-77", "an anonymous alert cannot be acted on")
 }
 
 // These are methods on a half-built execRun, and Append on a nil RunLog panics
