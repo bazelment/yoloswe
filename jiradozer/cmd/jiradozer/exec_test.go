@@ -634,6 +634,49 @@ func TestTheTerminalEventRecordsWhyAFailedRunEnded(t *testing.T) {
 		"the reason belongs in the trail, or a reader must open meta.json to learn it")
 }
 
+// A Ctrl-C'd or timed-out run is NOT a failed one — a dispatcher retries the
+// first and escalates the second — and the terminal event is where that
+// distinction is recorded.
+//
+// It is worth pinning separately because the workflow's own phase trail
+// disagrees: jiradozer.Workflow routes a cancelled step through fail(), which
+// transitions to StepFailed, so the last `phase` event on a cancelled run reads
+// `failed`. Both records are accurate about different things — the phase names
+// the state machine's step, the terminal event names the run's outcome — and
+// the terminal event is the one a reader classifies a run by. Collapsing that
+// disagreement means giving the state machine a reachable StepCancelled, which
+// is a change to state.go's transition table, not to the trail.
+func TestTheTerminalEventTellsACancelledRunFromAFailedOne(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	for _, tc := range []struct {
+		err  error
+		name string
+	}{
+		{context.Canceled, "interrupted"},
+		{context.DeadlineExceeded, "timed out"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x := newFinishTestRun(t)
+			// Wrapped, because that is how the error reaches finish(): the
+			// workflow annotates it on the way out, and a classifier using ==
+			// instead of errors.Is would silently record every one of these as
+			// a failure.
+			x.finish(fmt.Errorf("build step: %w", tc.err))
+
+			events, err := jiradozer.LoadEvents(x.rl.Dir())
+			require.NoError(t, err)
+			require.NotEmpty(t, events, "a cancelled run still owes a reader a terminal event")
+
+			finished := firstEventOfKind(t, events, jiradozer.EventRunFinished)
+			assert.Equal(t, string(jiradozer.RunStateCancelled), finished.Detail,
+				"a cancelled run must not be recorded as a failed one")
+			assert.Contains(t, finished.Fields["error"], tc.err.Error(),
+				"the reason it stopped belongs in the trail either way")
+		})
+	}
+}
+
 func TestTheEventTrailRecordsEveryPhaseTheRunPassedThrough(t *testing.T) {
 	events := runToCompletionAndLoadTrail(t)
 
