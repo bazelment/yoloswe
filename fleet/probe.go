@@ -38,7 +38,7 @@ func (t Tool) probeScript() string {
 	if leaseDir == "" {
 		leaseDir = "~/." + t.Name + "/leases"
 	}
-	// `gh auth status` is asked because EVERY task needs it: the worker runs
+	// GitHub auth is probed because EVERY task needs it: the worker runs
 	// `wt new`, which refuses without GitHub auth, so a box with an expired
 	// token fails a second after dispatch, every time, having done nothing.
 	// Observed 2026-08-05: the token expired fleet-wide, dispatch still scored
@@ -79,7 +79,7 @@ echo "__END__"`
 // an absent binary stay distinguishable.
 const binMissing = "MISSING"
 
-// ghAuthMissing is what the probe prints when `gh auth status` fails. Like
+// ghAuthMissing is what the probe prints when `gh api user` fails. Like
 // binMissing it is a sentinel, so "the section was truncated" and "auth is
 // broken" never collapse into the same reading.
 const ghAuthMissing = "NOAUTH"
@@ -125,7 +125,7 @@ type HostHealth struct {
 	TmuxWindows int
 	Cores       int
 	HasBinary   bool
-	// HasGitHubAuth reports that `gh auth status` succeeded. A box without it
+	// HasGitHubAuth reports that `gh api user` succeeded. A box without it
 	// can reach the network and hold the binary and still complete no task.
 	HasGitHubAuth bool
 	Reachable     bool

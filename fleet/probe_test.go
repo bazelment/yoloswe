@@ -26,7 +26,7 @@ func (h HostHealth) EligibleT(opts ProbeOptions) (bool, string) {
 // The blobs below are REAL probe output captured from the live fleet, not
 // hand-written fixtures. They carry the exact quirks the parser must handle.
 //
-// The __GH__ section was added later than these captures: `gh auth status`
+// The __GH__ section was added later than these captures: `gh api user`
 // gates eligibility because a box with an expired token completes no task. A
 // blob WITHOUT that section leaves HasGitHubAuth false and the host ineligible
 // — fail closed, since "the probe did not say" and "auth is broken" must not
