@@ -26,6 +26,12 @@ func (h HostHealth) EligibleT(opts ProbeOptions) (bool, string) {
 // The blobs below are REAL probe output captured from the live fleet, not
 // hand-written fixtures. They carry the exact quirks the parser must handle.
 //
+// The __GH__ section was added later than these captures: `gh auth status`
+// gates eligibility because a box with an expired token completes no task. A
+// blob WITHOUT that section leaves HasGitHubAuth false and the host ineligible
+// — fail closed, since "the probe did not say" and "auth is broken" must not
+// resolve to "probably fine".
+//
 // The __LEASES__ section is now a list of HELD lock names rather than a count,
 // so a box holding nothing emits an empty section. The captured blobs said "0";
 // left unchanged they parsed as one lease named "0", which is what caught the
@@ -42,6 +48,8 @@ Filesystem     1024-blocks      Used Available Capacity Mounted on
 __TMUX__
 31
 __LEASES__
+__GH__
+ok
 __BIN__
 /home/ubuntu/bin/prdozer
 __END__
@@ -63,6 +71,8 @@ Filesystem     1024-blocks     Used Available Capacity Mounted on
 __TMUX__
 15
 __LEASES__
+__GH__
+ok
 __BIN__
 /home/ming/bin/prdozer
 __END__
@@ -79,6 +89,8 @@ Filesystem     1024-blocks      Used Available Capacity Mounted on
 __TMUX__
 38
 __LEASES__
+__GH__
+ok
 __BIN__
 MISSING
 __END__
@@ -155,6 +167,8 @@ Filesystem     1024-blocks     Used Available Capacity Mounted on
 __TMUX__
 0
 __LEASES__
+__GH__
+ok
 __BIN__
 /usr/bin/prdozer
 __END__
@@ -208,8 +222,8 @@ func TestPickHost_ExcludesAndExplains(t *testing.T) {
 	t.Parallel()
 	opts := ProbeOptions{MinDiskGB: 40, MaxLeasesPerHost: 1}
 	hosts := []HostHealth{
-		{Host: "full", Reachable: true, HasBinary: true, Cores: 8, Load1: 0.1, DiskFreeGB: 5},
-		{Host: "leased", Reachable: true, HasBinary: true, Cores: 8, Load1: 0.2, DiskFreeGB: 500, HeldLeases: []string{"o-r-1.lock"}},
+		{Host: "full", Reachable: true, HasBinary: true, HasGitHubAuth: true, Cores: 8, Load1: 0.1, DiskFreeGB: 5},
+		{Host: "leased", Reachable: true, HasBinary: true, HasGitHubAuth: true, Cores: 8, Load1: 0.2, DiskFreeGB: 500, HeldLeases: []string{"o-r-1.lock"}},
 		{Host: "down", Reachable: false, Err: fmt.Errorf("connection refused")},
 	}
 	_, err := PickHostT(hosts, opts)
@@ -221,7 +235,7 @@ func TestPickHost_ExcludesAndExplains(t *testing.T) {
 	assert.Contains(t, err.Error(), "leases")
 	assert.Contains(t, err.Error(), "down")
 
-	good := HostHealth{Host: "good", Reachable: true, HasBinary: true, Cores: 8, Load1: 0.3, DiskFreeGB: 500}
+	good := HostHealth{Host: "good", Reachable: true, HasBinary: true, HasGitHubAuth: true, Cores: 8, Load1: 0.3, DiskFreeGB: 500}
 	picked, err := PickHostT(append(hosts, good), opts)
 	require.NoError(t, err)
 	assert.Equal(t, "good", picked.Host)
@@ -355,7 +369,7 @@ func TestProbeCommand_CountsHeldLeasesNotFiles(t *testing.T) {
 func TestEligible_StaleLeaseFilesDoNotExcludeAHost(t *testing.T) {
 	t.Parallel()
 	h := HostHealth{
-		Host: "box", Reachable: true, HasBinary: true,
+		Host: "box", Reachable: true, HasBinary: true, HasGitHubAuth: true,
 		Cores: 8, Load1: 1.0, DiskFreeGB: 100,
 		// Files may exist on disk; none are HELD, so none count.
 		HeldLeases: nil,
@@ -381,6 +395,8 @@ __TMUX__
 __LEASES__
 INF-1234.lock
 acme-app-42.lock
+__GH__
+ok
 __BIN__
 /home/ubuntu/bin/jiradozer
 __END__
@@ -420,4 +436,90 @@ func TestProbeScript_TestsLocksRatherThanListingFiles(t *testing.T) {
 	assert.Contains(t, script, "command -v prdozer")
 	assert.Contains(t, script, `$HOME/bin/prdozer`,
 		"~/bin is not on a non-interactive ssh PATH, so the fallback must be explicit")
+}
+
+// A box can be reachable, hold the binary, and have disk and free leases — and
+// still complete zero tasks, because every task runs `wt new`, which refuses
+// without GitHub auth. Observed 2026-08-05: the token expired fleet-wide,
+// dispatch scored all three boxes eligible, and the run died one second later
+// at worktree creation.
+func TestEligible_ExcludesAHostWhoseGitHubAuthIsDead(t *testing.T) {
+	t.Parallel()
+	h := HostHealth{
+		Host: "box", Reachable: true, HasBinary: true,
+		Cores: 8, Load1: 0.1, DiskFreeGB: 500,
+		HasGitHubAuth: false,
+	}
+	ok, reason := h.EligibleT(ProbeOptions{MinDiskGB: 40, MaxLeasesPerHost: 2})
+	assert.False(t, ok, "a box that cannot authenticate must not be dispatched to")
+	assert.Contains(t, reason, "GitHub auth")
+	assert.Contains(t, reason, "gh auth login", "the reason must say how to fix it")
+
+	h.HasGitHubAuth = true
+	ok, reason = h.EligibleT(ProbeOptions{MinDiskGB: 40, MaxLeasesPerHost: 2})
+	assert.True(t, ok, "an authenticated box is eligible: %s", reason)
+}
+
+func TestParseProbe_ReadsGitHubAuth(t *testing.T) {
+	t.Parallel()
+	base := func(gh string) string {
+		return `__NPROC__
+8
+__LOAD__
+0.5 0.4 0.3 1/100 1
+__DF__
+Filesystem     1024-blocks      Used Available Capacity Mounted on
+/dev/root        506771172 345397612 161357176      69% /
+__TMUX__
+1
+__LEASES__
+__GH__
+` + gh + `
+__BIN__
+/home/ubuntu/bin/jiradozer
+__END__
+`
+	}
+	var ok, broken, absent HostHealth
+	require.NoError(t, parseProbe(base("ok"), &ok))
+	assert.True(t, ok.HasGitHubAuth)
+
+	require.NoError(t, parseProbe(base(ghAuthMissing), &broken))
+	assert.False(t, broken.HasGitHubAuth, "NOAUTH must not read as authenticated")
+
+	// A probe from an older binary has no __GH__ section at all. That is not
+	// evidence of working auth, so it must fail closed exactly like NOAUTH —
+	// otherwise a half-upgraded fleet silently loses the check.
+	old := `__NPROC__
+8
+__LOAD__
+0.5 0.4 0.3 1/100 1
+__DF__
+Filesystem     1024-blocks      Used Available Capacity Mounted on
+/dev/root        506771172 345397612 161357176      69% /
+__TMUX__
+1
+__LEASES__
+__BIN__
+/home/ubuntu/bin/jiradozer
+__END__
+`
+	require.NoError(t, parseProbe(old, &absent))
+	assert.False(t, absent.HasGitHubAuth, "a missing section must not read as authenticated")
+}
+
+// The check must VALIDATE the token, not merely find a config file — a
+// local-only check would have passed on 2026-08-05 with an expired token.
+func TestProbeScript_ValidatesTheGitHubToken(t *testing.T) {
+	t.Parallel()
+	script := testTool.probeScript()
+	assert.Contains(t, script, "gh api user", "the check must exercise API authorization")
+	assert.Contains(t, script, ghAuthMissing)
+	assert.NotContains(t, script, "hosts.yml",
+		"checking for the config file would pass with an expired token in it")
+	// `gh auth status` PRINTS that a token is invalid and still EXITS 0
+	// (verified 2026-08-06), so keying off its exit code reports every box
+	// healthy. That was this fix's first version, and its unit tests passed.
+	assert.NotContains(t, script, "gh auth status",
+		"gh auth status exits 0 on an invalid token; its exit code is not an answer")
 }

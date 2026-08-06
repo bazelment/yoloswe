@@ -9,6 +9,11 @@ import "context"
 
 // awsProbeBlob is a healthy box with prdozer installed and nothing held.
 //
+// The __GH__ section reports whether `gh api user` succeeds. Eligibility gates
+// on it because every task shells out to gh, and a box with an expired token
+// fails a second after dispatch. A fixture without it leaves the host
+// ineligible — fail closed by design.
+//
 // The __LEASES__ section lists HELD lock names, so an idle box emits nothing
 // there. It is not a count — a count cannot answer "which host is running
 // this task".
@@ -22,6 +27,8 @@ Filesystem     1024-blocks      Used Available Capacity Mounted on
 __TMUX__
 3
 __LEASES__
+__GH__
+ok
 __BIN__
 /home/ubuntu/bin/prdozer
 __END__

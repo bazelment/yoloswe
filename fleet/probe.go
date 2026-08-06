@@ -38,6 +38,26 @@ func (t Tool) probeScript() string {
 	if leaseDir == "" {
 		leaseDir = "~/." + t.Name + "/leases"
 	}
+	// `gh auth status` is asked because EVERY task needs it: the worker runs
+	// `wt new`, which refuses without GitHub auth, so a box with an expired
+	// token fails a second after dispatch, every time, having done nothing.
+	// Observed 2026-08-05: the token expired fleet-wide, dispatch still scored
+	// all three boxes "eligible", and the run died at worktree creation. The
+	// probe was checking that the tool EXISTS, not that it can work — the same
+	// blind spot that let a ~/.local/bin install read as "not on PATH".
+	//
+	// It goes through `gh api user`, NOT `gh auth status`. Verified 2026-08-06
+	// against a deliberately corrupted token: `gh auth status` PRINTS "The
+	// token is invalid" and still EXITS 0, so `gh auth status && echo ok`
+	// reports a healthy box no matter what. The first version of this fix did
+	// exactly that and passed its unit tests, because those feed the parser
+	// synthetic values and never run the command.
+	//
+	// `gh api user` exercises the capability the worker actually needs —
+	// authorization against the API, which is what `wt new` fails on — and its
+	// exit code means something. It costs no extra round trip: `gh auth status`
+	// was already calling the network and discarding the answer.
+	//
 	// Held locks are tested with `flock -n`, never counted as files. Release
 	// deliberately leaves the file behind — removing it races a process that
 	// just opened it and is about to flock — so a file count is a count of
@@ -50,6 +70,7 @@ echo "__DF__"; df -P "$HOME"; df -P /mnt/nvme 2>/dev/null
 echo "__TMUX__"; tmux list-windows -a 2>/dev/null | wc -l
 echo "__LEASES__"; { cd ` + leaseDir + ` 2>/dev/null && for f in *.lock; do [ -e "$f" ] || continue; flock -n "$f" true 2>/dev/null || echo "$f"; done; } 2>/dev/null || true
 echo "__BIN__"; ` + t.resolveBinExpr() + `
+echo "__GH__"; gh api user >/dev/null 2>&1 && echo ok || echo ` + ghAuthMissing + `
 echo "__END__"`
 }
 
@@ -57,6 +78,11 @@ echo "__END__"`
 // found. It is a sentinel rather than an empty line so a truncated section and
 // an absent binary stay distinguishable.
 const binMissing = "MISSING"
+
+// ghAuthMissing is what the probe prints when `gh auth status` fails. Like
+// binMissing it is a sentinel, so "the section was truncated" and "auth is
+// broken" never collapse into the same reading.
+const ghAuthMissing = "NOAUTH"
 
 // resolveBinExpr renders the shell expression that prints the tool's absolute
 // path on a target box, or binMissing.
@@ -99,8 +125,11 @@ type HostHealth struct {
 	TmuxWindows int
 	Cores       int
 	HasBinary   bool
-	Reachable   bool
-	IsSelf      bool
+	// HasGitHubAuth reports that `gh auth status` succeeded. A box without it
+	// can reach the network and hold the binary and still complete no task.
+	HasGitHubAuth bool
+	Reachable     bool
+	IsSelf        bool
 }
 
 // Leases counts the leases actually HELD on this host.
@@ -299,6 +328,9 @@ func parseProbe(raw string, hh *HostHealth) error {
 			hh.HeldLeases = append(hh.HeldLeases, t)
 		}
 	}
+	if v := firstLine(sections["GH"]); v == "ok" {
+		hh.HasGitHubAuth = true
+	}
 	if v := firstLine(sections["BIN"]); v != "" && v != binMissing {
 		hh.HasBinary = true
 		hh.BinaryPath = v
@@ -373,6 +405,8 @@ func (h HostHealth) Eligible(tool Tool, opts ProbeOptions) (bool, string) {
 		return false, "unreachable"
 	case !h.HasBinary:
 		return false, tool.Name + " not on PATH"
+	case !h.HasGitHubAuth:
+		return false, "GitHub auth invalid (run `gh auth login` there)"
 	case h.UsableDiskGB() < opts.MinDiskGB:
 		return false, fmt.Sprintf("only %dGB free (need %dGB)", h.UsableDiskGB(), opts.MinDiskGB)
 	case h.Leases() >= maxLeases:
