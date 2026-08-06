@@ -1,5 +1,8 @@
 This is a Bazel-managed monorepo with a collection of multiple Go projects.
 
+## Dev Setup
+After cloning, run `scripts/setup.sh` to initialize submodules and build tools (requires [bun](https://bun.sh/)).
+
 ## Build and Test
 Always use `bazel build //...` and `bazel test //...` to build and test the project.
 Never use `go build` or `go test` directly.
