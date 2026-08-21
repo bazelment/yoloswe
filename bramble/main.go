@@ -238,15 +238,18 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	sessionManager := session.NewManagerWithConfig(initialConfig)
 	defer sessionManager.Close()
 
-	// Discover repos (other than the initial one) that have live tmux sessions,
-	// so the TUI can auto-open them and fully re-adopt their sessions. This is
-	// a read-only probe: a dead session in an unopened repo is left alone for
-	// that repo's own manager to reconcile, which is what lets a subagent that
-	// finished while bramble was down still report to its parent.
-	resumeRepos := session.ReposWithLiveTmuxSessions(store, repoName)
+	// Discover repos (other than the initial one) still holding a non-terminal
+	// tmux session, so the TUI can auto-open them and fully re-adopt those
+	// sessions. This is a read-only probe: it never marks a dead session
+	// completed, because that transition is what carries a subagent's report to
+	// its parent and there is no courier here to hear it. That is also why a
+	// repo whose window already died is returned — its manager still owes the
+	// transition.
+	resumeRepos := session.ReposNeedingTmuxReconcile(store, repoName, sharedManagerConfig.SessionMode)
 
-	// The scan above only finds repos with a live tmux window, so without the
-	// handoff a repo the user had opened but left idle would disappear.
+	// The scan above only finds repos with a session still to reconcile, so
+	// without the handoff a repo the user had opened but left idle would
+	// disappear.
 	resumeRepos = mergeResumeRepos(resumeRepos, restored, repoName)
 
 	// Start the AI task router using the best available provider.
@@ -565,18 +568,12 @@ func startIPCServer(registry *session.SessionRegistry, sockPath, wtRoot, repoNam
 		// A parent pins the repo more precisely than the process-wide default:
 		// a subagent belongs with its parent, which may live under a different
 		// manager than the repo bramble was launched on.
-		parent, hasParent := resolveParentSession(registry, params.ParentSessionID)
-		if params.ParentSessionID != "" && !hasParent {
-			return nil, fmt.Errorf("parent session %q not found", params.ParentSessionID)
+		parent, hasParent, err := parentForSpawn(registry, params)
+		if err != nil {
+			return nil, err
 		}
 
-		targetRepo := params.RepoName
-		if targetRepo == "" && hasParent {
-			targetRepo = parent.RepoName
-		}
-		if targetRepo == "" {
-			targetRepo = repoName // fall back to initial repo
-		}
+		targetRepo := repoForSpawn(params, parent, hasParent, repoName)
 
 		mgr, ok := registry.FindManagerByRepo(targetRepo)
 		if !ok {
@@ -747,6 +744,49 @@ func resolveParentSession(registry *session.SessionRegistry, id string) (session
 	return info, true
 }
 
+// repoForSpawn picks the repo a new session is filed under, and so which
+// manager starts it.
+//
+// A resolved parent outranks a repo the client only inferred from its cwd: a
+// subagent belongs with its parent, the parent knows its own repo exactly, and
+// an agent's cwd is merely wherever its worktree happens to be. A --repo the
+// caller typed outranks both — and if that then contradicts an inherited
+// worktree, handleNewSession refuses rather than guessing.
+func repoForSpawn(params *ipc.NewSessionParams, parent session.SessionInfo, hasParent bool, fallbackRepo string) string {
+	repo := params.RepoName
+	if hasParent && (repo == "" || params.RepoInferred) && parent.RepoName != "" {
+		repo = parent.RepoName
+	}
+	if repo == "" {
+		repo = fallbackRepo
+	}
+	return repo
+}
+
+// parentForSpawn resolves the parent a new session should be filed under, and
+// clears params.ParentSessionID when there is none — so the rest of the spawn
+// sees one answer rather than an ID nothing can be looked up by.
+//
+// An explicitly named parent that does not resolve is an error: the caller
+// asked for that session and got something else. An inherited one is only a
+// default, and a default that cannot be honored must not cost the caller a
+// spawn that would have worked without it — the registry sees only sessions
+// adopted into an open manager, so an agent whose own repo is not open in this
+// bramble would otherwise lose the ability to start any session at all.
+func parentForSpawn(registry *session.SessionRegistry, params *ipc.NewSessionParams) (session.SessionInfo, bool, error) {
+	parent, ok := resolveParentSession(registry, params.ParentSessionID)
+	if ok || params.ParentSessionID == "" {
+		return parent, ok, nil
+	}
+	if !params.ParentInherited {
+		return session.SessionInfo{}, false, fmt.Errorf("parent session %q not found", params.ParentSessionID)
+	}
+	slog.Warn("spawning a top-level session: inherited parent is not adopted in this bramble; pass --no-parent to silence this",
+		"parent_session_id", params.ParentSessionID)
+	params.ParentSessionID = ""
+	return session.SessionInfo{}, false, nil
+}
+
 func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoName string, params *ipc.NewSessionParams, parent session.SessionInfo) (*ipc.NewSessionResult, error) {
 	worktreePath := params.WorktreePath
 
@@ -765,6 +805,20 @@ func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoNam
 	// still explicit (--create-worktree -b), so this never surprises a caller
 	// who wanted isolation.
 	if worktreePath == "" && parent.WorktreePath != "" {
+		// A child living in its parent's tree must be filed under its parent's
+		// repo. repoName picked mgr, and a --repo naming a different one would
+		// register the session — and persist its history — under a repo whose
+		// worktree it is not in.
+		//
+		// Only reachable for a repo the caller actually typed: an inferred one
+		// has already lost to the parent's when the manager was chosen, so a
+		// mismatch here means two explicit, incompatible requests and there is no
+		// safe guess between them.
+		if parent.RepoName != "" && parent.RepoName != repoName {
+			return nil, fmt.Errorf("cannot spawn into repo %q while inheriting parent %s's worktree in repo %q: "+
+				"drop --repo, or give the subagent a tree of its own with --worktree or --create-worktree --branch",
+				repoName, parent.ID, parent.RepoName)
+		}
 		worktreePath = parent.WorktreePath
 	}
 
@@ -885,13 +939,17 @@ var newSessionCmd = &cobra.Command{
 		repo, _ := cmd.Flags().GetString("repo")
 		parentFlag, _ := cmd.Flags().GetString("parent")
 		noParent, _ := cmd.Flags().GetBool("no-parent")
-		parent := resolveParentSessionID(parentFlag, os.Getenv(session.SessionIDEnvVar), noParent)
+		parent, parentInherited := resolveParentSessionID(parentFlag, os.Getenv(session.SessionIDEnvVar), noParent)
 
-		// Auto-detect repo from cwd if not explicitly specified.
+		// Auto-detect repo from cwd if not explicitly specified. Flagged as
+		// inferred: an agent's cwd is wherever its worktree is, which is not the
+		// same claim as a --repo the caller typed.
+		repoInferred := false
 		if repo == "" {
 			if wtRoot, err := resolveWTRoot(); err == nil {
 				cwd, _ := os.Getwd()
 				repo, _ = detectRepoFromPath(cwd, wtRoot)
+				repoInferred = repo != ""
 			}
 		}
 
@@ -908,7 +966,9 @@ var newSessionCmd = &cobra.Command{
 				Model:           model,
 				Goal:            goal,
 				RepoName:        repo,
+				RepoInferred:    repoInferred,
 				ParentSessionID: parent,
+				ParentInherited: parentInherited,
 			},
 		})
 		if err != nil {
@@ -944,14 +1004,18 @@ func resolveOwnSessionID(flagID, envID string) (string, error) {
 // terminal is simply top-level — so this returns "" rather than an error.
 // --no-parent is the escape hatch for spawning a top-level session from inside
 // a bramble session, which would otherwise always inherit a parent.
-func resolveParentSessionID(flagID, envID string, noParent bool) string {
+//
+// inherited says the ID came from the environment rather than the flag. The
+// server needs that distinction to decide whether an unresolvable parent is an
+// error or just a default it should drop — see ipc.NewSessionParams.
+func resolveParentSessionID(flagID, envID string, noParent bool) (id string, inherited bool) {
 	if noParent {
-		return ""
+		return "", false
 	}
 	if flagID != "" {
-		return flagID
+		return flagID, false
 	}
-	return envID
+	return envID, envID != ""
 }
 
 var notifyCmd = &cobra.Command{
@@ -1128,7 +1192,7 @@ var listSessionsCmd = &cobra.Command{
 			parentFlag, _ := cmd.Flags().GetString("parent")
 			// --parent= (empty) means "my own children", so a caller inside a
 			// bramble session need not echo its own ID back.
-			parent := resolveParentSessionID(parentFlag, os.Getenv(session.SessionIDEnvVar), false)
+			parent, _ := resolveParentSessionID(parentFlag, os.Getenv(session.SessionIDEnvVar), false)
 			if parent == "" {
 				return fmt.Errorf("--parent needs an ID, or $%s must be set", session.SessionIDEnvVar)
 			}
@@ -1226,7 +1290,7 @@ the recipient should read as part of its own work.`,
 			return err
 		}
 		if result.Queued {
-			fmt.Printf("queued for %s; it will be delivered when that session goes idle\n", sessionID)
+			fmt.Printf("queued for %s; it will be delivered when that session can take it\n", sessionID)
 		}
 		return nil
 	},

@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"sync"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
@@ -187,26 +188,90 @@ func (r *delegatorRunner) CLISessionID() string {
 // would block the emitting session, and closing before unsubscribing would let
 // a concurrent emit send on a closed channel.
 func watchStateChanges(ctx context.Context, manager *Manager, fn func(SessionStateChangeEvent)) func() {
-	stateCh := make(chan SessionStateChangeEvent, 100)
-	unsub := manager.SubscribeStateChanges(stateCh)
-
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case evt, ok := <-stateCh:
-				if !ok {
-					return
-				}
-				fn(evt)
-			}
-		}
-	}()
+	pump := newEventPump()
+	go pump.run(ctx, fn)
+	unsub := manager.SubscribeStateChanges(pump.push)
 
 	return func() {
 		unsub()
-		close(stateCh)
+		pump.close()
+	}
+}
+
+// eventPump is the queue every state-change listener sits behind: the manager
+// pushes onto it from the goroutine making the transition, and one worker hands
+// events to the listener in arrival order.
+//
+// It grows rather than blocking or dropping, which is the whole reason it
+// exists. A fixed buffer drops under exactly the load that matters — several
+// subagents finishing at once, where the lost event is a completion that never
+// happens again — and a tight burst fills any buffer before the reading
+// goroutine is scheduled even once, so the size is not the fix. Blocking
+// instead would stall the status transition behind whatever the listener is
+// doing, which here is a pane capture and a file write.
+type eventPump struct {
+	cond    *sync.Cond
+	pending []SessionStateChangeEvent
+	closed  bool
+}
+
+func newEventPump() *eventPump {
+	return &eventPump{cond: sync.NewCond(&sync.Mutex{})}
+}
+
+// push queues an event. It takes a mutex and appends, and never waits on the
+// worker — this runs on the goroutine that changed the session's status.
+func (p *eventPump) push(evt SessionStateChangeEvent) {
+	p.cond.L.Lock()
+	defer p.cond.L.Unlock()
+	if p.closed {
+		return
+	}
+	p.pending = append(p.pending, evt)
+	p.cond.Signal()
+}
+
+// close stops the worker once it has handled what it already holds.
+func (p *eventPump) close() {
+	p.cond.L.Lock()
+	defer p.cond.L.Unlock()
+	p.closed = true
+	p.cond.Broadcast()
+}
+
+// run hands queued events to fn until the pump is closed and drained, or the
+// context ends.
+//
+// Ordering: push may run before this goroutine is scheduled at all, which is
+// why the wait is on a condition over the queue rather than a signal — an
+// event queued before the worker starts is still handled, in order.
+func (p *eventPump) run(ctx context.Context, fn func(SessionStateChangeEvent)) {
+	// A cancelled context has to wake the worker: it is asleep on the condvar,
+	// which knows nothing about ctx.
+	stop := context.AfterFunc(ctx, p.close)
+	defer stop()
+
+	for {
+		p.cond.L.Lock()
+		for len(p.pending) == 0 && !p.closed {
+			p.cond.Wait()
+		}
+		batch := p.pending
+		p.pending = nil
+		done := p.closed && len(batch) == 0
+		p.cond.L.Unlock()
+
+		if done {
+			return
+		}
+		// Indexed: SessionStateChangeEvent carries a whole SessionInfo, and a
+		// range copy of it per event is pure waste on the path a fan-out floods.
+		for i := range batch {
+			if ctx.Err() != nil {
+				return
+			}
+			fn(batch[i])
+		}
 	}
 }
 

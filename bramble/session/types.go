@@ -147,7 +147,13 @@ type Session struct {
 	WorktreePath    string
 	Status          SessionStatus
 	Type            SessionType
-	mu              sync.RWMutex
+	// turnEpoch counts the turns this session has been started on: it is bumped
+	// every time the session enters StatusRunning. It exists so a watcher that
+	// only ever samples the session — the pane-idle probe, which is all a
+	// hookless backend has — can tell one turn's observations from the next
+	// one's. Guarded by mu.
+	turnEpoch uint64
+	mu        sync.RWMutex
 }
 
 // SessionProgress tracks real-time progress.

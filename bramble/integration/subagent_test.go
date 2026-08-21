@@ -20,6 +20,11 @@ import (
 // model ID, and any gpt-* model means "run the codex binary".
 const stubModel = "gpt-5.5"
 
+// stubCursorModel routes to the cursor stand-in the same way: a composer-*
+// model means "run the binary named agent". It is the hookless backend, so a
+// session on it is only ever seen to finish by reading its pane.
+const stubCursorModel = "composer-3"
+
 // reportMarker is the prefix of every report bramble generates for a parent.
 const reportMarker = "[bramble] subagent"
 
@@ -256,6 +261,50 @@ func TestSubagentIsReportedOnceNotOnEveryStateChange(t *testing.T) {
 	require.Never(t, func() bool {
 		return h.countInPane(parent, deliveredReportMarker) > 1
 	}, 8*time.Second, pollInterval, "the parent was told more than once about one turn")
+}
+
+// TestReadoptedCursorSubagentIsStillSeenToFinish is the restart path, and the
+// only test that runs the monitor loop a re-adopted session gets.
+//
+// A session bramble started is watched by runSession's loop; one bramble
+// re-adopts after a restart is watched by monitorTrackedTmuxWindow instead.
+// Cursor has no completion hook — its idleness is read off its pane — so a
+// re-adopt loop that does not poll the pane leaves the subagent running
+// forever: nothing drains its queued mail and its parent is never told it
+// finished. That gap shipped once and is invisible to every unit test, because
+// neither loop can be driven without a tmux server.
+//
+// The second turn is what matters. The first proves the child works before the
+// restart; the assertion is on the one after it, which only the re-adopted
+// loop can observe.
+func TestReadoptedCursorSubagentIsStillSeenToFinish(t *testing.T) {
+	h := newHarness(t, true)
+
+	parent := h.spawn("builder", stubModel, "", "PARENT-BOOT")
+	h.awaitStatus(parent, "idle")
+
+	child := h.spawn("codetalk", stubCursorModel, string(parent), "BEFORE-RESTART")
+	dumpPanesOnFailure(t, h, parent, child)
+
+	// Before the restart the child is watched by the loop that started it.
+	h.awaitPane(child, "CURSOR-STUB-REPLY BEFORE-RESTART", "the cursor stand-in never answered")
+	h.awaitStatus(child, "idle")
+
+	h.restart()
+
+	// The re-adopted child takes another turn. Queued rather than typed
+	// directly: this has to go through the courier, which is what needs the
+	// child to be seen going idle again.
+	h.awaitStatus(child, "idle")
+	_, err := h.send(parent, child, "AFTER-RESTART", true)
+	require.NoError(t, err)
+	h.awaitPane(child, "CURSOR-STUB-REPLY AFTER-RESTART", "the message never reached the re-adopted child")
+
+	// The whole point: the re-adopted loop must see the pane go quiet again.
+	// Without it the child stays "running" for the rest of the process.
+	h.awaitPaneCond(child, func() bool {
+		return h.status(child) == "idle"
+	}, "the re-adopted cursor session was never seen to finish its turn — nothing polls its pane")
 }
 
 // --- live backends -----------------------------------------------------------

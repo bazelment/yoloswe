@@ -27,7 +27,7 @@ const staleRestartStateAge = time.Hour
 //
 // It is deliberately small. Sessions, their tmux windows, and their output all
 // survive on their own — the session store plus Manager.ReconcileTmuxSessions
-// and session.ReposWithLiveTmuxSessions re-adopt them at startup. What those
+// and session.ReposNeedingTmuxReconcile re-adopt them at startup. What those
 // cannot reconstruct is which repo the user was looking at (repos with no live
 // tmux session are invisible to that scan) and where the cursor was.
 type RestartState struct {

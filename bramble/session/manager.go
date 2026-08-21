@@ -442,10 +442,10 @@ type Manager struct { //nolint:govet // fieldalignment: readability over packing
 	mu              sync.RWMutex
 	outputsMu       sync.RWMutex
 	followUpChansMu sync.RWMutex
-	// stateSubscribers receive copies of SessionStateChangeEvent. Used by
-	// delegator sessions to watch child state changes without consuming the
-	// primary events channel.
-	stateSubscribers   []chan<- SessionStateChangeEvent
+	// stateSubscribers receive copies of SessionStateChangeEvent, without
+	// consuming the primary events channel. The delegator's child watcher and
+	// the subagent courier are both built on it.
+	stateSubscribers   []*stateSink
 	stateSubscribersMu sync.Mutex
 	worktreeDirtyMu    sync.RWMutex
 	onWorktreeDirty    func(repoName, worktreePath string)
@@ -486,18 +486,29 @@ func NewManager() *Manager {
 	return NewManagerWithConfig(ManagerConfig{})
 }
 
+// ResolveSessionMode turns a configured mode into the one a manager will
+// actually run in: auto (and unset) means tmux exactly when there is a tmux to
+// be inside, and an explicit mode is taken at its word.
+//
+// Exported because callers outside a manager have to make the same call — the
+// startup probe decides which repos to open on it, and deciding differently
+// from the manager that then has to reconcile them is how repos get opened for
+// sessions nothing will ever touch.
+func ResolveSessionMode(mode SessionMode) SessionMode {
+	if mode != SessionModeAuto && mode != "" {
+		return mode
+	}
+	if IsInsideTmux() && IsTmuxAvailable() {
+		return SessionModeTmux
+	}
+	return SessionModeTUI
+}
+
 // NewManagerWithConfig creates a new session manager with the given config.
 func NewManagerWithConfig(config ManagerConfig) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Resolve auto mode
-	if config.SessionMode == SessionModeAuto || config.SessionMode == "" {
-		if IsInsideTmux() && IsTmuxAvailable() {
-			config.SessionMode = SessionModeTmux
-		} else {
-			config.SessionMode = SessionModeTUI
-		}
-	}
+	config.SessionMode = ResolveSessionMode(config.SessionMode)
 
 	return &Manager{
 		config:        config,
@@ -555,18 +566,36 @@ func (m *Manager) DisableTmuxExitOnQuit() {
 	m.config.TmuxExitOnQuit = false
 }
 
-// SubscribeStateChanges registers a channel to receive copies of all
-// SessionStateChangeEvent emissions. Returns an unsubscribe function.
-func (m *Manager) SubscribeStateChanges(ch chan<- SessionStateChangeEvent) func() {
+// stateSink is one registered listener. A struct rather than the bare function
+// so unsubscribing can find it again: functions are not comparable.
+type stateSink struct {
+	fn func(SessionStateChangeEvent)
+}
+
+// SubscribeStateChanges registers a sink for every SessionStateChangeEvent and
+// returns an unsubscribe function.
+//
+// A function called on the emitting goroutine, not a channel. A channel here
+// has to be bounded, and a bounded channel leaves only two behaviours, both
+// wrong: drop, which loses the completion a subagent's report rides and which
+// the emitter cannot even detect — a tight burst fills the buffer before the
+// reading goroutine is scheduled once — or block, which stalls the status
+// transition that produced the event, behind arbitrary listener work.
+//
+// So the sink must not block. One that has slow work to do queues internally,
+// where the queue can grow; watchStateChanges is that, and every listener in
+// this package goes through it.
+func (m *Manager) SubscribeStateChanges(fn func(SessionStateChangeEvent)) func() {
+	sink := &stateSink{fn: fn}
 	m.stateSubscribersMu.Lock()
-	m.stateSubscribers = append(m.stateSubscribers, ch)
+	m.stateSubscribers = append(m.stateSubscribers, sink)
 	m.stateSubscribersMu.Unlock()
 
 	return func() {
 		m.stateSubscribersMu.Lock()
 		defer m.stateSubscribersMu.Unlock()
 		for i, sub := range m.stateSubscribers {
-			if sub == ch {
+			if sub == sink {
 				m.stateSubscribers = slices.Delete(m.stateSubscribers, i, i+1)
 				break
 			}
@@ -728,76 +757,80 @@ func (m *Manager) ReconcileTmuxSessions() error {
 	return nil
 }
 
-// ReposWithLiveTmuxSessions returns repo names (other than activeRepo) that
-// have at least one tmux session whose window is still alive. Repos that only
-// have dead tmux sessions are cleaned up in place (marked completed).
-// The caller can use the returned list to auto-open those repos so their
-// sessions are fully re-adopted by a Manager.
-func ReposWithLiveTmuxSessions(store *Store, activeRepo string) []string {
+// ReposNeedingTmuxReconcile returns repo names (other than activeRepo) holding
+// a tmux session that has not reached a terminal state. The caller auto-opens
+// them so a Manager re-adopts their sessions.
+//
+// Deliberately not "repos with a *live* window". This probe has no manager and
+// so no courier, which is why it mutates nothing: marking a dead session
+// completed here would consume the one transition its parent's report depends
+// on with nothing listening. That leaves ReconcileTmuxSessions to make the
+// transition and emit it — and ReconcileTmuxSessions only runs for a repo that
+// gets opened. So a repo whose only subagent died while bramble was down has to
+// be returned too, or the parent is never told, which is the whole point of
+// leaving the session alone.
+func ReposNeedingTmuxReconcile(store *Store, activeRepo string, mode SessionMode) []string {
 	if store == nil {
 		return nil
 	}
-	// Only scan for live sessions when inside tmux; outside tmux all window-alive
-	// checks return false, which would incorrectly mark live sessions as completed.
+	// Both of ReconcileTmuxSessions' environmental guards, because naming a repo
+	// it will decline to reconcile is worse than saying nothing: the repo is
+	// opened — a manager and its goroutines, and a sidebar entry — on every
+	// startup, and since nothing there will ever mark those sessions terminal,
+	// it happens again forever. In TUI mode a tmux session record is simply not
+	// this process's to settle.
+	if ResolveSessionMode(mode) != SessionModeTmux {
+		return nil
+	}
 	if !IsInsideTmux() || !IsTmuxAvailable() {
 		return nil
 	}
+	return reposWithUnreconciledTmuxSessions(store, activeRepo)
+}
 
+// reposWithUnreconciledTmuxSessions is the store scan behind
+// ReposNeedingTmuxReconcile, split out so it can be tested without a tmux
+// server: the caller's guard is the only part that needs one.
+func reposWithUnreconciledTmuxSessions(store *Store, activeRepo string) []string {
 	repos, err := store.ListRepos()
 	if err != nil {
 		return nil
 	}
 
-	var liveRepos []string
+	var needing []string
 	for _, repo := range repos {
 		if repo == activeRepo {
 			continue // handled by the active manager's ReconcileTmuxSessions
 		}
-
-		hasLive := false
-
-		worktrees, err := store.ListWorktrees(repo)
-		if err != nil {
-			continue
-		}
-
-		for _, wtName := range worktrees {
-			sessions, err := store.ListSessions(repo, wtName)
-			if err != nil {
-				continue
-			}
-
-			for _, meta := range sessions {
-				if !isTmuxRunner(meta.RunnerType) {
-					continue
-				}
-				if meta.Status.IsTerminal() {
-					continue
-				}
-
-				stored, err := store.LoadSession(repo, wtName, meta.ID)
-				if err != nil {
-					continue
-				}
-
-				if tmuxWindowAlive(stored.TmuxWindowID, stored.TmuxWindowName) {
-					hasLive = true
-				}
-				// Deliberately does not mark a dead session completed. This is
-				// a read-only probe over repos that have no manager and so no
-				// courier: completing a session here would consume the one
-				// transition its parent's report depends on, and nothing would
-				// be listening. The owning manager's ReconcileTmuxSessions does
-				// it — and emits — when the repo is opened.
-			}
-		}
-
-		if hasLive {
-			liveRepos = append(liveRepos, repo)
+		if repoHasUnreconciledTmuxSession(store, repo) {
+			needing = append(needing, repo)
 		}
 	}
 
-	return liveRepos
+	return needing
+}
+
+// repoHasUnreconciledTmuxSession reports whether a repo holds a tmux session
+// still owed a terminal transition. Decided from the session metadata alone —
+// a dead window and a live one both need the repo opened, so there is nothing
+// left for a window-alive check to decide.
+func repoHasUnreconciledTmuxSession(store *Store, repo string) bool {
+	worktrees, err := store.ListWorktrees(repo)
+	if err != nil {
+		return false
+	}
+	for _, wtName := range worktrees {
+		sessions, err := store.ListSessions(repo, wtName)
+		if err != nil {
+			continue
+		}
+		for _, meta := range sessions {
+			if isTmuxRunner(meta.RunnerType) && !meta.Status.IsTerminal() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Close shuts down the manager and all sessions.
@@ -1251,6 +1284,15 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 		}
 	}
 
+	// A re-adopted session reaches this loop instead of runSession's, so its
+	// hookless backend needs the same pane-idle polling here or a restart
+	// permanently strands it. The provider comes from the stored model: there is
+	// no live agentModel on the re-adopt path.
+	session.mu.RLock()
+	storedModel := session.Model
+	session.mu.RUnlock()
+	idleTracker := m.newPaneIdleTrackerForModel(storedModel)
+
 	// Do an initial capture so the command center has data immediately.
 	captureRecentOutput()
 
@@ -1309,7 +1351,11 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 				// tmux-mode sessions receive the Notification hook.
 				session.mu.RLock()
 				status := session.Status
+				turnEpoch := session.turnEpoch
 				session.mu.RUnlock()
+
+				m.pollPaneIdle(idleTracker, sessionID, status, turnEpoch, windowTarget)
+
 				if status == StatusIdle {
 					if IsSessionWindowActive(windowID, windowName) {
 						// Use windowID as target when available; for re-adopted
@@ -1397,6 +1443,27 @@ func resolveAgentModel(modelID string, registry *agent.ModelRegistry) (agent.Age
 		return m, nil
 	}
 	return agent.AgentModel{}, fmt.Errorf("unknown model %q: no curated entry and no recognized prefix (%s)", modelID, agent.KnownModelPrefixes())
+}
+
+// newPaneIdleTrackerForModel returns the pane-idle tracker a session needs,
+// resolving its provider from the model it was created with.
+//
+// Both tmux monitor loops go through this — the one runSession runs for a
+// session it started, and monitorTrackedTmuxWindow for one re-adopted after a
+// restart. That is the point: a backend with no completion hook (cursor) is
+// only ever seen to finish because one of these loops reads its pane, and a
+// loop that skips it leaves such a session running forever, with its queued
+// mail undelivered and its parent never told it is done.
+//
+// nil for a provider that reports its own turn ends, and nil for a model that
+// no longer resolves — an unrecognized model is not grounds for guessing at a
+// pane's chrome.
+func (m *Manager) newPaneIdleTrackerForModel(model string) *paneIdleTracker {
+	agentModel, err := resolveAgentModel(model, m.config.ModelRegistry)
+	if err != nil {
+		return nil
+	}
+	return newPaneIdleTracker(agentModel.Provider)
 }
 
 // newTmuxRunner builds the runner for a tmux-mode session, copying the
@@ -1772,7 +1839,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		// Backends with no turn-completion hook (cursor) have their idleness
 		// read off the pane instead. nil for claude and codex, which report it
 		// themselves; see pane_idle.go for why this is a last resort.
-		idleTracker := newPaneIdleTracker(agentModel.Provider)
+		idleTracker := m.newPaneIdleTrackerForModel(session.Model)
 
 		// Periodically check if tmux window still exists
 		ticker := time.NewTicker(2 * time.Second)
@@ -1791,6 +1858,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				tmuxID := session.TmuxWindowID
 				sessionID := session.ID
 				status := session.Status
+				turnEpoch := session.turnEpoch
 				session.mu.RUnlock()
 
 				if tmuxName == "" && tmuxID == "" {
@@ -1804,7 +1872,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					windowTarget = tmuxID
 				}
 
-				m.pollPaneIdle(idleTracker, sessionID, status, windowTarget)
+				m.pollPaneIdle(idleTracker, sessionID, status, turnEpoch, windowTarget)
 
 				windowExists := tmuxWindowAlive(tmuxID, tmuxName)
 				paneDead := windowExists && TmuxWindowPaneDead(windowTarget)
@@ -2140,6 +2208,10 @@ func applySessionStatusLocked(session *Session, oldStatus, newStatus SessionStat
 	now := time.Now()
 	switch newStatus {
 	case StatusRunning:
+		// A new turn. Bumped here rather than at each caller because this is the
+		// only place a session's status is written, so nothing can start a turn
+		// without the pane-idle probe noticing — see paneIdleTracker.forTurn.
+		session.turnEpoch++
 		// Set StartedAt only when first starting (Pending→Running) or when missing;
 		// preserve the original start time when resuming from Idle.
 		if oldStatus == StatusPending || session.StartedAt == nil {
@@ -2158,16 +2230,15 @@ func (m *Manager) emitSessionStateChange(evt SessionStateChangeEvent) {
 		log.Printf("WARNING: events channel full, dropping state change event for session %s (%s -> %s)", evt.SessionID, evt.OldStatus, evt.NewStatus)
 	}
 
-	// Notify state subscribers (used by delegator child watchers)
+	// Notify state subscribers. Called outside the lock so a sink is never
+	// running while subscribe/unsubscribe waits on it, and never dropped: see
+	// SubscribeStateChanges for why a bounded channel here is not an option.
 	m.stateSubscribersMu.Lock()
-	for _, ch := range m.stateSubscribers {
-		select {
-		case ch <- evt:
-		default:
-			log.Printf("WARNING: state subscriber channel full, dropping state change event for session %s (%s -> %s)", evt.SessionID, evt.OldStatus, evt.NewStatus)
-		}
-	}
+	sinks := slices.Clone(m.stateSubscribers)
 	m.stateSubscribersMu.Unlock()
+	for _, sink := range sinks {
+		sink.fn(evt)
+	}
 }
 
 // addOutput adds an output line and emits event.
@@ -2393,9 +2464,10 @@ func (m *Manager) SetSessionRunning(id SessionID) {
 // ends, in which case this does nothing.
 //
 // Only a running session is a candidate: once idle it stays idle until
-// something delivers work and marks it running again, which is also what
-// re-arms the tracker.
-func (m *Manager) pollPaneIdle(tracker *paneIdleTracker, id SessionID, status SessionStatus, windowTarget string) {
+// something delivers work and marks it running again. turnEpoch is what makes
+// that re-arming reliable — the delivery and the transition it causes both
+// happen between two polls, so the status alone cannot show the boundary.
+func (m *Manager) pollPaneIdle(tracker *paneIdleTracker, id SessionID, status SessionStatus, turnEpoch uint64, windowTarget string) {
 	if tracker == nil {
 		return
 	}
@@ -2403,6 +2475,7 @@ func (m *Manager) pollPaneIdle(tracker *paneIdleTracker, id SessionID, status Se
 		tracker.reset()
 		return
 	}
+	tracker.forTurn(turnEpoch)
 	// CaptureTmuxPane rather than CapturePaneText: the caller resolved this
 	// same target from the same session a few lines ago, and going back through
 	// the session map would retake two locks per tick to rederive it.
@@ -2514,9 +2587,10 @@ func (m *Manager) writeResearchFile(session *Session) (string, error) {
 		}
 	}
 
-	// Same treatment as the pane capture in subagent_report.go: a transcript in
-	// a world-traversable temp dir is 0600, and create-and-rename replaces a
-	// symlink at this predictable path rather than writing through it.
+	// Same treatment as the pane capture in subagent_report.go: a transcript is
+	// the session's whole output and so is 0600 even inside a private ~/.bramble,
+	// and create-and-rename replaces a symlink at this predictable path rather
+	// than writing through it.
 	if err := writeFileAtomic(researchPath, []byte(body.String()), 0o600); err != nil {
 		return "", fmt.Errorf("write research file: %w", err)
 	}

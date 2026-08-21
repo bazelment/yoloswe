@@ -34,7 +34,25 @@ service. The delegator (`bramble/session/delegator_tools.go`) is untouched.
 spawn through `SpawnOpts` and persisted, so a subagent's return address survives
 a restart. `new-session --parent` defaults to `$BRAMBLE_SESSION_ID`;
 `--no-parent` opts out. With no `--branch` and no `--worktree`, a subagent
-inherits its parent's worktree.
+inherits its parent's worktree — and must then be filed under its parent's
+repo, so a `--repo` naming a different one is refused rather than registering a
+session under a repo whose tree it is not in.
+
+**A value the client inferred is not a claim the caller made.** `new-session`
+fills in two fields on its own — the parent from `$BRAMBLE_SESSION_ID`, and the
+repo from the cwd when `--repo` is omitted — and both carry that provenance to
+the server (`ipc.NewSessionParams.ParentInherited`, `RepoInferred`), because
+each is weighed differently from a typed one:
+
+- An id passed to `--parent` must resolve and never silently becomes a
+  top-level spawn. An inherited one is a default, and the registry only sees
+  sessions adopted into an open manager — so an agent whose own repo is closed
+  would otherwise lose the ability to spawn anything at all. That case warns and
+  spawns top-level.
+- A `--repo` the caller typed picks the manager, and `handleNewSession` refuses
+  if that then contradicts an inherited worktree. An inferred one loses to a
+  resolved parent's repo, which is exact where a cwd is merely wherever the
+  agent's worktree happens to be.
 
 The delegator deliberately does *not* set a parent: it runs its own child
 watcher and would otherwise be told about every transition twice.
@@ -60,6 +78,23 @@ refused rather than queued, and a queue whose session dies is reclaimed.
 **One delivery per idle transition.** Writing a message starts the recipient's
 next turn, so a second write in the same drain would land mid-turn — the very
 thing the queue prevents. The rest ride the transition after.
+
+**No state change reaches the courier through a buffer.** Reporting rides
+transitions, and a lost completion is the one event that never comes again — so
+`SubscribeStateChanges` takes a function called on the goroutine that made the
+transition, and `watchStateChanges` puts a growable queue behind it. A bounded
+channel would have to drop or block: drop loses exactly the fan-out case this
+feature is for (and a tight burst fills any buffer before the reader is
+scheduled once, so a bigger one is not the fix), and block would stall a status
+transition behind a pane capture and a file write.
+
+**A failed write queues instead of failing.** Both write paths — the direct one
+for an idle recipient and the drain — hand a failure to the queue and arm a
+timed retry, because the recipient of a failed write is a session that was idle
+and stays idle: there is no later transition for the message to ride. Only a
+queue that cannot be written is reported as an error, and that is the one case
+where a subagent report releases its dedup reservation and tries again on the
+child's next transition.
 
 The unqueued `send-input` path is unchanged, and stays the right tool for a
 deliberate interrupt and for raw pane targets.
@@ -160,6 +195,16 @@ listed once its chrome has been checked against the real CLI. Claude and codex
 are deliberately absent: they report their own turn ends, and a second, weaker
 signal could only contradict them.
 
+Both tmux monitor loops poll it — the one `runSession` starts, and the one a
+session re-adopted after a restart gets — through
+`Manager.newPaneIdleTrackerForModel`, and
+`TestReadoptedCursorSubagentIsStillSeenToFinish` drives the second of those for
+real: it restarts bramble under tmux and asserts the re-adopted cursor session
+is still seen to finish a turn. A loop that skipped it would leave a
+cursor subagent that outlived a bramble restart running forever: nothing would
+drain its queued mail and its parent would never be told it finished, which is
+the whole failure this section exists to fix.
+
 ## Known limitations
 
 - The cursor probe keys on that CLI's chrome and will go stale when cursor
@@ -211,10 +256,17 @@ agent CLIs — and is run with:
 
 Two layers:
 
-- **Stubbed.** A scripted stand-in for an agent CLI, installed on PATH as
-  `codex`, exercises bramble's own logic deterministically and with no
-  credentials: lineage, the notify hook, queued delivery, delivery into a pane
-  left in copy mode, and a full two-round conversation.
+- **Stubbed.** Scripted stand-ins for the agent CLIs, installed on PATH as
+  `codex` and as `agent` (cursor's binary), exercise bramble's own logic
+  deterministically and with no credentials: lineage, the notify hook, queued
+  delivery, delivery into a pane left in copy mode, and a full two-round
+  conversation. The cursor stand-in is faithful about one thing only — the
+  composer footer, which is the entire idle signal for a backend with no hook.
+  - `TestReadoptedCursorSubagentIsStillSeenToFinish` restarts bramble (by
+    signal, so its sessions are written to the store the way a real quit writes
+    them) and takes another turn on the re-adopted cursor child. It is the only
+    test that runs `monitorTrackedTmuxWindow`, the loop a session gets after a
+    restart, and neither loop can be driven without a tmux server.
 - **Live.** Two tests drive the real claude, codex and cursor CLIs, one subtest
   each, with a Claude parent. They run by default and skip only when a backend
   is missing or logged out, because every bug this feature shipped with was

@@ -157,3 +157,60 @@ func TestCursorPlanModeIdleIsIdle(t *testing.T) {
 	require.True(t, known)
 	assert.True(t, idle)
 }
+
+// TestPaneIdleTrackerComesFromTheStoredModel pins the input the re-adopt path
+// has to work from. monitorTrackedTmuxWindow never sees a resolved agent model
+// — only the model string the session was persisted with — so if that string
+// does not yield a provider, a cursor session that survives a bramble restart
+// gets no idle signal at all and its parent is never told it finished.
+func TestPaneIdleTrackerComesFromTheStoredModel(t *testing.T) {
+	t.Parallel()
+
+	m := NewManagerWithConfig(ManagerConfig{RepoName: "repo"})
+	defer m.Close()
+
+	assert.NotNil(t, m.newPaneIdleTrackerForModel("composer-3"),
+		"a stored cursor model must still produce a pane-idle tracker")
+	assert.Nil(t, m.newPaneIdleTrackerForModel("sonnet"),
+		"claude reports its own turn ends; a second signal could only contradict it")
+	assert.Nil(t, m.newPaneIdleTrackerForModel("not-a-model"),
+		"an unresolvable model is not grounds for guessing at a pane's chrome")
+}
+
+// TestTrackerDoesNotCarryObservationsAcrossATurn is the boundary the monitor
+// cannot see in the pane. A delivery is written while the recipient is idle and
+// marks it running again between two polls, so an idle frame observed before
+// the write must not count towards calling the turn that write started idle —
+// the CLI has not necessarily repainted yet.
+func TestTrackerDoesNotCarryObservationsAcrossATurn(t *testing.T) {
+	t.Parallel()
+
+	tr := newPaneIdleTracker(ProviderCursor)
+	tr.forTurn(1)
+	require.False(t, tr.observe(cursorPane(false)), "one observation is never enough")
+
+	// A message is delivered; the session is marked running again.
+	tr.forTurn(2)
+	assert.False(t, tr.observe(cursorPane(false)),
+		"the frame before the delivery must not be counted towards the new turn")
+	assert.True(t, tr.observe(cursorPane(false)), "two fresh observations agree")
+}
+
+// TestTrackerRearmsForEveryTurn keeps a turn too short to be caught working
+// from latching the session as never-idle-again: the streak counts past the
+// confirmation count, and only a new turn brings it back.
+func TestTrackerRearmsForEveryTurn(t *testing.T) {
+	t.Parallel()
+
+	tr := newPaneIdleTracker(ProviderCursor)
+	tr.forTurn(1)
+	require.False(t, tr.observe(cursorPane(false)))
+	require.True(t, tr.observe(cursorPane(false)), "the first turn is seen to end")
+	require.False(t, tr.observe(cursorPane(false)), "it fires once per run of observations")
+
+	// A second turn runs and finishes between polls, so no working frame is ever
+	// captured — the only signal that it happened is the turn bump.
+	tr.forTurn(2)
+	assert.False(t, tr.observe(cursorPane(false)))
+	assert.True(t, tr.observe(cursorPane(false)), "the second turn was never seen to end")
+}

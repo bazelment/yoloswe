@@ -43,6 +43,7 @@ go_test(
     name = "bramble_test",
     srcs = [
         "main_test.go",
+        "new_session_test.go",
         "notify_cmd_test.go",
         "notify_session_id_test.go",
         "restart_test.go",

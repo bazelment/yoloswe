@@ -19,13 +19,17 @@ import (
 // fakeTarget is a DeliveryTarget backed by a map, so courier behaviour can be
 // driven through every status and runner type without live managers or tmux.
 type fakeTarget struct { //nolint:govet // fieldalignment: readability over packing
-	mu            sync.Mutex
-	sessions      map[SessionID]SessionInfo
-	followUps     []string
-	tmuxTarget    string
-	followErr     error
-	captured      map[SessionID][]string
-	captureErr    error
+	mu         sync.Mutex
+	sessions   map[SessionID]SessionInfo
+	followUps  []string
+	tmuxTarget string
+	followErr  error
+	captured   map[SessionID][]string
+	captureErr error
+	// captureDelay stands in for how long a real pane capture takes. It is what
+	// makes the courier's event handling slow enough to test what happens to the
+	// events arriving behind it.
+	captureDelay  time.Duration
 	markedRunning []SessionID
 }
 
@@ -95,11 +99,19 @@ func (f *fakeTarget) ResolveTmuxTarget(id SessionID) (string, error) {
 
 func (f *fakeTarget) CapturePaneText(id SessionID, _ int) ([]string, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.captureErr != nil {
-		return nil, f.captureErr
+	delay := f.captureDelay
+	err := f.captureErr
+	lines := f.captured[id]
+	f.mu.Unlock()
+	if delay > 0 {
+		// Outside the lock: this stands in for a real pane capture, which
+		// shells out to tmux and holds nothing of the courier's.
+		time.Sleep(delay)
 	}
-	return f.captured[id], nil
+	if err != nil {
+		return nil, err
+	}
+	return lines, nil
 }
 
 // appendPane mirrors text into every session's pane buffer. The courier only
@@ -767,24 +779,60 @@ func TestReportToIdleParentIsWrittenImmediately(t *testing.T) {
 	assert.Empty(t, c.Pending(parentID))
 }
 
-// TestFailedReportIsRetriedOnTheNextTransition is the dedup-before-delivery
-// case: shouldReport reserves the status before the write is attempted, so a
-// write that fails must release the reservation or the parent never hears about
-// this child again.
-func TestFailedReportIsRetriedOnTheNextTransition(t *testing.T) {
+// TestFailedReportIsQueuedNotDropped is the dedup-before-delivery case:
+// shouldReport reserves the status before the write is attempted, so a failed
+// write must either release the reservation or make the message durable. It
+// makes it durable — the queue plus its timed retry outlive a transient tmux
+// error, and the reservation is what stops the retry arriving twice.
+func TestFailedReportIsQueuedNotDropped(t *testing.T) {
 	t.Parallel()
 	c, target, parentID, childID := reportFixture(t, StatusIdle)
-	// An idle parent is written to directly, so a paste failure surfaces as a
-	// failed report rather than a queued one.
+	// An idle parent is written to directly, so a paste failure exercises the
+	// direct path rather than the queued one.
 	target.set(parentID, StatusIdle, RunnerTypeTmux)
 	panes := &fakePanes{pasteErr: errors.New("tmux exploded")}
 	c.panes = panes
 
 	reportNow(c, target, childID)
-	require.Empty(t, c.Pending(parentID), "the write failed, so nothing should be queued")
 	require.Empty(t, panes.recorded(), "a failed paste records no write")
+	require.Len(t, c.Pending(parentID), 1,
+		"a report whose write failed must be queued: an already-idle parent makes no further transition to retry on")
+
+	c.mu.Lock()
+	armed, seen := c.retryArmed, c.reported[childID][StatusIdle]
+	c.mu.Unlock()
+	assert.True(t, armed, "nothing would ever write the queued report")
+	assert.True(t, seen, "the queued report still stands; reporting it again would deliver it twice")
+}
+
+// TestUnqueueableReportIsRetriedOnTheNextTransition is the remaining way a
+// report can be lost outright: the write failed *and* the queue could not take
+// it, so nothing holds the message. The reservation must be released or the
+// parent never hears about this child again.
+func TestUnqueueableReportIsRetriedOnTheNextTransition(t *testing.T) {
+	t.Parallel()
+	queueDir := t.TempDir()
+	target := newFakeTarget()
+	c, err := NewCourier(target, &fakePanes{pasteErr: errors.New("tmux exploded")}, queueDir)
+	require.NoError(t, err)
+	parentID, childID := ids(t)
+	target.set(parentID, StatusIdle, RunnerTypeTmux)
+	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
+
+	// A queue directory that cannot be written to is the failure enqueue
+	// reports; 0500 leaves it readable so NewCourier's load still works.
+	require.NoError(t, os.Chmod(queueDir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(queueDir, 0o700) })
+
+	reportNow(c, target, childID)
+	require.Empty(t, c.Pending(parentID), "the queue rejected the delivery, so nothing is holding it")
+	c.mu.Lock()
+	seen := len(c.reported[childID])
+	c.mu.Unlock()
+	require.Zero(t, seen, "a report nothing holds must leave no state claiming the parent was told")
 
 	// The same child goes idle again; the report must be attempted afresh.
+	require.NoError(t, os.Chmod(queueDir, 0o700))
 	working := echoPanes(target)
 	c.panes = working
 	reportNow(c, target, childID)
@@ -794,22 +842,25 @@ func TestFailedReportIsRetriedOnTheNextTransition(t *testing.T) {
 }
 
 // TestGeneratedReportDoesNotCountAsTheChildSpeaking keeps the courier's own
-// report from registering as a self-report. If it did, a failed delivery would
-// leave every remaining state marked as already told.
+// report from registering as a self-report. If it did it would mark idle,
+// completed and stopped in one go — see noteChildSpoke — and every later state
+// of this child would be silently swallowed as already told.
 func TestGeneratedReportDoesNotCountAsTheChildSpeaking(t *testing.T) {
 	t.Parallel()
 	c, target, parentID, childID := reportFixture(t, StatusIdle)
 	target.set(parentID, StatusIdle, RunnerTypeTmux)
-	c.panes = &fakePanes{pasteErr: errors.New("tmux exploded")}
 
 	reportNow(c, target, childID)
+	require.Empty(t, c.Pending(parentID), "an idle parent takes the report directly")
 
-	// A failure must leave nothing recorded for this child at all.
 	c.mu.Lock()
-	seen := len(c.reported[childID])
+	seen := map[SessionStatus]bool{}
+	for k, v := range c.reported[childID] {
+		seen[k] = v
+	}
 	c.mu.Unlock()
-	assert.Zero(t, seen, "a failed report must leave no state claiming the parent was told")
-	_ = parentID
+	assert.Equal(t, map[SessionStatus]bool{StatusIdle: true}, seen,
+		"the courier's own report stands only for the status it reported")
 }
 
 // TestReportToDeadParentIsDropped covers the child outliving its parent: there
@@ -944,6 +995,151 @@ func TestFailedWriteToAnIdleRecipientIsRetried(t *testing.T) {
 	assert.True(t, armed, "no retry was scheduled for a recipient that never leaves idle")
 }
 
+// TestFailedDirectWriteIsQueuedAndRetried is the same hole as
+// TestFailedWriteToAnIdleRecipientIsRetried on the other write path. Send takes
+// the direct branch when the recipient is already idle, and that is exactly the
+// recipient that produces no further transition: returning the error and
+// dropping the text loses a subagent report for good, because a child in a
+// terminal state never reports again.
+func TestFailedDirectWriteIsQueuedAndRetried(t *testing.T) {
+	t.Parallel()
+	c, target, _ := newTestCourier(t)
+	c.panes = &fakePanes{pasteErr: errors.New("tmux exploded")}
+	target.set("s1", StatusIdle, RunnerTypeTmux)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	queued, err := c.Send(ctx, "", "s1", "report me", true)
+	require.NoError(t, err, "a failed write must not lose the message")
+	assert.True(t, queued, "the caller must be told the message is waiting, not written")
+	require.Len(t, c.Pending("s1"), 1, "a failed direct write must leave the delivery queued")
+
+	c.mu.Lock()
+	armed := c.retryArmed
+	c.mu.Unlock()
+	assert.True(t, armed, "no retry was scheduled for a recipient that never leaves idle")
+}
+
+// TestNoReportIsLostWhenManySubagentsFinishAtOnce pins the path a completion
+// takes from the manager to the courier. The courier's handling of one event is
+// slow — a report captures a pane and writes a file — so the emitter runs far
+// ahead of it, which is what a bounded buffer between them would drop. Fan-out
+// is the case this feature exists for, and a dropped completion is the one event
+// that never comes again: the parent would wait forever for a subagent that
+// already finished. See SubscribeStateChanges for why there is no such buffer.
+func TestNoReportIsLostWhenManySubagentsFinishAtOnce(t *testing.T) {
+	t.Parallel()
+	target := newFakeTarget()
+	c, err := NewCourier(target, echoPanes(target), t.TempDir())
+	require.NoError(t, err)
+
+	mgr := NewManagerWithConfig(ManagerConfig{RepoName: "repo"})
+	defer mgr.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer c.Watch(ctx, mgr)()
+
+	// Busy, so every report queues rather than racing a write.
+	parentID, _ := ids(t)
+	target.set(parentID, StatusRunning, RunnerTypeTmux)
+
+	// Slow enough that the emitter below runs far ahead of the handler. Against
+	// the bounded channel this replaced, that is what lost events — measured, 8
+	// of the 150 below.
+	target.mu.Lock()
+	target.captureDelay = 2 * time.Millisecond
+	target.mu.Unlock()
+
+	const children = 150
+	for i := range children {
+		childID := SessionID(fmt.Sprintf("%s-child-%03d", parentID, i))
+		target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
+		target.mu.Lock()
+		target.captured[childID] = []string{"answer from " + string(childID)}
+		target.mu.Unlock()
+		mgr.emitSessionStateChange(SessionStateChangeEvent{
+			Info:      target.mustInfo(childID),
+			SessionID: childID,
+			OldStatus: StatusRunning,
+			NewStatus: StatusIdle,
+		})
+	}
+
+	require.Eventually(t, func() bool { return len(c.Pending(parentID)) == children },
+		30*time.Second, 20*time.Millisecond,
+		"only %d of %d subagents were reported: events were dropped on the way to the courier",
+		len(c.Pending(parentID)), children)
+}
+
+// TestEventPumpKeepsEventsQueuedBeforeItsWorkerStarts covers the ordering the
+// pump promises. push runs on the goroutine making the status transition and
+// may well run before the worker is scheduled at all, so the queue — not a
+// wakeup — is what carries those events, and it must carry them in order.
+func TestEventPumpKeepsEventsQueuedBeforeItsWorkerStarts(t *testing.T) {
+	t.Parallel()
+	p := newEventPump()
+
+	const events = 5
+	for i := range events {
+		p.push(SessionStateChangeEvent{SessionID: SessionID(fmt.Sprintf("s%d", i))})
+	}
+
+	seen := make(chan SessionID, events)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.run(ctx, func(evt SessionStateChangeEvent) { seen <- evt.SessionID })
+	t.Cleanup(p.close)
+
+	for i := range events {
+		select {
+		case got := <-seen:
+			require.Equal(t, SessionID(fmt.Sprintf("s%d", i)), got,
+				"events queued before the worker started must arrive in order")
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of %d events queued before the worker started arrived", i, events)
+		}
+	}
+}
+
+// TestEventPumpDrainsWhatItHoldsOnClose is the contract with teeth. An event
+// dropped at close is a completion that never became a queued Delivery, so
+// unlike a delivery it is not recoverable from anything on disk — the parent
+// simply never hears.
+func TestEventPumpDrainsWhatItHoldsOnClose(t *testing.T) {
+	t.Parallel()
+	p := newEventPump()
+
+	// Block the worker on its first event so the rest are still queued when the
+	// pump is closed underneath it.
+	release := make(chan struct{})
+	var handled sync.WaitGroup
+	handled.Add(4)
+	first := true
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.run(ctx, func(SessionStateChangeEvent) {
+		if first {
+			first = false
+			<-release
+		}
+		handled.Done()
+	})
+
+	for i := range 4 {
+		p.push(SessionStateChangeEvent{SessionID: SessionID(fmt.Sprintf("s%d", i))})
+	}
+	p.close()
+	close(release)
+
+	done := make(chan struct{})
+	go func() { handled.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("closing the pump discarded events it had already accepted")
+	}
+}
+
 // TestStaleQueueIsReclaimedOnLoad bounds the cost of never discarding on an
 // unknown recipient: a session that vanished without a terminal transition
 // would otherwise keep its queue file forever.
@@ -1067,14 +1263,15 @@ func TestDrainIdleDeliversAfterAReload(t *testing.T) {
 }
 
 // TestResultArtifactsAreNotWorldReadable pins the privacy of what a subagent
-// leaves in a shared temp dir: a captured pane is the child's whole transcript,
-// and os.TempDir() is traversable by every local user.
+// leaves behind: a captured pane is the child's whole transcript, so neither it
+// nor the directory holding it may be readable by another local user.
 func TestResultArtifactsAreNotWorldReadable(t *testing.T) {
-	// Not parallel: the result dir is shared by every session under one HOME,
-	// which TestMain has already pointed at a temp dir. Against a real shared
-	// dir this test passed even with the fix reverted, because os.WriteFile
-	// leaves an existing file's mode alone and an earlier run had created it
-	// 0600 — so it must start from a directory it knows nothing has touched.
+	// Not parallel: HOME decides the result dir — ResultFilePath resolves
+	// ~/.bramble/research under it — and t.Setenv forbids t.Parallel. A private
+	// HOME here rather than TestMain's package-wide one because the assertion is
+	// about the mode a *fresh* directory is created with: os.MkdirAll leaves an
+	// existing directory alone, so a dir another test already made would let
+	// this pass with the fix reverted.
 	t.Setenv("HOME", t.TempDir())
 	c, target, _, childID := reportFixture(t, StatusIdle)
 	target.annotate(childID, func(i *SessionInfo) { i.RunnerType = RunnerTypeTmux })
@@ -1082,6 +1279,13 @@ func TestResultArtifactsAreNotWorldReadable(t *testing.T) {
 
 	path := c.resultPathFor(target.mustInfo(childID))
 	require.NotEmpty(t, path, "the pane capture should have produced a result file")
+
+	// The location is half the invariant. Mode bits on a path in a shared temp
+	// dir prove nothing: another local user can own the directory they sit in.
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(path, filepath.Join(home, ".bramble", resultDirName)+string(filepath.Separator)),
+		"a result file must live under the user's private ~/.bramble, got %s", path)
 
 	fi, err := os.Stat(path)
 	require.NoError(t, err)

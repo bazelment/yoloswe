@@ -198,6 +198,76 @@ while IFS= read -r line; do
 done
 `
 
+// stubCursorScript stands in for cursor-agent, the one backend bramble has no
+// hook into.
+//
+// Faithful about exactly one thing: the composer footer. Cursor announces
+// nothing when a turn ends — no --notify flag, and its plugin `stop` hook does
+// not fire from the CLI — so bramble reads its state off the pane, and the
+// footer is the whole signal. `Add a follow-up` is on that line the entire
+// time; `ctrl+c to stop` joins it for exactly as long as a turn runs. Getting
+// that pair wrong in either direction is what pane_idle.go exists to avoid, so
+// the stand-in reproduces both markers and where they sit. Only the decorative
+// glyphs are ASCII here; the probe never looks at them.
+//
+// Deliberately no notify program: a stand-in that reported its own idleness
+// would be testing the hook path this backend does not have.
+const stubCursorScript = `#!/usr/bin/env bash
+# Scripted stand-in for cursor-agent. See support_test.go.
+set -u
+
+prompt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --model|--mode|--resume) shift 2 ;;
+    --*) shift ;;
+    *) prompt="$1"; shift ;;
+  esac
+done
+
+log() {
+  [ -n "${BRAMBLE_IT_STUB_LOG:-}" ] && printf 'cursor-stub: %s\n' "$*" >> "$BRAMBLE_IT_STUB_LOG"
+  return 0
+}
+
+# The composer line, with cursor's footer under it. working=1 adds the hint
+# cursor shows for the length of a turn, on the composer line itself.
+footer() {
+  if [ "$1" = "1" ]; then
+    printf '  -> Add a follow-up                    ctrl+c to stop\n'
+  else
+    printf '  -> Add a follow-up\n'
+  fi
+  printf '  Composer 2.5 - 7.6%%                    Run Everything\n'
+  printf '  %s - master\n' "$PWD"
+}
+
+turn() {
+  log "turn start: $1"
+  footer 1
+  # Long enough that the monitor, which polls every 2s, sees the working
+  # footer: a turn nobody ever observes working is a different test.
+  sleep 5
+  printf 'CURSOR-STUB-REPLY %s\n' "$1"
+  footer 0
+  log "turn end: $1"
+}
+
+if [ -n "$prompt" ]; then
+  turn "$prompt"
+else
+  footer 0
+fi
+
+while IFS= read -r line; do
+  case "$line" in
+    "") continue ;;
+    CURSOR-STUB-EXIT) log "exiting cleanly"; exit 0 ;;
+  esac
+  turn "$line"
+done
+`
+
 // stubGhScript stands in for the GitHub CLI.
 //
 // Creating a worktree goes through wt.FetchOrigin, which gates on `gh auth
@@ -216,15 +286,17 @@ exit 0
 // installStubAgent writes the stand-ins into a fresh directory and returns it,
 // for prepending to PATH.
 //
-// The agent masquerades as codex because bramble picks a backend from the model
-// ID, so a `gpt-*` model routes to whatever binary named `codex` is first on
-// PATH.
+// The stand-ins masquerade as the real CLIs because bramble picks a backend
+// from the model ID: a `gpt-*` model routes to whatever binary named `codex` is
+// first on PATH, and a `composer-*` model to one named `agent` — cursor's CLI
+// is `agent`, not `cursor`, which is the IDE launcher.
 func installStubAgent(t *testing.T, root string) string {
 	t.Helper()
 	dir := filepath.Join(root, "stubbin")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	for name, script := range map[string]string{
 		"codex": stubAgentScript,
+		"agent": stubCursorScript,
 		"gh":    stubGhScript,
 	} {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755))

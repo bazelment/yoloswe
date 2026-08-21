@@ -106,6 +106,9 @@ func containsAny(haystack string, needles []string) bool {
 type paneIdleTracker struct {
 	provider string
 	streak   int
+	// epoch is the session turn the current streak was observed during, so
+	// observations cannot be carried across a turn boundary. See forTurn.
+	epoch uint64
 }
 
 // newPaneIdleTracker returns a tracker for a provider, or nil when that
@@ -117,10 +120,27 @@ func newPaneIdleTracker(provider string) *paneIdleTracker {
 	return &paneIdleTracker{provider: provider}
 }
 
+// forTurn re-arms the tracker when the session has been started on a new turn.
+//
+// The monitor cannot see that boundary in the pane. A delivery is written while
+// the recipient is idle and marks it running again between two polls, so
+// without this the poll after the write extends the streak the poll before it
+// began — a frame the CLI has not repainted yet would then be counted towards
+// calling the new turn idle. It is also what re-arms a tracker whose streak has
+// already fired: a turn short enough that no poll catches its working chrome
+// would otherwise leave the streak counting past the confirmation count
+// forever, and the session would never be seen to go idle again.
+func (p *paneIdleTracker) forTurn(epoch uint64) {
+	if p == nil || p.epoch == epoch {
+		return
+	}
+	p.epoch = epoch
+	p.streak = 0
+}
+
 // observe feeds one capture in and reports whether the session should now be
 // marked idle. It fires once per run of idle observations: the caller marks the
-// session idle, and anything that starts a new turn (a delivered message, which
-// marks it running again) re-arms it.
+// session idle, and the next turn re-arms it through forTurn.
 func (p *paneIdleTracker) observe(lines []string) bool {
 	if p == nil {
 		return false
