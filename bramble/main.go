@@ -273,6 +273,13 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		slog.Warn("tmux session reconciliation failed", "err", err)
 	}
 
+	// Sweep again now that reconciliation has re-adopted the stored sessions:
+	// the sweep inside OnRegister ran before they existed, so a recipient that
+	// came back idle was not reachable yet.
+	if courier != nil {
+		courier.DrainIdle(ctx)
+	}
+
 	controlServer := startControlServer(registry, courier)
 	controlSockPath := ""
 	if controlServer != nil {

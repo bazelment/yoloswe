@@ -846,6 +846,78 @@ func TestQueueThatCannotPersistIsNotReportedAsQueued(t *testing.T) {
 	assert.Empty(t, c.Pending("s1"), "the failed delivery must not linger in memory either")
 }
 
+// TestUnknownRecipientKeepsItsQueue is the failure mode the startup sweep
+// introduced: DrainIdle runs over every persisted recipient, including ones
+// whose repo has not been opened and ones reconciliation has not re-adopted
+// yet. Treating "I cannot see it" as "it is gone" deleted the queue on every
+// restart — exactly what persisting it was for.
+func TestUnknownRecipientKeepsItsQueue(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	target := newFakeTarget()
+	target.set("s1", StatusRunning, RunnerTypeTmux)
+
+	c, err := NewCourier(target, echoPanes(target), dir)
+	require.NoError(t, err)
+	_, err = c.Send(context.Background(), "", "s1", "held for a repo that is not open yet", true)
+	require.NoError(t, err)
+
+	// A courier that cannot see the recipient at all — a not-yet-registered
+	// manager, or a sweep that beat reconciliation to it.
+	blind, err := NewCourier(newFakeTarget(), &fakePanes{}, dir)
+	require.NoError(t, err)
+	require.Len(t, blind.Pending("s1"), 1)
+
+	blind.DrainIdle(context.Background())
+
+	assert.Len(t, blind.Pending("s1"), 1, "an unseen recipient's queue must survive the sweep")
+	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	require.NoError(t, err)
+	assert.Len(t, files, 1, "the queue file must still be on disk")
+}
+
+// TestConcurrentDrainsDeliverOnlyOnce pins the claim: Watch and the startup
+// sweep can reach one recipient at the same moment, and Drain does not hold the
+// lock across the write.
+func TestConcurrentDrainsDeliverOnlyOnce(t *testing.T) {
+	t.Parallel()
+	c, target, panes := newTestCourier(t)
+	target.set("s1", StatusRunning, RunnerTypeTmux)
+	_, err := c.Send(context.Background(), "", "s1", "deliver me once", true)
+	require.NoError(t, err)
+	target.set("s1", StatusIdle, RunnerTypeTmux)
+
+	// Deterministic, not a stress loop: hold the first drain inside its write
+	// (onSubmit runs outside the fake's lock) and call Drain again while it is
+	// provably still in flight. Without a claim the second drain reads the same
+	// head — the dequeue only happens after write returns — and pastes it too.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	panes.onSubmit = func() {
+		close(entered)
+		<-release
+		target.appendPane("> ")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.Drain(context.Background(), "s1")
+	}()
+	<-entered
+	c.Drain(context.Background(), "s1")
+	close(release)
+	<-done
+
+	pastes := 0
+	for _, w := range panes.recorded() {
+		if strings.Contains(w, "deliver me once") {
+			pastes++
+		}
+	}
+	assert.Equal(t, 1, pastes, "concurrent drains delivered the same message more than once")
+}
+
 // TestDrainIdleDeliversAfterAReload covers the restart gap: Watch only reacts
 // to idle transitions, and a recipient that is already idle when bramble comes
 // back makes no transition to react to.

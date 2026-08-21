@@ -104,6 +104,11 @@ type Courier struct { //nolint:govet // fieldalignment: grouping by role reads b
 	// reported remembers which (child, status) pairs have already been
 	// reported to a parent, so a child is not announced twice.
 	reported map[SessionID]map[SessionStatus]bool
+	// draining holds the recipients a drain is currently writing to. Watch and
+	// the startup sweep can both reach one recipient at the same moment, and
+	// Drain does not hold the lock across the write — without a claim both
+	// would read the same head and deliver it twice.
+	draining map[SessionID]bool
 	seq      uint64
 }
 
@@ -128,6 +133,7 @@ func NewCourier(target DeliveryTarget, panes PaneWriter, dir string) (*Courier, 
 		dir:      dir,
 		pending:  make(map[SessionID][]Delivery),
 		reported: make(map[SessionID]map[SessionStatus]bool),
+		draining: make(map[SessionID]bool),
 	}
 	if err := c.load(); err != nil {
 		return nil, err
@@ -236,15 +242,30 @@ func (c *Courier) Pending(to SessionID) []Delivery {
 func (c *Courier) Drain(ctx context.Context, to SessionID) {
 	c.mu.Lock()
 	queue := c.pending[to]
-	if len(queue) == 0 {
+	if len(queue) == 0 || c.draining[to] {
 		c.mu.Unlock()
 		return
 	}
 	next := queue[0]
+	c.draining[to] = true
 	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.draining, to)
+		c.mu.Unlock()
+	}()
 
 	info, ok := c.target.SessionInfo(to)
-	if !ok || info.Status.IsTerminal() {
+	if !ok {
+		// Not "gone" — just not visible from here yet. A recipient can be
+		// missing because its repo has not been opened, or because the startup
+		// sweep ran before reconciliation re-adopted it. Discarding on a failed
+		// lookup deleted persisted queues on every restart, which is precisely
+		// what the on-disk queue exists to survive. A queue is only ever
+		// dropped on an observed terminal transition — see Watch.
+		return
+	}
+	if info.Status.IsTerminal() {
 		c.discard(to)
 		return
 	}
@@ -271,7 +292,14 @@ func (c *Courier) Drain(ctx context.Context, to SessionID) {
 	c.mu.Unlock()
 
 	if err != nil {
-		logDeliveryWarn("failed to persist delivery queue", to, err)
+		// Delivery is at-least-once, deliberately. The message is written
+		// before the queue file is updated, so a persist that fails here
+		// leaves the delivered item on disk and a restart will deliver it a
+		// second time. That is the trade this queue exists to make: a
+		// duplicate report is noise, a dropped one is a parent waiting forever
+		// for a subagent that already finished. Any later successful persist
+		// for this recipient clears the stale entry.
+		logDeliveryWarn("delivery written but queue not persisted (may be redelivered after a restart)", to, err)
 	}
 }
 

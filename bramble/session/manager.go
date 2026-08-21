@@ -691,19 +691,20 @@ func (m *Manager) ReconcileTmuxSessions() error {
 			m.outputs[session.ID] = make([]OutputLine, 0, 16)
 			m.outputsMu.Unlock()
 
-			// Emit the state-change event directly rather than calling updateSessionStatus,
-			// so we avoid any side-effects on StartedAt or other fields for this
-			// re-adoption path that restores a stored session.
-			select {
-			case m.events <- SessionStateChangeEvent{
+			// Emit rather than calling updateSessionStatus, so this re-adoption
+			// path has no side-effects on StartedAt or the other fields that
+			// a real transition would touch.
+			//
+			// Through emitSessionStateChange, so state subscribers see it too:
+			// a re-adopted session that is already idle makes no further
+			// transition, and the courier would otherwise never learn it is
+			// reachable and could take the mail waiting for it.
+			m.emitSessionStateChange(SessionStateChangeEvent{
 				Info:      session.ToInfo(),
 				SessionID: session.ID,
 				OldStatus: stored.Status,
 				NewStatus: stored.Status,
-			}:
-			default:
-				log.Printf("WARNING: events channel full, dropping state change event for re-adopted session %s", session.ID)
-			}
+			})
 
 			// Monitor the window lifecycle
 			if IsInsideTmux() && IsTmuxAvailable() {
