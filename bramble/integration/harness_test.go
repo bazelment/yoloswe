@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +61,9 @@ type harness struct {
 	controlSock  string
 	home         string
 	stubLog      string
+	// answeredDialogs records the screen each dialog was answered on, so one
+	// appearance collects one answer.
+	answeredDialogs map[string]string
 }
 
 // newHarness brings up a private tmux server, a throwaway repo, and a bramble
@@ -81,8 +85,9 @@ func newHarness(t *testing.T, stubAgent bool) *harness {
 	// have to live somewhere shallow. Everything else can use the long path.
 	shortRoot := shortTempDir(t)
 	h := &harness{
-		t:          t,
-		tmuxSocket: filepath.Join(shortRoot, "t.sock"),
+		t:               t,
+		tmuxSocket:      filepath.Join(shortRoot, "t.sock"),
+		answeredDialogs: map[string]string{},
 	}
 	wtRoot := filepath.Join(root, "worktrees")
 	runtimeDir := filepath.Join(shortRoot, "run")
@@ -393,18 +398,46 @@ var startupDialogs = []startupDialog{
 	},
 }
 
-// answerStartupDialogs looks at a session's pane and answers any dialog it
-// recognizes. It reports whether it acted.
+// dialogTailLines is how much of the pane's bottom a dialog is looked for in.
+//
+// Not the whole capture: a dialog's text stays in the scrollback after it is
+// dismissed, so matching the full pane re-recognizes one that is long gone —
+// and each "answer" is a keystroke into whatever has since taken its place.
+const dialogTailLines = 30
+
+// paneTail returns the last few non-empty lines of a session's pane.
+func (h *harness) paneTail(id session.SessionID) string {
+	h.t.Helper()
+	lines := strings.Split(h.pane(id), "\n")
+	kept := make([]string, 0, dialogTailLines)
+	for i := len(lines) - 1; i >= 0 && len(kept) < dialogTailLines; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		kept = append(kept, lines[i])
+	}
+	return strings.Join(kept, "\n")
+}
+
+// answerStartupDialogs looks at what is currently on a session's screen and
+// answers any dialog it recognizes. It reports whether it acted.
+//
+// A given dialog is answered once and then not again until it has disappeared
+// from the screen entirely. Keying on the screen's contents instead does not
+// work: a live TUI repaints a spinner and a token count every poll, so no two
+// captures are equal and every poll looks like a new dialog. Without this a run
+// sent Enter twenty-two times into a live session — a dismissed dialog stays in
+// the scrollback just above the prompt that replaced it.
 func (h *harness) answerStartupDialogs(id session.SessionID) bool {
 	h.t.Helper()
-	pane := h.pane(id)
-	if pane == "" {
+	tail := h.paneTail(id)
+	if tail == "" {
 		return false
 	}
 	for _, d := range startupDialogs {
 		matched := true
 		for _, m := range d.match {
-			if !strings.Contains(pane, m) {
+			if !strings.Contains(tail, m) {
 				matched = false
 				break
 			}
@@ -412,6 +445,11 @@ func (h *harness) answerStartupDialogs(id session.SessionID) bool {
 		if !matched {
 			continue
 		}
+		key := string(id) + "\x00" + d.name
+		if h.answeredDialogs[key] != "" {
+			return false // already answered; waiting for it to go away
+		}
+
 		target := h.tmuxTargetOf(id)
 		h.t.Logf("answering %q dialog in %s with %v", d.name, id, d.keys)
 		for _, k := range d.keys {
@@ -421,7 +459,14 @@ func (h *harness) answerStartupDialogs(id session.SessionID) bool {
 			}
 			time.Sleep(300 * time.Millisecond)
 		}
+		h.answeredDialogs[key] = "answered"
 		return true
+	}
+
+	// Nothing matched: any dialog previously answered is gone, so a fresh
+	// appearance of it may be answered again.
+	for _, d := range startupDialogs {
+		delete(h.answeredDialogs, string(id)+"\x00"+d.name)
 	}
 	return false
 }
@@ -457,3 +502,56 @@ func (h *harness) awaitPaneClearingDialogs(id session.SessionID, want, because s
 	h.t.Fatalf("%s: %q never appeared in %s's pane\n--- pane ---\n%s",
 		because, want, id, h.pane(id))
 }
+
+// longTurnSeconds is how long a "keep busy" prompt occupies an agent. Long
+// enough that a queued message is unambiguously held across a live turn, short
+// enough not to dominate the suite.
+const longTurnSeconds = 20
+
+// longTurnPrompt asks an agent to occupy itself for a bounded, predictable
+// time and then say a known word.
+//
+// It shells out rather than asking for a long answer because generated text is
+// not a reliable clock — a model told to "count slowly" may emit the whole list
+// at once, leaving no live turn to queue behind. A sleep is the same length on
+// every backend. Requires a session type that may run commands (builder).
+func longTurnPrompt(done string) string {
+	return fmt.Sprintf(
+		"Run this exact shell command and wait for it to finish: sleep %d. "+
+			"Then reply with exactly one line and nothing else: %s. "+
+			"Do not read or edit any files.", longTurnSeconds, done)
+}
+
+// awaitWorking waits until a session is demonstrably mid-turn: bramble reports
+// it running and its pane shows it has taken the prompt.
+//
+// Both halves matter. Status alone is true from the moment the session is
+// created, so a test that queued on status alone could be queueing before the
+// CLI had even started — which is a different case, and not the one under test.
+func (h *harness) awaitWorking(id session.SessionID, promptEcho string) {
+	h.t.Helper()
+	deadline := time.Now().Add(settleTimeout)
+	for time.Now().Before(deadline) {
+		if h.status(id) == "running" && strings.Contains(h.pane(id), promptEcho) {
+			return
+		}
+		h.answerStartupDialogs(id)
+		time.Sleep(pollInterval)
+	}
+	h.t.Fatalf("session %s never started working\n--- pane ---\n%s", id, h.pane(id))
+}
+
+// reportedResultPath pulls the path out of the most recent report in a pane.
+//
+// The report is a pointer, not a payload, so the path is the part a parent
+// actually has to be able to use; asserting only that "result:" appears would
+// pass on a report naming a file that was never written.
+func reportedResultPath(pane string) (string, bool) {
+	matches := resultPathRE.FindAllStringSubmatch(pane, -1)
+	if len(matches) == 0 {
+		return "", false
+	}
+	return matches[len(matches)-1][1], true
+}
+
+var resultPathRE = regexp.MustCompile(`result:\s+(\S+)`)

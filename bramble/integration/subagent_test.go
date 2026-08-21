@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -296,6 +297,17 @@ func TestLiveSubagentTwoWay(t *testing.T) {
 				"the parent was never told about its %s subagent\n--- parent pane ---\n%s",
 				backend.provider, h.pane(parent))
 
+			// The report is a pointer, so the path is the part the parent has
+			// to be able to use. Asserting only that "result:" appeared would
+			// pass on a report naming a file that was never written — which is
+			// what a failed pane capture produces.
+			resultPath, ok := reportedResultPath(h.pane(parent))
+			require.Truef(t, ok, "the report carried no result path\n--- parent pane ---\n%s", h.pane(parent))
+			body, err := os.ReadFile(resultPath)
+			require.NoErrorf(t, err, "the reported result file is not readable: %s", resultPath)
+			assert.Containsf(t, string(body), "ARTICHOKE",
+				"the %s subagent's answer is missing from its result file %s", backend.provider, resultPath)
+
 			// Round two: the parent replies, and the answer comes back. This is
 			// the leg that stayed broken longest — a delivery has to move the
 			// child off idle, or the turn it starts produces no state change and
@@ -319,6 +331,60 @@ func TestLiveSubagentTwoWay(t *testing.T) {
 			}, settleTimeout, pollInterval,
 				"round two was never reported for %s — the conversation went quiet after one exchange\n--- parent pane ---\n%s",
 				backend.provider, h.pane(parent))
+		})
+	}
+}
+
+// TestLiveQueuedDeliveryWaitsForALiveTurn is the live counterpart to the
+// stubbed queue tests, and covers two things nothing else does against a real
+// CLI.
+//
+// First, the queue itself. Every other live assertion delivers to an *idle*
+// child, so the deferred path — the reason the courier exists — was only ever
+// exercised against a stand-in. Here the child is genuinely mid-turn.
+//
+// Second, and more valuable: that a real agent working for twenty seconds is
+// not mistaken for an idle one. That is the harmful direction. Claude and codex
+// report their own turn ends, but cursor's state is read off its pane, and a
+// false idle there would release this queued message straight into the running
+// turn — precisely what the queue prevents. The unit tests pin that against a
+// synthetic pane; only this pins it against the real chrome.
+func TestLiveQueuedDeliveryWaitsForALiveTurn(t *testing.T) {
+	for _, backend := range liveBackends {
+		t.Run(backend.provider, func(t *testing.T) {
+			model := backend.require(t)
+			h := newHarness(t, false)
+
+			parent := h.spawn("builder", liveBackends[0].require(t), "",
+				"You are the PARENT in an automated test. Say exactly: PARENT READY. Then wait.")
+			h.awaitReady(parent)
+
+			// A builder, not a codetalk: the child has to be able to run a
+			// command to occupy itself for a known length of time.
+			child := h.spawn("builder", model, string(parent), longTurnPrompt("LONG-DONE"))
+			dumpPanesOnFailure(t, h, parent, child)
+			h.awaitWorking(child, "sleep")
+
+			result, err := h.send(parent, child, "QUEUED-MID-TURN: acknowledge with QUEUE-ACK", true)
+			require.NoErrorf(t, err, "could not queue for the %s subagent", backend.provider)
+			require.Truef(t, result.Queued,
+				"a message sent to a %s subagent mid-turn should have been held, not written", backend.provider)
+			assert.Equal(t, 1, h.deliveryQueueLen(), "the held message should be persisted")
+
+			// While the turn runs: the session must stay running, and nothing
+			// may be typed into it.
+			watchFor := (longTurnSeconds - 6) * int(time.Second)
+			require.Neverf(t, func() bool {
+				return h.status(child) == "idle" || strings.Contains(h.pane(child), "QUEUED-MID-TURN")
+			}, time.Duration(watchFor), pollInterval,
+				"the %s subagent was treated as idle mid-turn, or the queued message was typed into a live turn\n--- pane ---\n%s",
+				backend.provider, h.pane(child))
+
+			// The turn ends, and only then does the message land.
+			h.awaitPaneClearingDialogs(child, "LONG-DONE", "the subagent never finished its long turn")
+			h.awaitPaneClearingDialogs(child, "QUEUED-MID-TURN", "the held message never landed after the turn ended")
+			require.Eventually(t, func() bool { return h.deliveryQueueLen() == 0 },
+				settleTimeout, pollInterval, "the queue should drain once delivered")
 		})
 	}
 }

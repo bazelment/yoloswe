@@ -206,10 +206,26 @@ Two layers:
   `codex`, exercises bramble's own logic deterministically and with no
   credentials: lineage, the notify hook, queued delivery, delivery into a pane
   left in copy mode, and a full two-round conversation.
-- **Live.** `TestLiveSubagentTwoWay` drives the real claude, codex and cursor
-  CLIs, one subtest each, with a Claude parent. These run by default and skip
-  only when a backend is missing or logged out, because every bug this feature
-  shipped with was invisible without a real CLI in a real pane.
+- **Live.** Two tests drive the real claude, codex and cursor CLIs, one subtest
+  each, with a Claude parent. They run by default and skip only when a backend
+  is missing or logged out, because every bug this feature shipped with was
+  invisible without a real CLI in a real pane.
+  - `TestLiveSubagentTwoWay` — a two-round conversation, and the result file the
+    report points at is opened and checked for the subagent's answer. Asserting
+    only that a path appeared would pass on a report naming a file that a failed
+    pane capture never wrote.
+  - `TestLiveQueuedDeliveryWaitsForALiveTurn` — the deferred path, which every
+    other live assertion misses by delivering to an idle child. The subagent is
+    given a twenty-second shell command, and the test asserts the message is
+    held, that nothing is typed into the running turn, and — the point of it —
+    that the session is not mistaken for idle while it works. That last one is
+    the harmful direction for the cursor probe: a false idle would release the
+    queued message into the live turn. The unit tests pin it against a synthetic
+    pane; only this pins it against the real chrome.
+
+  A backend is occupied with `sleep` rather than a long answer because generated
+  text is not a clock — a model told to count slowly may emit the whole list at
+  once, leaving no live turn to queue behind.
 
 The live cases answer the CLIs' first-run dialogs themselves — Claude's folder
 trust, codex's directory trust, its model-deprecation and rate-limit prompts —
