@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -58,6 +57,21 @@ func (c *Courier) reportedForLocked(child SessionID) map[SessionStatus]bool {
 		c.reported[child] = seen
 	}
 	return seen
+}
+
+// unmarkReported undoes a shouldReport reservation whose delivery then failed,
+// so the next eligible transition tries again.
+//
+// shouldReport has to reserve the status up front — two transitions for one
+// child would otherwise both pass the check and both report — but a reservation
+// that is never released turns one transient tmux error into a report the
+// parent never gets and nothing ever retries.
+func (c *Courier) unmarkReported(child SessionID, status SessionStatus) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if seen := c.reported[child]; seen != nil {
+		delete(seen, status)
+	}
 }
 
 // noteChildSpoke records that a child has messaged its parent directly, so the
@@ -125,8 +139,12 @@ func (c *Courier) reportToParent(ctx context.Context, child SessionInfo) {
 		return
 	}
 	resultPath := c.resultPathFor(child)
-	if _, err := c.Send(ctx, child.ID, child.ParentSessionID, formatSubagentReport(child, resultPath), true); err != nil {
+	// deliver, not Send: this report is composed by the courier, so it must not
+	// register as the child having spoken for itself — that would suppress the
+	// reports the courier still owes for the child's remaining states.
+	if _, err := c.deliver(ctx, child.ID, child.ParentSessionID, formatSubagentReport(child, resultPath), true); err != nil {
 		logDeliveryWarn("failed to report subagent completion", child.ParentSessionID, err)
+		c.unmarkReported(child.ID, child.Status)
 	}
 }
 
@@ -154,6 +172,15 @@ func (c *Courier) resultPathFor(child SessionInfo) string {
 	}
 
 	lines, err := c.target.CapturePaneText(child.ID, tmuxCaptureLines)
+	if err != nil {
+		// The session-keyed capture misses once the manager has dropped a
+		// completed session, which is precisely when this runs. The window
+		// itself often outlives it — tmux keeps it open under remain-on-exit —
+		// so fall back to the target recorded on the event's own snapshot.
+		if target := child.tmuxTarget(); target != "" {
+			lines, err = CaptureTmuxPane(target, tmuxCaptureLines)
+		}
+	}
 	if err != nil || len(lines) == 0 {
 		// Not worth failing the report over — the parent still learns the
 		// child finished, just without a pointer to read.
@@ -164,7 +191,11 @@ func (c *Courier) resultPathFor(child SessionInfo) string {
 		return ""
 	}
 	body := strings.Join(lines, "\n") + "\n"
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+	// writeFileAtomic, not os.WriteFile: 0600 because a captured pane can hold
+	// anything the subagent printed, and the create-and-rename replaces a
+	// symlink someone planted at this predictable path instead of writing
+	// through it.
+	if err := writeFileAtomic(path, []byte(body), 0o600); err != nil {
 		logDeliveryWarn("failed to write captured pane", child.ID, err)
 		return ""
 	}

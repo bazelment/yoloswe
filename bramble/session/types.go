@@ -104,6 +104,15 @@ const (
 	RunnerTypeTmuxTracked = "tmux-tracked"
 )
 
+// tmuxTarget is the session's tmux window, preferring the stable window ID over
+// the name, which a rename can change. Empty when the session has neither.
+func (s SessionInfo) tmuxTarget() string {
+	if s.TmuxWindowID != "" {
+		return s.TmuxWindowID
+	}
+	return s.TmuxWindowName
+}
+
 // isTmuxRunner reports whether a session runs in a tmux window, and so is
 // reachable by typing into a pane rather than through the TUI turn loop.
 func isTmuxRunner(runnerType string) bool {
@@ -330,7 +339,16 @@ type SessionOutputEvent struct {
 }
 
 // SessionStateChangeEvent is sent when session state changes.
-type SessionStateChangeEvent struct {
+type SessionStateChangeEvent struct { //nolint:govet // fieldalignment: readability over packing
+	// Info is the session as it stood when the change was emitted.
+	//
+	// Carried on the event rather than looked up by the subscriber because a
+	// subscriber often runs after the session is gone: the tmux monitor emits
+	// StatusCompleted and then deletes the session from the manager, so a
+	// lookup keyed on SessionID races the delete and usually loses. That race
+	// silently dropped the completion report a subagent's parent was waiting
+	// for — see Courier.Watch.
+	Info      SessionInfo
 	SessionID SessionID
 	OldStatus SessionStatus
 	NewStatus SessionStatus

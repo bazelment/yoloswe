@@ -123,6 +123,13 @@ func (f *fakeTarget) MarkRunning(id SessionID) {
 	f.markedRunning = append(f.markedRunning, id)
 }
 
+// mustInfo returns a registered session, for tests that hand a SessionInfo
+// straight to a courier method.
+func (f *fakeTarget) mustInfo(id SessionID) SessionInfo {
+	info, _ := f.SessionInfo(id)
+	return info
+}
+
 func (f *fakeTarget) sentFollowUps() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -759,6 +766,51 @@ func TestReportToIdleParentIsWrittenImmediately(t *testing.T) {
 	assert.Empty(t, c.Pending(parentID))
 }
 
+// TestFailedReportIsRetriedOnTheNextTransition is the dedup-before-delivery
+// case: shouldReport reserves the status before the write is attempted, so a
+// write that fails must release the reservation or the parent never hears about
+// this child again.
+func TestFailedReportIsRetriedOnTheNextTransition(t *testing.T) {
+	t.Parallel()
+	c, target, parentID, childID := reportFixture(t, StatusIdle)
+	// An idle parent is written to directly, so a paste failure surfaces as a
+	// failed report rather than a queued one.
+	target.set(parentID, StatusIdle, RunnerTypeTmux)
+	panes := &fakePanes{pasteErr: errors.New("tmux exploded")}
+	c.panes = panes
+
+	reportNow(c, target, childID)
+	require.Empty(t, c.Pending(parentID), "the write failed, so nothing should be queued")
+	require.Empty(t, panes.recorded(), "a failed paste records no write")
+
+	// The same child goes idle again; the report must be attempted afresh.
+	working := echoPanes(target)
+	c.panes = working
+	reportNow(c, target, childID)
+
+	assert.Contains(t, strings.Join(working.recorded(), "\n"), "subagent "+string(childID),
+		"the report was never retried after the first attempt failed")
+}
+
+// TestGeneratedReportDoesNotCountAsTheChildSpeaking keeps the courier's own
+// report from registering as a self-report. If it did, a failed delivery would
+// leave every remaining state marked as already told.
+func TestGeneratedReportDoesNotCountAsTheChildSpeaking(t *testing.T) {
+	t.Parallel()
+	c, target, parentID, childID := reportFixture(t, StatusIdle)
+	target.set(parentID, StatusIdle, RunnerTypeTmux)
+	c.panes = &fakePanes{pasteErr: errors.New("tmux exploded")}
+
+	reportNow(c, target, childID)
+
+	// A failure must leave nothing recorded for this child at all.
+	c.mu.Lock()
+	seen := len(c.reported[childID])
+	c.mu.Unlock()
+	assert.Zero(t, seen, "a failed report must leave no state claiming the parent was told")
+	_ = parentID
+}
+
 // TestReportToDeadParentIsDropped covers the child outliving its parent: there
 // is nowhere to report, and that must not be an error or a leaked queue.
 func TestReportToDeadParentIsDropped(t *testing.T) {
@@ -771,6 +823,73 @@ func TestReportToDeadParentIsDropped(t *testing.T) {
 	reportNow(c, target, childID)
 
 	assert.Empty(t, c.Pending(parentID))
+}
+
+// TestResultArtifactsAreNotWorldReadable pins the privacy of what a subagent
+// leaves in a shared temp dir: a captured pane is the child's whole transcript,
+// and os.TempDir() is traversable by every local user.
+func TestResultArtifactsAreNotWorldReadable(t *testing.T) {
+	// Not parallel, and TMPDIR-scoped: ResultFilePath writes into a directory
+	// shared by every session on the machine. Against the real one this test
+	// passed even with the fix reverted, because os.WriteFile leaves an
+	// existing file's mode alone and a previous run had already created it 0600.
+	t.Setenv("TMPDIR", t.TempDir())
+	c, target, _, childID := reportFixture(t, StatusIdle)
+	target.annotate(childID, func(i *SessionInfo) { i.RunnerType = RunnerTypeTmux })
+	target.captured[childID] = []string{"secret: hunter2"}
+
+	path := c.resultPathFor(target.mustInfo(childID))
+	require.NotEmpty(t, path, "the pane capture should have produced a result file")
+
+	fi, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm(), "a transcript must not be readable by other users")
+
+	di, err := os.Stat(filepath.Dir(path))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), di.Mode().Perm(), "the result dir must not be traversable by other users")
+}
+
+// TestCompletedChildIsReportedAfterTheManagerDropsIt is the window-close path
+// Gemini and Agy depend on, and the one the tmux monitor races: it emits
+// StatusCompleted and immediately deletes the session, so a subscriber that
+// looks the child up by ID finds nothing and reports nothing.
+func TestCompletedChildIsReportedAfterTheManagerDropsIt(t *testing.T) {
+	t.Parallel()
+	parentID, childID := ids(t)
+	target := newFakeTarget()
+	c, err := NewCourier(target, echoPanes(target), t.TempDir())
+	require.NoError(t, err)
+	target.set(parentID, StatusRunning, RunnerTypeTmux)
+
+	mgr := NewManagerWithConfig(ManagerConfig{RepoName: "repo"})
+	defer mgr.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	unsub := c.Watch(ctx, mgr)
+	defer unsub()
+
+	// The child is gone from the target by the time the event is handled —
+	// exactly what deleting it from m.sessions produces.
+	child := SessionInfo{
+		ID:              childID,
+		ParentSessionID: parentID,
+		Status:          StatusCompleted,
+		Type:            SessionTypeCodeTalk,
+		RunnerType:      RunnerTypeTmux,
+	}
+	mgr.emitSessionStateChange(SessionStateChangeEvent{
+		Info:      child,
+		SessionID: childID,
+		OldStatus: StatusRunning,
+		NewStatus: StatusCompleted,
+	})
+
+	require.Eventually(t, func() bool { return len(c.Pending(parentID)) == 1 },
+		5*time.Second, 10*time.Millisecond,
+		"a child the manager already dropped was never reported to its parent")
+	assert.Contains(t, c.Pending(parentID)[0].Text, "is completed")
 }
 
 // TestWatchReportsChildCompletion is the end-to-end wiring: a real Manager

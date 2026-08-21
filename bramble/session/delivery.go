@@ -118,7 +118,8 @@ func NewCourier(target DeliveryTarget, panes PaneWriter, dir string) (*Courier, 
 		}
 		dir = filepath.Join(home, ".bramble", "deliveries")
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0700: queue files hold message text meant for one session's operator.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create delivery dir %s: %w", dir, err)
 	}
 	c := &Courier{
@@ -140,20 +141,27 @@ func NewCourier(target DeliveryTarget, panes PaneWriter, dir string) (*Courier, 
 // A recipient in a terminal state is refused rather than queued: nothing will
 // ever make it idle again, so the message would sit on disk forever.
 func (c *Courier) Send(ctx context.Context, from, to SessionID, text string, submit bool) (queued bool, err error) {
+	// A child speaking to its own parent replaces the report the courier would
+	// otherwise generate for it — see noteChildSpoke. Only a message the child
+	// composed itself counts; the courier's own report goes through deliver,
+	// below, which skips this.
+	if from != "" {
+		if sender, ok := c.target.SessionInfo(from); ok && sender.ParentSessionID == to {
+			c.noteChildSpoke(from)
+		}
+	}
+	return c.deliver(ctx, from, to, text, submit)
+}
+
+// deliver is Send without the child-spoke bookkeeping: it writes to an idle
+// recipient and queues for a busy one, reporting which it did.
+func (c *Courier) deliver(ctx context.Context, from, to SessionID, text string, submit bool) (queued bool, err error) {
 	info, ok := c.target.SessionInfo(to)
 	if !ok {
 		return false, fmt.Errorf("session not found: %s", to)
 	}
 	if info.Status.IsTerminal() {
 		return false, fmt.Errorf("session %s is %s and cannot receive messages", to, info.Status)
-	}
-
-	// A child speaking to its own parent replaces the report the courier would
-	// otherwise generate for it — see noteChildSpoke.
-	if from != "" {
-		if sender, ok := c.target.SessionInfo(from); ok && sender.ParentSessionID == to {
-			c.noteChildSpoke(from)
-		}
 	}
 
 	if info.Status == StatusIdle {
@@ -408,8 +416,19 @@ func (c *Courier) Watch(ctx context.Context, mgr *Manager) func() {
 		// A session is both a recipient of queued mail and, when it has a
 		// parent, a subagent whose progress that parent is waiting on. One
 		// transition can mean both things.
-		if info, found := c.target.SessionInfo(evt.SessionID); found && info.ParentSessionID != "" {
-			c.reportToParent(ctx, info)
+		//
+		// The child comes off the event, not from a lookup: the tmux monitor
+		// deletes a completed session from the manager immediately after
+		// emitting, so by the time this callback runs the lookup would usually
+		// miss — which is exactly the window-close path Gemini and Agy report
+		// on. Fall back to a lookup only for an event that predates the
+		// snapshot field.
+		child := evt.Info
+		if child.ID == "" {
+			child, _ = c.target.SessionInfo(evt.SessionID)
+		}
+		if child.ParentSessionID != "" {
+			c.reportToParent(ctx, child)
 		}
 		switch {
 		case evt.NewStatus == StatusIdle:
@@ -515,8 +534,16 @@ const resultDirName = "bramble-research"
 // pane capture so a parent is handed the same shape of path either way.
 func ResultFilePath(id SessionID) (string, error) {
 	dir := filepath.Join(os.TempDir(), resultDirName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0700, and chmod as well as create: these live in a world-traversable
+	// temp dir and hold a subagent's whole transcript — prompts, file contents,
+	// whatever its tools printed. MkdirAll leaves an existing directory's mode
+	// alone, so a dir created 0755 by an older build stays readable until it is
+	// narrowed explicitly.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create result dir: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", fmt.Errorf("secure result dir: %w", err)
 	}
 	return filepath.Join(dir, sanitizeFileName(string(id))+".md"), nil
 }
