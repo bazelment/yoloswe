@@ -104,17 +104,55 @@ func NewStore(baseDir string) (*Store, error) {
 	}, nil
 }
 
+// containedPath joins parts under base and refuses a result that escapes it.
+//
+// A containment check rather than stricter character rewriting, because the
+// store's directory names are load-bearing: tightening sanitizeName would move
+// every existing user's history to a new path and make it look empty. Refusing
+// an escape leaves well-formed names exactly where they are and rejects only
+// what could never have been a real session.
+//
+// It is a real hole, not a theoretical one. A worktree name reaches here as
+// filepath.Base of the worktree path an IPC caller supplied, and
+// filepath.Base("/a/b/..") is "..", which walks straight out of the store.
+func containedPath(base string, parts ...string) (string, error) {
+	// Every part is meant to be one directory or file name, so anything that
+	// is not — a separator, or a dot segment — is refused outright. Checking
+	// only the joined result is not enough: base/repo/../x.json stays inside
+	// base while still landing somewhere its caller never meant, which is how
+	// one session's record would overwrite another's.
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." ||
+			strings.ContainsRune(part, '/') || strings.ContainsRune(part, filepath.Separator) {
+			return "", fmt.Errorf("refusing %q as a path component under the session store", part)
+		}
+	}
+
+	base = filepath.Clean(base)
+	joined := filepath.Join(append([]string{base}, parts...)...)
+
+	// Independent backstop, so a gap in the rules above still cannot escape.
+	rel, err := filepath.Rel(base, joined)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("refusing path outside the session store: %q", filepath.Join(parts...))
+	}
+	return joined, nil
+}
+
 // sessionDir returns the directory for a session's repo/worktree.
-func (s *Store) sessionDir(repoName, worktreeName string) string {
+func (s *Store) sessionDir(repoName, worktreeName string) (string, error) {
 	// Sanitize names for filesystem
 	repoName = sanitizeName(repoName)
 	worktreeName = sanitizeName(worktreeName)
-	return filepath.Join(s.baseDir, repoName, worktreeName)
+	return containedPath(s.baseDir, repoName, worktreeName)
 }
 
 // sessionPath returns the file path for a session.
-func (s *Store) sessionPath(repoName, worktreeName string, id SessionID) string {
-	return filepath.Join(s.sessionDir(repoName, worktreeName), string(id)+".json")
+//
+// The ID is not rewritten for the same reason the names are not: it is part of
+// existing filenames. It is contained instead.
+func (s *Store) sessionPath(repoName, worktreeName string, id SessionID) (string, error) {
+	return containedPath(s.baseDir, sanitizeName(repoName), sanitizeName(worktreeName), string(id)+".json")
 }
 
 // sanitizeName sanitizes a repo or worktree name for use as a directory name.
@@ -206,12 +244,18 @@ func (s *Store) SaveSession(session *StoredSession) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	dir := s.sessionDir(session.RepoName, session.WorktreeName)
+	dir, err := s.sessionDir(session.RepoName, session.WorktreeName)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create session directory: %w", err)
 	}
 
-	path := s.sessionPath(session.RepoName, session.WorktreeName, session.ID)
+	path, err := s.sessionPath(session.RepoName, session.WorktreeName, session.ID)
+	if err != nil {
+		return err
+	}
 
 	if err := writeFileAtomic(path, data, 0644); err != nil {
 		return fmt.Errorf("failed to write session file: %w", err)
@@ -225,7 +269,10 @@ func (s *Store) LoadSession(repoName, worktreeName string, id SessionID) (*Store
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	path := s.sessionPath(repoName, worktreeName, id)
+	path, err := s.sessionPath(repoName, worktreeName, id)
+	if err != nil {
+		return nil, err
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -248,7 +295,10 @@ func (s *Store) DeleteSession(repoName, worktreeName string, id SessionID) error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	path := s.sessionPath(repoName, worktreeName, id)
+	path, err := s.sessionPath(repoName, worktreeName, id)
+	if err != nil {
+		return err
+	}
 
 	if err := os.Remove(path); err != nil {
 		if os.IsNotExist(err) {
@@ -265,7 +315,11 @@ func (s *Store) DeleteSession(repoName, worktreeName string, id SessionID) error
 func (s *Store) ListSessions(repoName, worktreeName string) ([]*SessionMeta, error) {
 	// Read directory entries under lock, then release for file I/O.
 	s.mu.RLock()
-	dir := s.sessionDir(repoName, worktreeName)
+	dir, err := s.sessionDir(repoName, worktreeName)
+	if err != nil {
+		s.mu.RUnlock()
+		return nil, err
+	}
 	entries, err := os.ReadDir(dir)
 	s.mu.RUnlock()
 

@@ -576,8 +576,11 @@ func (c *Courier) Watch(ctx context.Context, mgr *Manager) func() {
 // --- persistence -------------------------------------------------------------
 
 // queuePath returns the on-disk file backing a recipient's queue.
-func (c *Courier) queuePath(to SessionID) string {
-	return filepath.Join(c.dir, sanitizeFileName(string(to))+".json")
+func (c *Courier) queuePath(to SessionID) (string, error) {
+	// Belt and braces: the name is already reduced to an allowlist, so this
+	// can only fail if that ever regresses. Cheap enough to keep as a guard
+	// that does not depend on the sanitizer being right.
+	return containedPath(c.dir, sanitizeFileName(string(to))+".json")
 }
 
 // persistLocked writes a recipient's current queue to disk, removing the file
@@ -594,7 +597,10 @@ func (c *Courier) queuePath(to SessionID) string {
 // The cost is a small file write inside the critical section, at the rate
 // subagents finish turns.
 func (c *Courier) persistLocked(to SessionID) error {
-	path := c.queuePath(to)
+	path, err := c.queuePath(to)
+	if err != nil {
+		return err
+	}
 	queue := c.pending[to]
 	if len(queue) == 0 {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -693,15 +699,9 @@ const resultDirName = "research"
 // creating the directory. Shared by the TUI transcript writer and the tmux
 // pane capture so a parent is handed the same shape of path either way.
 func ResultFilePath(id SessionID) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("locate home directory: %w", err)
-	}
-	// 0700: a transcript holds prompts, file contents, and whatever the
-	// subagent's tools printed.
-	dir := filepath.Join(home, ".bramble", resultDirName)
+	dir := filepath.Join(os.TempDir(), resultDirName)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create result dir: %w", err)
 	}
-	return filepath.Join(dir, sanitizeFileName(string(id))+".md"), nil
+	return containedPath(dir, sanitizeFileName(string(id))+".md")
 }

@@ -839,7 +839,9 @@ func TestQueueThatCannotPersistIsNotReportedAsQueued(t *testing.T) {
 	target.set("s1", StatusRunning, RunnerTypeTmux)
 
 	// Make the queue file unwritable by putting a directory where it goes.
-	require.NoError(t, os.MkdirAll(c.queuePath("s1"), 0o700))
+	qp, err := c.queuePath("s1")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(qp, 0o700))
 
 	queued, err := c.Send(context.Background(), "", "s1", "hello", true)
 	require.Error(t, err, "an unpersistable queue must not be reported as queued")

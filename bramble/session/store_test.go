@@ -700,3 +700,76 @@ func TestTmuxFieldsInStoredToSessionInfo(t *testing.T) {
 	assert.Equal(t, "@7", info.TmuxWindowID)
 	assert.Equal(t, RunnerTypeTmuxTracked, info.RunnerType)
 }
+
+// TestStoreRefusesPathsOutsideItself covers the traversal CodeQL flagged.
+//
+// A worktree name arrives here as filepath.Base of the worktree path an IPC
+// caller supplied, and filepath.Base("/a/b/..") is ".." — which walks straight
+// out of the store. sanitizeName does not stop it: it rewrites separators and
+// spaces, not dot segments, and it deliberately stays lax because the names it
+// produces are existing users' directory names.
+//
+// So containment is checked instead of the characters being tightened. A
+// well-formed name still lands exactly where it always did.
+func TestStoreRefusesPathsOutsideItself(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	store, err := NewStore(base)
+	require.NoError(t, err)
+
+	escapes := []struct {
+		name     string
+		repo     string
+		worktree string
+		id       SessionID
+	}{
+		{"worktree walks up", "repo", "..", "s1"},
+		{"repo walks up", "..", "wt", "s1"},
+		{"both walk up", "..", "..", "s1"},
+		{"id walks up", "repo", "wt", "../../escape"},
+	}
+	for _, tc := range escapes {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := store.sessionPath(tc.repo, tc.worktree, tc.id)
+			require.Errorf(t, err, "%s/%s/%s should be refused", tc.repo, tc.worktree, tc.id)
+
+			// And the public surface refuses it too, rather than only the helper.
+			saveErr := store.SaveSession(&StoredSession{
+				ID: tc.id, RepoName: tc.repo, WorktreeName: tc.worktree,
+				Type: SessionTypeBuilder, Status: StatusIdle,
+			})
+			assert.Error(t, saveErr, "SaveSession should refuse an escaping path")
+		})
+	}
+
+	// Nothing may have been written outside the store.
+	parent := filepath.Dir(base)
+	strays, err := filepath.Glob(filepath.Join(parent, "*.json"))
+	require.NoError(t, err)
+	assert.Empty(t, strays, "a refused path still wrote outside the store")
+}
+
+// TestStoreKeepsExistingLayout is the other half: containment must not move
+// anything. A name that was legal before still resolves to the same path, so
+// existing history stays findable.
+func TestStoreKeepsExistingLayout(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	store, err := NewStore(base)
+	require.NoError(t, err)
+
+	// Dots and dashes are common in worktree names and session IDs, and are
+	// exactly what a stricter character rewrite would have mangled.
+	got, err := store.sessionPath("my-repo", "v1.2", "v1.2-builder-abc123")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(base, "my-repo", "v1.2", "v1.2-builder-abc123.json"), got)
+
+	// A dot segment as an ID is not an escape once it is a filename: ".."
+	// becomes "...json", which sits in the intended directory like any other
+	// name. Refusing it would be theatre, so it is allowed.
+	dotted, err := store.sessionPath("repo", "wt", "..")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(base, "repo", "wt", "...json"), dotted)
+}
