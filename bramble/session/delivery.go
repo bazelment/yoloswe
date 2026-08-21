@@ -104,12 +104,16 @@ type Courier struct { //nolint:govet // fieldalignment: grouping by role reads b
 	// reported remembers which (child, status) pairs have already been
 	// reported to a parent, so a child is not announced twice.
 	reported map[SessionID]map[SessionStatus]bool
-	// draining holds the recipients a drain is currently writing to. Watch and
-	// the startup sweep can both reach one recipient at the same moment, and
-	// Drain does not hold the lock across the write — without a claim both
-	// would read the same head and deliver it twice.
-	draining map[SessionID]bool
-	seq      uint64
+	// writing holds the recipients a write is currently in flight to.
+	//
+	// One rule for both paths that can write: a direct send to an idle
+	// recipient, and a drain. Neither holds c.mu across the write — it can take
+	// seconds, pasting and reading a pane back — so without a claim two callers
+	// both see "idle" and both write, and the second lands mid-turn, which is
+	// the interruption this whole type exists to prevent. Anything that cannot
+	// take the claim queues instead.
+	writing map[SessionID]bool
+	seq     uint64
 }
 
 // NewCourier creates a courier that persists its queue under dir. If dir is
@@ -133,7 +137,7 @@ func NewCourier(target DeliveryTarget, panes PaneWriter, dir string) (*Courier, 
 		dir:      dir,
 		pending:  make(map[SessionID][]Delivery),
 		reported: make(map[SessionID]map[SessionStatus]bool),
-		draining: make(map[SessionID]bool),
+		writing:  make(map[SessionID]bool),
 	}
 	if err := c.load(); err != nil {
 		return nil, err
@@ -170,11 +174,18 @@ func (c *Courier) deliver(ctx context.Context, from, to SessionID, text string, 
 		return false, fmt.Errorf("session %s is %s and cannot receive messages", to, info.Status)
 	}
 
-	if info.Status == StatusIdle {
-		if err := c.write(ctx, info, text, submit); err != nil {
-			return false, err
+	// Write only under the claim, and re-read the status once holding it: two
+	// callers can both have seen StatusIdle above, and only one of them may
+	// write. The loser queues, which is the right answer — the winner's write
+	// starts a turn, so the recipient is no longer idle.
+	if info.Status == StatusIdle && c.claimWrite(to) {
+		defer c.releaseWrite(to)
+		if fresh, ok := c.target.SessionInfo(to); ok && fresh.Status == StatusIdle {
+			if err := c.write(ctx, fresh, text, submit); err != nil {
+				return false, err
+			}
+			return false, nil
 		}
-		return false, nil
 	}
 	if err := c.enqueue(from, to, text, submit); err != nil {
 		return false, err
@@ -223,6 +234,24 @@ func (c *Courier) Pending(to SessionID) []Delivery {
 	return append([]Delivery(nil), c.pending[to]...)
 }
 
+// claimWrite reserves the right to write to a recipient, reporting whether it
+// got it. A caller that does not must not write: it queues instead.
+func (c *Courier) claimWrite(to SessionID) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.writing[to] {
+		return false
+	}
+	c.writing[to] = true
+	return true
+}
+
+func (c *Courier) releaseWrite(to SessionID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.writing, to)
+}
+
 // Drain writes the oldest queued delivery for a session that is now ready to
 // take it, and returns.
 //
@@ -242,18 +271,19 @@ func (c *Courier) Pending(to SessionID) []Delivery {
 func (c *Courier) Drain(ctx context.Context, to SessionID) {
 	c.mu.Lock()
 	queue := c.pending[to]
-	if len(queue) == 0 || c.draining[to] {
+	if len(queue) == 0 {
 		c.mu.Unlock()
 		return
 	}
 	next := queue[0]
-	c.draining[to] = true
 	c.mu.Unlock()
-	defer func() {
-		c.mu.Lock()
-		delete(c.draining, to)
-		c.mu.Unlock()
-	}()
+
+	if !c.claimWrite(to) {
+		// Another write is already in flight; that write will leave the
+		// recipient running, and this queue rides the next idle transition.
+		return
+	}
+	defer c.releaseWrite(to)
 
 	info, ok := c.target.SessionInfo(to)
 	if !ok {
@@ -490,7 +520,12 @@ func (c *Courier) Watch(ctx context.Context, mgr *Manager) func() {
 		if child.ID == "" {
 			child, _ = c.target.SessionInfo(evt.SessionID)
 		}
-		if child.ParentSessionID != "" {
+		// Report on transitions only. Re-adoption emits a synthetic
+		// same-status event so a restored session's mail can be drained, and
+		// that is not news: the dedup map lives only in memory, so reporting
+		// on it would hand the parent the same "is idle" report, with the same
+		// result path, after every single restart.
+		if child.ParentSessionID != "" && evt.OldStatus != evt.NewStatus {
 			c.reportToParent(ctx, child)
 		}
 		switch {
@@ -566,10 +601,32 @@ func (c *Courier) load() error {
 		sort.SliceStable(queue, func(i, j int) bool {
 			return queue[i].CreatedAt.Before(queue[j].CreatedAt)
 		})
-		c.pending[queue[0].To] = queue
+		// Drop anything too old to be worth delivering. A queue is only ever
+		// discarded on an observed terminal transition, so a recipient that
+		// vanished without one — a deleted session, a crash — would otherwise
+		// keep its file forever. Age is the one signal available here: nothing
+		// in the file says whether its recipient still exists.
+		fresh := queue[:0]
+		for _, d := range queue {
+			if time.Since(d.CreatedAt) < maxDeliveryAge {
+				fresh = append(fresh, d)
+			}
+		}
+		if len(fresh) == 0 {
+			// Reclaim the file too, or it is re-read and re-pruned every start.
+			_ = os.Remove(filepath.Join(c.dir, e.Name()))
+			continue
+		}
+		c.pending[fresh[0].To] = fresh
 	}
 	return nil
 }
+
+// maxDeliveryAge bounds how long an undelivered message is kept. Generous: the
+// queue exists to survive a restart, and a bramble that was down over a weekend
+// should still deliver. Past it the recipient is almost certainly gone, and a
+// week-old "your subagent finished" is of no use to anyone anyway.
+const maxDeliveryAge = 7 * 24 * time.Hour
 
 // logDeliveryWarn reports a non-fatal courier problem. Delivery failures are
 // never returned to the state-change watcher — there is nobody to return them

@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -844,6 +845,97 @@ func TestQueueThatCannotPersistIsNotReportedAsQueued(t *testing.T) {
 	require.Error(t, err, "an unpersistable queue must not be reported as queued")
 	assert.False(t, queued)
 	assert.Empty(t, c.Pending("s1"), "the failed delivery must not linger in memory either")
+}
+
+// TestConcurrentSendsToAnIdleRecipientQueueTheLoser pins the write claim on the
+// direct path: two reports landing on one idle parent must not both be typed
+// into the same turn, which is the interruption the queue exists to prevent.
+func TestConcurrentSendsToAnIdleRecipientQueueTheLoser(t *testing.T) {
+	t.Parallel()
+	c, target, panes := newTestCourier(t)
+	target.set("s1", StatusIdle, RunnerTypeTmux)
+
+	// Hold the first write inside its submit, which the fake runs outside its
+	// own lock, then send again while it is provably still in flight.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	panes.onSubmit = func() {
+		close(entered)
+		<-release
+		target.appendPane("> ")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = c.Send(context.Background(), "", "s1", "first", true)
+	}()
+	<-entered
+
+	queued, err := c.Send(context.Background(), "", "s1", "second", true)
+	require.NoError(t, err)
+	assert.True(t, queued, "a send racing a write in flight must queue, not join the turn")
+
+	close(release)
+	<-done
+
+	for _, w := range panes.recorded() {
+		assert.NotContains(t, w, "second", "the second message was written into a live turn")
+	}
+}
+
+// TestReAdoptionDoesNotReReportOnEveryRestart guards the synthetic same-status
+// event reconciliation emits so restored mail can drain. It is not a
+// transition, and the dedup map lives only in memory, so reporting on it would
+// hand the parent the same report again after every restart.
+func TestReAdoptionDoesNotReReportOnEveryRestart(t *testing.T) {
+	t.Parallel()
+	parentID, childID := ids(t)
+	target := newFakeTarget()
+	c, err := NewCourier(target, echoPanes(target), t.TempDir())
+	require.NoError(t, err)
+	target.set(parentID, StatusRunning, RunnerTypeTmux)
+	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
+
+	mgr := NewManagerWithConfig(ManagerConfig{RepoName: "repo"})
+	defer mgr.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	unsub := c.Watch(ctx, mgr)
+	defer unsub()
+
+	child, _ := target.SessionInfo(childID)
+	mgr.emitSessionStateChange(SessionStateChangeEvent{
+		Info: child, SessionID: childID,
+		OldStatus: StatusIdle, NewStatus: StatusIdle,
+	})
+
+	require.Never(t, func() bool { return len(c.Pending(parentID)) > 0 },
+		500*time.Millisecond, 20*time.Millisecond,
+		"a re-adoption emit is not a transition and must not re-report")
+}
+
+// TestStaleQueueIsReclaimedOnLoad bounds the cost of never discarding on an
+// unknown recipient: a session that vanished without a terminal transition
+// would otherwise keep its queue file forever.
+func TestStaleQueueIsReclaimedOnLoad(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	old := []Delivery{{
+		ID: "1", To: "gone", Text: "nobody is coming for this", Submit: true,
+		CreatedAt: time.Now().Add(-maxDeliveryAge - time.Hour),
+	}}
+	data, err := json.MarshalIndent(old, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "gone.json"), data, 0o600))
+
+	c, err := NewCourier(newFakeTarget(), &fakePanes{}, dir)
+	require.NoError(t, err)
+
+	assert.Empty(t, c.Pending("gone"), "a delivery past its age should not be reloaded")
+	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	require.NoError(t, err)
+	assert.Empty(t, files, "the emptied queue file should be reclaimed")
 }
 
 // TestUnknownRecipientKeepsItsQueue is the failure mode the startup sweep
