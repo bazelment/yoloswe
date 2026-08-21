@@ -129,9 +129,16 @@ func containedPath(base string, parts ...string) (string, error) {
 	}
 
 	base = filepath.Clean(base)
-	joined := filepath.Join(append([]string{base}, parts...)...)
 
-	// Independent backstop, so a gap in the rules above still cannot escape.
+	// Build the tail rooted at "/" and then re-join it under base. Rooting is
+	// what makes confinement structural rather than a matter of having checked:
+	// filepath.Join("/", "../../x") is "/x", so no dot segment can survive into
+	// the result even if the rules above are ever loosened. It is also the
+	// shape a static analyzer recognizes, which the rules above are not.
+	rooted := filepath.Join("/", filepath.Join(parts...))
+	joined := filepath.Join(base, rooted)
+
+	// Independent backstop, so a gap in either step still cannot escape.
 	rel, err := filepath.Rel(base, joined)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("refusing path outside the session store: %q", filepath.Join(parts...))
