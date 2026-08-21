@@ -107,3 +107,73 @@ func TestTmuxRunnerEnvArgs_OmitsUnsetValues(t *testing.T) {
 		}
 	}
 }
+
+// A codex window that never runs its notify program leaves bramble believing
+// the session is still working after it has answered. Nothing then drains that
+// session's queued messages, and its parent is only told it finished when the
+// window dies — so both directions of subagent messaging go quiet. Assert the
+// override is spliced in.
+func TestTmuxRunnerCodexGetsNotifyHook(t *testing.T) {
+	r := &tmuxRunner{
+		provider:   ProviderCodex,
+		model:      "gpt-5.5",
+		sessionID:  "subagent-codetalk-9c89b7f5",
+		brambleBin: "/home/ming/bin/bramble",
+	}
+
+	_, args := r.buildCommand()
+
+	idx := slices.Index(args, "-c")
+	if idx < 0 || idx+1 >= len(args) {
+		t.Fatalf("buildCommand() has no -c override\ngot: %v", args)
+	}
+	got := args[idx+1]
+	want := `notify=["/home/ming/bin/bramble","notify","--silent","--session-id","subagent-codetalk-9c89b7f5"]`
+	if got != want {
+		t.Errorf("notify override = %q, want %q", got, want)
+	}
+	// The prompt must stay last: codex treats the trailing argument as the
+	// prompt, so an override appended after it would be swallowed.
+	if args[len(args)-1] != r.prompt {
+		t.Errorf("prompt is not the final argument: %v", args)
+	}
+}
+
+// The notify program is only useful if bramble can be found and has an address
+// to report. Without either, emit no override rather than a broken one that
+// makes codex fail to start.
+func TestTmuxRunnerCodexNotifyRequiresIdentityAndBinary(t *testing.T) {
+	for name, r := range map[string]*tmuxRunner{
+		"no session id":  {provider: ProviderCodex, brambleBin: "/bin/bramble"},
+		"no bramble bin": {provider: ProviderCodex, sessionID: "s1"},
+	} {
+		_, args := r.buildCommand()
+		if slices.Contains(args, "-c") {
+			t.Errorf("%s: expected no notify override, got: %v", name, args)
+		}
+	}
+}
+
+// Only codex takes this override. Claude has its own Stop hook via --settings,
+// and passing -c to it would be a startup error.
+func TestTmuxRunnerNotifyOverrideIsCodexOnly(t *testing.T) {
+	for _, provider := range []string{ProviderClaude, ProviderGemini, ProviderAgy} {
+		r := &tmuxRunner{provider: provider, sessionID: "s1", brambleBin: "/bin/bramble"}
+		_, args := r.buildCommand()
+		for _, a := range args {
+			if strings.HasPrefix(a, "notify=[") {
+				t.Errorf("provider %s got a codex notify override: %v", provider, args)
+			}
+		}
+	}
+}
+
+// The TOML value is built by string concatenation, so a path or ID containing
+// a quote or backslash must not be able to break out of it.
+func TestCodexNotifyConfigQuotesValues(t *testing.T) {
+	got := codexNotifyConfig(`/opt/we"ird\path/bramble`, `id"1`)
+	want := `notify=["/opt/we\"ird\\path/bramble","notify","--silent","--session-id","id\"1"]`
+	if got != want {
+		t.Errorf("codexNotifyConfig() = %q, want %q", got, want)
+	}
+}

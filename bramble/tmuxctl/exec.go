@@ -131,6 +131,24 @@ func (c *execController) Paste(ctx context.Context, target, text string) error {
 	return err
 }
 
+// ExitCopyMode cancels an active pane mode.
+//
+// The mode is queried first rather than cancelling unconditionally: `send-keys
+// -X cancel` on a pane that is not in a mode exits non-zero, so firing it
+// blindly would turn the overwhelmingly common case into an error and fail
+// every delivery.
+func (c *execController) ExitCopyMode(ctx context.Context, target string) error {
+	out, err := c.exec(ctx, []string{"display-message", "-p", "-t", target, "#{pane_in_mode}"})
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) != "1" {
+		return nil
+	}
+	_, err = c.exec(ctx, []string{"send-keys", "-t", target, "-X", "cancel"})
+	return err
+}
+
 // --- Controller: navigation / lifecycle -------------------------------------
 
 func (c *execController) Select(ctx context.Context, target string) error {

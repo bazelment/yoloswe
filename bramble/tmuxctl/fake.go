@@ -92,6 +92,11 @@ func (f *FakeController) Paste(_ context.Context, target, text string) error {
 	return f.Err
 }
 
+func (f *FakeController) ExitCopyMode(_ context.Context, target string) error {
+	f.record(FakeCall{Method: "ExitCopyMode", Target: target})
+	return f.Err
+}
+
 func (f *FakeController) Select(_ context.Context, target string) error {
 	f.record(FakeCall{Method: "Select", Target: target})
 	return f.Err

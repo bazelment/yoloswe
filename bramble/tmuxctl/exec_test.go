@@ -3,6 +3,7 @@ package tmuxctl
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -159,4 +160,46 @@ func TestCaptureStripsANSIAndBlankLines(t *testing.T) {
 	lines, err := c.Capture(context.Background(), "@3", 10)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"hello", "  world"}, lines)
+}
+
+// `send-keys -X cancel` exits non-zero on a pane that is not in a mode, so
+// firing it blindly would turn the overwhelmingly common case — a perfectly
+// normal pane — into a failure and break every delivery. Query first.
+func TestExitCopyModeSkipsCancelWhenNotInMode(t *testing.T) {
+	t.Parallel()
+	var got [][]string
+	c := &execController{run: func(_ context.Context, args []string) (string, error) {
+		got = append(got, args)
+		return "0\n", nil
+	}}
+
+	if err := c.ExitCopyMode(context.Background(), "@7"); err != nil {
+		t.Fatalf("ExitCopyMode() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected only the mode query, got %v", got)
+	}
+	if got[0][0] != "display-message" {
+		t.Errorf("first call = %v, want a display-message query", got[0])
+	}
+}
+
+func TestExitCopyModeCancelsWhenInMode(t *testing.T) {
+	t.Parallel()
+	var got [][]string
+	c := &execController{run: func(_ context.Context, args []string) (string, error) {
+		got = append(got, args)
+		return "1\n", nil
+	}}
+
+	if err := c.ExitCopyMode(context.Background(), "@7"); err != nil {
+		t.Fatalf("ExitCopyMode() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected a query then a cancel, got %v", got)
+	}
+	want := []string{"send-keys", "-t", "@7", "-X", "cancel"}
+	if !slices.Equal(got[1], want) {
+		t.Errorf("cancel args = %v, want %v", got[1], want)
+	}
 }

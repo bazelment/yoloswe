@@ -77,8 +77,26 @@ type SessionRef struct {
 type SendInputReq struct {
 	SessionID string `json:"session_id,omitempty"` // session-centric form
 	Target    string `json:"target,omitempty"`     // raw-pane form
-	Text      string `json:"text"`
-	Submit    bool   `json:"submit"`
+	// From is the sender's session ID, when the sender is itself a session.
+	// A subagent messaging its own parent this way replaces the completion
+	// report bramble would otherwise generate for it.
+	From   string `json:"from,omitempty"`
+	Text   string `json:"text"`
+	Submit bool   `json:"submit"`
+	// Queue holds the text back until the recipient is idle instead of typing
+	// it into a live turn, where it would land in the recipient's next prompt
+	// stripped of its context. Requires SessionID: a raw pane target has no
+	// status to wait on. Queued delivery also reaches TUI-mode sessions, which
+	// have no pane at all.
+	Queue bool `json:"queue,omitempty"`
+}
+
+// SendInputResult reports what happened to a send_input request. Queued is true
+// when the message is waiting for the recipient to go idle rather than having
+// been written already.
+type SendInputResult struct {
+	OK     bool `json:"ok"`
+	Queued bool `json:"queued,omitempty"`
 }
 
 // SendKeyReq sends a single named special key.

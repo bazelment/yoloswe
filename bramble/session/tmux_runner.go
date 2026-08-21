@@ -199,6 +199,18 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		if r.yoloMode {
 			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 		}
+		// Codex's notify program is its analogue of Claude's Stop hook: it runs
+		// when a turn completes. Without it bramble never learns a codex window
+		// went idle, so the session sits at "running" forever after answering —
+		// which breaks both halves of subagent messaging. Nothing drains the
+		// queue for it, and its parent is only told it finished when the window
+		// finally dies.
+		//
+		// Codex appends its own JSON payload as a trailing argument; `bramble
+		// notify` takes no positional arguments, so the extra one is ignored.
+		if r.sessionID != "" && r.brambleBin != "" {
+			args = append(args, "-c", codexNotifyConfig(r.brambleBin, r.sessionID))
+		}
 	case ProviderGemini:
 		// Gemini-specific flags
 		// Note: Do NOT use --experimental-acp in tmux mode. ACP is for programmatic
@@ -313,4 +325,19 @@ func buildShellCommand(cmd string, args []string) string {
 		cmdStr += " " + escaped
 	}
 	return cmdStr
+}
+
+// codexNotifyConfig renders the `-c notify=[...]` override that makes a codex
+// window report its own idleness, mirroring the Claude Stop hook built above.
+//
+// The value is TOML, so each element is a quoted string. Go's %q produces the
+// same escaping TOML wants for the characters that can appear in a path or a
+// generated session ID.
+func codexNotifyConfig(brambleBin, sessionID string) string {
+	parts := []string{brambleBin, "notify", "--silent", "--session-id", sessionID}
+	quoted := make([]string, len(parts))
+	for i, p := range parts {
+		quoted[i] = fmt.Sprintf("%q", p)
+	}
+	return "notify=[" + strings.Join(quoted, ",") + "]"
 }

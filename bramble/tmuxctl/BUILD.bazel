@@ -7,6 +7,7 @@ go_library(
         "controller.go",
         "exec.go",
         "fake.go",
+        "panewriter.go",
     ],
     importpath = "github.com/bazelment/yoloswe/bramble/tmuxctl",
     visibility = ["//visibility:public"],
@@ -15,7 +16,10 @@ go_library(
 
 go_test(
     name = "tmuxctl_test",
-    srcs = ["exec_test.go"],
+    srcs = [
+        "exec_test.go",
+        "panewriter_test.go",
+    ],
     embed = [":tmuxctl"],
     deps = [
         "@com_github_stretchr_testify//assert",

@@ -158,6 +158,62 @@ bramble capture-pane
 bramble notify
 ```
 
+## Subagents
+
+A session can spawn another session as its **subagent**. Pass `--parent`; inside
+a Bramble-spawned session it defaults to `$BRAMBLE_SESSION_ID`, so the flag is
+usually implicit.
+
+```bash
+# Spawn a Codex subagent on the parent's own worktree
+bramble new-session --type codetalk --model gpt-5.5 --prompt "Explain the session lifecycle"
+
+# Give it a worktree of its own instead
+bramble new-session --type builder --create-worktree --branch fix/foo --prompt "..."
+
+# Spawn a top-level session even from inside one
+bramble new-session --no-parent --type planner --prompt "..."
+
+# See just your own subagents
+bramble list-sessions --parent=
+```
+
+With no `--branch` and no `--worktree`, a subagent works on its parent's
+worktree — the usual "helper on the same branch" case.
+
+When a subagent finishes a turn, Bramble delivers a one-line report to its
+parent naming a file with the subagent's full output:
+
+```
+[bramble] subagent <id> (codetalk, gpt-5.5) is idle
+result: /tmp/bramble-research/<id>.md
+```
+
+The report is generated from Bramble's own view of the session, so it arrives
+whatever backend the subagent ran and whether or not the agent inside
+cooperated — which is what makes Codex, Gemini, Cursor and Agy usable as
+subagents, none of which can be given a reporting instruction as reliably as
+Claude. A subagent that messages its parent itself replaces the generated
+report rather than being duplicated by it.
+
+### Messaging a session
+
+`send-input` writes into a session's tmux pane immediately. That is right for a
+deliberate interrupt, but if the recipient is mid-turn the text lands in its
+*next* prompt, stripped of the context that made it make sense — and a TUI-mode
+session has no pane at all.
+
+`--queue` holds the message until the recipient is idle, then delivers it by
+whichever path its runner supports:
+
+```bash
+bramble send-input --session-id <id> --queue --submit --text "also check the tests"
+```
+
+Queued messages are persisted under `~/.bramble/deliveries/`, so they survive a
+Bramble restart, and are delivered one per idle transition — a delivery starts
+the recipient's next turn, so the rest wait for the one after it.
+
 ## Configuration
 
 Settings are stored in `~/.bramble/settings.json`:

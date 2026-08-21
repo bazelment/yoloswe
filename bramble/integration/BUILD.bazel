@@ -1,0 +1,41 @@
+# gazelle:ignore
+load("@rules_go//go:def.bzl", "go_test")
+
+# End-to-end subagent tests: a real bramble binary, in tmux mode, on a
+# throwaway repo. Hand-maintained because gazelle cannot see sources behind the
+# `integration` build tag and cannot add gotags/tags/data itself.
+#
+#   bazel test //bramble/integration:integration_test --test_output=all
+#
+# Tagged manual so `bazel test //...` skips them: they need tmux and a real
+# terminal, which CI does not have. The live-backend cases additionally need a
+# logged-in agent CLI and skip unless their env var is set:
+#
+#   --test_env=BRAMBLE_IT_CODEX_MODEL=gpt-5.5
+go_test(
+    name = "integration_test",
+    timeout = "long",
+    srcs = [
+        "harness_test.go",
+        "subagent_test.go",
+        "support_test.go",
+    ],
+    # The binary under test. Resolved from runfiles, so a plain `bazel test`
+    # works with no flags; $BRAMBLE_BIN overrides it.
+    data = ["//bramble"],
+    gotags = ["integration"],
+    # Each case boots its own bramble and tmux server, so they are slow but
+    # fully independent — shard them.
+    shard_count = 4,
+    tags = [
+        "local",
+        "manual",
+    ],
+    deps = [
+        "//bramble/control",
+        "//bramble/ipc",
+        "//bramble/session",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

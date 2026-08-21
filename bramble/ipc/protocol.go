@@ -32,15 +32,19 @@ type Response struct {
 
 // NewSessionParams are the parameters for a new-session request.
 type NewSessionParams struct {
-	SessionType    string `json:"session_type"`            // "planner", "builder", or "codetalk"
-	WorktreePath   string `json:"worktree_path,omitempty"` // existing worktree path (mutually exclusive with Branch)
-	Branch         string `json:"branch,omitempty"`        // create new worktree with this branch name
-	BaseBranch     string `json:"base_branch,omitempty"`   // base branch for new worktree (default: main)
-	Prompt         string `json:"prompt"`
-	Model          string `json:"model,omitempty"`           // model ID (default: provider default)
-	Goal           string `json:"goal,omitempty"`            // worktree goal (used when creating)
-	RepoName       string `json:"repo_name,omitempty"`       // target repo; auto-detected from cwd if empty
-	CreateWorktree bool   `json:"create_worktree,omitempty"` // if true, create a new worktree for Branch
+	SessionType  string `json:"session_type"`            // "planner", "builder", or "codetalk"
+	WorktreePath string `json:"worktree_path,omitempty"` // existing worktree path (mutually exclusive with Branch)
+	Branch       string `json:"branch,omitempty"`        // create new worktree with this branch name
+	BaseBranch   string `json:"base_branch,omitempty"`   // base branch for new worktree (default: main)
+	Prompt       string `json:"prompt"`
+	Model        string `json:"model,omitempty"`     // model ID (default: provider default)
+	Goal         string `json:"goal,omitempty"`      // worktree goal (used when creating)
+	RepoName     string `json:"repo_name,omitempty"` // target repo; auto-detected from cwd if empty
+	// ParentSessionID makes the new session a subagent of that session: when it
+	// finishes, bramble delivers a completion report back there. When set with
+	// no Branch and no WorktreePath, the child inherits the parent's worktree.
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	CreateWorktree  bool   `json:"create_worktree,omitempty"` // if true, create a new worktree for Branch
 }
 
 // NewSessionResult is the result of a successful new-session request.
@@ -62,6 +66,9 @@ type SessionSummary struct {
 	WorktreeName string `json:"worktree_name"`
 	Prompt       string `json:"prompt"`
 	Model        string `json:"model"`
+	// ParentSessionID is the session that spawned this one, so a caller can
+	// pick its own subagents out of the list. Empty for a top-level session.
+	ParentSessionID string `json:"parent_session_id,omitempty"`
 }
 
 // NotifyParams are the parameters for a notify request.

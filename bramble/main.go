@@ -259,7 +259,14 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// Start the control server (read+write tmux control plane) on its own Unix
 	// socket. Local CLI subcommands (send-input, send-key) and the remote hub
 	// agent client both drive the same control.Dispatcher.
-	controlServer := startControlServer(registry)
+	// The courier is created before the control server because the server's
+	// dispatcher takes it: a send-input asking to be queued must either work or
+	// say plainly that it cannot, never fall through to interrupting the
+	// recipient. OnRegister covers the manager registered just above as well as
+	// any repo opened later with Alt-R.
+	courier := startCourier(ctx, registry)
+
+	controlServer := startControlServer(registry, courier)
 	controlSockPath := ""
 	if controlServer != nil {
 		defer controlServer.Close()
@@ -288,7 +295,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// If a hub is configured, dial out to it so the user can reach this
 	// machine's sessions remotely. The agent client reuses the same dispatcher.
-	if stopRemote := startRemoteAgent(ctx, registry); stopRemote != nil {
+	if stopRemote := startRemoteAgent(ctx, registry, courier); stopRemote != nil {
 		defer stopRemote()
 	}
 
@@ -457,7 +464,18 @@ func startIPCServer(registry *session.SessionRegistry, sockPath, wtRoot, repoNam
 			return nil, fmt.Errorf("invalid params")
 		}
 
+		// A parent pins the repo more precisely than the process-wide default:
+		// a subagent belongs with its parent, which may live under a different
+		// manager than the repo bramble was launched on.
+		parent, hasParent := resolveParentSession(registry, params.ParentSessionID)
+		if params.ParentSessionID != "" && !hasParent {
+			return nil, fmt.Errorf("parent session %q not found", params.ParentSessionID)
+		}
+
 		targetRepo := params.RepoName
+		if targetRepo == "" && hasParent {
+			targetRepo = parent.RepoName
+		}
 		if targetRepo == "" {
 			targetRepo = repoName // fall back to initial repo
 		}
@@ -467,7 +485,7 @@ func startIPCServer(registry *session.SessionRegistry, sockPath, wtRoot, repoNam
 			return nil, fmt.Errorf("repo %q is not open in bramble; open it with Alt-R first", targetRepo)
 		}
 
-		return handleNewSession(ctx, mgr, wtRoot, targetRepo, params)
+		return handleNewSession(ctx, mgr, wtRoot, targetRepo, params, parent)
 	})
 
 	srv.Handle(ipc.RequestListSessions, func(_ context.Context, _ *ipc.Request) (any, error) {
@@ -526,14 +544,39 @@ func startIPCServer(registry *session.SessionRegistry, sockPath, wtRoot, repoNam
 // startControlServer starts the control-protocol Unix server backed by the
 // session registry and a real tmux controller. Returns nil if it fails to
 // start (non-fatal — the TUI still runs, only remote/CLI control is absent).
-func startControlServer(registry *session.SessionRegistry) *control.UnixServer {
+func startControlServer(registry *session.SessionRegistry, courier *session.Courier) *control.UnixServer {
 	disp := control.NewDispatcher(registry, tmuxctl.New())
+	if courier != nil {
+		disp.SetCourier(courier)
+	}
 	srv := control.NewUnixServer(controlSocketPath(), disp)
 	if err := srv.Start(); err != nil {
 		slog.Warn("control server failed to start", "err", err)
 		return nil
 	}
 	return srv
+}
+
+// startCourier builds the delivery courier and points it at every session
+// manager, present and future.
+//
+// A failure here is not fatal. Queued delivery and subagent reports stop
+// working and say so; everything else — including the unqueued send-input the
+// TUI and CLI already rely on — is untouched.
+func startCourier(ctx context.Context, registry *session.SessionRegistry) *session.Courier {
+	courier, err := session.NewCourier(
+		session.NewRegistryDeliveryTarget(registry),
+		tmuxctl.NewPaneWriter(tmuxctl.New()),
+		"",
+	)
+	if err != nil {
+		slog.Warn("courier failed to start; queued delivery and subagent reports are unavailable", "err", err)
+		return nil
+	}
+	registry.OnRegister(func(mgr *session.Manager) {
+		courier.Watch(ctx, mgr)
+	})
+	return courier
 }
 
 // startRemoteAgent dials the cloud hub when BRAMBLE_HUB_URL is set, serving
@@ -544,7 +587,7 @@ func startControlServer(registry *session.SessionRegistry) *control.UnixServer {
 //	BRAMBLE_HUB_URL    wss://hub.example/agent
 //	BRAMBLE_HUB_TOKEN  machine auth token
 //	BRAMBLE_MACHINE_ID stable machine id (defaults to hostname)
-func startRemoteAgent(ctx context.Context, registry *session.SessionRegistry) func() {
+func startRemoteAgent(ctx context.Context, registry *session.SessionRegistry, courier *session.Courier) func() {
 	hubURL := os.Getenv("BRAMBLE_HUB_URL")
 	if hubURL == "" {
 		return nil
@@ -555,6 +598,9 @@ func startRemoteAgent(ctx context.Context, registry *session.SessionRegistry) fu
 		machineID = hostname
 	}
 	disp := control.NewDispatcher(registry, tmuxctl.New())
+	if courier != nil {
+		disp.SetCourier(courier)
+	}
 	client := remote.New(remote.Config{
 		HubURL:     hubURL,
 		Token:      os.Getenv("BRAMBLE_HUB_TOKEN"),
@@ -571,7 +617,20 @@ func startRemoteAgent(ctx context.Context, registry *session.SessionRegistry) fu
 	return cancel
 }
 
-func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoName string, params *ipc.NewSessionParams) (*ipc.NewSessionResult, error) {
+// resolveParentSession looks a parent session ID up across every open repo.
+// An empty ID is not an error — it just means the caller has no parent.
+func resolveParentSession(registry *session.SessionRegistry, id string) (session.SessionInfo, bool) {
+	if id == "" {
+		return session.SessionInfo{}, false
+	}
+	info, _, ok := registry.GetSessionInfo(session.SessionID(id))
+	if !ok {
+		return session.SessionInfo{}, false
+	}
+	return info, true
+}
+
+func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoName string, params *ipc.NewSessionParams, parent session.SessionInfo) (*ipc.NewSessionResult, error) {
 	worktreePath := params.WorktreePath
 
 	// Create worktree if requested
@@ -584,8 +643,16 @@ func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoNam
 		worktreePath = path
 	}
 
+	// A subagent with no worktree of its own works on its parent's tree — the
+	// common "helper on the same branch" case. Asking for a fresh worktree is
+	// still explicit (--create-worktree -b), so this never surprises a caller
+	// who wanted isolation.
+	if worktreePath == "" && parent.WorktreePath != "" {
+		worktreePath = parent.WorktreePath
+	}
+
 	if worktreePath == "" {
-		return nil, fmt.Errorf("either worktree_path or branch with create_worktree is required")
+		return nil, fmt.Errorf("either worktree_path, branch with create_worktree, or parent_session_id is required")
 	}
 
 	var sessionType session.SessionType
@@ -600,7 +667,8 @@ func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoNam
 		return nil, fmt.Errorf("unknown session_type %q (expected \"planner\", \"builder\", or \"codetalk\")", params.SessionType)
 	}
 
-	id, err := mgr.StartSession(sessionType, worktreePath, params.Prompt, params.Model)
+	id, err := mgr.StartSessionWithOpts(sessionType, worktreePath, params.Prompt, params.Model,
+		session.SpawnOpts{ParentSessionID: session.SessionID(params.ParentSessionID)})
 	if err != nil {
 		return nil, fmt.Errorf("failed to start session: %w", err)
 	}
@@ -617,12 +685,13 @@ func handleListSessions(registry *session.SessionRegistry) *ipc.ListSessionsResu
 	for i := range sessions {
 		s := &sessions[i]
 		summaries[i] = ipc.SessionSummary{
-			ID:           string(s.ID),
-			Type:         string(s.Type),
-			Status:       string(s.Status),
-			WorktreeName: s.WorktreeName,
-			Prompt:       s.Prompt,
-			Model:        s.Model,
+			ID:              string(s.ID),
+			Type:            string(s.Type),
+			Status:          string(s.Status),
+			WorktreeName:    s.WorktreeName,
+			Prompt:          s.Prompt,
+			Model:           s.Model,
+			ParentSessionID: string(s.ParentSessionID),
 		}
 	}
 	return &ipc.ListSessionsResult{Sessions: summaries}
@@ -664,6 +733,9 @@ var newSessionCmd = &cobra.Command{
 		goal, _ := cmd.Flags().GetString("goal")
 		createWT, _ := cmd.Flags().GetBool("create-worktree")
 		repo, _ := cmd.Flags().GetString("repo")
+		parentFlag, _ := cmd.Flags().GetString("parent")
+		noParent, _ := cmd.Flags().GetBool("no-parent")
+		parent := resolveParentSessionID(parentFlag, os.Getenv(session.SessionIDEnvVar), noParent)
 
 		// Auto-detect repo from cwd if not explicitly specified.
 		if repo == "" {
@@ -677,15 +749,16 @@ var newSessionCmd = &cobra.Command{
 			Type: ipc.RequestNewSession,
 			ID:   "cli-new-session",
 			Params: &ipc.NewSessionParams{
-				SessionType:    sessionType,
-				Branch:         branch,
-				BaseBranch:     baseBranch,
-				WorktreePath:   worktreePath,
-				CreateWorktree: createWT,
-				Prompt:         prompt,
-				Model:          model,
-				Goal:           goal,
-				RepoName:       repo,
+				SessionType:     sessionType,
+				Branch:          branch,
+				BaseBranch:      baseBranch,
+				WorktreePath:    worktreePath,
+				CreateWorktree:  createWT,
+				Prompt:          prompt,
+				Model:           model,
+				Goal:            goal,
+				RepoName:        repo,
+				ParentSessionID: parent,
 			},
 		})
 		if err != nil {
@@ -714,6 +787,21 @@ func resolveOwnSessionID(flagID, envID string) (string, error) {
 		return envID, nil
 	}
 	return "", fmt.Errorf("no session: pass --session-id or run inside a bramble session ($%s)", session.SessionIDEnvVar)
+}
+
+// resolveParentSessionID picks the parent for a newly spawned session. Unlike
+// resolveOwnSessionID, having no answer is legitimate — a spawn from a plain
+// terminal is simply top-level — so this returns "" rather than an error.
+// --no-parent is the escape hatch for spawning a top-level session from inside
+// a bramble session, which would otherwise always inherit a parent.
+func resolveParentSessionID(flagID, envID string, noParent bool) string {
+	if noParent {
+		return ""
+	}
+	if flagID != "" {
+		return flagID
+	}
+	return envID
 }
 
 var notifyCmd = &cobra.Command{
@@ -811,10 +899,51 @@ var listSessionsCmd = &cobra.Command{
 			return fmt.Errorf("server error: %s", resp.Error)
 		}
 
+		// Filtering happens client-side: the server already returns every
+		// session with its parent, and keeping the wire request parameterless
+		// leaves the existing handler and its tests untouched.
+		if cmd.Flags().Changed("parent") {
+			parentFlag, _ := cmd.Flags().GetString("parent")
+			// --parent= (empty) means "my own children", so a caller inside a
+			// bramble session need not echo its own ID back.
+			parent := resolveParentSessionID(parentFlag, os.Getenv(session.SessionIDEnvVar), false)
+			if parent == "" {
+				return fmt.Errorf("--parent needs an ID, or $%s must be set", session.SessionIDEnvVar)
+			}
+			filtered, err := filterSessionsByParent(resp.Result, parent)
+			if err != nil {
+				return err
+			}
+			out, _ := json.MarshalIndent(filtered, "", "  ")
+			fmt.Println(string(out))
+			return nil
+		}
+
 		out, _ := json.MarshalIndent(resp.Result, "", "  ")
 		fmt.Println(string(out))
 		return nil
 	},
+}
+
+// filterSessionsByParent narrows a list-sessions result to one session's
+// children. The result arrives as a generic map (ipc.Response.Result is any),
+// so it is re-marshaled through the typed struct rather than reached into.
+func filterSessionsByParent(result any, parent string) (*ipc.ListSessionsResult, error) {
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+	var list ipc.ListSessionsResult
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil, err
+	}
+	children := make([]ipc.SessionSummary, 0, len(list.Sessions))
+	for _, s := range list.Sessions {
+		if s.ParentSessionID == parent {
+			children = append(children, s)
+		}
+	}
+	return &ipc.ListSessionsResult{Sessions: children}, nil
 }
 
 // runControl performs a one-shot control request against the running bramble's
@@ -839,20 +968,47 @@ func runControl(typ control.MsgType, payload, v any) error {
 
 var sendInputCmd = &cobra.Command{
 	Use:   "send-input",
-	Short: "Send prompt text to a session's tmux pane (optionally submit it)",
+	Short: "Send prompt text to a session (optionally queueing it until the session is idle)",
+	Long: `Send prompt text to a session's tmux pane, or with --queue to any session
+whatever its runner.
+
+Without --queue the text is typed into the pane immediately. That is the right
+behaviour for a deliberate interrupt, but if the recipient is mid-turn the text
+lands in its *next* prompt, out of the context that made it make sense — and a
+TUI-mode session has no pane to type into at all.
+
+With --queue the message is held until the recipient goes idle and is then
+delivered through whichever path its runner supports. Use --queue for anything
+the recipient should read as part of its own work.`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		sessionID, _ := cmd.Flags().GetString("session-id")
 		target, _ := cmd.Flags().GetString("target")
 		text, _ := cmd.Flags().GetString("text")
 		submit, _ := cmd.Flags().GetBool("submit")
+		queue, _ := cmd.Flags().GetBool("queue")
+		from, _ := cmd.Flags().GetString("from")
+		if from == "" {
+			// A session messaging a peer is identified by its own ID, so a
+			// subagent reporting to its parent replaces bramble's generated
+			// report instead of arriving alongside it.
+			from = os.Getenv(session.SessionIDEnvVar)
+		}
 
 		typ := control.TypeSessionSendInput
 		if sessionID == "" {
 			typ = control.TypePaneSendInput
 		}
-		return runControl(typ, control.SendInputReq{
-			SessionID: sessionID, Target: target, Text: text, Submit: submit,
-		}, nil)
+		var result control.SendInputResult
+		if err := runControl(typ, control.SendInputReq{
+			SessionID: sessionID, Target: target, From: from,
+			Text: text, Submit: submit, Queue: queue,
+		}, &result); err != nil {
+			return err
+		}
+		if result.Queued {
+			fmt.Printf("queued for %s; it will be delivered when that session goes idle\n", sessionID)
+		}
+		return nil
 	},
 }
 
@@ -987,6 +1143,13 @@ func init() {
 	newSessionCmd.Flags().StringP("goal", "g", "", "Goal for new worktree")
 	newSessionCmd.Flags().Bool("create-worktree", false, "Create a new worktree for the branch")
 	newSessionCmd.Flags().StringP("repo", "r", "", "Target repo name (auto-detected from cwd if omitted)")
+	newSessionCmd.Flags().String("parent", "",
+		"Spawn as a subagent of this session; it receives a report when the new session finishes "+
+			"(defaults to $"+session.SessionIDEnvVar+")")
+	newSessionCmd.Flags().Bool("no-parent", false,
+		"Spawn a top-level session even when running inside a bramble session")
+	listSessionsCmd.Flags().String("parent", "",
+		"Only list sessions spawned by this session; --parent= means $"+session.SessionIDEnvVar)
 
 	// Not MarkFlagRequired: inside a tmux session $BRAMBLE_SESSION_ID supplies
 	// the caller's own ID, and RunE errors when neither source yields one.
@@ -1001,6 +1164,12 @@ func init() {
 	sendInputCmd.Flags().String("target", "", "Raw tmux target (window/pane id) instead of a session")
 	sendInputCmd.Flags().String("text", "", "Text to deliver to the pane")
 	sendInputCmd.Flags().Bool("submit", false, "Press Enter after delivering the text")
+	sendInputCmd.Flags().Bool("queue", false,
+		"Hold the text until the session is idle instead of typing into a live turn "+
+			"(requires --session-id; also reaches TUI-mode sessions)")
+	sendInputCmd.Flags().String("from", "",
+		"Sender's session ID (defaults to $"+session.SessionIDEnvVar+"); a subagent "+
+			"messaging its parent this way replaces bramble's generated report")
 	_ = sendInputCmd.MarkFlagRequired("text")
 
 	sendKeyCmd.Flags().String("session-id", "", "Target bramble session ID (session-centric)")

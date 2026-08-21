@@ -218,3 +218,141 @@ func TestUnsupportedTypeErrors(t *testing.T) {
 
 // compile-time: the real registry satisfies the narrow Registry interface.
 var _ Registry = (*session.SessionRegistry)(nil)
+
+// fakeCourier records queued sends so the dispatcher's queue branch can be
+// tested without a real delivery directory or live sessions.
+type fakeCourier struct { //nolint:govet // fieldalignment: readability over packing
+	sendErr   error
+	sends     []fakeSend
+	callCount int
+	queued    bool
+}
+
+type fakeSend struct {
+	from, to session.SessionID
+	text     string
+	submit   bool
+}
+
+func (c *fakeCourier) Send(_ context.Context, from, to session.SessionID, text string, submit bool) (bool, error) {
+	c.callCount++
+	if c.sendErr != nil {
+		return false, c.sendErr
+	}
+	c.sends = append(c.sends, fakeSend{from: from, to: to, text: text, submit: submit})
+	return c.queued, nil
+}
+
+// TestSendInputQueueGoesThroughCourier pins that --queue takes the delivery
+// path that can wait, rather than pasting into a possibly-running turn.
+func TestSendInputQueueGoesThroughCourier(t *testing.T) {
+	t.Parallel()
+	reg := &fakeRegistry{targets: map[string]string{"s1": "@7"}}
+	d, ctl := newDispatcher(reg)
+	courier := &fakeCourier{queued: true}
+	d.SetCourier(courier)
+
+	resp := d.Handle(context.Background(), req(t, TypeSessionSendInput,
+		SendInputReq{SessionID: "s1", From: "s0", Text: "hello", Submit: true, Queue: true}))
+
+	var result SendInputResult
+	require.NoError(t, resp.DecodeResponse(&result))
+	assert.True(t, result.OK)
+	assert.True(t, result.Queued)
+
+	require.Len(t, courier.sends, 1)
+	assert.Equal(t, session.SessionID("s0"), courier.sends[0].from)
+	assert.Equal(t, session.SessionID("s1"), courier.sends[0].to)
+	assert.Equal(t, "hello", courier.sends[0].text)
+	assert.True(t, courier.sends[0].submit)
+
+	assert.Empty(t, ctl.CallsFor("Paste"), "a queued message must not be typed into the pane")
+	assert.Empty(t, ctl.CallsFor("SendSpecial"))
+}
+
+// TestSendInputQueueReportsImmediateWrite covers the courier deciding the
+// recipient was already idle: the caller is told it was not queued.
+func TestSendInputQueueReportsImmediateWrite(t *testing.T) {
+	t.Parallel()
+	reg := &fakeRegistry{targets: map[string]string{"s1": "@7"}}
+	d, _ := newDispatcher(reg)
+	d.SetCourier(&fakeCourier{queued: false})
+
+	resp := d.Handle(context.Background(), req(t, TypeSessionSendInput,
+		SendInputReq{SessionID: "s1", Text: "hello", Submit: true, Queue: true}))
+
+	var result SendInputResult
+	require.NoError(t, resp.DecodeResponse(&result))
+	assert.True(t, result.OK)
+	assert.False(t, result.Queued)
+}
+
+// TestSendInputWithoutQueueBypassesCourier is the compatibility guard: the
+// default path must stay exactly the direct paste it has always been.
+func TestSendInputWithoutQueueBypassesCourier(t *testing.T) {
+	t.Parallel()
+	reg := &fakeRegistry{targets: map[string]string{"s1": "@7"}}
+	d, ctl := newDispatcher(reg)
+	courier := &fakeCourier{}
+	d.SetCourier(courier)
+
+	resp := d.Handle(context.Background(), req(t, TypeSessionSendInput,
+		SendInputReq{SessionID: "s1", Text: "hello", Submit: true}))
+
+	var result OKResult
+	require.NoError(t, resp.DecodeResponse(&result))
+	assert.True(t, result.OK)
+	assert.Zero(t, courier.callCount, "the unqueued path must not involve the courier")
+	pastes := ctl.CallsFor("Paste")
+	require.Len(t, pastes, 1)
+	assert.Equal(t, "@7", pastes[0].Target)
+	assert.Equal(t, "hello", pastes[0].Text)
+}
+
+// TestSendInputQueueRequiresSessionID: a raw pane target has no status, so
+// there is nothing to wait for. Better to refuse than to paste anyway.
+func TestSendInputQueueRequiresSessionID(t *testing.T) {
+	t.Parallel()
+	d, ctl := newDispatcher(&fakeRegistry{})
+	d.SetCourier(&fakeCourier{})
+
+	resp := d.Handle(context.Background(), req(t, TypePaneSendInput,
+		SendInputReq{Target: "%9", Text: "hello", Queue: true}))
+
+	err := resp.DecodeResponse(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "session_id")
+	assert.Empty(t, ctl.CallsFor("Paste"))
+}
+
+// TestSendInputQueueWithoutCourierErrors keeps a bramble whose courier failed
+// to start from silently downgrading to an interrupting write.
+func TestSendInputQueueWithoutCourierErrors(t *testing.T) {
+	t.Parallel()
+	reg := &fakeRegistry{targets: map[string]string{"s1": "@7"}}
+	d, ctl := newDispatcher(reg) // no SetCourier
+
+	resp := d.Handle(context.Background(), req(t, TypeSessionSendInput,
+		SendInputReq{SessionID: "s1", Text: "hello", Queue: true}))
+
+	err := resp.DecodeResponse(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not available")
+	assert.Empty(t, ctl.CallsFor("Paste"), "refusing must not fall back to interrupting the recipient")
+}
+
+// TestSendInputQueueSurfacesCourierError makes a rejected recipient (already
+// completed, say) reach the caller instead of vanishing.
+func TestSendInputQueueSurfacesCourierError(t *testing.T) {
+	t.Parallel()
+	reg := &fakeRegistry{targets: map[string]string{"s1": "@7"}}
+	d, _ := newDispatcher(reg)
+	d.SetCourier(&fakeCourier{sendErr: fmt.Errorf("session s1 is completed and cannot receive messages")})
+
+	resp := d.Handle(context.Background(), req(t, TypeSessionSendInput,
+		SendInputReq{SessionID: "s1", Text: "hello", Queue: true}))
+
+	err := resp.DecodeResponse(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot receive messages")
+}

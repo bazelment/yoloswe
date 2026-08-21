@@ -20,25 +20,29 @@ type Store struct {
 
 // StoredSession is the serializable representation of a session.
 type StoredSession struct {
-	ID             SessionID       `json:"id"`
-	Type           SessionType     `json:"type"`
-	Status         SessionStatus   `json:"status"`
-	RepoName       string          `json:"repo_name"`
-	WorktreePath   string          `json:"worktree_path"`
-	WorktreeName   string          `json:"worktree_name"`
-	Prompt         string          `json:"prompt"`
-	Title          string          `json:"title,omitempty"`
-	Model          string          `json:"model,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
-	StartedAt      *time.Time      `json:"started_at,omitempty"`
-	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
-	ErrorMsg       string          `json:"error_msg,omitempty"`
-	CLISessionID   string          `json:"cli_session_id,omitempty"`
-	TmuxWindowName string          `json:"tmux_window_name,omitempty"`
-	TmuxWindowID   string          `json:"tmux_window_id,omitempty"`
-	RunnerType     string          `json:"runner_type,omitempty"`
-	Progress       *StoredProgress `json:"progress,omitempty"`
-	Output         []OutputLine    `json:"output,omitempty"`
+	ID             SessionID     `json:"id"`
+	Type           SessionType   `json:"type"`
+	Status         SessionStatus `json:"status"`
+	RepoName       string        `json:"repo_name"`
+	WorktreePath   string        `json:"worktree_path"`
+	WorktreeName   string        `json:"worktree_name"`
+	Prompt         string        `json:"prompt"`
+	Title          string        `json:"title,omitempty"`
+	Model          string        `json:"model,omitempty"`
+	CreatedAt      time.Time     `json:"created_at"`
+	StartedAt      *time.Time    `json:"started_at,omitempty"`
+	CompletedAt    *time.Time    `json:"completed_at,omitempty"`
+	ErrorMsg       string        `json:"error_msg,omitempty"`
+	CLISessionID   string        `json:"cli_session_id,omitempty"`
+	TmuxWindowName string        `json:"tmux_window_name,omitempty"`
+	TmuxWindowID   string        `json:"tmux_window_id,omitempty"`
+	RunnerType     string        `json:"runner_type,omitempty"`
+	// ParentSessionID names the session that spawned this one. Persisted so a
+	// subagent's lineage survives a TUI restart and its completion report still
+	// has somewhere to go.
+	ParentSessionID SessionID       `json:"parent_session_id,omitempty"`
+	Progress        *StoredProgress `json:"progress,omitempty"`
+	Output          []OutputLine    `json:"output,omitempty"`
 }
 
 // StoredProgress is the serializable representation of session progress.
@@ -376,23 +380,24 @@ func SessionToStored(session *Session, repoName string, output []OutputLine) *St
 	defer session.mu.RUnlock()
 
 	stored := &StoredSession{
-		ID:             session.ID,
-		Type:           session.Type,
-		Status:         session.Status,
-		RepoName:       repoName,
-		WorktreePath:   session.WorktreePath,
-		WorktreeName:   session.WorktreeName,
-		Prompt:         session.Prompt,
-		Title:          session.Title,
-		Model:          session.Model,
-		CLISessionID:   session.CLISessionID,
-		TmuxWindowName: session.TmuxWindowName,
-		TmuxWindowID:   session.TmuxWindowID,
-		RunnerType:     session.RunnerType,
-		CreatedAt:      session.CreatedAt,
-		StartedAt:      session.StartedAt,
-		CompletedAt:    session.CompletedAt,
-		Output:         output,
+		ID:              session.ID,
+		Type:            session.Type,
+		Status:          session.Status,
+		RepoName:        repoName,
+		WorktreePath:    session.WorktreePath,
+		WorktreeName:    session.WorktreeName,
+		Prompt:          session.Prompt,
+		Title:           session.Title,
+		Model:           session.Model,
+		CLISessionID:    session.CLISessionID,
+		TmuxWindowName:  session.TmuxWindowName,
+		TmuxWindowID:    session.TmuxWindowID,
+		RunnerType:      session.RunnerType,
+		ParentSessionID: session.ParentSessionID,
+		CreatedAt:       session.CreatedAt,
+		StartedAt:       session.StartedAt,
+		CompletedAt:     session.CompletedAt,
+		Output:          output,
 	}
 
 	if session.Error != nil {
@@ -419,22 +424,23 @@ func StoredToSessionInfo(stored *StoredSession) SessionInfo {
 	}
 
 	info := SessionInfo{
-		ID:             stored.ID,
-		Type:           stored.Type,
-		Status:         stored.Status,
-		WorktreePath:   stored.WorktreePath,
-		WorktreeName:   stored.WorktreeName,
-		Prompt:         stored.Prompt,
-		Title:          stored.Title,
-		Model:          stored.Model,
-		CLISessionID:   stored.CLISessionID,
-		TmuxWindowName: stored.TmuxWindowName,
-		TmuxWindowID:   stored.TmuxWindowID,
-		RunnerType:     stored.RunnerType,
-		CreatedAt:      stored.CreatedAt,
-		StartedAt:      stored.StartedAt,
-		CompletedAt:    stored.CompletedAt,
-		ErrorMsg:       stored.ErrorMsg,
+		ID:              stored.ID,
+		Type:            stored.Type,
+		Status:          stored.Status,
+		WorktreePath:    stored.WorktreePath,
+		WorktreeName:    stored.WorktreeName,
+		Prompt:          stored.Prompt,
+		Title:           stored.Title,
+		Model:           stored.Model,
+		CLISessionID:    stored.CLISessionID,
+		TmuxWindowName:  stored.TmuxWindowName,
+		TmuxWindowID:    stored.TmuxWindowID,
+		RunnerType:      stored.RunnerType,
+		ParentSessionID: stored.ParentSessionID,
+		CreatedAt:       stored.CreatedAt,
+		StartedAt:       stored.StartedAt,
+		CompletedAt:     stored.CompletedAt,
+		ErrorMsg:        stored.ErrorMsg,
 	}
 
 	if stored.Progress != nil {

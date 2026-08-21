@@ -150,7 +150,10 @@ func (h *DelegatorToolHandler) handleStartSession(_ context.Context, params star
 	h.childIDs[id] = struct{}{}
 	h.mu.Unlock()
 
-	_, err := h.manager.startSessionWithID(id, sessionType, h.worktreePath, worktreeName, params.Prompt, model)
+	// SpawnOpts is left zero on purpose: the delegator tracks its own children
+	// through childIDs + watchChildSessionChanges, so recording a parent here
+	// would report every child transition to it a second time.
+	_, err := h.manager.startSessionWithID(id, sessionType, h.worktreePath, worktreeName, params.Prompt, model, SpawnOpts{})
 	if err != nil {
 		// Clean up the pre-registration on failure.
 		h.mu.Lock()

@@ -86,6 +86,11 @@ type Controller interface {
 	// Writes.
 	SendSpecial(ctx context.Context, target string, key SpecialKey) error
 	Paste(ctx context.Context, target, text string) error
+	// ExitCopyMode returns a pane to normal input. A pane someone scrolled
+	// back in sits in tmux copy mode, where every key — including the Enter
+	// that submits a delivered prompt — is consumed by the pager instead of
+	// reaching the agent. A no-op when the pane is not in a mode.
+	ExitCopyMode(ctx context.Context, target string) error
 
 	// Navigation / lifecycle.
 	Select(ctx context.Context, target string) error

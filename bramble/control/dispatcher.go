@@ -18,18 +18,31 @@ type Registry interface {
 	StopSession(id session.SessionID) error
 }
 
+// Courier is the narrow slice of *session.Courier the dispatcher needs to hold
+// a message back until its recipient is idle. Consumer-side, like Registry, so
+// the queue branch can be tested without a real delivery directory.
+type Courier interface {
+	Send(ctx context.Context, from, to session.SessionID, text string, submit bool) (bool, error)
+}
+
 // Dispatcher handles control protocol requests against a registry (session
 // -centric ops) and a tmuxctl.Controller (raw-pane ops). It is transport
 // -agnostic: the local CLI and the remote hub client both call Handle.
 type Dispatcher struct {
-	reg Registry
-	ctl tmuxctl.Controller
+	reg     Registry
+	ctl     tmuxctl.Controller
+	courier Courier
 }
 
-// NewDispatcher constructs a Dispatcher.
+// NewDispatcher constructs a Dispatcher. Queued delivery is unavailable until
+// SetCourier is called; a send_input asking for it gets a clear error rather
+// than silently interrupting the recipient.
 func NewDispatcher(reg Registry, ctl tmuxctl.Controller) *Dispatcher {
 	return &Dispatcher{reg: reg, ctl: ctl}
 }
+
+// SetCourier enables queued delivery.
+func (d *Dispatcher) SetCourier(c Courier) { d.courier = c }
 
 // Handle processes one request Msg and returns a response Msg. It never returns
 // a nil Msg for a known request: failures are encoded as a TypeResponse with an
@@ -162,21 +175,40 @@ func (d *Dispatcher) sessionStatus(ctx context.Context, req *Msg) (*PaneStatusJS
 }
 
 // sendInput delivers text to a session (sessionScoped=true) or a raw target.
-func (d *Dispatcher) sendInput(ctx context.Context, req *Msg, sessionScoped bool) (OKResult, error) {
+func (d *Dispatcher) sendInput(ctx context.Context, req *Msg, sessionScoped bool) (any, error) {
 	var r SendInputReq
 	if err := req.decode(&r); err != nil {
-		return OKResult{}, err
+		return nil, err
 	}
+
+	// The queued path goes through the courier, which knows how to reach a
+	// session whatever its runner. The unqueued path below is unchanged: it
+	// still types straight into a pane, which stays the right behaviour for a
+	// deliberate interrupt and for raw pane targets.
+	if r.Queue {
+		if r.SessionID == "" {
+			return nil, fmt.Errorf("queue requires session_id: a raw pane target has no status to wait on")
+		}
+		if d.courier == nil {
+			return nil, fmt.Errorf("queued delivery is not available on this bramble")
+		}
+		queued, err := d.courier.Send(ctx, session.SessionID(r.From), session.SessionID(r.SessionID), r.Text, r.Submit)
+		if err != nil {
+			return nil, err
+		}
+		return SendInputResult{OK: true, Queued: queued}, nil
+	}
+
 	target, err := d.targetFor(r.SessionID, r.Target, sessionScoped)
 	if err != nil {
-		return OKResult{}, err
+		return nil, err
 	}
 	if err := d.ctl.Paste(ctx, target, r.Text); err != nil {
-		return OKResult{}, err
+		return nil, err
 	}
 	if r.Submit {
 		if err := d.ctl.SendSpecial(ctx, target, tmuxctl.KeyEnter); err != nil {
-			return OKResult{}, err
+			return nil, err
 		}
 	}
 	return OKResult{OK: true}, nil

@@ -642,24 +642,25 @@ func (m *Manager) ReconcileTmuxSessions() error {
 			// Re-adopt: create in-memory session and start monitoring
 			ctx, cancel := context.WithCancel(m.ctx)
 			session := &Session{
-				ID:             stored.ID,
-				Type:           stored.Type,
-				Status:         stored.Status,
-				WorktreePath:   stored.WorktreePath,
-				WorktreeName:   stored.WorktreeName,
-				Prompt:         stored.Prompt,
-				Title:          stored.Title,
-				Model:          stored.Model,
-				TmuxWindowName: stored.TmuxWindowName,
-				TmuxWindowID:   stored.TmuxWindowID,
-				RunnerType:     stored.RunnerType,
-				RepoName:       m.config.RepoName,
-				CLISessionID:   stored.CLISessionID,
-				Progress:       &SessionProgress{LastActivity: time.Now()},
-				CreatedAt:      stored.CreatedAt,
-				StartedAt:      stored.StartedAt,
-				ctx:            ctx,
-				cancel:         cancel,
+				ID:              stored.ID,
+				Type:            stored.Type,
+				Status:          stored.Status,
+				WorktreePath:    stored.WorktreePath,
+				WorktreeName:    stored.WorktreeName,
+				Prompt:          stored.Prompt,
+				Title:           stored.Title,
+				Model:           stored.Model,
+				TmuxWindowName:  stored.TmuxWindowName,
+				TmuxWindowID:    stored.TmuxWindowID,
+				RunnerType:      stored.RunnerType,
+				RepoName:        m.config.RepoName,
+				CLISessionID:    stored.CLISessionID,
+				ParentSessionID: stored.ParentSessionID,
+				Progress:        &SessionProgress{LastActivity: time.Now()},
+				CreatedAt:       stored.CreatedAt,
+				StartedAt:       stored.StartedAt,
+				ctx:             ctx,
+				cancel:          cancel,
 			}
 
 			m.mu.Lock()
@@ -857,16 +858,34 @@ func generateTitle(prompt string, maxLen int) string {
 // model is the AgentModel ID (e.g. "opus", "gpt-5.5"). If empty,
 // defaults to "opus" for planners and "sonnet" for builders.
 func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt, model string) (SessionID, error) {
+	return m.StartSessionWithOpts(sessionType, worktreePath, prompt, model, SpawnOpts{})
+}
+
+// SpawnOpts carries the optional attributes of a new session that only some
+// callers set. The zero value means a plain, top-level session, so callers with
+// nothing to say can keep using StartSession.
+type SpawnOpts struct {
+	// ParentSessionID makes the new session a subagent of that parent: its
+	// completion is reported back there. Leave empty for a top-level session.
+	//
+	// The delegator deliberately does NOT set this. It runs its own child
+	// watcher (watchChildSessionChanges) and would otherwise be told about
+	// every child transition twice.
+	ParentSessionID SessionID
+}
+
+// StartSessionWithOpts is StartSession with the optional attributes in SpawnOpts.
+func (m *Manager) StartSessionWithOpts(sessionType SessionType, worktreePath, prompt, model string, opts SpawnOpts) (SessionID, error) {
 	worktreeName := filepath.Base(worktreePath)
 	sessionID := generateSessionID(worktreeName, sessionType)
-	return m.startSessionWithID(sessionID, sessionType, worktreePath, worktreeName, prompt, model)
+	return m.startSessionWithID(sessionID, sessionType, worktreePath, worktreeName, prompt, model, opts)
 }
 
 // startSessionWithID starts a session using a caller-supplied session ID.
 // This allows callers (e.g. DelegatorToolHandler) to pre-register the ID
 // before spawning the child goroutine, closing the window where a very fast
 // state transition could be missed by watchChildSessionChanges.
-func (m *Manager) startSessionWithID(sessionID SessionID, sessionType SessionType, worktreePath, worktreeName, prompt, model string) (SessionID, error) {
+func (m *Manager) startSessionWithID(sessionID SessionID, sessionType SessionType, worktreePath, worktreeName, prompt, model string, opts SpawnOpts) (SessionID, error) {
 	ctx, cancel := context.WithCancel(m.ctx)
 
 	if model == "" {
@@ -879,19 +898,20 @@ func (m *Manager) startSessionWithID(sessionID SessionID, sessionType SessionTyp
 	}
 
 	session := &Session{
-		ID:           sessionID,
-		Type:         sessionType,
-		Status:       StatusPending,
-		WorktreePath: worktreePath,
-		WorktreeName: worktreeName,
-		Prompt:       prompt,
-		Title:        generateTitle(prompt, 20),
-		Model:        model,
-		RepoName:     m.config.RepoName,
-		Progress:     &SessionProgress{LastActivity: time.Now()},
-		CreatedAt:    time.Now(),
-		ctx:          ctx,
-		cancel:       cancel,
+		ID:              sessionID,
+		Type:            sessionType,
+		Status:          StatusPending,
+		WorktreePath:    worktreePath,
+		WorktreeName:    worktreeName,
+		Prompt:          prompt,
+		Title:           generateTitle(prompt, 20),
+		Model:           model,
+		RepoName:        m.config.RepoName,
+		ParentSessionID: opts.ParentSessionID,
+		Progress:        &SessionProgress{LastActivity: time.Now()},
+		CreatedAt:       time.Now(),
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 
 	m.mu.Lock()
@@ -1016,20 +1036,21 @@ func (m *Manager) rehydrateSession(id SessionID) (*Session, bool) {
 		// (completed/failed/stopped) and ResumeSession will set ctx/cancel
 		// before running. Allocating one here would leak it immediately.
 		session := &Session{
-			ID:           stored.ID,
-			Type:         stored.Type,
-			Status:       stored.Status,
-			WorktreePath: stored.WorktreePath,
-			WorktreeName: stored.WorktreeName,
-			Prompt:       stored.Prompt,
-			Title:        stored.Title,
-			Model:        stored.Model,
-			RepoName:     stored.RepoName,
-			CLISessionID: stored.CLISessionID,
-			CreatedAt:    stored.CreatedAt,
-			StartedAt:    stored.StartedAt,
-			CompletedAt:  stored.CompletedAt,
-			Progress:     &SessionProgress{LastActivity: time.Now()},
+			ID:              stored.ID,
+			Type:            stored.Type,
+			Status:          stored.Status,
+			WorktreePath:    stored.WorktreePath,
+			WorktreeName:    stored.WorktreeName,
+			Prompt:          stored.Prompt,
+			Title:           stored.Title,
+			Model:           stored.Model,
+			RepoName:        stored.RepoName,
+			CLISessionID:    stored.CLISessionID,
+			ParentSessionID: stored.ParentSessionID,
+			CreatedAt:       stored.CreatedAt,
+			StartedAt:       stored.StartedAt,
+			CompletedAt:     stored.CompletedAt,
+			Progress:        &SessionProgress{LastActivity: time.Now()},
 		}
 
 		m.mu.Lock()
@@ -1702,7 +1723,17 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	// Tmux mode: just wait for the window to be stopped manually
 	// The tmux window handles all interaction, so we don't run turns
 	if m.config.SessionMode == SessionModeTmux {
-		m.updateSessionStatus(session, StatusRunning)
+		// Compare-and-set, not a plain write. The window has been up since
+		// runner.Start(), which lingers ~100ms before returning, and the agent
+		// inside can finish a turn and fire its notify hook in that gap. An
+		// unconditional write here would overwrite that idle with Running and
+		// leave the session stuck: SetSessionIdle only advances a Running
+		// session, so the *next* notify — which never comes, because the agent
+		// is waiting for input — is the only thing that could fix it.
+		//
+		// Status is already Running from the top of runSession, so this is a
+		// no-op in the normal case and simply declines to move backwards.
+		m.tryUpdateSessionStatus(session, StatusPending, StatusRunning)
 		startTime := time.Now()
 
 		// Periodically check if tmux window still exists
@@ -1905,8 +1936,12 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			}
 		}
 
-		// After codetalk turn: write research output to a file for delegator consumption.
-		if session.Type == SessionTypeCodeTalk {
+		// After a codetalk turn: write research output to a file for delegator
+		// consumption. Subagents get the same treatment whatever their type —
+		// their parent is told they finished and handed this path, and a
+		// backend like codex cannot be asked to produce a result file itself.
+		// Without this a parent would have to scrape the child's pane.
+		if session.Type == SessionTypeCodeTalk || session.parentSessionID() != "" {
 			if researchPath, err := m.writeResearchFile(session); err == nil {
 				session.mu.Lock()
 				session.ResearchFilePath = researchPath
@@ -2286,6 +2321,34 @@ func (m *Manager) ActiveWorktreePaths() map[string]struct{} {
 	return paths
 }
 
+// SetSessionRunning moves an idle session back to running.
+//
+// Needed because a tmux session's status is driven entirely from outside: the
+// agent's notify hook reports idleness, and nothing reports the opposite. When
+// bramble itself types a prompt into such a session it is the only party that
+// knows a turn just started. Without this the session stays "idle" through the
+// whole turn, and the next notify hits the StatusRunning guard in
+// SetSessionIdle and is dropped — so a second turn never produces a state
+// change, and anything waiting on one (queued delivery, subagent reports)
+// goes quiet after the first exchange.
+//
+// TUI sessions do not need this: their turn loop sets StatusRunning itself.
+func (m *Manager) SetSessionRunning(id SessionID) {
+	m.mu.RLock()
+	s, ok := m.sessions[id]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+	s.mu.RLock()
+	status := s.Status
+	s.mu.RUnlock()
+	if status != StatusIdle {
+		return
+	}
+	m.updateSessionStatus(s, StatusRunning)
+}
+
 // SetSessionIdle transitions a session to StatusIdle (waiting for user input).
 // It only transitions from StatusRunning to avoid reverting terminal states
 // (completed, failed, stopped) that may have been set by the monitor loop.
@@ -2371,12 +2434,10 @@ func (m *Manager) RecentOutputLines(id SessionID, n int) []string {
 // writeResearchFile writes a codetalk session's text output to a markdown file
 // in /tmp/bramble-research/. Returns the file path on success.
 func (m *Manager) writeResearchFile(session *Session) (string, error) {
-	researchDir := filepath.Join(os.TempDir(), "bramble-research")
-	if err := os.MkdirAll(researchDir, 0o755); err != nil {
-		return "", fmt.Errorf("create research dir: %w", err)
+	researchPath, err := ResultFilePath(session.ID)
+	if err != nil {
+		return "", err
 	}
-
-	researchPath := filepath.Join(researchDir, string(session.ID)+".md")
 	lines := m.GetSessionOutput(session.ID)
 
 	f, err := os.Create(researchPath)
