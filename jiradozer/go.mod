@@ -9,7 +9,7 @@ require (
 	github.com/bazelment/yoloswe/multiagent v0.0.0
 	github.com/bazelment/yoloswe/notify v0.0.0-00010101000000-000000000000
 	github.com/bazelment/yoloswe/wt v0.0.0
-	github.com/bazelment/yoloswe/yoloswe v0.0.0-20260803224826-2d10110b7f1a
+	github.com/bazelment/yoloswe/yoloswe v0.0.0
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.12.1
 	gopkg.in/yaml.v3 v3.0.1
@@ -40,3 +40,5 @@ replace (
 	github.com/bazelment/yoloswe/notify => ../notify
 	github.com/bazelment/yoloswe/wt => ../wt
 )
+
+replace github.com/bazelment/yoloswe/yoloswe => ../yoloswe
