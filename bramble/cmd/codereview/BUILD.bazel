@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/bramble/cmd/codereview",
     visibility = ["//visibility:public"],
     deps = [
+        "//multiagent/agent",
         "//yoloswe/reviewer",
         "@com_github_spf13_cobra//:cobra",
     ],

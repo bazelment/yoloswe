@@ -355,3 +355,55 @@ func TestAllModels_PlaceholderIDsAreMarked(t *testing.T) {
 		}
 	}
 }
+
+func TestModelProviderMismatch(t *testing.T) {
+	t.Parallel()
+
+	// A curated ID paired with a backend that does not own it: the user named
+	// a model, so refuse rather than let CLIModelArg drop it silently.
+	for _, tc := range []struct{ model, provider string }{
+		{"opus", ProviderCursor},
+		{"opus", ProviderCodex},
+		{"gpt-5.5", ProviderCursor},
+		{"claude-fable-5", ProviderCodex},
+		{" FABLE ", ProviderCodex},
+	} {
+		err := ModelProviderMismatch(tc.model, tc.provider)
+		require.Error(t, err, "%s/%s", tc.model, tc.provider)
+		assert.Contains(t, err.Error(), tc.provider)
+	}
+
+	// Matched pairs, and the cases that are deliberately not a mismatch.
+	for _, tc := range []struct{ model, provider string }{
+		{"opus", ProviderClaude},
+		{"gpt-5.5", ProviderCodex},
+		// A placeholder means "this backend's own default" — nothing named,
+		// so nothing to discard.
+		{"cursor-default", ProviderCursor},
+		{"agy-default", ProviderAgy},
+		// Uncurated IDs are the CLI's business. Cursor genuinely serves these.
+		{"claude-opus-5-thinking-high", ProviderCursor},
+		{"gpt-5.3-codex", ProviderCursor},
+		{"composer-2.5", ProviderCursor},
+		{"o3", ProviderCodex},
+		// Nothing to check.
+		{"", ProviderCursor},
+		{"opus", ""},
+	} {
+		assert.NoError(t, ModelProviderMismatch(tc.model, tc.provider), "%s/%s", tc.model, tc.provider)
+	}
+}
+
+// The two are one rule seen from both sides: wherever the loud check fires,
+// the silent one would have discarded the user's model.
+func TestModelProviderMismatch_AgreesWithCLIModelArg(t *testing.T) {
+	t.Parallel()
+
+	for _, m := range AllModels {
+		for _, p := range AllProviders {
+			mismatch := ModelProviderMismatch(m.ID, p) != nil
+			dropped := CLIModelArg(m.ID, p) == "" && !m.Placeholder
+			assert.Equal(t, dropped, mismatch, "%s/%s", m.ID, p)
+		}
+	}
+}

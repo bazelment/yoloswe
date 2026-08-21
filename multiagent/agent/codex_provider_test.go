@@ -12,14 +12,39 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 )
 
-func TestIsClaudeModelAlias(t *testing.T) {
+// Pin what actually reaches the CLI, not just the rule that feeds it: Execute
+// forwarding cfg.Model straight to codex.WithModel is the regression this
+// guards, and a test of CLIModelArg alone still passes through it.
+func TestCodexThreadOpts_Model(t *testing.T) {
 	t.Parallel()
 
-	for _, model := range []string{"haiku", "sonnet", "opus", "fable", " FABLE "} {
-		assert.True(t, isClaudeModelAlias(model), model)
+	tests := []struct {
+		name  string
+		model string
+		want  string
+	}{
+		{name: "unset", model: "", want: ""},
+		{name: "claude default applyOptions fills in", model: "sonnet", want: ""},
+		{name: "other claude shorthand", model: "opus", want: ""},
+		{name: "shorthand as typed by hand", model: " FABLE ", want: ""},
+		// Codex is not a gateway: it answers a curated non-OpenAI ID with
+		// "The 'claude-fable-5' model is not supported", so forwarding it
+		// only moved the failure to the API.
+		{name: "another provider's curated model", model: "claude-fable-5", want: ""},
+		{name: "codex model passes through", model: "gpt-5.5", want: "gpt-5.5"},
+		// Codex's own catalog is its business, not the registry's.
+		{name: "uncurated ID passes through", model: "o3", want: "o3"},
 	}
-	assert.False(t, isClaudeModelAlias("gpt-5.5"))
-	assert.False(t, isClaudeModelAlias("claude-fable-5"))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got codex.ThreadConfig
+			for _, opt := range codexThreadOpts(ExecuteConfig{Model: tt.model}) {
+				opt(&got)
+			}
+			assert.Equal(t, tt.want, got.Model)
+		})
+	}
 }
 
 type recordingHandler struct { //nolint:govet // fieldalignment: test fixture readability

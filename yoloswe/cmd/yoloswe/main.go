@@ -358,6 +358,12 @@ func runCodeTalk(cmd *cobra.Command, args []string, flags *codeTalkFlags) error 
 	if backend == "" {
 		backend = agent.ProviderClaude
 	}
+	// --backend and --model are independent flags, so a user can name a model
+	// the chosen backend cannot run. Refuse instead of quietly substituting the
+	// backend's default: the run would otherwise look like it honoured the flag.
+	if err := agent.ModelProviderMismatch(flags.model, backend); err != nil {
+		return err
+	}
 	if backend == agent.ProviderClaude {
 		return runCodeTalkClaude(cmd.Context(), flags, ep, workDir, prompt)
 	}

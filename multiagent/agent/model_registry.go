@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 )
@@ -37,7 +38,7 @@ type AgentModel struct {
 // passes through: there the CLI is the authority, not this list. An empty
 // provider means "no attribution known", so only the placeholder rule applies.
 func CLIModelArg(model, provider string) string {
-	m, ok := ModelByID(model)
+	m, ok := curatedModel(model)
 	if !ok {
 		return model
 	}
@@ -48,6 +49,38 @@ func CLIModelArg(model, provider string) string {
 		return ""
 	}
 	return model
+}
+
+// ModelProviderMismatch reports an error when a curated model ID is paired with
+// a provider that does not own it. It is the loud counterpart to CLIModelArg
+// over exactly the same rule: CLIModelArg drops such an ID because a CLI given
+// one dies, but dropping is only the right answer where nobody chose the
+// pairing. At an entry point where a human typed both halves, silently running
+// a different model than the one they named is the worse failure — so those
+// call it first and refuse.
+//
+// A placeholder is not a mismatch: it means "this provider's own default", so
+// the caller named no model to discard. Neither is an ID the curated list does
+// not name — see CLIModelArg on why bramble does not police a CLI's catalog.
+func ModelProviderMismatch(model, provider string) error {
+	if model == "" || provider == "" {
+		return nil
+	}
+	m, ok := curatedModel(model)
+	if !ok || m.Placeholder || m.Provider == provider {
+		return nil
+	}
+	return fmt.Errorf("model %q belongs to provider %q, but backend %q was selected; "+
+		"pass a %[3]s model or omit the model flag to use %[3]s's own default", model, m.Provider, provider)
+}
+
+// curatedModel looks a model ID up in the curated list, tolerating the case and
+// surrounding whitespace that a hand-typed flag carries — every curated ID is
+// lowercase, so lowering the needle is enough. Only the curated list is
+// consulted; CLIModelArg documents why prefix attribution is deliberately not
+// used for this question.
+func curatedModel(model string) (AgentModel, bool) {
+	return ModelByID(strings.ToLower(strings.TrimSpace(model)))
 }
 
 // AllModels is the ordered list of all known models across providers.
