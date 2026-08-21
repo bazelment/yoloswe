@@ -608,7 +608,7 @@ func (m *Manager) ReconcileTmuxSessions() error {
 		}
 
 		for _, meta := range sessions {
-			if meta.RunnerType != RunnerTypeTmux && meta.RunnerType != RunnerTypeTmuxTracked {
+			if !isTmuxRunner(meta.RunnerType) {
 				continue
 			}
 			if meta.Status.IsTerminal() {
@@ -736,7 +736,7 @@ func ReposWithLiveTmuxSessions(store *Store, activeRepo string) []string {
 			}
 
 			for _, meta := range sessions {
-				if meta.RunnerType != RunnerTypeTmux && meta.RunnerType != RunnerTypeTmuxTracked {
+				if !isTmuxRunner(meta.RunnerType) {
 					continue
 				}
 				if meta.Status.IsTerminal() {
@@ -1757,27 +1757,11 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				tmuxName := session.TmuxWindowName
 				tmuxID := session.TmuxWindowID
 				sessionID := session.ID
+				status := session.Status
 				session.mu.RUnlock()
 
 				if tmuxName == "" && tmuxID == "" {
 					continue
-				}
-
-				// Read idleness off the pane for hookless backends. Only a
-				// running session is a candidate: once idle it stays idle
-				// until something delivers work and marks it running again,
-				// which is also what re-arms the tracker.
-				if idleTracker != nil {
-					session.mu.RLock()
-					status := session.Status
-					session.mu.RUnlock()
-					if status != StatusRunning {
-						idleTracker.reset()
-					} else if lines, err := m.CapturePaneText(sessionID, paneIdleCaptureLines); err == nil {
-						if idleTracker.observe(lines) {
-							m.SetSessionIdle(sessionID)
-						}
-					}
 				}
 
 				// windowTarget is the most stable identifier available for
@@ -1786,6 +1770,8 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				if tmuxID != "" {
 					windowTarget = tmuxID
 				}
+
+				m.pollPaneIdle(idleTracker, sessionID, status, windowTarget)
 
 				windowExists := tmuxWindowAlive(tmuxID, tmuxName)
 				paneDead := windowExists && TmuxWindowPaneDead(windowTarget)
@@ -2355,39 +2341,59 @@ func (m *Manager) ActiveWorktreePaths() map[string]struct{} {
 // goes quiet after the first exchange.
 //
 // TUI sessions do not need this: their turn loop sets StatusRunning itself.
+//
+// The transition is compare-and-set rather than check-then-set because this is
+// racing the agent's notify hook by construction: bramble submits a prompt at
+// the same moment the previous turn's notify may be landing, and a separate
+// read and write would let the two interleave into a lost update.
 func (m *Manager) SetSessionRunning(id SessionID) {
-	m.mu.RLock()
-	s, ok := m.sessions[id]
-	m.mu.RUnlock()
-	if !ok {
+	m.trySetStatus(id, StatusIdle, StatusRunning)
+}
+
+// pollPaneIdle reads idleness off a hookless backend's pane, for one tick of
+// the monitor loop. tracker is nil for a provider that reports its own turn
+// ends, in which case this does nothing.
+//
+// Only a running session is a candidate: once idle it stays idle until
+// something delivers work and marks it running again, which is also what
+// re-arms the tracker.
+func (m *Manager) pollPaneIdle(tracker *paneIdleTracker, id SessionID, status SessionStatus, windowTarget string) {
+	if tracker == nil {
 		return
 	}
-	s.mu.RLock()
-	status := s.Status
-	s.mu.RUnlock()
-	if status != StatusIdle {
+	if status != StatusRunning {
+		tracker.reset()
 		return
 	}
-	m.updateSessionStatus(s, StatusRunning)
+	// CaptureTmuxPane rather than CapturePaneText: the caller resolved this
+	// same target from the same session a few lines ago, and going back through
+	// the session map would retake two locks per tick to rederive it.
+	lines, err := CaptureTmuxPane(windowTarget, paneIdleCaptureLines)
+	if err != nil {
+		return
+	}
+	if tracker.observe(lines) {
+		m.SetSessionIdle(id)
+	}
 }
 
 // SetSessionIdle transitions a session to StatusIdle (waiting for user input).
 // It only transitions from StatusRunning to avoid reverting terminal states
 // (completed, failed, stopped) that may have been set by the monitor loop.
 func (m *Manager) SetSessionIdle(id SessionID) {
+	m.trySetStatus(id, StatusRunning, StatusIdle)
+}
+
+// trySetStatus looks a session up and moves it from one status to another,
+// doing nothing if it is not there or has since moved on.
+func (m *Manager) trySetStatus(id SessionID, from, to SessionStatus) {
 	m.mu.RLock()
 	s, ok := m.sessions[id]
 	m.mu.RUnlock()
 	if !ok {
 		return
 	}
-	s.mu.RLock()
-	status := s.Status
-	s.mu.RUnlock()
-	if status != StatusRunning {
-		return
-	}
-	m.updateSessionStatus(s, StatusIdle)
+	m.tryUpdateSessionStatus(s, from, to)
 }
 
 // GetAllSessions returns all sessions sorted by creation time (newest first).
@@ -2403,7 +2409,7 @@ func (m *Manager) GetAllSessions() []SessionInfo {
 		// so the command center shows the latest agent text, not a stale snapshot.
 		// For tmux sessions, RecentOutput is already set by captureRecentOutput()
 		// in the session's Progress struct, so we keep it from ToInfo().
-		if info.RunnerType != RunnerTypeTmux && info.RunnerType != RunnerTypeTmuxTracked {
+		if !isTmuxRunner(info.RunnerType) {
 			info.Progress.RecentOutput = m.RecentOutputLines(s.ID, sessionmodel.RecentOutputDisplayLines)
 		}
 		result = append(result, info)
@@ -2493,7 +2499,7 @@ func (m *Manager) CapturePaneText(id SessionID, n int) ([]string, error) {
 	runnerType := session.RunnerType
 	session.mu.RUnlock()
 
-	if runnerType != RunnerTypeTmux && runnerType != RunnerTypeTmuxTracked {
+	if !isTmuxRunner(runnerType) {
 		return nil, fmt.Errorf("session %q is not a tmux session (runner type: %s)", id, runnerType)
 	}
 
@@ -2530,7 +2536,7 @@ func (m *Manager) ResolveTmuxTarget(id SessionID) (string, error) {
 	runnerType := session.RunnerType
 	session.mu.RUnlock()
 
-	if runnerType != RunnerTypeTmux && runnerType != RunnerTypeTmuxTracked {
+	if !isTmuxRunner(runnerType) {
 		return "", fmt.Errorf("session %q is not a tmux session (runner type: %s)", id, runnerType)
 	}
 

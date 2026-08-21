@@ -175,43 +175,43 @@ func (d *Dispatcher) sessionStatus(ctx context.Context, req *Msg) (*PaneStatusJS
 }
 
 // sendInput delivers text to a session (sessionScoped=true) or a raw target.
-func (d *Dispatcher) sendInput(ctx context.Context, req *Msg, sessionScoped bool) (any, error) {
+func (d *Dispatcher) sendInput(ctx context.Context, req *Msg, sessionScoped bool) (SendInputResult, error) {
 	var r SendInputReq
 	if err := req.decode(&r); err != nil {
-		return nil, err
+		return SendInputResult{}, err
 	}
 
 	// The queued path goes through the courier, which knows how to reach a
-	// session whatever its runner. The unqueued path below is unchanged: it
-	// still types straight into a pane, which stays the right behaviour for a
-	// deliberate interrupt and for raw pane targets.
+	// session whatever its runner. The unqueued path below types straight into
+	// a pane, which stays the right behaviour for a deliberate interrupt and
+	// for raw pane targets.
 	if r.Queue {
 		if r.SessionID == "" {
-			return nil, fmt.Errorf("queue requires session_id: a raw pane target has no status to wait on")
+			return SendInputResult{}, fmt.Errorf("queue requires session_id: a raw pane target has no status to wait on")
 		}
 		if d.courier == nil {
-			return nil, fmt.Errorf("queued delivery is not available on this bramble")
+			return SendInputResult{}, fmt.Errorf("queued delivery is not available on this bramble")
 		}
 		queued, err := d.courier.Send(ctx, session.SessionID(r.From), session.SessionID(r.SessionID), r.Text, r.Submit)
 		if err != nil {
-			return nil, err
+			return SendInputResult{}, err
 		}
 		return SendInputResult{OK: true, Queued: queued}, nil
 	}
 
 	target, err := d.targetFor(r.SessionID, r.Target, sessionScoped)
 	if err != nil {
-		return nil, err
+		return SendInputResult{}, err
 	}
 	if err := d.ctl.Paste(ctx, target, r.Text); err != nil {
-		return nil, err
+		return SendInputResult{}, err
 	}
 	if r.Submit {
 		if err := d.ctl.SendSpecial(ctx, target, tmuxctl.KeyEnter); err != nil {
-			return nil, err
+			return SendInputResult{}, err
 		}
 	}
-	return OKResult{OK: true}, nil
+	return SendInputResult{OK: true}, nil
 }
 
 func (d *Dispatcher) sendKey(ctx context.Context, req *Msg, sessionScoped bool) (OKResult, error) {

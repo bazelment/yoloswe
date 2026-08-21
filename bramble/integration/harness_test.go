@@ -61,12 +61,9 @@ type harness struct {
 	controlSock  string
 	home         string
 	stubLog      string
-	// lastWorktreePath is the path returned by the most recent
-	// spawnOnNewWorktree, so a test can assert on what bramble actually made.
-	lastWorktreePath string
-	// answeredDialogs records the screen each dialog was answered on, so one
+	// answeredDialogs remembers which dialogs have been answered, so one
 	// appearance collects one answer.
-	answeredDialogs map[string]string
+	answeredDialogs map[dialogKey]bool
 }
 
 // newHarness brings up a private tmux server, a throwaway repo, and a bramble
@@ -90,7 +87,7 @@ func newHarness(t *testing.T, stubAgent bool) *harness {
 	h := &harness{
 		t:               t,
 		tmuxSocket:      filepath.Join(shortRoot, "t.sock"),
-		answeredDialogs: map[string]string{},
+		answeredDialogs: map[dialogKey]bool{},
 	}
 	wtRoot := filepath.Join(root, "worktrees")
 	runtimeDir := filepath.Join(shortRoot, "run")
@@ -147,10 +144,7 @@ func newHarness(t *testing.T, stubAgent bool) *harness {
 	// variables. Those have to go on the server. PATH deliberately does not:
 	// tmux special-cases it here and the override is silently dropped, which
 	// is why it rides the shell wrapper above instead.
-	for _, kv := range []string{"BRAMBLE_IT_STUB_LOG=" + h.stubLog} {
-		name, value, _ := strings.Cut(kv, "=")
-		_, _ = h.tmux("set-environment", "-g", name, value)
-	}
+	_, _ = h.tmux("set-environment", "-g", "BRAMBLE_IT_STUB_LOG", h.stubLog)
 
 	t.Cleanup(func() {
 		// Dump the TUI window on failure: a bramble that refused to start
@@ -194,62 +188,58 @@ func (h *harness) awaitSockets(runtimeDir string) {
 
 // --- talking to the bramble under test ---------------------------------------
 
+// newSession sends a new-session request and returns the decoded result.
+func (h *harness) newSession(reqID string, params ipc.NewSessionParams) ipc.NewSessionResult {
+	h.t.Helper()
+	params.RepoName = repoName
+	resp, err := ipc.NewClient(h.ipcSock).Send(&ipc.Request{
+		Type:   ipc.RequestNewSession,
+		ID:     reqID,
+		Params: &params,
+	})
+	require.NoError(h.t, err)
+	require.Truef(h.t, resp.OK, "%s failed: %s", reqID, resp.Error)
+
+	var result ipc.NewSessionResult
+	requireDecode(h.t, resp.Result, &result)
+	require.NotEmpty(h.t, result.SessionID)
+	return result
+}
+
 // spawn creates a session and returns its ID. A parent of "" is a top-level
 // session; anything else makes the new session that session's subagent.
 func (h *harness) spawn(sessionType, model, parent, prompt string) session.SessionID {
 	h.t.Helper()
-	resp, err := ipc.NewClient(h.ipcSock).Send(&ipc.Request{
-		Type: ipc.RequestNewSession,
-		ID:   "it-new-session",
-		Params: &ipc.NewSessionParams{
-			SessionType:     sessionType,
-			WorktreePath:    h.worktreePath,
-			Model:           model,
-			RepoName:        repoName,
-			ParentSessionID: parent,
-			Prompt:          prompt,
-		},
+	result := h.newSession("it-new-session", ipc.NewSessionParams{
+		SessionType:     sessionType,
+		WorktreePath:    h.worktreePath,
+		Model:           model,
+		ParentSessionID: parent,
+		Prompt:          prompt,
 	})
-	require.NoError(h.t, err)
-	require.True(h.t, resp.OK, "new-session failed: %s", resp.Error)
-
-	var result ipc.NewSessionResult
-	requireDecode(h.t, resp.Result, &result)
-	require.NotEmpty(h.t, result.SessionID)
 	return session.SessionID(result.SessionID)
 }
 
 // spawnOnNewWorktree creates a subagent with a worktree of its own rather than
-// its parent's, the way `new-session --create-worktree -b <branch>` does.
+// its parent's, the way `new-session --create-worktree -b <branch>` does, and
+// returns the session along with the tree bramble actually made.
 //
 // It deliberately passes no worktree path: that is what makes bramble create
 // one, and it is also what would silently fall back to inheriting the parent's
 // tree if worktree creation stopped happening.
-func (h *harness) spawnOnNewWorktree(sessionType, model, parent, branch, base, prompt string) session.SessionID {
+func (h *harness) spawnOnNewWorktree(sessionType, model, parent, branch, base, prompt string) (session.SessionID, string) {
 	h.t.Helper()
-	resp, err := ipc.NewClient(h.ipcSock).Send(&ipc.Request{
-		Type: ipc.RequestNewSession,
-		ID:   "it-new-session-wt",
-		Params: &ipc.NewSessionParams{
-			SessionType:     sessionType,
-			Branch:          branch,
-			BaseBranch:      base,
-			CreateWorktree:  true,
-			Model:           model,
-			RepoName:        repoName,
-			ParentSessionID: parent,
-			Prompt:          prompt,
-		},
+	result := h.newSession("it-new-session-wt", ipc.NewSessionParams{
+		SessionType:     sessionType,
+		Branch:          branch,
+		BaseBranch:      base,
+		CreateWorktree:  true,
+		Model:           model,
+		ParentSessionID: parent,
+		Prompt:          prompt,
 	})
-	require.NoError(h.t, err)
-	require.Truef(h.t, resp.OK, "new-session --create-worktree failed: %s", resp.Error)
-
-	var result ipc.NewSessionResult
-	requireDecode(h.t, resp.Result, &result)
-	require.NotEmpty(h.t, result.SessionID)
 	require.NotEmptyf(h.t, result.WorktreePath, "no worktree path came back for branch %s", branch)
-	h.lastWorktreePath = result.WorktreePath
-	return session.SessionID(result.SessionID)
+	return session.SessionID(result.SessionID), result.WorktreePath
 }
 
 // gitIn runs a read-only git command inside a worktree.
@@ -343,10 +333,8 @@ func (h *harness) pane(id session.SessionID) string {
 // awaitPane waits for a session's pane to contain want.
 func (h *harness) awaitPane(id session.SessionID, want, because string) {
 	h.t.Helper()
-	require.Eventuallyf(h.t, func() bool {
-		return strings.Contains(h.pane(id), want)
-	}, settleTimeout, pollInterval, "%s: %q never appeared in %s's pane\n--- pane ---\n%s",
-		because, want, id, h.pane(id))
+	h.awaitPaneCond(id, func() bool { return strings.Contains(h.pane(id), want) },
+		"%s: %q never appeared in %s's pane", because, want, id)
 }
 
 // countInPane reports how many times want appears in a session's pane.
@@ -413,6 +401,13 @@ type startupDialog struct {
 // startupDialogs is the set answered automatically. Each entry names the choice
 // it takes, because pressing Enter on an unknown menu is how a test silently
 // changes a setting (codex's rate-limit prompt switches model on Enter).
+// dialogKey identifies one dialog on one session, so an answer to a codex
+// trust prompt does not count as an answer to Claude's.
+type dialogKey struct {
+	id   session.SessionID
+	name string
+}
+
 var startupDialogs = []startupDialog{
 	{
 		// Claude, on a directory it has not seen before. Option 1, the
@@ -451,10 +446,9 @@ var startupDialogs = []startupDialog{
 // and each "answer" is a keystroke into whatever has since taken its place.
 const dialogTailLines = 30
 
-// paneTail returns the last few non-empty lines of a session's pane.
-func (h *harness) paneTail(id session.SessionID) string {
-	h.t.Helper()
-	lines := strings.Split(h.pane(id), "\n")
+// paneTail returns the last few non-empty lines of an already-captured pane.
+func paneTail(pane string) string {
+	lines := strings.Split(pane, "\n")
 	kept := make([]string, 0, dialogTailLines)
 	for i := len(lines) - 1; i >= 0 && len(kept) < dialogTailLines; i-- {
 		if strings.TrimSpace(lines[i]) == "" {
@@ -474,9 +468,9 @@ func (h *harness) paneTail(id session.SessionID) string {
 // captures are equal and every poll looks like a new dialog. Without this a run
 // sent Enter twenty-two times into a live session — a dismissed dialog stays in
 // the scrollback just above the prompt that replaced it.
-func (h *harness) answerStartupDialogs(id session.SessionID) bool {
+func (h *harness) answerStartupDialogs(id session.SessionID, pane string) bool {
 	h.t.Helper()
-	tail := h.paneTail(id)
+	tail := paneTail(pane)
 	if tail == "" {
 		return false
 	}
@@ -491,8 +485,8 @@ func (h *harness) answerStartupDialogs(id session.SessionID) bool {
 		if !matched {
 			continue
 		}
-		key := string(id) + "\x00" + d.name
-		if h.answeredDialogs[key] != "" {
+		key := dialogKey{id: id, name: d.name}
+		if h.answeredDialogs[key] {
 			return false // already answered; waiting for it to go away
 		}
 
@@ -505,16 +499,75 @@ func (h *harness) answerStartupDialogs(id session.SessionID) bool {
 			}
 			time.Sleep(300 * time.Millisecond)
 		}
-		h.answeredDialogs[key] = "answered"
+		h.answeredDialogs[key] = true
 		return true
 	}
 
 	// Nothing matched: any dialog previously answered is gone, so a fresh
 	// appearance of it may be answered again.
 	for _, d := range startupDialogs {
-		delete(h.answeredDialogs, string(id)+"\x00"+d.name)
+		delete(h.answeredDialogs, dialogKey{id: id, name: d.name})
 	}
 	return false
+}
+
+// awaitClearingDialogs polls cond, answering first-run dialogs between polls,
+// and fails with the session's pane attached if it never comes true.
+//
+// Answering as it polls is what separates these waits from require.Eventually:
+// a real CLI on a fresh worktree puts a trust prompt in front of the agent, and
+// a condition that waits for the agent to act can only come true once that
+// prompt is cleared.
+// The pane is captured once per iteration and handed to both cond and the
+// dialog answerer: a capture is an IPC round-trip plus a tmux fork, and taking
+// two per poll for 90 seconds is hundreds of them per wait. The last capture
+// also becomes the failure dump, which is the pane the wait actually gave up
+// on rather than a fresh one taken afterwards.
+func (h *harness) awaitClearingDialogs(id session.SessionID, cond func(pane string) bool, failf string, args ...any) {
+	h.t.Helper()
+	deadline := time.Now().Add(settleTimeout)
+	var pane string
+	for time.Now().Before(deadline) {
+		pane = h.pane(id)
+		if cond(pane) {
+			return
+		}
+		h.answerStartupDialogs(id, pane)
+		time.Sleep(pollInterval)
+	}
+	h.t.Fatalf(failf+"\n--- pane ---\n%s", append(args, pane)...)
+}
+
+// awaitPaneCond polls cond until it holds, failing with the session's pane as
+// it stands at that moment.
+//
+// Deliberately not require.Eventuallyf with h.pane() among its format
+// arguments: Go evaluates those eagerly, so the pane is captured before the
+// wait even begins — an extra capture on every passing run, and on a failing
+// one it prints the screen from before the wait instead of the one that failed.
+func (h *harness) awaitPaneCond(id session.SessionID, cond func() bool, failf string, args ...any) {
+	h.t.Helper()
+	deadline := time.Now().Add(settleTimeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(pollInterval)
+	}
+	h.t.Fatalf(failf+"\n--- pane ---\n%s", append(args, h.pane(id))...)
+}
+
+// neverDuring fails if cond ever holds within d, dumping the pane at the moment
+// it did. Same eager-argument reasoning as awaitPaneCond.
+func (h *harness) neverDuring(id session.SessionID, d time.Duration, cond func() bool, failf string, args ...any) {
+	h.t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			h.t.Fatalf(failf+"\n--- pane ---\n%s", append(args, h.pane(id))...)
+		}
+		time.Sleep(pollInterval)
+	}
 }
 
 // awaitReady waits for a session to reach its prompt, answering first-run
@@ -522,31 +575,16 @@ func (h *harness) answerStartupDialogs(id session.SessionID) bool {
 // a real CLI on a fresh worktree may need a click before it ever runs a turn.
 func (h *harness) awaitReady(id session.SessionID) {
 	h.t.Helper()
-	deadline := time.Now().Add(settleTimeout)
-	for time.Now().Before(deadline) {
-		if h.status(id) == "idle" {
-			return
-		}
-		h.answerStartupDialogs(id)
-		time.Sleep(pollInterval)
-	}
-	h.t.Fatalf("session %s never reached its prompt\n--- pane ---\n%s", id, h.pane(id))
+	h.awaitClearingDialogs(id, func(string) bool { return h.status(id) == "idle" },
+		"session %s never reached its prompt", id)
 }
 
 // awaitPaneClearingDialogs waits for text to appear, answering any dialog that
 // blocks the agent on the way.
 func (h *harness) awaitPaneClearingDialogs(id session.SessionID, want, because string) {
 	h.t.Helper()
-	deadline := time.Now().Add(settleTimeout)
-	for time.Now().Before(deadline) {
-		if strings.Contains(h.pane(id), want) {
-			return
-		}
-		h.answerStartupDialogs(id)
-		time.Sleep(pollInterval)
-	}
-	h.t.Fatalf("%s: %q never appeared in %s's pane\n--- pane ---\n%s",
-		because, want, id, h.pane(id))
+	h.awaitClearingDialogs(id, func(pane string) bool { return strings.Contains(pane, want) },
+		"%s: %q never appeared in %s's pane", because, want, id)
 }
 
 // longTurnSeconds is how long a "keep busy" prompt occupies an agent. Long
@@ -576,15 +614,9 @@ func longTurnPrompt(done string) string {
 // CLI had even started — which is a different case, and not the one under test.
 func (h *harness) awaitWorking(id session.SessionID, promptEcho string) {
 	h.t.Helper()
-	deadline := time.Now().Add(settleTimeout)
-	for time.Now().Before(deadline) {
-		if h.status(id) == "running" && strings.Contains(h.pane(id), promptEcho) {
-			return
-		}
-		h.answerStartupDialogs(id)
-		time.Sleep(pollInterval)
-	}
-	h.t.Fatalf("session %s never started working\n--- pane ---\n%s", id, h.pane(id))
+	h.awaitClearingDialogs(id, func(pane string) bool {
+		return h.status(id) == "running" && strings.Contains(pane, promptEcho)
+	}, "session %s never started working", id)
 }
 
 // reportedResultPath pulls the path out of the most recent report in a pane.

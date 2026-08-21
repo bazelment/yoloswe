@@ -114,7 +114,12 @@ func (s *Store) sessionPath(repoName, worktreeName string, id SessionID) string 
 	return filepath.Join(s.sessionDir(repoName, worktreeName), string(id)+".json")
 }
 
-// sanitizeName sanitizes a name for use as a directory name.
+// sanitizeName sanitizes a repo or worktree name for use as a directory name.
+//
+// Deliberately NOT the stricter sanitizeFileName: this one decides where a
+// user's saved sessions live, so tightening it would move existing stores to
+// new paths and make their history look empty. The inputs are local repo and
+// worktree names rather than anything off a socket.
 func sanitizeName(name string) string {
 	// Replace problematic characters
 	name = strings.ReplaceAll(name, "/", "_")
@@ -122,6 +127,56 @@ func sanitizeName(name string) string {
 	name = strings.ReplaceAll(name, ":", "_")
 	name = strings.ReplaceAll(name, " ", "_")
 	return name
+}
+
+// sanitizeFileName makes an untrusted name safe as a single path component.
+//
+// An allowlist, not a list of characters to strip: session IDs reach the
+// delivery queue and the result file straight off a socket, and a denylist that
+// forgets "." lets "../.." walk out of the directory the result is joined to.
+func sanitizeFileName(name string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '-', r == '_':
+			return r
+		default:
+			return '_'
+		}
+	}, name)
+}
+
+// writeFileAtomic writes data to path via a temp file in the same directory and
+// a rename, so a concurrent reader sees either the old contents or the new ones
+// and never a half-written file.
+//
+// The temp file gets a random name rather than a fixed "<path>.tmp": two writers
+// racing on one path would otherwise share the scratch file and interleave.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 // SaveSession saves a session to disk.
@@ -155,15 +210,8 @@ func (s *Store) SaveSession(session *StoredSession) error {
 
 	path := s.sessionPath(session.RepoName, session.WorktreeName, session.ID)
 
-	// Write atomically using temp file + rename
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	if err := writeFileAtomic(path, data, 0644); err != nil {
 		return fmt.Errorf("failed to write session file: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath) // Clean up temp file
-		return fmt.Errorf("failed to rename session file: %w", err)
 	}
 
 	return nil

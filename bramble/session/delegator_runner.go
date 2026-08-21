@@ -179,11 +179,14 @@ func (r *delegatorRunner) CLISessionID() string {
 	return info.SessionID
 }
 
-// watchChildSessionChanges subscribes to Manager state change events and
-// forwards relevant child session notifications to the notify channel.
-// It runs until ctx is canceled. The caller must call the returned unsubscribe
-// function to clean up the subscription.
-func watchChildSessionChanges(ctx context.Context, manager *Manager, toolHandler *DelegatorToolHandler, notify chan<- SessionStateChangeEvent) func() {
+// watchStateChanges runs fn for every state change a Manager emits, until ctx
+// is canceled. The caller must call the returned unsubscribe function.
+//
+// The buffer, the closed-channel guard and the unsubscribe-then-close ordering
+// are subtle enough to be worth having in one place: an unbuffered channel
+// would block the emitting session, and closing before unsubscribing would let
+// a concurrent emit send on a closed channel.
+func watchStateChanges(ctx context.Context, manager *Manager, fn func(SessionStateChangeEvent)) func() {
 	stateCh := make(chan SessionStateChangeEvent, 100)
 	unsub := manager.SubscribeStateChanges(stateCh)
 
@@ -194,25 +197,9 @@ func watchChildSessionChanges(ctx context.Context, manager *Manager, toolHandler
 				return
 			case evt, ok := <-stateCh:
 				if !ok {
-					// stateCh was closed by the unsubscribe wrapper below,
-					// meaning the delegator session has ended. Exit cleanly.
 					return
 				}
-				// Only forward if this is a child session we're tracking
-				if !toolHandler.IsChild(evt.SessionID) {
-					continue
-				}
-				// Only notify on meaningful state transitions
-				if evt.NewStatus == StatusIdle ||
-					evt.NewStatus == StatusCompleted ||
-					evt.NewStatus == StatusFailed ||
-					evt.NewStatus == StatusStopped {
-					select {
-					case notify <- evt:
-					case <-ctx.Done():
-						return
-					}
-				}
+				fn(evt)
 			}
 		}
 	}()
@@ -221,6 +208,24 @@ func watchChildSessionChanges(ctx context.Context, manager *Manager, toolHandler
 		unsub()
 		close(stateCh)
 	}
+}
+
+// watchChildSessionChanges forwards state changes for the delegator's own child
+// sessions to the notify channel.
+func watchChildSessionChanges(ctx context.Context, manager *Manager, toolHandler *DelegatorToolHandler, notify chan<- SessionStateChangeEvent) func() {
+	return watchStateChanges(ctx, manager, func(evt SessionStateChangeEvent) {
+		if !toolHandler.IsChild(evt.SessionID) {
+			return
+		}
+		// Terminal transitions and idle are the only ones the delegator acts on.
+		if evt.NewStatus != StatusIdle && !evt.NewStatus.IsTerminal() {
+			return
+		}
+		select {
+		case notify <- evt:
+		case <-ctx.Done():
+		}
+	})
 }
 
 // forwardEvents reads events from the Claude session and forwards them to the

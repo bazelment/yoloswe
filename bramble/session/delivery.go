@@ -105,9 +105,6 @@ type Courier struct { //nolint:govet // fieldalignment: grouping by role reads b
 	// reported to a parent, so a child is not announced twice.
 	reported map[SessionID]map[SessionStatus]bool
 	seq      uint64
-	// onDelivered, when set, is called after a delivery is written. Tests use
-	// it to observe the drain without polling.
-	onDelivered func(Delivery)
 }
 
 // NewCourier creates a courier that persists its queue under dir. If dir is
@@ -137,13 +134,6 @@ func NewCourier(target DeliveryTarget, panes PaneWriter, dir string) (*Courier, 
 	return c, nil
 }
 
-// SetOnDelivered installs a callback invoked after each successful write.
-func (c *Courier) SetOnDelivered(fn func(Delivery)) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.onDelivered = fn
-}
-
 // Send delivers text to a session, writing it now if the recipient is idle and
 // queueing it otherwise. It reports whether the message was queued.
 //
@@ -154,7 +144,7 @@ func (c *Courier) Send(ctx context.Context, from, to SessionID, text string, sub
 	if !ok {
 		return false, fmt.Errorf("session not found: %s", to)
 	}
-	if isTerminalStatus(info.Status) {
+	if info.Status.IsTerminal() {
 		return false, fmt.Errorf("session %s is %s and cannot receive messages", to, info.Status)
 	}
 
@@ -224,14 +214,16 @@ func (c *Courier) Pending(to SessionID) []Delivery {
 // they can never be written, and keeping them would leak the queue forever.
 func (c *Courier) Drain(ctx context.Context, to SessionID) {
 	c.mu.Lock()
-	queue := append([]Delivery(nil), c.pending[to]...)
-	c.mu.Unlock()
+	queue := c.pending[to]
 	if len(queue) == 0 {
+		c.mu.Unlock()
 		return
 	}
+	next := queue[0]
+	c.mu.Unlock()
 
 	info, ok := c.target.SessionInfo(to)
-	if !ok || isTerminalStatus(info.Status) {
+	if !ok || info.Status.IsTerminal() {
 		c.discard(to)
 		return
 	}
@@ -239,7 +231,6 @@ func (c *Courier) Drain(ctx context.Context, to SessionID) {
 		return
 	}
 
-	next := queue[0]
 	if err := c.write(ctx, info, next.Text, next.Submit); err != nil {
 		logDeliveryWarn("failed to write queued delivery", to, err)
 		return
@@ -249,17 +240,17 @@ func (c *Courier) Drain(ctx context.Context, to SessionID) {
 	if remaining := c.pending[to]; len(remaining) <= 1 {
 		delete(c.pending, to)
 	} else {
-		c.pending[to] = append([]Delivery(nil), remaining[1:]...)
+		// Reslice rather than re-copy: Pending already hands callers a copy,
+		// so nothing outside aliases this, and copying the tail on every drain
+		// makes emptying an n-deep queue quadratic — worst exactly in the
+		// fan-out case, where n subagents report into one busy parent.
+		c.pending[to] = remaining[1:]
 	}
 	err := c.persistLocked(to)
-	cb := c.onDelivered
 	c.mu.Unlock()
 
 	if err != nil {
 		logDeliveryWarn("failed to persist delivery queue", to, err)
-	}
-	if cb != nil {
-		cb(next)
 	}
 }
 
@@ -356,18 +347,23 @@ func (c *Courier) pasteLanded(ctx context.Context, id SessionID, text string) bo
 		return true // nothing distinctive to look for; do not block delivery
 	}
 	for i := 0; i < pasteVerifyAttempts; i++ {
-		lines, err := c.target.CapturePaneText(id, pasteVerifyLines)
-		if err == nil {
-			for _, line := range lines {
-				if strings.Contains(line, probe) {
-					return true
-				}
+		// Wait before every attempt but the first: a paste needs a frame to
+		// show up, and sleeping *after* the last one only delays the verdict.
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(pasteVerifyInterval):
 			}
 		}
-		select {
-		case <-ctx.Done():
-			return false
-		case <-time.After(pasteVerifyInterval):
+		lines, err := c.target.CapturePaneText(id, pasteVerifyLines)
+		if err != nil {
+			continue
+		}
+		for _, line := range lines {
+			if strings.Contains(line, probe) {
+				return true
+			}
 		}
 	}
 	return false
@@ -387,8 +383,16 @@ func pasteProbe(text string) string {
 }
 
 // discard drops a recipient's whole queue, on disk and in memory.
+//
+// This runs on every terminal transition, and most sessions never had a queue,
+// so an absent one returns before persistLocked can unlink a path that was
+// never written.
 func (c *Courier) discard(to SessionID) {
 	c.mu.Lock()
+	if _, queued := c.pending[to]; !queued {
+		c.mu.Unlock()
+		return
+	}
 	delete(c.pending, to)
 	err := c.persistLocked(to)
 	c.mu.Unlock()
@@ -400,67 +404,35 @@ func (c *Courier) discard(to SessionID) {
 // Watch drains a session's queue whenever it becomes idle. It returns an
 // unsubscribe function and runs until ctx is canceled.
 func (c *Courier) Watch(ctx context.Context, mgr *Manager) func() {
-	ch := make(chan SessionStateChangeEvent, 100)
-	unsub := mgr.SubscribeStateChanges(ch)
-
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case evt, ok := <-ch:
-				if !ok {
-					return
-				}
-				// A session is both a recipient of queued mail and, when it
-				// has a parent, a subagent whose progress that parent is
-				// waiting on. One transition can mean both things.
-				if info, found := c.target.SessionInfo(evt.SessionID); found && info.ParentSessionID != "" {
-					c.reportToParent(ctx, info)
-				}
-				switch evt.NewStatus {
-				case StatusIdle:
-					c.Drain(ctx, evt.SessionID)
-				case StatusCompleted, StatusFailed, StatusStopped:
-					// Nothing will make this session idle again; reclaim the
-					// queue rather than leaving it on disk forever.
-					c.discard(evt.SessionID)
-					c.forgetChild(evt.SessionID)
-				}
-			}
+	return watchStateChanges(ctx, mgr, func(evt SessionStateChangeEvent) {
+		// A session is both a recipient of queued mail and, when it has a
+		// parent, a subagent whose progress that parent is waiting on. One
+		// transition can mean both things.
+		if info, found := c.target.SessionInfo(evt.SessionID); found && info.ParentSessionID != "" {
+			c.reportToParent(ctx, info)
 		}
-	}()
-
-	return func() {
-		unsub()
-		close(ch)
-	}
+		switch {
+		case evt.NewStatus == StatusIdle:
+			c.Drain(ctx, evt.SessionID)
+		case evt.NewStatus.IsTerminal():
+			// Nothing will make this session idle again; reclaim the queue
+			// rather than leaving it on disk forever.
+			c.discard(evt.SessionID)
+			c.forgetChild(evt.SessionID)
+		}
+	})
 }
 
 // --- persistence -------------------------------------------------------------
 
-// queuePath returns the on-disk file backing a recipient's queue. Session IDs
-// are generated from a worktree name plus hex (generateSessionID), but the file
-// name is sanitized anyway so a hand-passed ID can never escape the directory.
+// queuePath returns the on-disk file backing a recipient's queue.
 func (c *Courier) queuePath(to SessionID) string {
-	return filepath.Join(c.dir, sanitizeQueueName(string(to))+".json")
+	return filepath.Join(c.dir, sanitizeFileName(string(to))+".json")
 }
 
-func sanitizeQueueName(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			return r
-		case r == '-', r == '_':
-			return r
-		default:
-			return '_'
-		}
-	}, s)
-}
-
-// persistLocked writes a recipient's current queue to disk. The caller must
-// hold c.mu.
+// persistLocked writes a recipient's current queue to disk, removing the file
+// when the queue empties so the directory does not accumulate empty stubs. The
+// caller must hold c.mu.
 //
 // Writing under the lock, rather than snapshotting and writing after releasing
 // it, is what keeps the file agreeing with memory. Several subagents finishing
@@ -472,13 +444,8 @@ func sanitizeQueueName(s string) string {
 // The cost is a small file write inside the critical section, at the rate
 // subagents finish turns.
 func (c *Courier) persistLocked(to SessionID) error {
-	return c.persist(to, c.pending[to])
-}
-
-// persist writes a recipient's queue atomically, removing the file when the
-// queue empties so the directory does not accumulate empty stubs.
-func (c *Courier) persist(to SessionID, queue []Delivery) error {
 	path := c.queuePath(to)
+	queue := c.pending[to]
 	if len(queue) == 0 {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
@@ -489,27 +456,8 @@ func (c *Courier) persist(to SessionID, queue []Delivery) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(c.dir, ".queue-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	// Rename last: a reader either sees the old queue or the new one, never a
-	// half-written file.
-	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	return nil
+	// 0600: a queue file holds message text meant for one session's operator.
+	return writeFileAtomic(path, data, 0o600)
 }
 
 // load reads every queue file back into memory.
@@ -548,11 +496,6 @@ func logDeliveryWarn(msg string, to SessionID, err error) {
 	log.Printf("WARNING: %s for session %s: %v", msg, to, err)
 }
 
-// isTerminalStatus reports whether a session can still receive messages.
-func isTerminalStatus(s SessionStatus) bool {
-	return s == StatusCompleted || s == StatusFailed || s == StatusStopped
-}
-
 // parentSessionID reads the session's parent under the lock. The field is set
 // once before runSession starts and never mutated, but every other reader in
 // this package goes through the mutex, and an unsynchronized read here would
@@ -575,5 +518,5 @@ func ResultFilePath(id SessionID) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create result dir: %w", err)
 	}
-	return filepath.Join(dir, sanitizeQueueName(string(id))+".md"), nil
+	return filepath.Join(dir, sanitizeFileName(string(id))+".md"), nil
 }

@@ -227,11 +227,9 @@ func TestTwoWayConversationKeepsReporting(t *testing.T) {
 	h.awaitPane(child, "STUB-REPLY ROUND-TWO", "the parent's reply never reached the child")
 
 	// Round 2: the answer to the reply is reported too.
-	require.Eventuallyf(t, func() bool {
+	h.awaitPaneCond(parent, func() bool {
 		return h.countInPane(parent, deliveredReportMarker) >= 2
-	}, settleTimeout, pollInterval,
-		"round two was never reported — the conversation went silent after one exchange\n--- parent pane ---\n%s",
-		h.pane(parent))
+	}, "round two was never reported — the conversation went silent after one exchange")
 }
 
 // TestSubagentIsReportedOnceNotOnEveryStateChange keeps a finished subagent
@@ -295,11 +293,9 @@ func TestLiveSubagentTwoWay(t *testing.T) {
 			// is read off its pane.
 			h.awaitPaneClearingDialogs(child, "ARTICHOKE", "the subagent never answered round one")
 			h.awaitStatus(child, "idle")
-			require.Eventuallyf(t, func() bool {
+			h.awaitPaneCond(parent, func() bool {
 				return h.countInPane(parent, reportMarker) >= 1
-			}, settleTimeout, pollInterval,
-				"the parent was never told about its %s subagent\n--- parent pane ---\n%s",
-				backend.provider, h.pane(parent))
+			}, "the parent was never told about its %s subagent", backend.provider)
 
 			// The report is a pointer, so the path is the part the parent has
 			// to be able to use. Asserting only that "result:" appeared would
@@ -322,7 +318,7 @@ func TestLiveSubagentTwoWay(t *testing.T) {
 				// A modal in the recipient's pane blocks delivery, which is
 				// correctly an error rather than an Enter into a menu. Answer it
 				// and try once more before giving up.
-				h.answerStartupDialogs(child)
+				h.answerStartupDialogs(child, h.pane(child))
 				result, err = h.send(parent, child,
 					"R2: reply with exactly one line and nothing else: R2 CONFIRMED", true)
 				require.NoErrorf(t, err, "could not deliver to the %s subagent", backend.provider)
@@ -330,11 +326,9 @@ func TestLiveSubagentTwoWay(t *testing.T) {
 			require.False(t, result.Queued, "the child was idle, so this should have been written at once")
 
 			h.awaitPaneClearingDialogs(child, "R2 CONFIRMED", "the subagent never answered round two")
-			require.Eventuallyf(t, func() bool {
+			h.awaitPaneCond(parent, func() bool {
 				return h.countInPane(parent, reportMarker) >= 2
-			}, settleTimeout, pollInterval,
-				"round two was never reported for %s — the conversation went quiet after one exchange\n--- parent pane ---\n%s",
-				backend.provider, h.pane(parent))
+			}, "round two was never reported for %s — the conversation went quiet after one exchange", backend.provider)
 		})
 	}
 }
@@ -378,11 +372,10 @@ func TestLiveQueuedDeliveryWaitsForALiveTurn(t *testing.T) {
 			// While the turn runs: the session must stay running, and nothing
 			// may be typed into it.
 			watchFor := (longTurnSeconds - 6) * int(time.Second)
-			require.Neverf(t, func() bool {
+			h.neverDuring(child, time.Duration(watchFor), func() bool {
 				return h.status(child) == "idle" || strings.Contains(h.pane(child), "QUEUED-MID-TURN")
-			}, time.Duration(watchFor), pollInterval,
-				"the %s subagent was treated as idle mid-turn, or the queued message was typed into a live turn\n--- pane ---\n%s",
-				backend.provider, h.pane(child))
+			}, "the %s subagent was treated as idle mid-turn, or the queued message was typed into a live turn",
+				backend.provider)
 
 			// The turn ends, and only then does the message land.
 			h.awaitPaneClearingDialogs(child, "LONG-DONE", "the subagent never finished its long turn")
@@ -433,10 +426,8 @@ func TestConcurrentSubagentsAllReport(t *testing.T) {
 	// twice, which is as wrong as one delivered never.
 	for _, child := range children {
 		want := deliveredReportMarker + " " + string(child)
-		require.Eventuallyf(t, func() bool {
-			return h.countInPane(parent, want) >= 1
-		}, settleTimeout, pollInterval,
-			"the parent was never told about subagent %s\n--- parent pane ---\n%s", child, h.pane(parent))
+		h.awaitPaneCond(parent, func() bool { return h.countInPane(parent, want) >= 1 },
+			"the parent was never told about subagent %s", child)
 	}
 	for _, child := range children {
 		assert.Equalf(t, 1, h.countInPane(parent, deliveredReportMarker+" "+string(child)),
@@ -492,10 +483,8 @@ func TestConcurrentSubagentsQueueDurablyWhileParentIsBusy(t *testing.T) {
 	// And they all still arrive once it frees up.
 	for _, child := range children {
 		want := deliveredReportMarker + " " + string(child)
-		require.Eventuallyf(t, func() bool {
-			return h.countInPane(parent, want) >= 1
-		}, settleTimeout, pollInterval,
-			"subagent %s was queued but never delivered\n--- parent pane ---\n%s", child, h.pane(parent))
+		h.awaitPaneCond(parent, func() bool { return h.countInPane(parent, want) >= 1 },
+			"subagent %s was queued but never delivered", child)
 	}
 }
 
@@ -516,10 +505,9 @@ func TestSubagentOnItsOwnWorktreeIsIsolated(t *testing.T) {
 	h.awaitStatus(parent, "idle")
 
 	const branch = "sub/isolated"
-	child := h.spawnOnNewWorktree("builder", stubModel, string(parent), branch, "main", "CHILD-ON-OWN-TREE")
+	child, worktree := h.spawnOnNewWorktree("builder", stubModel, string(parent), branch, "main", "CHILD-ON-OWN-TREE")
 	dumpPanesOnFailure(t, h, parent, child)
 
-	worktree := h.lastWorktreePath
 	assert.NotEqualf(t, h.worktreePath, worktree,
 		"the subagent was put on its parent's tree instead of a new one")
 	require.DirExists(t, worktree)
@@ -569,14 +557,13 @@ func TestSubagentWorktreeIsReusedNotDuplicated(t *testing.T) {
 	h.awaitStatus(parent, "idle")
 
 	const branch = "sub/reused"
-	first := h.spawnOnNewWorktree("builder", stubModel, string(parent), branch, "main", "FIRST-ATTEMPT")
-	firstPath := h.lastWorktreePath
+	first, firstPath := h.spawnOnNewWorktree("builder", stubModel, string(parent), branch, "main", "FIRST-ATTEMPT")
 	h.awaitStatus(first, "idle")
 
-	second := h.spawnOnNewWorktree("builder", stubModel, string(parent), branch, "main", "SECOND-ATTEMPT")
+	second, secondPath := h.spawnOnNewWorktree("builder", stubModel, string(parent), branch, "main", "SECOND-ATTEMPT")
 	dumpPanesOnFailure(t, h, parent, first, second)
 
-	assert.Equal(t, firstPath, h.lastWorktreePath,
+	assert.Equal(t, firstPath, secondPath,
 		"respawning on the same branch should reuse the worktree, not make another")
 	assert.NotEqual(t, first, second, "each spawn is still its own session")
 	h.awaitPane(second, "STUB-REPLY SECOND-ATTEMPT", "the second subagent never ran")

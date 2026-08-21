@@ -104,6 +104,12 @@ const (
 	RunnerTypeTmuxTracked = "tmux-tracked"
 )
 
+// isTmuxRunner reports whether a session runs in a tmux window, and so is
+// reachable by typing into a pane rather than through the TUI turn loop.
+func isTmuxRunner(runnerType string) bool {
+	return runnerType == RunnerTypeTmux || runnerType == RunnerTypeTmuxTracked
+}
+
 // Session represents a single plan or builder session.
 type Session struct {
 	CreatedAt        time.Time

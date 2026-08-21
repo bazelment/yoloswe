@@ -93,7 +93,8 @@ type SendInputReq struct {
 
 // SendInputResult reports what happened to a send_input request. Queued is true
 // when the message is waiting for the recipient to go idle rather than having
-// been written already.
+// been written already; it is omitted otherwise, so an unqueued send is
+// wire-identical to the OKResult this endpoint used to return.
 type SendInputResult struct {
 	OK     bool `json:"ok"`
 	Queued bool `json:"queued,omitempty"`

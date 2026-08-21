@@ -541,15 +541,23 @@ func startIPCServer(registry *session.SessionRegistry, sockPath, wtRoot, repoNam
 	return srv
 }
 
-// startControlServer starts the control-protocol Unix server backed by the
-// session registry and a real tmux controller. Returns nil if it fails to
-// start (non-fatal — the TUI still runs, only remote/CLI control is absent).
-func startControlServer(registry *session.SessionRegistry, courier *session.Courier) *control.UnixServer {
+// newDispatcher builds a control dispatcher, enabling queued delivery when a
+// courier is available. The nil check is not decoration: courier is a concrete
+// pointer and SetCourier takes an interface, so passing a nil one through would
+// store a non-nil interface holding a nil pointer and panic on first use.
+func newDispatcher(registry *session.SessionRegistry, courier *session.Courier) *control.Dispatcher {
 	disp := control.NewDispatcher(registry, tmuxctl.New())
 	if courier != nil {
 		disp.SetCourier(courier)
 	}
-	srv := control.NewUnixServer(controlSocketPath(), disp)
+	return disp
+}
+
+// startControlServer starts the control-protocol Unix server backed by the
+// session registry and a real tmux controller. Returns nil if it fails to
+// start (non-fatal — the TUI still runs, only remote/CLI control is absent).
+func startControlServer(registry *session.SessionRegistry, courier *session.Courier) *control.UnixServer {
+	srv := control.NewUnixServer(controlSocketPath(), newDispatcher(registry, courier))
 	if err := srv.Start(); err != nil {
 		slog.Warn("control server failed to start", "err", err)
 		return nil
@@ -597,16 +605,12 @@ func startRemoteAgent(ctx context.Context, registry *session.SessionRegistry, co
 	if machineID == "" {
 		machineID = hostname
 	}
-	disp := control.NewDispatcher(registry, tmuxctl.New())
-	if courier != nil {
-		disp.SetCourier(courier)
-	}
 	client := remote.New(remote.Config{
 		HubURL:     hubURL,
 		Token:      os.Getenv("BRAMBLE_HUB_TOKEN"),
 		MachineID:  machineID,
 		Hostname:   hostname,
-		Dispatcher: disp,
+		Dispatcher: newDispatcher(registry, courier),
 	})
 	runCtx, cancel := context.WithCancel(ctx)
 	go func() {
@@ -900,8 +904,8 @@ var listSessionsCmd = &cobra.Command{
 		}
 
 		// Filtering happens client-side: the server already returns every
-		// session with its parent, and keeping the wire request parameterless
-		// leaves the existing handler and its tests untouched.
+		// session with its parent.
+		result := resp.Result
 		if cmd.Flags().Changed("parent") {
 			parentFlag, _ := cmd.Flags().GetString("parent")
 			// --parent= (empty) means "my own children", so a caller inside a
@@ -914,12 +918,10 @@ var listSessionsCmd = &cobra.Command{
 			if err != nil {
 				return err
 			}
-			out, _ := json.MarshalIndent(filtered, "", "  ")
-			fmt.Println(string(out))
-			return nil
+			result = filtered
 		}
 
-		out, _ := json.MarshalIndent(resp.Result, "", "  ")
+		out, _ := json.MarshalIndent(result, "", "  ")
 		fmt.Println(string(out))
 		return nil
 	},

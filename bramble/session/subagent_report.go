@@ -24,14 +24,7 @@ func (c *Courier) shouldReport(child SessionID, status SessionStatus) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	seen := c.reported[child]
-	if seen == nil {
-		seen = make(map[SessionStatus]bool)
-		if c.reported == nil {
-			c.reported = make(map[SessionID]map[SessionStatus]bool)
-		}
-		c.reported[child] = seen
-	}
+	seen := c.reportedForLocked(child)
 	if seen[status] {
 		return false
 	}
@@ -42,11 +35,11 @@ func (c *Courier) shouldReport(child SessionID, status SessionStatus) bool {
 	case StatusIdle:
 		// The normal "here is your result" moment.
 	case StatusCompleted, StatusStopped:
-		// Only if the parent has heard nothing at all so far.
-		for _, already := range seen {
-			if already {
-				return false
-			}
+		// Only if the parent has heard nothing at all so far. Every entry that
+		// is present is true — resetIdleReport deletes rather than clears — so
+		// a non-empty set means something has been reported.
+		if len(seen) > 0 {
+			return false
 		}
 	default:
 		return false
@@ -54,6 +47,17 @@ func (c *Courier) shouldReport(child SessionID, status SessionStatus) bool {
 
 	seen[status] = true
 	return true
+}
+
+// reportedForLocked returns the child's reporting history, creating it on first
+// use. The caller must hold c.mu.
+func (c *Courier) reportedForLocked(child SessionID) map[SessionStatus]bool {
+	seen := c.reported[child]
+	if seen == nil {
+		seen = make(map[SessionStatus]bool)
+		c.reported[child] = seen
+	}
+	return seen
 }
 
 // noteChildSpoke records that a child has messaged its parent directly, so the
@@ -65,14 +69,7 @@ func (c *Courier) noteChildSpoke(child SessionID) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.reported == nil {
-		c.reported = make(map[SessionID]map[SessionStatus]bool)
-	}
-	seen := c.reported[child]
-	if seen == nil {
-		seen = make(map[SessionStatus]bool)
-		c.reported[child] = seen
-	}
+	seen := c.reportedForLocked(child)
 	// Mark the states a self-report stands in for. A later failure still
 	// reports, because the child's own message predates it.
 	seen[StatusIdle] = true
@@ -117,6 +114,13 @@ func (c *Courier) reportToParent(ctx context.Context, child SessionInfo) {
 	if child.ParentSessionID == "" {
 		return
 	}
+	// Check the parent can still take a message before composing one:
+	// resultPathFor captures two thousand lines of pane and writes them to a
+	// file, all of it discarded if the parent has already gone.
+	parent, ok := c.target.SessionInfo(child.ParentSessionID)
+	if !ok || parent.Status.IsTerminal() {
+		return
+	}
 	if !c.shouldReport(child.ID, child.Status) {
 		return
 	}
@@ -145,7 +149,7 @@ func (c *Courier) resultPathFor(child SessionInfo) string {
 	if child.ResearchFilePath != "" {
 		return child.ResearchFilePath
 	}
-	if child.RunnerType != RunnerTypeTmux && child.RunnerType != RunnerTypeTmuxTracked {
+	if !isTmuxRunner(child.RunnerType) {
 		return ""
 	}
 

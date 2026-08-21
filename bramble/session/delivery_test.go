@@ -197,6 +197,24 @@ func newTestCourier(t *testing.T) (*Courier, *fakeTarget, *fakePanes) {
 	return c, target, panes
 }
 
+// reportFixture builds the setup every subagent-report test shares: a courier,
+// a running parent, and a child of that parent in the given status.
+func reportFixture(t *testing.T, childStatus SessionStatus) (*Courier, *fakeTarget, SessionID, SessionID) {
+	t.Helper()
+	parentID, childID := ids(t)
+	c, target, _ := newTestCourier(t)
+	target.set(parentID, StatusRunning, RunnerTypeTmux)
+	target.setChild(childID, parentID, childStatus, RunnerTypeTmux)
+	return c, target, parentID, childID
+}
+
+// reportNow reads the child's current state and runs one report pass over it,
+// the way the state-change watcher does.
+func reportNow(c *Courier, target *fakeTarget, childID SessionID) {
+	child, _ := target.SessionInfo(childID)
+	c.reportToParent(context.Background(), child)
+}
+
 // ids returns session IDs unique to this test. Result files are written to a
 // shared directory keyed by session ID, so parallel tests reusing a literal
 // "child" would overwrite each other's output.
@@ -514,9 +532,6 @@ func TestWatchDrainsOnIdle(t *testing.T) {
 	c, err := NewCourier(target, panes, t.TempDir())
 	require.NoError(t, err)
 
-	delivered := make(chan Delivery, 4)
-	c.SetOnDelivered(func(d Delivery) { delivered <- d })
-
 	mgr := NewManagerWithConfig(ManagerConfig{RepoName: "repo"})
 	defer mgr.Close()
 
@@ -536,12 +551,9 @@ func TestWatchDrainsOnIdle(t *testing.T) {
 		SessionID: "s1", OldStatus: StatusRunning, NewStatus: StatusIdle,
 	})
 
-	select {
-	case d := <-delivered:
-		assert.Equal(t, "hello", d.Text)
-	case <-time.After(5 * time.Second):
-		t.Fatal("queued delivery was not written after the idle transition")
-	}
+	require.Eventually(t, func() bool { return len(c.Pending("s1")) == 0 },
+		5*time.Second, 10*time.Millisecond,
+		"queued delivery was not written after the idle transition")
 	assert.Equal(t, []string{"paste(@7): hello", "enter(@7)"}, panes.recorded())
 }
 
@@ -594,10 +606,7 @@ func TestNewCourierIgnoresJunkFiles(t *testing.T) {
 // parent that spawned a codex subagent would wait forever.
 func TestChildIdleReportsToParent(t *testing.T) {
 	t.Parallel()
-	parentID, childID := ids(t)
-	c, target, _ := newTestCourier(t)
-	target.set(parentID, StatusRunning, RunnerTypeTmux)
-	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
+	c, target, parentID, childID := reportFixture(t, StatusIdle)
 	target.annotate(childID, func(i *SessionInfo) {
 		i.Type = SessionTypeCodeTalk
 		i.Model = "gpt-5.4-mini"
@@ -605,8 +614,7 @@ func TestChildIdleReportsToParent(t *testing.T) {
 		i.Progress = SessionProgressSnapshot{TurnCount: 2, TotalCostUSD: 0.25}
 	})
 
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	pending := c.Pending(parentID)
 	require.Len(t, pending, 1, "the parent should have been told its child is done")
@@ -620,15 +628,11 @@ func TestChildIdleReportsToParent(t *testing.T) {
 // parent with the same news after every state change.
 func TestReportIsSentOnlyOncePerStatus(t *testing.T) {
 	t.Parallel()
-	parentID, childID := ids(t)
-	c, target, _ := newTestCourier(t)
-	target.set(parentID, StatusRunning, RunnerTypeTmux)
-	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
+	c, target, parentID, childID := reportFixture(t, StatusIdle)
 
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
-	c.reportToParent(context.Background(), child)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
+	reportNow(c, target, childID)
+	reportNow(c, target, childID)
 
 	assert.Len(t, c.Pending(parentID), 1)
 }
@@ -637,17 +641,12 @@ func TestReportIsSentOnlyOncePerStatus(t *testing.T) {
 // after the result was already reported carries no new information.
 func TestCompletedAfterIdleIsSilent(t *testing.T) {
 	t.Parallel()
-	parentID, childID := ids(t)
-	c, target, _ := newTestCourier(t)
-	target.set(parentID, StatusRunning, RunnerTypeTmux)
-	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
+	c, target, parentID, childID := reportFixture(t, StatusIdle)
 
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	target.setChild(childID, parentID, StatusCompleted, RunnerTypeTmux)
-	child, _ = target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	assert.Len(t, c.Pending(parentID), 1, "completion after a report adds nothing")
 }
@@ -656,18 +655,13 @@ func TestCompletedAfterIdleIsSilent(t *testing.T) {
 // failure changes what the parent should do next.
 func TestFailureIsReportedEvenAfterAnIdleReport(t *testing.T) {
 	t.Parallel()
-	parentID, childID := ids(t)
-	c, target, _ := newTestCourier(t)
-	target.set(parentID, StatusRunning, RunnerTypeTmux)
-	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
+	c, target, parentID, childID := reportFixture(t, StatusIdle)
 
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	target.setChild(childID, parentID, StatusFailed, RunnerTypeTmux)
 	target.annotate(childID, func(i *SessionInfo) { i.ErrorMsg = "context window exhausted" })
-	child, _ = target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	pending := c.Pending(parentID)
 	require.Len(t, pending, 2)
@@ -678,13 +672,9 @@ func TestFailureIsReportedEvenAfterAnIdleReport(t *testing.T) {
 // ever going idle — the parent still needs to hear about it.
 func TestCompletedWithoutPriorReportIsAnnounced(t *testing.T) {
 	t.Parallel()
-	parentID, childID := ids(t)
-	c, target, _ := newTestCourier(t)
-	target.set(parentID, StatusRunning, RunnerTypeTmux)
-	target.setChild(childID, parentID, StatusCompleted, RunnerTypeTmux)
+	c, target, parentID, childID := reportFixture(t, StatusCompleted)
 
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	require.Len(t, c.Pending(parentID), 1)
 }
@@ -693,18 +683,14 @@ func TestCompletedWithoutPriorReportIsAnnounced(t *testing.T) {
 // a subagent that wrote its own, better summary.
 func TestChildSelfReportSuppressesGeneratedReport(t *testing.T) {
 	t.Parallel()
-	parentID, childID := ids(t)
-	c, target, _ := newTestCourier(t)
-	target.set(parentID, StatusRunning, RunnerTypeTmux)
-	target.setChild(childID, parentID, StatusRunning, RunnerTypeTmux)
+	c, target, parentID, childID := reportFixture(t, StatusRunning)
 
 	// The child speaks for itself while still mid-turn.
 	_, err := c.Send(context.Background(), childID, parentID, "done: see /tmp/mine.md", true)
 	require.NoError(t, err)
 
 	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	pending := c.Pending(parentID)
 	require.Len(t, pending, 1, "bramble should not repeat what the child already said")
@@ -715,18 +701,14 @@ func TestChildSelfReportSuppressesGeneratedReport(t *testing.T) {
 // on a message between two sessions that are not parent and child.
 func TestUnrelatedSenderDoesNotSuppressReport(t *testing.T) {
 	t.Parallel()
-	parentID, childID := ids(t)
-	c, target, _ := newTestCourier(t)
-	target.set(parentID, StatusRunning, RunnerTypeTmux)
-	target.setChild(childID, parentID, StatusRunning, RunnerTypeTmux)
+	c, target, parentID, childID := reportFixture(t, StatusRunning)
 	target.set("stranger", StatusRunning, RunnerTypeTmux)
 
 	_, err := c.Send(context.Background(), "stranger", parentID, "fyi", true)
 	require.NoError(t, err)
 
 	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	assert.Len(t, c.Pending(parentID), 2)
 }
@@ -770,8 +752,7 @@ func TestReportToIdleParentIsWrittenImmediately(t *testing.T) {
 	target.set(parentID, StatusIdle, RunnerTypeTmux)
 	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
 
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	require.Len(t, panes.recorded(), 2)
 	assert.Contains(t, panes.recorded()[0], "subagent child")
@@ -787,8 +768,7 @@ func TestReportToDeadParentIsDropped(t *testing.T) {
 	target.set(parentID, StatusCompleted, RunnerTypeTmux)
 	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
 
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	assert.Empty(t, c.Pending(parentID))
 }
@@ -829,16 +809,12 @@ func TestWatchReportsChildCompletion(t *testing.T) {
 // capture the parent would be told "your subagent finished" and handed nothing.
 func TestTmuxChildResultComesFromPaneCapture(t *testing.T) {
 	t.Parallel()
-	parentID, childID := ids(t)
-	c, target, _ := newTestCourier(t)
-	target.set(parentID, StatusRunning, RunnerTypeTmux)
-	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
+	c, target, parentID, childID := reportFixture(t, StatusIdle)
 	target.mu.Lock()
 	target.captured[childID] = []string{"codex here", "the answer is 42"}
 	target.mu.Unlock()
 
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	pending := c.Pending(parentID)
 	require.Len(t, pending, 1)
@@ -857,16 +833,12 @@ func TestTmuxChildResultComesFromPaneCapture(t *testing.T) {
 // the parent needs to know the child finished even without a result file.
 func TestCaptureFailureStillReports(t *testing.T) {
 	t.Parallel()
-	parentID, childID := ids(t)
-	c, target, _ := newTestCourier(t)
-	target.set(parentID, StatusRunning, RunnerTypeTmux)
-	target.setChild(childID, parentID, StatusFailed, RunnerTypeTmux)
+	c, target, parentID, childID := reportFixture(t, StatusFailed)
 	target.mu.Lock()
 	target.captureErr = errors.New("window is gone")
 	target.mu.Unlock()
 
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	pending := c.Pending(parentID)
 	require.Len(t, pending, 1)
@@ -884,8 +856,7 @@ func TestTUIChildDoesNotCapturePane(t *testing.T) {
 	target.setChild(childID, parentID, StatusIdle, RunnerTypeTUI)
 	target.annotate(childID, func(i *SessionInfo) { i.ResearchFilePath = "/tmp/transcript.md" })
 
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	require.Len(t, c.Pending(parentID), 1)
 	assert.Contains(t, c.Pending(parentID)[0].Text, "result: /tmp/transcript.md")
@@ -897,14 +868,10 @@ func TestTUIChildDoesNotCapturePane(t *testing.T) {
 // is left polling a child it just spoke to.
 func TestFollowUpToChildRearmsReporting(t *testing.T) {
 	t.Parallel()
-	parentID, childID := ids(t)
-	c, target, _ := newTestCourier(t)
-	target.set(parentID, StatusRunning, RunnerTypeTmux)
-	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
+	c, target, parentID, childID := reportFixture(t, StatusIdle)
 
 	// Round 1: the child finishes and is reported.
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 	require.Len(t, c.Pending(parentID), 1)
 
 	// The parent replies. The child is idle, so this is written straight away.
@@ -913,8 +880,7 @@ func TestFollowUpToChildRearmsReporting(t *testing.T) {
 
 	// Round 2: the child finishes again and must be reported again.
 	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
-	child, _ = target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	assert.Len(t, c.Pending(parentID), 2, "the second answer was never reported")
 }
@@ -923,10 +889,7 @@ func TestFollowUpToChildRearmsReporting(t *testing.T) {
 // no new message, repeated idle transitions stay quiet.
 func TestUnansweredChildIsStillReportedOnlyOnce(t *testing.T) {
 	t.Parallel()
-	parentID, childID := ids(t)
-	c, target, _ := newTestCourier(t)
-	target.set(parentID, StatusRunning, RunnerTypeTmux)
-	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
+	c, target, parentID, childID := reportFixture(t, StatusIdle)
 
 	child, _ := target.SessionInfo(childID)
 	for i := 0; i < 3; i++ {
@@ -940,13 +903,9 @@ func TestUnansweredChildIsStillReportedOnlyOnce(t *testing.T) {
 // not when it was queued.
 func TestQueuedFollowUpRearmsReportingWhenDelivered(t *testing.T) {
 	t.Parallel()
-	parentID, childID := ids(t)
-	c, target, _ := newTestCourier(t)
-	target.set(parentID, StatusRunning, RunnerTypeTmux)
-	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
+	c, target, parentID, childID := reportFixture(t, StatusIdle)
 
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 	require.Len(t, c.Pending(parentID), 1)
 
 	// The child is busy again, so the parent's reply is held.
@@ -957,15 +916,13 @@ func TestQueuedFollowUpRearmsReportingWhenDelivered(t *testing.T) {
 
 	// Still one report: nothing has been delivered to the child yet.
 	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
-	child, _ = target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 	require.Len(t, c.Pending(parentID), 1, "queueing alone must not re-arm reporting")
 
 	// Now it lands, and the following turn is reportable again.
 	c.Drain(context.Background(), childID)
 	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
-	child, _ = target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 	assert.Len(t, c.Pending(parentID), 2)
 }
 
@@ -1024,14 +981,10 @@ func TestTUIWriteDoesNotMarkRunning(t *testing.T) {
 // marking the session running so the turn boundary exists at all.
 func TestTwoWayConversationKeepsReporting(t *testing.T) {
 	t.Parallel()
-	parentID, childID := ids(t)
-	c, target, _ := newTestCourier(t)
-	target.set(parentID, StatusRunning, RunnerTypeTmux)
-	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
+	c, target, parentID, childID := reportFixture(t, StatusIdle)
 
 	// Round 1: the child answers its opening prompt.
-	child, _ := target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 	require.Len(t, c.Pending(parentID), 1)
 
 	// The parent replies; the child starts a turn.
@@ -1042,8 +995,7 @@ func TestTwoWayConversationKeepsReporting(t *testing.T) {
 
 	// Round 2 ends, and the parent hears about it.
 	target.setChild(childID, parentID, StatusIdle, RunnerTypeTmux)
-	child, _ = target.SessionInfo(childID)
-	c.reportToParent(context.Background(), child)
+	reportNow(c, target, childID)
 
 	assert.Len(t, c.Pending(parentID), 2, "the second round was never reported")
 }

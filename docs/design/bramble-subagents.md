@@ -196,6 +196,9 @@ signal could only contradict them.
 | `bramble/session/tmux_runner.go` | Codex notify hook |
 | `bramble/session/pane_idle.go` | pane-read idleness for hookless providers (cursor) |
 | `bramble/integration/` | end-to-end tests: a real bramble in tmux, stubbed and live backends |
+| `bramble/tmuxctl/panewriter.go` | `session.PaneWriter` adapter; exits copy mode |
+| `bramble/control/{proto,dispatcher}.go` | `Queue`/`From` on `SendInputReq` |
+| `bramble/ipc/protocol.go`, `bramble/main.go` | `--parent`, `--no-parent`, `--queue`, `--from` |
 
 ## Tests
 
@@ -271,6 +274,3 @@ for that reason. And the stand-in deliberately waits before its first reply: an
 agent that answers in under a millisecond lands inside `runner.Start()`'s settle
 window, which is a real race (fixed, and pinned by
 `TestFastIdleIsNotClobberedByStartup`) rather than anything a real CLI does.
-| `bramble/tmuxctl/panewriter.go` | `session.PaneWriter` adapter; exits copy mode |
-| `bramble/control/{proto,dispatcher}.go` | `Queue`/`From` on `SendInputReq` |
-| `bramble/ipc/protocol.go`, `bramble/main.go` | `--parent`, `--no-parent`, `--queue`, `--from` |
