@@ -631,11 +631,30 @@ func (m *Manager) ReconcileTmuxSessions() error {
 
 			// Check if the tmux window is still alive
 			if !tmuxWindowAlive(stored.TmuxWindowID, stored.TmuxWindowName) {
-				// Window is gone — mark as completed
+				// Window is gone — mark as completed.
+				//
+				// Only when it is not terminal already: this runs on every
+				// start, and re-announcing a session that was completed three
+				// restarts ago would report it to its parent each time.
+				if stored.Status.IsTerminal() {
+					continue
+				}
+				previous := stored.Status
 				now := time.Now()
 				stored.Status = StatusCompleted
 				stored.CompletedAt = &now
 				_ = m.config.Store.SaveSession(stored)
+
+				// Announce it. A subagent that finished while bramble was down
+				// still owes its parent a report, and this is the only place
+				// that transition happens — nothing else will emit it, because
+				// the session is never adopted into m.sessions.
+				m.emitSessionStateChange(SessionStateChangeEvent{
+					Info:      StoredToSessionInfo(stored),
+					SessionID: stored.ID,
+					OldStatus: previous,
+					NewStatus: StatusCompleted,
+				})
 				continue
 			}
 
@@ -751,16 +770,13 @@ func ReposWithLiveTmuxSessions(store *Store, activeRepo string) []string {
 
 				if tmuxWindowAlive(stored.TmuxWindowID, stored.TmuxWindowName) {
 					hasLive = true
-					continue
 				}
-
-				// Window is gone — mark as completed
-				now := time.Now()
-				stored.Status = StatusCompleted
-				stored.CompletedAt = &now
-				if err := store.SaveSession(stored); err != nil {
-					log.Printf("Warning: failed to mark stale session %s as completed: %v", stored.ID, err)
-				}
+				// Deliberately does not mark a dead session completed. This is
+				// a read-only probe over repos that have no manager and so no
+				// courier: completing a session here would consume the one
+				// transition its parent's report depends on, and nothing would
+				// be listening. The owning manager's ReconcileTmuxSessions does
+				// it — and emits — when the repo is opened.
 			}
 		}
 
@@ -2466,7 +2482,7 @@ func (m *Manager) RecentOutputLines(id SessionID, n int) []string {
 }
 
 // writeResearchFile writes a codetalk session's text output to a markdown file
-// in /tmp/bramble-research/. Returns the file path on success.
+// under ~/.bramble/research/. Returns the file path on success.
 func (m *Manager) writeResearchFile(session *Session) (string, error) {
 	researchPath, err := ResultFilePath(session.ID)
 	if err != nil {

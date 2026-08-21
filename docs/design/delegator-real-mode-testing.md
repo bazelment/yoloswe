@@ -413,7 +413,7 @@ Added codetalk child session support + `send_followup` tool + `Read` built-in to
 
 - Delegator now has 5 tools: `start_session`, `stop_session`, `get_session_progress`, `send_followup` (new), `Read` (built-in)
 - `start_session` accepts `type=codetalk` alongside `planner`/`builder`
-- Manager writes codetalk research to `/tmp/bramble-research/<session-id>.md` after each turn
+- Manager writes codetalk research to `~/.bramble/research/<session-id>.md` after each turn
 - `get_session_progress` exposes `research_file` path
 - Delegator reads research files via the `Read` built-in tool
 

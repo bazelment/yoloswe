@@ -186,7 +186,7 @@ parent naming a file with the subagent's full output:
 
 ```
 [bramble] subagent <id> (codetalk, gpt-5.5) is idle
-result: /tmp/bramble-research/<id>.md
+result: ~/.bramble/research/<id>.md
 ```
 
 Backends differ in how Bramble learns a turn ended: Claude and Codex are given a

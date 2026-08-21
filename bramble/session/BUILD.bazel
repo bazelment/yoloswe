@@ -43,6 +43,7 @@ go_test(
         "delivery_test.go",
         "event_handler_test.go",
         "lineage_test.go",
+        "main_test.go",
         "manager_control_sock_test.go",
         "manager_provider_fallback_test.go",
         "manager_test.go",

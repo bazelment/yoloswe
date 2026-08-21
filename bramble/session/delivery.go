@@ -170,13 +170,23 @@ func (c *Courier) deliver(ctx context.Context, from, to SessionID, text string, 
 		}
 		return false, nil
 	}
-	c.enqueue(from, to, text, submit)
+	if err := c.enqueue(from, to, text, submit); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
 // enqueue appends a delivery to the recipient's queue and persists it.
-func (c *Courier) enqueue(from, to SessionID, text string, submit bool) {
+//
+// A queue that cannot be written is not a queue: "queued" is a promise the
+// message survives a restart, and the caller acts on it — the CLI tells the
+// user the message is waiting, and a subagent report stops being retried. So a
+// failed persist rolls the delivery back out of memory and is returned, rather
+// than leaving the caller holding a promise this process cannot keep.
+func (c *Courier) enqueue(from, to SessionID, text string, submit bool) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.seq++
 	d := Delivery{
 		ID:        fmt.Sprintf("%d-%d", time.Now().UnixNano(), c.seq),
@@ -186,15 +196,18 @@ func (c *Courier) enqueue(from, to SessionID, text string, submit bool) {
 		Submit:    submit,
 		CreatedAt: time.Now(),
 	}
-	c.pending[to] = append(c.pending[to], d)
-	err := c.persistLocked(to)
-	c.mu.Unlock()
-
-	if err != nil {
-		// A failed persist costs durability across a restart, not delivery:
-		// the in-memory queue is still authoritative for this process.
+	before := c.pending[to]
+	c.pending[to] = append(append([]Delivery(nil), before...), d)
+	if err := c.persistLocked(to); err != nil {
+		if len(before) == 0 {
+			delete(c.pending, to)
+		} else {
+			c.pending[to] = before
+		}
 		logDeliveryWarn("failed to persist delivery queue", to, err)
+		return fmt.Errorf("queue delivery for %s: %w", to, err)
 	}
+	return nil
 }
 
 // Pending returns a copy of the queue for a recipient, oldest first.
@@ -409,6 +422,28 @@ func (c *Courier) discard(to SessionID) {
 	}
 }
 
+// DrainIdle delivers to every recipient that is already idle right now.
+//
+// Watch only reacts to idle *transitions*, which is one event short of
+// correct after a restart: NewCourier reloads the queues from disk, but a
+// recipient that was already idle when bramble came up will not transition
+// again until something else gives it work — so its mail would sit there
+// indefinitely. Called once per manager as it registers.
+func (c *Courier) DrainIdle(ctx context.Context) {
+	c.mu.Lock()
+	recipients := make([]SessionID, 0, len(c.pending))
+	for to := range c.pending {
+		recipients = append(recipients, to)
+	}
+	c.mu.Unlock()
+
+	// Drain re-checks status itself, so a recipient that is busy or gone is a
+	// no-op here rather than a special case.
+	for _, to := range recipients {
+		c.Drain(ctx, to)
+	}
+}
+
 // Watch drains a session's queue whenever it becomes idle. It returns an
 // unsubscribe function and runs until ctx is canceled.
 func (c *Courier) Watch(ctx context.Context, mgr *Manager) func() {
@@ -527,23 +562,28 @@ func (s *Session) parentSessionID() SessionID {
 
 // resultDirName holds the files a subagent's parent is pointed at: the
 // transcript of a TUI session, or the captured pane of a tmux one.
-const resultDirName = "bramble-research"
+//
+// Under the user's home rather than os.TempDir(). A world-writable temp dir
+// cannot be secured from inside this process: another local user can
+// pre-create the directory — or a symlink standing in for it — and no amount
+// of MkdirAll/Chmod on that path fixes it, because both follow the symlink and
+// would hand an attacker's directory our transcripts. $HOME is not writable by
+// anyone else, so the question does not arise.
+const resultDirName = "research"
 
 // ResultFilePath returns the path a session's result file is written to,
 // creating the directory. Shared by the TUI transcript writer and the tmux
 // pane capture so a parent is handed the same shape of path either way.
 func ResultFilePath(id SessionID) (string, error) {
-	dir := filepath.Join(os.TempDir(), resultDirName)
-	// 0700, and chmod as well as create: these live in a world-traversable
-	// temp dir and hold a subagent's whole transcript — prompts, file contents,
-	// whatever its tools printed. MkdirAll leaves an existing directory's mode
-	// alone, so a dir created 0755 by an older build stays readable until it is
-	// narrowed explicitly.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("locate home directory: %w", err)
+	}
+	// 0700: a transcript holds prompts, file contents, and whatever the
+	// subagent's tools printed.
+	dir := filepath.Join(home, ".bramble", resultDirName)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create result dir: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return "", fmt.Errorf("secure result dir: %w", err)
 	}
 	return filepath.Join(dir, sanitizeFileName(string(id))+".md"), nil
 }

@@ -205,14 +205,11 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	sessionManager := session.NewManagerWithConfig(initialConfig)
 	defer sessionManager.Close()
 
-	// Reconcile previously-running tmux sessions against live tmux windows.
-	if err := sessionManager.ReconcileTmuxSessions(); err != nil {
-		slog.Warn("tmux session reconciliation failed", "err", err)
-	}
-
-	// Discover repos (other than the initial one) that have live tmux sessions.
-	// Dead sessions from those repos are cleaned up; live ones will be auto-opened
-	// by the TUI so their sessions are fully re-adopted.
+	// Discover repos (other than the initial one) that have live tmux sessions,
+	// so the TUI can auto-open them and fully re-adopt their sessions. This is
+	// a read-only probe: a dead session in an unopened repo is left alone for
+	// that repo's own manager to reconcile, which is what lets a subagent that
+	// finished while bramble was down still report to its parent.
 	resumeRepos := session.ReposWithLiveTmuxSessions(store, repoName)
 
 	// Start the AI task router using the best available provider.
@@ -265,6 +262,16 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// recipient. OnRegister covers the manager registered just above as well as
 	// any repo opened later with Alt-R.
 	courier := startCourier(ctx, registry)
+
+	// Reconcile previously-running tmux sessions against live tmux windows.
+	//
+	// After the courier, not before: reconciliation is where a subagent that
+	// finished while bramble was down gets its terminal transition, and that
+	// is the only announcement its parent's report will ever get. Run it
+	// first and the event is emitted into a courier that does not exist yet.
+	if err := sessionManager.ReconcileTmuxSessions(); err != nil {
+		slog.Warn("tmux session reconciliation failed", "err", err)
+	}
 
 	controlServer := startControlServer(registry, courier)
 	controlSockPath := ""
@@ -583,6 +590,10 @@ func startCourier(ctx context.Context, registry *session.SessionRegistry) *sessi
 	}
 	registry.OnRegister(func(mgr *session.Manager) {
 		courier.Watch(ctx, mgr)
+		// Queues reloaded from disk belong to sessions that may already be
+		// idle, and an idle session produces no transition for Watch to react
+		// to. Sweep once now that this manager's sessions are reachable.
+		courier.DrainIdle(ctx)
 	})
 	return courier
 }

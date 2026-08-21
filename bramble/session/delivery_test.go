@@ -617,7 +617,7 @@ func TestChildIdleReportsToParent(t *testing.T) {
 	target.annotate(childID, func(i *SessionInfo) {
 		i.Type = SessionTypeCodeTalk
 		i.Model = "gpt-5.4-mini"
-		i.ResearchFilePath = "/tmp/bramble-research/child.md"
+		i.ResearchFilePath = "/tmp/some-plan/child.md"
 		i.Progress = SessionProgressSnapshot{TurnCount: 2, TotalCostUSD: 0.25}
 	})
 
@@ -628,7 +628,7 @@ func TestChildIdleReportsToParent(t *testing.T) {
 	assert.Equal(t, SessionID(childID), pending[0].From)
 	assert.Contains(t, pending[0].Text, "subagent child")
 	assert.Contains(t, pending[0].Text, "gpt-5.4-mini")
-	assert.Contains(t, pending[0].Text, "result: /tmp/bramble-research/child.md")
+	assert.Contains(t, pending[0].Text, "result: /tmp/some-plan/child.md")
 }
 
 // TestReportIsSentOnlyOncePerStatus keeps a chatty session from nagging its
@@ -825,15 +825,64 @@ func TestReportToDeadParentIsDropped(t *testing.T) {
 	assert.Empty(t, c.Pending(parentID))
 }
 
+// TestQueueThatCannotPersistIsNotReportedAsQueued pins the meaning of
+// "queued": the caller is told the message survives a restart, so a queue that
+// could not be written must be an error rather than a promise this process
+// cannot keep.
+func TestQueueThatCannotPersistIsNotReportedAsQueued(t *testing.T) {
+	t.Parallel()
+	target := newFakeTarget()
+	dir := t.TempDir()
+	c, err := NewCourier(target, &fakePanes{}, dir)
+	require.NoError(t, err)
+	target.set("s1", StatusRunning, RunnerTypeTmux)
+
+	// Make the queue file unwritable by putting a directory where it goes.
+	require.NoError(t, os.MkdirAll(c.queuePath("s1"), 0o700))
+
+	queued, err := c.Send(context.Background(), "", "s1", "hello", true)
+	require.Error(t, err, "an unpersistable queue must not be reported as queued")
+	assert.False(t, queued)
+	assert.Empty(t, c.Pending("s1"), "the failed delivery must not linger in memory either")
+}
+
+// TestDrainIdleDeliversAfterAReload covers the restart gap: Watch only reacts
+// to idle transitions, and a recipient that is already idle when bramble comes
+// back makes no transition to react to.
+func TestDrainIdleDeliversAfterAReload(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	target := newFakeTarget()
+	target.set("s1", StatusRunning, RunnerTypeTmux)
+
+	first, err := NewCourier(target, echoPanes(target), dir)
+	require.NoError(t, err)
+	queued, err := first.Send(context.Background(), "", "s1", "held over a restart", true)
+	require.NoError(t, err)
+	require.True(t, queued)
+
+	// A fresh courier over the same directory is what a restart looks like.
+	reloaded, err := NewCourier(target, echoPanes(target), dir)
+	require.NoError(t, err)
+	require.Len(t, reloaded.Pending("s1"), 1, "the queue should have been reloaded")
+
+	// The recipient is already idle and will never transition again.
+	target.set("s1", StatusIdle, RunnerTypeTmux)
+	reloaded.DrainIdle(context.Background())
+
+	assert.Empty(t, reloaded.Pending("s1"), "a queue reloaded for an already-idle session was never delivered")
+}
+
 // TestResultArtifactsAreNotWorldReadable pins the privacy of what a subagent
 // leaves in a shared temp dir: a captured pane is the child's whole transcript,
 // and os.TempDir() is traversable by every local user.
 func TestResultArtifactsAreNotWorldReadable(t *testing.T) {
-	// Not parallel, and TMPDIR-scoped: ResultFilePath writes into a directory
-	// shared by every session on the machine. Against the real one this test
-	// passed even with the fix reverted, because os.WriteFile leaves an
-	// existing file's mode alone and a previous run had already created it 0600.
-	t.Setenv("TMPDIR", t.TempDir())
+	// Not parallel: the result dir is shared by every session under one HOME,
+	// which TestMain has already pointed at a temp dir. Against a real shared
+	// dir this test passed even with the fix reverted, because os.WriteFile
+	// leaves an existing file's mode alone and an earlier run had created it
+	// 0600 — so it must start from a directory it knows nothing has touched.
+	t.Setenv("HOME", t.TempDir())
 	c, target, _, childID := reportFixture(t, StatusIdle)
 	target.annotate(childID, func(i *SessionInfo) { i.RunnerType = RunnerTypeTmux })
 	target.captured[childID] = []string{"secret: hunter2"}
