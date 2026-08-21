@@ -5,6 +5,7 @@ package integration
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -496,4 +497,87 @@ func TestConcurrentSubagentsQueueDurablyWhileParentIsBusy(t *testing.T) {
 		}, settleTimeout, pollInterval,
 			"subagent %s was queued but never delivered\n--- parent pane ---\n%s", child, h.pane(parent))
 	}
+}
+
+// TestSubagentOnItsOwnWorktreeIsIsolated covers the other half of the worktree
+// story. A subagent with no branch of its own works on its parent's tree; with
+// `--create-worktree -b <branch>` it gets one of its own, on a new branch off
+// the base.
+//
+// The isolation is the point: two subagents editing one tree would corrupt each
+// other's work, so "it got its own worktree" has to be asserted against git,
+// not just against the path bramble reports. And the return path has to keep
+// working across that boundary — lineage travels by session ID, not by tree,
+// but nothing proved it until now.
+func TestSubagentOnItsOwnWorktreeIsIsolated(t *testing.T) {
+	h := newHarness(t, true)
+
+	parent := h.spawn("builder", stubModel, "", "PARENT-BOOT")
+	h.awaitStatus(parent, "idle")
+
+	const branch = "sub/isolated"
+	child := h.spawnOnNewWorktree("builder", stubModel, string(parent), branch, "main", "CHILD-ON-OWN-TREE")
+	dumpPanesOnFailure(t, h, parent, child)
+
+	worktree := h.lastWorktreePath
+	assert.NotEqualf(t, h.worktreePath, worktree,
+		"the subagent was put on its parent's tree instead of a new one")
+	require.DirExists(t, worktree)
+
+	// Ask git, not bramble: a path that exists proves nothing about whether a
+	// worktree was actually added on the right branch off the right base.
+	assert.Equal(t, branch, h.gitIn(worktree, "branch", "--show-current"),
+		"the new worktree is not on the requested branch")
+	assert.Equal(t,
+		h.gitIn(h.worktreePath, "rev-parse", "main"),
+		h.gitIn(worktree, "rev-parse", "HEAD"),
+		"the new branch is not based on main")
+
+	// Edits on one tree must not appear on the other.
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, "child-only.txt"), []byte("x\n"), 0o644))
+	assert.NoFileExists(t, filepath.Join(h.worktreePath, "child-only.txt"),
+		"a file written on the subagent's tree showed up on its parent's")
+
+	// bramble reports the session against its own worktree, which is what the
+	// command centre and `list-sessions --parent` show.
+	var found bool
+	for _, s := range h.sessions() {
+		if s.ID != string(child) {
+			continue
+		}
+		found = true
+		assert.Equal(t, string(parent), s.ParentSessionID)
+		assert.Equal(t, filepath.Base(branch), s.WorktreeName)
+	}
+	require.True(t, found, "the subagent is missing from list-sessions")
+
+	// The return path still works across the worktree boundary.
+	h.awaitPane(parent, reportMarker, "a subagent on its own worktree never reported to its parent")
+	_, err := h.send(parent, child, "CROSS-TREE-FOLLOWUP", true)
+	require.NoError(t, err)
+	h.awaitPane(child, "STUB-REPLY CROSS-TREE-FOLLOWUP",
+		"a message to a subagent on another worktree never landed")
+}
+
+// TestSubagentWorktreeIsReusedNotDuplicated: a parent that respawns a subagent
+// on the same branch — after a crash, or for a second attempt — should land on
+// the existing tree rather than failing.
+func TestSubagentWorktreeIsReusedNotDuplicated(t *testing.T) {
+	h := newHarness(t, true)
+
+	parent := h.spawn("builder", stubModel, "", "PARENT-BOOT")
+	h.awaitStatus(parent, "idle")
+
+	const branch = "sub/reused"
+	first := h.spawnOnNewWorktree("builder", stubModel, string(parent), branch, "main", "FIRST-ATTEMPT")
+	firstPath := h.lastWorktreePath
+	h.awaitStatus(first, "idle")
+
+	second := h.spawnOnNewWorktree("builder", stubModel, string(parent), branch, "main", "SECOND-ATTEMPT")
+	dumpPanesOnFailure(t, h, parent, first, second)
+
+	assert.Equal(t, firstPath, h.lastWorktreePath,
+		"respawning on the same branch should reuse the worktree, not make another")
+	assert.NotEqual(t, first, second, "each spawn is still its own session")
+	h.awaitPane(second, "STUB-REPLY SECOND-ATTEMPT", "the second subagent never ran")
 }

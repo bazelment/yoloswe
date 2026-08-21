@@ -78,9 +78,15 @@ func seedRepo(t *testing.T, wtRoot string) string {
 		require.NoErrorf(t, err, "git %s: %s", strings.Join(args, " "), out)
 	}
 
+	upstream := filepath.Join(t.TempDir(), "upstream.git")
 	require.NoError(t, os.MkdirAll(repoDir, 0o755))
 	require.NoError(t, os.MkdirAll(seed, 0o755))
-	git("", "init", "--bare", "--initial-branch=main", bare)
+
+	// Stand in for the remote. `wt` creates a worktree from `origin/<base>`,
+	// so the layout has to be a real clone with remote-tracking refs — a bare
+	// repo with local branches only is not enough, and the failure it produces
+	// ("invalid reference: origin/main") says nothing about why.
+	git("", "init", "--bare", "--initial-branch=main", upstream)
 
 	// A bare repo has no index to commit into, so the first commit is pushed
 	// in from a scratch clone.
@@ -88,8 +94,17 @@ func seedRepo(t *testing.T, wtRoot string) string {
 	require.NoError(t, os.WriteFile(filepath.Join(seed, "README.md"), []byte("subagent it\n"), 0o644))
 	git(seed, "add", "README.md")
 	git(seed, "commit", "-m", "seed")
-	git(seed, "remote", "add", "origin", bare)
+	git(seed, "remote", "add", "origin", upstream)
 	git(seed, "push", "origin", "main")
+
+	// The wt layout: <root>/<repo>/.bare is a bare clone of the remote, and
+	// every worktree hangs off it.
+	git("", "clone", "--bare", upstream, bare)
+	// A bare clone fetches into refs/heads by default, which leaves no
+	// origin/* to branch from.
+	git(bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	git(bare, "fetch", "origin")
+	git(bare, "remote", "set-head", "origin", "-a")
 
 	git(bare, "worktree", "add", worktree, "main")
 	return worktree
@@ -183,17 +198,37 @@ while IFS= read -r line; do
 done
 `
 
-// installStubAgent writes the stand-in as `codex` into a fresh directory and
-// returns that directory, for prepending to PATH.
+// stubGhScript stands in for the GitHub CLI.
 //
-// It masquerades as codex because bramble picks a backend from the model ID,
-// so a `gpt-*` model routes to whatever binary named `codex` is first on PATH.
+// Creating a worktree goes through wt.FetchOrigin, which gates on `gh auth
+// status` before fetching. The stubbed tests run under an isolated HOME, so the
+// real gh cannot find its credentials there and every worktree creation fails
+// on an authentication error that has nothing to do with what is being tested.
+// The fetch itself is against a local path and needs no credentials.
+const stubGhScript = `#!/usr/bin/env bash
+# Stand-in for the GitHub CLI. See support_test.go.
+case "$1 $2" in
+  "auth status") echo "Logged in to github.com as stub"; exit 0 ;;
+esac
+exit 0
+`
+
+// installStubAgent writes the stand-ins into a fresh directory and returns it,
+// for prepending to PATH.
+//
+// The agent masquerades as codex because bramble picks a backend from the model
+// ID, so a `gpt-*` model routes to whatever binary named `codex` is first on
+// PATH.
 func installStubAgent(t *testing.T, root string) string {
 	t.Helper()
 	dir := filepath.Join(root, "stubbin")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
-	path := filepath.Join(dir, "codex")
-	require.NoError(t, os.WriteFile(path, []byte(stubAgentScript), 0o755))
+	for name, script := range map[string]string{
+		"codex": stubAgentScript,
+		"gh":    stubGhScript,
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755))
+	}
 	return dir
 }
 

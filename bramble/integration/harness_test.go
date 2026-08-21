@@ -61,6 +61,9 @@ type harness struct {
 	controlSock  string
 	home         string
 	stubLog      string
+	// lastWorktreePath is the path returned by the most recent
+	// spawnOnNewWorktree, so a test can assert on what bramble actually made.
+	lastWorktreePath string
 	// answeredDialogs records the screen each dialog was answered on, so one
 	// appearance collects one answer.
 	answeredDialogs map[string]string
@@ -214,6 +217,49 @@ func (h *harness) spawn(sessionType, model, parent, prompt string) session.Sessi
 	requireDecode(h.t, resp.Result, &result)
 	require.NotEmpty(h.t, result.SessionID)
 	return session.SessionID(result.SessionID)
+}
+
+// spawnOnNewWorktree creates a subagent with a worktree of its own rather than
+// its parent's, the way `new-session --create-worktree -b <branch>` does.
+//
+// It deliberately passes no worktree path: that is what makes bramble create
+// one, and it is also what would silently fall back to inheriting the parent's
+// tree if worktree creation stopped happening.
+func (h *harness) spawnOnNewWorktree(sessionType, model, parent, branch, base, prompt string) session.SessionID {
+	h.t.Helper()
+	resp, err := ipc.NewClient(h.ipcSock).Send(&ipc.Request{
+		Type: ipc.RequestNewSession,
+		ID:   "it-new-session-wt",
+		Params: &ipc.NewSessionParams{
+			SessionType:     sessionType,
+			Branch:          branch,
+			BaseBranch:      base,
+			CreateWorktree:  true,
+			Model:           model,
+			RepoName:        repoName,
+			ParentSessionID: parent,
+			Prompt:          prompt,
+		},
+	})
+	require.NoError(h.t, err)
+	require.Truef(h.t, resp.OK, "new-session --create-worktree failed: %s", resp.Error)
+
+	var result ipc.NewSessionResult
+	requireDecode(h.t, resp.Result, &result)
+	require.NotEmpty(h.t, result.SessionID)
+	require.NotEmptyf(h.t, result.WorktreePath, "no worktree path came back for branch %s", branch)
+	h.lastWorktreePath = result.WorktreePath
+	return session.SessionID(result.SessionID)
+}
+
+// gitIn runs a read-only git command inside a worktree.
+func (h *harness) gitIn(dir string, args ...string) string {
+	h.t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(h.t, err, "git %s in %s: %s", strings.Join(args, " "), dir, out)
+	return strings.TrimSpace(string(out))
 }
 
 // sessions returns every session bramble currently knows about.

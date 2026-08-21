@@ -229,6 +229,12 @@ Two layers:
     queued message into the live turn. The unit tests pin it against a synthetic
     pane; only this pins it against the real chrome.
 
+  `TestSubagentOnItsOwnWorktree*` cover `--create-worktree`: the isolation is
+  asserted against git, not against the path bramble reports — the branch it is
+  on, the base it came from, and a file written on one tree not appearing on the
+  other. The return path is checked across that boundary too, since lineage
+  travels by session ID rather than by tree.
+
   `TestConcurrentSubagents*` cover a fan-out: several subagents working at once
   and reporting to the same parent. That is the only place the queue takes
   concurrent writes, and where a lost report is quiet rather than loud — the
@@ -247,6 +253,16 @@ because a fresh worktree puts one in front of every backend, and an unanswered
 one looks exactly like a bramble that never reached its prompt. Each entry names
 the option it takes: pressing Enter on an unrecognized menu is how a test
 silently changes a setting.
+
+The stubbed cases put a stand-in `gh` on PATH beside the stand-in agent.
+Creating a worktree goes through `wt.FetchOrigin`, which gates on `gh auth
+status`; under the isolated HOME the real gh cannot find its credentials, so
+every worktree creation would fail on an authentication error unrelated to what
+is under test. The fetch itself is against a local path and needs no
+credentials. The seed repo is a real clone with remote-tracking refs for the
+same reason — `wt` branches from `origin/<base>`, and a bare repo holding only
+local branches fails with "invalid reference: origin/main", which says nothing
+about why.
 
 Two traps are worth knowing before adding to these tests. A unix socket path is
 capped at ~107 bytes, and bazel's tmpdir plus a descriptive test name exceeds it
