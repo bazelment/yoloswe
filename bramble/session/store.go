@@ -69,6 +69,9 @@ type SessionMeta struct {
 	TmuxWindowName string        `json:"tmux_window_name,omitempty"`
 	TmuxWindowID   string        `json:"tmux_window_id,omitempty"`
 	RunnerType     string        `json:"runner_type,omitempty"`
+	// ParentSessionID names the session that spawned this one, so lineage
+	// survives into the history listing and not only the live session list.
+	ParentSessionID SessionID `json:"parent_session_id,omitempty"`
 }
 
 // DefaultStoreDir returns the default store directory (~/.bramble/sessions).
@@ -401,20 +404,21 @@ func (s *Store) ListWorktrees(repoName string) ([]string, error) {
 // storedToMeta converts a StoredSession to a SessionMeta for listing.
 func storedToMeta(stored *StoredSession) *SessionMeta {
 	return &SessionMeta{
-		ID:             stored.ID,
-		Type:           stored.Type,
-		Status:         stored.Status,
-		RepoName:       stored.RepoName,
-		WorktreeName:   stored.WorktreeName,
-		Prompt:         stored.Prompt,
-		Title:          stored.Title,
-		Model:          stored.Model,
-		CLISessionID:   stored.CLISessionID,
-		TmuxWindowName: stored.TmuxWindowName,
-		TmuxWindowID:   stored.TmuxWindowID,
-		RunnerType:     stored.RunnerType,
-		CreatedAt:      stored.CreatedAt,
-		CompletedAt:    stored.CompletedAt,
+		ID:              stored.ID,
+		Type:            stored.Type,
+		Status:          stored.Status,
+		RepoName:        stored.RepoName,
+		WorktreeName:    stored.WorktreeName,
+		Prompt:          stored.Prompt,
+		Title:           stored.Title,
+		Model:           stored.Model,
+		CLISessionID:    stored.CLISessionID,
+		TmuxWindowName:  stored.TmuxWindowName,
+		TmuxWindowID:    stored.TmuxWindowID,
+		RunnerType:      stored.RunnerType,
+		ParentSessionID: stored.ParentSessionID,
+		CreatedAt:       stored.CreatedAt,
+		CompletedAt:     stored.CompletedAt,
 	}
 }
 

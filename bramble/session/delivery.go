@@ -113,7 +113,10 @@ type Courier struct { //nolint:govet // fieldalignment: grouping by role reads b
 	// the interruption this whole type exists to prevent. Anything that cannot
 	// take the claim queues instead.
 	writing map[SessionID]bool
-	seq     uint64
+	// retryArmed records that a failed delivery has a retry scheduled. Only
+	// read by tests, which would otherwise have to wait out retryDelay.
+	retryArmed bool
+	seq        uint64
 }
 
 // NewCourier creates a courier that persists its queue under dir. If dir is
@@ -234,6 +237,32 @@ func (c *Courier) Pending(to SessionID) []Delivery {
 	return append([]Delivery(nil), c.pending[to]...)
 }
 
+// retryDelay is how long a failed delivery waits before it is tried again.
+// Long enough that a recipient stuck behind a modal is not hammered, short
+// enough that a transient tmux error costs one pause rather than a turn.
+const retryDelay = 30 * time.Second
+
+// retryLater schedules one more drain for a recipient whose write failed.
+//
+// A timer rather than a ticker: nothing polls in this design, and a failure is
+// the only thing that arms this. Each failed attempt arms exactly one more, so
+// a recipient that stays broken is retried at a steady low rate and one that
+// recovers stops rescheduling as soon as a write succeeds or its queue is
+// discarded. The context stops it at shutdown.
+func (c *Courier) retryLater(ctx context.Context, to SessionID) {
+	c.mu.Lock()
+	c.retryArmed = true
+	c.mu.Unlock()
+
+	timer := time.AfterFunc(retryDelay, func() {
+		if ctx.Err() != nil {
+			return
+		}
+		c.Drain(ctx, to)
+	})
+	context.AfterFunc(ctx, func() { timer.Stop() })
+}
+
 // claimWrite reserves the right to write to a recipient, reporting whether it
 // got it. A caller that does not must not write: it queues instead.
 func (c *Courier) claimWrite(to SessionID) bool {
@@ -263,8 +292,11 @@ func (c *Courier) releaseWrite(to SessionID) {
 // prevent. The remainder rides the next transition; the recipient goes idle
 // again at the end of the turn this delivery just started.
 //
-// On a write failure the delivery stays queued and retries on that same next
-// transition, so a transient tmux error does not drop it.
+// On a write failure the delivery stays queued and a retry is scheduled. It
+// cannot simply wait for the next transition: the common case is a recipient
+// that was already idle when the drain ran, and a session that never leaves
+// idle produces no further transition to ride — the parent would wait out the
+// whole process lifetime for a report sitting on disk.
 //
 // Deliveries for a session that has reached a terminal state are discarded —
 // they can never be written, and keeping them would leak the queue forever.
@@ -305,6 +337,7 @@ func (c *Courier) Drain(ctx context.Context, to SessionID) {
 
 	if err := c.write(ctx, info, next.Text, next.Submit); err != nil {
 		logDeliveryWarn("failed to write queued delivery", to, err)
+		c.retryLater(ctx, to)
 		return
 	}
 

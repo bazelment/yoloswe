@@ -915,6 +915,33 @@ func TestReAdoptionDoesNotReReportOnEveryRestart(t *testing.T) {
 		"a re-adoption emit is not a transition and must not re-report")
 }
 
+// TestFailedWriteToAnIdleRecipientIsRetried covers the case that produces no
+// further transition to ride: the recipient was already idle when the drain
+// ran, so waiting for the next running->idle edge means waiting forever.
+func TestFailedWriteToAnIdleRecipientIsRetried(t *testing.T) {
+	t.Parallel()
+	c, target, _ := newTestCourier(t)
+	target.set("s1", StatusRunning, RunnerTypeTmux)
+	_, err := c.Send(context.Background(), "", "s1", "report me", true)
+	require.NoError(t, err)
+
+	// The write fails while the recipient sits idle and stays idle.
+	failing := &fakePanes{pasteErr: errors.New("tmux exploded")}
+	c.panes = failing
+	target.set("s1", StatusIdle, RunnerTypeTmux)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.Drain(ctx, "s1")
+	require.Len(t, c.Pending("s1"), 1, "a failed write keeps the delivery queued")
+
+	// A retry must be armed rather than left to a transition that never comes.
+	c.mu.Lock()
+	armed := c.retryArmed
+	c.mu.Unlock()
+	assert.True(t, armed, "no retry was scheduled for a recipient that never leaves idle")
+}
+
 // TestStaleQueueIsReclaimedOnLoad bounds the cost of never discarding on an
 // unknown recipient: a session that vanished without a terminal transition
 // would otherwise keep its queue file forever.
