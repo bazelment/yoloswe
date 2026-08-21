@@ -75,15 +75,17 @@ func newHarness(t *testing.T, stubAgent bool) *harness {
 	brambleBin := brambleBinary(t)
 
 	root := t.TempDir()
+	// A unix socket path is capped at ~107 bytes, and bazel's tmpdir plus a
+	// descriptive test name blows straight through that. Both the tmux socket
+	// and bramble's own pid-scoped sockets — which land in XDG_RUNTIME_DIR —
+	// have to live somewhere shallow. Everything else can use the long path.
+	shortRoot := shortTempDir(t)
 	h := &harness{
-		t: t,
-		// A unix socket path is capped at ~107 bytes, and bazel's test tmpdir
-		// is nowhere near short enough. Keep the tmux socket in a shallow dir
-		// of its own; everything else can live under the long path.
-		tmuxSocket: shortTempSocket(t),
+		t:          t,
+		tmuxSocket: filepath.Join(shortRoot, "t.sock"),
 	}
 	wtRoot := filepath.Join(root, "worktrees")
-	runtimeDir := filepath.Join(root, "run")
+	runtimeDir := filepath.Join(shortRoot, "run")
 
 	// The live-backend cases must keep the developer's real HOME: an agent CLI
 	// reads its credentials from there, and a logged-out CLI hangs on an
@@ -338,4 +340,120 @@ func (h *harness) deliveryQueueLen() int {
 	h.t.Helper()
 	files, _ := filepath.Glob(filepath.Join(h.home, ".bramble", "deliveries", "*.json"))
 	return len(files)
+}
+
+// startupDialog is a prompt an agent CLI puts in front of its own prompt, which
+// a human would otherwise have to click through.
+//
+// These are the reason a "live" test is not simply a matter of spawning a
+// session and waiting: a fresh worktree makes Claude ask whether the folder is
+// trusted, and codex interrupts with model-deprecation and rate-limit choices.
+// Left unanswered the session never reaches its prompt and the test times out
+// looking like a bramble bug.
+type startupDialog struct {
+	name string
+	// match must all appear in the pane for this dialog to be recognized.
+	// Specific on purpose — answering the wrong modal picks a menu item.
+	match []string
+	// keys are sent, in order, to answer it.
+	keys []string
+}
+
+// startupDialogs is the set answered automatically. Each entry names the choice
+// it takes, because pressing Enter on an unknown menu is how a test silently
+// changes a setting (codex's rate-limit prompt switches model on Enter).
+var startupDialogs = []startupDialog{
+	{
+		// Claude, on a directory it has not seen before. Option 1, the
+		// default, is "Yes, I trust this folder".
+		name:  "claude folder trust",
+		match: []string{"Is this a project you created or one you trust", "I trust this folder"},
+		keys:  []string{"Enter"},
+	},
+	{
+		// Codex, on a directory it has not seen before. Option 1, the default,
+		// is "Yes, continue".
+		name:  "codex directory trust",
+		match: []string{"Do you trust the contents of this directory", "Yes, continue"},
+		keys:  []string{"Enter"},
+	},
+	{
+		// Codex, when the requested model is being retired. Option 2 keeps the
+		// model the test asked for; taking the new one silently would make the
+		// run untraceable to the model under test.
+		name:  "codex model deprecation",
+		match: []string{"will be deprecated soon", "Use existing model"},
+		keys:  []string{"Down", "Enter"},
+	},
+	{
+		// Codex, near a usage limit. Escape dismisses without switching model.
+		name:  "codex rate-limit switch",
+		match: []string{"Approaching rate limits", "Switch to"},
+		keys:  []string{"Escape"},
+	},
+}
+
+// answerStartupDialogs looks at a session's pane and answers any dialog it
+// recognizes. It reports whether it acted.
+func (h *harness) answerStartupDialogs(id session.SessionID) bool {
+	h.t.Helper()
+	pane := h.pane(id)
+	if pane == "" {
+		return false
+	}
+	for _, d := range startupDialogs {
+		matched := true
+		for _, m := range d.match {
+			if !strings.Contains(pane, m) {
+				matched = false
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		target := h.tmuxTargetOf(id)
+		h.t.Logf("answering %q dialog in %s with %v", d.name, id, d.keys)
+		for _, k := range d.keys {
+			if _, err := h.tmux("send-keys", "-t", target, k); err != nil {
+				h.t.Logf("failed to answer %q: %v", d.name, err)
+				return false
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		return true
+	}
+	return false
+}
+
+// awaitReady waits for a session to reach its prompt, answering first-run
+// dialogs along the way. This is what a live test uses instead of awaitStatus:
+// a real CLI on a fresh worktree may need a click before it ever runs a turn.
+func (h *harness) awaitReady(id session.SessionID) {
+	h.t.Helper()
+	deadline := time.Now().Add(settleTimeout)
+	for time.Now().Before(deadline) {
+		if h.status(id) == "idle" {
+			return
+		}
+		h.answerStartupDialogs(id)
+		time.Sleep(pollInterval)
+	}
+	h.t.Fatalf("session %s never reached its prompt\n--- pane ---\n%s", id, h.pane(id))
+}
+
+// awaitPaneClearingDialogs waits for text to appear, answering any dialog that
+// blocks the agent on the way.
+func (h *harness) awaitPaneClearingDialogs(id session.SessionID, want, because string) {
+	h.t.Helper()
+	deadline := time.Now().Add(settleTimeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(h.pane(id), want) {
+			return
+		}
+		h.answerStartupDialogs(id)
+		time.Sleep(pollInterval)
+	}
+	h.t.Fatalf("%s: %q never appeared in %s's pane\n--- pane ---\n%s",
+		because, want, id, h.pane(id))
 }

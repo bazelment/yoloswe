@@ -23,6 +23,15 @@ go_test(
     # The binary under test. Resolved from runfiles, so a plain `bazel test`
     # works with no flags; $BRAMBLE_BIN overrides it.
     data = ["//bramble"],
+    # The live-backend cases drive the developer's real agent CLIs, which read
+    # their credentials from $HOME and live on $PATH. bazel does not pass either
+    # through by default, which shows up as a CLI that is "not installed" or a
+    # logged-out one that hangs on a login prompt.
+    env_inherit = [
+        "HOME",
+        "PATH",
+        "USER",
+    ],
     gotags = ["integration"],
     # Each case boots its own bramble and tmux server, so they are slow but
     # fully independent — shard them.

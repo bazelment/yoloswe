@@ -134,11 +134,45 @@ so a pane scrape cannot distinguish "still pending" from "just submitted". A
 false negative would re-queue a message the recipient already answered, which is
 worse than the case it guards.
 
+### Cursor has no hook at all, so its idleness is read off the pane
+
+`cursor-agent` has no `--notify` flag, and its plugin `stop` hook does not fire
+from the CLI — checked both interactively and with `--print` against
+2026.08.11, in a `--plugin-dir` plugin and in a workspace `.cursor/hooks.json`.
+So there is nothing to inject, and bramble would only ever learn a cursor
+subagent finished when its window died.
+
+`bramble/session/pane_idle.go` reads the state off the pane instead, for
+providers with no hook only. Two things make that safe enough to act on:
+
+- **It keys on the composer line, not a window of trailing lines.** Cursor's
+  footer grows a mode line in plan mode — which is what a codetalk subagent
+  runs in — and a fixed trailing window then misses the working hint and reads a
+  running turn as *idle*, releasing queued mail into it. The hint lives on the
+  composer line, so that line is found first and only it is examined.
+- **`Add a follow-up` is not an idle marker.** Cursor shows it the whole time.
+  Only `ctrl+c to stop`, on that same line, means a turn is in flight. This is
+  recorded in the probe table because it is exactly the wrong guess to make.
+
+Two consecutive agreeing polls are required, the probe reports *unknown* rather
+than guessing when it cannot find the composer line, and a provider is only
+listed once its chrome has been checked against the real CLI. Claude and codex
+are deliberately absent: they report their own turn ends, and a second, weaker
+signal could only contradict them.
+
 ## Known limitations
 
-- Only Codex gained a notify hook. Gemini, Cursor and Agy tmux sessions still
-  report idleness only when their window dies, so a subagent on those backends
-  reports late. The same `-c`-style override does not exist for them.
+- The cursor probe keys on that CLI's chrome and will go stale when cursor
+  changes it. The failure is fail-safe — an unrecognized footer reports
+  *unknown*, so the session simply stops being detected as idle rather than
+  being detected wrongly — and `TestLiveCursorSubagentTwoWay` is there to fail
+  loudly when it happens.
+- Gemini and Agy have neither a hook nor a probe, so subagents on those backends
+  still report only when their window dies.
+- A subagent's output reaches its parent as ordinary prompt text. A parent
+  should treat it as data, not instructions — during testing a Claude parent
+  correctly flagged a captured cursor transcript as a possible prompt-injection
+  attempt.
 - Paste verification costs up to ~1.8s per delivery when a TUI is slow to
   render, and passes vacuously if the pasted text is under a few characters.
 - A modal in the recipient's TUI (Codex's rate-limit prompt, for instance)
@@ -154,6 +188,43 @@ worse than the case it guards.
 | `bramble/session/subagent_report.go` | report composition and the quiet/re-arm rules |
 | `bramble/session/manager.go` | `SpawnOpts`, `SetSessionRunning`, result file for any subagent |
 | `bramble/session/tmux_runner.go` | Codex notify hook |
+| `bramble/session/pane_idle.go` | pane-read idleness for hookless providers (cursor) |
+| `bramble/integration/` | end-to-end tests: a real bramble in tmux, stubbed and live backends |
+
+## Tests
+
+`bramble/integration/` runs a real bramble binary, in tmux mode, on a throwaway
+worktree repo, against a private tmux server and a private HOME. It is tagged
+`manual` so `bazel test //...` skips it — it needs tmux, a terminal, and real
+agent CLIs — and is run with:
+
+    bazel test //bramble/integration:integration_test --test_output=all
+
+Two layers:
+
+- **Stubbed.** A scripted stand-in for an agent CLI, installed on PATH as
+  `codex`, exercises bramble's own logic deterministically and with no
+  credentials: lineage, the notify hook, queued delivery, delivery into a pane
+  left in copy mode, and a full two-round conversation.
+- **Live.** `TestLiveSubagentTwoWay` drives the real claude, codex and cursor
+  CLIs, one subtest each, with a Claude parent. These run by default and skip
+  only when a backend is missing or logged out, because every bug this feature
+  shipped with was invisible without a real CLI in a real pane.
+
+The live cases answer the CLIs' first-run dialogs themselves — Claude's folder
+trust, codex's directory trust, its model-deprecation and rate-limit prompts —
+because a fresh worktree puts one in front of every backend, and an unanswered
+one looks exactly like a bramble that never reached its prompt. Each entry names
+the option it takes: pressing Enter on an unrecognized menu is how a test
+silently changes a setting.
+
+Two traps are worth knowing before adding to these tests. A unix socket path is
+capped at ~107 bytes, and bazel's tmpdir plus a descriptive test name exceeds it
+— both the tmux socket and bramble's runtime dir live under a short temp root
+for that reason. And the stand-in deliberately waits before its first reply: an
+agent that answers in under a millisecond lands inside `runner.Start()`'s settle
+window, which is a real race (fixed, and pinned by
+`TestFastIdleIsNotClobberedByStartup`) rather than anything a real CLI does.
 | `bramble/tmuxctl/panewriter.go` | `session.PaneWriter` adapter; exits copy mode |
 | `bramble/control/{proto,dispatcher}.go` | `Queue`/`From` on `SendInputReq` |
 | `bramble/ipc/protocol.go`, `bramble/main.go` | `--parent`, `--no-parent`, `--queue`, `--from` |

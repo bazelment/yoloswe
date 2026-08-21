@@ -189,6 +189,11 @@ parent naming a file with the subagent's full output:
 result: /tmp/bramble-research/<id>.md
 ```
 
+Backends differ in how Bramble learns a turn ended: Claude and Codex are given a
+completion hook, and Cursor — which has neither a notify flag nor a working CLI
+hook — has its idleness read off its pane. Gemini and Agy have neither, so a
+subagent on those reports only when its window closes.
+
 The report is generated from Bramble's own view of the session, so it arrives
 whatever backend the subagent ran and whether or not the agent inside
 cooperated — which is what makes Codex, Gemini, Cursor and Agy usable as

@@ -3,12 +3,14 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -212,20 +214,74 @@ func exportOf(kv string) string {
 	return "export " + name + "=" + shellQuote(value) + "; "
 }
 
-// liveBackend reports the model to use for a live-backend test, or skips.
-//
-// Gated on an env var rather than probing for credentials: a logged-out CLI
-// hangs on an interactive prompt instead of failing, which would look like a
-// bramble bug. Skip-not-fail, so a developer without the backend still gets a
-// green run.
-func liveBackend(t *testing.T, envVar, binary string) string {
-	t.Helper()
-	model := os.Getenv(envVar)
-	if model == "" {
-		t.Skipf("set %s=<model> to run this against a live backend (e.g. %s=gpt-5.5)", envVar, envVar)
+// liveBackend describes one real agent CLI the subagent path must work with.
+type liveBackendSpec struct {
+	// provider is bramble's name for it, used only in messages.
+	provider string
+	// binary is what has to be on PATH.
+	binary string
+	// model routes bramble to this backend; the model ID is the only thing
+	// that selects a backend.
+	model string
+	// authProbe runs non-interactively and succeeds only when the CLI is
+	// logged in. A logged-out CLI does not fail — it sits on a login prompt
+	// forever — so this is checked up front rather than discovered as a
+	// mysterious timeout.
+	authProbe []string
+	// authWant, when set, must appear in the probe's output.
+	authWant string
+	// envOverride names an env var that replaces the model, for trying a
+	// different one without editing the test.
+	envOverride string
+}
+
+// liveBackends is every backend these tests drive for real. They run by
+// default — the whole point is to exercise the actual CLIs — and skip only when
+// one is genuinely unavailable on this machine.
+var liveBackends = []liveBackendSpec{
+	{
+		provider: "claude", binary: "claude", model: "sonnet",
+		authProbe:   []string{"claude", "--version"},
+		envOverride: "BRAMBLE_IT_CLAUDE_MODEL",
+	},
+	{
+		provider: "codex", binary: "codex", model: "gpt-5.5",
+		authProbe: []string{"codex", "login", "status"}, authWant: "Logged in",
+		envOverride: "BRAMBLE_IT_CODEX_MODEL",
+	},
+	{
+		provider: "cursor", binary: "cursor-agent", model: "cursor-default",
+		authProbe: []string{"cursor-agent", "status"}, authWant: "Logged in",
+		envOverride: "BRAMBLE_IT_CURSOR_MODEL",
+	},
+}
+
+// resolve returns the model to use, honouring the env override.
+func (b liveBackendSpec) resolve() string {
+	if m := os.Getenv(b.envOverride); m != "" {
+		return m
 	}
-	requireTool(t, binary)
-	return model
+	return b.model
+}
+
+// require skips the test when this backend cannot be driven on this machine.
+func (b liveBackendSpec) require(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath(b.binary); err != nil {
+		t.Skipf("%s is not installed", b.binary)
+	}
+	if len(b.authProbe) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, b.authProbe[0], b.authProbe[1:]...).CombinedOutput()
+		if err != nil {
+			t.Skipf("%s is not usable (%v): %s", b.binary, err, out)
+		}
+		if b.authWant != "" && !strings.Contains(string(out), b.authWant) {
+			t.Skipf("%s is not logged in: %s", b.binary, out)
+		}
+	}
+	return b.resolve()
 }
 
 // dumpPanesOnFailure logs the sessions' panes, which is the only record of
@@ -242,15 +298,20 @@ func dumpPanesOnFailure(t *testing.T, h *harness, ids ...session.SessionID) {
 	})
 }
 
-// shortTempSocket returns a path for a unix socket that fits the ~107-byte
-// sockaddr limit. bazel's test tmpdir alone can exceed it, and the failure —
-// "File name too long" from tmux — points nowhere near the real cause.
-func shortTempSocket(t *testing.T) string {
+// shortTempDir returns a directory shallow enough to hold unix sockets, whose
+// paths are capped at ~107 bytes.
+//
+// bazel's test tmpdir plus a descriptive test name already exceeds that, and
+// the symptoms point nowhere near the cause: tmux says "File name too long",
+// while bramble simply never appears on the sockets the harness is watching
+// for.
+func shortTempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "bit")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	sock := filepath.Join(dir, "t.sock")
-	require.Less(t, len(sock), 100, "tmux socket path is too long for a unix socket")
-	return sock
+	// Leave room for the longest name that goes under here:
+	// run/bramble-control-<pid>.sock
+	require.Less(t, len(dir), 60, "temp root is too long to hold unix sockets")
+	return dir
 }

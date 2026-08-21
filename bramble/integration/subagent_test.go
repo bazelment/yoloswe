@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -258,54 +257,68 @@ func TestSubagentIsReportedOnceNotOnEveryStateChange(t *testing.T) {
 
 // --- live backends -----------------------------------------------------------
 
-// TestLiveCodexSubagentTwoWay runs the same conversation against a real codex.
+// TestLiveSubagentTwoWay drives the real agent CLIs, one subtest per backend.
 //
-// The stub cannot catch what only a real TUI does: announcing idleness before
-// its prompt is ready to take a paste, or putting a modal in the way. Gate:
+// The stubbed cases above pin bramble's own logic; these pin the part that only
+// a real CLI can tell you. Every bug this feature shipped with was of that kind:
+// codex not reporting idle, a session never leaving "running", a paste dropped
+// while a TUI finished painting, an Enter eaten by copy mode. None of them are
+// visible without the real thing in a real pane.
 //
-//	bazel test //bramble/integration:integration_test \
-//	  --test_env=BRAMBLE_IT_CODEX_MODEL=gpt-5.5 --test_output=all
-func TestLiveCodexSubagentTwoWay(t *testing.T) {
-	model := liveBackend(t, "BRAMBLE_IT_CODEX_MODEL", "codex")
-	h := newHarness(t, false)
+// They run by default and skip only when a backend is missing or logged out, so
+// what is exercised depends on the machine rather than on remembering a flag.
+// A live run costs real tokens on each backend it finds.
+func TestLiveSubagentTwoWay(t *testing.T) {
+	for _, backend := range liveBackends {
+		t.Run(backend.provider, func(t *testing.T) {
+			model := backend.require(t)
+			h := newHarness(t, false)
 
-	parent := h.spawn("builder", parentModel(t), "",
-		"You are the PARENT in an automated test. Say exactly: PARENT READY. Then wait.")
-	h.awaitStatus(parent, "idle")
+			// The parent is Claude: that is the orchestrator in practice, and
+			// it is the side that has to receive and read the report.
+			parentModel := liveBackends[0].require(t)
+			parent := h.spawn("builder", parentModel, "",
+				"You are the PARENT in an automated test. Say exactly: PARENT READY. Then wait. Do not read or edit files.")
+			h.awaitReady(parent)
 
-	child := h.spawn("codetalk", model, string(parent),
-		"Reply with exactly one line and nothing else: R1 word ARTICHOKE. Do not read files. Do not run commands.")
-	dumpPanesOnFailure(t, h, parent, child)
+			child := h.spawn("codetalk", model, string(parent),
+				"Reply with exactly one line and nothing else: R1 ARTICHOKE. Do not read files. Do not run commands.")
+			dumpPanesOnFailure(t, h, parent, child)
 
-	h.awaitPane(child, "ARTICHOKE", "codex never answered round one")
-	require.Eventually(t, func() bool {
-		return h.countInPane(parent, deliveredReportMarker) >= 1
-	}, settleTimeout, pollInterval, "the parent was never told about its codex subagent")
+			// Round one. Reaching idle at all is the backend-specific part:
+			// claude and codex report it through a hook, cursor has neither and
+			// is read off its pane.
+			h.awaitPaneClearingDialogs(child, "ARTICHOKE", "the subagent never answered round one")
+			h.awaitStatus(child, "idle")
+			require.Eventuallyf(t, func() bool {
+				return h.countInPane(parent, reportMarker) >= 1
+			}, settleTimeout, pollInterval,
+				"the parent was never told about its %s subagent\n--- parent pane ---\n%s",
+				backend.provider, h.pane(parent))
 
-	result, err := h.send(parent, child,
-		"R2: reply with exactly one line: R2 confirmed ARTICHOKE", true)
-	// A modal in the recipient's TUI (codex's rate-limit prompt, say) blocks
-	// delivery. That is correctly an error rather than an Enter into a menu,
-	// but it is the developer's box, not a bramble bug.
-	if err != nil {
-		t.Skipf("codex would not take the delivery (a modal in its pane?): %v", err)
+			// Round two: the parent replies, and the answer comes back. This is
+			// the leg that stayed broken longest — a delivery has to move the
+			// child off idle, or the turn it starts produces no state change and
+			// the conversation goes quiet.
+			result, err := h.send(parent, child,
+				"R2: reply with exactly one line and nothing else: R2 CONFIRMED", true)
+			if err != nil {
+				// A modal in the recipient's pane blocks delivery, which is
+				// correctly an error rather than an Enter into a menu. Answer it
+				// and try once more before giving up.
+				h.answerStartupDialogs(child)
+				result, err = h.send(parent, child,
+					"R2: reply with exactly one line and nothing else: R2 CONFIRMED", true)
+				require.NoErrorf(t, err, "could not deliver to the %s subagent", backend.provider)
+			}
+			require.False(t, result.Queued, "the child was idle, so this should have been written at once")
+
+			h.awaitPaneClearingDialogs(child, "R2 CONFIRMED", "the subagent never answered round two")
+			require.Eventuallyf(t, func() bool {
+				return h.countInPane(parent, reportMarker) >= 2
+			}, settleTimeout, pollInterval,
+				"round two was never reported for %s — the conversation went quiet after one exchange\n--- parent pane ---\n%s",
+				backend.provider, h.pane(parent))
+		})
 	}
-	require.False(t, result.Queued, "the child was idle, so this should have been written at once")
-
-	h.awaitPane(child, "R2 confirmed", "codex never answered round two")
-	require.Eventuallyf(t, func() bool {
-		return h.countInPane(parent, deliveredReportMarker) >= 2
-	}, settleTimeout, pollInterval,
-		"round two was never reported\n--- parent pane ---\n%s", h.pane(parent))
-}
-
-// parentModel picks the backend for the parent in a live test. It defaults to
-// Claude, since the parent only has to sit at a prompt and be written to.
-func parentModel(t *testing.T) string {
-	t.Helper()
-	if m := os.Getenv("BRAMBLE_IT_PARENT_MODEL"); m != "" {
-		return m
-	}
-	requireTool(t, "claude")
-	return "sonnet"
 }

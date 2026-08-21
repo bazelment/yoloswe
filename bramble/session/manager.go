@@ -1736,6 +1736,11 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		m.tryUpdateSessionStatus(session, StatusPending, StatusRunning)
 		startTime := time.Now()
 
+		// Backends with no turn-completion hook (cursor) have their idleness
+		// read off the pane instead. nil for claude and codex, which report it
+		// themselves; see pane_idle.go for why this is a last resort.
+		idleTracker := newPaneIdleTracker(agentModel.Provider)
+
 		// Periodically check if tmux window still exists
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
@@ -1756,6 +1761,23 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 				if tmuxName == "" && tmuxID == "" {
 					continue
+				}
+
+				// Read idleness off the pane for hookless backends. Only a
+				// running session is a candidate: once idle it stays idle
+				// until something delivers work and marks it running again,
+				// which is also what re-arms the tracker.
+				if idleTracker != nil {
+					session.mu.RLock()
+					status := session.Status
+					session.mu.RUnlock()
+					if status != StatusRunning {
+						idleTracker.reset()
+					} else if lines, err := m.CapturePaneText(sessionID, paneIdleCaptureLines); err == nil {
+						if idleTracker.observe(lines) {
+							m.SetSessionIdle(sessionID)
+						}
+					}
 				}
 
 				// windowTarget is the most stable identifier available for
