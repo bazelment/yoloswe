@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bazelment/yoloswe/bramble/session"
 )
 
 // stubModel routes to the scripted stand-in: bramble picks a backend from the
@@ -386,5 +389,111 @@ func TestLiveQueuedDeliveryWaitsForALiveTurn(t *testing.T) {
 			require.Eventually(t, func() bool { return h.deliveryQueueLen() == 0 },
 				settleTimeout, pollInterval, "the queue should drain once delivered")
 		})
+	}
+}
+
+// concurrentSubagents is how many children the fan-out tests spawn. Enough for
+// their reports to genuinely overlap without making the suite slow.
+const concurrentSubagents = 3
+
+// TestConcurrentSubagentsAllReport covers a fan-out: one parent, several
+// subagents working at once, all reporting to the same place.
+//
+// This is where the queue takes concurrent writes — every child's completion
+// races the others into one recipient's queue — and where reports can be lost
+// quietly rather than loudly. A dropped report is not a crash: the parent
+// simply waits forever for a subagent that already finished.
+//
+// The parent is deliberately left mid-turn while they finish, so every report
+// has to queue rather than being written straight through.
+func TestConcurrentSubagentsAllReport(t *testing.T) {
+	h := newHarness(t, true)
+
+	parent := h.spawn("builder", stubModel, "", "PARENT-BOOT")
+	h.awaitStatus(parent, "idle")
+
+	// Occupy the parent so the reports pile up behind a live turn.
+	_, err := h.send("", parent, "PARENT-BUSY", true)
+	require.NoError(t, err)
+
+	children := make([]session.SessionID, 0, concurrentSubagents)
+	for i := 0; i < concurrentSubagents; i++ {
+		child := h.spawn("codetalk", stubModel, string(parent), fmt.Sprintf("CHILD-%d-WORK", i))
+		children = append(children, child)
+	}
+	dumpPanesOnFailure(t, h, append(children, parent)...)
+
+	for _, child := range children {
+		h.awaitStatus(child, "idle")
+	}
+
+	// Every child must be named in the parent's pane exactly once. Checking
+	// the count as well as the presence is what catches a report delivered
+	// twice, which is as wrong as one delivered never.
+	for _, child := range children {
+		want := deliveredReportMarker + " " + string(child)
+		require.Eventuallyf(t, func() bool {
+			return h.countInPane(parent, want) >= 1
+		}, settleTimeout, pollInterval,
+			"the parent was never told about subagent %s\n--- parent pane ---\n%s", child, h.pane(parent))
+	}
+	for _, child := range children {
+		assert.Equalf(t, 1, h.countInPane(parent, deliveredReportMarker+" "+string(child)),
+			"subagent %s was reported more than once", child)
+	}
+
+	require.Eventually(t, func() bool { return h.deliveryQueueLen() == 0 },
+		settleTimeout, pollInterval, "every queued report should drain")
+}
+
+// TestConcurrentSubagentsQueueDurablyWhileParentIsBusy pins the durability half
+// of a fan-out.
+//
+// Reports that arrive while a parent is mid-turn live on disk until it is free,
+// and a queue written from several goroutines at once used to lose some of them
+// there. Nothing looked wrong at the time — delivery in the running process
+// still worked off the in-memory queue — so the loss only showed up as a
+// restart that dropped reports for subagents that had already finished.
+//
+// The parent is held busy deliberately: without that it answers each report the
+// instant it lands and the queue never has more than one thing in it, which is
+// not the case being tested.
+func TestConcurrentSubagentsQueueDurablyWhileParentIsBusy(t *testing.T) {
+	h := newHarness(t, true)
+
+	parent := h.spawn("builder", stubModel, "", "PARENT-BOOT")
+	h.awaitStatus(parent, "idle")
+
+	// Hold the parent mid-turn for long enough that every child finishes while
+	// it is still busy.
+	_, err := h.send("", parent, "STUB-SLEEP 8", true)
+	require.NoError(t, err)
+	h.awaitStatus(parent, "running")
+
+	children := make([]session.SessionID, 0, concurrentSubagents)
+	for i := 0; i < concurrentSubagents; i++ {
+		children = append(children, h.spawn("codetalk", stubModel, string(parent), fmt.Sprintf("CHILD-%d-WORK", i)))
+	}
+	dumpPanesOnFailure(t, h, append(children, parent)...)
+	for _, child := range children {
+		h.awaitStatus(child, "idle")
+	}
+
+	// While the parent is still busy, every report must be on disk. This is
+	// the state a restarted bramble would resume from.
+	queued := h.queuedTextFor(parent)
+	require.NotEmptyf(t, queued, "no report was queued while the parent was busy\n--- parent pane ---\n%s", h.pane(parent))
+	for _, child := range children {
+		assert.Containsf(t, queued, string(child),
+			"the persisted queue is missing %s; a restart here would drop it", child)
+	}
+
+	// And they all still arrive once it frees up.
+	for _, child := range children {
+		want := deliveredReportMarker + " " + string(child)
+		require.Eventuallyf(t, func() bool {
+			return h.countInPane(parent, want) >= 1
+		}, settleTimeout, pollInterval,
+			"subagent %s was queued but never delivered\n--- parent pane ---\n%s", child, h.pane(parent))
 	}
 }

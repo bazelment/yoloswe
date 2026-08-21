@@ -170,6 +170,14 @@ if [ -n "$prompt" ]; then respond "$prompt"; fi
 while IFS= read -r line; do
   case "$line" in
     STUB-EXIT) log "exiting cleanly"; exit 0 ;;
+    STUB-SLEEP\ *)
+      # Occupy the session for a known length of time, so a test can hold it
+      # mid-turn while other things queue up behind it.
+      secs="${line#STUB-SLEEP }"
+      log "sleeping ${secs}s"
+      sleep "$secs"
+      respond "$line"
+      continue ;;
   esac
   [ -n "$line" ] && respond "$line"
 done

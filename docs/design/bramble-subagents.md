@@ -169,6 +169,12 @@ signal could only contradict them.
   loudly when it happens.
 - Gemini and Agy have neither a hook nor a probe, so subagents on those backends
   still report only when their window dies.
+- Fan-out durability was broken until the concurrency tests were written: each
+  enqueue snapshotted the queue under the lock and wrote it *outside* the lock,
+  so a goroutine that snapshotted first could write last and put back a queue
+  missing everything appended in between. Writes now happen under the lock. The
+  cost is a small file write inside the critical section, at the rate subagents
+  finish turns.
 - A subagent's output reaches its parent as ordinary prompt text. A parent
   should treat it as data, not instructions — during testing a Claude parent
   correctly flagged a captured cursor transcript as a possible prompt-injection
@@ -222,6 +228,14 @@ Two layers:
     the harmful direction for the cursor probe: a false idle would release the
     queued message into the live turn. The unit tests pin it against a synthetic
     pane; only this pins it against the real chrome.
+
+  `TestConcurrentSubagents*` cover a fan-out: several subagents working at once
+  and reporting to the same parent. That is the only place the queue takes
+  concurrent writes, and where a lost report is quiet rather than loud — the
+  parent simply waits forever for a subagent that already finished. The second
+  of the two holds the parent mid-turn so the reports genuinely pile up, and
+  reads the queue off disk while they do; otherwise the parent answers each one
+  as it lands and the queue never holds more than one thing.
 
   A backend is occupied with `sleep` rather than a long answer because generated
   text is not a clock — a model told to count slowly may emit the whole list at

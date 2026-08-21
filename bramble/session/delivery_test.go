@@ -1101,3 +1101,86 @@ func TestPersistentlyDroppedPasteKeepsDeliveryQueued(t *testing.T) {
 	assert.NotContains(t, panes.recorded(), "enter(@7)", "nothing may be submitted")
 	assert.Empty(t, target.markedRunning, "no turn started, so none may be claimed")
 }
+
+// TestConcurrentSendsToOneRecipientAllPersist covers several subagents
+// finishing at once and reporting to the same parent — the normal shape of a
+// fan-out, and the only place the queue takes concurrent writes.
+//
+// In memory this was always safe. On disk it was not: each enqueue took a
+// snapshot under the lock and then wrote it *outside* the lock, so a goroutine
+// that snapshotted first could write last and put back a queue missing
+// everything appended in between. The messages were delivered normally, so the
+// loss only surfaced after a restart — the one case the on-disk queue exists
+// for.
+func TestConcurrentSendsToOneRecipientAllPersist(t *testing.T) {
+	t.Parallel()
+
+	const senders = 12
+	dir := t.TempDir()
+	target := newFakeTarget()
+	target.set("parent", StatusRunning, RunnerTypeTmux)
+
+	c, err := NewCourier(target, echoPanes(target), dir)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	for i := 0; i < senders; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := c.Send(context.Background(), "", "parent", fmt.Sprintf("report-%02d", i), true)
+			assert.NoError(t, err)
+		}(i)
+	}
+	wg.Wait()
+
+	require.Len(t, c.Pending("parent"), senders, "in-memory queue lost a report")
+
+	// Reload from disk: this is what a restarted bramble would see.
+	reloaded, err := NewCourier(target, echoPanes(target), dir)
+	require.NoError(t, err)
+	assert.Lenf(t, reloaded.Pending("parent"), senders,
+		"the persisted queue lost reports; a restart would drop them")
+}
+
+// TestConcurrentDrainAndSendKeepsQueueConsistent covers the other overlap: a
+// parent going idle and draining while more subagents are still reporting to
+// it.
+func TestConcurrentDrainAndSendKeepsQueueConsistent(t *testing.T) {
+	t.Parallel()
+
+	const senders = 12
+	dir := t.TempDir()
+	target := newFakeTarget()
+	target.set("parent", StatusIdle, RunnerTypeTmux)
+
+	c, err := NewCourier(target, echoPanes(target), dir)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	for i := 0; i < senders; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := c.Send(context.Background(), "", "parent", fmt.Sprintf("report-%02d", i), true)
+			assert.NoError(t, err)
+		}(i)
+	}
+	for i := 0; i < senders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			target.set("parent", StatusIdle, RunnerTypeTmux)
+			c.Drain(context.Background(), "parent")
+		}()
+	}
+	wg.Wait()
+
+	// Whatever is still queued in memory must match what is on disk: a stale
+	// write would leave a restart with a different queue than this process has.
+	inMemory := c.Pending("parent")
+	reloaded, err := NewCourier(target, echoPanes(target), dir)
+	require.NoError(t, err)
+	assert.Lenf(t, reloaded.Pending("parent"), len(inMemory),
+		"the persisted queue disagrees with the live one")
+}

@@ -189,10 +189,10 @@ func (c *Courier) enqueue(from, to SessionID, text string, submit bool) {
 		CreatedAt: time.Now(),
 	}
 	c.pending[to] = append(c.pending[to], d)
-	queue := append([]Delivery(nil), c.pending[to]...)
+	err := c.persistLocked(to)
 	c.mu.Unlock()
 
-	if err := c.persist(to, queue); err != nil {
+	if err != nil {
 		// A failed persist costs durability across a restart, not delivery:
 		// the in-memory queue is still authoritative for this process.
 		logDeliveryWarn("failed to persist delivery queue", to, err)
@@ -246,18 +246,16 @@ func (c *Courier) Drain(ctx context.Context, to SessionID) {
 	}
 
 	c.mu.Lock()
-	remaining := c.pending[to]
-	if len(remaining) <= 1 {
+	if remaining := c.pending[to]; len(remaining) <= 1 {
 		delete(c.pending, to)
-		remaining = nil
 	} else {
-		remaining = append([]Delivery(nil), remaining[1:]...)
-		c.pending[to] = remaining
+		c.pending[to] = append([]Delivery(nil), remaining[1:]...)
 	}
+	err := c.persistLocked(to)
 	cb := c.onDelivered
 	c.mu.Unlock()
 
-	if err := c.persist(to, remaining); err != nil {
+	if err != nil {
 		logDeliveryWarn("failed to persist delivery queue", to, err)
 	}
 	if cb != nil {
@@ -392,8 +390,9 @@ func pasteProbe(text string) string {
 func (c *Courier) discard(to SessionID) {
 	c.mu.Lock()
 	delete(c.pending, to)
+	err := c.persistLocked(to)
 	c.mu.Unlock()
-	if err := c.persist(to, nil); err != nil {
+	if err != nil {
 		logDeliveryWarn("failed to clear delivery queue", to, err)
 	}
 }
@@ -458,6 +457,22 @@ func sanitizeQueueName(s string) string {
 			return '_'
 		}
 	}, s)
+}
+
+// persistLocked writes a recipient's current queue to disk. The caller must
+// hold c.mu.
+//
+// Writing under the lock, rather than snapshotting and writing after releasing
+// it, is what keeps the file agreeing with memory. Several subagents finishing
+// at once all report to the same parent, and with the write outside the lock a
+// goroutine that snapshotted first could write last, putting back a queue
+// missing everything appended in between. Delivery still worked, so the loss
+// only appeared after a restart — the one case the on-disk queue exists for.
+//
+// The cost is a small file write inside the critical section, at the rate
+// subagents finish turns.
+func (c *Courier) persistLocked(to SessionID) error {
+	return c.persist(to, c.pending[to])
 }
 
 // persist writes a recipient's queue atomically, removing the file when the

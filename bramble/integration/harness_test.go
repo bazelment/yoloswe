@@ -555,3 +555,20 @@ func reportedResultPath(pane string) (string, bool) {
 }
 
 var resultPathRE = regexp.MustCompile(`result:\s+(\S+)`)
+
+// queuedTextFor returns the raw on-disk queue for a recipient, which is what a
+// restarted bramble would read back.
+func (h *harness) queuedTextFor(to session.SessionID) string {
+	h.t.Helper()
+	files, _ := filepath.Glob(filepath.Join(h.home, ".bramble", "deliveries", "*.json"))
+	var b strings.Builder
+	for _, f := range files {
+		if !strings.Contains(filepath.Base(f), string(to)) {
+			continue
+		}
+		if data, err := os.ReadFile(f); err == nil {
+			b.Write(data)
+		}
+	}
+	return b.String()
+}
