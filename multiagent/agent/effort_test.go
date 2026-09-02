@@ -257,3 +257,50 @@ func TestProviderSupportsEffort(t *testing.T) {
 		})
 	}
 }
+
+// agy's effort support is model-scoped, not provider-scoped: its catalog is an
+// incomplete matrix, so a specific model can refuse a specific level. Callers
+// holding one model ID need that answer, not the provider-wide one.
+func TestModelSupportsEffort(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		model string
+		level EffortLevel
+		want  bool
+	}{
+		// Non-agy providers answer exactly as ProviderSupportsEffort does.
+		{model: "sonnet", level: EffortHigh, want: true},
+		{model: "gpt-5.5", level: EffortHigh, want: true},
+		{model: "composer-2.5", level: EffortHigh, want: false},
+
+		// agy models the catalog can serve.
+		{model: "gemini-3.8-flash-low", level: EffortHigh, want: true},
+		{model: "gemini-3.8-flash-low", level: EffortMedium, want: true},
+		{model: "gemini-3.1-pro-high", level: EffortLow, want: true},
+		{model: "gemini-3.1-pro-low", level: EffortLow, want: true},
+
+		// gemini-3.1-pro ships -low and -high but no -medium.
+		{model: "gemini-3.1-pro-high", level: EffortMedium, want: false},
+		{model: "gemini-3.1-pro-low", level: EffortMedium, want: false},
+
+		// EffortMax clamps to high, which both pro variants can serve.
+		{model: "gemini-3.1-pro-low", level: EffortMax, want: true},
+
+		// Auto never needs a variant, and an unpinned agy ID is unconstrained.
+		{model: "gemini-3.1-pro-high", level: EffortAuto, want: true},
+		{model: "agy-default", level: EffortMedium, want: true},
+
+		// Uncurated IDs: this list is not the authority on what agy can run.
+		{model: "gemini-9.9-flash-low", level: EffortMedium, want: true},
+
+		// A model no rule can route at all.
+		{model: "totally-unknown-model", level: EffortHigh, want: false},
+	} {
+		tc := tc
+		t.Run(tc.model+"/"+string(tc.level), func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, ModelSupportsEffort(tc.model, tc.level))
+		})
+	}
+}

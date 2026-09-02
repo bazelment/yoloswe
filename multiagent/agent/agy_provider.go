@@ -193,10 +193,14 @@ func splitModelEffort(model string) (base, pinned string) {
 // silent downgrade the contract above forbids, and jiradozer/agent.go already
 // handles this error.
 //
-// Uncurated ids are left alone. CLIModelArg passes them through precisely
-// because "there the CLI is the authority, not this list" (model_registry.go),
-// so AllModels cannot say whether a variant exists and this layer must not
-// invent an answer in either direction: agy itself will accept or reject.
+// Whether the model pins a level is decided by the id's SYNTAX, so it holds
+// for ids AllModels has never heard of; the catalog is consulted only to pick
+// between the two ways of honoring the request. For a curated model an absent
+// variant is knowably unrunnable, so it errors. For an uncurated one - which
+// CLIModelArg passes through because "there the CLI is the authority, not this
+// list" (model_registry.go) - the retarget is taken optimistically and agy
+// judges the result, which is strictly better than shipping a command line
+// already known to conflict.
 func reconcileAgyEffort(c *agy.SessionConfig) error {
 	if c.Effort == "" || c.Model == "" {
 		return nil
@@ -210,12 +214,8 @@ func reconcileAgyEffort(c *agy.SessionConfig) error {
 		c.Effort = "" // Same level twice; keep one representation.
 		return nil
 	}
-	if !isCuratedAgyModel(c.Model) {
-		// Not ours to adjudicate - hand both to agy unchanged.
-		return nil
-	}
 	retarget := base + "-" + c.Effort
-	if !isCuratedAgyModel(retarget) {
+	if isCuratedAgyModel(c.Model) && !isCuratedAgyModel(retarget) {
 		return fmt.Errorf("%w: agy has no %q variant of %q (requested effort %s on a model pinned to %s)",
 			ErrEffortUnsupported, c.Effort, base, c.Effort, pinned)
 	}

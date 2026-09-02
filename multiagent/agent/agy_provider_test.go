@@ -139,10 +139,11 @@ func TestReconcileAgyEffort(t *testing.T) {
 			model: "gemini-3.8-flash-low", effort: "high", wantModel: "gemini-3.8-flash-high", wantEffort: ""},
 		{name: "retarget also works downward",
 			model: "gemini-3.1-pro-high", effort: "low", wantModel: "gemini-3.1-pro-low", wantEffort: ""},
-		// An uncurated id is agy's to adjudicate, not ours: AllModels cannot
-		// say whether a variant exists, so both flags pass through untouched.
-		{name: "uncurated pinned model is left for agy to judge",
-			model: "gemini-9.9-flash-low", effort: "high", wantModel: "gemini-9.9-flash-low", wantEffort: "high"},
+		// An uncurated id still pins a level syntactically, so shipping both
+		// flags would be a certain conflict. Retarget optimistically and let
+		// agy judge the id - never emit the pair we know it rejects.
+		{name: "uncurated pinned model is retargeted, not sent as a conflict",
+			model: "gemini-9.9-flash-low", effort: "high", wantModel: "gemini-9.9-flash-high", wantEffort: ""},
 	}
 	for _, tt := range tests {
 		tt := tt

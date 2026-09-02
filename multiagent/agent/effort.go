@@ -44,9 +44,13 @@ func ParseEffort(s string) (EffortLevel, error) {
 // ProviderSupportsEffort reports whether a provider honors an explicit non-auto
 // reasoning-effort level. Claude, Codex, and Agy do; Cursor has no effort knob
 // and returns ErrEffortUnsupported for any non-auto level (see the respective
-// *_provider.go Execute guards). This is the single source of truth callers
-// should consult before handing a model an effort level — e.g. a model
-// fallback must drop effort when routing from a Claude model to a Cursor model.
+// *_provider.go Execute guards).
+//
+// This answers a PROVIDER-level question, which for agy is not the whole
+// story: agy encodes the level in the model id, and its catalog is not a full
+// cross product, so a specific agy model can refuse a specific level even
+// though the provider supports effort in general. Callers deciding what to do
+// with one concrete model should ask ModelSupportsEffort instead.
 // Unknown providers are assumed not to support effort (safe: caller drops it).
 func ProviderSupportsEffort(provider string) bool {
 	switch provider {
@@ -55,6 +59,36 @@ func ProviderSupportsEffort(provider string) bool {
 	default:
 		return false
 	}
+}
+
+// ModelSupportsEffort reports whether a specific model can actually run at a
+// given non-auto effort level, which is the question a caller holding one
+// model ID wants answered before handing it an effort - notably a fallback
+// deciding whether to carry a level over to the next model, where the
+// alternative is a rescue attempt that dies on ErrEffortUnsupported.
+//
+// It is ProviderSupportsEffort for every provider but agy. agy spells the
+// level in the model id and ships an incomplete matrix (gemini-3.1-pro has
+// -low and -high but no -medium), so a curated agy model answers for the
+// exact variant the level would need. An uncurated ID answers true: this list
+// is not the authority on models it does not name.
+func ModelSupportsEffort(modelID string, level EffortLevel) bool {
+	m, ok := ResolveModel(modelID)
+	if !ok {
+		return false
+	}
+	if m.Provider != ProviderAgy || level == "" || level == EffortAuto {
+		return ProviderSupportsEffort(m.Provider)
+	}
+	want := agyEffortLevel(level)
+	if want == "" {
+		return false
+	}
+	base, pinned := splitModelEffort(modelID)
+	if pinned == "" || pinned == want || !isCuratedAgyModel(modelID) {
+		return true
+	}
+	return isCuratedAgyModel(base + "-" + want)
 }
 
 // EffortUnsupportedError builds the canonical ErrEffortUnsupported wrap with
