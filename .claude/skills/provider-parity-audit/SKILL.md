@@ -178,7 +178,7 @@ LongRunningProvider (extends Provider)
 
 Not all providers implement `LongRunningProvider`. Currently:
 - Claude: both interfaces
-- Agy: `Provider` only — print-mode CLI wrapper, one `Session` per `Execute` call. It accepts a caller-supplied conversation ID for resume, but does not surface a new ID, so higher-level sessions cannot automatically continue a conversation.
+- Agy: `Provider` only — print-mode CLI wrapper, one `Session` per `Execute` call, no persistent multi-turn session concept exposed. It does surface a new conversation ID on every turn (`AgentResult.SessionID`), and `providerRunner` feeds it back in as the next turn's resume ID, so turn-to-turn continuity works without a `LongRunningProvider`.
 - Codex: `Provider` only (thread-per-execution model)
 
 ### Event Bridge Pattern
@@ -191,15 +191,15 @@ These are documented in conformance tests:
 - Codex: `hasEvents: false` — limited streaming event emission
 - Codex: No `LongRunningProvider` — uses ephemeral thread model
 - Codex: No thinking/chain-of-thought events
-- Agy: No `LongRunningProvider` — print-mode CLI wrapper, one `Session` per `Execute` call; it accepts a caller-supplied conversation ID but does not surface a new ID for automatic continuation
+- Agy: No `LongRunningProvider` — print-mode CLI wrapper, one `Session` per `Execute` call; conversation continuity across turns is handled by `providerRunner` threading `AgentResult.SessionID` back in as the next turn's resume ID instead
 - Agy: Emits **no tool-call events at all** — agy's print-mode wire format only has
   `TextEvent`/`TurnCompleteEvent`/`ErrorEvent` (see `agent-cli-wrapper/agy/events.go`), so
   `AgyProvider.Execute` never emits `ToolStartAgentEvent`/`ToolCompleteAgentEvent` and never
   calls `EventHandler.OnToolStart`/`OnToolComplete`. Consumers that need file-change detection
   must use the git-diff workaround (`detectFileChangesGit`, already used for Codex) instead of
   relying on tool-start events.
-- Agy: Token usage returns zeros (`AgentUsage` fields empty)
-- Agy: Cost reporting returns zero
+- Agy: Token usage is populated (`AgentUsage.{InputTokens,OutputTokens,CacheReadTokens}` from agy's `--output-format json` `usage` field)
+- Agy: Cost reporting returns zero (agy's protocol reports no per-turn dollar cost)
 - Agy: `ProviderSupportsEffort(ProviderAgy)` is **true** — agy DOES support `low|medium|high`
   effort (`EffortMax` clamps to `high`). This is a capability, not a gap; don't regress the
   matrix by marking it unsupported.

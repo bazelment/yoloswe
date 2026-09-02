@@ -66,6 +66,12 @@ func (p *AgyProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Work
 				Success:    e.Success,
 				Error:      e.Error,
 				DurationMs: e.DurationMs,
+				SessionID:  e.ConversationID,
+				Usage: AgentUsage{
+					InputTokens:     e.Usage.InputTokens,
+					OutputTokens:    e.Usage.OutputTokens,
+					CacheReadTokens: e.Usage.CacheReadTokens,
+				},
 			}, nil
 		case agy.ErrorEvent:
 			if cfg.EventHandler != nil {

@@ -14,7 +14,7 @@ func TestBuildCLIArgs_DefaultPrintMode(t *testing.T) {
 
 	pm := newProcessManager("hello", defaultConfig())
 
-	assert.Equal(t, []string{"-p", "hello"}, pm.BuildCLIArgs())
+	assert.Equal(t, []string{"--output-format", "json", "-p", "hello"}, pm.BuildCLIArgs())
 }
 
 func TestBuildCLIArgs_AllOptions(t *testing.T) {
@@ -34,6 +34,7 @@ func TestBuildCLIArgs_AllOptions(t *testing.T) {
 	pm := newProcessManager("hello", cfg)
 
 	assert.Equal(t, []string{
+		"--output-format", "json",
 		"--model", "gemini-3.8-flash-low",
 		"--effort", "low",
 		"--print-timeout", "120s",
@@ -128,6 +129,7 @@ func TestBuildCLIArgs_NoRegressionToLeadingPrintFlag(t *testing.T) {
 	pm := newProcessManager("hello", cfg)
 
 	assert.Equal(t, []string{
+		"--output-format", "json",
 		"--model", "gemini-3.8-flash-low",
 		"--effort", "high",
 		"-p", "hello",
@@ -146,5 +148,5 @@ func TestBuildCLIArgs_EmptyModelAndEffortEmitNothing(t *testing.T) {
 
 	assert.Equal(t, -1, slices.Index(args, "--model"))
 	assert.Equal(t, -1, slices.Index(args, "--effort"))
-	assert.Equal(t, []string{"-p", "hello"}, args)
+	assert.Equal(t, []string{"--output-format", "json", "-p", "hello"}, args)
 }

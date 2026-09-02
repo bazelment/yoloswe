@@ -23,9 +23,9 @@ Run `/provider-parity-audit` to populate this matrix with real data.
 |-----------|--------|-------|--------|--------|-----------------|-------|
 | Basic execution | supported | supported | supported | supported | BasicPrompt | All return text results |
 | Event streaming | supported | missing | supported | **partial** | EventsStreamDuringExecution | Codex `hasEvents: false`. Agy streams Text/TurnComplete events but has no tool events. |
-| Long-running sessions | supported | missing | supported | **missing** | LongRunningMultiTurn | Codex uses ephemeral threads. Agy implements `Provider` only, no `LongRunningProvider`. |
+| Long-running sessions | supported | missing | supported | **missing** | LongRunningMultiTurn | Codex uses ephemeral threads. Agy implements `Provider` only, no `LongRunningProvider` — but `providerRunner` threads `AgentResult.SessionID` across turns as a resume id, so bramble sessions still keep conversation continuity. |
 | Permission callbacks | supported | partial | supported | unaudited | PermissionCallback | Codex uses approval policies only |
-| Token usage (input/output) | supported | supported | missing | missing | BasicPrompt | Agy returns zeros (same gap Gemini had) |
+| Token usage (input/output) | supported | supported | missing | **supported** | BasicPrompt | Agy's `--output-format json` `usage` field populates `AgentUsage.{InputTokens,OutputTokens,CacheReadTokens}` — a capability GAIN over the old Gemini provider. |
 | Cost reporting (CostUSD) | supported | missing | missing | missing | BasicPrompt | Only Claude reports cost |
 | Reasoning effort | n/a (own knob) | supported | not supported (rejected) | **supported** | — | `ProviderSupportsEffort(ProviderAgy)==true`, low/medium/high, max clamps to high. This is a capability GAIN over the old Gemini provider, not a gap. |
 | Thinking/reasoning events | supported | missing | supported | **missing** | EventsStreamDuringExecution | Codex has no thinking events. Agy has no thinking events either (print-mode has no thinking delta). |

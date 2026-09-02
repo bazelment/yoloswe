@@ -88,6 +88,10 @@ type providerRunner struct { //nolint:govet // fieldalignment: keep related life
 	sawThinking     bool
 	turnDone        bool
 	turnDoneCh      chan struct{}
+
+	// resumeSessionID lets ephemeral providers resume the prior turn.
+	resumeMu        sync.Mutex
+	resumeSessionID string
 }
 
 func providerPermissionMode(sessionType SessionType) string {
@@ -248,16 +252,34 @@ func (r *providerRunner) RunTurn(ctx context.Context, message string) (*claude.T
 		// Give bridged events a brief window to flush before fallback synthesis.
 		r.waitForTurnDone(turnObsSeq, 150*time.Millisecond)
 	} else {
-		// Ephemeral providers create a fresh session each turn
+		// Resume ephemeral providers with the prior turn's session ID.
+		if resumeID := r.getResumeSessionID(); resumeID != "" {
+			opts = append(opts, agent.WithProviderResumeSessionID(resumeID))
+		}
 		var err error
 		result, err = r.provider.Execute(ctx, message, nil, opts...)
 		if err != nil {
 			return nil, err
 		}
+		if result.SessionID != "" {
+			r.setResumeSessionID(result.SessionID)
+		}
 	}
 
 	r.emitFallbackFromResult(turnObsSeq, result)
 	return agentUsageToTurnUsage(result.Usage), nil
+}
+
+func (r *providerRunner) getResumeSessionID() string {
+	r.resumeMu.Lock()
+	defer r.resumeMu.Unlock()
+	return r.resumeSessionID
+}
+
+func (r *providerRunner) setResumeSessionID(id string) {
+	r.resumeMu.Lock()
+	defer r.resumeMu.Unlock()
+	r.resumeSessionID = id
 }
 
 func (r *providerRunner) beginTurnObservation() uint64 {
@@ -1980,7 +2002,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				workDir:      session.WorktreePath,
 			}
 		} else if agentModel.Provider == ProviderAgy {
-			// agy does not expose a resumable conversation ID, so each in-process turn is independent.
+			// Antigravity uses the shared ephemeral-provider runner.
 			agyOpts, agyLogHint, agyStderrHint := m.agyProviderOptions(session.ID)
 			if agyLogHint != "" {
 				m.addOutput(session.ID, OutputLine{

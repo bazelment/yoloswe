@@ -212,11 +212,14 @@ vs. the deleted Gemini provider (and vs. Claude/Codex) to be aware of:
   `ToolCompleteAgentEvent`, so consumers that relied on Gemini's tool-start
   events for file-change detection must use the git-diff workaround instead
   (`detectFileChangesGit`, already used for Codex).
-- There is no `AgyLongRunningProvider`. `AgyProvider.Execute` can pass a
-  caller-supplied `ResumeSessionID` to agy as `--conversation`, but it does
-  not return the conversation ID for a new turn; higher-level sessions cannot
-  automatically continue a multi-turn agy conversation as they could with the
-  old `GeminiLongRunningProvider`.
+- There is no `AgyLongRunningProvider` — agy has no persistent multi-turn
+  session concept exposed, unlike the old `GeminiLongRunningProvider`. Turn-to-
+  turn continuity is still preserved for non-long-running sessions, though:
+  `AgyProvider.Execute` returns the turn's `conversation_id` as
+  `AgentResult.SessionID`, and `providerRunner.RunTurn` (bramble/session)
+  threads it back in as the next turn's `ResumeSessionID` via
+  `--conversation`, so a bramble session driven through `providerRunner`
+  keeps its agy conversation across turns without a long-running provider.
 
 **Session wrappers (higher-level convenience):**
 | Type | File | Purpose |

@@ -49,8 +49,11 @@ func newProcessManager(prompt string, config SessionConfig) *processManager {
 // below is not a correctness fix. Emitting every flag - ExtraArgs included -
 // before the trailing `-p <prompt>` pair keeps the list in one canonical
 // shape, which is what the argument-order tests pin. Keep -p <prompt> last.
+//
+// JSON output provides conversation_id and usage without changing event timing:
+// this wrapper already buffers the entire print-mode response before emitting it.
 func (pm *processManager) BuildCLIArgs() []string {
-	var args []string
+	args := []string{"--output-format", "json"}
 
 	if pm.config.Model != "" {
 		args = append(args, "--model", pm.config.Model)

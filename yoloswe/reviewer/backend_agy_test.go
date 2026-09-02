@@ -2,6 +2,8 @@ package reviewer
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,19 +12,71 @@ import (
 )
 
 // fakeAgyCLI writes an executable shell script standing in for the agy
-// binary, driven purely by exit code and stdout — the same contract
+// binary, driven purely by exit code and response text — the same contract
 // processManager.Start reads (see agent-cli-wrapper/agy/process.go). This
 // exercises RunPrompt end to end (argv construction, event loop, resume
 // bookkeeping) without a live agy CLI, deterministically.
-func fakeAgyCLI(t *testing.T, stdout string, exitCode int) string {
+//
+// On success (exitCode 0), it prints a realistic --output-format json
+// envelope (see resultPayload in agent-cli-wrapper/agy/session.go) with
+// response set to responseText, so the real parser in that package — which
+// every RunPrompt call goes through unconditionally — has something valid to
+// parse. On failure (nonzero exitCode) it prints nothing, matching a real
+// agy process that dies before it can write its result blob; the wrapper's
+// process-error path takes over and never reaches the JSON parser.
+//
+// It also asserts the invocation actually requested --output-format json,
+// so a future drift in BuildCLIArgs (agent-cli-wrapper/agy/process.go) that
+// silently dropped it would fail here instead of surfacing only as a
+// downstream parse error.
+func fakeAgyCLI(t *testing.T, responseText string, exitCode int) string {
+	t.Helper()
+	return fakeAgyCLIWithConversation(t, responseText, exitCode, "conv-fake")
+}
+
+// fakeAgyCLIWithConversation is fakeAgyCLI with an explicit conversation_id,
+// for tests that need control over whether the echoed id matches (or does
+// not match) a requested resume.
+func fakeAgyCLIWithConversation(t *testing.T, responseText string, exitCode int, conversationID string) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agy")
-	script := "#!/bin/sh\nprintf %s " + shellQuote(stdout) + "\nexit " + strconv.Itoa(exitCode) + "\n"
+
+	var body string
+	if exitCode == 0 {
+		envelope := fmt.Sprintf(
+			`{"conversation_id":%s,"status":"SUCCESS","response":%s,`+
+				`"duration_seconds":0.5,"num_turns":1,`+
+				`"usage":{"input_tokens":100,"output_tokens":2,"thinking_tokens":0,`+
+				`"cache_read_tokens":0,"total_tokens":102}}`,
+			mustJSONString(t, conversationID),
+			mustJSONString(t, responseText+"\n"),
+		)
+		body = "printf %s " + shellQuote(envelope) + "\n"
+	}
+
+	script := "#!/bin/sh\n" +
+		"case \" $* \" in\n" +
+		"  *' --output-format json '*) ;;\n" +
+		"  *) echo 'fakeAgyCLI: missing --output-format json' >&2; exit 99 ;;\n" +
+		"esac\n" +
+		body +
+		"exit " + strconv.Itoa(exitCode) + "\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake agy CLI: %v", err)
 	}
 	return path
+}
+
+// mustJSONString marshals s as a JSON string literal for embedding in the
+// fake CLI's hand-built envelope above.
+func mustJSONString(t *testing.T, s string) string {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal response text: %v", err)
+	}
+	return string(b)
 }
 
 func shellQuote(s string) string {
@@ -89,10 +143,28 @@ func TestAgyBackend_RunPrompt_ProcessFailure(t *testing.T) {
 	}
 }
 
-func TestAgyBackend_RunPrompt_ResumeStatusUnverifiedOnSuccess(t *testing.T) {
+func TestAgyBackend_RunPrompt_ResumeStatusOKOnSuccess(t *testing.T) {
 	b := &agyBackend{
 		config:  Config{Model: "gemini-3.8-flash-medium", ResumeSessionID: "conv-123"},
-		cliPath: fakeAgyCLI(t, "AGYOK", 0),
+		cliPath: fakeAgyCLIWithConversation(t, "AGYOK", 0, "conv-123"),
+	}
+
+	result, err := b.RunPrompt(context.Background(), "continue review", &recordingHandler{})
+	if err != nil {
+		t.Fatalf("RunPrompt failed: %v", err)
+	}
+	if result.ResumeStatus != ResumeStatusOK {
+		t.Errorf("ResumeStatus = %q, want %q", result.ResumeStatus, ResumeStatusOK)
+	}
+}
+
+// TestAgyBackend_RunPrompt_ResumeStatusUnverifiedOnMismatch pins the other
+// half of real verification: agy completing successfully is not enough by
+// itself, the echoed conversation_id must actually match what was requested.
+func TestAgyBackend_RunPrompt_ResumeStatusUnverifiedOnMismatch(t *testing.T) {
+	b := &agyBackend{
+		config:  Config{Model: "gemini-3.8-flash-medium", ResumeSessionID: "conv-123"},
+		cliPath: fakeAgyCLIWithConversation(t, "AGYOK", 0, "conv-999"),
 	}
 
 	result, err := b.RunPrompt(context.Background(), "continue review", &recordingHandler{})
@@ -100,7 +172,7 @@ func TestAgyBackend_RunPrompt_ResumeStatusUnverifiedOnSuccess(t *testing.T) {
 		t.Fatalf("RunPrompt failed: %v", err)
 	}
 	if result.ResumeStatus != ResumeStatusUnverified {
-		t.Errorf("ResumeStatus = %q, want %q", result.ResumeStatus, ResumeStatusUnverified)
+		t.Errorf("ResumeStatus = %q, want %q (echoed conversation_id did not match request)", result.ResumeStatus, ResumeStatusUnverified)
 	}
 }
 

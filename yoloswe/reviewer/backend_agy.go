@@ -12,10 +12,29 @@ import (
 // has no concept of a long-running process to reuse across turns; resume is
 // requested via --conversation on every invocation instead.
 //
-// agy emits no tool-call events and does not report the conversation it used.
-// A requested resume therefore remains ResumeStatusUnverified.
+// # No tool-call events
+//
+// agy's print-mode wire format only exposes TextEvent, TurnCompleteEvent, and
+// ErrorEvent (see agent-cli-wrapper/agy/events.go) — there is no tool-start or
+// tool-complete signal to bridge, unlike the gemini/ACP backend this replaces.
+// RunPrompt therefore never calls handler.OnToolStart/OnToolComplete. Callers
+// that need to know what files an agy review touched must fall back to
+// git-diff-based detection (see multiagent/agent/session.go's
+// detectFileChangesGit, the same workaround already used for codex).
+//
+// # Resume verification
+//
+// agy's --output-format json result carries conversation_id, so a requested
+// resume is verified by comparing it against the id we asked for: a match
+// promotes ResumeStatusUnverified to ResumeStatusOK, a mismatch (or a turn
+// that errors before completion) leaves it Unverified. This is a real check,
+// not an optimistic promotion on success alone — an unrecognized
+// --conversation id would otherwise surface only as agy's own turn failure,
+// indistinguishable from any other error.
 type agyBackend struct {
-	// cliPath is a test-only override; empty resolves agy from PATH.
+	// cliPath overrides the agy binary path. Empty means "agy" (agy's own
+	// default, resolved via $PATH) — only tests set this, to point RunPrompt
+	// at a fake binary instead of a live agy install.
 	cliPath string
 	config  Config
 }
@@ -68,7 +87,8 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 	}
 
 	if handler != nil {
-		// agy has no Ready-equivalent event with a session id.
+		// agy emits no Ready-equivalent event with a session id, so report
+		// what we configured (empty session id) just like the model.
 		handler.OnSessionInfo("", b.config.Model)
 	}
 
@@ -77,6 +97,7 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 	var success bool
 	var turnErr error
 	var eventErr error
+	var conversationID string
 	sawTurnComplete := false
 
 loop:
@@ -99,6 +120,7 @@ loop:
 				sawTurnComplete = true
 				durationMs = e.DurationMs
 				success = e.Success
+				conversationID = e.ConversationID
 				if e.Error != nil {
 					turnErr = e.Error
 				} else {
@@ -121,6 +143,13 @@ loop:
 			return reviewPartialResult(resumeStatus, &bridgeResult{responseText: responseText, durationMs: durationMs}, fmt.Errorf("agy: %w", eventErr))
 		}
 		return reviewPartialResult(resumeStatus, &bridgeResult{responseText: responseText, durationMs: durationMs}, fmt.Errorf("agy: session ended without result"))
+	}
+
+	if resumeStatus == ResumeStatusUnverified && turnErr == nil && conversationID == b.config.ResumeSessionID {
+		// The turn completed with no error and agy echoed back the exact
+		// conversation id we asked to resume — a real check, not an
+		// optimistic promotion on success alone. See the type doc.
+		resumeStatus = ResumeStatusOK
 	}
 
 	if turnErr != nil {

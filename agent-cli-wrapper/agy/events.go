@@ -12,11 +12,23 @@ type TextEvent struct {
 
 func (e TextEvent) eventType() string { return "text" }
 
-// TurnCompleteEvent marks the end of a print-mode invocation.
+// Usage carries agy's token accounting.
+type Usage struct {
+	InputTokens     int `json:"input_tokens"`
+	OutputTokens    int `json:"output_tokens"`
+	ThinkingTokens  int `json:"thinking_tokens"`
+	CacheReadTokens int `json:"cache_read_tokens"`
+	TotalTokens     int `json:"total_tokens"`
+}
+
+// TurnCompleteEvent marks the end of a print-mode invocation. ConversationID
+// resumes later turns, and Usage comes from agy's JSON result.
 type TurnCompleteEvent struct {
-	Error      error
-	DurationMs int64
-	Success    bool
+	Error          error
+	ConversationID string
+	DurationMs     int64
+	Usage          Usage
+	Success        bool
 }
 
 func (e TurnCompleteEvent) eventType() string { return "turn_complete" }
