@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
@@ -104,11 +103,7 @@ func (p *AgyProvider) Close() error {
 	return nil
 }
 
-// agyEffortLevel maps the neutral agent.EffortLevel to the string agy's
-// --effort flag accepts ("low", "medium", "high"). EffortMax has no distinct
-// agy level and clamps to "high". EffortAuto and the empty level both mean
-// "use agy's own default" and return "", which agy_provider.go's caller
-// treats as "omit --effort".
+// agyEffortLevel maps the neutral agent.EffortLevel to agy's --effort values.
 func agyEffortLevel(level EffortLevel) string {
 	switch level {
 	case EffortAuto, "":
@@ -120,5 +115,5 @@ func agyEffortLevel(level EffortLevel) string {
 	case EffortHigh, EffortMax:
 		return "high"
 	}
-	panic(fmt.Sprintf("BUG: unhandled EffortLevel %q in agyEffortLevel", level))
+	return ""
 }

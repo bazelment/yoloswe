@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -506,6 +507,30 @@ func TestProvider_ValidateGate(t *testing.T) {
 						"%s.Execute (%s) error should contain %q", name, shape, tc.wantErr)
 				})
 			}
+		})
+	}
+}
+
+func TestProvider_ValidateGateRejectsUnparsedEffort(t *testing.T) {
+	t.Parallel()
+
+	providerCtors := map[string]func() Provider{
+		"claude": func() Provider { return NewClaudeProvider() },
+		"cursor": func() Provider { return NewCursorProvider() },
+		"codex":  func() Provider { return NewCodexProvider() },
+		"agy":    func() Provider { return NewAgyProvider() },
+	}
+	for name, ctor := range providerCtors {
+		name, ctor := name, ctor
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			p := ctor()
+			defer func() { _ = p.Close() }()
+			_, err := p.Execute(ctx, "irrelevant", nil,
+				WithProviderEffort(EffortLevel("bogus")))
+			require.ErrorIs(t, err, ErrInvalidEffort)
 		})
 	}
 }
