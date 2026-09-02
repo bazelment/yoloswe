@@ -89,7 +89,6 @@ func TestAgySessionOpts_Effort(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		model  string
 		effort EffortLevel
 		want   string
 	}{
@@ -99,21 +98,97 @@ func TestAgySessionOpts_Effort(t *testing.T) {
 		{name: "medium", effort: EffortMedium, want: "medium"},
 		{name: "high", effort: EffortHigh, want: "high"},
 		{name: "max clamps to high", effort: EffortMax, want: "high"},
-		// agy rejects --model <id ending in a level> together with a
-		// conflicting --effort, so the level pinned by the model wins.
-		{name: "model pinning low drops a conflicting effort", model: "gemini-3.8-flash-low", effort: EffortHigh, want: ""},
-		{name: "model pinning high drops a matching effort too", model: "gemini-3.1-pro-high", effort: EffortHigh, want: ""},
-		{name: "unpinned model still carries effort", model: "gemini-99-ultra", effort: EffortLow, want: "low"},
 	}
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var got agy.SessionConfig
-			for _, opt := range agySessionOpts(ExecuteConfig{Model: tt.model, Effort: tt.effort}) {
+			for _, opt := range agySessionOpts(ExecuteConfig{Effort: tt.effort}) {
 				opt(&got)
 			}
 			assert.Equal(t, tt.want, got.Effort)
+		})
+	}
+}
+
+// agy encodes the reasoning level both in the model id and in --effort, and
+// rejects a command line carrying two that disagree. Pin the reconciliation
+// against the config that actually reaches the CLI: a requested level must be
+// honored by retargeting the model, never silently dropped, and never
+// retargeted onto a variant agy's catalog does not have.
+func TestReconcileAgyEffort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		model      string
+		effort     string
+		wantModel  string
+		wantEffort string
+	}{
+		{name: "no effort requested leaves the model alone",
+			model: "gemini-3.8-flash-low", effort: "", wantModel: "gemini-3.8-flash-low", wantEffort: ""},
+		{name: "unpinned model keeps the effort flag",
+			model: "agy-custom", effort: "high", wantModel: "agy-custom", wantEffort: "high"},
+		{name: "no model at all keeps the effort flag",
+			model: "", effort: "high", wantModel: "", wantEffort: "high"},
+		{name: "matching level drops the redundant flag",
+			model: "gemini-3.8-flash-high", effort: "high", wantModel: "gemini-3.8-flash-high", wantEffort: ""},
+		{name: "conflicting level retargets the model",
+			model: "gemini-3.8-flash-low", effort: "high", wantModel: "gemini-3.8-flash-high", wantEffort: ""},
+		{name: "retarget also works downward",
+			model: "gemini-3.1-pro-high", effort: "low", wantModel: "gemini-3.1-pro-low", wantEffort: ""},
+		// agy has no gemini-3.1-pro-medium; synthesizing one would trade a
+		// conflict error for an "unrecognized model" error.
+		{name: "uncurated retarget is abandoned, model's own level stands",
+			model: "gemini-3.1-pro-high", effort: "medium", wantModel: "gemini-3.1-pro-high", wantEffort: ""},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := agy.SessionConfig{Model: tt.model, Effort: tt.effort}
+			reconcileAgyEffort(&got)
+			assert.Equal(t, tt.wantModel, got.Model, "model")
+			assert.Equal(t, tt.wantEffort, got.Effort, "effort")
+		})
+	}
+}
+
+// The conflict is resolved against the MERGED config, so a model pinned by the
+// provider's constructor counts too - the shape the conformance test uses.
+func TestAgyProvider_ConstructorPinnedModelReconcilesEffort(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name       string
+		ctorModel  string
+		effort     EffortLevel
+		wantModel  string
+		wantEffort string
+	}{
+		{name: "constructor model retargeted to the requested level",
+			ctorModel: "gemini-3.8-flash-low", effort: EffortHigh,
+			wantModel: "gemini-3.8-flash-high", wantEffort: ""},
+		{name: "constructor model already at the requested level",
+			ctorModel: "gemini-3.1-pro-low", effort: EffortLow,
+			wantModel: "gemini-3.1-pro-low", wantEffort: ""},
+	} {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := NewAgyProvider(agy.WithModel(tt.ctorModel))
+			defer p.Close()
+
+			// Go through the same assembly Execute uses, so dropping the
+			// reconciliation pass from it fails this test.
+			var got agy.SessionConfig
+			for _, opt := range p.sessionOptsFor(ExecuteConfig{Effort: tt.effort}) {
+				opt(&got)
+			}
+			assert.Equal(t, tt.wantModel, got.Model, "model")
+			assert.Equal(t, tt.wantEffort, got.Effort, "effort")
 		})
 	}
 }

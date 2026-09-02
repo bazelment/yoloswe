@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -140,16 +141,29 @@ func TestProviderEffortMatrix(t *testing.T) {
 				if level == "" {
 					return nil
 				}
-				// Assert the level actually reaches agy's session options
+				// Assert the level actually reaches the agy command line
 				// rather than discarding the mapping: re-adding an
 				// ErrEffortUnsupported guard, or dropping the WithEffort
 				// wiring, must fail this entry.
-				var got agy.SessionConfig
-				for _, opt := range agySessionOpts(ExecuteConfig{Effort: level}) {
-					opt(&got)
-				}
-				if level != EffortAuto && got.Effort == "" {
-					return fmt.Errorf("agy dropped effort %q before it reached the CLI", level)
+				//
+				// Run it with a curated model too. agy encodes the level in
+				// the model id, so effort survives there as a suffix rather
+				// than as --effort; a level that reaches neither has been
+				// silently dropped, which is what this table exists to catch.
+				for _, model := range []string{"", "gemini-3.8-flash-low"} {
+					var got agy.SessionConfig
+					for _, opt := range agySessionOpts(ExecuteConfig{Model: model, Effort: level}) {
+						opt(&got)
+					}
+					reconcileAgyEffort(&got)
+					if level == EffortAuto {
+						continue
+					}
+					want := agyEffortLevel(level)
+					if got.Effort != want && !strings.HasSuffix(got.Model, "-"+want) {
+						return fmt.Errorf("agy dropped effort %q for model %q: got model=%q effort=%q",
+							level, model, got.Model, got.Effort)
+					}
 				}
 				return nil
 			},
