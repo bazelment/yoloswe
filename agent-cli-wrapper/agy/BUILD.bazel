@@ -19,5 +19,8 @@ go_test(
     name = "agy_test",
     srcs = ["process_test.go"],
     embed = [":agy"],
-    deps = ["@com_github_stretchr_testify//assert"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
 )

@@ -32,9 +32,22 @@ func newProcessManager(prompt string, config SessionConfig) *processManager {
 }
 
 // BuildCLIArgs builds the agy print-mode argument list.
+//
+// agy's -p/--print flag greedily consumes the very next token on the command
+// line as the prompt, whatever that token is - including another flag name
+// (e.g. `-p "hi" --model M` fails with "-p took \"--model\" as its prompt").
+// To make that mistake structurally impossible, every flag is emitted BEFORE
+// the trailing -p <prompt> pair, including ExtraArgs. Keep -p <prompt> last;
+// do not append anything after it.
 func (pm *processManager) BuildCLIArgs() []string {
-	args := []string{"-p", pm.prompt}
+	var args []string
 
+	if pm.config.Model != "" {
+		args = append(args, "--model", pm.config.Model)
+	}
+	if pm.config.Effort != "" {
+		args = append(args, "--effort", pm.config.Effort)
+	}
 	if pm.config.PrintTimeout > 0 {
 		args = append(args, "--print-timeout", formatDuration(pm.config.PrintTimeout))
 	}
@@ -54,6 +67,7 @@ func (pm *processManager) BuildCLIArgs() []string {
 		args = append(args, "--sandbox")
 	}
 	args = append(args, pm.config.ExtraArgs...)
+	args = append(args, "-p", pm.prompt)
 	return args
 }
 
