@@ -25,9 +25,10 @@ type paneIdleProbe struct {
 	workingInFooter []string
 	// confirmations overrides paneIdleConfirmations for noisy chrome.
 	confirmations int
-	// correctsPrematureIdle keeps polling an idle session whose hook can fire
-	// before the prompt is ready, so a live turn can be restored to running.
-	correctsPrematureIdle bool
+	// correctsStaleIdle keeps polling an idle session whose pane can become
+	// working without Bramble observing an idle-to-running edge. This covers a
+	// premature completion hook and work started by the provider itself.
+	correctsStaleIdle bool
 }
 
 // paneIdleProbes lists only providers whose chrome is understood. A wrong idle
@@ -43,16 +44,19 @@ var paneIdleProbes = map[string]paneIdleProbe{
 	// before the pane shows idle — while "Working (… • esc to interrupt)" is
 	// still on screen. The probe corrects that premature idle back to running.
 	ProviderCodex: {
-		promptMarkers:         []string{"Ask Codex to do anything"},
-		workingInFooter:       []string{"esc to interrupt"},
-		correctsPrematureIdle: true,
+		promptMarkers:     []string{"Ask Codex to do anything"},
+		workingInFooter:   []string{"esc to interrupt"},
+		correctsStaleIdle: true,
 	},
-	// Claude normally reports idle through its Stop hook; this is the fallback
-	// when that hook never arrives. Its chrome needs claudePaneJudge because "no
-	// spinner" is not enough to call the pane idle. correctsPrematureIdle stays
-	// off because the hook is not premature.
+	// Claude normally reports idle through its Stop hook. Its pane probe is both
+	// the fallback when that hook never arrives and the running-edge detector for
+	// native team messages and monitor events. Those start turns without going
+	// through Bramble's pane writer, so its recorded status can remain idle while
+	// Claude is working. Its chrome needs claudePaneJudge because "no spinner" is
+	// not enough to call the pane idle.
 	ProviderClaude: {
-		judge: claudePaneJudge,
+		judge:             claudePaneJudge,
+		correctsStaleIdle: true,
 		// Five, not two. Claude's working chrome is often absent from any given
 		// frame, so agreement has to be sustained before it means anything.
 		confirmations: 5,
@@ -350,13 +354,21 @@ type paneIdleTracker struct {
 	epoch uint64
 }
 
-// correctsPrematureIdle reports whether this provider's pane is worth reading
-// while the session is already idle.
-func (p *paneIdleTracker) correctsPrematureIdle() bool {
+// correctsStaleIdle reports whether this provider's pane is worth reading while
+// the session is already idle.
+func (p *paneIdleTracker) correctsStaleIdle() bool {
 	if p == nil {
 		return false
 	}
-	return paneIdleProbes[p.provider].correctsPrematureIdle
+	return paneIdleProbes[p.provider].correctsStaleIdle
+}
+
+// shouldPollPaneIdle reports whether a monitor should capture a pane for this
+// session state. Idle panes are normally skipped, except for providers whose
+// status can become stale without Bramble observing a new turn.
+func shouldPollPaneIdle(tracker *paneIdleTracker, status SessionStatus) bool {
+	return tracker != nil && (status == StatusRunning ||
+		(status == StatusIdle && tracker.correctsStaleIdle()))
 }
 
 // newPaneIdleTracker returns a tracker for a provider that needs pane evidence,

@@ -81,10 +81,12 @@ func TestEveryTmuxProviderHasAProbe(t *testing.T) {
 		assert.NotNil(t, newPaneIdleTracker(provider), "provider %q", provider)
 	}
 
-	// Only codex's hook fires early enough to need correcting.
-	assert.True(t, newPaneIdleTracker(ProviderCodex).correctsPrematureIdle())
-	assert.False(t, newPaneIdleTracker(ProviderClaude).correctsPrematureIdle(),
-		"claude's hook is not premature; re-reading every idle claude pane buys nothing")
+	// Codex needs correction after its hook fires early. Claude also needs it:
+	// native team messages and monitor events can start a new turn without going
+	// through Bramble's pane writer, so the previous turn's idle status is stale.
+	assert.True(t, newPaneIdleTracker(ProviderCodex).correctsStaleIdle())
+	assert.True(t, newPaneIdleTracker(ProviderClaude).correctsStaleIdle(),
+		"claude can start a turn outside Bramble while its recorded status is still idle")
 }
 
 // TestTrackerNeedsConsecutiveObservations stops one half-painted frame from
@@ -227,6 +229,28 @@ func TestCodexPrematureIdleReturnsToRunning(t *testing.T) {
 		"two in a row means the turn really is still running")
 }
 
+// TestClaudeExternalTurnStartReturnsToRunning covers work that starts without
+// Bramble typing into the pane. Claude team messages and monitor events can
+// begin a turn natively, so no send-input path is available to mark it running.
+// The pane monitor must correct the stale idle status once the working chrome
+// has remained stable for Claude's full confirmation window.
+func TestClaudeExternalTurnStartReturnsToRunning(t *testing.T) {
+	t.Parallel()
+
+	tr := newPaneIdleTracker(ProviderClaude)
+	require.True(t, tr.correctsStaleIdle(),
+		"an idle Claude session must still be polled for externally started work")
+	pane := claudePane("✽ Smooshing… (1m 31s · thinking)")
+
+	need := tr.confirmationsNeeded()
+	for i := 1; i < need; i++ {
+		require.Equal(t, paneIdleActionNone, decidePaneIdlePoll(tr, StatusIdle, pane),
+			"working observation %d of %d must not flap the state", i, need)
+	}
+	assert.Equal(t, paneIdleActionMarkRunning, decidePaneIdlePoll(tr, StatusIdle, pane),
+		"a sustained working pane must correct the stale idle status")
+}
+
 // TestStrayWorkingFrameDoesNotResurrect is why the correction is confirmed. It
 // used to fire on a single frame while going idle needed two, and because every
 // resurrection re-arms idle reporting, a pane flapping around the marker sent
@@ -263,18 +287,41 @@ func TestTerminalSessionNeverResurrectedByProbe(t *testing.T) {
 	}
 }
 
-// TestOnlyHookCorrectingProvidersArePolledWhileIdle keeps idle-pane polling
-// limited to providers whose hook can fire early. Cursor has no hook to correct.
-// Polling idle sessions without a correction to make buys tmux I/O and nothing else.
-func TestOnlyHookCorrectingProvidersArePolledWhileIdle(t *testing.T) {
+// TestOnlyProvidersWhoseIdleCanBecomeStaleArePolledWhileIdle keeps idle-pane
+// polling limited to providers with a state transition to recover. Cursor has
+// no completion hook and receives turns through Bramble, so it has no missing
+// running edge. Claude can start turns from native team and monitor messages.
+func TestOnlyProvidersWhoseIdleCanBecomeStaleArePolledWhileIdle(t *testing.T) {
 	t.Parallel()
 
-	assert.True(t, newPaneIdleTracker(ProviderCodex).correctsPrematureIdle(),
+	assert.True(t, newPaneIdleTracker(ProviderCodex).correctsStaleIdle(),
 		"codex's notify hook fires early; its pane must still be read when idle")
-	assert.False(t, newPaneIdleTracker(ProviderCursor).correctsPrematureIdle(),
+	assert.False(t, newPaneIdleTracker(ProviderCursor).correctsStaleIdle(),
 		"cursor has no hook to correct; polling it while idle is pure cost")
-	assert.False(t, newPaneIdleTracker(ProviderClaude).correctsPrematureIdle(),
-		"a provider with no probe at all has no tracker to ask")
+	assert.True(t, newPaneIdleTracker(ProviderClaude).correctsStaleIdle(),
+		"claude can start native work without Bramble observing the running edge")
+}
+
+func TestPaneIdlePollingEligibility(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		provider string
+		status   SessionStatus
+		want     bool
+	}{
+		{"running claude", ProviderClaude, StatusRunning, true},
+		{"idle claude with an externally started turn", ProviderClaude, StatusIdle, true},
+		{"idle codex after an early hook", ProviderCodex, StatusIdle, true},
+		{"idle cursor has no missed running edge", ProviderCursor, StatusIdle, false},
+		{"terminal claude", ProviderClaude, StatusCompleted, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, shouldPollPaneIdle(newPaneIdleTracker(tc.provider), tc.status))
+		})
+	}
 }
 
 // TestPaneIdleTrackerComesFromTheStoredModel pins the re-adopt input:

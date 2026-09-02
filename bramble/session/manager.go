@@ -2847,21 +2847,21 @@ func (m *Manager) SetSessionRunning(id SessionID) bool {
 // transition it causes both happen between two polls, so status alone cannot
 // show that boundary.
 //
-// An *idle* session is a candidate only for a provider whose completion hook
-// can fire early: reading its pane is the one thing that can put it back to
-// running, correcting a premature idle without relaxing SetSessionIdle's
-// compare-and-set. Terminal sessions are never resurrected.
+// An *idle* session is a candidate only for a provider whose idle status can
+// become stale: reading its pane is the one thing that can put it back to
+// running, either after a premature completion hook or work the provider
+// starts without Bramble observing the running edge. Terminal sessions are
+// never resurrected.
 func (m *Manager) pollPaneIdle(tracker *paneIdleTracker, id SessionID, status SessionStatus, turnEpoch uint64, windowTarget string) {
-	if tracker == nil {
-		return
-	}
-	// A provider whose hook can fire early needs a pane read even once marked
-	// idle — that read is the only thing that can put it back to running.
-	// Everything else is probed only while running, when the pane can
-	// establish the idle transition. Which providers those are is the probe
-	// table's business, not this loop's.
-	if status != StatusRunning && !(status == StatusIdle && tracker.correctsPrematureIdle()) {
-		tracker.reset()
+	// A provider whose idle status can become stale needs a pane read even once
+	// marked idle — that read is the only thing that can put it back to running.
+	// Everything else is probed only while running, when the pane can establish
+	// the idle transition. Which providers those are is the probe table's
+	// business, not this loop's.
+	if !shouldPollPaneIdle(tracker, status) {
+		if tracker != nil {
+			tracker.reset()
+		}
 		return
 	}
 	tracker.forTurn(turnEpoch)
