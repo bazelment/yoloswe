@@ -7,9 +7,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
+
+// agyFlashModel is the default model for AgyQueryFunc. Summarization is a
+// cheap, high-volume task (one call per session/turn), so the flash tier's
+// lower cost and latency matter more than the pro tier's extra reasoning
+// depth; "low" effort keeps each call fast for what is a short, templated
+// summarization prompt.
+const agyFlashModel = "gemini-3.8-flash-low"
 
 // QueryFunc sends a prompt to an LLM and returns the response text.
 type QueryFunc func(ctx context.Context, prompt string) (string, error)
@@ -28,37 +35,19 @@ func HaikuQueryFunc() QueryFunc {
 	}
 }
 
-// GeminiQueryFunc returns a QueryFunc that uses Gemini Flash via ACP.
-// The ACP client and session are lazily initialized on first call and reused
-// across subsequent calls to avoid spawning a new subprocess per invocation.
-func GeminiQueryFunc() QueryFunc {
-	var (
-		mu     sync.Mutex
-		client *acp.Client
-		sess   *acp.Session
-	)
+// AgyQueryFunc returns a QueryFunc that uses agy's Gemini Flash tier.
+// agy is a print-mode CLI wrapper (one subprocess per call, no persistent
+// session), which suits summarization's one-shot request/response shape.
+func AgyQueryFunc() QueryFunc {
 	return func(ctx context.Context, prompt string) (string, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if client == nil {
-			client = acp.NewClient()
-			if err := client.Start(ctx); err != nil {
-				client = nil
-				return "", fmt.Errorf("gemini start: %w", err)
-			}
-			var err error
-			sess, err = client.NewSession(ctx)
-			if err != nil {
-				client.Stop()
-				client = nil
-				return "", fmt.Errorf("gemini session: %w", err)
-			}
-		}
-		result, err := sess.Prompt(ctx, prompt)
+		result, err := agy.Query(ctx, prompt,
+			agy.WithModel(agyFlashModel),
+			agy.WithEffort("low"),
+		)
 		if err != nil {
-			return "", fmt.Errorf("gemini prompt: %w", err)
+			return "", fmt.Errorf("agy query: %w", err)
 		}
-		return result.FullText, nil
+		return result.Text, nil
 	}
 }
 

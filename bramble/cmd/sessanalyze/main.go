@@ -137,7 +137,7 @@ func parseFlags(args []string) config {
 	fs.StringVar(&cfg.untilStr, "until", "", "filter sessions up to and including this time (e.g. '2026-04-23T12:00:00Z'); stats mode only")
 	fs.BoolVar(&cfg.allProjects, "all", false, "scan all projects under ~/.claude/projects/")
 	fs.BoolVar(&cfg.summarize, "summarize", false, "use an LLM to generate session summaries")
-	fs.StringVar(&cfg.modelStr, "model", "haiku", "model for summarization: haiku (default) or gemini")
+	fs.StringVar(&cfg.modelStr, "model", "haiku", "model for summarization: haiku (default) or agy")
 	fs.StringVar(&cfg.pricingFile, "pricing-file", "", "JSON file with model pricing table for estimated cost")
 	fs.IntVar(&cfg.limit, "n", 0, "limit to the N most recent sessions (0=no limit)")
 	fs.IntVar(&cfg.statsMaxRows, "max-rows", 25, "max rows per stats breakdown table")
@@ -152,8 +152,8 @@ func parseFlags(args []string) config {
 
 func buildQueryFunc(model string) sessionanalysis.QueryFunc {
 	switch model {
-	case "gemini":
-		return sessionanalysis.GeminiQueryFunc()
+	case "agy":
+		return sessionanalysis.AgyQueryFunc()
 	default:
 		return sessionanalysis.HaikuQueryFunc()
 	}
