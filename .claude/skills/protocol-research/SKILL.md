@@ -163,9 +163,12 @@ Update or create documentation:
   `bramble/sessionanalysis/summarize.go`, unrelated to the agy migration.
 
 ### Agy Protocol
-- **Session model**: no persistent session — one subprocess invocation (`agy -p
-  "<prompt>" [--model ...] [--effort ...] [--print-timeout ...] ...`) per `Execute`
-  call; stdout is parsed for the response.
+- **Session model**: one subprocess invocation (`agy -p "<prompt>"
+  [--model ...] [--effort ...] [--print-timeout ...] ...) per `Execute` call;
+  stdout is parsed for the response. A caller may supply `--conversation` to
+  resume an existing agy conversation, but the current wrapper does not parse
+  or return a new conversation ID, so higher-level sessions cannot resume
+  automatically.
 - **Events**: `TextEvent`, `TurnCompleteEvent`, `ErrorEvent` only
   (`agent-cli-wrapper/agy/events.go`) — no tool-call or thinking events, no
   JSON-RPC/streaming wire format to trace the way Claude/Codex/ACP have.

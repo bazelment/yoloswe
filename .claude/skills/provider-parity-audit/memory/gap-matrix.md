@@ -10,7 +10,7 @@ print-mode CLI wrapper with materially different — and mostly worse —
 capabilities. The old Gemini column is preserved below for history but is
 **not a description of the current Agy provider**. Re-run
 `/provider-parity-audit` to regenerate this matrix against Agy; until then,
-use the "Agy (known, unaudited)" column below rather than the stale "Gemini"
+use the "Agy (known, partially audited)" column below rather than the stale "Gemini"
 column.
 
 ## Status: Initial — needs first audit pass (against Agy)
@@ -19,10 +19,10 @@ Run `/provider-parity-audit` to populate this matrix with real data.
 
 ## Known Gaps (from conformance tests)
 
-| Capability | Claude | Codex | Gemini (historical, deleted provider) | Agy (known, unaudited) | Conformance Test | Notes |
+| Capability | Claude | Codex | Gemini (historical, deleted provider) | Agy (known, partially audited) | Conformance Test | Notes |
 |-----------|--------|-------|--------|--------|-----------------|-------|
 | Basic execution | supported | supported | supported | supported | BasicPrompt | All return text results |
-| Event streaming | supported | missing | supported | **missing** | EventsStreamDuringExecution | Codex `hasEvents: false`. Agy print-mode only emits Text/TurnComplete/Error — no tool events. |
+| Event streaming | supported | missing | supported | **partial** | EventsStreamDuringExecution | Codex `hasEvents: false`. Agy streams Text/TurnComplete events but has no tool events. |
 | Long-running sessions | supported | missing | supported | **missing** | LongRunningMultiTurn | Codex uses ephemeral threads. Agy implements `Provider` only, no `LongRunningProvider`. |
 | Permission callbacks | supported | partial | supported | unaudited | PermissionCallback | Codex uses approval policies only |
 | Token usage (input/output) | supported | supported | missing | missing | BasicPrompt | Agy returns zeros (same gap Gemini had) |
@@ -30,6 +30,6 @@ Run `/provider-parity-audit` to populate this matrix with real data.
 | Reasoning effort | n/a (own knob) | supported | not supported (rejected) | **supported** | — | `ProviderSupportsEffort(ProviderAgy)==true`, low/medium/high, max clamps to high. This is a capability GAIN over the old Gemini provider, not a gap. |
 | Thinking/reasoning events | supported | missing | supported | **missing** | EventsStreamDuringExecution | Codex has no thinking events. Agy has no thinking events either (print-mode has no thinking delta). |
 | Tool start/end events | supported | partial | supported | **missing** | EventsStreamDuringExecution | Codex maps Bash only. Agy emits none — use git-diff detection (`detectFileChangesGit`) instead. |
-| Context cancellation | supported | supported | supported | unaudited | ContextCancellation | All handle gracefully |
-| Error on invalid workdir | supported | missing | supported | unaudited | ErrorOnInvalidWorkDir | Codex doesn't error |
+| Context cancellation | supported | supported | supported | supported | ContextCancellation | All handle gracefully |
+| Error on invalid workdir | supported | missing | supported | supported | ErrorOnInvalidWorkDir | Codex doesn't error; Agy returns an error. |
 | File tool tracking | supported | missing | supported | **missing** | FileToolTracking | Codex doesn't emit tool events. Agy doesn't either (no tool events at all). |

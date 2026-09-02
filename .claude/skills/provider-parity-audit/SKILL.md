@@ -178,7 +178,7 @@ LongRunningProvider (extends Provider)
 
 Not all providers implement `LongRunningProvider`. Currently:
 - Claude: both interfaces
-- Agy: `Provider` only — print-mode CLI wrapper, one `Session` per `Execute` call, no persistent multi-turn session concept exposed
+- Agy: `Provider` only — print-mode CLI wrapper, one `Session` per `Execute` call. It accepts a caller-supplied conversation ID for resume, but does not surface a new ID, so higher-level sessions cannot automatically continue a conversation.
 - Codex: `Provider` only (thread-per-execution model)
 
 ### Event Bridge Pattern
@@ -191,7 +191,7 @@ These are documented in conformance tests:
 - Codex: `hasEvents: false` — limited streaming event emission
 - Codex: No `LongRunningProvider` — uses ephemeral thread model
 - Codex: No thinking/chain-of-thought events
-- Agy: No `LongRunningProvider` — print-mode CLI wrapper, one `Session` per `Execute` call
+- Agy: No `LongRunningProvider` — print-mode CLI wrapper, one `Session` per `Execute` call; it accepts a caller-supplied conversation ID but does not surface a new ID for automatic continuation
 - Agy: Emits **no tool-call events at all** — agy's print-mode wire format only has
   `TextEvent`/`TurnCompleteEvent`/`ErrorEvent` (see `agent-cli-wrapper/agy/events.go`), so
   `AgyProvider.Execute` never emits `ToolStartAgentEvent`/`ToolCompleteAgentEvent` and never
