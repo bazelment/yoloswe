@@ -41,6 +41,7 @@ func TestAgyEffortLevel_MapsAllLevels(t *testing.T) {
 		{EffortMedium, "medium"},
 		{EffortHigh, "high"},
 		{EffortMax, "high"}, // EffortMax clamps to agy's highest level.
+		{EffortLevel("unexpected"), ""},
 	} {
 		t.Run(string(tc.in), func(t *testing.T) {
 			t.Parallel()

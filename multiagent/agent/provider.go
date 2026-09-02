@@ -353,8 +353,13 @@ func applyOptions(opts []ExecuteOption) ExecuteConfig {
 // validate enforces invariants that every Provider.Execute call relies on,
 // regardless of whether the provider rebuilds the underlying session per
 // call (claude/cursor/agy) or binds the endpoint at first Execute (codex).
-// Currently it only gates on LLMEndpoint, but the seam is intentional: any
-// future cross-provider invariant lands here once instead of in four places.
 func (c ExecuteConfig) validate() error {
-	return c.LLMEndpoint.Validate()
+	if err := c.LLMEndpoint.Validate(); err != nil {
+		return err
+	}
+	if c.Effort == "" {
+		return nil
+	}
+	_, err := ParseEffort(string(c.Effort))
+	return err
 }
