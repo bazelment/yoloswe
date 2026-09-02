@@ -135,30 +135,66 @@ func TestNewSessionRejectsAWorktreePathThatIsAFile(t *testing.T) {
 	assert.Empty(t, registry.GetAllSessions())
 }
 
-// TestNewSessionResolvesARelativeWorktreeAgainstWTRoot pins #335's relative
-// path behavior: `-w chore/foo` is rooted at wtRoot, not the caller's cwd.
-func TestNewSessionResolvesARelativeWorktreeAgainstWTRoot(t *testing.T) {
+// TestNewSessionRejectsARelativeWorktreePath pins #335's relative-path
+// behavior: the server never guesses a base for a path it did not read. Only
+// `bramble new-session` knows the cwd `-w chore/foo` was typed against, and it
+// resolves the flag before the request crosses IPC. Anchoring server-side
+// instead would accept `-w .` as WT_ROOT — a real directory that is not a
+// worktree, which is the mislanding this change exists to stop.
+func TestNewSessionRejectsARelativeWorktreePath(t *testing.T) {
 	t.Parallel()
 
-	wtRoot := t.TempDir()
+	registry := session.NewSessionRegistry()
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
+	t.Cleanup(mgr.Close)
+	registry.Register(mgr)
 
-	t.Run("nonexistent relative path is resolved and then rejected", func(t *testing.T) {
-		t.Parallel()
+	_, err := handleNewSession(context.Background(), mgr, t.TempDir(), "test-repo",
+		&ipc.NewSessionParams{WorktreePath: "chore/does-not-exist", Prompt: "help"}, session.SessionInfo{})
 
-		registry := session.NewSessionRegistry()
-		mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
-		t.Cleanup(mgr.Close)
-		registry.Register(mgr)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be absolute")
+	assert.Empty(t, registry.GetAllSessions())
+}
 
-		_, err := handleNewSession(context.Background(), mgr, wtRoot, "test-repo",
-			&ipc.NewSessionParams{WorktreePath: "chore/does-not-exist", Prompt: "help"}, session.SessionInfo{})
+// TestValidateWorktreePath covers both branches of the guard. Without an accept
+// case the whole check could be replaced by an unconditional error and every
+// rejection test would still pass.
+func TestValidateWorktreePath(t *testing.T) {
+	t.Parallel()
 
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), filepath.Join(wtRoot, "chore/does-not-exist"),
-			"a relative path must be resolved against wtRoot before it is reported back")
-		assert.Empty(t, registry.GetAllSessions())
-	})
+	base := t.TempDir()
+	realWorktree := filepath.Join(base, "repo", "feature/x")
+	require.NoError(t, os.MkdirAll(realWorktree, 0o755))
+	aFile := filepath.Join(base, "a-file")
+	require.NoError(t, os.WriteFile(aFile, []byte("x"), 0o644))
 
+	tests := []struct {
+		name    string
+		path    string
+		wantErr string // empty means the path must be accepted
+	}{
+		{name: "an existing worktree directory is accepted", path: realWorktree},
+		{name: "a relative path is refused, not resolved", path: "feature/x", wantErr: "must be absolute"},
+		{name: "a bare dot is refused", path: ".", wantErr: "must be absolute"},
+		{name: "a missing path names the remedy", path: filepath.Join(base, "gone"), wantErr: "--create-worktree"},
+		{name: "a file is not a worktree", path: aFile, wantErr: "not a directory"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateWorktreePath(tt.path)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.Contains(t, err.Error(), tt.path, "the error must name the path the caller passed")
+		})
+	}
 }
 
 // TestRepoForSpawnPrefersTheParentOverAnInferredRepo applies to the repo the
