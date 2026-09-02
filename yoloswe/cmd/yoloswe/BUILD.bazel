@@ -27,5 +27,8 @@ go_test(
     name = "yoloswe_test",
     srcs = ["main_test.go"],
     embed = [":yoloswe_lib"],
-    deps = ["//multiagent/agent"],
+    deps = [
+        "//agent-cli-wrapper/llmendpoint",
+        "//multiagent/agent",
+    ],
 )

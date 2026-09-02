@@ -84,9 +84,12 @@ func TestAgyBackend_RunPrompt_ProcessFailure(t *testing.T) {
 	if len(handler.errors) == 0 {
 		t.Errorf("expected handler.OnError to be called, got %v", handler.errors)
 	}
+	if len(handler.turns) != 1 || handler.turns[0] {
+		t.Errorf("handler.turns = %v, want [false]", handler.turns)
+	}
 }
 
-func TestAgyBackend_RunPrompt_ResumeStatusOKOnSuccess(t *testing.T) {
+func TestAgyBackend_RunPrompt_ResumeStatusUnverifiedOnSuccess(t *testing.T) {
 	b := &agyBackend{
 		config:  Config{Model: "gemini-3.8-flash-medium", ResumeSessionID: "conv-123"},
 		cliPath: fakeAgyCLI(t, "AGYOK", 0),
@@ -96,8 +99,8 @@ func TestAgyBackend_RunPrompt_ResumeStatusOKOnSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunPrompt failed: %v", err)
 	}
-	if result.ResumeStatus != ResumeStatusOK {
-		t.Errorf("ResumeStatus = %q, want %q", result.ResumeStatus, ResumeStatusOK)
+	if result.ResumeStatus != ResumeStatusUnverified {
+		t.Errorf("ResumeStatus = %q, want %q", result.ResumeStatus, ResumeStatusUnverified)
 	}
 }
 

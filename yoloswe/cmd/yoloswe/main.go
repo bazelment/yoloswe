@@ -402,6 +402,9 @@ func runCodeTalkProvider(ctx context.Context, backend string, flags *codeTalkFla
 		}
 		prov = agent.NewCodexProvider()
 	case agent.ProviderAgy:
+		if !ep.IsZero() {
+			return fmt.Errorf("agy does not support custom LLM endpoints")
+		}
 		if model == "" {
 			model = "gemini-3.8-flash-medium"
 		}
