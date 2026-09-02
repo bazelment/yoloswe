@@ -13,7 +13,7 @@ Usage:
         --questions-file scripts/delegator-eval-questions.txt \
         --work-dir /path/to/repo \
         --log-dir /tmp/eval-logs \
-        [--model sonnet] [--child-model gemini-3-flash-preview] \
+        [--model sonnet] [--child-model gemini-3.8-flash-low] \
         [--timeout 900]
 """
 import argparse

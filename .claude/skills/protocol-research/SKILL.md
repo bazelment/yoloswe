@@ -1,18 +1,18 @@
 ---
 name: protocol-research
 description: >
-  Investigate and document CLI protocol behavior for Claude, Codex, and Gemini agent CLIs.
+  Investigate and document CLI protocol behavior for Claude, Codex, Gemini (ACP), and Agy agent CLIs.
 disable-model-invocation: true
 ---
 
 # Protocol Research
 
-Investigate agent CLI subprocess protocol behavior using the `agent-cli-wrapper` SDKs, trace capture, and Go test infrastructure. This repo communicates with three CLI tools (Claude, Codex, Gemini) via subprocess stdio — each with different wire protocols. Understanding real protocol behavior is essential before building features that depend on message ordering, field presence, or event sequencing.
+Investigate agent CLI subprocess protocol behavior using the `agent-cli-wrapper` SDKs, trace capture, and Go test infrastructure. This repo communicates with agent CLIs via subprocess stdio — each with different wire protocols: Claude (NDJSON), Codex (JSON-RPC), the real `gemini` CLI in `--experimental-acp` mode (JSON-RPC/ACP, still wrapped directly by `agent-cli-wrapper/acp/` for standalone consumers like `yoloswe/reviewer/backend_gemini.go` and `bramble/sessionanalysis/summarize.go`), and Agy (a separate print-mode CLI, `agent-cli-wrapper/agy/`, wrapped by `multiagent/agent.AgyProvider` — no persistent JSON-RPC/streaming protocol, just one-shot subprocess invocation with parsed stdout). Note: `multiagent/agent.ProviderGemini` itself has been deleted — model IDs starting with `gemini-` now route to `AgyProvider`, not to the ACP/`gemini` CLI path described in this doc. The ACP protocol content below documents the `acp` package's own still-live wire protocol for its remaining direct consumers, not the deleted provider bridge. Understanding real protocol behavior is essential before building features that depend on message ordering, field presence, or event sequencing.
 
 ## Arguments
 
 ```
-/protocol-research --provider <claude|codex|gemini|all> --scenario <name> [--capture] [--compare]
+/protocol-research --provider <claude|codex|gemini|agy|all> --scenario <name> [--capture] [--compare]
 ```
 
 | Flag | Description | Default |
@@ -30,9 +30,10 @@ Before investigating, understand what you're looking at:
 |----------|-------------|-----------|-------------------|
 | **Claude** | NDJSON (stream-json) | stdin/stdout | `agent-cli-wrapper/protocol/` and `agent-cli-wrapper/claude/` |
 | **Codex** | JSON-RPC 2.0 | stdin/stdout | `agent-cli-wrapper/codex/` |
-| **Gemini** | JSON-RPC 2.0 (ACP) | stdin/stdout | `agent-cli-wrapper/acp/` |
+| **Gemini** (real `gemini --experimental-acp` CLI, standalone consumers only — not `multiagent/agent`) | JSON-RPC 2.0 (ACP) | stdin/stdout | `agent-cli-wrapper/acp/` |
+| **Agy** | one-shot print-mode invocation, parsed stdout (no JSON-RPC/streaming protocol) | subprocess exec | `agent-cli-wrapper/agy/` |
 
-All three are unified through the `agentstream` event interface at `agent-cli-wrapper/agentstream/`.
+Claude, Codex, and Agy are unified through the `agentstream`/`Provider` interfaces at `agent-cli-wrapper/agentstream/` and `multiagent/agent/`. The `acp`/Gemini path is not — it's used directly by standalone consumers outside `multiagent/agent`.
 
 ## Workflow
 
@@ -94,7 +95,7 @@ Each recorded message includes:
 {"timestamp": 1234567890123, "direction": "sent|received", "message": {...}}
 ```
 
-For Codex/Gemini, enable protocol logging:
+For Codex, enable protocol logging:
 ```
 bramble --protocol-log-dir /tmp/protocol-logs
 ```
@@ -150,21 +151,53 @@ Update or create documentation:
 - **Notifications**: `thread/started`, `turn/started`, `turn/completed`, `item/started`, `item/completed`, `codex/event/*`
 - **Scoped filtering**: Use `ScopeID()` on events to filter by thread
 
-### Gemini ACP Protocol
+### Gemini ACP Protocol (still-live `acp` package; not what Agy speaks)
 - **Session model**: Initialize → NewSession → Prompt cycles
 - **Session updates**: Discriminated union with subtypes: `agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_result`, `plan_update`
 - **Permission handling**: `RequestPermissionRequest` for tool approval
 - **Tool status lifecycle**: `running` → `completed` | `errored`
+- This is the real `gemini --experimental-acp` CLI's wire protocol, wrapped by
+  `agent-cli-wrapper/acp/`. `multiagent/agent.ProviderGemini` (which used to bridge
+  this into the `Provider` interface) has been deleted; the package itself is
+  still used directly by `yoloswe/reviewer/backend_gemini.go` and
+  `bramble/sessionanalysis/summarize.go`, unrelated to the agy migration.
+
+### Agy Protocol
+- **Session model**: one subprocess invocation (`agy -p "<prompt>"
+  [--model ...] [--effort ...] [--print-timeout ...] ...) per `Execute` call;
+  stdout is parsed for the response. A caller may supply `--conversation` to
+  resume an existing agy conversation, but the current wrapper does not parse
+  or return a new conversation ID, so higher-level sessions cannot resume
+  automatically.
+- **Events**: `TextEvent`, `TurnCompleteEvent`, `ErrorEvent` only
+  (`agent-cli-wrapper/agy/events.go`) — no tool-call or thinking events, no
+  JSON-RPC/streaming wire format to trace the way Claude/Codex/ACP have.
+- **Effort**: `--effort low|medium|high` is a plain pass-through CLI flag
+  (`agy.WithEffort`), no validation/normalization in the wrapper itself.
 
 ### Agentstream Event Mapping
-| agentstream Kind | Claude Event | Codex Event | Gemini Event |
+| agentstream Kind | Claude Event | Codex Event | Agy Event |
 |------------------|-------------|-------------|--------------|
-| `KindText` | `TextEvent` | `TextDeltaEvent` | `TextDeltaEvent` |
-| `KindThinking` | `ThinkingEvent` | `ReasoningDeltaEvent` | `ThinkingDeltaEvent` |
-| `KindToolStart` | `ToolStartEvent` | `CommandStartEvent` | `ToolCallStartEvent` |
-| `KindToolEnd` | `ToolCompleteEvent` | `CommandEndEvent` | `ToolCallUpdateEvent` (completed/errored) |
+| `KindText` | `TextEvent` | `TextDeltaEvent` | `TextEvent` |
+| `KindThinking` | `ThinkingEvent` | `ReasoningDeltaEvent` | not emitted |
+| `KindToolStart` | `ToolStartEvent` | `CommandStartEvent` | not emitted |
+| `KindToolEnd` | `ToolCompleteEvent` | `CommandEndEvent` | not emitted |
 | `KindTurnComplete` | `TurnCompleteEvent` | `TurnCompletedEvent` | `TurnCompleteEvent` |
 | `KindError` | `ErrorEvent` | `ErrorEvent` | `ErrorEvent` |
+
+Agy's wrapper (`agent-cli-wrapper/agy/events.go`) only defines `TextEvent`,
+`TurnCompleteEvent`, and `ErrorEvent` — print mode exposes no thinking or
+tool-call events at all, unlike Claude/Codex and the historical ACP/Gemini
+path (kept here for reference, not agentstream-bridged):
+
+| agentstream Kind | Gemini (ACP) Event, historical reference only |
+|------------------|--------------|
+| `KindText` | `TextDeltaEvent` |
+| `KindThinking` | `ThinkingDeltaEvent` |
+| `KindToolStart` | `ToolCallStartEvent` |
+| `KindToolEnd` | `ToolCallUpdateEvent` (completed/errored) |
+| `KindTurnComplete` | `TurnCompleteEvent` |
+| `KindError` | `ErrorEvent` |
 
 ## Reference Files
 

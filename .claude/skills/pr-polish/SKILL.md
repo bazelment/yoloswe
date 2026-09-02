@@ -25,7 +25,7 @@ Missing/error review streams → log as findings with stderr path cited. A `stat
 | Flag | Default | Meaning |
 |---|---|---|
 | `--rounds N` | `5` | Up to N additional rounds this invocation. Budget resets on re-invoke. `--rounds 0` = no-op. |
-| `--gemini` | off | Extra reviewer (`gemini-3-flash-preview`). Sets `USE_GEMINI=1`. |
+| `--gemini` | off | Extra reviewer (`gemini-3.1-flash-lite-preview`). Sets `USE_GEMINI=1`. |
 | `--claude` | off | Extra reviewer (`claude` backend, `opus`). Sets `USE_CLAUDE=1`. |
 | `--ask` / `--interactive` | off | Enable `AskUserQuestion` at gates (Step 3.g). Default: never block. |
 
@@ -269,7 +269,7 @@ PIDS+=($!)
 
 if [ "$USE_GEMINI" = "1" ]; then
   ( set -o pipefail; BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:gemini:r{ROUND} \
-    timeout 2400 $BRAMBLE_BIN code-review --backend gemini --model gemini-3-flash-preview \
+    timeout 2400 $BRAMBLE_BIN code-review --backend gemini --model gemini-3.1-flash-lite-preview \
       --skip-test-execution --verbose --idle-timeout 8m \
       --goal "$GOAL" --scope-hints-file "$SCOPE_HINTS" $DIFF_BASE_ARG \
       ${GEMINI_RESUME:+--resume-session-id "$GEMINI_RESUME"} \

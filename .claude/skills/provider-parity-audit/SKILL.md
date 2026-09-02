@@ -1,13 +1,13 @@
 ---
 name: provider-parity-audit
 description: >
-  Systematically audit and improve feature parity across Claude, Codex, and Gemini providers.
+  Systematically audit and improve feature parity across Claude, Codex, and Agy providers.
 disable-model-invocation: true
 ---
 
 # Provider Parity Audit
 
-Systematically find and fix capability gaps across Claude, Codex, and Gemini providers. The goal is to ensure the provider abstraction layer (`multiagent/agent/`) accurately represents each provider's capabilities and that higher-level consumers (Bramble sessions, swarm orchestration, task routing) work correctly regardless of which backend is active.
+Systematically find and fix capability gaps across Claude, Codex, and Agy providers. The goal is to ensure the provider abstraction layer (`multiagent/agent/`) accurately represents each provider's capabilities and that higher-level consumers (Bramble sessions, swarm orchestration, task routing) work correctly regardless of which backend is active.
 
 ## Arguments
 
@@ -34,7 +34,7 @@ Read these files to understand the current state — don't research from scratch
 Also review the provider implementations:
 - `multiagent/agent/claude_provider.go`
 - `multiagent/agent/codex_provider.go`
-- `multiagent/agent/gemini_provider.go`
+- `multiagent/agent/agy_provider.go`
 
 ## Phase 0 — Build the Gap Matrix
 
@@ -81,7 +81,7 @@ Start Bramble and run sessions with each provider to check the end-to-end flow:
 Create a table in `memory/gap-matrix.md`:
 
 - **Rows**: Each capability from Step 1
-- **Columns**: Claude | Codex | Gemini | Conformance Test? | Bramble Integration?
+- **Columns**: Claude | Codex | Agy | Conformance Test? | Bramble Integration?
 - **Cells**: `supported` / `missing` / `partial` / `n/a` with notes
 
 Sort by impact: session-breaking gaps > data loss gaps > degraded UX > nice-to-have.
@@ -178,7 +178,7 @@ LongRunningProvider (extends Provider)
 
 Not all providers implement `LongRunningProvider`. Currently:
 - Claude: both interfaces
-- Gemini: both interfaces
+- Agy: `Provider` only — print-mode CLI wrapper, one `Session` per `Execute` call. It accepts a caller-supplied conversation ID for resume, but does not surface a new ID, so higher-level sessions cannot automatically continue a conversation.
 - Codex: `Provider` only (thread-per-execution model)
 
 ### Event Bridge Pattern
@@ -190,9 +190,19 @@ The `bridgeEvents[E any]()` generic function in `multiagent/agent/bridge.go` use
 These are documented in conformance tests:
 - Codex: `hasEvents: false` — limited streaming event emission
 - Codex: No `LongRunningProvider` — uses ephemeral thread model
-- Gemini: Token usage returns zeros (`AgentUsage` fields empty)
-- Gemini: Cost reporting returns zero
 - Codex: No thinking/chain-of-thought events
+- Agy: No `LongRunningProvider` — print-mode CLI wrapper, one `Session` per `Execute` call; it accepts a caller-supplied conversation ID but does not surface a new ID for automatic continuation
+- Agy: Emits **no tool-call events at all** — agy's print-mode wire format only has
+  `TextEvent`/`TurnCompleteEvent`/`ErrorEvent` (see `agent-cli-wrapper/agy/events.go`), so
+  `AgyProvider.Execute` never emits `ToolStartAgentEvent`/`ToolCompleteAgentEvent` and never
+  calls `EventHandler.OnToolStart`/`OnToolComplete`. Consumers that need file-change detection
+  must use the git-diff workaround (`detectFileChangesGit`, already used for Codex) instead of
+  relying on tool-start events.
+- Agy: Token usage returns zeros (`AgentUsage` fields empty)
+- Agy: Cost reporting returns zero
+- Agy: `ProviderSupportsEffort(ProviderAgy)` is **true** — agy DOES support `low|medium|high`
+  effort (`EffortMax` clamps to `high`). This is a capability, not a gap; don't regress the
+  matrix by marking it unsupported.
 
 ## Reference Files
 

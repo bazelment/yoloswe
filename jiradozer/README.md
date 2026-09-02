@@ -23,7 +23,7 @@ bazel-bin/jiradozer/cmd/jiradozer/jiradozer \
 
 ## Prerequisites
 
-- A supported AI agent CLI installed (`claude`, `codex`, `gemini`, or `agent` for Cursor)
+- A supported AI agent CLI installed (`claude`, `codex`, `agy`, or `agent` for Cursor)
 - `gh` CLI authenticated (`gh auth login`)
 - A Linear API key, or `gh` CLI authenticated for GitHub Issues — **or** use `--description` for local mode (no tracker needed)
 
@@ -52,7 +52,7 @@ tracker:
   api_key: $LINEAR_API_KEY    # environment variable reference
 
 agent:
-  model: sonnet               # or fable, opus, haiku, gpt-5.5, gemini-3.1-pro-preview, cursor-default
+  model: sonnet               # or fable, opus, haiku, gpt-5.5, gemini-3.8-flash-high, cursor-default
 
 work_dir: .
 base_branch: main
@@ -107,7 +107,7 @@ Each step (`plan`, `build`, `validate`, `ship`) is a self-contained agent sessio
 | `max_turns` | `10` | `30` | `10` | `10` | Max agent turns (Claude only) |
 | `max_budget_usd` | inherit | inherit | inherit | inherit | Budget override (Claude only) |
 
-> **Note**: `max_turns`, `max_budget_usd`, and session resume (redo/feedback) are currently only honored by the Claude provider. Other providers (Codex, Gemini, Cursor) accept these options without error but do not enforce them.
+> **Note**: `max_turns`, `max_budget_usd`, and session resume (redo/feedback) are currently only honored by the Claude provider. Other providers (Codex, Agy, Cursor) accept these options without error but do not enforce them.
 
 ### Prompt templates
 
@@ -212,7 +212,7 @@ Jiradozer uses the `multiagent/agent.Provider` interface, so any agent backend t
 |----------|-----------|
 | Claude | `fable`, `opus`, `sonnet`, `haiku`, `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5` |
 | Codex | `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` |
-| Gemini | `gemini-3.1-pro-preview`, `gemini-3-pro-preview`, `gemini-2.5-pro`, ... |
+| Agy | `gemini-3.8-flash-high`, `gemini-3.8-flash-medium`, `gemini-3.8-flash-low`, `gemini-3.1-pro-high`, `gemini-3.1-pro-low`, `agy-default` |
 | Cursor | `cursor-default` |
 
 The provider is auto-detected from the model ID.

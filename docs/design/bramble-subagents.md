@@ -17,7 +17,7 @@ was missing was the *return leg*:
    it recommends is a race.
 2. **Reporting was opt-in and unbacked.** `<shared>/mail/` and `ledger.md` were
    pure convention with no code behind them. A child that ignored the Reporting
-   section in its prompt simply never reported — and a Codex or Gemini child,
+   section in its prompt simply never reported — and a Codex or Agy child,
    which cannot be given a system prompt or tools through this wrapper, usually
    would.
 3. **No lineage.** `Session` had no parent, so nothing fired when a child
@@ -211,7 +211,7 @@ which is the whole failure this section exists to fix.
   *unknown*, so the session simply stops being detected as idle rather than
   being detected wrongly — and `TestLiveCursorSubagentTwoWay` is there to fail
   loudly when it happens.
-- Gemini and Agy have neither a hook nor a probe, so subagents on those backends
+- Agy has neither a hook nor a probe, so subagents on that backend
   still report only when their window dies.
 - Only claude's composer can be read, so only claude's pane is protected from a
   hint landing on a half-typed line. Cursor and codex render placeholder text

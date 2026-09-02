@@ -70,11 +70,18 @@ CLI ──NDJSON──► SDK stdout    (SystemMessage, StreamEvent, AssistantMe
                                UserMessage, ResultMessage, ControlRequest)
 ```
 
-**ACP protocol flow (Gemini):**
+**ACP protocol flow (historical — Gemini CLI provider, since removed):**
 ```
 Client ──JSON-RPC──► Agent stdin   (InitializeRequest, NewSessionRequest, PromptRequest)
 Agent  ──JSON-RPC──► Client stdout (InitializeResponse, SessionNotification, PromptResponse)
 ```
+The `agent.GeminiProvider`/`agent.NewGeminiProvider` bridge onto this protocol has been
+deleted; `agent-cli-wrapper/acp/` itself is still present and still used directly by
+`bramble/sessionanalysis/summarize.go` and `yoloswe/reviewer/backend_gemini.go` (both
+call `acp.NewClient()` without going through `multiagent/agent`), so this protocol flow
+is not dead, just no longer reachable via the `Provider` interface. The current
+"Gemini" model IDs (`gemini-3.8-flash-*`, `gemini-3.1-pro-*`) route to `AgyProvider`
+(print-mode `agy` CLI wrapper), not to this ACP flow — see L4 below.
 
 ### L2: SDK Wrappers
 
@@ -163,7 +170,8 @@ codex.Event  ──implements──► agentstream.Event ──bridgeEvents─�
 - **Scope filtering:** Events implementing `Scoped` can be filtered by ID (used by
   Codex's multiplexed thread model).
 - **Turn-complete callback:** Optional `onTurnComplete` fires once on the first
-  `KindTurnComplete` event, used for synchronization (e.g., Gemini's drain pattern).
+  `KindTurnComplete` event, used for synchronization (e.g., the ACP/Gemini
+  provider's drain pattern — historical, see L4 note on `GeminiProvider`).
 
 ### L4: Provider Abstraction
 
@@ -193,8 +201,22 @@ LongRunningProvider extends Provider {
 |----------|------|---------|
 | `ClaudeProvider` | `claude_provider.go` | Ephemeral `claude.Session` per Execute |
 | `ClaudeLongRunningProvider` | `claude_provider.go` | Persistent `claude.Session` |
-| `GeminiProvider` | `gemini_provider.go` | `acp.Client` with persistent bridge |
+| `AgyProvider` | `agy_provider.go` | Print-mode `agy` CLI wrapper, one `Session` per Execute; implements `Provider` only — no `LongRunningProvider` |
 | `CodexProvider` | `codex_provider.go` | `codex.Client` with thread-based execution |
+
+`GeminiProvider` (`gemini_provider.go`, ACP-backed, persistent bridge) has been
+**deleted**. `gemini-*` model IDs now route to `AgyProvider`. Two behavior gaps
+vs. the deleted Gemini provider (and vs. Claude/Codex) to be aware of:
+- `AgyProvider` emits no tool-call events (agy's print-mode wire format has only
+  `TextEvent`/`TurnCompleteEvent`/`ErrorEvent`) — no `ToolStartAgentEvent`/
+  `ToolCompleteAgentEvent`, so consumers that relied on Gemini's tool-start
+  events for file-change detection must use the git-diff workaround instead
+  (`detectFileChangesGit`, already used for Codex).
+- There is no `AgyLongRunningProvider`. `AgyProvider.Execute` can pass a
+  caller-supplied `ResumeSessionID` to agy as `--conversation`, but it does
+  not return the conversation ID for a new turn; higher-level sessions cannot
+  automatically continue a multi-turn agy conversation as they could with the
+  old `GeminiLongRunningProvider`.
 
 **Session wrappers (higher-level convenience):**
 | Type | File | Purpose |
@@ -224,7 +246,7 @@ the appropriate runner, routes events to display output, handles follow-up messa
 ```
 Manager.createRunner(session)
   │
-  ├─ Provider configured?  ──► providerRunner (Claude/Codex/Gemini via agent.Provider)
+  ├─ Provider configured?  ──► providerRunner (Claude/Codex/Agy via agent.Provider)
   ├─ SessionTypePlanner?   ──► plannerRunner (wraps planner.PlannerWrapper)
   └─ SessionTypeBuilder?   ──► builderRunner (wraps yoloswe.BuilderSession)
 ```
@@ -431,8 +453,8 @@ implementations. The session's `handleControlRequest` becomes a one-liner delega
 
 **Problem:** `bramble/session/manager.go` imports `claude`, `acp`, `codex`, and
 `agent` packages directly. It constructs SDK sessions inline and has provider-specific
-branching (`isClaudeModel`, `isCodexModel`, `isGeminiModel`). This means adding a new
-provider requires touching the session manager.
+branching (`isClaudeModel`, `isCodexModel`, historically `isGeminiModel`). This means
+adding a new provider requires touching the session manager.
 
 **Recommendation:** The session manager should depend only on the `Provider` interface
 (L4). Provider construction should be handled by a factory:
@@ -443,9 +465,9 @@ type ProviderFactory interface {
 }
 ```
 
-The factory encapsulates model→provider mapping (currently in `multiagent/agent/models.go`).
+The factory encapsulates model→provider mapping (currently in `multiagent/agent/model_registry.go`).
 The session manager calls `factory.Create()` and works with the resulting `Provider`
-without knowing whether it's Claude, Gemini, or Codex.
+without knowing whether it's Claude, Agy, or Codex.
 
 ---
 
@@ -591,7 +613,7 @@ The improvements can be implemented incrementally without breaking existing code
 - `agent-cli-wrapper/claude/session_options.go` — Functional options
 - `agent-cli-wrapper/claude/mcp.go` — MCP configuration
 - `agent-cli-wrapper/claude/sdk_mcp.go` — SDK tool handler interface
-- `agent-cli-wrapper/acp/client.go` — ACP/Gemini client
+- `agent-cli-wrapper/acp/client.go` — ACP client (historically bridged to `agent.GeminiProvider`, now used directly by `bramble/sessionanalysis/summarize.go` and `yoloswe/reviewer/backend_gemini.go`)
 - `agent-cli-wrapper/acp/session.go` — ACP session
 - `agent-cli-wrapper/acp/protocol.go` — ACP JSON-RPC protocol
 - `agent-cli-wrapper/acp/state.go` — ACP state machines
@@ -606,7 +628,7 @@ The improvements can be implemented incrementally without breaking existing code
 ### L4 Provider Abstraction
 - `multiagent/agent/provider.go` — Provider interface, AgentEvent types, EventHandler
 - `multiagent/agent/claude_provider.go` — Claude provider implementations
-- `multiagent/agent/gemini_provider.go` — Gemini provider
+- `multiagent/agent/agy_provider.go` — Agy provider (replaces the deleted `gemini_provider.go`; print-mode CLI wrapper, no `LongRunningProvider`, no tool-call events)
 - `multiagent/agent/codex_provider.go` — Codex provider
 - `multiagent/agent/session.go` — LongRunningSession, EphemeralSession
 
