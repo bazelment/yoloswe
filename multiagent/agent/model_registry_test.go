@@ -23,7 +23,6 @@ func TestModelRegistry_AllInstalled(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  true,
-		ProviderGemini: true,
 		ProviderCursor: true,
 		ProviderAgy:    true,
 	})
@@ -35,7 +34,6 @@ func TestModelRegistry_OnlyClaude(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  false,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -45,25 +43,24 @@ func TestModelRegistry_OnlyClaude(t *testing.T) {
 	}
 	assert.True(t, reg.HasProvider(ProviderClaude))
 	assert.False(t, reg.HasProvider(ProviderCodex))
-	assert.False(t, reg.HasProvider(ProviderGemini))
+	assert.False(t, reg.HasProvider(ProviderAgy))
 }
 
 func TestModelRegistry_FilteredCycling(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  false,
-		ProviderGemini: true,
 		ProviderCursor: false,
-		ProviderAgy:    false,
+		ProviderAgy:    true,
 	})
 	reg := NewModelRegistry(avail, nil)
 
-	// Cycling from last claude model should skip codex and go to gemini
+	// Cycling from last claude model should skip codex and go to agy
 	next := reg.NextModel("claude-haiku-4-5")
-	assert.Equal(t, "gemini-3.1-pro-preview", next.ID)
+	assert.Equal(t, "gemini-3.8-flash-high", next.ID)
 
-	// Cycling from last gemini model should wrap to first claude (cursor not installed)
-	next = reg.NextModel("gemini-2.5-flash-lite")
+	// Cycling from last agy model should wrap to first claude (cursor not installed)
+	next = reg.NextModel("agy-default")
 	assert.Equal(t, "opus", next.ID)
 }
 
@@ -71,7 +68,6 @@ func TestModelRegistry_NotFoundReturnsFirst(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  false,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -84,7 +80,6 @@ func TestModelRegistry_EmptyFallback(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: false,
 		ProviderCodex:  false,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -109,9 +104,8 @@ func TestModelRegistry_RebuildWithEnabled(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  true,
-		ProviderGemini: true,
 		ProviderCursor: false,
-		ProviderAgy:    false,
+		ProviderAgy:    true,
 	})
 
 	reg := NewModelRegistry(avail, []string{ProviderClaude})
@@ -125,29 +119,27 @@ func TestModelRegistry_RebuildWithEnabled(t *testing.T) {
 	reg.Rebuild(avail, []string{ProviderClaude, ProviderCodex})
 	assert.True(t, reg.HasProvider(ProviderClaude))
 	assert.True(t, reg.HasProvider(ProviderCodex))
-	assert.False(t, reg.HasProvider(ProviderGemini))
+	assert.False(t, reg.HasProvider(ProviderAgy))
 }
 
 func TestModelRegistry_InstalledButNotEnabled(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  true,
-		ProviderGemini: true,
 		ProviderCursor: false,
-		ProviderAgy:    false,
+		ProviderAgy:    true,
 	})
-	// Only enable gemini
-	reg := NewModelRegistry(avail, []string{ProviderGemini})
+	// Only enable agy
+	reg := NewModelRegistry(avail, []string{ProviderAgy})
 	assert.False(t, reg.HasProvider(ProviderClaude))
 	assert.False(t, reg.HasProvider(ProviderCodex))
-	assert.True(t, reg.HasProvider(ProviderGemini))
+	assert.True(t, reg.HasProvider(ProviderAgy))
 }
 
 func TestModelRegistry_ModelByID(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  false,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -165,7 +157,6 @@ func TestModelRegistry_FirstModelForProvider(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  true,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -175,7 +166,7 @@ func TestModelRegistry_FirstModelForProvider(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "gpt-5.5", m.ID)
 
-	_, ok = reg.FirstModelForProvider(ProviderGemini)
+	_, ok = reg.FirstModelForProvider(ProviderAgy)
 	assert.False(t, ok)
 }
 
@@ -210,7 +201,7 @@ func TestProviderForModelID(t *testing.T) {
 		{"gpt-5.5", ProviderCodex, true},
 		// Prefix-only matches (forward-compat IDs not in AllModels)
 		{"gpt-future-9000", ProviderCodex, true},
-		{"gemini-99-ultra", ProviderGemini, true},
+		{"gemini-99-ultra", ProviderAgy, true},
 		{"cursor-fast", ProviderCursor, true},
 		{"composer-3", ProviderCursor, true},
 		{"agy-pro", ProviderAgy, true},
@@ -245,7 +236,7 @@ func TestProviderByModelPrefix(t *testing.T) {
 		ok       bool
 	}{
 		{"gpt-future-9000", ProviderCodex, true},
-		{"gemini-99-ultra", ProviderGemini, true},
+		{"gemini-99-ultra", ProviderAgy, true},
 		{"cursor-fast", ProviderCursor, true},
 		{"composer-3", ProviderCursor, true},
 		{"agy-pro", ProviderAgy, true},
@@ -324,13 +315,14 @@ func TestCLIModelArg(t *testing.T) {
 	assert.Equal(t, "", CLIModelArg("opus", ProviderCursor))
 	assert.Equal(t, "", CLIModelArg("gpt-5.5", ProviderCursor))
 	assert.Equal(t, "", CLIModelArg("claude-fable-5", ProviderCodex))
+	assert.Equal(t, "", CLIModelArg("gemini-3.8-flash-high", ProviderCursor))
 	// A model matched to its own provider passes through.
 	assert.Equal(t, "opus", CLIModelArg("opus", ProviderClaude))
 	assert.Equal(t, "gpt-5.5", CLIModelArg("gpt-5.5", ProviderCodex))
 	// Anything the curated list does not name passes through untouched. This is
 	// load-bearing, not laziness: cursor is a gateway that sells other vendors'
 	// models under their own names, so a prefix rule would read these as
-	// "belongs to claude/codex/gemini" and silently discard a model the user
+	// "belongs to claude/codex/agy" and silently discard a model the user
 	// named. `agent --list-models` returns all four of these.
 	assert.Equal(t, "composer-2.5", CLIModelArg("composer-2.5", ProviderCursor))
 	assert.Equal(t, "claude-opus-5-thinking-high", CLIModelArg("claude-opus-5-thinking-high", ProviderCursor))

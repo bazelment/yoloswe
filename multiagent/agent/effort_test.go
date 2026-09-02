@@ -8,8 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
@@ -82,9 +80,9 @@ func TestClaudeEffortLevel_MapsAllLevels(t *testing.T) {
 // When a provider is added, this table forces a deliberate choice
 // rather than another silent ignore.
 //
-// Claude and Codex accept all five levels; Cursor, Gemini, and agy reject any
-// explicit non-auto effort with ErrEffortUnsupported. EffortAuto and empty
-// effort both mean "use the provider default" and are never rejected.
+// Claude, Codex, and Agy accept all five levels; Cursor rejects any explicit
+// non-auto effort with ErrEffortUnsupported. EffortAuto and empty effort both
+// mean "use the provider default" and are never rejected.
 // (Invalid string parsing is covered by TestParseEffort_RejectsInvalidLevels
 // — providers receive a validated EffortLevel and trust the boundary.)
 func TestProviderEffortMatrix(t *testing.T) {
@@ -96,9 +94,9 @@ func TestProviderEffortMatrix(t *testing.T) {
 	// satisfy fieldalignment.
 	type providerCase struct {
 		// run returns the error a provider produces for the given effort
-		// level. For Claude/Codex we exercise the option-builder paths
-		// (no subprocess); for Cursor/Gemini we call Execute directly
-		// because the early-return happens before any subprocess work.
+		// level. For Claude/Codex/Agy we exercise the option-builder paths
+		// (no subprocess); for Cursor we call Execute directly because the
+		// early-return happens before any subprocess work.
 		run  func(t *testing.T, level EffortLevel) error
 		name string
 	}
@@ -134,23 +132,14 @@ func TestProviderEffortMatrix(t *testing.T) {
 			},
 		},
 		{
-			name: "gemini",
-			run: func(t *testing.T, level EffortLevel) error {
-				t.Helper()
-				p := NewGeminiProvider(acp.WithBinaryPath("missing-gemini-effort-test-binary"))
-				defer p.Close()
-				_, err := p.Execute(context.Background(), "ignored", nil, WithProviderEffort(level))
-				return err
-			},
-		},
-		{
 			name: "agy",
 			run: func(t *testing.T, level EffortLevel) error {
 				t.Helper()
-				p := NewAgyProvider(agy.WithCLIPath("missing-agy-effort-test-binary"))
-				defer p.Close()
-				_, err := p.Execute(context.Background(), "ignored", nil, WithProviderEffort(level))
-				return err
+				if level == "" {
+					return nil
+				}
+				_ = agyEffortLevel(level)
+				return nil
 			},
 		},
 	}
@@ -161,16 +150,16 @@ func TestProviderEffortMatrix(t *testing.T) {
 			t.Parallel()
 
 			// Empty effort is always a success no-op for the effort path.
-			// (Cursor/Gemini may still fail downstream when the subprocess
-			// can't start in the test environment — we explicitly skip
-			// those providers' empty-effort case to keep the matrix focused
-			// on effort behavior.)
-			if prov.name == "claude" || prov.name == "codex" {
+			// (Cursor may still fail downstream when the subprocess can't
+			// start in the test environment — we explicitly skip its
+			// empty-effort case to keep the matrix focused on effort
+			// behavior.)
+			if prov.name == "claude" || prov.name == "codex" || prov.name == "agy" {
 				err := prov.run(t, "")
 				assert.NoError(t, err, "empty effort should be a no-op")
 			}
 
-			noKnobProvider := prov.name == "cursor" || prov.name == "gemini" || prov.name == "agy"
+			noKnobProvider := prov.name == "cursor"
 			for _, level := range validLevels {
 				err := prov.run(t, level)
 				// EffortAuto means "use provider default" — a no-knob
@@ -230,8 +219,7 @@ func TestProviderSupportsEffort(t *testing.T) {
 		{ProviderClaude, true},
 		{ProviderCodex, true},
 		{ProviderCursor, false},
-		{ProviderGemini, false},
-		{ProviderAgy, false},
+		{ProviderAgy, true},
 		{"unknown-provider", false},
 	} {
 		tc := tc

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
@@ -29,9 +30,6 @@ func (p *AgyProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Work
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	if cfg.Effort != "" && cfg.Effort != EffortAuto {
-		return nil, EffortUnsupportedError(p.Name(), cfg.Effort)
-	}
 
 	fullPrompt := prompt
 	if wtCtx != nil {
@@ -39,6 +37,15 @@ func (p *AgyProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Work
 	}
 
 	sessionOpts := append([]agy.SessionOption{}, p.sessionOpts...)
+	// applyOptions defaults Model to "sonnet" when the caller named nothing;
+	// CLIModelArg strips it as a Claude ID, along with placeholders and any
+	// other provider's models (see cursorSessionOpts for the same idiom).
+	if model := CLIModelArg(cfg.Model, ProviderAgy); model != "" {
+		sessionOpts = append(sessionOpts, agy.WithModel(model))
+	}
+	if effort := agyEffortLevel(cfg.Effort); effort != "" {
+		sessionOpts = append(sessionOpts, agy.WithEffort(effort))
+	}
 	if cfg.WorkDir != "" {
 		sessionOpts = append(sessionOpts, agy.WithWorkDir(cfg.WorkDir))
 	}
@@ -95,4 +102,23 @@ func (p *AgyProvider) Events() <-chan AgentEvent { return p.events }
 func (p *AgyProvider) Close() error {
 	close(p.events)
 	return nil
+}
+
+// agyEffortLevel maps the neutral agent.EffortLevel to the string agy's
+// --effort flag accepts ("low", "medium", "high"). EffortMax has no distinct
+// agy level and clamps to "high". EffortAuto and the empty level both mean
+// "use agy's own default" and return "", which agy_provider.go's caller
+// treats as "omit --effort".
+func agyEffortLevel(level EffortLevel) string {
+	switch level {
+	case EffortAuto, "":
+		return ""
+	case EffortLow:
+		return "low"
+	case EffortMedium:
+		return "medium"
+	case EffortHigh, EffortMax:
+		return "high"
+	}
+	panic(fmt.Sprintf("BUG: unhandled EffortLevel %q in agyEffortLevel", level))
 }

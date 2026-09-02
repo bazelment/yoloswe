@@ -13,13 +13,12 @@ import (
 const (
 	ProviderClaude = "claude"
 	ProviderCodex  = "codex"
-	ProviderGemini = "gemini"
 	ProviderCursor = "cursor"
 	ProviderAgy    = "agy"
 )
 
 // AllProviders is the ordered list of known provider names.
-var AllProviders = []string{ProviderClaude, ProviderCodex, ProviderGemini, ProviderCursor, ProviderAgy}
+var AllProviders = []string{ProviderClaude, ProviderCodex, ProviderCursor, ProviderAgy}
 
 // providerBinaries maps provider names to their CLI binary names. Most
 // providers name their binary after themselves; cursor is the exception —
@@ -28,7 +27,6 @@ var AllProviders = []string{ProviderClaude, ProviderCodex, ProviderGemini, Provi
 var providerBinaries = map[string]string{
 	ProviderClaude: "claude",
 	ProviderCodex:  "codex",
-	ProviderGemini: "gemini",
 	ProviderCursor: "agent",
 	ProviderAgy:    "agy",
 }

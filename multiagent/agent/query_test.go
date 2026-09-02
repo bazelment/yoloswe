@@ -26,12 +26,12 @@ func TestNewProviderForModel_Claude(t *testing.T) {
 	assert.Equal(t, "claude", p.Name())
 }
 
-func TestNewProviderForModel_Gemini(t *testing.T) {
-	m := AgentModel{ID: "gemini-2.5-flash", Provider: ProviderGemini}
+func TestNewProviderForModel_Agy(t *testing.T) {
+	m := AgentModel{ID: "gemini-3.8-flash-low", Provider: ProviderAgy}
 	p, err := NewProviderForModel(m)
 	require.NoError(t, err)
 	defer p.Close()
-	assert.Equal(t, "gemini", p.Name())
+	assert.Equal(t, "agy", p.Name())
 }
 
 func TestNewProviderForModel_Codex(t *testing.T) {
