@@ -55,7 +55,7 @@ var Cmd = &cobra.Command{
 	Short:        "Run a one-shot code review using an agent backend",
 	Long: `Run a one-shot code review using an agent backend.
 
-Supported backends: claude, cursor, codex, gemini.
+Supported backends: claude, cursor, codex, agy.
 
 Output:
   Default:         NDJSON progress events on stdout, final envelope also on stdout
@@ -76,7 +76,7 @@ analysis. Set $BRAMBLE_RUN_TAG to tag the log with an external run id.`,
 }
 
 func init() {
-	Cmd.Flags().StringVar(&backend, "backend", "cursor", "Backend: claude, cursor, codex, or gemini")
+	Cmd.Flags().StringVar(&backend, "backend", "cursor", "Backend: claude, cursor, codex, or agy")
 	Cmd.Flags().StringVar(&model, "model", "", "Model override (default: backend-specific)")
 	Cmd.Flags().StringVar(&effort, "effort", "", "Reasoning effort level for codex (low, medium, high) and claude (low, medium, high, max)")
 	Cmd.Flags().StringVar(&sandbox, "sandbox", "", "Codex sandbox mode: read-only, workspace-write, danger-full-access (default: danger-full-access)")
