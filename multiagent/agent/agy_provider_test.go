@@ -242,3 +242,36 @@ func TestAgyProvider_AcceptsExplicitEffort(t *testing.T) {
 	assert.False(t, errors.Is(err, ErrEffortUnsupported),
 		"agy now supports effort; must not reject with ErrEffortUnsupported, got %v", err)
 }
+
+// ModelSupportsEffort advises callers and reconcileAgyEffort enforces at
+// execute. They now share agyRetarget, and this pins that they cannot drift:
+// whenever the predicate says a pair is supported, reconciliation must accept
+// it, and whenever it says no, reconciliation must reject it.
+func TestModelSupportsEffort_AgreesWithReconciliation(t *testing.T) {
+	t.Parallel()
+
+	levels := []EffortLevel{EffortAuto, EffortLow, EffortMedium, EffortHigh, EffortMax}
+	for _, m := range AllModels {
+		if m.Provider != ProviderAgy {
+			continue
+		}
+		for _, level := range levels {
+			m, level := m, level
+			t.Run(m.ID+"/"+string(level), func(t *testing.T) {
+				t.Parallel()
+
+				cfg := agy.SessionConfig{Model: m.ID, Effort: agyEffortLevel(level)}
+				err := reconcileAgyEffort(&cfg)
+
+				if ModelSupportsEffort(m.ID, level) {
+					require.NoError(t, err,
+						"predicate says %q supports %q, so reconciliation must accept it", m.ID, level)
+					return
+				}
+				require.Error(t, err,
+					"predicate says %q cannot serve %q, so reconciliation must reject it", m.ID, level)
+				assert.ErrorIs(t, err, ErrEffortUnsupported)
+			})
+		}
+	}
+}

@@ -84,11 +84,9 @@ func ModelSupportsEffort(modelID string, level EffortLevel) bool {
 	if want == "" {
 		return false
 	}
-	base, pinned := splitModelEffort(modelID)
-	if pinned == "" || pinned == want || !isCuratedAgyModel(modelID) {
-		return true
-	}
-	return isCuratedAgyModel(base + "-" + want)
+	// Same helper the provider enforces with, so advice and behavior agree.
+	_, ok = agyRetarget(modelID, want)
+	return ok
 }
 
 // EffortUnsupportedError builds the canonical ErrEffortUnsupported wrap with

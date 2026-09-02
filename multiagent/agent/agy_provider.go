@@ -214,14 +214,35 @@ func reconcileAgyEffort(c *agy.SessionConfig) error {
 		c.Effort = "" // Same level twice; keep one representation.
 		return nil
 	}
-	retarget := base + "-" + c.Effort
-	if isCuratedAgyModel(c.Model) && !isCuratedAgyModel(retarget) {
+	retarget, ok := agyRetarget(c.Model, c.Effort)
+	if !ok {
 		return fmt.Errorf("%w: agy has no %q variant of %q (requested effort %s on a model pinned to %s)",
 			ErrEffortUnsupported, c.Effort, base, c.Effort, pinned)
 	}
 	c.Model = retarget
 	c.Effort = ""
 	return nil
+}
+
+// agyRetarget returns the agy model id that runs `model` at the `want` level,
+// which for agy means swapping the level its id encodes. ok is false only when
+// the catalog knows `model` and has no such variant, i.e. the request cannot
+// be expressed at all; an uncurated id is retargeted optimistically, since
+// AllModels is not the authority on models it does not name.
+//
+// This is the single implementation of "can this (model, level) pair be
+// expressed on an agy command line". reconcileAgyEffort enforces it and
+// ModelSupportsEffort advises callers from it, so the two cannot drift.
+func agyRetarget(model, want string) (string, bool) {
+	base, pinned := splitModelEffort(model)
+	if pinned == "" || pinned == want {
+		return model, true
+	}
+	retarget := base + "-" + want
+	if isCuratedAgyModel(model) && !isCuratedAgyModel(retarget) {
+		return model, false
+	}
+	return retarget, true
 }
 
 // isCuratedAgyModel reports whether an id is a known agy model, i.e. one this
