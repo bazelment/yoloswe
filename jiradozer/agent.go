@@ -482,15 +482,20 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 
 		// Effort is config-scoped, not per-model, so the inherited level rides
 		// onto a fallback model. A provider with no effort knob (Cursor)
-		// hard-fails on any non-auto level, which would turn a rescue
-		// fallback into a terminal error — drop it for those providers. Only on
-		// failover (mi > 0): a directly-configured primary with an unsupported
-		// effort must still surface the unsupported-effort error, not be silently
-		// downgraded (matches the --thinking-level contract in run flags).
+		// hard-fails on any non-auto level, and agy's support is further
+		// model-scoped (its catalog is not a full cross product — e.g.
+		// gemini-3.1-pro has -low/-high but no -medium), so ask
+		// ModelSupportsEffort about the exact (model, level) pair rather than
+		// ProviderSupportsEffort about the provider alone; either shape would
+		// otherwise turn a rescue fallback into a terminal ErrEffortUnsupported.
+		// Drop it for those. Only on failover (mi > 0): a directly-configured
+		// primary with an unsupported effort must still surface the
+		// unsupported-effort error, not be silently downgraded (matches the
+		// --thinking-level contract in run flags).
 		if mi > 0 && activeCfg.Effort != "" && activeCfg.Effort != string(agent.EffortAuto) {
-			if model, ok := agent.ResolveModel(modelID); ok && !agent.ProviderSupportsEffort(model.Provider) {
-				logger.Debug("dropping effort for provider without effort support",
-					"step", stepName, "model", modelID, "provider", model.Provider, "effort", activeCfg.Effort)
+			if !agent.ModelSupportsEffort(modelID, agent.EffortLevel(activeCfg.Effort)) {
+				logger.Debug("dropping effort for model that can't serve it",
+					"step", stepName, "model", modelID, "effort", activeCfg.Effort)
 				activeCfg.Effort = ""
 			}
 		}

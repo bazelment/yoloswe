@@ -168,7 +168,7 @@ func getVersion(binaryPath string) string {
 	cmd := exec.CommandContext(ctx, binaryPath, "--version")
 	var out bytes.Buffer
 	cmd.Stdout = &out
-	// Discard stderr — tools like gemini emit Node.js deprecation warnings there.
+	// Discard stderr — some CLI tools emit deprecation warnings or other noise there.
 	if err := cmd.Run(); err != nil {
 		return ""
 	}
