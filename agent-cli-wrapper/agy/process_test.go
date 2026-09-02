@@ -115,9 +115,9 @@ func TestBuildCLIArgs_FlagsPrecedePrintFlag(t *testing.T) {
 
 // TestBuildCLIArgs_NoRegressionToLeadingPrintFlag guards against the old
 // ordering (-p <prompt> emitted first, with flags such as --model appended
-// after) ever coming back. Under that ordering agy's -p greedily consumes
-// the very next token as the prompt, so a flag immediately after -p's
-// argument would silently corrupt or error the invocation.
+// after) ever coming back. It pins the exact slice rather than just probing
+// args[0]: an args[0] check alone still passes for orderings that place a
+// flag after the prompt, which is the regression it is named for.
 func TestBuildCLIArgs_NoRegressionToLeadingPrintFlag(t *testing.T) {
 	t.Parallel()
 
@@ -126,17 +126,22 @@ func TestBuildCLIArgs_NoRegressionToLeadingPrintFlag(t *testing.T) {
 	WithEffort("high")(&cfg)
 
 	pm := newProcessManager("hello", cfg)
-	args := pm.BuildCLIArgs()
 
-	require.GreaterOrEqual(t, len(args), 2)
-	assert.Falsef(t, args[0] == "-p" && len(args) > 2,
-		"-p must not be the first token when other flags are configured: %v", args)
+	assert.Equal(t, []string{
+		"--model", "gemini-3.8-flash-low",
+		"--effort", "high",
+		"-p", "hello",
+	}, pm.BuildCLIArgs())
 }
 
 func TestBuildCLIArgs_EmptyModelAndEffortEmitNothing(t *testing.T) {
 	t.Parallel()
 
-	pm := newProcessManager("hello", defaultConfig())
+	cfg := defaultConfig()
+	WithModel("")(&cfg)
+	WithEffort("")(&cfg)
+
+	pm := newProcessManager("hello", cfg)
 	args := pm.BuildCLIArgs()
 
 	assert.Equal(t, -1, slices.Index(args, "--model"))

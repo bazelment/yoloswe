@@ -33,12 +33,22 @@ func newProcessManager(prompt string, config SessionConfig) *processManager {
 
 // BuildCLIArgs builds the agy print-mode argument list.
 //
-// agy's -p/--print flag greedily consumes the very next token on the command
-// line as the prompt, whatever that token is - including another flag name
-// (e.g. `-p "hi" --model M` fails with "-p took \"--model\" as its prompt").
-// To make that mistake structurally impossible, every flag is emitted BEFORE
-// the trailing -p <prompt> pair, including ExtraArgs. Keep -p <prompt> last;
-// do not append anything after it.
+// Two agy argument rules shape this list (verified against agy 1.1.24):
+//
+//  1. -p/--print rejects a prompt value that is a registered agy flag name:
+//     `agy -p --sandbox "task"` fails with `-p took "--sandbox" as its prompt`.
+//     This is a property of the prompt value itself, so it applies to the
+//     attached form (`--print=--sandbox`) too, and neither argument ordering
+//     nor an attached prompt can prevent it. It is not guarded here: the
+//     prompt is caller data, and agy's own error names the problem clearly.
+//  2. A stray positional argument is a hard error in any position
+//     (`Error: unexpected argument "..."`), so every token must be a flag or
+//     a flag's value.
+//
+// A flag placed after `-p <prompt>` does parse correctly, so the ordering
+// below is not a correctness fix. Emitting every flag - ExtraArgs included -
+// before the trailing `-p <prompt>` pair keeps the list in one canonical
+// shape, which is what the argument-order tests pin. Keep -p <prompt> last.
 func (pm *processManager) BuildCLIArgs() []string {
 	var args []string
 
