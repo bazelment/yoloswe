@@ -9,6 +9,7 @@ import (
 	"expvar"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
@@ -954,6 +955,49 @@ func parentForSpawn(registry *session.SessionRegistry, params *ipc.NewSessionPar
 	return session.SessionInfo{}, false, nil
 }
 
+// validateWorktreePath refuses a worktree path that would misland the session.
+// tmux silently falls back to its parent's cwd when the requested start
+// directory does not exist, so an unchecked path returns a success payload
+// naming a worktree the session is not actually in (#335).
+//
+// A relative path is rejected rather than resolved: only the process that read
+// the flag knows the cwd it was typed against, and every base the server could
+// pick is a guess. `bramble new-session` resolves its own --worktree before the
+// request crosses IPC, so a relative path arriving here came from a caller that
+// never said what it was relative to.
+func validateWorktreePath(worktreePath string) error {
+	if !filepath.IsAbs(worktreePath) {
+		return fmt.Errorf("worktree path %q must be absolute: a relative path has no meaning in the bramble server, "+
+			"which does not share the caller's working directory", worktreePath)
+	}
+	info, err := os.Stat(worktreePath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("worktree path %q does not exist; use --create-worktree --branch to create one", worktreePath)
+		}
+		return fmt.Errorf("could not verify worktree path %q: %w", worktreePath, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("worktree path %q is not a directory; pass the worktree's directory, "+
+			"or use --create-worktree --branch with a name that is not already taken", worktreePath)
+	}
+	return nil
+}
+
+// resolveWorktreeFlag turns a --worktree value into what the server requires: an
+// absolute path, resolved here because this process is the only one that knows
+// the directory the flag was typed against. An empty flag stays empty — the
+// spawn then falls to --create-worktree or the parent's tree.
+func resolveWorktreeFlag(cwd, flag string) (string, error) {
+	if flag == "" || filepath.IsAbs(flag) {
+		return flag, nil
+	}
+	if cwd == "" {
+		return "", fmt.Errorf("could not resolve --worktree %q: no working directory", flag)
+	}
+	return filepath.Join(cwd, flag), nil
+}
+
 func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoName string, params *ipc.NewSessionParams, parent session.SessionInfo) (*ipc.NewSessionResult, error) {
 	worktreePath := params.WorktreePath
 
@@ -993,6 +1037,10 @@ func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoNam
 		return nil, fmt.Errorf("either worktree_path, branch with create_worktree, or parent_session_id is required")
 	}
 
+	if err := validateWorktreePath(worktreePath); err != nil {
+		return nil, err
+	}
+
 	var sessionType session.SessionType
 	switch params.SessionType {
 	case "planner", "":
@@ -1014,6 +1062,7 @@ func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoNam
 	if err != nil {
 		return nil, fmt.Errorf("failed to start session: %w", err)
 	}
+	slog.Info("accepted new-session spawn", "worktree_path", worktreePath, "session_type", params.SessionType)
 
 	return &ipc.NewSessionResult{
 		SessionID:    string(id),
@@ -1126,6 +1175,15 @@ auto-compaction. Codex does not need this suffix.`,
 		branch, _ := cmd.Flags().GetString("branch")
 		baseBranch, _ := cmd.Flags().GetString("from")
 		worktreePath, _ := cmd.Flags().GetString("worktree")
+		// Resolve in the only process that knows what the path was typed
+		// against. The server has no access to this cwd, so a relative path that
+		// crossed IPC could only be resolved against a base the caller never
+		// named — which is how `-w .` used to land a session outside any repo.
+		cwd, _ := os.Getwd()
+		worktreePath, err = resolveWorktreeFlag(cwd, worktreePath)
+		if err != nil {
+			return err
+		}
 		prompt, _ := cmd.Flags().GetString("prompt")
 		model, _ := cmd.Flags().GetString("model")
 		backend, _ := cmd.Flags().GetString("backend")
@@ -1678,7 +1736,7 @@ func init() {
 	newSessionCmd.Flags().StringP("type", "t", "planner", "Session type: planner, builder, or codetalk")
 	newSessionCmd.Flags().StringP("branch", "b", "", "Branch name (creates worktree if --create-worktree)")
 	newSessionCmd.Flags().StringP("from", "f", "", "Base branch for new worktree")
-	newSessionCmd.Flags().StringP("worktree", "w", "", "Existing worktree path")
+	newSessionCmd.Flags().StringP("worktree", "w", "", "Existing worktree path (relative paths resolve against the current directory)")
 	newSessionCmd.Flags().StringP("prompt", "p", "", "Prompt for the session")
 	newSessionCmd.Flags().StringP("model", "m", "", "Model ID (e.g. opus, sonnet)")
 	newSessionCmd.Flags().String("backend", "", "CLI backend, independent of model: claude or codex (empty infers from model; naming one requires --model)")
