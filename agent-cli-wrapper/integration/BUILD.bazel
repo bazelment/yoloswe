@@ -41,7 +41,7 @@ go_test(
     # The agent CLIs need real user state to authenticate and run:
     #   HOME / USER          — cursor's `agent` launcher uses `set -u` and
     #                          dies on unbound HOME; auth state lives under
-    #                          ~/.claude, ~/.codex, ~/.cursor, ~/.gemini.
+    #                          ~/.claude, ~/.codex, ~/.cursor.
     #   PATH                 — the wrappers exec the CLI binary by name.
     #   XDG_*_HOME           — cursor + node compile cache locations.
     env_inherit = [

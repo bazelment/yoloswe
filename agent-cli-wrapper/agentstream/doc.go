@@ -42,8 +42,8 @@
 //     bridge code.
 //
 //   - KindUnknown sentinel: Events that conditionally map to a common kind
-//     (e.g., ACP ToolCallUpdateEvent with non-terminal status) return
-//     KindUnknown, which the bridge skips.
+//     before reaching a terminal state return KindUnknown, which the bridge
+//     skips.
 //
 // # Limitations
 //
