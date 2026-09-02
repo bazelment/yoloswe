@@ -78,31 +78,7 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 	}
 	p.mu.Unlock()
 
-	// Build thread options.
-	// Only pass an explicit model if the caller overrode the default;
-	// Claude-specific aliases (haiku, sonnet, opus, fable) are not valid for codex
-	// and should not be forwarded — let codex use its own configured default.
-	var threadOpts []codex.ThreadOption
-	if cfg.Model != "" && !isClaudeModelAlias(cfg.Model) {
-		threadOpts = append(threadOpts, codex.WithModel(cfg.Model))
-	}
-	if policy, ok := codexApprovalPolicyForPermissionMode(cfg.PermissionMode); ok {
-		threadOpts = append(threadOpts, codex.WithApprovalPolicy(policy))
-	}
-	// When no explicit permission mode is set (empty/"default"), don't override
-	// codex's own default approval policy — callers that need auto-approve should
-	// set PermissionMode to "bypass" explicitly.
-	if cfg.WorkDir != "" {
-		threadOpts = append(threadOpts, codex.WithWorkDir(cfg.WorkDir))
-	}
-	// For bypass mode (builders), disable sandboxing entirely so codex
-	// can write files and run commands. The "workspace-write" mode still
-	// uses bubblewrap, which may fail in container/VM environments that
-	// lack network namespace permissions. Since the delegator runs in a
-	// controlled environment, full access is appropriate.
-	if strings.ToLower(strings.TrimSpace(cfg.PermissionMode)) == "bypass" {
-		threadOpts = append(threadOpts, codex.WithSandbox("danger-full-access"))
-	}
+	threadOpts := codexThreadOpts(cfg)
 
 	// Create or resume thread and execute.
 	var thread *codex.Thread
@@ -251,15 +227,36 @@ func endpointsEqual(a, b llmendpoint.Endpoint) bool {
 	return true
 }
 
-// isClaudeModelAlias returns true for model names that are Claude-specific
-// shorthand (haiku, sonnet, opus, fable) and not valid for non-Claude providers.
-func isClaudeModelAlias(model string) bool {
-	switch strings.ToLower(strings.TrimSpace(model)) {
-	case "haiku", "sonnet", "opus", "fable":
-		return true
-	default:
-		return false
+// codexThreadOpts builds the codex thread options for one Execute call. It is
+// split out of Execute so a test can assert what actually reaches the CLI
+// rather than only the rules that feed it.
+func codexThreadOpts(cfg ExecuteConfig) []codex.ThreadOption {
+	var opts []codex.ThreadOption
+	// CLIModelArg drops what codex cannot run: the Claude-specific shorthand
+	// applyOptions defaults to ("sonnet"), and any other curated ID belonging
+	// to another provider — codex is not a gateway, it answers a curated
+	// non-OpenAI ID with `The 'claude-fable-5' model is not supported`.
+	if model := CLIModelArg(cfg.Model, ProviderCodex); model != "" {
+		opts = append(opts, codex.WithModel(model))
 	}
+	if policy, ok := codexApprovalPolicyForPermissionMode(cfg.PermissionMode); ok {
+		opts = append(opts, codex.WithApprovalPolicy(policy))
+	}
+	// When no explicit permission mode is set (empty/"default"), don't override
+	// codex's own default approval policy — callers that need auto-approve should
+	// set PermissionMode to "bypass" explicitly.
+	if cfg.WorkDir != "" {
+		opts = append(opts, codex.WithWorkDir(cfg.WorkDir))
+	}
+	// For bypass mode (builders), disable sandboxing entirely so codex
+	// can write files and run commands. The "workspace-write" mode still
+	// uses bubblewrap, which may fail in container/VM environments that
+	// lack network namespace permissions. Since the delegator runs in a
+	// controlled environment, full access is appropriate.
+	if strings.ToLower(strings.TrimSpace(cfg.PermissionMode)) == "bypass" {
+		opts = append(opts, codex.WithSandbox("danger-full-access"))
+	}
+	return opts
 }
 
 func codexApprovalPolicyForPermissionMode(permissionMode string) (codex.ApprovalPolicy, bool) {

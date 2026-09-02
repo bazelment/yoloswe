@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/yoloswe/reviewer"
 )
 
@@ -196,6 +197,14 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 
 	if err := reviewer.ValidateBackend(backend); err != nil {
 		return emitEarlyFailure(err, "", requestedMode, emitEnvelope)
+	}
+
+	// --backend and --model are independent flags. Refuse a model the chosen
+	// backend cannot run rather than letting it be dropped: an orchestrator
+	// reading the envelope would see a clean review from a model it never
+	// asked for.
+	if err := agent.ModelProviderMismatch(model, backend); err != nil {
+		return emitEarlyFailure(err, model, requestedMode, emitEnvelope)
 	}
 
 	workDir, err := reviewer.ResolveWorkDir()
