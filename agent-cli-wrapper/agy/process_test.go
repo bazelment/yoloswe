@@ -1,6 +1,7 @@
 package agy
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -46,16 +47,6 @@ func TestBuildCLIArgs_AllOptions(t *testing.T) {
 	}, pm.BuildCLIArgs())
 }
 
-// indexOf returns the index of needle in args, or -1 if absent.
-func indexOf(args []string, needle string) int {
-	for i, a := range args {
-		if a == needle {
-			return i
-		}
-	}
-	return -1
-}
-
 func TestBuildCLIArgs_FlagsPrecedePrintFlag(t *testing.T) {
 	t.Parallel()
 
@@ -93,7 +84,6 @@ func TestBuildCLIArgs_FlagsPrecedePrintFlag(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -104,13 +94,13 @@ func TestBuildCLIArgs_FlagsPrecedePrintFlag(t *testing.T) {
 			pm := newProcessManager("the prompt", cfg)
 			args := pm.BuildCLIArgs()
 
-			pIdx := indexOf(args, "-p")
+			pIdx := slices.Index(args, "-p")
 			require.GreaterOrEqualf(t, pIdx, 0, "-p flag missing from args: %v", args)
 			require.Lessf(t, pIdx, len(args)-1, "-p has no trailing prompt token: %v", args)
 			require.Equalf(t, "the prompt", args[pIdx+1], "-p must be immediately followed by the prompt: %v", args)
 
 			for _, flag := range []string{"--model", "--effort", "--future-flag", "--sandbox"} {
-				if idx := indexOf(args, flag); idx >= 0 {
+				if idx := slices.Index(args, flag); idx >= 0 {
 					assert.Lessf(t, idx, pIdx, "%s at %d must precede -p at %d: %v", flag, idx, pIdx, args)
 				}
 			}
@@ -149,7 +139,7 @@ func TestBuildCLIArgs_EmptyModelAndEffortEmitNothing(t *testing.T) {
 	pm := newProcessManager("hello", defaultConfig())
 	args := pm.BuildCLIArgs()
 
-	assert.Equal(t, -1, indexOf(args, "--model"))
-	assert.Equal(t, -1, indexOf(args, "--effort"))
+	assert.Equal(t, -1, slices.Index(args, "--model"))
+	assert.Equal(t, -1, slices.Index(args, "--effort"))
 	assert.Equal(t, []string{"-p", "hello"}, args)
 }
