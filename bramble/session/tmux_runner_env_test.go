@@ -247,7 +247,7 @@ func TestTmuxRunnerCodexNotifyRequiresIdentityAndBinary(t *testing.T) {
 // Only codex takes this override. Claude has its own Stop hook via --settings,
 // and passing -c to it would be a startup error.
 func TestTmuxRunnerNotifyOverrideIsCodexOnly(t *testing.T) {
-	for _, provider := range []string{ProviderClaude, ProviderGemini, ProviderAgy} {
+	for _, provider := range []string{ProviderClaude, ProviderCursor, ProviderAgy} {
 		r := &tmuxRunner{provider: provider, sessionID: "s1", brambleBin: "/bin/bramble"}
 		_, args := r.buildCommand()
 		for _, a := range args {

@@ -29,7 +29,6 @@ func TestResolveAgentModel_ExactMatchFromRegistry(t *testing.T) {
 	avail := agent.NewProviderAvailabilityFromMap(map[string]agent.ProviderStatus{
 		agent.ProviderClaude: {Provider: agent.ProviderClaude, Installed: true},
 		agent.ProviderCodex:  {Provider: agent.ProviderCodex, Installed: false},
-		agent.ProviderGemini: {Provider: agent.ProviderGemini, Installed: false},
 		agent.ProviderCursor: {Provider: agent.ProviderCursor, Installed: false},
 		agent.ProviderAgy:    {Provider: agent.ProviderAgy, Installed: false},
 	})
@@ -49,7 +48,7 @@ func TestResolveAgentModel_PrefixFallback(t *testing.T) {
 		provider string
 	}{
 		{"gpt-future-9000", agent.ProviderCodex},
-		{"gemini-99-ultra", agent.ProviderGemini},
+		{"gemini-99-ultra", agent.ProviderAgy},
 		{"cursor-fast", agent.ProviderCursor},
 		{"composer-3", agent.ProviderCursor},
 		{"agy-pro", agent.ProviderAgy},
@@ -153,7 +152,7 @@ func TestManager_PrefixModelRoutesToCorrectProvider(t *testing.T) {
 		availProvider   string // must be installed so the registry accepts the session
 	}{
 		{"gpt-future-9000", agent.ProviderCodex, agent.ProviderClaude},
-		{"gemini-99-ultra", agent.ProviderGemini, agent.ProviderClaude},
+		{"gemini-99-ultra", agent.ProviderAgy, agent.ProviderClaude},
 		{"cursor-fast-99", agent.ProviderCursor, agent.ProviderClaude},
 		{"composer-v9", agent.ProviderCursor, agent.ProviderClaude},
 		{"agy-pro", agent.ProviderAgy, agent.ProviderClaude},
@@ -167,7 +166,6 @@ func TestManager_PrefixModelRoutesToCorrectProvider(t *testing.T) {
 			statusMap := map[string]agent.ProviderStatus{
 				agent.ProviderClaude: {Provider: agent.ProviderClaude, Installed: true},
 				agent.ProviderCodex:  {Provider: agent.ProviderCodex, Installed: true},
-				agent.ProviderGemini: {Provider: agent.ProviderGemini, Installed: true},
 				agent.ProviderCursor: {Provider: agent.ProviderCursor, Installed: true},
 				agent.ProviderAgy:    {Provider: agent.ProviderAgy, Installed: true},
 			}
@@ -209,7 +207,6 @@ func TestManager_UnknownModelLandsInStatusFailed(t *testing.T) {
 	avail := agent.NewProviderAvailabilityFromMap(map[string]agent.ProviderStatus{
 		agent.ProviderClaude: {Provider: agent.ProviderClaude, Installed: true},
 		agent.ProviderCodex:  {Provider: agent.ProviderCodex, Installed: true},
-		agent.ProviderGemini: {Provider: agent.ProviderGemini, Installed: true},
 		agent.ProviderCursor: {Provider: agent.ProviderCursor, Installed: true},
 		agent.ProviderAgy:    {Provider: agent.ProviderAgy, Installed: true},
 	})
@@ -688,12 +685,12 @@ func TestStartSession_EndpointRejectedForInferredProvider(t *testing.T) {
 	mgr := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	t.Cleanup(mgr.Close)
 
-	// No Backend: the provider comes from the model id, which is gemini's.
+	// No Backend: the provider comes from the model id, which routes to agy.
 	_, err := mgr.StartSessionWithOpts(
-		SessionTypeBuilder, t.TempDir(), "test prompt", "gemini-2.5-pro",
+		SessionTypeBuilder, t.TempDir(), "test prompt", "gemini-3.8-flash-low",
 		SpawnOpts{LLMEndpoint: endpoint},
 	)
-	require.Error(t, err, "an endpoint on a gemini model must be refused at the call, not in the background")
-	assert.Contains(t, err.Error(), ProviderGemini,
+	require.Error(t, err, "an endpoint on a gemini-routed model must be refused at the call, not in the background")
+	assert.Contains(t, err.Error(), ProviderAgy,
 		"the error must name the provider the model resolved to")
 }

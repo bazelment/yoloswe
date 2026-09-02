@@ -90,7 +90,7 @@ all opened repos are visible in the Shift-S overlay.
 Environment:
   WT_ROOT     Base directory for worktrees (default: ~/worktrees)
   EDITOR      Editor command for [e]dit (default: code)
-  BRAMBLE_PROTOCOL_LOG_DIR  Directory for Codex/Gemini protocol logs`,
+  BRAMBLE_PROTOCOL_LOG_DIR  Directory for Codex/agy protocol logs`,
 	RunE: runTUI,
 }
 
@@ -280,7 +280,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	resumeRepos = mergeResumeRepos(resumeRepos, restored, repoName)
 
 	// Start the AI task router using the best available provider.
-	// Priority: codex (original default) → claude → gemini.
+	// Priority: codex (original default) → claude → agy.
 	var taskRouter *taskrouter.Router
 	routerProvider := pickRouterProvider(providerAvailability, settings.GetEnabledProviders())
 	if routerProvider != nil {
@@ -1801,7 +1801,7 @@ func init() {
 }
 
 // pickRouterProvider selects the best available provider for the task router.
-// Prefers codex (original default), then claude, then gemini, then agy.
+// Prefers codex (original default), then claude, then agy.
 // Returns nil if no suitable provider is installed and enabled.
 func pickRouterProvider(availability *agent.ProviderAvailability, enabledProviders []string) agent.Provider {
 	enabled := func(name string) bool {
@@ -1823,10 +1823,6 @@ func pickRouterProvider(availability *agent.ProviderAvailability, enabledProvide
 	// Fall back to claude
 	if availability.IsInstalled(agent.ProviderClaude) && enabled(agent.ProviderClaude) {
 		return agent.NewClaudeProvider()
-	}
-	// Fall back to gemini
-	if availability.IsInstalled(agent.ProviderGemini) && enabled(agent.ProviderGemini) {
-		return agent.NewGeminiProvider()
 	}
 	if availability.IsInstalled(agent.ProviderAgy) && enabled(agent.ProviderAgy) {
 		return agent.NewAgyProvider()
