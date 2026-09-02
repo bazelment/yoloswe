@@ -10,6 +10,8 @@ type SessionConfig struct {
 	CLIPath                    string
 	ConversationID             string
 	LogFile                    string
+	Model                      string
+	Effort                     string
 	ExtraArgs                  []string
 	AddDirs                    []string
 	PrintTimeout               time.Duration
@@ -46,6 +48,30 @@ func WithConversation(id string) SessionOption {
 func WithLogFile(path string) SessionOption {
 	return func(c *SessionConfig) {
 		c.LogFile = path
+	}
+}
+
+// WithModel selects the model agy uses for the session, e.g. "gemini-3.8-flash-low"
+// or "claude-sonnet-4-6". See `agy models` for the live catalog. An empty id emits
+// no --model flag, leaving agy's own default in effect.
+func WithModel(id string) SessionOption {
+	return func(c *SessionConfig) {
+		c.Model = id
+	}
+}
+
+// WithEffort sets the reasoning effort agy requests for the session.
+//
+// agy's own --effort flag documents "low|medium|high". This wrapper is a thin
+// transport: it does not validate, normalize, or clamp the value in any way —
+// it passes the string through verbatim as the argument to --effort, and an
+// empty string emits no --effort flag at all. Callers that need to map a
+// richer effort concept (e.g. an EffortLevel enum) onto agy's vocabulary, or
+// reject/clamp values outside low|medium|high, own that logic themselves
+// before calling WithEffort.
+func WithEffort(level string) SessionOption {
+	return func(c *SessionConfig) {
+		c.Effort = level
 	}
 }
 
