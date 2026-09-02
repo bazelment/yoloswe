@@ -15,7 +15,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/cliapp"
@@ -273,11 +272,11 @@ func newCodeTalkCmd() *cobra.Command {
 		Long: `Codetalk runs a single read-only code-understanding turn against the chosen
 backend. The agent has Read/Grep/Glob and read-only Bash; it cannot modify files.
 
-Pass --backend=claude (default), codex, gemini, or cursor to pick the underlying
+Pass --backend=claude (default), codex, agy, or cursor to pick the underlying
 CLI. The --llm-* flags route inference through a third-party LLM API endpoint
 (e.g. Baseten, OpenRouter, LiteLLM). Note: the claude backend requires an
-Anthropic-shaped endpoint — use codex or gemini for raw OpenAI-compatible
-endpoints.`,
+Anthropic-shaped endpoint — use codex for raw OpenAI-compatible endpoints (agy
+does not support a custom LLM endpoint).`,
 		Example: `  yoloswe codetalk "explain agent-cli-wrapper"
   yoloswe codetalk --backend codex --model moonshotai/Kimi-K2.6 \
     --llm-base-url https://inference.baseten.co/v1 \
@@ -290,7 +289,7 @@ endpoints.`,
 		},
 	}
 	cmd.Flags().StringVar(&flags.backend, "backend", agent.ProviderClaude, "Backend CLI: "+strings.Join(agent.AllProviders, ", "))
-	cmd.Flags().StringVar(&flags.model, "model", "", "Model to use (defaults: claude=opus, codex=gpt-5.5, gemini=gemini-2.5-pro)")
+	cmd.Flags().StringVar(&flags.model, "model", "", "Model to use (defaults: claude=opus, codex=gpt-5.5, agy=gemini-3.8-flash-medium)")
 	cmd.Flags().StringVar(&flags.workDir, "dir", "", "Working directory (default: current)")
 	cmd.Flags().StringVar(&flags.recordDir, "record", "", "Recording directory (default: ~/.yoloswe)")
 	cmd.Flags().StringVar(&flags.systemPrompt, "system", "", "Custom system prompt")
@@ -402,11 +401,14 @@ func runCodeTalkProvider(ctx context.Context, backend string, flags *codeTalkFla
 			model = "gpt-5.5"
 		}
 		prov = agent.NewCodexProvider()
-	case agent.ProviderGemini:
-		if model == "" {
-			model = "gemini-2.5-pro"
+	case agent.ProviderAgy:
+		if !ep.IsZero() {
+			return fmt.Errorf("agy does not support custom LLM endpoints")
 		}
-		prov = agent.NewGeminiProvider(acp.WithBinaryArgs("--experimental-acp"))
+		if model == "" {
+			model = "gemini-3.8-flash-medium"
+		}
+		prov = agent.NewAgyProvider()
 	case agent.ProviderCursor:
 		if model == "" {
 			model = "cursor-default"
