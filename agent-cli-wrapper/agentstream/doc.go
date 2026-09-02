@@ -1,10 +1,10 @@
 // Package agentstream defines the common streaming event interface shared by
-// all agent SDK packages (claude, acp/gemini, codex).
+// all agent SDK packages (claude, codex).
 //
 // # Background
 //
 // Each agent SDK wraps a CLI subprocess and emits typed events on a Go channel
-// (e.g., claude.TextEvent, codex.CommandStartEvent, acp.ToolCallStartEvent).
+// (e.g., claude.TextEvent, codex.CommandStartEvent).
 // The multiagent/agent provider layer consumes these events and translates them
 // into a provider-agnostic AgentEvent type for upstream consumers.
 //

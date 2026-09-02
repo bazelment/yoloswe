@@ -47,7 +47,6 @@ go_test(
     data = glob(["testdata/**"]),
     embed = [":reviewer"],
     deps = [
-        "//agent-cli-wrapper/acp",
         "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/claude/render",
