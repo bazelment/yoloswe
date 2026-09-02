@@ -8,7 +8,7 @@ Bramble is a terminal UI for managing AI-assisted software engineering workflows
 ## Key Features
 
 - **Dual execution modes** — run AI sessions in-process (TUI mode) or in background tmux windows
-- **Multi-provider support** — Claude, Codex, and Gemini backends with auto-detection
+- **Multi-provider support** — Claude, Codex, and Agy backends with auto-detection
 - **Worktree management** — create, switch, sync, and delete git worktrees from the UI
 - **Parallel sessions** — run planners and builders side-by-side on the same worktree
 - **Multi-repo support** — manage sessions across multiple repositories in a single instance
@@ -197,12 +197,12 @@ it.
 
 Backends differ in how Bramble learns a turn ended: Claude and Codex are given a
 completion hook, and Cursor — which has neither a notify flag nor a working CLI
-hook — has its idleness read off its pane. Gemini and Agy have neither, so a
-subagent on those is only seen to finish when its window closes.
+hook — has its idleness read off its pane. Agy has neither, so a
+subagent on that is only seen to finish when its window closes.
 
 Because a session's status comes from Bramble's own view rather than the agent's
 cooperation, it is accurate whatever backend ran — which is what makes Codex,
-Gemini, Cursor and Agy usable as subagents, none of which can be given a
+Cursor and Agy usable as subagents, none of which can be given a
 reporting instruction as reliably as Claude.
 
 ### Messaging a session
@@ -229,7 +229,7 @@ Settings are stored in `~/.bramble/settings.json`:
 ```json
 {
   "theme_name": "dark",
-  "enabled_providers": ["claude", "codex", "gemini"],
+  "enabled_providers": ["claude", "codex", "agy"],
   "repos": {
     "my-repo": {
       "on_worktree_create": ["./scripts/setup-worktree.sh"],

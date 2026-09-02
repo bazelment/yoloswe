@@ -121,7 +121,7 @@ For sessions recorded by each provider:
 Create a table in `memory/gap-matrix.md`:
 
 - **Rows**: Each capability (text rendering, tool display, thinking, errors, turn summary, replay, persistence, layout, etc.)
-- **Columns**: Claude | Codex | Gemini | Replay? | Persistence?
+- **Columns**: Claude | Codex | Agy | Replay? | Persistence?
 - **Cells**: `works` / `broken` / `partial` / `untested` with notes
 
 Sort by severity: broken rendering > missing data > degraded display > cosmetic.

@@ -20,7 +20,7 @@ Autonomous test→diagnose→fix cycle for the delegator agent. **Max 5 rounds.*
    python3 scripts/delegator-eval.py \
      --questions-file scripts/delegator-eval-questions.txt \
      --work-dir /path/to/repo \
-     --model sonnet --child-model gemini-3-flash-preview \
+     --model sonnet --child-model gemini-3.8-flash-low \
      --log-dir "$LOG_DIR" --timeout 900 2>"$LOG_DIR/stderr.txt"
    ```
    The script drives interactive mode via PTY + `--status-fd` pipe. It sends

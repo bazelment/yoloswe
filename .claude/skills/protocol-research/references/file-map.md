@@ -46,7 +46,7 @@ Quick reference for finding protocol-related code across the repo.
 |------|----------|
 | `multiagent/agent/claude_provider.go` | Claude provider — both ephemeral and long-running |
 | `multiagent/agent/codex_provider.go` | Codex provider — ephemeral only (thread-per-execution) |
-| `multiagent/agent/gemini_provider.go` | Gemini provider — both ephemeral and long-running |
+| `multiagent/agent/agy_provider.go` | Agy provider — ephemeral only, print-mode CLI wrapper, no tool-call events (replaces the deleted `gemini_provider.go`) |
 | `multiagent/agent/provider_check.go` | Binary availability probing |
 | `multiagent/agent/model_registry.go` | Model-to-provider mapping |
 

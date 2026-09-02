@@ -4,6 +4,15 @@
 
 This document captures the iterative testing and review process for adding `--mode real` to `bramble delegator`, from initial implementation through multiple rounds of output readability improvements.
 
+> **Historical note:** the test runs below exercised the now-deleted `gemini`
+> CLI provider (`agent.GeminiProvider`/ACP-backed) and model IDs like
+> `gemini-2.5-flash` / `gemini-3-flash-preview` that agy cannot run. That
+> provider has been replaced by `AgyProvider`; current `gemini-*` IDs
+> (`gemini-3.8-flash-*`, `gemini-3.1-pro-*`) route to agy instead. The
+> findings below (cost/token reporting gaps, model-name-parsing fix, etc.)
+> are preserved as the historical record and are not rewritten — do not use
+> the specific commands/model IDs here as current guidance.
+
 ## Files Changed
 
 | File | Change |
