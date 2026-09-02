@@ -984,6 +984,20 @@ func validateWorktreePath(worktreePath string) error {
 	return nil
 }
 
+// resolveWorktreeFlag turns a --worktree value into what the server requires: an
+// absolute path, resolved here because this process is the only one that knows
+// the directory the flag was typed against. An empty flag stays empty — the
+// spawn then falls to --create-worktree or the parent's tree.
+func resolveWorktreeFlag(cwd, flag string) (string, error) {
+	if flag == "" || filepath.IsAbs(flag) {
+		return flag, nil
+	}
+	if cwd == "" {
+		return "", fmt.Errorf("could not resolve --worktree %q: no working directory", flag)
+	}
+	return filepath.Join(cwd, flag), nil
+}
+
 func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoName string, params *ipc.NewSessionParams, parent session.SessionInfo) (*ipc.NewSessionResult, error) {
 	worktreePath := params.WorktreePath
 
@@ -1161,15 +1175,14 @@ auto-compaction. Codex does not need this suffix.`,
 		branch, _ := cmd.Flags().GetString("branch")
 		baseBranch, _ := cmd.Flags().GetString("from")
 		worktreePath, _ := cmd.Flags().GetString("worktree")
-		// Resolve here, in the only process that knows what the path was typed
+		// Resolve in the only process that knows what the path was typed
 		// against. The server has no access to this cwd, so a relative path that
 		// crossed IPC could only be resolved against a base the caller never
 		// named — which is how `-w .` used to land a session outside any repo.
-		if worktreePath != "" {
-			worktreePath, err = filepath.Abs(worktreePath)
-			if err != nil {
-				return fmt.Errorf("could not resolve --worktree: %w", err)
-			}
+		cwd, _ := os.Getwd()
+		worktreePath, err = resolveWorktreeFlag(cwd, worktreePath)
+		if err != nil {
+			return err
 		}
 		prompt, _ := cmd.Flags().GetString("prompt")
 		model, _ := cmd.Flags().GetString("model")

@@ -197,6 +197,47 @@ func TestValidateWorktreePath(t *testing.T) {
 	}
 }
 
+// TestResolveWorktreeFlag covers the client half of the contract the server's
+// hard rejection depends on. Without it, deleting the resolution would make
+// every relative -w fail with "must be absolute" and no test would notice.
+func TestResolveWorktreeFlag(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		cwd     string
+		flag    string
+		want    string
+		wantErr string
+	}{
+		{name: "an empty flag stays empty", cwd: "/wt/repo/feature", flag: "", want: ""},
+		{name: "an absolute path passes through unchanged", cwd: "/wt/repo/feature", flag: "/wt/other/x", want: "/wt/other/x"},
+		{name: "a bare dot becomes the caller's directory", cwd: "/wt/repo/feature", flag: ".", want: "/wt/repo/feature"},
+		{name: "a relative name joins the caller's directory", cwd: "/wt/repo", flag: "feature", want: "/wt/repo/feature"},
+		{name: "a parent reference is resolved, not passed on", cwd: "/wt/repo/feature", flag: "../other", want: "/wt/repo/other"},
+		{name: "a relative flag with no cwd is an error", cwd: "", flag: "feature", wantErr: "no working directory"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := resolveWorktreeFlag(tt.cwd, tt.flag)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			if got != "" {
+				assert.True(t, filepath.IsAbs(got),
+					"whatever the client sends must satisfy the server's absolute-path rule")
+			}
+		})
+	}
+}
+
 // TestRepoForSpawnPrefersTheParentOverAnInferredRepo applies to the repo the
 // rule round 6 established for the parent: a value the client guessed is not a
 // claim the caller made. `bramble new-session` auto-detects the repo from cwd
