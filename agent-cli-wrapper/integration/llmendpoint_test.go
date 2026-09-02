@@ -46,7 +46,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
@@ -65,15 +64,9 @@ const (
 
 // TestLLMEndpoint_Baseten runs WithLLMEndpoint smoke against Baseten's
 // Kimi-K2.6 deployment for the wrappers whose CLIs currently honor a
-// custom endpoint at runtime. Today that's claude and codex; gemini and
-// cursor have compile-time guards (below) but no runtime subtests:
+// custom endpoint at runtime. Today that's claude and codex; cursor has no
+// runtime subtest:
 //
-//   - gemini-cli has no OpenAI/Anthropic passthrough on any released 0.x
-//     build (issue google-gemini/gemini-cli#1605, closed "wontfix"). It
-//     only speaks GenerateContent, so hitting Baseten requires a
-//     translating proxy in front of GOOGLE_GEMINI_BASE_URL. The smoke
-//     against such a proxy is project-specific; add it when the proxy
-//     ships.
 //   - cursor-agent ignores OPENAI_BASE_URL when its model id is not a
 //     recognized third-party model.
 //
@@ -388,5 +381,4 @@ func isOpenRouterHighDemand(label, message string) bool {
 var (
 	_ claude.SessionOption = claude.WithLLMEndpoint(llmendpoint.Endpoint{})
 	_ codex.ClientOption   = codex.WithLLMEndpoint(llmendpoint.Endpoint{})
-	_ acp.ClientOption     = acp.WithLLMEndpoint(llmendpoint.Endpoint{})
 )

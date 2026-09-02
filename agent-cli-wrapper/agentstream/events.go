@@ -5,7 +5,7 @@ type EventKind int
 
 const (
 	// KindUnknown is the zero value. Events returning KindUnknown are skipped
-	// by the generic bridge (e.g., ACP ToolCallUpdateEvent with non-terminal status).
+	// by the generic bridge (e.g., a progress event before it reaches a terminal status).
 	KindUnknown EventKind = iota
 	KindReady
 	KindText

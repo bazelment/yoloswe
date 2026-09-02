@@ -1,7 +1,7 @@
 // Package llmendpoint describes a third-party LLM API endpoint that an
 // agent-cli-wrapper subpackage can be pointed at.
 //
-// Each wrapper (claude, codex, cursor, acp/gemini) accepts an Endpoint via a
+// Each wrapper (claude, codex, cursor) accepts an Endpoint via a
 // WithLLMEndpoint option and translates it into the env vars and CLI flags its
 // CLI binary expects. The translation is per-wrapper because each upstream CLI
 // honors a different convention:
@@ -9,10 +9,6 @@
 //   - claude: ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (Anthropic-shaped only)
 //   - codex:  --config model_providers.<name>.{base_url,wire_api,env_key}
 //     (supports both OpenAI Chat Completions and OpenAI Responses wires)
-//   - acp:    GEMINI_API_KEY + GOOGLE_GEMINI_BASE_URL only. The official
-//     gemini-cli has no OpenAI/Anthropic passthrough (issue
-//     google-gemini/gemini-cli#1605, closed wontfix), so a Google-shaped
-//     translating proxy is required to hit OpenAI/Anthropic endpoints.
 //   - cursor: best-effort OPENAI_BASE_URL/OPENAI_API_KEY (cursor-agent ignores
 //     these for non-Cursor models; the option exists for symmetry)
 //
@@ -100,7 +96,7 @@ type Endpoint struct {
 
 	// Headers carries optional extra HTTP headers to inject on each request.
 	// Wrapper support is partial today — only codex consumes them via
-	// `--config model_providers.<n>.http_headers.*`. claude/cursor/gemini
+	// `--config model_providers.<n>.http_headers.*`. claude/cursor
 	// wrappers ignore Headers, so switching providers on a config that
 	// relies on Headers silently drops them. Validate still runs the same
 	// header-name regex globally, so this map is shape-checked at
@@ -136,7 +132,7 @@ var providerNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 // without quoting. RFC 7230 allows a wider token set (`!#$%&'*+.^|~`) but
 // those chars would fail at codex --config arg time, and we apply the same
 // regex globally because the whole point of this validator is to reject at
-// config-load. Operators targeting only claude/cursor/gemini still inherit
+// config-load. Operators targeting only claude/cursor still inherit
 // this restriction; it's preferable to a Validate that varies per-backend
 // since the same Endpoint flows through a single LoadConfig path before
 // the orchestrator even knows which provider will run it.
