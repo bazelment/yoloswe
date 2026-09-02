@@ -88,6 +88,16 @@ type providerRunner struct { //nolint:govet // fieldalignment: keep related life
 	sawThinking     bool
 	turnDone        bool
 	turnDoneCh      chan struct{}
+
+	// resumeSessionID carries the provider's own session/conversation id from
+	// one RunTurn to the next, for ephemeral (non-LongRunningProvider)
+	// backends that create a fresh process per turn (agy, Codex, Cursor).
+	// Guarded by resumeMu because RunTurn can, in principle, be called again
+	// before a prior turn's caller has finished reading its result, and
+	// CLISessionID() reads it from a different goroutine than RunTurn writes
+	// it.
+	resumeMu        sync.Mutex
+	resumeSessionID string
 }
 
 // trackingEventHandler wraps provider callbacks to record observed event types
@@ -241,16 +251,39 @@ func (r *providerRunner) RunTurn(ctx context.Context, message string) (*claude.T
 		// Give bridged events a brief window to flush before fallback synthesis.
 		r.waitForTurnDone(turnObsSeq, 150*time.Millisecond)
 	} else {
-		// Ephemeral providers create a fresh session each turn
+		// Ephemeral providers create a fresh session each turn: thread the
+		// prior turn's SessionID back in as ResumeSessionID so the new
+		// process resumes the same conversation instead of starting cold.
+		// This is what actually closes the "agy/Codex/Cursor sessions lose
+		// context on turn 2" gap — Execute already accepts ResumeSessionID
+		// per-provider, but nothing above this call ever supplied one.
+		if resumeID := r.getResumeSessionID(); resumeID != "" {
+			opts = append(opts, agent.WithProviderResumeSessionID(resumeID))
+		}
 		var err error
 		result, err = r.provider.Execute(ctx, message, nil, opts...)
 		if err != nil {
 			return nil, err
 		}
+		if result.SessionID != "" {
+			r.setResumeSessionID(result.SessionID)
+		}
 	}
 
 	r.emitFallbackFromResult(turnObsSeq, result)
 	return agentUsageToTurnUsage(result.Usage), nil
+}
+
+func (r *providerRunner) getResumeSessionID() string {
+	r.resumeMu.Lock()
+	defer r.resumeMu.Unlock()
+	return r.resumeSessionID
+}
+
+func (r *providerRunner) setResumeSessionID(id string) {
+	r.resumeMu.Lock()
+	defer r.resumeMu.Unlock()
+	r.resumeSessionID = id
 }
 
 func (r *providerRunner) beginTurnObservation() uint64 {
@@ -1983,12 +2016,12 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			// RunTurn calls Execute fresh, exactly like the Codex/Cursor
 			// branches above. providerRunner's non-LongRunningProvider path
 			// already handles this uniformly; nothing agy-specific is needed
-			// there. Multi-turn *conversation continuity* is not available:
-			// agy's wrapper never surfaces the conversation_id its own
-			// --output-format json mode reports (see L4.notes.md), so there is
-			// no ID here to feed back in as ResumeSessionID on the next turn.
-			// Each turn is a fresh agy conversation with no memory of prior
-			// turns in this session.
+			// there. Conversation continuity across turns IS preserved despite
+			// each turn being a fresh process: providerRunner.RunTurn tracks
+			// the conversation_id agy's --output-format json result reports
+			// (via AgentResult.SessionID) and feeds it back as
+			// ResumeSessionID on the next turn, so agy resumes the same
+			// conversation instead of starting cold.
 			agyOpts, agyLogHint, agyStderrHint := m.agyProviderOptions(session.ID)
 			if agyLogHint != "" {
 				m.addOutput(session.ID, OutputLine{

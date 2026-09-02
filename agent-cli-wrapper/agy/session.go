@@ -2,6 +2,8 @@ package agy
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -9,9 +11,62 @@ import (
 
 // QueryResult contains the result of a one-shot agy query.
 type QueryResult struct {
-	Text       string
-	DurationMs int64
-	Success    bool
+	Text           string
+	ConversationID string
+	DurationMs     int64
+	Usage          Usage
+	Success        bool
+}
+
+// resultPayload mirrors agy's --output-format json result object, e.g.:
+//
+//	{"conversation_id":"...","status":"SUCCESS","response":"...",
+//	 "duration_seconds":1.04,"num_turns":1,
+//	 "usage":{"input_tokens":13888,"output_tokens":2,"thinking_tokens":0,
+//	          "cache_read_tokens":0,"total_tokens":13890}}
+//
+// On error, status is "ERROR", response is empty, and error carries the
+// message (see agy --output-format json --print "" for a live example).
+type resultPayload struct {
+	ConversationID string       `json:"conversation_id"`
+	Status         string       `json:"status"`
+	Response       string       `json:"response"`
+	Error          string       `json:"error"`
+	Usage          usagePayload `json:"usage"`
+}
+
+type usagePayload struct {
+	InputTokens     int `json:"input_tokens"`
+	OutputTokens    int `json:"output_tokens"`
+	ThinkingTokens  int `json:"thinking_tokens"`
+	CacheReadTokens int `json:"cache_read_tokens"`
+	TotalTokens     int `json:"total_tokens"`
+}
+
+func (u usagePayload) toUsage() Usage {
+	return Usage{
+		InputTokens:     u.InputTokens,
+		OutputTokens:    u.OutputTokens,
+		ThinkingTokens:  u.ThinkingTokens,
+		CacheReadTokens: u.CacheReadTokens,
+		TotalTokens:     u.TotalTokens,
+	}
+}
+
+// parseResultPayload parses agy's --output-format json stdout blob. An empty
+// (whitespace-only) raw string returns the zero payload with no error — the
+// caller treats that as "the process produced no result", not a parse
+// failure, since a nonzero process error already explains it.
+func parseResultPayload(raw string) (resultPayload, error) {
+	raw = strings.TrimSpace(raw)
+	var payload resultPayload
+	if raw == "" {
+		return payload, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return resultPayload{}, fmt.Errorf("agy: failed to parse --output-format json result: %w (raw output: %s)", err, raw)
+	}
+	return payload, nil
 }
 
 // Session manages one agy print-mode invocation.
@@ -82,18 +137,46 @@ func (s *Session) run(ctx context.Context) {
 	defer close(s.events)
 
 	start := time.Now()
-	out, _, err := s.process.Start(ctx)
+	out, _, procErr := s.process.Start(ctx)
 	duration := time.Since(start).Milliseconds()
-	text := strings.TrimRight(string(out), "\r\n")
-	if text != "" {
-		s.emit(TextEvent{Text: text})
+
+	payload, parseErr := parseResultPayload(string(out))
+
+	if payload.Response != "" {
+		s.emit(TextEvent{Text: strings.TrimRight(payload.Response, "\r\n")})
 	}
-	if err != nil {
-		s.emit(ErrorEvent{Error: err, Context: "process"})
-		s.emit(TurnCompleteEvent{Error: err, DurationMs: duration, Success: false})
-		return
+
+	switch {
+	case procErr != nil:
+		s.emit(ErrorEvent{Error: procErr, Context: "process"})
+		s.emit(TurnCompleteEvent{
+			Error:          procErr,
+			ConversationID: payload.ConversationID,
+			DurationMs:     duration,
+			Usage:          payload.Usage.toUsage(),
+			Success:        false,
+		})
+	case parseErr != nil:
+		s.emit(ErrorEvent{Error: parseErr, Context: "parse"})
+		s.emit(TurnCompleteEvent{Error: parseErr, DurationMs: duration, Success: false})
+	case payload.Status != "SUCCESS":
+		turnErr := fmt.Errorf("agy: turn failed with status %q: %s", payload.Status, payload.Error)
+		s.emit(ErrorEvent{Error: turnErr, Context: "agy"})
+		s.emit(TurnCompleteEvent{
+			Error:          turnErr,
+			ConversationID: payload.ConversationID,
+			DurationMs:     duration,
+			Usage:          payload.Usage.toUsage(),
+			Success:        false,
+		})
+	default:
+		s.emit(TurnCompleteEvent{
+			ConversationID: payload.ConversationID,
+			DurationMs:     duration,
+			Usage:          payload.Usage.toUsage(),
+			Success:        true,
+		})
 	}
-	s.emit(TurnCompleteEvent{DurationMs: duration, Success: true})
 }
 
 func (s *Session) emit(evt Event) {
@@ -120,6 +203,8 @@ func Query(ctx context.Context, prompt string, opts ...SessionOption) (*QueryRes
 		case TurnCompleteEvent:
 			result.DurationMs = e.DurationMs
 			result.Success = e.Success
+			result.ConversationID = e.ConversationID
+			result.Usage = e.Usage
 			return &result, e.Error
 		case ErrorEvent:
 			return nil, e.Error
