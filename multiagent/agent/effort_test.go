@@ -155,7 +155,9 @@ func TestProviderEffortMatrix(t *testing.T) {
 					for _, opt := range agySessionOpts(ExecuteConfig{Model: model, Effort: level}) {
 						opt(&got)
 					}
-					reconcileAgyEffort(&got)
+					if err := reconcileAgyEffort(&got); err != nil {
+						return err
+					}
 					if level == EffortAuto {
 						continue
 					}

@@ -42,12 +42,12 @@ import (
 
 // agentTurnEvents collects events from a single provider execution.
 type agentTurnEvents struct {
-	TextEvents    []agent.TextAgentEvent
+	TextEvents     []agent.TextAgentEvent
 	ThinkingEvents []agent.ThinkingAgentEvent
-	ToolStarts    []agent.ToolStartAgentEvent
-	ToolCompletes []agent.ToolCompleteAgentEvent
-	TurnComplete  *agent.TurnCompleteAgentEvent
-	Errors        []agent.ErrorAgentEvent
+	ToolStarts     []agent.ToolStartAgentEvent
+	ToolCompletes  []agent.ToolCompleteAgentEvent
+	TurnComplete   *agent.TurnCompleteAgentEvent
+	Errors         []agent.ErrorAgentEvent
 }
 
 // collectAgentEvents reads from provider.Events() until TurnCompleteAgentEvent or context timeout.
@@ -82,13 +82,13 @@ func collectAgentEvents(ctx context.Context, events <-chan agent.AgentEvent) (*a
 
 // recordingEventHandler implements agent.EventHandler and records all callbacks.
 type recordingEventHandler struct {
-	mu             sync.Mutex
-	textCalls      []string
-	thinkingCalls  []string
-	toolStarts     []toolStartCall
-	toolCompletes  []toolCompleteCall
-	turnCompletes  []turnCompleteCall
-	errors         []errorCall
+	mu            sync.Mutex
+	textCalls     []string
+	thinkingCalls []string
+	toolStarts    []toolStartCall
+	toolCompletes []toolCompleteCall
+	turnCompletes []turnCompleteCall
+	errors        []errorCall
 }
 
 type toolStartCall struct {
@@ -159,9 +159,9 @@ func (h *recordingEventHandler) OnError(err error, ctx string) {
 
 // providerFactory creates providers for each backend.
 type providerFactory struct {
-	name       string
-	binary     string // binary to check in PATH
-	hasEvents  bool
+	name      string
+	binary    string // binary to check in PATH
+	hasEvents bool
 	// hasToolEvents is true only for providers whose Events()/EventHandler
 	// stream ToolStart/ToolComplete. Agy's wrapper (agent-cli-wrapper/agy)
 	// is a print-mode CLI wrapper that surfaces only TextEvent,

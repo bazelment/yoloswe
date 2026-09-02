@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
@@ -35,7 +36,12 @@ func (p *AgyProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Work
 		fullPrompt = wtCtx.FormatForPrompt() + "\n\n" + prompt
 	}
 
-	session := agy.NewSession(fullPrompt, p.sessionOptsFor(cfg)...)
+	sessionOpts, err := p.sessionOptsFor(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	session := agy.NewSession(fullPrompt, sessionOpts...)
 	if err := session.Start(ctx); err != nil {
 		return nil, err
 	}
@@ -88,10 +94,23 @@ func (p *AgyProvider) Close() error {
 // MERGED config: the constructor's options can pin a model too, and a guard
 // that inspected only cfg would miss it - the conformance test builds the
 // provider with agy.WithModel(...) and an empty cfg.Model exactly that way.
-func (p *AgyProvider) sessionOptsFor(cfg ExecuteConfig) []agy.SessionOption {
+func (p *AgyProvider) sessionOptsFor(cfg ExecuteConfig) ([]agy.SessionOption, error) {
 	opts := append([]agy.SessionOption{}, p.sessionOpts...)
 	opts = append(opts, agySessionOpts(cfg)...)
-	return append(opts, reconcileAgyEffort)
+
+	// Reconcile against the assembled config, then re-apply the result: the
+	// conflict is a property of the final command line, not of any one option.
+	var merged agy.SessionConfig
+	for _, opt := range opts {
+		opt(&merged)
+	}
+	if err := reconcileAgyEffort(&merged); err != nil {
+		return nil, err
+	}
+	return append(opts, func(c *agy.SessionConfig) {
+		c.Model = merged.Model
+		c.Effort = merged.Effort
+	}), nil
 }
 
 // agySessionOpts builds the agy session options an ExecuteConfig implies.
@@ -168,24 +187,41 @@ func splitModelEffort(model string) (base, pinned string) {
 // Retargeting is only safe onto a variant that exists: agy's catalog is not a
 // full cross product (gemini-3.1-pro ships -low and -high but no -medium, and
 // `--model gemini-3.1-pro-medium` is rejected as "not recognized"). AllModels
-// is this repo's record of which combinations are real, so a retarget it does
-// not know is abandoned and the model's own level stands - the same outcome as
-// before the level was requested, and still a valid command line.
-func reconcileAgyEffort(c *agy.SessionConfig) {
-	if c.Effort == "" {
-		return
+// is this repo's record of which combinations are real. When it has no such
+// variant the request CANNOT be honored, so this returns ErrEffortUnsupported
+// rather than running at the model's own level - that would be exactly the
+// silent downgrade the contract above forbids, and jiradozer/agent.go already
+// handles this error.
+//
+// Uncurated ids are left alone. CLIModelArg passes them through precisely
+// because "there the CLI is the authority, not this list" (model_registry.go),
+// so AllModels cannot say whether a variant exists and this layer must not
+// invent an answer in either direction: agy itself will accept or reject.
+func reconcileAgyEffort(c *agy.SessionConfig) error {
+	if c.Effort == "" || c.Model == "" {
+		return nil
 	}
 	base, pinned := splitModelEffort(c.Model)
-	if c.Model == "" || pinned == "" {
+	if pinned == "" {
 		// Nothing pinned by the model: --effort alone carries the level.
-		return
+		return nil
 	}
-	if pinned != c.Effort {
-		if retarget := base + "-" + c.Effort; isCuratedAgyModel(retarget) {
-			c.Model = retarget
-		}
+	if pinned == c.Effort {
+		c.Effort = "" // Same level twice; keep one representation.
+		return nil
 	}
+	if !isCuratedAgyModel(c.Model) {
+		// Not ours to adjudicate - hand both to agy unchanged.
+		return nil
+	}
+	retarget := base + "-" + c.Effort
+	if !isCuratedAgyModel(retarget) {
+		return fmt.Errorf("%w: agy has no %q variant of %q (requested effort %s on a model pinned to %s)",
+			ErrEffortUnsupported, c.Effort, base, c.Effort, pinned)
+	}
+	c.Model = retarget
 	c.Effort = ""
+	return nil
 }
 
 // isCuratedAgyModel reports whether an id is a known agy model, i.e. one this

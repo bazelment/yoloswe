@@ -139,21 +139,52 @@ func TestReconcileAgyEffort(t *testing.T) {
 			model: "gemini-3.8-flash-low", effort: "high", wantModel: "gemini-3.8-flash-high", wantEffort: ""},
 		{name: "retarget also works downward",
 			model: "gemini-3.1-pro-high", effort: "low", wantModel: "gemini-3.1-pro-low", wantEffort: ""},
-		// agy has no gemini-3.1-pro-medium; synthesizing one would trade a
-		// conflict error for an "unrecognized model" error.
-		{name: "uncurated retarget is abandoned, model's own level stands",
-			model: "gemini-3.1-pro-high", effort: "medium", wantModel: "gemini-3.1-pro-high", wantEffort: ""},
+		// An uncurated id is agy's to adjudicate, not ours: AllModels cannot
+		// say whether a variant exists, so both flags pass through untouched.
+		{name: "uncurated pinned model is left for agy to judge",
+			model: "gemini-9.9-flash-low", effort: "high", wantModel: "gemini-9.9-flash-low", wantEffort: "high"},
 	}
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := agy.SessionConfig{Model: tt.model, Effort: tt.effort}
-			reconcileAgyEffort(&got)
+			require.NoError(t, reconcileAgyEffort(&got))
 			assert.Equal(t, tt.wantModel, got.Model, "model")
 			assert.Equal(t, tt.wantEffort, got.Effort, "effort")
 		})
 	}
+}
+
+// agy's catalog is not a full cross product, so some requested levels simply
+// cannot be run. Surface that rather than quietly running at another level:
+// the whole point of ProviderSupportsEffort(agy)=true is that a caller can
+// trust the level it asked for, and jiradozer already handles this error.
+func TestReconcileAgyEffort_UnrepresentableLevelIsRejected(t *testing.T) {
+	t.Parallel()
+
+	// gemini-3.1-pro ships -low and -high but no -medium.
+	got := agy.SessionConfig{Model: "gemini-3.1-pro-high", Effort: "medium"}
+	err := reconcileAgyEffort(&got)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrEffortUnsupported)
+	assert.Contains(t, err.Error(), "gemini-3.1-pro", "error should name the model")
+	assert.Contains(t, err.Error(), "medium", "error should name the requested level")
+}
+
+func TestAgyProvider_ExecuteRejectsUnrepresentableEffort(t *testing.T) {
+	t.Parallel()
+
+	p := NewAgyProvider(agy.WithCLIPath("missing-agy-effort-test-binary"))
+	defer p.Close()
+
+	_, err := p.Execute(context.Background(), "ignored", nil,
+		WithProviderModel("gemini-3.1-pro-high"), WithProviderEffort(EffortMedium))
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrEffortUnsupported,
+		"an unrepresentable model/effort pair must fail before the CLI runs, got %v", err)
 }
 
 // The conflict is resolved against the MERGED config, so a model pinned by the
@@ -183,8 +214,10 @@ func TestAgyProvider_ConstructorPinnedModelReconcilesEffort(t *testing.T) {
 
 			// Go through the same assembly Execute uses, so dropping the
 			// reconciliation pass from it fails this test.
+			opts, err := p.sessionOptsFor(ExecuteConfig{Effort: tt.effort})
+			require.NoError(t, err)
 			var got agy.SessionConfig
-			for _, opt := range p.sessionOptsFor(ExecuteConfig{Effort: tt.effort}) {
+			for _, opt := range opts {
 				opt(&got)
 			}
 			assert.Equal(t, tt.wantModel, got.Model, "model")
