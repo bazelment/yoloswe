@@ -7,9 +7,10 @@ import "strings"
 // Callers use it to degrade a stale --resume-session-id into a fresh session
 // tagged resume_status=fallback instead of losing the whole review round.
 //
-// The vocabulary is deliberately cross-backend: cursor/codex/gemini speak of
+// The vocabulary is deliberately cross-backend: cursor/codex speak of
 // sessions, threads, and chats; the Claude CLI reports an unknown --resume id
-// as "No conversation found with session ID …".
+// as "No conversation found with session ID …". agy does not use this helper
+// — see agyBackend's doc comment for why it has no resume-not-found signal.
 func isResumeUnavailableMessage(msg string) bool {
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "session not found") ||

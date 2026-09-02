@@ -1,5 +1,5 @@
 // Package reviewer provides a multi-backend wrapper for code review using
-// agent CLIs (Claude, Codex, Cursor, Gemini).
+// agent CLIs (Claude, Codex, Cursor, Agy).
 package reviewer
 
 import (
@@ -48,16 +48,19 @@ const (
 	BackendClaude BackendType = "claude"
 	BackendCodex  BackendType = "codex"
 	BackendCursor BackendType = "cursor"
-	BackendGemini BackendType = "gemini"
+	BackendAgy    BackendType = "agy"
 
 	// DefaultClaudeModel is the model used when BackendClaude is selected and
 	// no --model flag is provided. Matches the default `yoloswe codetalk`
 	// applies to its claude backend.
 	DefaultClaudeModel = "opus"
 
-	// DefaultGeminiModel is the model used when BackendGemini is selected and
-	// no --model flag is provided.
-	DefaultGeminiModel = "gemini-3.1-flash-lite-preview"
+	// DefaultAgyModel is the model used when BackendAgy is selected and no
+	// --model flag is provided. gemini-3.8-flash-medium is the latest flash
+	// generation in agy's curated catalog (see multiagent/agent/model_registry.go)
+	// — flash over pro for review-turn latency, medium effort as the balance
+	// between the low tier (agy's own default) and the added latency of high.
+	DefaultAgyModel = "gemini-3.8-flash-medium"
 
 	// DefaultCodexModel is the model used when BackendCodex is selected and
 	// no --model flag is provided.
@@ -117,7 +120,7 @@ type Config struct {
 	WorkDir         string
 	Goal            string
 	SessionLogPath  string
-	Effort          string // Reasoning effort: codex (low, medium, high), claude (low, medium, high, max)
+	Effort          string // Reasoning effort: codex (low, medium, high), claude (low, medium, high, max), agy (low, medium, high)
 	Sandbox         string // Codex sandbox: "read-only", "workspace-write", "danger-full-access"
 	Model           string
 	BackendType     BackendType
@@ -125,7 +128,7 @@ type Config struct {
 	// ReadOnly withholds the file-mutation surface from the reviewer. Codex
 	// enforces it with an approval handler that denies Write tool calls;
 	// Claude enforces it by not granting the write tools at all (see
-	// claudeReadOnlyDisallowedTools). Cursor and Gemini ignore it. CLI
+	// claudeReadOnlyDisallowedTools). Cursor and Agy ignore it. CLI
 	// entrypoints default this to true. Neither backend can block a
 	// destructive shell command — the prompt is the remaining constraint.
 	ReadOnly bool
@@ -1114,10 +1117,10 @@ func New(config Config) *Reviewer {
 		}
 	}
 
-	// Apply Gemini-specific defaults.
-	if config.BackendType == BackendGemini {
+	// Apply agy-specific defaults.
+	if config.BackendType == BackendAgy {
 		if config.Model == "" {
-			config.Model = DefaultGeminiModel
+			config.Model = DefaultAgyModel
 		}
 	}
 
@@ -1161,8 +1164,8 @@ func New(config Config) *Reviewer {
 		backend = newClaudeBackend(config)
 	case BackendCursor:
 		backend = newCursorBackend(config)
-	case BackendGemini:
-		backend = newGeminiBackend(config)
+	case BackendAgy:
+		backend = newAgyBackend(config)
 	default:
 		backend = newCodexBackend(config)
 	}
@@ -1268,7 +1271,7 @@ func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, 
 }
 
 // EffectiveModel returns the model actually used by the backend. Defaults for
-// all backends (Codex, Cursor, Gemini) are applied in New, so the value is
+// all backends (Codex, Cursor, Agy) are applied in New, so the value is
 // set before the session starts. For Cursor, it may be replaced by the model
 // reported in the backend's ReadyEvent (OnSessionInfo). Callers should prefer
 // this over the raw --model flag, which may be empty or differ from what the
@@ -1282,10 +1285,10 @@ func (r *Reviewer) LastSessionID() string { return r.lastSessionID }
 // ValidateBackend returns an error if the given backend string is not supported.
 func ValidateBackend(backend string) error {
 	switch BackendType(backend) {
-	case BackendClaude, BackendCursor, BackendCodex, BackendGemini:
+	case BackendClaude, BackendCursor, BackendCodex, BackendAgy:
 		return nil
 	default:
-		return fmt.Errorf("unknown backend %q (supported: claude, cursor, codex, gemini)", backend)
+		return fmt.Errorf("unknown backend %q (supported: claude, cursor, codex, agy)", backend)
 	}
 }
 
@@ -1308,7 +1311,7 @@ func ResolveWorkDir() (string, error) {
 // collisions between concurrent runs. Returns "" if no log dir is configured.
 //
 // Note: protocol session logging is currently only supported by the Codex
-// backend; the Claude, Cursor, and Gemini backends silently ignore
+// backend; the Claude, Cursor, and Agy backends silently ignore
 // SessionLogPath.
 func ResolveProtocolLogPath(flagValue string) (string, error) {
 	dir := flagValue

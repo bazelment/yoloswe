@@ -522,7 +522,7 @@ func TestValidateBackend(t *testing.T) {
 		{"claude", false},
 		{"cursor", false},
 		{"codex", false},
-		{"gemini", false},
+		{"agy", false},
 		{"unknown", true},
 		{"", true},
 	}
@@ -536,53 +536,53 @@ func TestValidateBackend(t *testing.T) {
 	}
 }
 
-func TestNew_GeminiBackend(t *testing.T) {
+func TestNew_AgyBackend(t *testing.T) {
 	r := New(Config{
-		BackendType: BackendGemini,
+		BackendType: BackendAgy,
 	})
 
-	if r.config.BackendType != BackendGemini {
-		t.Errorf("expected gemini backend, got %s", r.config.BackendType)
+	if r.config.BackendType != BackendAgy {
+		t.Errorf("expected agy backend, got %s", r.config.BackendType)
 	}
-	if r.config.Model != DefaultGeminiModel {
-		t.Errorf("expected default model %s, got %s", DefaultGeminiModel, r.config.Model)
+	if r.config.Model != DefaultAgyModel {
+		t.Errorf("expected default model %s, got %s", DefaultAgyModel, r.config.Model)
 	}
 	if r.backend == nil {
-		t.Error("backend should not be nil for gemini")
+		t.Error("backend should not be nil for agy")
 	}
 }
 
-func TestNew_GeminiBackend_CustomModel(t *testing.T) {
+func TestNew_AgyBackend_CustomModel(t *testing.T) {
 	r := New(Config{
-		BackendType: BackendGemini,
-		Model:       "gemini-2.5-flash",
+		BackendType: BackendAgy,
+		Model:       "gemini-3.1-pro-low",
 	})
-	if r.config.Model != "gemini-2.5-flash" {
-		t.Errorf("expected custom model gemini-2.5-flash, got %s", r.config.Model)
+	if r.config.Model != "gemini-3.1-pro-low" {
+		t.Errorf("expected custom model gemini-3.1-pro-low, got %s", r.config.Model)
 	}
 }
 
-func TestNew_ApprovalPolicyNotOverriddenForGemini(t *testing.T) {
-	r := New(Config{BackendType: BackendGemini})
+func TestNew_ApprovalPolicyNotOverriddenForAgy(t *testing.T) {
+	r := New(Config{BackendType: BackendAgy})
 	if r.config.ApprovalPolicy != "" {
-		t.Errorf("expected gemini approval policy to remain empty, got %q", r.config.ApprovalPolicy)
+		t.Errorf("expected agy approval policy to remain empty, got %q", r.config.ApprovalPolicy)
 	}
 }
 
-func TestEffectiveModel_GeminiDefault(t *testing.T) {
-	r := New(Config{BackendType: BackendGemini})
-	if got := r.EffectiveModel(); got != "gemini-3.1-flash-lite-preview" {
-		t.Errorf("EffectiveModel() = %q, want gemini-3.1-flash-lite-preview", got)
+func TestEffectiveModel_AgyDefault(t *testing.T) {
+	r := New(Config{BackendType: BackendAgy})
+	if got := r.EffectiveModel(); got != "gemini-3.8-flash-medium" {
+		t.Errorf("EffectiveModel() = %q, want gemini-3.8-flash-medium", got)
 	}
 }
 
-func TestValidateBackend_GeminiErrorMessage(t *testing.T) {
+func TestValidateBackend_AgyErrorMessage(t *testing.T) {
 	err := ValidateBackend("unknown")
 	if err == nil {
 		t.Fatal("expected error for unknown backend")
 	}
-	if !strings.Contains(err.Error(), "gemini") {
-		t.Errorf("error message should mention gemini: %q", err.Error())
+	if !strings.Contains(err.Error(), "agy") {
+		t.Errorf("error message should mention agy: %q", err.Error())
 	}
 }
 
