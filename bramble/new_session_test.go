@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -89,6 +91,103 @@ func TestNewSessionRefusesToInheritAWorktreeFromAnotherRepo(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "repo-a")
 	assert.Contains(t, err.Error(), "repo-b")
+}
+
+// TestNewSessionRejectsANonexistentWorktreePath is the regression test for
+// issue #335: a --worktree that does not exist on disk used to sail through
+// with only a non-empty check, and tmux would silently fall back to the
+// server's own cwd — landing the session somewhere the caller never asked
+// for while the IPC response still reported success. It must fail loudly
+// and register nothing.
+func TestNewSessionRejectsANonexistentWorktreePath(t *testing.T) {
+	t.Parallel()
+
+	wtRoot := t.TempDir()
+	missing := filepath.Join(wtRoot, "does-not-exist")
+
+	registry := session.NewSessionRegistry()
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
+	t.Cleanup(mgr.Close)
+	registry.Register(mgr)
+
+	_, err := handleNewSession(context.Background(), mgr, wtRoot, "test-repo",
+		&ipc.NewSessionParams{WorktreePath: missing, Prompt: "help"}, session.SessionInfo{})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), missing, "the error must name the resolved path that confused the caller")
+	assert.Contains(t, err.Error(), "--create-worktree")
+	assert.Empty(t, registry.GetAllSessions(),
+		"an error that still leaves a session registered is only half a fix")
+}
+
+// TestNewSessionRejectsAWorktreePathThatIsAFile guards the other half of the
+// os.Stat check: a path that exists but is not a directory (e.g. a stray
+// file left over from a botched worktree) must not be handed to tmux as a
+// start directory either.
+func TestNewSessionRejectsAWorktreePathThatIsAFile(t *testing.T) {
+	t.Parallel()
+
+	wtRoot := t.TempDir()
+	notADir := filepath.Join(wtRoot, "not-a-dir")
+	require.NoError(t, os.WriteFile(notADir, []byte("x"), 0o644))
+
+	registry := session.NewSessionRegistry()
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
+	t.Cleanup(mgr.Close)
+	registry.Register(mgr)
+
+	_, err := handleNewSession(context.Background(), mgr, wtRoot, "test-repo",
+		&ipc.NewSessionParams{WorktreePath: notADir, Prompt: "help"}, session.SessionInfo{})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a directory")
+	assert.Empty(t, registry.GetAllSessions())
+}
+
+// TestNewSessionResolvesARelativeWorktreeAgainstWTRoot pins the decision for
+// issue #335's second ask: `-w chore/foo` must mean the same thing regardless
+// of the caller's cwd, so it is resolved against wtRoot rather than the
+// process's working directory. The nonexistent-path branch below proves the
+// resolution actually happened (the error names the joined absolute path);
+// the sentinel session_type proves resolution runs before anything else that
+// would need a real manager.
+func TestNewSessionResolvesARelativeWorktreeAgainstWTRoot(t *testing.T) {
+	t.Parallel()
+
+	wtRoot := t.TempDir()
+
+	t.Run("nonexistent relative path is resolved and then rejected", func(t *testing.T) {
+		t.Parallel()
+
+		registry := session.NewSessionRegistry()
+		mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
+		t.Cleanup(mgr.Close)
+		registry.Register(mgr)
+
+		_, err := handleNewSession(context.Background(), mgr, wtRoot, "test-repo",
+			&ipc.NewSessionParams{WorktreePath: "chore/does-not-exist", Prompt: "help"}, session.SessionInfo{})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), filepath.Join(wtRoot, "chore/does-not-exist"),
+			"a relative path must be resolved against wtRoot before it is reported back")
+		assert.Empty(t, registry.GetAllSessions())
+	})
+
+	t.Run("existing relative path resolves and clears the stat check", func(t *testing.T) {
+		t.Parallel()
+
+		existing := filepath.Join(wtRoot, "chore", "real")
+		require.NoError(t, os.MkdirAll(existing, 0o755))
+
+		// mgr is nil on purpose: an invalid session_type errors out before
+		// mgr is ever touched, so reaching that error (instead of the stat
+		// error) proves the relative path resolved to a real directory.
+		_, err := handleNewSession(context.Background(), nil, wtRoot, "test-repo",
+			&ipc.NewSessionParams{WorktreePath: "chore/real", SessionType: "bogus", Prompt: "help"}, session.SessionInfo{})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown session_type")
+	})
 }
 
 // TestRepoForSpawnPrefersTheParentOverAnInferredRepo applies to the repo the

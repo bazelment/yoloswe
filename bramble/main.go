@@ -9,6 +9,7 @@ import (
 	"expvar"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
@@ -992,6 +993,30 @@ func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoNam
 	if worktreePath == "" {
 		return nil, fmt.Errorf("either worktree_path, branch with create_worktree, or parent_session_id is required")
 	}
+
+	// A relative --worktree means different things depending on the caller's
+	// cwd, which is exactly the ambiguity that lands a session outside its
+	// intended tree. Anchor it to wtRoot — the same base every worktree this
+	// command can create or inherit already lives under — so `-w chore/foo`
+	// has one meaning regardless of where bramble was invoked from.
+	if !filepath.IsAbs(worktreePath) {
+		worktreePath = filepath.Join(wtRoot, worktreePath)
+	}
+
+	// tmux silently falls back to the parent process's cwd when the requested
+	// start directory does not exist, so an unchecked path here does not fail
+	// — it mislands the session somewhere else entirely while every status
+	// surface still reports success. Catch it before it ever reaches tmux.
+	if info, err := os.Stat(worktreePath); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("worktree path %q does not exist; use --create-worktree --branch to create one", worktreePath)
+		}
+		return nil, fmt.Errorf("could not verify worktree path %q: %w", worktreePath, err)
+	} else if !info.IsDir() {
+		return nil, fmt.Errorf("worktree path %q is not a directory", worktreePath)
+	}
+
+	slog.Info("accepted new-session spawn", "worktree_path", worktreePath, "session_type", params.SessionType)
 
 	var sessionType session.SessionType
 	switch params.SessionType {
