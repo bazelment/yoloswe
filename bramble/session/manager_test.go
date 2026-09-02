@@ -35,6 +35,26 @@ func TestNewManagerWithConfig(t *testing.T) {
 	assert.NotNil(t, m.config.Store)
 }
 
+func TestProviderPermissionMode(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name        string
+		sessionType SessionType
+		want        string
+	}{
+		{name: "builder", sessionType: SessionTypeBuilder, want: "bypass"},
+		{name: "planner", sessionType: SessionTypePlanner, want: "plan"},
+		{name: "delegator", sessionType: SessionTypeDelegator, want: "bypass"},
+		{name: "codetalk", sessionType: SessionTypeCodeTalk, want: "plan"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, providerPermissionMode(tc.sessionType))
+		})
+	}
+}
+
 func TestManagerIPCSockPath(t *testing.T) {
 	t.Parallel()
 

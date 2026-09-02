@@ -90,6 +90,13 @@ type providerRunner struct { //nolint:govet // fieldalignment: keep related life
 	turnDoneCh      chan struct{}
 }
 
+func providerPermissionMode(sessionType SessionType) string {
+	if sessionType == SessionTypePlanner || sessionType == SessionTypeCodeTalk {
+		return "plan"
+	}
+	return "bypass"
+}
+
 // trackingEventHandler wraps provider callbacks to record observed event types
 // for the current turn before forwarding to the session event handler.
 type trackingEventHandler struct {
@@ -1958,16 +1965,11 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				})
 			}
 			runner = &providerRunner{
-				provider:     agent.NewCodexProvider(codexOpts...),
-				eventHandler: eventHandler,
-				model:        session.Model,
-				permissionMode: func() string {
-					if session.Type == SessionTypePlanner || session.Type == SessionTypeCodeTalk {
-						return "plan"
-					}
-					return "bypass"
-				}(),
-				workDir: session.WorktreePath,
+				provider:       agent.NewCodexProvider(codexOpts...),
+				eventHandler:   eventHandler,
+				model:          session.Model,
+				permissionMode: providerPermissionMode(session.Type),
+				workDir:        session.WorktreePath,
 			}
 		} else if agentModel.Provider == ProviderCursor {
 			// Cursor provider backend
@@ -1978,17 +1980,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				workDir:      session.WorktreePath,
 			}
 		} else if agentModel.Provider == ProviderAgy {
-			// Antigravity (agy) provider backend. agy has no long-running,
-			// multi-turn session concept (see AgyProvider doc comment) — every
-			// RunTurn calls Execute fresh, exactly like the Codex/Cursor
-			// branches above. providerRunner's non-LongRunningProvider path
-			// already handles this uniformly; nothing agy-specific is needed
-			// there. Multi-turn *conversation continuity* is not available:
-			// agy's wrapper never surfaces the conversation_id its own
-			// --output-format json mode reports (see L4.notes.md), so there is
-			// no ID here to feed back in as ResumeSessionID on the next turn.
-			// Each turn is a fresh agy conversation with no memory of prior
-			// turns in this session.
+			// agy does not expose a resumable conversation ID, so each in-process turn is independent.
 			agyOpts, agyLogHint, agyStderrHint := m.agyProviderOptions(session.ID)
 			if agyLogHint != "" {
 				m.addOutput(session.ID, OutputLine{
@@ -2005,16 +1997,11 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				})
 			}
 			runner = &providerRunner{
-				provider:     agent.NewAgyProvider(agyOpts...),
-				eventHandler: eventHandler,
-				model:        session.Model,
-				permissionMode: func() string {
-					if session.Type == SessionTypePlanner || session.Type == SessionTypeCodeTalk {
-						return "plan"
-					}
-					return "bypass"
-				}(),
-				workDir: session.WorktreePath,
+				provider:       agent.NewAgyProvider(agyOpts...),
+				eventHandler:   eventHandler,
+				model:          session.Model,
+				permissionMode: providerPermissionMode(session.Type),
+				workDir:        session.WorktreePath,
 			}
 		} else {
 			// Default: use hardcoded planner/builder runners with model from session
@@ -3292,11 +3279,7 @@ func (m *Manager) codexProviderOptions(sessionID SessionID) ([]codex.ClientOptio
 		fmt.Sprintf("Codex stderr log: %s", stderrLogPath)
 }
 
-// agyProviderOptions builds logging options for an agy print-mode session.
-// Unlike gemini's ACP client, agy has no separate protocol-log seam — only a
-// CLI-level --log-file and a stderr callback — so only a stderr hint is ever
-// returned; the log-file hint stays empty, mirroring codex's "" when logging
-// is disabled.
+// agyProviderOptions builds log-file and stderr options for an agy print-mode session.
 func (m *Manager) agyProviderOptions(sessionID SessionID) ([]agy.SessionOption, string, string) {
 	stderrLogPath, ok := m.protocolLogPath(sessionID, "agy.stderr.log")
 	if !ok {
