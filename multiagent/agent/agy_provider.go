@@ -36,27 +36,7 @@ func (p *AgyProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Work
 	}
 
 	sessionOpts := append([]agy.SessionOption{}, p.sessionOpts...)
-	// applyOptions defaults Model to "sonnet" when the caller named nothing;
-	// CLIModelArg strips it as a Claude ID, along with placeholders and any
-	// other provider's models (see cursorSessionOpts for the same idiom).
-	if model := CLIModelArg(cfg.Model, ProviderAgy); model != "" {
-		sessionOpts = append(sessionOpts, agy.WithModel(model))
-	}
-	if effort := agyEffortLevel(cfg.Effort); effort != "" {
-		sessionOpts = append(sessionOpts, agy.WithEffort(effort))
-	}
-	if cfg.WorkDir != "" {
-		sessionOpts = append(sessionOpts, agy.WithWorkDir(cfg.WorkDir))
-	}
-	if cfg.ResumeSessionID != "" {
-		sessionOpts = append(sessionOpts, agy.WithConversation(cfg.ResumeSessionID))
-	}
-	switch strings.ToLower(strings.TrimSpace(cfg.PermissionMode)) {
-	case "bypass":
-		sessionOpts = append(sessionOpts, agy.WithDangerouslySkipPermissions())
-	case "plan":
-		sessionOpts = append(sessionOpts, agy.WithSandbox())
-	}
+	sessionOpts = append(sessionOpts, agySessionOpts(cfg)...)
 
 	session := agy.NewSession(fullPrompt, sessionOpts...)
 	if err := session.Start(ctx); err != nil {
@@ -101,6 +81,65 @@ func (p *AgyProvider) Events() <-chan AgentEvent { return p.events }
 func (p *AgyProvider) Close() error {
 	close(p.events)
 	return nil
+}
+
+// agySessionOpts builds the agy session options an ExecuteConfig implies.
+//
+// Split out of Execute so the arguments that actually reach the CLI are
+// unit-testable without a subprocess (see cursorSessionOpts/codexTurnOptions
+// for the same idiom, and TestAgySessionOpts_* for the tests this enables).
+func agySessionOpts(cfg ExecuteConfig) []agy.SessionOption {
+	var opts []agy.SessionOption
+
+	// applyOptions defaults Model to "sonnet" when the caller named nothing;
+	// CLIModelArg strips it as a Claude ID, along with placeholders and any
+	// other provider's models (see cursorSessionOpts for the same idiom).
+	model := CLIModelArg(cfg.Model, ProviderAgy)
+	if model != "" {
+		opts = append(opts, agy.WithModel(model))
+	}
+
+	// agy's catalog encodes the effort level in the model id itself
+	// (gemini-3.8-flash-low, gemini-3.1-pro-high, ...) *and* offers a separate
+	// --effort flag. Passing both is a hard error from the CLI:
+	//
+	//	Error: invalid model selection (--model "gemini-3.1-pro-high"
+	//	--effort "low"): --model gemini-3.1-pro-high conflicts with --effort=low
+	//
+	// A model id that already pins a level is therefore the more specific
+	// request and wins; --effort is only emitted when the model leaves the
+	// level open. Without this an agy-backed caller that sets both a curated
+	// model and a neutral effort - which ProviderSupportsEffort(agy)=true now
+	// invites - fails at session start.
+	if effort := agyEffortLevel(cfg.Effort); effort != "" && !modelPinsEffort(model) {
+		opts = append(opts, agy.WithEffort(effort))
+	}
+
+	if cfg.WorkDir != "" {
+		opts = append(opts, agy.WithWorkDir(cfg.WorkDir))
+	}
+	if cfg.ResumeSessionID != "" {
+		opts = append(opts, agy.WithConversation(cfg.ResumeSessionID))
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.PermissionMode)) {
+	case "bypass":
+		opts = append(opts, agy.WithDangerouslySkipPermissions())
+	case "plan":
+		opts = append(opts, agy.WithSandbox())
+	}
+	return opts
+}
+
+// modelPinsEffort reports whether an agy model id already encodes a reasoning
+// effort level, making a separate --effort flag redundant and, when the two
+// disagree, a CLI error. agy spells these as a trailing -low/-medium/-high.
+func modelPinsEffort(model string) bool {
+	for _, suffix := range []string{"-low", "-medium", "-high"} {
+		if strings.HasSuffix(model, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // agyEffortLevel maps the neutral agent.EffortLevel to agy's --effort values.

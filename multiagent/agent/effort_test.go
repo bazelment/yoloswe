@@ -3,11 +3,13 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
@@ -138,7 +140,17 @@ func TestProviderEffortMatrix(t *testing.T) {
 				if level == "" {
 					return nil
 				}
-				_ = agyEffortLevel(level)
+				// Assert the level actually reaches agy's session options
+				// rather than discarding the mapping: re-adding an
+				// ErrEffortUnsupported guard, or dropping the WithEffort
+				// wiring, must fail this entry.
+				var got agy.SessionConfig
+				for _, opt := range agySessionOpts(ExecuteConfig{Effort: level}) {
+					opt(&got)
+				}
+				if level != EffortAuto && got.Effort == "" {
+					return fmt.Errorf("agy dropped effort %q before it reached the CLI", level)
+				}
 				return nil
 			},
 		},
