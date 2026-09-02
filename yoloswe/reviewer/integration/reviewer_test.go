@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	geminiModel = flag.String("gemini-model", reviewer.DefaultGeminiModel, "Gemini model ID to use in integration tests")
+	agyModel    = flag.String("agy-model", reviewer.DefaultAgyModel, "agy model ID to use in integration tests")
 	claudeModel = flag.String("claude-model", reviewer.DefaultClaudeModel, "Claude model ID to use in integration tests")
 )
 
@@ -85,13 +85,13 @@ func TestReviewWithResult_Cursor(t *testing.T) {
 	t.Logf("Review completed in %v (response length: %d chars)", elapsed, len(result.ResponseText))
 }
 
-// TestReviewWithResult_Gemini tests that a simple review round-trip completes
-// within a reasonable time using the gemini backend via ACP.
-// Requires the "gemini" CLI to be installed and authenticated.
-func TestReviewWithResult_Gemini(t *testing.T) {
+// TestReviewWithResult_Agy tests that a simple review round-trip completes
+// within a reasonable time using the agy backend.
+// Requires the "agy" CLI to be installed and authenticated.
+func TestReviewWithResult_Agy(t *testing.T) {
 	config := reviewer.Config{
-		BackendType: reviewer.BackendGemini,
-		Model:       *geminiModel,
+		BackendType: reviewer.BackendAgy,
+		Model:       *agyModel,
 		WorkDir:     t.TempDir(),
 		Verbose:     true,
 	}
