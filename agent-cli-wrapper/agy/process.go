@@ -40,15 +40,8 @@ func newProcessManager(prompt string, config SessionConfig) *processManager {
 // the trailing -p <prompt> pair, including ExtraArgs. Keep -p <prompt> last;
 // do not append anything after it.
 //
-// --output-format json is always requested (unconditionally, not gated by a
-// SessionOption): agy's print mode already buffers its entire response and
-// writes it to stdout only once the process exits (see processManager.Start,
-// which reads the whole pipe into a bytes.Buffer before returning) — plain
-// text mode never streamed incrementally through this wrapper, so switching
-// the wire format changes nothing about when callers see output, only what
-// session.go parses out of the one blob it already waits for. JSON mode is
-// what carries conversation_id and usage back to the caller; there is no
-// text-mode source for either.
+// JSON output provides conversation_id and usage without changing event timing:
+// this wrapper already buffers the entire print-mode response before emitting it.
 func (pm *processManager) BuildCLIArgs() []string {
 	args := []string{"--output-format", "json"}
 

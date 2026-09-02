@@ -279,14 +279,7 @@ func TestProviderRunner_NoEventBridgeForEphemeralProviders(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// mockEphemeralProvider is a mock ephemeral (non-long-running) provider.
-//
-// It records the ResumeSessionID seen on each Execute call (via
-// seenResumeIDs) and, if resultSessionIDs is non-empty, returns them in
-// order as each call's AgentResult.SessionID — standing in for a real
-// provider (agy, Codex) that reports a fresh conversation/session id every
-// turn, which providerRunner.RunTurn must feed back in as the next turn's
-// ResumeSessionID.
+// mockEphemeralProvider records resume IDs and returns scripted session IDs.
 type mockEphemeralProvider struct {
 	events           chan agent.AgentEvent
 	seenResumeIDs    []string
@@ -509,12 +502,8 @@ func TestProviderRunner_EventBridgeGracefulShutdown(t *testing.T) {
 	assert.Nil(t, runner.eventBridgeDone, "eventBridgeDone should be nil after Stop")
 }
 
-// TestProviderRunner_RunTurn_CarriesSessionIDAcrossTurns is the reachability
-// control for the F6 fix (agy/Codex/Cursor sessions losing conversation
-// history between turns): it fails if providerRunner.RunTurn stops reading
-// back AgentResult.SessionID and feeding it in as the next turn's
-// ResumeSessionID. See L7.notes.md for the verbatim revert-and-watch-it-fail
-// output.
+// TestProviderRunner_RunTurn_CarriesSessionIDAcrossTurns guards ephemeral
+// provider conversation continuity.
 func TestProviderRunner_RunTurn_CarriesSessionIDAcrossTurns(t *testing.T) {
 	mockProvider := &mockEphemeralProvider{
 		events:           make(chan agent.AgentEvent, 10),

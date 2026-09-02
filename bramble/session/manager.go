@@ -89,13 +89,7 @@ type providerRunner struct { //nolint:govet // fieldalignment: keep related life
 	turnDone        bool
 	turnDoneCh      chan struct{}
 
-	// resumeSessionID carries the provider's own session/conversation id from
-	// one RunTurn to the next, for ephemeral (non-LongRunningProvider)
-	// backends that create a fresh process per turn (agy, Codex, Cursor).
-	// Guarded by resumeMu because RunTurn can, in principle, be called again
-	// before a prior turn's caller has finished reading its result, and
-	// CLISessionID() reads it from a different goroutine than RunTurn writes
-	// it.
+	// resumeSessionID lets ephemeral providers resume the prior turn.
 	resumeMu        sync.Mutex
 	resumeSessionID string
 }
@@ -251,12 +245,7 @@ func (r *providerRunner) RunTurn(ctx context.Context, message string) (*claude.T
 		// Give bridged events a brief window to flush before fallback synthesis.
 		r.waitForTurnDone(turnObsSeq, 150*time.Millisecond)
 	} else {
-		// Ephemeral providers create a fresh session each turn: thread the
-		// prior turn's SessionID back in as ResumeSessionID so the new
-		// process resumes the same conversation instead of starting cold.
-		// This is what actually closes the "agy/Codex/Cursor sessions lose
-		// context on turn 2" gap — Execute already accepts ResumeSessionID
-		// per-provider, but nothing above this call ever supplied one.
+		// Resume ephemeral providers with the prior turn's session ID.
 		if resumeID := r.getResumeSessionID(); resumeID != "" {
 			opts = append(opts, agent.WithProviderResumeSessionID(resumeID))
 		}
@@ -2011,17 +2000,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				workDir:      session.WorktreePath,
 			}
 		} else if agentModel.Provider == ProviderAgy {
-			// Antigravity (agy) provider backend. agy has no long-running,
-			// multi-turn session concept (see AgyProvider doc comment) — every
-			// RunTurn calls Execute fresh, exactly like the Codex/Cursor
-			// branches above. providerRunner's non-LongRunningProvider path
-			// already handles this uniformly; nothing agy-specific is needed
-			// there. Conversation continuity across turns IS preserved despite
-			// each turn being a fresh process: providerRunner.RunTurn tracks
-			// the conversation_id agy's --output-format json result reports
-			// (via AgentResult.SessionID) and feeds it back as
-			// ResumeSessionID on the next turn, so agy resumes the same
-			// conversation instead of starting cold.
+			// Antigravity uses the shared ephemeral-provider runner.
 			agyOpts, agyLogHint, agyStderrHint := m.agyProviderOptions(session.ID)
 			if agyLogHint != "" {
 				m.addOutput(session.ID, OutputLine{

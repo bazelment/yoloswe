@@ -1,6 +1,7 @@
 package agy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,52 +19,24 @@ type QueryResult struct {
 	Success        bool
 }
 
-// resultPayload mirrors agy's --output-format json result object, e.g.:
-//
-//	{"conversation_id":"...","status":"SUCCESS","response":"...",
-//	 "duration_seconds":1.04,"num_turns":1,
-//	 "usage":{"input_tokens":13888,"output_tokens":2,"thinking_tokens":0,
-//	          "cache_read_tokens":0,"total_tokens":13890}}
-//
-// On error, status is "ERROR", response is empty, and error carries the
-// message (see agy --output-format json --print "" for a live example).
+// resultPayload mirrors agy's --output-format json result object.
 type resultPayload struct {
-	ConversationID string       `json:"conversation_id"`
-	Status         string       `json:"status"`
-	Response       string       `json:"response"`
-	Error          string       `json:"error"`
-	Usage          usagePayload `json:"usage"`
+	ConversationID string `json:"conversation_id"`
+	Status         string `json:"status"`
+	Response       string `json:"response"`
+	Error          string `json:"error"`
+	Usage          Usage  `json:"usage"`
 }
 
-type usagePayload struct {
-	InputTokens     int `json:"input_tokens"`
-	OutputTokens    int `json:"output_tokens"`
-	ThinkingTokens  int `json:"thinking_tokens"`
-	CacheReadTokens int `json:"cache_read_tokens"`
-	TotalTokens     int `json:"total_tokens"`
-}
-
-func (u usagePayload) toUsage() Usage {
-	return Usage{
-		InputTokens:     u.InputTokens,
-		OutputTokens:    u.OutputTokens,
-		ThinkingTokens:  u.ThinkingTokens,
-		CacheReadTokens: u.CacheReadTokens,
-		TotalTokens:     u.TotalTokens,
-	}
-}
-
-// parseResultPayload parses agy's --output-format json stdout blob. An empty
-// (whitespace-only) raw string returns the zero payload with no error — the
-// caller treats that as "the process produced no result", not a parse
-// failure, since a nonzero process error already explains it.
-func parseResultPayload(raw string) (resultPayload, error) {
-	raw = strings.TrimSpace(raw)
+// parseResultPayload parses agy's JSON stdout. Empty stdout yields the zero
+// payload because a process error already describes the root cause.
+func parseResultPayload(raw []byte) (resultPayload, error) {
+	raw = bytes.TrimSpace(raw)
 	var payload resultPayload
-	if raw == "" {
+	if len(raw) == 0 {
 		return payload, nil
 	}
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+	if err := json.Unmarshal(raw, &payload); err != nil {
 		return resultPayload{}, fmt.Errorf("agy: failed to parse --output-format json result: %w (raw output: %s)", err, raw)
 	}
 	return payload, nil
@@ -140,43 +113,32 @@ func (s *Session) run(ctx context.Context) {
 	out, _, procErr := s.process.Start(ctx)
 	duration := time.Since(start).Milliseconds()
 
-	payload, parseErr := parseResultPayload(string(out))
+	payload, parseErr := parseResultPayload(out)
 
 	if payload.Response != "" {
 		s.emit(TextEvent{Text: strings.TrimRight(payload.Response, "\r\n")})
 	}
 
+	turn := TurnCompleteEvent{
+		ConversationID: payload.ConversationID,
+		DurationMs:     duration,
+		Usage:          payload.Usage,
+	}
 	switch {
 	case procErr != nil:
 		s.emit(ErrorEvent{Error: procErr, Context: "process"})
-		s.emit(TurnCompleteEvent{
-			Error:          procErr,
-			ConversationID: payload.ConversationID,
-			DurationMs:     duration,
-			Usage:          payload.Usage.toUsage(),
-			Success:        false,
-		})
+		turn.Error = procErr
 	case parseErr != nil:
 		s.emit(ErrorEvent{Error: parseErr, Context: "parse"})
-		s.emit(TurnCompleteEvent{Error: parseErr, DurationMs: duration, Success: false})
+		turn.Error = parseErr
 	case payload.Status != "SUCCESS":
 		turnErr := fmt.Errorf("agy: turn failed with status %q: %s", payload.Status, payload.Error)
 		s.emit(ErrorEvent{Error: turnErr, Context: "agy"})
-		s.emit(TurnCompleteEvent{
-			Error:          turnErr,
-			ConversationID: payload.ConversationID,
-			DurationMs:     duration,
-			Usage:          payload.Usage.toUsage(),
-			Success:        false,
-		})
+		turn.Error = turnErr
 	default:
-		s.emit(TurnCompleteEvent{
-			ConversationID: payload.ConversationID,
-			DurationMs:     duration,
-			Usage:          payload.Usage.toUsage(),
-			Success:        true,
-		})
+		turn.Success = true
 	}
+	s.emit(turn)
 }
 
 func (s *Session) emit(evt Event) {

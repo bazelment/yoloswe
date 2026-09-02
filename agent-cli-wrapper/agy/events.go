@@ -12,23 +12,17 @@ type TextEvent struct {
 
 func (e TextEvent) eventType() string { return "text" }
 
-// Usage carries the token accounting agy reports in its --output-format
-// json result object.
+// Usage carries agy's token accounting.
 type Usage struct {
-	InputTokens     int
-	OutputTokens    int
-	ThinkingTokens  int
-	CacheReadTokens int
-	TotalTokens     int
+	InputTokens     int `json:"input_tokens"`
+	OutputTokens    int `json:"output_tokens"`
+	ThinkingTokens  int `json:"thinking_tokens"`
+	CacheReadTokens int `json:"cache_read_tokens"`
+	TotalTokens     int `json:"total_tokens"`
 }
 
-// TurnCompleteEvent marks the end of a print-mode invocation.
-//
-// ConversationID and Usage are populated from agy's --output-format json
-// result object (see resultPayload in session.go). ConversationID is agy's
-// own id for the conversation this turn ran in — pass it to WithConversation
-// on a later Session to resume with full context. It is empty if the turn
-// errored before agy could assign or report one.
+// TurnCompleteEvent marks the end of a print-mode invocation. ConversationID
+// resumes later turns, and Usage comes from agy's JSON result.
 type TurnCompleteEvent struct {
 	Error          error
 	ConversationID string
