@@ -120,13 +120,13 @@ func TestDelegatorSystemPromptWithModels(t *testing.T) {
 	})
 
 	t.Run("appends model list", func(t *testing.T) {
-		models := "- claude: opus, sonnet\n- gemini: gemini-3.1-pro-high\n"
+		models := "- sonnet (claude)\n- gemini-3.1-pro-high (agy)\n"
 		result := delegatorSystemPromptWithModels(models, "sonnet")
 
 		assert.Contains(t, result, DelegatorSystemPrompt)
 		assert.Contains(t, result, "## Available models")
-		assert.Contains(t, result, "claude: opus, sonnet")
-		assert.Contains(t, result, "gemini: gemini-3.1-pro-high")
+		assert.Contains(t, result, "sonnet (claude)")
+		assert.Contains(t, result, "gemini-3.1-pro-high (agy)")
 		assert.Contains(t, result, "Your default model for child sessions is: sonnet")
 	})
 
