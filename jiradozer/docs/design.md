@@ -5,7 +5,7 @@
 We need a CLI tool that drives a complete development workflow from an issue tracker through planning, building, validation, and PR creation — with human-in-the-loop approval at each step via issue comments. The tool is provider-agnostic on two axes:
 
 1. **Issue tracker**: Pluggable interface (Linear first, but extensible to GitHub Issues, Jira, etc.)
-2. **Agent backend**: Uses bramble's `multiagent/agent.Provider` interface — supports Claude, Codex, Gemini, Cursor out of the box
+2. **Agent backend**: Uses bramble's `multiagent/agent.Provider` interface — supports Claude, Codex, Agy, Cursor out of the box
 
 ## Workflow
 
@@ -168,7 +168,7 @@ Prompt resolution logic:
 The `ExecuteConfig.PermissionMode` maps correctly for each backend:
 - Claude: `"plan"` → `PermissionModePlan`, `"bypass"` → `PermissionModeBypass`
 - Codex: `"plan"` → `ApprovalPolicyOnRequest`, `"bypass"` → `ApprovalPolicyNever`
-- Gemini/Cursor: equivalent mappings
+- Agy/Cursor: equivalent mappings
 
 Key files:
 - `multiagent/agent/provider.go` — `Provider` interface, `ExecuteConfig` (with `ResumeSessionID`), `AgentResult` (with `SessionID`)
@@ -303,7 +303,7 @@ jiradozer --issue ENG-123 [--config jiradozer.yaml] [--work-dir .]
               [--run-step plan] [--verbose]
 ```
 
-`--model` accepts any model ID from `agent.AllModels` (fable, opus, sonnet, haiku, gpt-5.5, gemini-3.1-pro-preview, cursor-default, etc.). Provider is auto-detected.
+`--model` accepts any model ID from `agent.AllModels` (fable, opus, sonnet, haiku, gpt-5.5, gemini-3.8-flash-high, cursor-default, etc.). Provider is auto-detected.
 
 `--run-step` runs a single step and exits without tracker interaction — useful for debugging prompts and agent behavior.
 

@@ -46,7 +46,7 @@ implements the existing `sessionRunner` interface. It plugs into the same
 sessionRunner interface
 ├── plannerRunner     → wraps PlannerWrapper (claude session in plan mode)
 ├── builderRunner     → wraps BuilderSession (claude session in bypass mode)
-├── providerRunner    → wraps agent.Provider  (codex, gemini, etc.)
+├── providerRunner    → wraps agent.Provider  (codex, agy, etc.)
 ├── tmuxRunner        → launches tmux window
 └── delegatorRunner   → wraps claude session with SDK tools (NEW)
 ```
