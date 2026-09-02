@@ -994,19 +994,14 @@ func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoNam
 		return nil, fmt.Errorf("either worktree_path, branch with create_worktree, or parent_session_id is required")
 	}
 
-	// A relative --worktree means different things depending on the caller's
-	// cwd, which is exactly the ambiguity that lands a session outside its
-	// intended tree. Anchor it to wtRoot — the same base every worktree this
-	// command can create or inherit already lives under — so `-w chore/foo`
-	// has one meaning regardless of where bramble was invoked from.
+	// Anchor relative paths to wtRoot so their meaning never depends on the
+	// caller's cwd.
 	if !filepath.IsAbs(worktreePath) {
 		worktreePath = filepath.Join(wtRoot, worktreePath)
 	}
 
-	// tmux silently falls back to the parent process's cwd when the requested
-	// start directory does not exist, so an unchecked path here does not fail
-	// — it mislands the session somewhere else entirely while every status
-	// surface still reports success. Catch it before it ever reaches tmux.
+	// tmux silently falls back to its parent's cwd for a nonexistent start
+	// directory, so validate the path before it can misland a session.
 	if info, err := os.Stat(worktreePath); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("worktree path %q does not exist; use --create-worktree --branch to create one", worktreePath)
@@ -1015,8 +1010,6 @@ func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoNam
 	} else if !info.IsDir() {
 		return nil, fmt.Errorf("worktree path %q is not a directory", worktreePath)
 	}
-
-	slog.Info("accepted new-session spawn", "worktree_path", worktreePath, "session_type", params.SessionType)
 
 	var sessionType session.SessionType
 	switch params.SessionType {
@@ -1039,6 +1032,7 @@ func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoNam
 	if err != nil {
 		return nil, fmt.Errorf("failed to start session: %w", err)
 	}
+	slog.Info("accepted new-session spawn", "worktree_path", worktreePath, "session_type", params.SessionType)
 
 	return &ipc.NewSessionResult{
 		SessionID:    string(id),

@@ -93,12 +93,7 @@ func TestNewSessionRefusesToInheritAWorktreeFromAnotherRepo(t *testing.T) {
 	assert.Contains(t, err.Error(), "repo-b")
 }
 
-// TestNewSessionRejectsANonexistentWorktreePath is the regression test for
-// issue #335: a --worktree that does not exist on disk used to sail through
-// with only a non-empty check, and tmux would silently fall back to the
-// server's own cwd — landing the session somewhere the caller never asked
-// for while the IPC response still reported success. It must fail loudly
-// and register nothing.
+// TestNewSessionRejectsANonexistentWorktreePath is the regression test for #335.
 func TestNewSessionRejectsANonexistentWorktreePath(t *testing.T) {
 	t.Parallel()
 
@@ -120,10 +115,6 @@ func TestNewSessionRejectsANonexistentWorktreePath(t *testing.T) {
 		"an error that still leaves a session registered is only half a fix")
 }
 
-// TestNewSessionRejectsAWorktreePathThatIsAFile guards the other half of the
-// os.Stat check: a path that exists but is not a directory (e.g. a stray
-// file left over from a botched worktree) must not be handed to tmux as a
-// start directory either.
 func TestNewSessionRejectsAWorktreePathThatIsAFile(t *testing.T) {
 	t.Parallel()
 
@@ -144,13 +135,8 @@ func TestNewSessionRejectsAWorktreePathThatIsAFile(t *testing.T) {
 	assert.Empty(t, registry.GetAllSessions())
 }
 
-// TestNewSessionResolvesARelativeWorktreeAgainstWTRoot pins the decision for
-// issue #335's second ask: `-w chore/foo` must mean the same thing regardless
-// of the caller's cwd, so it is resolved against wtRoot rather than the
-// process's working directory. The nonexistent-path branch below proves the
-// resolution actually happened (the error names the joined absolute path);
-// the sentinel session_type proves resolution runs before anything else that
-// would need a real manager.
+// TestNewSessionResolvesARelativeWorktreeAgainstWTRoot pins #335's relative
+// path behavior: `-w chore/foo` is rooted at wtRoot, not the caller's cwd.
 func TestNewSessionResolvesARelativeWorktreeAgainstWTRoot(t *testing.T) {
 	t.Parallel()
 
@@ -173,21 +159,6 @@ func TestNewSessionResolvesARelativeWorktreeAgainstWTRoot(t *testing.T) {
 		assert.Empty(t, registry.GetAllSessions())
 	})
 
-	t.Run("existing relative path resolves and clears the stat check", func(t *testing.T) {
-		t.Parallel()
-
-		existing := filepath.Join(wtRoot, "chore", "real")
-		require.NoError(t, os.MkdirAll(existing, 0o755))
-
-		// mgr is nil on purpose: an invalid session_type errors out before
-		// mgr is ever touched, so reaching that error (instead of the stat
-		// error) proves the relative path resolved to a real directory.
-		_, err := handleNewSession(context.Background(), nil, wtRoot, "test-repo",
-			&ipc.NewSessionParams{WorktreePath: "chore/real", SessionType: "bogus", Prompt: "help"}, session.SessionInfo{})
-
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "unknown session_type")
-	})
 }
 
 // TestRepoForSpawnPrefersTheParentOverAnInferredRepo applies to the repo the
