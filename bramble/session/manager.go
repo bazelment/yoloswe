@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
@@ -71,7 +71,7 @@ func (r *plannerRunner) RunTurn(ctx context.Context, message string) (*claude.Tu
 }
 
 // providerRunner adapts agent.Provider to the sessionRunner interface.
-// This allows plugging in any provider backend (Claude, Codex, Gemini, agy)
+// This allows plugging in any provider backend (Claude, Codex, Cursor, agy)
 // via the ManagerConfig.Provider field.
 type providerRunner struct { //nolint:govet // fieldalignment: keep related lifecycle fields grouped
 	provider        agent.Provider
@@ -1023,7 +1023,7 @@ func (m *Manager) startSessionWithID(sessionID SessionID, sessionType SessionTyp
 	}
 	// validateEndpointBackend is a no-op on an empty backend, but runSession
 	// re-runs it against the *resolved* provider -- so without this, an
-	// endpoint on a gemini/cursor/agy model id with no --backend passed every
+	// endpoint on a cursor/agy model id with no --backend passed every
 	// check here, printed a session ID, and only failed in the background.
 	// That is the exact split the duplicate checks below exist to close, and
 	// startSessionWithID already holds the registry needed to close it.
@@ -1969,42 +1969,6 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				}(),
 				workDir: session.WorktreePath,
 			}
-		} else if agentModel.Provider == ProviderGemini {
-			// Gemini provider backend
-			clientOpts := []acp.ClientOption{
-				acp.WithBinaryArgs("--experimental-acp", "--model", session.Model),
-			}
-
-			geminiOpts, geminiLogHint, geminiStderrHint := m.geminiProviderOptions(session.ID)
-			clientOpts = append(clientOpts, geminiOpts...)
-			if geminiLogHint != "" {
-				m.addOutput(session.ID, OutputLine{
-					Timestamp: time.Now(),
-					Type:      OutputTypeStatus,
-					Content:   geminiLogHint,
-				})
-			}
-			if geminiStderrHint != "" {
-				m.addOutput(session.ID, OutputLine{
-					Timestamp: time.Now(),
-					Type:      OutputTypeStatus,
-					Content:   geminiStderrHint,
-				})
-			}
-
-			// Configure permission handler based on session type
-			if session.Type == SessionTypePlanner || session.Type == SessionTypeCodeTalk {
-				// Planner/codetalk sessions should only be able to read, not write
-				clientOpts = append(clientOpts, acp.WithPermissionHandler(&acp.PlanOnlyPermissionHandler{}))
-			}
-			// Builder sessions use the default BypassPermissionHandler (auto-approve all)
-
-			runner = &providerRunner{
-				provider:     agent.NewGeminiLongRunningProvider(clientOpts, acp.WithSessionCWD(session.WorktreePath)),
-				eventHandler: eventHandler,
-				model:        session.Model,
-				workDir:      session.WorktreePath,
-			}
 		} else if agentModel.Provider == ProviderCursor {
 			// Cursor provider backend
 			runner = &providerRunner{
@@ -2014,9 +1978,34 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				workDir:      session.WorktreePath,
 			}
 		} else if agentModel.Provider == ProviderAgy {
-			// Antigravity provider backend
+			// Antigravity (agy) provider backend. agy has no long-running,
+			// multi-turn session concept (see AgyProvider doc comment) — every
+			// RunTurn calls Execute fresh, exactly like the Codex/Cursor
+			// branches above. providerRunner's non-LongRunningProvider path
+			// already handles this uniformly; nothing agy-specific is needed
+			// there. Multi-turn *conversation continuity* is not available:
+			// agy's wrapper never surfaces the conversation_id its own
+			// --output-format json mode reports (see L4.notes.md), so there is
+			// no ID here to feed back in as ResumeSessionID on the next turn.
+			// Each turn is a fresh agy conversation with no memory of prior
+			// turns in this session.
+			agyOpts, agyLogHint, agyStderrHint := m.agyProviderOptions(session.ID)
+			if agyLogHint != "" {
+				m.addOutput(session.ID, OutputLine{
+					Timestamp: time.Now(),
+					Type:      OutputTypeStatus,
+					Content:   agyLogHint,
+				})
+			}
+			if agyStderrHint != "" {
+				m.addOutput(session.ID, OutputLine{
+					Timestamp: time.Now(),
+					Type:      OutputTypeStatus,
+					Content:   agyStderrHint,
+				})
+			}
 			runner = &providerRunner{
-				provider:     agent.NewAgyProvider(),
+				provider:     agent.NewAgyProvider(agyOpts...),
 				eventHandler: eventHandler,
 				model:        session.Model,
 				permissionMode: func() string {
@@ -3303,27 +3292,32 @@ func (m *Manager) codexProviderOptions(sessionID SessionID) ([]codex.ClientOptio
 		fmt.Sprintf("Codex stderr log: %s", stderrLogPath)
 }
 
-func (m *Manager) geminiProviderOptions(sessionID SessionID) ([]acp.ClientOption, string, string) {
-	stderrLogPath, ok := m.protocolLogPath(sessionID, "gemini.stderr.log")
+// agyProviderOptions builds logging options for an agy print-mode session.
+// Unlike gemini's ACP client, agy has no separate protocol-log seam — only a
+// CLI-level --log-file and a stderr callback — so only a stderr hint is ever
+// returned; the log-file hint stays empty, mirroring codex's "" when logging
+// is disabled.
+func (m *Manager) agyProviderOptions(sessionID SessionID) ([]agy.SessionOption, string, string) {
+	stderrLogPath, ok := m.protocolLogPath(sessionID, "agy.stderr.log")
 	if !ok {
 		return nil, "", ""
 	}
 
-	protocolLogPath, _ := m.protocolLogPath(sessionID, "gemini.protocol.jsonl")
+	logFilePath, _ := m.protocolLogPath(sessionID, "agy.log")
 
-	opts := []acp.ClientOption{
-		acp.WithStderrHandler(newFileAppendHandler(stderrLogPath)),
+	opts := []agy.SessionOption{
+		agy.WithStderrHandler(newFileAppendHandler(stderrLogPath)),
 	}
 
-	var protocolLogHint string
-	if protocolLogPath != "" {
-		opts = append(opts, acp.WithProtocolLogger(newFileAppendWriter(protocolLogPath)))
-		protocolLogHint = fmt.Sprintf("Gemini protocol log: %s", protocolLogPath)
+	var logFileHint string
+	if logFilePath != "" {
+		opts = append(opts, agy.WithLogFile(logFilePath))
+		logFileHint = fmt.Sprintf("agy log file: %s", logFilePath)
 	}
 
 	return opts,
-		protocolLogHint,
-		fmt.Sprintf("Gemini stderr log: %s", stderrLogPath)
+		logFileHint,
+		fmt.Sprintf("agy stderr log: %s", stderrLogPath)
 }
 
 // fileAppendWriter implements io.Writer by appending to a file.

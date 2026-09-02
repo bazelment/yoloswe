@@ -108,7 +108,7 @@ func FromClaudeEvent(model *SessionModel, event claude.Event) {
 }
 
 // FromAgentEvent maps an agent.AgentEvent to SessionModel mutations.
-// This is used by providerRunner for non-Claude providers (Codex/Gemini).
+// This is used by providerRunner for non-Claude providers (Codex/agy).
 func FromAgentEvent(model *SessionModel, event agent.AgentEvent) {
 	switch e := event.(type) {
 	case agent.TextAgentEvent:

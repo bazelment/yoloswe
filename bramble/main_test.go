@@ -184,7 +184,7 @@ func TestCheckCodetalkModel(t *testing.T) {
 			errSubstr: "bramble TUI",
 		},
 		{
-			name:      "gemini-3-pro-preview is Gemini — error with TUI hint",
+			name:      "gemini-3-pro-preview routes to agy — error with TUI hint",
 			modelID:   "gemini-3-pro-preview",
 			wantErr:   true,
 			errSubstr: "bramble TUI",
@@ -208,10 +208,10 @@ func TestCheckCodetalkModel(t *testing.T) {
 			errSubstr: "codex",
 		},
 		{
-			name:      "gemini- prefix triggers Gemini routing — error",
+			name:      "gemini- prefix triggers agy routing — error",
 			modelID:   "gemini-99",
 			wantErr:   true,
-			errSubstr: "gemini",
+			errSubstr: "agy",
 		},
 		{
 			name:      "agy- prefix triggers agy routing — error",
