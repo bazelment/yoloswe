@@ -414,7 +414,7 @@ func (s *LongRunningSession) RecordUsage(usage claude.TurnUsage) {
 // EphemeralSession creates fresh sessions for each task (Designer, Builder, Reviewer).
 // Each Execute() call creates a new session, runs one interaction, and stops the session.
 // The provider is derived from the configured Model via ModelByID, so non-Claude models
-// (e.g. Gemini, Codex) are automatically routed to the correct provider.
+// (e.g. Agy, Codex) are automatically routed to the correct provider.
 type EphemeralSession struct {
 	swarmSessionID string
 	baseSessionDir string

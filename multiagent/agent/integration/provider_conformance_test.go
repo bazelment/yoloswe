@@ -1,7 +1,7 @@
 //go:build integration
 // +build integration
 
-// Provider conformance tests verify that all agent providers (Claude, Codex, Gemini)
+// Provider conformance tests verify that all agent providers (Claude, Codex, Agy)
 // are interchangeable when plugged into the same consumer paths. Tests run with real
 // CLI binaries and require network access + valid API keys.
 //
@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/stretchr/testify/assert"
@@ -36,9 +36,9 @@ import (
 // Test Infrastructure
 // ============================================================================
 
-// Note: Gemini tests do NOT use t.Parallel() to avoid API rate limiting.
+// Note: Agy tests do NOT use t.Parallel() to avoid API rate limiting.
 // Since shards are separate processes, we can't use a mutex. Instead, we
-// conditionally call t.Parallel() only for non-Gemini providers.
+// conditionally call t.Parallel() only for non-Agy providers.
 
 // agentTurnEvents collects events from a single provider execution.
 type agentTurnEvents struct {
@@ -162,6 +162,15 @@ type providerFactory struct {
 	name       string
 	binary     string // binary to check in PATH
 	hasEvents  bool
+	// hasToolEvents is true only for providers whose Events()/EventHandler
+	// stream ToolStart/ToolComplete. Agy's wrapper (agent-cli-wrapper/agy)
+	// is a print-mode CLI wrapper that surfaces only TextEvent,
+	// TurnCompleteEvent, and ErrorEvent — no tool-call events exist to
+	// bridge, so AgyProvider never emits ToolStartAgentEvent/
+	// ToolCompleteAgentEvent. hasEvents alone (text/turn-complete streaming)
+	// is still true for agy; this flag is the finer-grained one tool-event
+	// assertions must gate on instead.
+	hasToolEvents  bool
 	newProvider    func(t *testing.T, tmpDir string) agent.Provider
 	newLongRunning func(t *testing.T, tmpDir string) agent.LongRunningProvider
 }
@@ -169,9 +178,10 @@ type providerFactory struct {
 func allFactories() []providerFactory {
 	return []providerFactory{
 		{
-			name:      "claude",
-			binary:    "claude",
-			hasEvents: true,
+			name:          "claude",
+			binary:        "claude",
+			hasEvents:     true,
+			hasToolEvents: true,
 			newProvider: func(t *testing.T, tmpDir string) agent.Provider {
 				return agent.NewClaudeProvider(
 					claude.WithModel("haiku"),
@@ -197,26 +207,19 @@ func allFactories() []providerFactory {
 			newLongRunning: nil, // Codex doesn't implement LongRunningProvider
 		},
 		{
-			name:      "gemini",
-			binary:    "gemini",
-			hasEvents: true,
+			name:      "agy",
+			binary:    "agy",
+			hasEvents: true, // streams TextAgentEvent/TurnCompleteAgentEvent
+			// hasToolEvents left false: see the field doc above.
 			newProvider: func(t *testing.T, tmpDir string) agent.Provider {
-				return agent.NewGeminiProvider(
-					acp.WithStderrHandler(func(data []byte) {
-						t.Logf("[gemini stderr] %s", string(data))
+				return agent.NewAgyProvider(
+					agy.WithModel("gemini-3.8-flash-low"),
+					agy.WithStderrHandler(func(data []byte) {
+						t.Logf("[agy stderr] %s", string(data))
 					}),
 				)
 			},
-			newLongRunning: func(t *testing.T, tmpDir string) agent.LongRunningProvider {
-				return agent.NewGeminiLongRunningProvider(
-					[]acp.ClientOption{
-						acp.WithStderrHandler(func(data []byte) {
-							t.Logf("[gemini stderr] %s", string(data))
-						}),
-					},
-					acp.WithSessionCWD(tmpDir),
-				)
-			},
+			newLongRunning: nil, // AgyProvider doesn't implement LongRunningProvider
 		},
 	}
 }
@@ -229,11 +232,11 @@ func skipIfBinaryMissing(t *testing.T, binary string) {
 	}
 }
 
-// parallelIfNotGemini enables parallel execution for non-Gemini tests.
-// Gemini tests run sequentially to avoid API rate limiting.
-func parallelIfNotGemini(t *testing.T, providerName string) {
+// parallelIfNotAgy enables parallel execution for non-Agy tests.
+// Agy tests run sequentially to avoid API rate limiting.
+func parallelIfNotAgy(t *testing.T, providerName string) {
 	t.Helper()
-	if providerName != "gemini" {
+	if providerName != "agy" {
 		t.Parallel()
 	}
 }
@@ -246,7 +249,7 @@ func TestConformance_BasicPrompt(t *testing.T) {
 	for _, f := range allFactories() {
 		f := f
 		t.Run(f.name, func(t *testing.T) {
-			parallelIfNotGemini(t, f.name)
+			parallelIfNotAgy(t, f.name)
 			skipIfBinaryMissing(t, f.binary)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -277,18 +280,18 @@ func TestConformance_BasicPrompt(t *testing.T) {
 				// the binary emits token_count events. CostUSD is always 0.
 				t.Logf("Codex usage: input=%d, output=%d", result.Usage.InputTokens, result.Usage.OutputTokens)
 				assert.Equal(t, float64(0), result.Usage.CostUSD, "Codex should not report cost")
-			case "gemini":
-				// ACP does not define token usage; all fields zero
-				assert.Equal(t, 0, result.Usage.InputTokens, "Gemini usage should be zero")
-				assert.Equal(t, 0, result.Usage.OutputTokens, "Gemini usage should be zero")
-				assert.Equal(t, float64(0), result.Usage.CostUSD, "Gemini cost should be zero")
+			case "agy":
+				// AgyProvider does not populate AgentResult.Usage; all fields zero.
+				assert.Equal(t, 0, result.Usage.InputTokens, "Agy usage should be zero")
+				assert.Equal(t, 0, result.Usage.OutputTokens, "Agy usage should be zero")
+				assert.Equal(t, float64(0), result.Usage.CostUSD, "Agy cost should be zero")
 			}
 		})
 	}
 }
 
 // ============================================================================
-// Test 2: EventsStreamDuringExecution — Claude and Gemini
+// Test 2: EventsStreamDuringExecution — Claude and Agy
 // ============================================================================
 
 func TestConformance_EventsStreamDuringExecution(t *testing.T) {
@@ -298,7 +301,7 @@ func TestConformance_EventsStreamDuringExecution(t *testing.T) {
 			continue
 		}
 		t.Run(f.name, func(t *testing.T) {
-			parallelIfNotGemini(t, f.name)
+			parallelIfNotAgy(t, f.name)
 			skipIfBinaryMissing(t, f.binary)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
@@ -354,8 +357,11 @@ func TestConformance_EventsStreamDuringExecution(t *testing.T) {
 				assert.True(t, handler.turnCompletes[0].Success, "turn should be successful")
 			}
 
-			// Verify tool events were emitted
-			assert.Greater(t, len(handler.toolStarts), 0, "OnToolStart should have been called (file write tool)")
+			// Verify tool events were emitted (providers whose wrapper
+			// exposes tool-call events only — see hasToolEvents doc).
+			if f.hasToolEvents {
+				assert.Greater(t, len(handler.toolStarts), 0, "OnToolStart should have been called (file write tool)")
+			}
 
 			// Verify file was created
 			_, err := os.Stat(targetFile)
@@ -365,7 +371,7 @@ func TestConformance_EventsStreamDuringExecution(t *testing.T) {
 }
 
 // ============================================================================
-// Test 3: LongRunningMultiTurn — Claude and Gemini
+// Test 3: LongRunningMultiTurn — Claude and Agy
 // ============================================================================
 
 func TestConformance_LongRunningMultiTurn(t *testing.T) {
@@ -375,7 +381,7 @@ func TestConformance_LongRunningMultiTurn(t *testing.T) {
 			continue
 		}
 		t.Run(f.name, func(t *testing.T) {
-			parallelIfNotGemini(t, f.name)
+			parallelIfNotAgy(t, f.name)
 			skipIfBinaryMissing(t, f.binary)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
@@ -409,155 +415,62 @@ func TestConformance_LongRunningMultiTurn(t *testing.T) {
 }
 
 // ============================================================================
-// Test 4: PermissionCallback — Claude and Gemini
+// Test 4: PermissionCallback — Claude only (Agy has no permission-callback API;
+// it only exposes coarse --dangerously-skip-permissions / --sandbox flags via
+// agy.WithDangerouslySkipPermissions / agy.WithSandbox, no per-tool callback)
 // ============================================================================
 
-// recordingACPPermHandler records ACP permission requests and auto-approves.
-type recordingACPPermHandler struct {
-	mu   sync.Mutex
-	reqs []acp.RequestPermissionRequest
-}
+func TestConformance_PermissionCallback(t *testing.T) {
+	t.Parallel()
+	skipIfBinaryMissing(t, "claude")
 
-func (h *recordingACPPermHandler) RequestPermission(_ context.Context, req acp.RequestPermissionRequest) (*acp.RequestPermissionResponse, error) {
-	h.mu.Lock()
-	h.reqs = append(h.reqs, req)
-	h.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
 
-	// Auto-approve: select the first "allow" option
-	for _, opt := range req.Options {
-		if strings.HasPrefix(opt.Kind, "allow") {
-			return &acp.RequestPermissionResponse{
-				Outcome: acp.PermissionOutcome{
-					Type:     "selected",
-					OptionID: opt.ID,
-				},
-			}, nil
+	tmpDir := t.TempDir()
+	var mu sync.Mutex
+	var claudeReqs []claude.PermissionRequest
+	handler := claude.PermissionHandlerFunc(func(ctx context.Context, req *claude.PermissionRequest) (*claude.PermissionResponse, error) {
+		mu.Lock()
+		claudeReqs = append(claudeReqs, *req)
+		mu.Unlock()
+		t.Logf("Claude permission requested: tool=%s", req.ToolName)
+		return &claude.PermissionResponse{Behavior: claude.PermissionAllow}, nil
+	})
+	provider := agent.NewClaudeProvider(
+		claude.WithModel("haiku"),
+		claude.WithPermissionHandler(handler),
+		claude.WithPermissionPromptToolStdio(),
+	)
+	defer provider.Close()
+
+	targetFile := filepath.Join(tmpDir, "permission_test.txt")
+	prompt := fmt.Sprintf(
+		"Create a file at the exact path %s containing the text 'test content'. "+
+			"Use a file writing tool to create it.", targetFile)
+
+	// Don't pass bypass permission mode — we want default so permissions fire.
+	result, err := provider.Execute(ctx, prompt, nil,
+		agent.WithProviderWorkDir(tmpDir),
+		agent.WithProviderPermissionMode("default"),
+	)
+	require.NoError(t, err, "Execute should succeed")
+	require.NotNil(t, result)
+	assert.True(t, result.Success, "result.Success should be true")
+
+	// At least one request should have a tool name
+	hasToolName := false
+	for _, req := range claudeReqs {
+		if req.ToolName != "" {
+			hasToolName = true
+			t.Logf("Claude permission: tool=%s, input keys=%v", req.ToolName, mapKeys(req.Input))
 		}
 	}
-	// Fallback: select the first option
-	if len(req.Options) > 0 {
-		return &acp.RequestPermissionResponse{
-			Outcome: acp.PermissionOutcome{
-				Type:     "selected",
-				OptionID: req.Options[0].ID,
-			},
-		}, nil
-	}
-	return &acp.RequestPermissionResponse{
-		Outcome: acp.PermissionOutcome{Type: "cancelled"},
-	}, nil
-}
+	assert.True(t, hasToolName, "at least one permission request should have a tool name")
 
-func TestConformance_PermissionCallback(t *testing.T) {
-	type permTestCase struct {
-		name        string
-		binary      string
-		newProvider func(t *testing.T, tmpDir string, claudeReqs *[]claude.PermissionRequest, acpHandler *recordingACPPermHandler) agent.Provider
-		// verify checks that permission requests were received with the right info
-		verify func(t *testing.T, claudeReqs []claude.PermissionRequest, acpHandler *recordingACPPermHandler)
-	}
-
-	cases := []permTestCase{
-		{
-			name:   "claude",
-			binary: "claude",
-			newProvider: func(t *testing.T, tmpDir string, claudeReqs *[]claude.PermissionRequest, _ *recordingACPPermHandler) agent.Provider {
-				var mu sync.Mutex
-				handler := claude.PermissionHandlerFunc(func(ctx context.Context, req *claude.PermissionRequest) (*claude.PermissionResponse, error) {
-					mu.Lock()
-					*claudeReqs = append(*claudeReqs, *req)
-					mu.Unlock()
-					t.Logf("Claude permission requested: tool=%s", req.ToolName)
-					return &claude.PermissionResponse{Behavior: claude.PermissionAllow}, nil
-				})
-				return agent.NewClaudeProvider(
-					claude.WithModel("haiku"),
-					claude.WithPermissionHandler(handler),
-					claude.WithPermissionPromptToolStdio(),
-				)
-			},
-			verify: func(t *testing.T, claudeReqs []claude.PermissionRequest, _ *recordingACPPermHandler) {
-				require.Greater(t, len(claudeReqs), 0, "should have received permission requests")
-				// At least one request should have a tool name
-				hasToolName := false
-				for _, req := range claudeReqs {
-					if req.ToolName != "" {
-						hasToolName = true
-						t.Logf("Claude permission: tool=%s, input keys=%v", req.ToolName, mapKeys(req.Input))
-					}
-				}
-				assert.True(t, hasToolName, "at least one permission request should have a tool name")
-			},
-		},
-		{
-			name:   "gemini",
-			binary: "gemini",
-			newProvider: func(t *testing.T, tmpDir string, _ *[]claude.PermissionRequest, acpHandler *recordingACPPermHandler) agent.Provider {
-				return agent.NewGeminiProvider(
-					acp.WithPermissionHandler(acpHandler),
-				)
-			},
-			verify: func(t *testing.T, _ []claude.PermissionRequest, acpHandler *recordingACPPermHandler) {
-				acpHandler.mu.Lock()
-				defer acpHandler.mu.Unlock()
-				require.Greater(t, len(acpHandler.reqs), 0, "should have received ACP permission requests")
-				hasToolInfo := false
-				for _, req := range acpHandler.reqs {
-					// Gemini puts tool name in ToolCallID (e.g., "write_file-1770849300776"),
-					// not in ToolName. Check both.
-					toolName := req.ToolCall.ToolName
-					if toolName == "" {
-						toolName = extractToolNameFromID(req.ToolCall.ToolCallID)
-					}
-					if toolName != "" {
-						hasToolInfo = true
-						t.Logf("ACP permission: tool=%s, callId=%s, locations=%d",
-							toolName, req.ToolCall.ToolCallID, len(req.ToolCall.Locations))
-					}
-				}
-				assert.True(t, hasToolInfo, "at least one ACP permission request should have tool info")
-			},
-		},
-	}
-
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			parallelIfNotGemini(t, tc.name)
-			skipIfBinaryMissing(t, tc.binary)
-
-			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
-			defer cancel()
-
-			tmpDir := t.TempDir()
-			var claudeReqs []claude.PermissionRequest
-			acpHandler := &recordingACPPermHandler{}
-
-			// Don't pass bypass permission mode — we want default so permissions fire
-			provider := tc.newProvider(t, tmpDir, &claudeReqs, acpHandler)
-			defer provider.Close()
-
-			targetFile := filepath.Join(tmpDir, "permission_test.txt")
-			prompt := fmt.Sprintf(
-				"Create a file at the exact path %s containing the text 'test content'. "+
-					"Use a file writing tool to create it.", targetFile)
-
-			result, err := provider.Execute(ctx, prompt, nil,
-				agent.WithProviderWorkDir(tmpDir),
-				agent.WithProviderPermissionMode("default"),
-			)
-			require.NoError(t, err, "Execute should succeed")
-			require.NotNil(t, result)
-			assert.True(t, result.Success, "result.Success should be true")
-
-			// Verify permission requests were received
-			tc.verify(t, claudeReqs, acpHandler)
-
-			// Verify file was created (permission was granted)
-			_, err = os.Stat(targetFile)
-			assert.NoError(t, err, "file should have been created (permission was granted)")
-		})
-	}
+	// Verify file was created (permission was granted)
+	_, err = os.Stat(targetFile)
+	assert.NoError(t, err, "file should have been created (permission was granted)")
 }
 
 // ============================================================================
@@ -568,7 +481,7 @@ func TestConformance_ContextCancellation(t *testing.T) {
 	for _, f := range allFactories() {
 		f := f
 		t.Run(f.name, func(t *testing.T) {
-			parallelIfNotGemini(t, f.name)
+			parallelIfNotAgy(t, f.name)
 			skipIfBinaryMissing(t, f.binary)
 
 			tmpDir := t.TempDir()
@@ -614,14 +527,14 @@ func TestConformance_ContextCancellation(t *testing.T) {
 
 func TestConformance_ErrorOnInvalidWorkDir(t *testing.T) {
 	// Test that providers handle invalid work directories gracefully.
-	// Claude and Gemini return errors; Codex may not (it handles work dirs differently).
+	// Claude and Agy return errors; Codex may not (it handles work dirs differently).
 	for _, f := range allFactories() {
 		f := f
 		if f.name == "codex" {
 			continue // Codex does not error on invalid work dir
 		}
 		t.Run(f.name, func(t *testing.T) {
-			parallelIfNotGemini(t, f.name)
+			parallelIfNotAgy(t, f.name)
 			skipIfBinaryMissing(t, f.binary)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -640,17 +553,18 @@ func TestConformance_ErrorOnInvalidWorkDir(t *testing.T) {
 }
 
 // ============================================================================
-// Test 7: FileToolTracking — Claude and Gemini
+// Test 7: FileToolTracking — providers with tool-call events (Claude only;
+// Agy's wrapper has no tool events, see hasToolEvents doc)
 // ============================================================================
 
 func TestConformance_FileToolTracking(t *testing.T) {
 	for _, f := range allFactories() {
 		f := f
-		if !f.hasEvents {
+		if !f.hasToolEvents {
 			continue
 		}
 		t.Run(f.name, func(t *testing.T) {
-			parallelIfNotGemini(t, f.name)
+			parallelIfNotAgy(t, f.name)
 			skipIfBinaryMissing(t, f.binary)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
@@ -687,7 +601,6 @@ func TestConformance_FileToolTracking(t *testing.T) {
 
 			// Check tool events for file_path in Input.
 			// For Claude, this shows up in tool complete events.
-			// For Gemini, tool start events (from permission requests) carry the path.
 			handler.mu.Lock()
 			defer handler.mu.Unlock()
 
@@ -732,13 +645,4 @@ func mapKeys(m map[string]interface{}) []string {
 		keys = append(keys, k)
 	}
 	return keys
-}
-
-// extractToolNameFromID extracts the tool name from a Gemini-style toolCallId
-// like "write_file-1770849300776" → "write_file".
-func extractToolNameFromID(toolCallID string) string {
-	if idx := strings.LastIndex(toolCallID, "-"); idx > 0 {
-		return toolCallID[:idx]
-	}
-	return toolCallID
 }
