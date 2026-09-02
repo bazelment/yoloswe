@@ -25,7 +25,7 @@ var fixCmd = &cobra.Command{
 	Long: `Full workflow: scan GitHub Actions for failures, reconcile with
 known issues, then launch parallel agents to fix each actionable issue.
 Each agent creates a worktree, investigates the failure, applies a fix,
-and creates a PR. Supports Claude, Gemini, and Codex providers.`,
+and creates a PR. Supports Claude, Agy, and Codex providers.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root, err := resolveRepoRoot()
 		if err != nil {
@@ -117,7 +117,7 @@ func init() {
 	rootCmd.AddCommand(fixCmd)
 	fixCmd.Flags().StringVar(&fixBranch, "branch", "main", "Branch to scan for failures")
 	fixCmd.Flags().IntVar(&fixMaxParallel, "max-parallel", 3, "Maximum parallel fix agents")
-	fixCmd.Flags().StringVar(&fixModel, "model", "sonnet", "Model for fix agents (e.g. sonnet, gemini-2.5-pro)")
+	fixCmd.Flags().StringVar(&fixModel, "model", "sonnet", "Model for fix agents (e.g. sonnet, gemini-3.1-pro-high)")
 	fixCmd.Flags().Float64Var(&fixBudget, "budget", 1.0, "Cost budget per agent in USD")
 	fixCmd.Flags().BoolVar(&fixSkipScan, "skip-scan", false, "Skip scanning; fix issues from existing tracker state")
 }

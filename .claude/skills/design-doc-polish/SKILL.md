@@ -103,7 +103,7 @@ Monitor({
 })
 ```
 
-Backends/models: `codex`/`gpt-5.4-mini`, `cursor`/`composer-2`, `gemini`/`gemini-3-flash-preview`.
+Backends/models: `codex`/`gpt-5.4-mini`, `cursor`/`composer-2`, `gemini`/`gemini-3.1-flash-lite-preview`. `bramble code-review --backend gemini` is `yoloswe/reviewer`'s standalone ACP-based `geminiBackend` (talks to the real `gemini` CLI directly via `agent-cli-wrapper/acp`) — this is a separate, still-intact code path from the deleted `multiagent/agent.ProviderGemini`/`agy` migration, so `gemini-3.1-flash-lite-preview` is correct here as `reviewer.DefaultGeminiModel`, not a stale ID. Omit `--model` to take the backend's own default, which matches.
 
 A missing envelope or `status: "error"` is a high-severity finding — surface it with the stderr path.
 

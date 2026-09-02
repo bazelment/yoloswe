@@ -195,7 +195,7 @@ func (h *logEventHandler) idleFor(now time.Time) time.Duration {
 
 // providerReportsCost reports whether a provider's turn/result events carry a
 // real cost measurement. Only the Claude provider does today; codex, cursor,
-// gemini and agy emit a structural zero. Logging that zero as "$0.0000" reads
+// and agy emit a structural zero. Logging that zero as "$0.0000" reads
 // like a measurement, so callers log "n/a" instead.
 func providerReportsCost(provider string) bool {
 	return provider == agent.ProviderClaude
@@ -203,7 +203,7 @@ func providerReportsCost(provider string) bool {
 
 // providerReportsTokens reports whether a provider's result carries real
 // input/output token counts. Claude and codex both do (codex populates
-// AgentResult.Usage from its token_count events); cursor, gemini and agy
+// AgentResult.Usage from its token_count events); cursor and agy
 // leave Usage zero. This is intentionally distinct from providerReportsCost:
 // codex reports tokens but not cost, so the two metrics need separate gates.
 func providerReportsTokens(provider string) bool {
@@ -481,8 +481,8 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 		activeCfg.Model = modelID
 
 		// Effort is config-scoped, not per-model, so the inherited level rides
-		// onto a fallback model. A provider with no effort knob (Cursor, Gemini,
-		// Agy) hard-fails on any non-auto level, which would turn a rescue
+		// onto a fallback model. A provider with no effort knob (Cursor)
+		// hard-fails on any non-auto level, which would turn a rescue
 		// fallback into a terminal error — drop it for those providers. Only on
 		// failover (mi > 0): a directly-configured primary with an unsupported
 		// effort must still surface the unsupported-effort error, not be silently

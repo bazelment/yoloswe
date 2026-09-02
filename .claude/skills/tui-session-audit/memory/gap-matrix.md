@@ -8,8 +8,8 @@ Run `/tui-session-audit` to populate this matrix with real testing data.
 
 ## Capabilities to Audit
 
-| Capability | Claude | Codex | Gemini | Replay | Persistence | Status |
-|-----------|--------|-------|--------|--------|-------------|--------|
+| Capability | Claude | Codex | Agy | Replay | Persistence | Status |
+|-----------|--------|-------|-----|--------|-------------|--------|
 | Text streaming | untested | untested | untested | untested | untested | — |
 | Thinking display | untested | untested | untested | untested | untested | — |
 | Tool start rendering | untested | untested | untested | untested | untested | — |

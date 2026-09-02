@@ -1,6 +1,27 @@
 # Multi-Provider Reasoning Effort
 
-Status: design — ready to implement
+Status: **SUPERSEDED (2026-09-02)** — this doc describes a design against the
+now-deleted `gemini_provider.go` (ACP-backed Gemini CLI provider). That
+provider was removed and replaced by `AgyProvider`
+(`multiagent/agent/agy_provider.go`), which is a print-mode wrapper around the
+`agy` CLI. Two load-bearing facts below are now **wrong** for the current
+provider:
+
+- `ProviderSupportsEffort(ProviderAgy)` is **true** — agy DOES support
+  `low|medium|high` effort (mapped via `agyEffortLevel` in
+  `agy_provider.go`), unlike the old Gemini/ACP provider this doc rejected.
+  `EffortMax` clamps to `high`.
+- There is no `gemini_provider.go`/`gemini_provider_test.go` to edit; agy's
+  effort wiring already landed in `AgyProvider.Execute`, not as the
+  reject-early shape described here.
+
+Everything else below (the Codex/Cursor feasibility analysis, the
+`agent/effort.go` shim shape, the validation architecture) is preserved as
+the historical record of the original design and reads correctly for
+Codex/Cursor/Claude. Do not use the Gemini rows/steps below as current
+guidance — see `agent-cli-wrapper/agy/` and `multiagent/agent/agy_provider.go`
+for the real, current agy effort behavior.
+
 Owner: hand-off after this doc lands
 Related: PR #172 (`feature/jiradozer-agent-flags`), `multiagent/agent/provider.go:194` (`ExecuteConfig.Effort`)
 

@@ -22,7 +22,7 @@ type TriageConfig struct {
 }
 
 // QueryFn is the signature for one-shot LLM queries.
-// modelID identifies the model (e.g. "haiku", "gemini-2.5-flash").
+// modelID identifies the model (e.g. "haiku", "gemini-3.8-flash-low").
 type QueryFn func(ctx context.Context, modelID, prompt string) (*agent.QueryResult, error)
 
 // triageResponse is one element of the JSON array returned by the LLM.
