@@ -23,7 +23,7 @@ const (
 var ErrInvalidEffort = errors.New("invalid effort level")
 
 // ErrEffortUnsupported is returned by providers that have no reasoning-effort
-// concept (e.g. Cursor, Gemini today) when ExecuteConfig.Effort is set to an
+// concept (e.g. Cursor today) when ExecuteConfig.Effort is set to an
 // explicit non-auto level. EffortAuto means "use the provider default" and
 // must not produce this error. Wrapped with the provider name and requested
 // level.
@@ -42,15 +42,15 @@ func ParseEffort(s string) (EffortLevel, error) {
 }
 
 // ProviderSupportsEffort reports whether a provider honors an explicit non-auto
-// reasoning-effort level. Claude and Codex do; Cursor, Gemini, and Agy have no
-// effort knob and return ErrEffortUnsupported for any non-auto level (see the
-// respective *_provider.go Execute guards). This is the single source of truth
-// callers should consult before handing a model an effort level — e.g. a model
+// reasoning-effort level. Claude, Codex, and Agy do; Cursor has no effort knob
+// and returns ErrEffortUnsupported for any non-auto level (see the respective
+// *_provider.go Execute guards). This is the single source of truth callers
+// should consult before handing a model an effort level — e.g. a model
 // fallback must drop effort when routing from a Claude model to a Cursor model.
 // Unknown providers are assumed not to support effort (safe: caller drops it).
 func ProviderSupportsEffort(provider string) bool {
 	switch provider {
-	case ProviderClaude, ProviderCodex:
+	case ProviderClaude, ProviderCodex, ProviderAgy:
 		return true
 	default:
 		return false
