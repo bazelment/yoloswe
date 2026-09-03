@@ -258,6 +258,67 @@ func TestTmuxRunnerNotifyOverrideIsCodexOnly(t *testing.T) {
 	}
 }
 
+func TestTmuxRunnerAgyNewSessionBindsWorktree(t *testing.T) {
+	r := &tmuxRunner{
+		provider: ProviderAgy,
+		model:    "gemini-3.8-flash-low",
+		prompt:   "do it",
+	}
+
+	_, args := r.buildCommand()
+
+	if !slices.Contains(args, "--new-project") {
+		t.Fatalf("new agy session missing --new-project: %v", args)
+	}
+}
+
+func TestTmuxRunnerAgyResumeDoesNotReCreateProject(t *testing.T) {
+	r := &tmuxRunner{
+		provider:        ProviderAgy,
+		model:           "gemini-3.8-flash-low",
+		prompt:          "keep going",
+		resumeSessionID: "conv-abc123",
+	}
+
+	_, args := r.buildCommand()
+
+	if slices.Contains(args, "--new-project") {
+		t.Errorf("resumed agy session should not get --new-project: %v", args)
+	}
+	if !slices.Contains(args, "--conversation") {
+		t.Errorf("resumed agy session missing --conversation: %v", args)
+	}
+}
+
+func TestTmuxRunnerAgyNewProjectPrecedesPrompt(t *testing.T) {
+	r := &tmuxRunner{
+		provider: ProviderAgy,
+		model:    "gemini-3.8-flash-low",
+		prompt:   "build it",
+	}
+
+	_, args := r.buildCommand()
+
+	idx := slices.Index(args, "--new-project")
+	if idx < 0 {
+		t.Fatalf("--new-project not found: %v", args)
+	}
+	if args[len(args)-1] != r.prompt {
+		t.Fatalf("prompt is not the final argument: %v", args)
+	}
+	// --prompt-interactive takes the prompt as its VALUE, so the flag that must
+	// not slip past it is --prompt-interactive itself, not the trailing token:
+	// [..., "--prompt-interactive", "--new-project", prompt] would make agy
+	// consume "--new-project" as the prompt while still leaving the prompt last.
+	promptFlag := slices.Index(args, "--prompt-interactive")
+	if promptFlag < 0 {
+		t.Fatalf("--prompt-interactive not found: %v", args)
+	}
+	if idx >= promptFlag {
+		t.Errorf("--new-project must precede --prompt-interactive, got %d >= %d in %v", idx, promptFlag, args)
+	}
+}
+
 // The TOML value is built by string concatenation, so a path or ID containing
 // a quote or backslash must not be able to break out of it.
 func TestCodexNotifyConfigQuotesValues(t *testing.T) {

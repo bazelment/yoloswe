@@ -322,6 +322,10 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		}
 		if r.resumeSessionID != "" {
 			args = append(args, "--conversation", r.resumeSessionID)
+		} else {
+			// Agy binds tools to a project, not the process cwd. Fresh sessions
+			// need a project for their worktree; resumed conversations reuse theirs.
+			args = append(args, "--new-project")
 		}
 		args = append(args, "--prompt-interactive")
 	default:
