@@ -1543,3 +1543,24 @@ func TestFailedReviewResult_NilResultStillYieldsAnErrorEnvelope(t *testing.T) {
 		t.Errorf("nothing was produced, so status = %s, want error", env.Status)
 	}
 }
+
+// TestReadOnlyFlagHelpNamesTheBackendsThatIgnoreIt keeps the operator-facing
+// promise honest. --read-only defaults to true, but the agy and cursor backends
+// auto-approve writes and shell regardless (agy exposes no per-tool lever; see
+// the rationale in reviewer/backend_agy.go). Help text that enumerates only the
+// backends which DO honour it reads as though the flag applies everywhere, on a
+// command whose WorkDir is the caller's own checkout.
+func TestReadOnlyFlagHelpNamesTheBackendsThatIgnoreIt(t *testing.T) {
+	flag := Cmd.Flags().Lookup("read-only")
+	if flag == nil {
+		t.Fatal("--read-only flag not registered")
+	}
+	if flag.DefValue != "true" {
+		t.Fatalf("--read-only default = %s, want true; the help text below assumes it is on by default", flag.DefValue)
+	}
+	for _, backend := range []string{"Cursor", "Agy"} {
+		if !strings.Contains(flag.Usage, backend) {
+			t.Errorf("--read-only help must name %s as ignoring the flag, got %q", backend, flag.Usage)
+		}
+	}
+}
