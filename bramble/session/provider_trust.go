@@ -12,6 +12,14 @@ import (
 
 // preTrustWorkspace seeds a provider's trust store before its interactive
 // session starts. Failures are non-fatal, preserving the CLI's normal dialog.
+//
+// Only agy and codex are handled here. Cursor is already covered by the
+// --trust flag buildCommand passes it. Claude shows a folder-trust dialog too
+// (see startupDialogs in bramble/integration/harness_test.go), but seeding it
+// means editing ~/.claude.json, the live config of the CLI this repo is
+// developed with, whose per-project map holds far more than a trust bit. That
+// is a larger blast radius than the stall it would remove, so claude is
+// deliberately left to its dialog rather than covered here.
 func preTrustWorkspace(provider, workDir string) {
 	if workDir == "" {
 		return
@@ -68,12 +76,13 @@ func trustAgyWorkspace(workDir string) error {
 	})
 }
 
+// agySettingsPath resolves agy's settings file the single way agy resolves it:
+// under $HOME. agy does NOT honor XDG_CONFIG_HOME for this file — seeding
+// $XDG_CONFIG_HOME/gemini/... leaves the trust dialog firing (verified against
+// Antigravity CLI 1.1.25), so there is no second layout to fall back to.
 func agySettingsPath() (string, error) {
 	if home := os.Getenv("HOME"); home != "" {
 		return filepath.Join(home, ".gemini", agySettingsRelPath), nil
-	}
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "gemini", agySettingsRelPath), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -86,11 +95,11 @@ const codexConfigTrustedTableFmt = "[projects.%s]\ntrust_level = \"trusted\"\n"
 
 // trustCodexWorkspace records workDir in codex's trusted-projects table.
 func trustCodexWorkspace(workDir string) error {
-	home, err := os.UserHomeDir()
+	dir, err := codexHomeDir()
 	if err != nil {
-		return fmt.Errorf("resolve home directory: %w", err)
+		return err
 	}
-	path := filepath.Join(home, ".codex", "config.toml")
+	path := filepath.Join(dir, "config.toml")
 	quotedWorkDir := fmt.Sprintf("%q", workDir)
 	header := fmt.Sprintf("[projects.%s]", quotedWorkDir)
 
@@ -114,6 +123,21 @@ func trustCodexWorkspace(workDir string) error {
 
 		return writeFileAtomic(path, []byte(updated), 0o600)
 	})
+}
+
+// codexHomeDir resolves codex's config directory. $CODEX_HOME overrides
+// ~/.codex; without honoring it bramble writes the trust entry to a file codex
+// never reads and the session still stalls on the dialog (verified against
+// codex-cli 0.150.1).
+func codexHomeDir() (string, error) {
+	if dir := os.Getenv("CODEX_HOME"); dir != "" {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".codex"), nil
 }
 
 // withFileLock serializes bramble's trust-store updates to one path.

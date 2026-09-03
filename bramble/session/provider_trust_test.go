@@ -9,14 +9,16 @@ import (
 	"testing"
 )
 
-// withTestHome points $HOME (and clears $XDG_CONFIG_HOME) at a fresh temp
-// directory for the duration of the test, so trustAgyWorkspace's home
-// resolution is exercised the same way it runs in production.
+// withTestHome points $HOME at a fresh temp directory for the duration of the
+// test, so trust-store resolution is exercised the same way it runs in
+// production. $CODEX_HOME is cleared too: it overrides ~/.codex, so leaving the
+// developer's own value set would send trustCodexWorkspace's writes outside the
+// temp home and the assertions below would read the wrong file.
 func withTestHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("CODEX_HOME", "")
 	return home
 }
 
@@ -271,5 +273,73 @@ func TestPreTrustWorkspace_EmptyWorkDirIsNoop(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("home directory not empty after empty workDir: %v", entries)
+	}
+}
+
+// The two tests below cover preTrustWorkspace's provider dispatch from the
+// entry point tmuxRunner.Start actually calls. Without them the switch arms
+// could be deleted outright — reintroducing the stall this package exists to
+// prevent — while every other test in this file still passed, because they all
+// call trustAgyWorkspace/trustCodexWorkspace directly.
+
+func TestPreTrustWorkspace_AgyWritesSettings(t *testing.T) {
+	home := withTestHome(t)
+	workDir := "/work/repo"
+
+	preTrustWorkspace(ProviderAgy, workDir)
+
+	data, err := os.ReadFile(filepath.Join(home, ".gemini", agySettingsRelPath))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var settings struct {
+		TrustedWorkspaces []string `json:"trustedWorkspaces"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if len(settings.TrustedWorkspaces) != 1 || settings.TrustedWorkspaces[0] != workDir {
+		t.Fatalf("trustedWorkspaces = %v, want [%s]", settings.TrustedWorkspaces, workDir)
+	}
+}
+
+func TestPreTrustWorkspace_CodexWritesConfig(t *testing.T) {
+	home := withTestHome(t)
+	workDir := "/work/repo"
+
+	preTrustWorkspace(ProviderCodex, workDir)
+
+	data, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	want := `[projects."` + workDir + `"]` + "\ntrust_level = \"trusted\"\n"
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("config.toml missing trusted table, got:\n%s", string(data))
+	}
+}
+
+// $CODEX_HOME overrides ~/.codex. Writing to ~/.codex when it is set puts the
+// trust entry in a file codex never reads, so the session still stalls on the
+// dialog the rest of this package exists to prevent.
+func TestTrustCodexWorkspace_HonorsCodexHome(t *testing.T) {
+	home := withTestHome(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	workDir := "/work/repo"
+
+	if err := trustCodexWorkspace(workDir); err != nil {
+		t.Fatalf("trustCodexWorkspace() error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile($CODEX_HOME/config.toml) error = %v", err)
+	}
+	if !strings.Contains(string(data), `[projects."`+workDir+`"]`) {
+		t.Fatalf("$CODEX_HOME/config.toml missing trusted table, got:\n%s", string(data))
+	}
+	if _, err := os.Stat(filepath.Join(home, ".codex", "config.toml")); !os.IsNotExist(err) {
+		t.Fatalf("wrote ~/.codex/config.toml while $CODEX_HOME was set (Stat err = %v)", err)
 	}
 }
