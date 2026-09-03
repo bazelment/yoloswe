@@ -836,6 +836,54 @@ func TestComposerLiteralTextAcceptsOnlyAProvenSingleRowComposer(t *testing.T) {
 	})
 }
 
+// TestComposerBlockCountsTheRowsAnEnterWouldSubmit pins the fact the ownership
+// comparison rests on. claudeComposerIdx reports only the block's TOP row, so
+// the row count is the only thing that distinguishes "the line I compared is
+// the whole composer" from "the line I compared has a human's rows under it".
+// Both readers walk the same bounded loop (claudeComposerWalk), so the index
+// and the count cannot disagree about a pane.
+func TestComposerBlockCountsTheRowsAnEnterWouldSubmit(t *testing.T) {
+	t.Parallel()
+
+	single := []string{
+		"✻ Worked for 12s",
+		"────────────────────────────────────────────",
+		"❯ one row only",
+		"────────────────────────────────────────────",
+		"  ~/wt/branch  main  Opus 4.6  ctx:43%  tokens:20k",
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+	}
+	idx, rows := claudeComposerBlock(single)
+	require.GreaterOrEqual(t, idx, 0, "a delimited composer is located")
+	assert.Equal(t, 1, rows, "one row between the rules")
+	topIdx, _ := claudeComposerIdx(single)
+	assert.Equal(t, topIdx, idx, "both readers agree on the same pane")
+
+	wrapped := []string{
+		"✻ Worked for 12s",
+		"────────────────────────────────────────────",
+		"❯ the first row of a wrapped draft",
+		"the continuation the human is still typing",
+		"────────────────────────────────────────────",
+		"  ~/wt/branch  main  Opus 4.6  ctx:43%  tokens:20k",
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+	}
+	idx, rows = claudeComposerBlock(wrapped)
+	require.GreaterOrEqual(t, idx, 0, "a wrapped composer is still located")
+	assert.Equal(t, 2, rows, "the count is what reveals the row below the match")
+	assert.Equal(t, "❯ the first row of a wrapped draft", wrapped[idx],
+		"and the index is still the TOP row, which is why the count is needed")
+
+	undelimited := []string{
+		"❯ no upper rule bounds this",
+		"────────────────────────────────────────────",
+		"  ~/wt/branch  main  Opus 4.6  ctx:43%  tokens:20k",
+	}
+	idx, rows = claudeComposerBlock(undelimited)
+	assert.Equal(t, -1, idx, "an unbounded line is not a located composer")
+	assert.Equal(t, 0, rows)
+}
+
 // TestLocatedButUnreadableComposerHolds pins fail-closed behavior for a located
 // composer whose text cannot be parsed. Unknown means deliver, so unreadable
 // content must report hold.
