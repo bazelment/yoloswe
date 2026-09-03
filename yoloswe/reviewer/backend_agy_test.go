@@ -446,15 +446,16 @@ func hangingAgyCLI(t *testing.T) string {
 	return path
 }
 
-// A wedged agy must not hang the review forever: Config.IdleTimeout is the
-// stall-killer every other backend honors via bridgeStreamEvents, and the
-// code-review CLI sets it from --idle-timeout (default 8m) on every run.
-// Without the backstop in RunPrompt this test hangs until the Go test timeout.
-func TestAgyBackend_RunPrompt_IdleTimeoutBoundsAWedgedProcess(t *testing.T) {
+// A wedged agy must not hang the review forever. The bound is
+// Config.TurnTimeout (a total wall-clock cap), NOT Config.IdleTimeout — agy
+// streams nothing until the turn ends, so there is no activity to reset an
+// inactivity deadline. Without the backstop in RunPrompt this hangs until the
+// Go test timeout.
+func TestAgyBackend_RunPrompt_TurnTimeoutBoundsAWedgedProcess(t *testing.T) {
 	b := &agyBackend{
 		config: Config{
 			Model:       "gemini-3.8-flash-medium",
-			IdleTimeout: 150 * time.Millisecond,
+			TurnTimeout: 150 * time.Millisecond,
 		},
 		cliPath: hangingAgyCLI(t),
 	}
@@ -470,41 +471,40 @@ func TestAgyBackend_RunPrompt_IdleTimeoutBoundsAWedgedProcess(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(15 * time.Second):
-		t.Fatal("RunPrompt did not return: Config.IdleTimeout is not enforced")
+		t.Fatal("RunPrompt did not return: Config.TurnTimeout is not enforced")
 	}
 
 	if err == nil {
 		t.Fatal("expected an error when the agy process never produces a result")
 	}
-	if !strings.Contains(err.Error(), "idle timeout") {
-		t.Fatalf("error should name the idle timeout, got %v", err)
+	if !strings.Contains(err.Error(), "turn timeout") {
+		t.Fatalf("error should name the turn timeout, got %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("took %s; the timeout should bound it near 150ms", elapsed)
 	}
 }
 
-// Zero must disable the bound, matching Config.IdleTimeout's documented
-// meaning ("Zero (the default) disables the idle check"). Guards against a
-// backstop that fires immediately on a nil/zero timer.
-func TestAgyBackend_RunPrompt_IdleTimeoutZeroDisablesTheBound(t *testing.T) {
+// Zero must disable the local bound, leaving agy's own --print-timeout default
+// in force. Guards against a backstop that fires immediately on a nil/zero timer.
+func TestAgyBackend_RunPrompt_TurnTimeoutZeroDisablesTheBound(t *testing.T) {
 	b := &agyBackend{
-		config:  Config{Model: "gemini-3.8-flash-medium", IdleTimeout: 0},
+		config:  Config{Model: "gemini-3.8-flash-medium", TurnTimeout: 0},
 		cliPath: fakeAgyCLI(t, "AGYOK", 0),
 	}
 
 	result, err := b.RunPrompt(context.Background(), "review this", &recordingHandler{})
 	if err != nil {
-		t.Fatalf("RunPrompt failed with IdleTimeout=0: %v", err)
+		t.Fatalf("RunPrompt failed with TurnTimeout=0: %v", err)
 	}
 	if !result.Success {
-		t.Fatal("expected success with the idle bound disabled")
+		t.Fatal("expected success with the turn bound disabled")
 	}
 }
 
 // The bound must also reach agy itself as --print-timeout, so the CLI enforces
 // it in the common case instead of relying on the local backstop alone.
-func TestAgyBackend_RunPrompt_IdleTimeoutReachesAgyAsPrintTimeout(t *testing.T) {
+func TestAgyBackend_RunPrompt_TurnTimeoutReachesAgyAsPrintTimeout(t *testing.T) {
 	dir := t.TempDir()
 	argvPath := filepath.Join(dir, "argv.txt")
 	cliPath := filepath.Join(dir, "agy")
@@ -519,7 +519,7 @@ func TestAgyBackend_RunPrompt_IdleTimeoutReachesAgyAsPrintTimeout(t *testing.T) 
 	}
 
 	b := &agyBackend{
-		config:  Config{Model: "gemini-3.8-flash-medium", IdleTimeout: 90 * time.Second},
+		config:  Config{Model: "gemini-3.8-flash-medium", TurnTimeout: 90 * time.Second},
 		cliPath: cliPath,
 	}
 	if _, err := b.RunPrompt(context.Background(), "review this", &recordingHandler{}); err != nil {
@@ -598,5 +598,79 @@ func TestAgyBackend_RunPrompt_TurnStartDoesNotBlankAKnownConversationID(t *testi
 	}
 	if got := handler.sessionIDs[0]; got != "conv-123" {
 		t.Fatalf("turn start reported %q; reporting \"\" erases Reviewer.lastSessionID", got)
+	}
+}
+
+// The semantics pin: IdleTimeout must NOT bound an agy turn. agy streams
+// nothing until the turn ends, so treating the inactivity value as a wall-clock
+// cap kills healthy long reviews — /pr-polish passes --idle-timeout 8m under a
+// 40m backstop precisely because "a review making progress runs as long as it
+// needs", and a real review on a large diff runs 18min+.
+//
+// This turn takes materially longer than IdleTimeout and must still succeed.
+// It is the test the round-5 fix lacked: a wedged-process test passes under
+// either semantics, because a process that never emits is killed either way.
+func TestAgyBackend_RunPrompt_IdleTimeoutDoesNotTruncateAProgressingTurn(t *testing.T) {
+	dir := t.TempDir()
+	cliPath := filepath.Join(dir, "agy")
+	envelope := `{"conversation_id":"conv-slow","status":"SUCCESS","response":"AGYOK\n",` +
+		`"duration_seconds":0.5,"num_turns":1,` +
+		`"usage":{"input_tokens":1,"output_tokens":1,"thinking_tokens":0,` +
+		`"cache_read_tokens":0,"total_tokens":2}}`
+	// Emits nothing for 400ms — 8x the idle value — then completes normally.
+	script := "#!/bin/sh\nsleep 0.4\nprintf %s " + shellQuote(envelope) + "\nexit 0\n"
+	if err := os.WriteFile(cliPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write slow agy CLI: %v", err)
+	}
+
+	b := &agyBackend{
+		config: Config{
+			Model:       "gemini-3.8-flash-medium",
+			IdleTimeout: 50 * time.Millisecond, // must NOT bound the turn
+			TurnTimeout: 10 * time.Second,      // the real cap, comfortably clear
+		},
+		cliPath: cliPath,
+	}
+
+	result, err := b.RunPrompt(context.Background(), "review this", &recordingHandler{})
+	if err != nil {
+		t.Fatalf("a turn that outlived IdleTimeout was killed: %v", err)
+	}
+	if !result.Success {
+		t.Fatal("expected the slow-but-healthy turn to succeed")
+	}
+}
+
+// IdleTimeout must not leak into agy's argv either: --print-timeout is a total
+// wall-clock bound, so driving it from the inactivity value would cap the turn
+// at the wrong quantity inside the CLI itself.
+func TestAgyBackend_RunPrompt_IdleTimeoutIsNotSentAsPrintTimeout(t *testing.T) {
+	dir := t.TempDir()
+	argvPath := filepath.Join(dir, "argv.txt")
+	cliPath := filepath.Join(dir, "agy")
+	envelope := `{"conversation_id":"conv-fake","status":"SUCCESS","response":"AGYOK\n",` +
+		`"duration_seconds":0.5,"num_turns":1,` +
+		`"usage":{"input_tokens":1,"output_tokens":1,"thinking_tokens":0,` +
+		`"cache_read_tokens":0,"total_tokens":2}}`
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + shellQuote(argvPath) + "\n" +
+		"printf %s " + shellQuote(envelope) + "\nexit 0\n"
+	if err := os.WriteFile(cliPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write argv-recording agy CLI: %v", err)
+	}
+
+	b := &agyBackend{
+		config:  Config{Model: "gemini-3.8-flash-medium", IdleTimeout: 8 * time.Minute},
+		cliPath: cliPath,
+	}
+	if _, err := b.RunPrompt(context.Background(), "review this", &recordingHandler{}); err != nil {
+		t.Fatalf("RunPrompt failed: %v", err)
+	}
+
+	argv, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("read recorded argv: %v", err)
+	}
+	if strings.Contains(string(argv), "--print-timeout") {
+		t.Fatalf("IdleTimeout leaked into argv as --print-timeout: %q", string(argv))
 	}
 }

@@ -255,6 +255,13 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		// Scoped to this reviewer instance via Config (not a package global) so
 		// the CLI's opt-in can't impose a stall policy on other reviewer callers.
 		IdleTimeout: idleTimeout,
+		// Wall-clock bound for print-mode backends (agy), which stream nothing
+		// until the turn ends and so cannot be governed by an inactivity
+		// deadline. Same value as the context deadline below, so a print-mode
+		// backend is bounded exactly like a streaming one: by --timeout, not by
+		// --idle-timeout. Zero (the default) leaves agy's own --print-timeout
+		// default in force.
+		TurnTimeout: timeout,
 	}
 
 	logPath2, err := reviewer.ResolveProtocolLogPath(protocolLogDir)

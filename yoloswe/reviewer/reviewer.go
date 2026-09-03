@@ -146,6 +146,15 @@ type Config struct {
 	// no-inactivity-kill behavior. The code-review CLI sets this from its
 	// --idle-timeout flag.
 	IdleTimeout time.Duration
+	// TurnTimeout bounds the TOTAL wall-clock time one backend turn may take,
+	// as distinct from IdleTimeout's inactivity deadline. It exists for
+	// print-mode backends (agy) that stream nothing until the turn ends: an
+	// inactivity deadline is meaningless there, because there is no activity to
+	// reset it, so IdleTimeout cannot be reused without silently truncating a
+	// healthy long review. Zero (the default) leaves the backend's own bound in
+	// place. The code-review CLI sets this from its --timeout flag, the same
+	// value it uses for the overall context deadline.
+	TurnTimeout time.Duration
 }
 
 // ResumeStatus records whether a requested backend resume succeeded.

@@ -39,13 +39,18 @@ import (
 //
 // # Stall protection
 //
-// agy is a print-mode CLI: it emits nothing until the turn ends, so the
-// per-event idle timer the streaming backends use (bridgeStreamEvents' reset-on-
-// every-event deadline) would fire on every healthy long turn. Config.IdleTimeout
-// is therefore honored as a WALL-CLOCK bound on the whole turn — passed to agy
-// as --print-timeout so the CLI enforces it itself, and backed by a local timer
-// so a wedged subprocess that ignores its own flag still returns. Zero disables
-// both, matching Config.IdleTimeout's documented meaning.
+// agy is a print-mode CLI: it emits nothing until the turn ends. There is
+// therefore no activity to reset an inactivity deadline, so Config.IdleTimeout
+// — explicitly "NOT a total-wall cap" — is deliberately NOT honored here.
+// Applying it as a wall-clock bound would kill a healthy long review at the
+// value calibrated for detecting a stalled *streaming* backend.
+//
+// The bound agy honors is Config.TurnTimeout, a total wall-clock cap: passed
+// down as --print-timeout (agy's own flag, whose default is 5m) so the CLI
+// enforces it, and backed by a local timer so a subprocess that ignores its own
+// flag still returns. Zero leaves agy's default in force. Callers that want a
+// hard cap set it; bramble code-review sets it from --timeout, the same value
+// that bounds the context.
 //
 // # Resume verification
 //
@@ -152,10 +157,12 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 	if b.config.WorkDir != "" {
 		sessionOpts = append(sessionOpts, agy.WithWorkDir(b.config.WorkDir))
 	}
-	if b.config.IdleTimeout > 0 {
-		// agy enforces this itself via --print-timeout; the select below adds a
-		// local backstop for a subprocess that ignores it. See the type doc.
-		sessionOpts = append(sessionOpts, agy.WithPrintTimeout(b.config.IdleTimeout))
+	if b.config.TurnTimeout > 0 {
+		// agy's --print-timeout is a TOTAL wall-clock bound on print mode (its
+		// own default is 5m), so it is driven by Config.TurnTimeout, never by
+		// Config.IdleTimeout — those are different quantities, and using the
+		// inactivity value here would kill a healthy long review. See the type doc.
+		sessionOpts = append(sessionOpts, agy.WithPrintTimeout(b.config.TurnTimeout))
 	}
 
 	requestedResumeID := b.resumeID()
@@ -201,16 +208,16 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 	var inputTokens, outputTokens int64
 	sawTurnComplete := false
 
-	// Wall-clock backstop for Config.IdleTimeout. agy already enforces the same
-	// bound via --print-timeout (set above), so this only fires when the
-	// subprocess ignores its own flag or wedges before parsing it. A nil channel
-	// blocks forever, so IdleTimeout==0 leaves the select with exactly the two
-	// arms it had before. Ordering: the timer starts before the first receive, so
-	// a subprocess that never emits anything is still bounded; a turn that
+	// Local backstop for Config.TurnTimeout. agy already enforces the same bound
+	// via --print-timeout (set above), so this only fires when the subprocess
+	// ignores its own flag or wedges before parsing it. A nil channel blocks
+	// forever, so TurnTimeout==0 leaves the select with exactly the two arms it
+	// had before. Ordering: the timer starts before the first receive, so a
+	// subprocess that never emits anything is still bounded; a turn that
 	// completes first breaks the loop and the deferred Stop tears the timer down.
 	var stallC <-chan time.Time
-	if b.config.IdleTimeout > 0 {
-		stallTimer := time.NewTimer(b.config.IdleTimeout)
+	if b.config.TurnTimeout > 0 {
+		stallTimer := time.NewTimer(b.config.TurnTimeout)
 		defer stallTimer.Stop()
 		stallC = stallTimer.C
 	}
@@ -224,7 +231,7 @@ loop:
 		case <-stallC:
 			_ = session.Stop()
 			return reviewPartialResult(resumeStatus, &bridgeResult{responseText: responseText, durationMs: durationMs},
-				fmt.Errorf("agy: no result after %s (idle timeout)", b.config.IdleTimeout))
+				fmt.Errorf("agy: no result after %s (turn timeout)", b.config.TurnTimeout))
 		case evt, ok := <-session.Events():
 			if !ok {
 				break loop

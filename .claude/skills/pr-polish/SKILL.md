@@ -241,6 +241,12 @@ per-reviewer `BRAMBLE_RUN_TAG` is how runs are attributed.
 # own recovery and killed live turns (measured on #8682 r2: 12min of review
 # holding ~2M input tokens, discarded). The backstop is 2x the old 1200s to stay
 # well clear of the idle bound — a real review on a large diff runs 18min+.
+# agy alone also takes `--timeout 35m`: it is a print-mode CLI that streams
+# nothing until the turn ends, so --idle-timeout cannot govern it (there is no
+# activity to reset). --timeout is the wall-clock knob it honors, and without it
+# agy applies its OWN --print-timeout default of 5m — which would cut an agy
+# review off well before the 18min+ a large diff needs. 35m sits under the 2400s
+# backstop so the CLI reports a timeout rather than being killed outright.
 # `set -o pipefail` keeps each subshell's status the reviewer's, not `sed`'s 0.
 PIDS=()
 
@@ -270,7 +276,7 @@ PIDS+=($!)
 if [ "$USE_AGY" = "1" ]; then
   ( set -o pipefail; BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:agy:r{ROUND} \
     timeout 2400 $BRAMBLE_BIN code-review --backend agy --model gemini-3.8-flash-low \
-      --skip-test-execution --verbose --idle-timeout 8m \
+      --skip-test-execution --verbose --idle-timeout 8m --timeout 35m \
       --goal "$GOAL" --scope-hints-file "$SCOPE_HINTS" $DIFF_BASE_ARG \
       ${AGY_RESUME:+--resume-session-id "$AGY_RESUME"} \
       --envelope-file "$LOG_DIR/agy-envelope.json" \
