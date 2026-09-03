@@ -214,7 +214,7 @@ func TestTmuxRunnerBuildCommand(t *testing.T) {
 				yoloMode: true,
 			},
 			wantBin:  "agy",
-			wantArgs: []string{"--dangerously-skip-permissions", "--prompt-interactive", "build it"},
+			wantArgs: []string{"--dangerously-skip-permissions", "--new-project", "--prompt-interactive", "build it"},
 		},
 		{
 			name: "empty provider defaults to claude",

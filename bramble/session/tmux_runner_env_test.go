@@ -258,6 +258,79 @@ func TestTmuxRunnerNotifyOverrideIsCodexOnly(t *testing.T) {
 	}
 }
 
+// agy binds its tools (shell cwd, file writes) to a registered "project"
+// resource, not to the process's actual working directory: a session
+// launched with no --new-project sits on agy's built-in default-cli-project,
+// whose projectResources is empty, so the shell tool falls back to
+// ~/.gemini/antigravity-cli/scratch regardless of tmux's -c workDir. This was
+// confirmed by driving a live bramble Build session (DRIVE-FINDINGS G-B) and
+// by direct CLI checks: `agy --model ... --prompt-interactive 'run pwd'`
+// printed the scratch dir until --new-project was added, at which point agy
+// registered workDir as a project resource and pwd/writes bound correctly.
+// A fresh agy session must therefore always get --new-project.
+func TestTmuxRunnerAgyNewSessionBindsWorktree(t *testing.T) {
+	r := &tmuxRunner{
+		provider: ProviderAgy,
+		model:    "gemini-3.8-flash-low",
+		prompt:   "do it",
+		workDir:  "/home/ubuntu/worktrees/yoloswe/scratch-build-1",
+	}
+
+	_, args := r.buildCommand()
+
+	if !slices.Contains(args, "--new-project") {
+		t.Fatalf("new agy session missing --new-project, which is what binds it to workDir as the writable workspace: %v", args)
+	}
+}
+
+// --conversation already resumes into the previously-registered project for
+// that worktree; pairing it with --new-project would create a second,
+// mismatched project resource instead of reusing the bound one.
+func TestTmuxRunnerAgyResumeDoesNotReCreateProject(t *testing.T) {
+	r := &tmuxRunner{
+		provider:        ProviderAgy,
+		model:           "gemini-3.8-flash-low",
+		prompt:          "keep going",
+		workDir:         "/home/ubuntu/worktrees/yoloswe/scratch-build-1",
+		resumeSessionID: "conv-abc123",
+	}
+
+	_, args := r.buildCommand()
+
+	if slices.Contains(args, "--new-project") {
+		t.Errorf("resumed agy session should not get --new-project: %v", args)
+	}
+	if !slices.Contains(args, "--conversation") {
+		t.Errorf("resumed agy session missing --conversation: %v", args)
+	}
+}
+
+// agy's -p/--print greedily consumes the next token as the prompt (see
+// agent-cli-wrapper/agy/process.go and its ordering tests), so every flag —
+// --new-project included — must land before the trailing prompt in
+// --prompt-interactive mode, never after.
+func TestTmuxRunnerAgyNewProjectPrecedesPrompt(t *testing.T) {
+	r := &tmuxRunner{
+		provider: ProviderAgy,
+		model:    "gemini-3.8-flash-low",
+		prompt:   "build it",
+		workDir:  "/home/ubuntu/worktrees/yoloswe/scratch-build-1",
+	}
+
+	_, args := r.buildCommand()
+
+	idx := slices.Index(args, "--new-project")
+	if idx < 0 {
+		t.Fatalf("--new-project not found: %v", args)
+	}
+	if args[len(args)-1] != r.prompt {
+		t.Fatalf("prompt is not the final argument: %v", args)
+	}
+	if idx >= len(args)-1 {
+		t.Errorf("--new-project must precede the prompt, got index %d in %v", idx, args)
+	}
+}
+
 // The TOML value is built by string concatenation, so a path or ID containing
 // a quote or backslash must not be able to break out of it.
 func TestCodexNotifyConfigQuotesValues(t *testing.T) {

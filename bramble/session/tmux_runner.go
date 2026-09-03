@@ -322,6 +322,21 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		}
 		if r.resumeSessionID != "" {
 			args = append(args, "--conversation", r.resumeSessionID)
+		} else {
+			// agy binds its tools (shell cwd, file writes) to a registered
+			// "project" resource, not to the process's actual working
+			// directory: launching plain in workDir with no --new-project
+			// leaves the session on agy's built-in default-cli-project, whose
+			// projectResources is empty, so the shell tool falls back to
+			// ~/.gemini/antigravity-cli/scratch regardless of tmux's -c. This
+			// was confirmed by driving a real session and by direct CLI
+			// checks: `agy --model ... --prompt-interactive 'run pwd'`
+			// printed the scratch dir until --new-project was added, at which
+			// point it registered workDir as a project resource
+			// (~/.gemini/config/projects/<uuid>.json) and pwd/writes bound
+			// correctly. --new-project only applies to a fresh session; a
+			// resumed one already has its project bound via --conversation.
+			args = append(args, "--new-project")
 		}
 		args = append(args, "--prompt-interactive")
 	default:
