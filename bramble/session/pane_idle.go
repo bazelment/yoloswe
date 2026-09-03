@@ -98,9 +98,25 @@ func statusSepIdx(lines []string) int {
 }
 
 func claudeComposerIdx(lines []string) (composerIdx, contentEndIdx int) {
+	composerIdx, contentEndIdx, _ = claudeComposerWalk(lines)
+	return composerIdx, contentEndIdx
+}
+
+// claudeComposerBlock reports where the bounded walk found the composer and how
+// many rows it occupies. A caller that intends to press Enter needs the row
+// count: claudeComposerIdx returns only the block's top row, so a one-row
+// answer is what proves nothing else is riding on the submit.
+func claudeComposerBlock(lines []string) (composerIdx, rows int) {
+	composerIdx, _, rows = claudeComposerWalk(lines)
+	return composerIdx, rows
+}
+
+// claudeComposerWalk is the one bounded walk both readers share, so the
+// location and the row count can never disagree about the same pane.
+func claudeComposerWalk(lines []string) (composerIdx, contentEndIdx, rows int) {
 	sepIdx := statusSepIdx(lines)
 	if sepIdx < 0 {
-		return -1, -1
+		return -1, -1, 0
 	}
 	// Walk up from the status separator to the upper rule. The composer may wrap,
 	// so its line is the first line in that block, not the nearest one.
@@ -115,7 +131,7 @@ func claudeComposerIdx(lines []string) (composerIdx, contentEndIdx int) {
 		if isClaudeSeparator(trimmed) {
 			if composerIdx < 0 {
 				// Two rules with nothing between them: no composer drawn.
-				return -1, i
+				return -1, i, 0
 			}
 			sawUpperRule = true
 			break
@@ -124,13 +140,13 @@ func claudeComposerIdx(lines []string) (composerIdx, contentEndIdx int) {
 		composerIdx = i
 	}
 	if composerIdx < 0 {
-		return -1, -1
+		return -1, -1, 0
 	}
 	if !sawUpperRule {
 		// Without the upper rule, the topmost reached line is not a proven
 		// composer. Fail closed as unfound; trusting it can either deliver into an
 		// oversized draft or latch onto a transcript prompt that never clears.
-		return -1, -1
+		return -1, -1, 0
 	}
 	contentEndIdx = -1
 	for i := composerIdx - 1; i >= 0; i-- {
@@ -143,7 +159,7 @@ func claudeComposerIdx(lines []string) (composerIdx, contentEndIdx int) {
 		}
 		break
 	}
-	return composerIdx, contentEndIdx
+	return composerIdx, contentEndIdx, seen
 }
 
 // claudePaneJudge reads claude-code's pane to decide whether a turn is in flight.
@@ -546,17 +562,33 @@ func composerDraft(provider string, lines []string) (draft, known bool) {
 }
 
 // composerLiteralText returns composer text for a caller that knows the payload
-// it staged. Unreadable and empty composers never match, preserving the draft
-// guard's fail-closed behavior.
+// it staged, and that will press Enter on the strength of the answer.
+//
+// That is the opposite question from composerDraft's, so it cannot share
+// composerDraft's fallbacks. Every branch composerDraft locates through is safe
+// when it over-reports TEXT ("assume a draft, stay quiet"); this caller is safe
+// only when it under-reports OWNERSHIP ("assume not mine, stay quiet"). So the
+// only shape accepted here is the one that proves both facts an Enter needs:
+//
+//   - a composer delimited by BOTH of claude's rules, so the line is the live
+//     composer and not a transcript prompt that merely looks like one. The
+//     weaker locators — the line above the status rule with no upper rule, and
+//     the chrome-less tail scan — can each return a transcript echo of an
+//     already-submitted nudge, and an Enter there submits an empty composer
+//     while marking a turn that never started.
+//   - a composer exactly ONE row tall. claudeComposerIdx returns the TOP row of
+//     a wrapped block (see TestWrappedComposerStillReadsAsADraft), so matching
+//     only that row would submit whatever the human typed on the rows below —
+//     the human-draft protection this whole comparison exists to keep.
 func composerLiteralText(provider string, lines []string) (text string, ok bool) {
 	if provider != ProviderClaude {
 		return "", false
 	}
-	line, found, _ := locateComposerLine(lines)
-	if !found {
+	composerIdx, rows := claudeComposerBlock(lines)
+	if composerIdx < 0 || rows != 1 {
 		return "", false
 	}
-	body, hasGlyph := composerBody(line)
+	body, hasGlyph := composerBody(lines[composerIdx])
 	if !hasGlyph || body == "" {
 		return "", false
 	}

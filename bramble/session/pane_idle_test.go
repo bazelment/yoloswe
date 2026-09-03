@@ -749,14 +749,17 @@ func TestComposerLayerDoesNotJudgeOwnership(t *testing.T) {
 	}
 }
 
-// TestComposerLiteralTextReadsWhatComposerDraftJudges pins that the
-// text-extraction path (added for issue #346, so a caller can recognize its
-// own stranded paste) finds the same body composerDraft judges, across every
-// branch composerDraft locates through.
-func TestComposerLiteralTextReadsWhatComposerDraftJudges(t *testing.T) {
+// TestComposerLiteralTextAcceptsOnlyAProvenSingleRowComposer pins the contract
+// the ownership comparison actually needs, which is NOT composerDraft's.
+// composerDraft is safe whenever it over-reports text ("assume a draft, stay
+// quiet"); this reader's answer is acted on with an Enter, so it is safe only
+// when it under-reports ownership. Every locator weaker than the fully
+// delimited bounded walk, and every composer taller than one row, must
+// therefore come back not-ok even though composerDraft happily reads them.
+func TestComposerLiteralTextAcceptsOnlyAProvenSingleRowComposer(t *testing.T) {
 	t.Parallel()
 
-	t.Run("located by the bounded walk", func(t *testing.T) {
+	t.Run("a single row between both rules is the one accepted shape", func(t *testing.T) {
 		t.Parallel()
 		pane := claudePaneComposer("❯ [bramble] subagent activity — check your run directory", "✻ Worked for 12s")
 		text, ok := composerLiteralText(ProviderClaude, pane)
@@ -764,7 +767,25 @@ func TestComposerLiteralTextReadsWhatComposerDraftJudges(t *testing.T) {
 		assert.Equal(t, "[bramble] subagent activity — check your run directory", text)
 	})
 
-	t.Run("located via the line above the status rule, upper rule missing", func(t *testing.T) {
+	t.Run("a wrapped composer is refused, its lower rows are not on the top row", func(t *testing.T) {
+		t.Parallel()
+		pane := []string{
+			"────────────────────────────────────────────",
+			"❯ [bramble] subagent activity — check your run directory",
+			"a human continuation typed under the stranded line",
+			"────────────────────────────────────────────",
+			"  ~/wt/branch  main  Opus 4.6  ctx:43%  tokens:20k",
+			"  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+		}
+		draft, known := composerDraft(ProviderClaude, pane)
+		require.True(t, known)
+		require.True(t, draft, "precondition: composerDraft still sees a draft here")
+
+		_, ok := composerLiteralText(ProviderClaude, pane)
+		assert.False(t, ok, "matching only the top row would submit the rows below it")
+	})
+
+	t.Run("the line above the status rule is refused, upper rule missing", func(t *testing.T) {
 		t.Parallel()
 		pane := []string{
 			"❯ a line the bounded walk cannot bound",
@@ -772,17 +793,15 @@ func TestComposerLiteralTextReadsWhatComposerDraftJudges(t *testing.T) {
 			"  ~/wt/branch  main  Opus 4.6  ctx:43%  tokens:20k",
 			"  ⏵⏵ bypass permissions on (shift+tab to cycle)",
 		}
-		text, ok := composerLiteralText(ProviderClaude, pane)
-		require.True(t, ok)
-		assert.Equal(t, "a line the bounded walk cannot bound", text)
+		_, ok := composerLiteralText(ProviderClaude, pane)
+		assert.False(t, ok, "an unbounded line is not a composer proven safe to submit")
 	})
 
-	t.Run("located via the tail scan, no status rule at all", func(t *testing.T) {
+	t.Run("the chrome-less tail scan is refused, it can find a transcript echo", func(t *testing.T) {
 		t.Parallel()
 		pane := []string{"❯ no chrome around this line at all"}
-		text, ok := composerLiteralText(ProviderClaude, pane)
-		require.True(t, ok)
-		assert.Equal(t, "no chrome around this line at all", text)
+		_, ok := composerLiteralText(ProviderClaude, pane)
+		assert.False(t, ok, "with no rules in the capture nothing proves this is the live composer")
 	})
 
 	t.Run("an empty composer has no text to compare", func(t *testing.T) {
@@ -792,7 +811,7 @@ func TestComposerLiteralTextReadsWhatComposerDraftJudges(t *testing.T) {
 		assert.False(t, ok, "nothing to recognize as bramble's own text")
 	})
 
-	t.Run("located but unreadable fails closed to not-ok, same as composerDraft", func(t *testing.T) {
+	t.Run("located but unreadable is refused while composerDraft fails closed to draft", func(t *testing.T) {
 		t.Parallel()
 		pane := []string{
 			"✻ Worked for 12s",

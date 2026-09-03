@@ -263,10 +263,13 @@ func (n *Notifier) nudge(ctx context.Context, parent SessionInfo) {
 		//
 		// composerLiteralText decides this without composerDraft or
 		// judgeComposerLine ever weighing in on provenance — they still say only
-		// "any text is a draft, whoever wrote it" — so a human's line, or a
-		// bramble line with anything appended or missing, keeps failing this
-		// comparison and stays protected. Submit rather than paste-then-submit:
-		// the text is already there, and pasting again would duplicate it.
+		// "any text is a draft, whoever wrote it". It answers only for a
+		// composer proven by both of claude's rules AND exactly one row tall,
+		// so what this Enter submits is the row that was compared and nothing
+		// else: a human's own line fails the comparison, and a human's
+		// continuation typed under a stranded line is not reachable by it at
+		// all. Submit rather than paste-then-submit: the text is already there,
+		// and pasting again would duplicate it.
 		if text, ok := composerLiteralText(provider, lines); ok && text == nudgeText {
 			n.submitAndTrack(ctx, parent.ID, target)
 		}
