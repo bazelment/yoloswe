@@ -33,3 +33,19 @@ func (e *ProcessError) Error() string {
 }
 
 func (e *ProcessError) Unwrap() error { return e.Cause }
+
+// ToolDeniedError reports a turn that agy's own JSON result marks SUCCESS
+// (exit 0, empty response) while its stderr carries the jetski headless-mode
+// auto-denial marker. See isToolDeniedEmptyResult for why this is the only
+// condition that promotes such a payload to an error, and why it cannot
+// false-positive on a turn that legitimately produced no text.
+type ToolDeniedError struct {
+	// Stderr is the raw stderr captured for the denied turn, kept verbatim so
+	// callers/logs can see which permission (read_file, command, ...) was
+	// denied without re-parsing agy's message themselves.
+	Stderr string
+}
+
+func (e *ToolDeniedError) Error() string {
+	return fmt.Sprintf("agy: turn reported SUCCESS with an empty response after a tool permission was auto-denied in headless mode: %s", e.Stderr)
+}
