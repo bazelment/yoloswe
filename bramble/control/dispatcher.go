@@ -219,6 +219,15 @@ func (d *Dispatcher) sendKey(ctx context.Context, req *Msg, sessionScoped bool) 
 	// Before the key, not after. See noteTurnStarted.
 	var started turnStart
 	if r.Key == tmuxctl.KeyEnter {
+		// Nothing pasted before this Enter, so nothing has taken the pane out
+		// of copy mode for it the way tmuxctl.Paste does for a submitted
+		// send-input. In copy mode the pager eats the key, and the staged text
+		// stays in the composer looking delivered while no turn ever starts.
+		// Only for Enter: C-c, Escape and the arrows are legitimate copy-mode
+		// input and must reach the pager unchanged.
+		if err := d.ctl.ExitCopyMode(ctx, target); err != nil {
+			return OKResult{}, err
+		}
 		started = d.noteTurnStarted(sessionScoped, r.SessionID)
 	}
 	if err := d.ctl.SendSpecial(ctx, target, r.Key); err != nil {

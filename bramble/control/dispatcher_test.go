@@ -387,6 +387,45 @@ func TestSendKeyEnterMarksTheSessionRunning(t *testing.T) {
 		"Enter submits the composer, which starts a turn")
 }
 
+// The same sibling, one layer down. send-key's Enter has no preceding paste to
+// have exited copy mode for it, so it must do it itself: on a pane someone
+// scrolled back in, the pager eats that Enter, the staged text sits in the
+// composer looking delivered, and the session is left marked running with
+// nothing behind it. Only Enter — C-c, Escape and the arrows are legitimate
+// copy-mode input and must reach the pager unchanged.
+func TestSendKeyEnterLeavesCopyModeFirst(t *testing.T) {
+	t.Parallel()
+	reg := &fakeRegistry{targets: map[string]string{"s1": "@7"}}
+	d, ctl := newDispatcher(reg)
+
+	d.Handle(context.Background(), req(t, TypeSessionSendKey,
+		SendKeyReq{SessionID: "s1", Key: tmuxctl.KeyEnter}))
+
+	require.GreaterOrEqual(t, len(ctl.Calls), 2, "expected ExitCopyMode then SendSpecial, got %v", ctl.Calls)
+	assert.Equal(t, "ExitCopyMode", ctl.Calls[0].Method,
+		"a submit with no paste before it must clear copy mode itself")
+	assert.Equal(t, "SendSpecial", ctl.Calls[1].Method)
+}
+
+func TestNonSubmittingKeysAreNotTreatedAsSubmits(t *testing.T) {
+	t.Parallel()
+	for _, key := range []tmuxctl.SpecialKey{tmuxctl.KeyEscape, tmuxctl.KeyCtrlC, tmuxctl.KeyUp} {
+		t.Run(string(key), func(t *testing.T) {
+			t.Parallel()
+			reg := &fakeRegistry{targets: map[string]string{"s1": "@7"}}
+			d, ctl := newDispatcher(reg)
+
+			d.Handle(context.Background(), req(t, TypeSessionSendKey,
+				SendKeyReq{SessionID: "s1", Key: key}))
+
+			for _, c := range ctl.Calls {
+				assert.NotEqual(t, "ExitCopyMode", c.Method,
+					"%s is legitimate copy-mode input and must not clear the mode", key)
+			}
+		})
+	}
+}
+
 // Only Enter. Interrupting or dismissing does not start a turn, and marking one
 // would leave an idle session looking busy with nothing to end it.
 func TestNonSubmittingKeysMarkNothingRunning(t *testing.T) {

@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
 // codexPane renders codex's footer chrome, including its working status line.
@@ -1022,6 +1024,31 @@ func TestEffortIndicatorIsNotMistakenForATurnInFlight(t *testing.T) {
 	working, known := paneShowsWorking(ProviderClaude, pane)
 	assert.False(t, known, "an effort indicator with nothing else in the tail says nothing about the turn")
 	assert.False(t, working, "and must never be read as a tool call in flight")
+}
+
+// TestEveryExplicitEffortLevelIsRecognized is the drift guard. The other effort
+// tests enumerate literals, so they would drift together with a hand-written
+// pattern and catch nothing; this one asks the wrapper for the levels instead,
+// so adding one there fails here until the matcher covers it. That direction
+// matters: an unrecognized level reads as a tool call again, which is the wedge
+// this recognition exists to prevent.
+func TestEveryExplicitEffortLevelIsRecognized(t *testing.T) {
+	t.Parallel()
+
+	for _, level := range []claude.EffortLevel{
+		claude.EffortLow, claude.EffortMed, claude.EffortHigh, claude.EffortMax,
+	} {
+		line := "● " + string(level) + " · /effort"
+		working, known := claudeLineVerdict(line)
+		assert.False(t, known, "%q is header chrome, not a turn verdict", line)
+		assert.False(t, working)
+	}
+
+	// EffortAuto clears explicit effort, so the CLI draws no indicator for it;
+	// if that ever changes this line starts reading as a tool call and the
+	// assertion above is where the new level belongs.
+	assert.False(t, isEffortIndicatorLine("● "+string(claude.EffortAuto)+" · /effort"),
+		"auto renders no indicator today; revisit the matcher if it starts to")
 }
 
 // TestEffortIndicatorDoesNotMaskARealToolLine pins the narrowness of the fix:
