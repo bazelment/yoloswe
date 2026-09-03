@@ -155,7 +155,17 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 		sessionOpts = append(sessionOpts, agy.WithEffort(effort))
 	}
 	if b.config.WorkDir != "" {
-		sessionOpts = append(sessionOpts, agy.WithWorkDir(b.config.WorkDir))
+		// Grant read access to the review's own worktree so a read-only review
+		// (Read/Glob/Grep-equivalent tools) does not hit agy's headless
+		// auto-deny path (see isToolDeniedEmptyResult in the wrapper). agy's
+		// cwd alone does NOT imply read access — verified against a live agy
+		// 1.1.25 binary, a prompt run with WorkDir as cwd but no --add-dir
+		// still auto-denies "read_file". --add-dir grants read/list for the
+		// directory but NOT write_file or command/exec, so this stays
+		// least-privilege for a review: deliberately NOT
+		// WithDangerouslySkipPermissions, which would also auto-approve
+		// writes and shell execution a code review has no business doing.
+		sessionOpts = append(sessionOpts, agy.WithWorkDir(b.config.WorkDir), agy.WithAddDir(b.config.WorkDir))
 	}
 	if b.config.TurnTimeout > 0 {
 		// agy's --print-timeout is a TOTAL wall-clock bound on print mode (its

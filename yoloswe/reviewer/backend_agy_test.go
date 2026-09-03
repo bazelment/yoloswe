@@ -535,6 +535,52 @@ func TestAgyBackend_RunPrompt_TurnTimeoutReachesAgyAsPrintTimeout(t *testing.T) 
 	}
 }
 
+// TestAgyBackend_RunPrompt_WorkDirGrantsAddDir pins the permission-gap fix
+// (see DRIVE-FINDINGS.md G-A): a review's WorkDir must reach agy as --add-dir
+// so a read-only review can actually read files without hitting the headless
+// auto-deny path. Deliberately NOT --dangerously-skip-permissions, which
+// would also auto-approve writes and command execution a review has no
+// business doing — --add-dir was verified (live agy 1.1.25) to grant
+// read_file/list for the directory while leaving write_file and command
+// denied. See A1.notes.md for the verbatim CLI verification.
+func TestAgyBackend_RunPrompt_WorkDirGrantsAddDir(t *testing.T) {
+	dir := t.TempDir()
+	argvPath := filepath.Join(dir, "argv.txt")
+	cliPath := filepath.Join(dir, "agy")
+	envelope := `{"conversation_id":"conv-fake","status":"SUCCESS","response":"AGYOK\n",` +
+		`"duration_seconds":0.5,"num_turns":1,` +
+		`"usage":{"input_tokens":1,"output_tokens":1,"thinking_tokens":0,` +
+		`"cache_read_tokens":0,"total_tokens":2}}`
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + shellQuote(argvPath) + "\n" +
+		"printf %s " + shellQuote(envelope) + "\nexit 0\n"
+	if err := os.WriteFile(cliPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write argv-recording agy CLI: %v", err)
+	}
+
+	reviewWorkDir := filepath.Join(dir, "review-worktree")
+	if err := os.Mkdir(reviewWorkDir, 0o755); err != nil {
+		t.Fatalf("create review worktree dir: %v", err)
+	}
+	b := &agyBackend{
+		config:  Config{Model: "gemini-3.8-flash-medium", WorkDir: reviewWorkDir},
+		cliPath: cliPath,
+	}
+	if _, err := b.RunPrompt(context.Background(), "review this", &recordingHandler{}); err != nil {
+		t.Fatalf("RunPrompt failed: %v", err)
+	}
+
+	argv, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("read recorded argv: %v", err)
+	}
+	if !strings.Contains(string(argv), "--add-dir "+reviewWorkDir) {
+		t.Fatalf("argv should carry --add-dir %s, got %q", reviewWorkDir, string(argv))
+	}
+	if strings.Contains(string(argv), "--dangerously-skip-permissions") {
+		t.Fatalf("a read-only review must not auto-approve writes/exec, got %q", string(argv))
+	}
+}
+
 // Reviewer.FollowUp sends a purely context-dependent prompt ("the code has been
 // updated based on your previous feedback"), so the second turn must continue
 // the conversation the first one established. agy spawns a fresh process per

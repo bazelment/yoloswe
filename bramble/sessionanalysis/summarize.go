@@ -38,6 +38,14 @@ func HaikuQueryFunc() QueryFunc {
 // AgyQueryFunc returns a QueryFunc that uses agy's Gemini Flash tier.
 // agy is a print-mode CLI wrapper (one subprocess per call, no persistent
 // session), which suits summarization's one-shot request/response shape.
+//
+// No WithAddDir/WithWorkDir here: buildSummaryPrompt embeds the entire
+// session transcript directly into the prompt text, so this query never asks
+// agy to read a file off disk and has no filesystem tool call that could hit
+// agy's headless auto-deny path. If a legitimate deny still occurs (a stray
+// tool call), the wrapper now surfaces it as an error instead of an empty
+// summary — see agy.ToolDeniedError — so SummarizeSession's err != nil check
+// already covers this path without a permission grant here.
 func AgyQueryFunc() QueryFunc {
 	return func(ctx context.Context, prompt string) (string, error) {
 		result, err := agy.Query(ctx, prompt,
