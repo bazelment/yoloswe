@@ -39,6 +39,10 @@ func fakeAgyCLI(t *testing.T, responseText string, exitCode int) string {
 // for tests that need control over whether the echoed id matches (or does
 // not match) a requested resume.
 func fakeAgyCLIWithConversation(t *testing.T, responseText string, exitCode int, conversationID string) string {
+	return fakeAgyCLIWithConversationRecordingArgs(t, responseText, exitCode, conversationID, "")
+}
+
+func fakeAgyCLIWithConversationRecordingArgs(t *testing.T, responseText string, exitCode int, conversationID, argvPath string) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agy")
@@ -55,12 +59,17 @@ func fakeAgyCLIWithConversation(t *testing.T, responseText string, exitCode int,
 		)
 		body = "printf %s " + shellQuote(envelope) + "\n"
 	}
+	var recordArgs string
+	if argvPath != "" {
+		recordArgs = "printf '%s\\n' \"$*\" > " + shellQuote(argvPath) + "\n"
+	}
 
 	script := "#!/bin/sh\n" +
 		"case \" $* \" in\n" +
 		"  *' --output-format json '*) ;;\n" +
 		"  *) echo 'fakeAgyCLI: missing --output-format json' >&2; exit 99 ;;\n" +
 		"esac\n" +
+		recordArgs +
 		body +
 		"exit " + strconv.Itoa(exitCode) + "\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
@@ -535,27 +544,12 @@ func TestAgyBackend_RunPrompt_TurnTimeoutReachesAgyAsPrintTimeout(t *testing.T) 
 	}
 }
 
-// TestAgyBackend_RunPrompt_WorkDirGrantsAddDir pins the permission-gap fix
-// (see DRIVE-FINDINGS.md G-A): a review's WorkDir must reach agy as --add-dir
-// so a read-only review can actually read files without hitting the headless
-// auto-deny path. Deliberately NOT --dangerously-skip-permissions, which
-// would also auto-approve writes and command execution a review has no
-// business doing — --add-dir was verified (live agy 1.1.25) to grant
-// read_file/list for the directory while leaving write_file and command
-// denied. See A1.notes.md for the verbatim CLI verification.
+// TestAgyBackend_RunPrompt_WorkDirGrantsAddDir ensures reviews receive the
+// least-privilege read grant rather than blanket permission approval.
 func TestAgyBackend_RunPrompt_WorkDirGrantsAddDir(t *testing.T) {
 	dir := t.TempDir()
 	argvPath := filepath.Join(dir, "argv.txt")
-	cliPath := filepath.Join(dir, "agy")
-	envelope := `{"conversation_id":"conv-fake","status":"SUCCESS","response":"AGYOK\n",` +
-		`"duration_seconds":0.5,"num_turns":1,` +
-		`"usage":{"input_tokens":1,"output_tokens":1,"thinking_tokens":0,` +
-		`"cache_read_tokens":0,"total_tokens":2}}`
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + shellQuote(argvPath) + "\n" +
-		"printf %s " + shellQuote(envelope) + "\nexit 0\n"
-	if err := os.WriteFile(cliPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write argv-recording agy CLI: %v", err)
-	}
+	cliPath := fakeAgyCLIWithConversationRecordingArgs(t, "AGYOK", 0, "conv-fake", argvPath)
 
 	reviewWorkDir := filepath.Join(dir, "review-worktree")
 	if err := os.Mkdir(reviewWorkDir, 0o755); err != nil {

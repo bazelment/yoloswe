@@ -110,32 +110,12 @@ func (s *Session) Stop() error {
 	return nil
 }
 
-// jetskiToolDeniedMarker is the stable prefix of agy's own stderr message
-// when headless mode (-p/--print) auto-denies a tool that would have required
-// an interactive permission prompt (verified against the agy 1.1.25 binary):
-//
-//	jetski: no output produced — a tool required the "read_file" permission
-//	that headless mode cannot prompt for, so it was auto-denied. Add an
-//	allow-rule under permissions.allow in settings.json (e.g. read_file(<target>)).
-//	Alternatively, re-run with --dangerously-skip-permissions to auto-approve
-//	all tools.
-//
-// agy still exits 0 and reports the JSON result as {"status":"SUCCESS","response":""}
-// for this case (and as "CANCELED" when the model gives up after the denial),
-// so this stderr marker is the only signal that distinguishes an auto-denied
-// turn from a turn that legitimately produced no text.
+// jetskiToolDeniedMarker distinguishes a headless auto-denial from a turn
+// that legitimately produced no text.
 const jetskiToolDeniedMarker = "jetski: no output produced"
 
-// isToolDeniedEmptyResult reports whether a SUCCESS-shaped, empty-response
-// payload is actually a silently auto-denied tool call rather than a
-// legitimate no-text turn.
-//
-// It requires BOTH an empty response AND the jetski headless-denial marker in
-// stderr. Emptiness alone is not used, because a turn can legitimately
-// produce no response text (e.g. a tool-only turn, or a model that emits only
-// whitespace); requiring the marker ties the failure to the actual signal agy
-// emits for this specific condition, so a genuinely-empty-but-successful turn
-// (whose stderr never contains this marker) cannot be misclassified.
+// isToolDeniedEmptyResult requires both the marker and no response so a
+// legitimate empty result is not reported as a failure.
 func isToolDeniedEmptyResult(response string, stderr []byte) bool {
 	return response == "" && strings.Contains(string(stderr), jetskiToolDeniedMarker)
 }
@@ -167,7 +147,7 @@ func (s *Session) run(ctx context.Context) {
 		s.emit(ErrorEvent{Error: parseErr, Context: "parse"})
 		turn.Error = parseErr
 	case isToolDeniedEmptyResult(payload.Response, stderr):
-		turnErr := &ToolDeniedError{Stderr: strings.TrimSpace(string(stderr))}
+		turnErr := &ToolDeniedError{Status: payload.Status, Stderr: strings.TrimSpace(string(stderr))}
 		s.emit(ErrorEvent{Error: turnErr, Context: "agy"})
 		turn.Error = turnErr
 	case payload.Status != "SUCCESS":

@@ -155,12 +155,8 @@ func TestSession_RoundTrip_ErrorStatusReportsAgyError(t *testing.T) {
 	assert.Contains(t, err.Error(), "boom")
 }
 
-// writeFakeAgyWithStderr writes a fake agy CLI that prints resultJSON to
-// stdout and stderrText to stderr, exiting 0 — the exact shape a real agy
-// binary produces when headless mode auto-denies a tool: exit 0, a
-// SUCCESS-shaped empty JSON result on stdout, and the jetski denial marker on
-// stderr (see DRIVE-FINDINGS.md section G-A for the verbatim reproduction
-// this fake pins).
+// writeFakeAgyWithStderr writes a fake CLI that produces both result JSON and
+// stderr, including the headless tool-denial shape.
 func writeFakeAgyWithStderr(t *testing.T, resultJSON, stderrText string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -172,12 +168,8 @@ func writeFakeAgyWithStderr(t *testing.T, resultJSON, stderrText string) string 
 	return path
 }
 
-// TestSession_ToolDeniedEmptyResult_ReportsAsFailure is the false-green
-// regression test: agy's headless auto-deny path (see DRIVE-FINDINGS.md G-A)
-// exits 0 with {"status":"SUCCESS","response":""} on stdout and the jetski
-// denial marker on stderr. Before this fix, Query returned a nil error and an
-// empty-but-"successful" QueryResult for this exact payload — a review that
-// never ran, reported clean. It must now surface a *ToolDeniedError.
+// TestSession_ToolDeniedEmptyResult_ReportsAsFailure keeps denied empty turns
+// from being reported as successful queries.
 func TestSession_ToolDeniedEmptyResult_ReportsAsFailure(t *testing.T) {
 	t.Parallel()
 
@@ -193,14 +185,12 @@ func TestSession_ToolDeniedEmptyResult_ReportsAsFailure(t *testing.T) {
 
 	var toolDenied *ToolDeniedError
 	require.ErrorAs(t, err, &toolDenied, "error must be identifiable as a tool-denial, not a generic failure")
+	assert.Equal(t, "SUCCESS", toolDenied.Status)
 	assert.Contains(t, toolDenied.Stderr, "read_file")
 }
 
-// TestSession_ToolDeniedEmptyResult_CanceledStatusAlsoCaught covers the
-// CANCELED variant observed live (see A1 investigation notes): agy can also
-// report status "CANCELED" (still exit 0) when the model gives up after a
-// tool denial, with the same jetski marker on stderr and an empty response.
-// The guard must not depend on the literal string "SUCCESS".
+// TestSession_ToolDeniedEmptyResult_CanceledStatusAlsoCaught ensures the guard
+// does not depend on the result status.
 func TestSession_ToolDeniedEmptyResult_CanceledStatusAlsoCaught(t *testing.T) {
 	t.Parallel()
 
@@ -216,12 +206,11 @@ func TestSession_ToolDeniedEmptyResult_CanceledStatusAlsoCaught(t *testing.T) {
 
 	var toolDenied *ToolDeniedError
 	require.ErrorAs(t, err, &toolDenied)
+	assert.Equal(t, "CANCELED", toolDenied.Status)
 }
 
-// TestSession_LegitimateEmptyResult_StillSucceeds proves the guard cannot
-// false-positive: an empty response with NO jetski marker on stderr (a model
-// that genuinely produced no text, e.g. a tool-only turn) must still report
-// success, exactly as before this fix.
+// TestSession_LegitimateEmptyResult_StillSucceeds proves an empty response
+// without the denial marker still succeeds.
 func TestSession_LegitimateEmptyResult_StillSucceeds(t *testing.T) {
 	t.Parallel()
 
@@ -237,10 +226,8 @@ func TestSession_LegitimateEmptyResult_StillSucceeds(t *testing.T) {
 	assert.Empty(t, result.Text)
 }
 
-// TestSession_NonEmptyResponseWithStderrNoise_StillSucceeds further guards
-// against false positives: stderr containing the jetski marker text must not
-// fail a turn that DID produce a real response (e.g. a denial on one tool
-// call that the model recovered from and still answered).
+// TestSession_NonEmptyResponseWithStderrNoise_StillSucceeds proves a real
+// response still succeeds when stderr contains denial noise.
 func TestSession_NonEmptyResponseWithStderrNoise_StillSucceeds(t *testing.T) {
 	t.Parallel()
 
