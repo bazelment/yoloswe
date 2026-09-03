@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,30 +33,12 @@ func newProcessManager(prompt string, config SessionConfig) *processManager {
 	}
 }
 
-// BuildCLIArgs builds the agy print-mode argument list.
-//
-// Two agy argument rules shape this list (verified against agy 1.1.24):
-//
-//  1. -p/--print rejects a prompt value that is a registered agy flag name:
-//     `agy -p --sandbox "task"` fails with `-p took "--sandbox" as its prompt`.
-//     This is a property of the prompt value itself, so it applies to the
-//     attached form (`--print=--sandbox`) too, and neither argument ordering
-//     nor an attached prompt can prevent it. It is not guarded here: the
-//     prompt is caller data, and agy's own error names the problem clearly.
-//  2. A stray positional argument is a hard error in any position
-//     (`Error: unexpected argument "..."`), so every token must be a flag or
-//     a flag's value.
-//
-// A flag placed after `-p <prompt>` does parse correctly, so the ordering
-// below is not a correctness fix. Emitting every flag - ExtraArgs included -
-// before the trailing `-p <prompt>` pair keeps the list in one canonical
-// shape, which is what the argument-order tests pin. Keep -p <prompt> last.
-//
-// JSON output provides conversation_id and usage without changing event timing:
-// this wrapper already buffers the entire print-mode response before emitting it.
-// agyEffortSuffixes are the reasoning levels agy encodes in a model id, longest
-// first so the split matches "-medium" before any shorter overlap.
-var agyEffortSuffixes = []string{"-medium", "-high", "-low"}
+// agyEffortLevels is the reasoning vocabulary agy accepts, in the order the
+// model-id split must try them: longest first, so "-medium" matches before any
+// shorter overlap. This slice is the single owner of the set - SplitModelEffort
+// reads it as id suffixes and isAgyEffortLevel as bare --effort values, so the
+// two cannot disagree about which levels exist.
+var agyEffortLevels = []string{"medium", "high", "low"}
 
 // SplitModelEffort separates an agy model id from the reasoning level it pins.
 // agy's catalog spells the level as a trailing -low/-medium/-high
@@ -66,9 +49,10 @@ var agyEffortSuffixes = []string{"-medium", "-high", "-low"}
 // catalog-aware reconciliation needs the same split, and two copies of "how an
 // agy id encodes its level" would be free to drift.
 func SplitModelEffort(model string) (base, pinned string) {
-	for _, suffix := range agyEffortSuffixes {
+	for _, level := range agyEffortLevels {
+		suffix := "-" + level
 		if strings.HasSuffix(model, suffix) {
-			return strings.TrimSuffix(model, suffix), strings.TrimPrefix(suffix, "-")
+			return strings.TrimSuffix(model, suffix), level
 		}
 	}
 	return model, ""
@@ -123,14 +107,11 @@ func reconcileModelEffort(model, effort string) (string, string) {
 	return base + "-" + effort, ""
 }
 
-// isAgyEffortLevel reports whether level is one agy encodes in a model id.
-// agy's --effort flag documents exactly low|medium|high.
+// isAgyEffortLevel reports whether level is one agy spells, i.e. one that has a
+// model-id variant to retarget onto. agy's --effort flag documents exactly
+// low|medium|high, which is what agyEffortLevels holds.
 func isAgyEffortLevel(level string) bool {
-	switch level {
-	case "low", "medium", "high":
-		return true
-	}
-	return false
+	return slices.Contains(agyEffortLevels, level)
 }
 
 // EffectiveModel is the model id BuildCLIArgs actually passes to agy, after
@@ -140,6 +121,30 @@ func (pm *processManager) EffectiveModel() string {
 	return model
 }
 
+// BuildCLIArgs builds the agy print-mode argument list.
+//
+// Two agy argument rules shape this list (verified against agy 1.1.24):
+//
+//  1. -p/--print rejects a prompt value that is a registered agy flag name:
+//     `agy -p --sandbox "task"` fails with `-p took "--sandbox" as its prompt`.
+//     This is a property of the prompt value itself, so it applies to the
+//     attached form (`--print=--sandbox`) too, and neither argument ordering
+//     nor an attached prompt can prevent it. It is not guarded here: the
+//     prompt is caller data, and agy's own error names the problem clearly.
+//  2. A stray positional argument is a hard error in any position
+//     (`Error: unexpected argument "..."`), so every token must be a flag or
+//     a flag's value.
+//
+// A flag placed after `-p <prompt>` does parse correctly, so the ordering
+// below is not a correctness fix. Emitting every flag - ExtraArgs included -
+// before the trailing `-p <prompt>` pair keeps the list in one canonical
+// shape, which is what the argument-order tests pin. Keep -p <prompt> last.
+//
+// JSON output provides conversation_id and usage without changing event timing:
+// this wrapper already buffers the entire print-mode response before emitting it.
+//
+// It also reconciles --model against --effort so the level reaches agy exactly
+// once; see reconcileModelEffort.
 func (pm *processManager) BuildCLIArgs() []string {
 	args := []string{"--output-format", "json"}
 

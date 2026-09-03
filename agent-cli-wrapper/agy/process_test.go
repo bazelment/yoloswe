@@ -270,3 +270,26 @@ func TestEffectiveModel_ReportsTheRetargetedID(t *testing.T) {
 
 	assert.Equal(t, "gemini-3.8-flash-high", newProcessManager("hi", cfg).EffectiveModel())
 }
+
+// TestAgyEffortLevels_IsTheSingleVocabulary pins that the two views of agy's
+// reasoning vocabulary — model-id suffixes read by SplitModelEffort, and bare
+// --effort values read by isAgyEffortLevel — stay derived from one list. They
+// were briefly two separate enumerations six lines apart, which is exactly the
+// drift SplitModelEffort was exported to prevent.
+func TestAgyEffortLevels_IsTheSingleVocabulary(t *testing.T) {
+	t.Parallel()
+
+	require.NotEmpty(t, agyEffortLevels)
+	for _, level := range agyEffortLevels {
+		assert.True(t, isAgyEffortLevel(level), "%q is in the vocabulary but not accepted as an --effort value", level)
+
+		base, pinned := SplitModelEffort("some-model-" + level)
+		assert.Equal(t, "some-model", base, "%q must split off as a model-id suffix", level)
+		assert.Equal(t, level, pinned)
+	}
+
+	// Longest-first ordering is load-bearing: "-medium" must not be split as a
+	// shorter overlapping suffix.
+	_, pinned := SplitModelEffort("gemini-3.8-flash-medium")
+	assert.Equal(t, "medium", pinned)
+}
