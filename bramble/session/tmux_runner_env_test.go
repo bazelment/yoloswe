@@ -258,40 +258,25 @@ func TestTmuxRunnerNotifyOverrideIsCodexOnly(t *testing.T) {
 	}
 }
 
-// agy binds its tools (shell cwd, file writes) to a registered "project"
-// resource, not to the process's actual working directory: a session
-// launched with no --new-project sits on agy's built-in default-cli-project,
-// whose projectResources is empty, so the shell tool falls back to
-// ~/.gemini/antigravity-cli/scratch regardless of tmux's -c workDir. This was
-// confirmed by driving a live bramble Build session (DRIVE-FINDINGS G-B) and
-// by direct CLI checks: `agy --model ... --prompt-interactive 'run pwd'`
-// printed the scratch dir until --new-project was added, at which point agy
-// registered workDir as a project resource and pwd/writes bound correctly.
-// A fresh agy session must therefore always get --new-project.
 func TestTmuxRunnerAgyNewSessionBindsWorktree(t *testing.T) {
 	r := &tmuxRunner{
 		provider: ProviderAgy,
 		model:    "gemini-3.8-flash-low",
 		prompt:   "do it",
-		workDir:  "/home/ubuntu/worktrees/yoloswe/scratch-build-1",
 	}
 
 	_, args := r.buildCommand()
 
 	if !slices.Contains(args, "--new-project") {
-		t.Fatalf("new agy session missing --new-project, which is what binds it to workDir as the writable workspace: %v", args)
+		t.Fatalf("new agy session missing --new-project: %v", args)
 	}
 }
 
-// --conversation already resumes into the previously-registered project for
-// that worktree; pairing it with --new-project would create a second,
-// mismatched project resource instead of reusing the bound one.
 func TestTmuxRunnerAgyResumeDoesNotReCreateProject(t *testing.T) {
 	r := &tmuxRunner{
 		provider:        ProviderAgy,
 		model:           "gemini-3.8-flash-low",
 		prompt:          "keep going",
-		workDir:         "/home/ubuntu/worktrees/yoloswe/scratch-build-1",
 		resumeSessionID: "conv-abc123",
 	}
 
@@ -305,16 +290,11 @@ func TestTmuxRunnerAgyResumeDoesNotReCreateProject(t *testing.T) {
 	}
 }
 
-// agy's -p/--print greedily consumes the next token as the prompt (see
-// agent-cli-wrapper/agy/process.go and its ordering tests), so every flag —
-// --new-project included — must land before the trailing prompt in
-// --prompt-interactive mode, never after.
 func TestTmuxRunnerAgyNewProjectPrecedesPrompt(t *testing.T) {
 	r := &tmuxRunner{
 		provider: ProviderAgy,
 		model:    "gemini-3.8-flash-low",
 		prompt:   "build it",
-		workDir:  "/home/ubuntu/worktrees/yoloswe/scratch-build-1",
 	}
 
 	_, args := r.buildCommand()
