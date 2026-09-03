@@ -65,6 +65,8 @@ func TestIsToolDeniedEmptyResult(t *testing.T) {
 		want     bool
 	}{
 		{"empty response with denial marker", "", deniedStderr, true},
+		{"empty response, generic no-output prefix without a denial clause", "",
+			[]byte("jetski: no output produced \u2014 the model stopped early."), false},
 		{"empty response, no stderr at all", "", nil, false},
 		{"empty response, unrelated stderr", "", []byte("some warning: deprecated flag used"), false},
 		{"non-empty response with denial marker present", "SECRETTOKEN42", deniedStderr, false},
@@ -224,6 +226,47 @@ func TestSession_LegitimateEmptyResult_StillSucceeds(t *testing.T) {
 	require.NotNil(t, result)
 	assert.True(t, result.Success)
 	assert.Empty(t, result.Text)
+}
+
+// TestSession_GenericNoOutputPrefixWithoutDenial_StillSucceeds proves the guard
+// keys on the denial clause, not on agy's generic "no output produced" prefix:
+// an empty turn that prints that prefix for some other reason must still
+// succeed rather than be mislabelled a permission denial.
+func TestSession_GenericNoOutputPrefixWithoutDenial_StillSucceeds(t *testing.T) {
+	t.Parallel()
+
+	resultJSON := `{"conversation_id":"conv-generic","status":"SUCCESS","response":"",` +
+		`"duration_seconds":1.2,"num_turns":1,` +
+		`"usage":{"input_tokens":10,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":10}}`
+	stderrText := `jetski: no output produced — the model stopped without emitting text.`
+	cliPath := writeFakeAgyWithStderr(t, resultJSON, stderrText)
+
+	result, err := Query(context.Background(), "do nothing", WithCLIPath(cliPath))
+	require.NoError(t, err, "the generic no-output prefix alone must not be read as a tool denial")
+	require.NotNil(t, result)
+	assert.True(t, result.Success)
+}
+
+// TestSession_ToolDeniedEmptyResult_PreservesAgyError proves a turn that failed
+// for its own reason keeps agy's explanation even when the denial branch wins.
+func TestSession_ToolDeniedEmptyResult_PreservesAgyError(t *testing.T) {
+	t.Parallel()
+
+	resultJSON := `{"conversation_id":"conv-both","status":"ERROR","response":"",` +
+		`"error":"timeout waiting for response",` +
+		`"duration_seconds":178.2,"num_turns":1,` +
+		`"usage":{"input_tokens":10,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":10}}`
+	stderrText := `jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.`
+	cliPath := writeFakeAgyWithStderr(t, resultJSON, stderrText)
+
+	_, err := Query(context.Background(), "do a thing", WithCLIPath(cliPath))
+	require.Error(t, err)
+
+	var toolDenied *ToolDeniedError
+	require.ErrorAs(t, err, &toolDenied)
+	assert.Equal(t, "timeout waiting for response", toolDenied.AgyError,
+		"agy's own failure explanation must not be swallowed by the denial branch")
+	assert.Contains(t, err.Error(), "timeout waiting for response")
 }
 
 // TestSession_NonEmptyResponseWithStderrNoise_StillSucceeds proves a real

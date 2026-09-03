@@ -155,10 +155,22 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 		sessionOpts = append(sessionOpts, agy.WithEffort(effort))
 	}
 	if b.config.WorkDir != "" {
-		// Agy requires --add-dir to read its cwd; it grants a review read access
-		// without auto-approving writes or shell commands.
+		// --add-dir puts the worktree in agy's workspace so its file tools can
+		// see it at all; agy resolves tools against a registered workspace, not
+		// against the process cwd.
 		sessionOpts = append(sessionOpts, agy.WithWorkDir(b.config.WorkDir), agy.WithAddDir(b.config.WorkDir))
 	}
+	// --add-dir grants reads but NOT the "command" permission, and the review
+	// prompt mandates a shell `git diff` (see diffScopeClause in reviewer.go).
+	// Verified live against agy 1.1.25: with --add-dir alone that command is
+	// auto-denied and the turn returns CANCELED with an empty response, so a
+	// read-only grant does not make an agy review runnable — it only makes the
+	// failure loud. Bash is granted for the same reason every sibling backend
+	// grants it (a reviewer needs git log/diff/show): backend_claude.go uses
+	// PermissionModeBypass, backend_cursor.go uses --trust --force. As there,
+	// the prompt is the last line of defence against a destructive command;
+	// callers needing a real filesystem boundary must sandbox the process.
+	sessionOpts = append(sessionOpts, agy.WithDangerouslySkipPermissions())
 	if b.config.TurnTimeout > 0 {
 		// agy's --print-timeout is a TOTAL wall-clock bound on print mode (its
 		// own default is 5m), so it is driven by Config.TurnTimeout, never by

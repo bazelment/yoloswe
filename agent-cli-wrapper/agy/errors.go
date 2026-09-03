@@ -38,9 +38,17 @@ func (e *ProcessError) Unwrap() error { return e.Cause }
 // tool permission request.
 type ToolDeniedError struct {
 	Status string
-	Stderr string
+	// AgyError is the result payload's own error field, preserved so a turn
+	// that failed for an unrelated reason and also tripped a denial does not
+	// lose agy's explanation of the failure.
+	AgyError string
+	Stderr   string
 }
 
 func (e *ToolDeniedError) Error() string {
-	return fmt.Sprintf("agy: turn reported %q with an empty response after a tool permission was auto-denied in headless mode: %s", e.Status, e.Stderr)
+	msg := fmt.Sprintf("agy: turn reported %q with an empty response after a tool permission was auto-denied in headless mode: %s", e.Status, e.Stderr)
+	if e.AgyError != "" {
+		msg += fmt.Sprintf(" (agy error: %s)", e.AgyError)
+	}
+	return msg
 }

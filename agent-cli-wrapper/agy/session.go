@@ -110,14 +110,24 @@ func (s *Session) Stop() error {
 	return nil
 }
 
-// jetskiToolDeniedMarker distinguishes a headless auto-denial from a turn
-// that legitimately produced no text.
-const jetskiToolDeniedMarker = "jetski: no output produced"
+// jetskiAutoDeniedMarker is the denial-specific clause agy prints when headless
+// mode auto-denies a tool. Both of agy 1.1.25's denial messages carry it:
+//
+//	<tool> required the <perm> permission that headless mode cannot prompt for,
+//	so it was auto-denied. Add an allow-rule under permissions.allow ...
+//	the <n> tool(s) required approval that headless mode cannot prompt for, so
+//	they were auto-denied. Settings allow-rules do not apply; re-run with ...
+//
+// Both are appended to the generic "jetski: no output produced — " prefix, so
+// matching the prefix would key on why agy printed a line at all rather than on
+// the denial itself. Matching "auto-denied" keys on the denial.
+const jetskiAutoDeniedMarker = "auto-denied"
 
-// isToolDeniedEmptyResult requires both the marker and no response so a
-// legitimate empty result is not reported as a failure.
+// isToolDeniedEmptyResult requires the denial clause AND an empty response, so
+// neither a legitimate no-text turn nor a turn that recovered from a denial and
+// still answered is reported as a failure.
 func isToolDeniedEmptyResult(response string, stderr []byte) bool {
-	return response == "" && strings.Contains(string(stderr), jetskiToolDeniedMarker)
+	return response == "" && strings.Contains(string(stderr), jetskiAutoDeniedMarker)
 }
 
 func (s *Session) run(ctx context.Context) {
@@ -147,7 +157,10 @@ func (s *Session) run(ctx context.Context) {
 		s.emit(ErrorEvent{Error: parseErr, Context: "parse"})
 		turn.Error = parseErr
 	case isToolDeniedEmptyResult(payload.Response, stderr):
-		turnErr := &ToolDeniedError{Status: payload.Status, Stderr: strings.TrimSpace(string(stderr))}
+		// Ahead of the status check because agy reports this same denial as both
+		// SUCCESS and CANCELED; ToolDeniedError carries payload.Error so a turn
+		// that failed for its own reason keeps agy's explanation either way.
+		turnErr := &ToolDeniedError{Status: payload.Status, AgyError: payload.Error, Stderr: strings.TrimSpace(string(stderr))}
 		s.emit(ErrorEvent{Error: turnErr, Context: "agy"})
 		turn.Error = turnErr
 	case payload.Status != "SUCCESS":

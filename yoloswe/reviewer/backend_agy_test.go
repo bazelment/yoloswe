@@ -544,9 +544,11 @@ func TestAgyBackend_RunPrompt_TurnTimeoutReachesAgyAsPrintTimeout(t *testing.T) 
 	}
 }
 
-// TestAgyBackend_RunPrompt_WorkDirGrantsAddDir ensures reviews receive the
-// least-privilege read grant rather than blanket permission approval.
-func TestAgyBackend_RunPrompt_WorkDirGrantsAddDir(t *testing.T) {
+// TestAgyBackend_RunPrompt_WorkDirGrantsWorkspaceAndTools ensures a review can
+// actually run: --add-dir puts the worktree in agy's workspace, and the tool
+// grant covers the shell `git diff` the review prompt mandates. Verified live
+// against agy 1.1.25 that --add-dir alone leaves that command auto-denied.
+func TestAgyBackend_RunPrompt_WorkDirGrantsWorkspaceAndTools(t *testing.T) {
 	dir := t.TempDir()
 	argvPath := filepath.Join(dir, "argv.txt")
 	cliPath := fakeAgyCLIWithConversationRecordingArgs(t, "AGYOK", 0, "conv-fake", argvPath)
@@ -570,8 +572,8 @@ func TestAgyBackend_RunPrompt_WorkDirGrantsAddDir(t *testing.T) {
 	if !strings.Contains(string(argv), "--add-dir "+reviewWorkDir) {
 		t.Fatalf("argv should carry --add-dir %s, got %q", reviewWorkDir, string(argv))
 	}
-	if strings.Contains(string(argv), "--dangerously-skip-permissions") {
-		t.Fatalf("a read-only review must not auto-approve writes/exec, got %q", string(argv))
+	if !strings.Contains(string(argv), "--dangerously-skip-permissions") {
+		t.Fatalf("a review must be able to run the git diff its prompt mandates, got %q", string(argv))
 	}
 }
 
