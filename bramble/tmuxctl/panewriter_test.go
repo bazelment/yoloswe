@@ -50,6 +50,50 @@ func TestPaneWriterPasteFailsWhenCopyModeCannotBeCleared(t *testing.T) {
 	}
 }
 
+// A submit can be reached without a preceding Paste: a caller that recognizes
+// text it staged on an earlier attempt presses Enter without re-pasting, so
+// Paste's own ExitCopyMode never runs. In copy mode that Enter is eaten by the
+// pager and the staged text sits in the composer looking delivered while no
+// turn ever starts — the same failure Paste exits copy mode to avoid.
+func TestPaneWriterExitsCopyModeBeforeSubmitting(t *testing.T) {
+	t.Parallel()
+	ctl := NewFake()
+	w := NewPaneWriter(ctl)
+
+	if err := w.SendEnter(context.Background(), "@7"); err != nil {
+		t.Fatalf("SendEnter() error = %v", err)
+	}
+
+	if len(ctl.Calls) < 2 {
+		t.Fatalf("expected an ExitCopyMode then a SendSpecial, got %v", ctl.Calls)
+	}
+	if ctl.Calls[0].Method != "ExitCopyMode" {
+		t.Errorf("first call = %q, want ExitCopyMode", ctl.Calls[0].Method)
+	}
+	if ctl.Calls[1].Method != "SendSpecial" {
+		t.Errorf("second call = %q, want SendSpecial", ctl.Calls[1].Method)
+	}
+}
+
+// If the pane cannot be taken out of copy mode, the Enter would be swallowed
+// and the caller would believe it submitted. Fail instead, so the caller can
+// leave the parent's status alone and try again.
+func TestPaneWriterSendEnterFailsWhenCopyModeCannotBeCleared(t *testing.T) {
+	t.Parallel()
+	ctl := NewFake()
+	ctl.Err = errors.New("no such pane")
+	w := NewPaneWriter(ctl)
+
+	if err := w.SendEnter(context.Background(), "@7"); err == nil {
+		t.Fatal("SendEnter() succeeded despite a failing ExitCopyMode")
+	}
+	for _, c := range ctl.Calls {
+		if c.Method == "SendSpecial" {
+			t.Error("sent Enter anyway after ExitCopyMode failed")
+		}
+	}
+}
+
 // SendEnter is the submit step; it must map to the Enter key.
 func TestPaneWriterSendEnterSendsEnter(t *testing.T) {
 	t.Parallel()

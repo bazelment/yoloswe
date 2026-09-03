@@ -305,6 +305,99 @@ func TestADraftInTheComposerSilencesTheNudge(t *testing.T) {
 	require.Empty(t, target.markedRunning, "no turn was started")
 }
 
+// TestAStrandedNudgeIsSubmittedNotDropped pins the fix for issue #346: a
+// previous nudge that pasted its line but never got the Enter that would have
+// submitted it (a killed process, a dropped tmux write) leaves nudgeText
+// sitting alone in the composer. Every later nudge attempt runs straight into
+// the draft guard and reads it as a human's half-written line, so without
+// recognizing its own words the wedge is permanent — nothing else will ever
+// submit that line, and nothing else will ever nudge this parent again either
+// (claimNudge is per-attempt, not a queue).
+func TestAStrandedNudgeIsSubmittedNotDropped(t *testing.T) {
+	t.Parallel()
+	target := newFakeTarget()
+	child := claudeChild(target)
+	target.setPane(claudeComposerPane(nudgeText))
+	panes := echoPanes(target)
+
+	newTestNotifier(t, target, panes).NotifyParent(t.Context(), child)
+
+	require.Equal(t, []string{"enter(@7)"}, panes.recorded(),
+		"the stranded line is submitted with a bare Enter, never pasted again")
+	require.Equal(t, []SessionID{"parent"}, target.markedRunning,
+		"submitting the stranded nudge starts a turn like any other delivery")
+}
+
+// TestAHumanDraftThatMerelyContainsTheNudgeStaysProtected pins the boundary of
+// the ownership comparison: it is exact-match on the whole composer body, not
+// a substring or prefix check, so a human line that happens to quote or
+// reference bramble's hint text is still a human's line.
+func TestAHumanDraftThatMerelyContainsTheNudgeStaysProtected(t *testing.T) {
+	t.Parallel()
+	target := newFakeTarget()
+	child := claudeChild(target)
+	target.setPane(claudeComposerPane(nudgeText + " -- I'm mid-thought, don't submit this"))
+	panes := echoPanes(target)
+
+	newTestNotifier(t, target, panes).NotifyParent(t.Context(), child)
+
+	require.Empty(t, panes.recorded(), "a human draft is never submitted, even one that echoes the hint text")
+	require.Empty(t, target.markedRunning, "no turn was started")
+}
+
+// TestAHumanContinuationBelowAStrandedNudgeStaysProtected pins the case an
+// exact match on the composer's top row alone gets wrong. claude wraps a
+// composer over several rows and claudeComposerIdx returns the TOP one (see
+// TestWrappedComposerStillReadsAsADraft), so a human who types a follow-up
+// under a stranded nudge produces a block whose first row is byte-for-byte
+// nudgeText. Submitting on that match would send the human's unfinished line
+// riding along with it — the exact harm the draft guard exists to prevent, and
+// strictly worse than the dropped nudge it was trying to fix.
+func TestAHumanContinuationBelowAStrandedNudgeStaysProtected(t *testing.T) {
+	t.Parallel()
+	target := newFakeTarget()
+	child := claudeChild(target)
+	target.setPane(strings.Join([]string{
+		"────────────────────────────────────────────",
+		"❯ " + nudgeText,
+		"and my own follow-up that I have not finished typing yet",
+		"────────────────────────────────────────────",
+		"  ~/wt/branch  main  Opus 4.6  ctx:43%  tokens:20k",
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+	}, "\n"))
+	panes := echoPanes(target)
+
+	newTestNotifier(t, target, panes).NotifyParent(t.Context(), child)
+
+	require.Empty(t, panes.recorded(),
+		"a wrapped composer whose first row matches is still carrying a human's rows below it")
+	require.Empty(t, target.markedRunning, "no turn was started")
+}
+
+// TestAnEchoedNudgeInAChromelessPaneIsNotResubmitted pins the other way a
+// weaker locator can be wrong about ownership. With no status rule in the
+// capture — a pane scrolled back, or one showing only transcript — the tail
+// scan finds any "❯" line, including the transcript's echo of a nudge that was
+// already submitted and answered. Pressing Enter there submits an empty
+// composer and marks a turn that never starts, so the parent reads busy with
+// nothing behind it.
+func TestAnEchoedNudgeInAChromelessPaneIsNotResubmitted(t *testing.T) {
+	t.Parallel()
+	target := newFakeTarget()
+	child := claudeChild(target)
+	target.setPane(strings.Join([]string{
+		"some earlier transcript output",
+		"❯ " + nudgeText,
+	}, "\n"))
+	panes := echoPanes(target)
+
+	newTestNotifier(t, target, panes).NotifyParent(t.Context(), child)
+
+	require.Empty(t, panes.recorded(),
+		"a transcript echo is not a composer bramble has proven it can submit")
+	require.Empty(t, target.markedRunning, "no turn was started")
+}
+
 func TestAWorkingPaneSilencesTheNudge(t *testing.T) {
 	t.Parallel()
 	target := newFakeTarget()

@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
 // codexPane renders codex's footer chrome, including its working status line.
@@ -749,6 +751,141 @@ func TestComposerLayerDoesNotJudgeOwnership(t *testing.T) {
 	}
 }
 
+// TestComposerLiteralTextAcceptsOnlyAProvenSingleRowComposer pins the contract
+// the ownership comparison actually needs, which is NOT composerDraft's.
+// composerDraft is safe whenever it over-reports text ("assume a draft, stay
+// quiet"); this reader's answer is acted on with an Enter, so it is safe only
+// when it under-reports ownership. Every locator weaker than the fully
+// delimited bounded walk, and every composer taller than one row, must
+// therefore come back not-ok even though composerDraft happily reads them.
+func TestComposerLiteralTextAcceptsOnlyAProvenSingleRowComposer(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a single row between both rules is the one accepted shape", func(t *testing.T) {
+		t.Parallel()
+		pane := claudePaneComposer("❯ [bramble] subagent activity — check your run directory", "✻ Worked for 12s")
+		text, ok := composerLiteralText(ProviderClaude, pane)
+		require.True(t, ok)
+		assert.Equal(t, "[bramble] subagent activity — check your run directory", text)
+	})
+
+	t.Run("a wrapped composer is refused, its lower rows are not on the top row", func(t *testing.T) {
+		t.Parallel()
+		pane := []string{
+			"────────────────────────────────────────────",
+			"❯ [bramble] subagent activity — check your run directory",
+			"a human continuation typed under the stranded line",
+			"────────────────────────────────────────────",
+			"  ~/wt/branch  main  Opus 4.6  ctx:43%  tokens:20k",
+			"  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+		}
+		draft, known := composerDraft(ProviderClaude, pane)
+		require.True(t, known)
+		require.True(t, draft, "precondition: composerDraft still sees a draft here")
+
+		_, ok := composerLiteralText(ProviderClaude, pane)
+		assert.False(t, ok, "matching only the top row would submit the rows below it")
+	})
+
+	t.Run("the line above the status rule is refused, upper rule missing", func(t *testing.T) {
+		t.Parallel()
+		pane := []string{
+			"❯ a line the bounded walk cannot bound",
+			"────────────────────────────────────────────",
+			"  ~/wt/branch  main  Opus 4.6  ctx:43%  tokens:20k",
+			"  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+		}
+		_, ok := composerLiteralText(ProviderClaude, pane)
+		assert.False(t, ok, "an unbounded line is not a composer proven safe to submit")
+	})
+
+	t.Run("the chrome-less tail scan is refused, it can find a transcript echo", func(t *testing.T) {
+		t.Parallel()
+		pane := []string{"❯ no chrome around this line at all"}
+		_, ok := composerLiteralText(ProviderClaude, pane)
+		assert.False(t, ok, "with no rules in the capture nothing proves this is the live composer")
+	})
+
+	t.Run("an empty composer has no text to compare", func(t *testing.T) {
+		t.Parallel()
+		pane := claudePaneComposer("❯ ", "✻ Worked for 12s")
+		_, ok := composerLiteralText(ProviderClaude, pane)
+		assert.False(t, ok, "nothing to recognize as bramble's own text")
+	})
+
+	t.Run("located but unreadable is refused while composerDraft fails closed to draft", func(t *testing.T) {
+		t.Parallel()
+		pane := []string{
+			"✻ Worked for 12s",
+			"────────────────────────────────────────────",
+			"⏎ some decorated composer shape we do not parse",
+			"────────────────────────────────────────────",
+			"  ~/wt/branch  main  Opus 4.6  ctx:43%  tokens:20k",
+			"  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+		}
+		draft, known := composerDraft(ProviderClaude, pane)
+		require.True(t, known)
+		require.True(t, draft, "precondition: composerDraft fails closed to draft here")
+
+		_, ok := composerLiteralText(ProviderClaude, pane)
+		assert.False(t, ok, "no legible text means it can never match a known payload")
+	})
+
+	t.Run("non-claude providers have no readable composer", func(t *testing.T) {
+		t.Parallel()
+		_, ok := composerLiteralText(ProviderCodex, []string{"❯ anything"})
+		assert.False(t, ok)
+	})
+}
+
+// TestComposerBlockCountsTheRowsAnEnterWouldSubmit pins the fact the ownership
+// comparison rests on. claudeComposerIdx reports only the block's TOP row, so
+// the row count is the only thing that distinguishes "the line I compared is
+// the whole composer" from "the line I compared has a human's rows under it".
+// Both readers walk the same bounded loop (claudeComposerWalk), so the index
+// and the count cannot disagree about a pane.
+func TestComposerBlockCountsTheRowsAnEnterWouldSubmit(t *testing.T) {
+	t.Parallel()
+
+	single := []string{
+		"✻ Worked for 12s",
+		"────────────────────────────────────────────",
+		"❯ one row only",
+		"────────────────────────────────────────────",
+		"  ~/wt/branch  main  Opus 4.6  ctx:43%  tokens:20k",
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+	}
+	idx, rows := claudeComposerBlock(single)
+	require.GreaterOrEqual(t, idx, 0, "a delimited composer is located")
+	assert.Equal(t, 1, rows, "one row between the rules")
+	topIdx, _ := claudeComposerIdx(single)
+	assert.Equal(t, topIdx, idx, "both readers agree on the same pane")
+
+	wrapped := []string{
+		"✻ Worked for 12s",
+		"────────────────────────────────────────────",
+		"❯ the first row of a wrapped draft",
+		"the continuation the human is still typing",
+		"────────────────────────────────────────────",
+		"  ~/wt/branch  main  Opus 4.6  ctx:43%  tokens:20k",
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+	}
+	idx, rows = claudeComposerBlock(wrapped)
+	require.GreaterOrEqual(t, idx, 0, "a wrapped composer is still located")
+	assert.Equal(t, 2, rows, "the count is what reveals the row below the match")
+	assert.Equal(t, "❯ the first row of a wrapped draft", wrapped[idx],
+		"and the index is still the TOP row, which is why the count is needed")
+
+	undelimited := []string{
+		"❯ no upper rule bounds this",
+		"────────────────────────────────────────────",
+		"  ~/wt/branch  main  Opus 4.6  ctx:43%  tokens:20k",
+	}
+	idx, rows = claudeComposerBlock(undelimited)
+	assert.Equal(t, -1, idx, "an unbounded line is not a located composer")
+	assert.Equal(t, 0, rows)
+}
+
 // TestLocatedButUnreadableComposerHolds pins fail-closed behavior for a located
 // composer whose text cannot be parsed. Unknown means deliver, so unreadable
 // content must report hold.
@@ -857,4 +994,117 @@ func TestComposerBoundFollowsTheCapture(t *testing.T) {
 		"the walk must reach further than the tail scan it replaced")
 	assert.Less(t, claudeComposerMaxLines, paneCaptureLines,
 		"but never past the capture, or it walks into transcript")
+}
+
+// TestEffortIndicatorIsNotMistakenForATurnInFlight pins a second, independent
+// bug found while live-proving issue #346: a fresh session's header renders
+// "● high · /effort" directly above the top rule (there is no transcript yet
+// to occupy that space), which is exactly where claudePaneJudge's bounded
+// tail scan looks first. Before this fix it read the effort indicator as a
+// tool-call line and called the pane working, which made Notifier.nudge yield
+// on paneSaysWorking before the composer-draft guard ever ran — so this bites
+// hardest on exactly the case #346 is about: a freshly spawned pane with
+// little or no transcript, not a long-running one where real content
+// occupies the tail first.
+func TestEffortIndicatorIsNotMistakenForATurnInFlight(t *testing.T) {
+	t.Parallel()
+
+	pane := []string{
+		" ▐▛███▛█   Claude Code v2.1.259",
+		"▝▜██████▀  Opus 5 (1M context) with high effort · Claude Max",
+		"  ▝▝ ▝▝    ~/wt/branch",
+		"● high · /effort",
+		"────────────────────────────────────────────",
+		"❯ ",
+		"────────────────────────────────────────────",
+		"  ~/wt/branch  main  Opus 5  ctx:1%  tokens:0",
+		"  ⏵⏵ accept edits on (shift+tab to cycle)",
+	}
+
+	working, known := paneShowsWorking(ProviderClaude, pane)
+	assert.False(t, known, "an effort indicator with nothing else in the tail says nothing about the turn")
+	assert.False(t, working, "and must never be read as a tool call in flight")
+}
+
+// TestEveryExplicitEffortLevelIsRecognized pins that the matcher's level list
+// is derived, not mirrored. The other effort tests spell out literals, which is
+// fine for what they pin but would say nothing about a level added upstream;
+// this one asks claude.ExplicitEffortLevels for the set, so it fails the moment
+// the matcher stops covering everything that list names — including a level
+// added there later, which today needs no edit in this package at all. That
+// direction is the one that costs: an unrecognized level reads as a tool call
+// again, which is the wedge this recognition exists to prevent.
+func TestEveryExplicitEffortLevelIsRecognized(t *testing.T) {
+	t.Parallel()
+
+	levels := claude.ExplicitEffortLevels()
+	require.NotEmpty(t, levels, "the wrapper must name at least one explicit level")
+
+	for _, level := range levels {
+		line := "● " + string(level) + " · /effort"
+		working, known := claudeLineVerdict(line)
+		assert.False(t, known, "%q is header chrome, not a turn verdict", line)
+		assert.False(t, working)
+	}
+
+	// EffortAuto clears explicit effort, so the CLI draws no indicator for it;
+	// if that ever changes this line starts reading as a tool call and the
+	// assertion above is where the new level belongs.
+	assert.False(t, isEffortIndicatorLine("● "+string(claude.EffortAuto)+" · /effort"),
+		"auto renders no indicator today; revisit the matcher if it starts to")
+}
+
+// TestEffortIndicatorDoesNotMaskARealToolLine pins the narrowness of the fix:
+// a genuine tool-call line right next to the effort indicator must still read
+// as working. The exclusion is a literal-shape match on the effort line
+// itself, not a blanket "skip whatever is nearest the top rule".
+func TestEffortIndicatorDoesNotMaskARealToolLine(t *testing.T) {
+	t.Parallel()
+
+	pane := []string{
+		"● high · /effort",
+		"● Read(delivery.go)",
+		"────────────────────────────────────────────",
+		"❯ ",
+		"────────────────────────────────────────────",
+		"  ~/wt/branch  main  Opus 5  ctx:1%  tokens:0",
+		"  ⏵⏵ accept edits on (shift+tab to cycle)",
+	}
+
+	working, known := paneShowsWorking(ProviderClaude, pane)
+	require.True(t, known, "the real tool line below it still gives a verdict")
+	assert.True(t, working, "a genuine tool call must still be read as work in flight")
+}
+
+// TestEffortIndicatorTextDoesNotFoolTheLineVerdict pins claudeLineVerdict
+// directly against the two shapes that must never be confused: the indicator
+// itself, and ordinary non-tool assistant text that happens to start with the
+// same bullet glyph (see TestOversizedComposerIsHeldNotDelivered's "some tool
+// output" and TestClaudePaneJudge's "Sure! Here's a tricky one-liner:" — both
+// must keep reading as work, since only the literal "· /effort" shape is
+// excluded).
+func TestEffortIndicatorTextDoesNotFoolTheLineVerdict(t *testing.T) {
+	t.Parallel()
+
+	for _, line := range []string{
+		"● low · /effort",
+		"● medium · /effort",
+		"● high · /effort",
+		"● max · /effort",
+	} {
+		working, known := claudeLineVerdict(line)
+		assert.False(t, known, "the indicator %q says nothing about the turn", line)
+		assert.False(t, working)
+	}
+
+	for _, line := range []string{
+		"● some tool output",
+		"● Sure! Here's a tricky one-liner:",
+		"● Bash(git status)",
+		"● Read(· /effort)",
+	} {
+		working, known := claudeLineVerdict(line)
+		require.True(t, known, "line %q must still produce a verdict", line)
+		assert.True(t, working, "line %q must still read as work in flight", line)
+	}
 }

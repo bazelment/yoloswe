@@ -633,13 +633,25 @@ func marshalControlPayload(payload any) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
+// ExplicitEffortLevels is every effort level a caller can set explicitly, in
+// increasing order. EffortAuto is not one of them: it clears explicit effort
+// rather than naming one.
+//
+// This is the single place the set is written down. Everything that needs to
+// know the levels — validation, the parse error's "valid:" list, and callers
+// that must recognize every level the CLI can be in — derives from it, so
+// adding a level here is the only edit adding a level takes.
+func ExplicitEffortLevels() []EffortLevel {
+	return []EffortLevel{EffortLow, EffortMed, EffortHigh, EffortMax}
+}
+
 func (level EffortLevel) validExplicitEffort() bool {
-	switch level {
-	case EffortLow, EffortMed, EffortHigh, EffortMax:
-		return true
-	default:
-		return false
+	for _, valid := range ExplicitEffortLevels() {
+		if level == valid {
+			return true
+		}
 	}
+	return false
 }
 
 // ParseEffort parses a user-supplied string into an EffortLevel. It accepts
@@ -650,7 +662,12 @@ func ParseEffort(s string) (EffortLevel, error) {
 	if level == EffortAuto || level.validExplicitEffort() {
 		return level, nil
 	}
-	return "", fmt.Errorf("%w: %q (valid: low, medium, high, max, auto)", ErrInvalidEffort, s)
+	valid := make([]string, 0, len(ExplicitEffortLevels())+1)
+	for _, level := range ExplicitEffortLevels() {
+		valid = append(valid, string(level))
+	}
+	valid = append(valid, string(EffortAuto))
+	return "", fmt.Errorf("%w: %q (valid: %s)", ErrInvalidEffort, s, strings.Join(valid, ", "))
 }
 
 type storedCredentials struct {

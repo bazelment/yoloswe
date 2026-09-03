@@ -35,9 +35,18 @@ func Paste(ctx context.Context, ctl Controller, target, text string) error {
 	return ctl.Paste(ctx, target, text)
 }
 
-// SendEnter submits what was pasted. The interface names the intent rather
-// than taking a SpecialKey, so session does not need tmuxctl's key vocabulary
-// to describe a write.
+// SendEnter submits what is staged in the composer. The interface names the
+// intent rather than taking a SpecialKey, so session does not need tmuxctl's
+// key vocabulary to describe a write.
+//
+// It leaves copy mode for the same reason Paste does, and not merely because
+// Paste happens to run first: a submit can now be reached without one, when a
+// caller recognizes text it staged on an earlier attempt and presses Enter
+// without re-pasting. In copy mode that Enter is consumed by the pager, so the
+// text stays in the composer looking delivered while no turn ever starts.
 func (w *paneWriter) SendEnter(ctx context.Context, target string) error {
+	if err := w.ctl.ExitCopyMode(ctx, target); err != nil {
+		return err
+	}
 	return w.ctl.SendSpecial(ctx, target, KeyEnter)
 }
