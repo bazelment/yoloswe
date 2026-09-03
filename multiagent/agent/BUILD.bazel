@@ -11,7 +11,6 @@ go_library(
         "config.go",
         "cursor_provider.go",
         "effort.go",
-        "gemini_provider.go",
         "model_registry.go",
         "provider.go",
         "provider_check.go",
@@ -23,7 +22,6 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/multiagent/agent",
     visibility = ["//visibility:public"],
     deps = [
-        "//agent-cli-wrapper/acp",
         "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/agy",
         "//agent-cli-wrapper/claude",
@@ -46,7 +44,6 @@ go_test(
         "config_test.go",
         "cursor_provider_test.go",
         "effort_test.go",
-        "gemini_provider_test.go",
         "git_diff_test.go",
         "model_registry_test.go",
         "provider_check_test.go",
@@ -57,7 +54,6 @@ go_test(
     ],
     embed = [":agent"],
     deps = [
-        "//agent-cli-wrapper/acp",
         "//agent-cli-wrapper/agy",
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/codex",

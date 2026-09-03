@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
@@ -29,27 +30,15 @@ func (p *AgyProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Work
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	if cfg.Effort != "" && cfg.Effort != EffortAuto {
-		return nil, EffortUnsupportedError(p.Name(), cfg.Effort)
-	}
 
 	fullPrompt := prompt
 	if wtCtx != nil {
 		fullPrompt = wtCtx.FormatForPrompt() + "\n\n" + prompt
 	}
 
-	sessionOpts := append([]agy.SessionOption{}, p.sessionOpts...)
-	if cfg.WorkDir != "" {
-		sessionOpts = append(sessionOpts, agy.WithWorkDir(cfg.WorkDir))
-	}
-	if cfg.ResumeSessionID != "" {
-		sessionOpts = append(sessionOpts, agy.WithConversation(cfg.ResumeSessionID))
-	}
-	switch strings.ToLower(strings.TrimSpace(cfg.PermissionMode)) {
-	case "bypass":
-		sessionOpts = append(sessionOpts, agy.WithDangerouslySkipPermissions())
-	case "plan":
-		sessionOpts = append(sessionOpts, agy.WithSandbox())
+	sessionOpts, err := p.sessionOptsFor(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	session := agy.NewSession(fullPrompt, sessionOpts...)
@@ -66,23 +55,33 @@ func (p *AgyProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Work
 			if cfg.EventHandler != nil {
 				cfg.EventHandler.OnText(e.Text)
 			}
-			p.events <- TextAgentEvent{Text: e.Text}
+			p.emit(TextAgentEvent{Text: e.Text})
 		case agy.TurnCompleteEvent:
 			if cfg.EventHandler != nil {
 				cfg.EventHandler.OnTurnComplete(1, e.Success, e.DurationMs, 0)
 			}
-			p.events <- TurnCompleteAgentEvent{TurnNumber: 1, Success: e.Success, DurationMs: e.DurationMs}
+			p.emit(TurnCompleteAgentEvent{TurnNumber: 1, Success: e.Success, DurationMs: e.DurationMs})
 			return &AgentResult{
 				Text:       resultText.String(),
 				Success:    e.Success,
 				Error:      e.Error,
 				DurationMs: e.DurationMs,
+				SessionID:  e.ConversationID,
+				// agy also reports thinking_tokens, which AgentUsage has no
+				// field for; dropped rather than folded into OutputTokens,
+				// which would silently inflate a number operators compare
+				// across providers. CostUSD stays zero: agy reports no cost.
+				Usage: AgentUsage{
+					InputTokens:     e.Usage.InputTokens,
+					OutputTokens:    e.Usage.OutputTokens,
+					CacheReadTokens: e.Usage.CacheReadTokens,
+				},
 			}, nil
 		case agy.ErrorEvent:
 			if cfg.EventHandler != nil {
 				cfg.EventHandler.OnError(e.Error, e.Context)
 			}
-			p.events <- ErrorAgentEvent{Err: e.Error, Context: e.Context}
+			p.emit(ErrorAgentEvent{Err: e.Error, Context: e.Context})
 			return nil, e.Error
 		}
 	}
@@ -92,7 +91,200 @@ func (p *AgyProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Work
 
 func (p *AgyProvider) Events() <-chan AgentEvent { return p.events }
 
+// emit offers an event to the provider's channel and drops it when no consumer
+// is keeping up.
+//
+// The drop is deliberate, and it is the same discipline every other provider
+// already gets for free: they reach this channel through dispatchStreamEvent,
+// which sends under a select with a default arm (see bridge.go). AgyProvider
+// is ephemeral, so bramble's providerRunner never starts an event bridge for
+// it (bridgeProviderEvents runs only for a LongRunningProvider) and nothing
+// drains Events() at all. A blocking send there is not backpressure - there is
+// no reader to catch up - so it wedges Execute permanently once the buffer
+// fills. Events() is a best-effort observation stream; the authoritative
+// result is the AgentResult that Execute returns, and it is unaffected by a
+// drop. Guarded by TestAgyProvider_ExecuteDoesNotBlockOnUndrainedEvents.
+func (p *AgyProvider) emit(ev AgentEvent) {
+	select {
+	case p.events <- ev:
+	default:
+	}
+}
+
 func (p *AgyProvider) Close() error {
 	close(p.events)
 	return nil
+}
+
+// sessionOptsFor assembles the full option list Execute hands to agy: the
+// provider's constructor options first, then the ExecuteConfig's, then the
+// reconciliation pass.
+//
+// The order is load-bearing. reconcileAgyEffort must run LAST so it sees the
+// MERGED config: the constructor's options can pin a model too, and a guard
+// that inspected only cfg would miss it - the conformance test builds the
+// provider with agy.WithModel(...) and an empty cfg.Model exactly that way.
+func (p *AgyProvider) sessionOptsFor(cfg ExecuteConfig) ([]agy.SessionOption, error) {
+	opts := append([]agy.SessionOption{}, p.sessionOpts...)
+	opts = append(opts, agySessionOpts(cfg)...)
+
+	// Reconcile against the assembled config, then re-apply the result: the
+	// conflict is a property of the final command line, not of any one option.
+	var merged agy.SessionConfig
+	for _, opt := range opts {
+		opt(&merged)
+	}
+	if err := reconcileAgyEffort(&merged); err != nil {
+		return nil, err
+	}
+	return append(opts, func(c *agy.SessionConfig) {
+		c.Model = merged.Model
+		c.Effort = merged.Effort
+	}), nil
+}
+
+// agySessionOpts builds the agy session options an ExecuteConfig implies.
+//
+// Split out of Execute so the arguments that actually reach the CLI are
+// unit-testable without a subprocess (see cursorSessionOpts/codexTurnOptions
+// for the same idiom, and TestAgySessionOpts_* for the tests this enables).
+func agySessionOpts(cfg ExecuteConfig) []agy.SessionOption {
+	var opts []agy.SessionOption
+
+	// applyOptions defaults Model to "sonnet" when the caller named nothing;
+	// CLIModelArg strips it as a Claude ID, along with placeholders and any
+	// other provider's models (see cursorSessionOpts for the same idiom).
+	model := CLIModelArg(cfg.Model, ProviderAgy)
+	if model != "" {
+		opts = append(opts, agy.WithModel(model))
+	}
+
+	// Effort is reconciled against the merged config by reconcileAgyEffort,
+	// which Execute appends last; record the request verbatim here.
+	if effort := agyEffortLevel(cfg.Effort); effort != "" {
+		opts = append(opts, agy.WithEffort(effort))
+	}
+
+	if cfg.WorkDir != "" {
+		opts = append(opts, agy.WithWorkDir(cfg.WorkDir))
+	}
+	if cfg.ResumeSessionID != "" {
+		opts = append(opts, agy.WithConversation(cfg.ResumeSessionID))
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.PermissionMode)) {
+	case "bypass":
+		opts = append(opts, agy.WithDangerouslySkipPermissions())
+	case "plan":
+		opts = append(opts, agy.WithSandbox())
+	}
+	return opts
+}
+
+// splitModelEffort separates an agy model id from the reasoning level it pins.
+//
+// Delegates to the agy wrapper, which owns this spelling rule because it is the
+// package that builds the argv. Kept as a local alias so the catalog-aware
+// logic below reads the same as it always has.
+func splitModelEffort(model string) (base, pinned string) {
+	return agy.SplitModelEffort(model)
+}
+
+// reconcileAgyEffort settles the two ways an agy invocation can carry a
+// reasoning level, and must be applied LAST so it sees the merged config.
+//
+// agy's catalog encodes the level in the model id *and* offers a separate
+// --effort flag. Passing both is a hard error from the CLI:
+//
+//	Error: invalid model selection (--model "gemini-3.1-pro-high"
+//	--effort "low"): --model gemini-3.1-pro-high conflicts with --effort=low
+//
+// Dropping the requested level instead would be worse than the crash: callers
+// consult ProviderSupportsEffort(ProviderAgy), which is now true, and act on a
+// contract of honor-or-surface-an-error, never silent downgrade (see the
+// --thinking-level handling in jiradozer/agent.go). So the request is honored
+// by RETARGETING the model to the variant that encodes it - the level the
+// caller asked for is the one that runs - and --effort is then dropped as
+// redundant, leaving exactly one representation on the command line.
+//
+// Retargeting is only safe onto a variant that exists: agy's catalog is not a
+// full cross product (gemini-3.1-pro ships -low and -high but no -medium, and
+// `--model gemini-3.1-pro-medium` is rejected as "not recognized"). AllModels
+// is this repo's record of which combinations are real. When it has no such
+// variant the request CANNOT be honored, so this returns ErrEffortUnsupported
+// rather than running at the model's own level - that would be exactly the
+// silent downgrade the contract above forbids, and jiradozer/agent.go already
+// handles this error.
+//
+// Whether the model pins a level is decided by the id's SYNTAX, so it holds
+// for ids AllModels has never heard of; the catalog is consulted only to pick
+// between the two ways of honoring the request. For a curated model an absent
+// variant is knowably unrunnable, so it errors. For an uncurated one - which
+// CLIModelArg passes through because "there the CLI is the authority, not this
+// list" (model_registry.go) - the retarget is taken optimistically and agy
+// judges the result, which is strictly better than shipping a command line
+// already known to conflict.
+func reconcileAgyEffort(c *agy.SessionConfig) error {
+	if c.Effort == "" || c.Model == "" {
+		return nil
+	}
+	base, pinned := splitModelEffort(c.Model)
+	if pinned == "" {
+		// Nothing pinned by the model: --effort alone carries the level.
+		return nil
+	}
+	if pinned == c.Effort {
+		c.Effort = "" // Same level twice; keep one representation.
+		return nil
+	}
+	retarget, ok := agyRetarget(c.Model, c.Effort)
+	if !ok {
+		return fmt.Errorf("%w: agy has no %q variant of %q (requested effort %s on a model pinned to %s)",
+			ErrEffortUnsupported, c.Effort, base, c.Effort, pinned)
+	}
+	c.Model = retarget
+	c.Effort = ""
+	return nil
+}
+
+// agyRetarget returns the agy model id that runs `model` at the `want` level,
+// which for agy means swapping the level its id encodes. ok is false only when
+// the catalog knows `model` and has no such variant, i.e. the request cannot
+// be expressed at all; an uncurated id is retargeted optimistically, since
+// AllModels is not the authority on models it does not name.
+//
+// This is the single implementation of "can this (model, level) pair be
+// expressed on an agy command line". reconcileAgyEffort enforces it and
+// ModelSupportsEffort advises callers from it, so the two cannot drift.
+func agyRetarget(model, want string) (string, bool) {
+	base, pinned := splitModelEffort(model)
+	if pinned == "" || pinned == want {
+		return model, true
+	}
+	retarget := base + "-" + want
+	if isCuratedAgyModel(model) && !isCuratedAgyModel(retarget) {
+		return model, false
+	}
+	return retarget, true
+}
+
+// isCuratedAgyModel reports whether an id is a known agy model, i.e. one this
+// repo has recorded in AllModels as runnable by the agy CLI.
+func isCuratedAgyModel(id string) bool {
+	m, ok := ModelByID(id)
+	return ok && m.Provider == ProviderAgy && !m.Placeholder
+}
+
+// agyEffortLevel maps the neutral agent.EffortLevel to agy's --effort values.
+func agyEffortLevel(level EffortLevel) string {
+	switch level {
+	case EffortAuto, "":
+		return ""
+	case EffortLow:
+		return "low"
+	case EffortMedium:
+		return "medium"
+	case EffortHigh, EffortMax:
+		return "high"
+	}
+	return ""
 }

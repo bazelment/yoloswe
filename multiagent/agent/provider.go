@@ -157,9 +157,9 @@ type RetryHandler interface {
 }
 
 // Provider is the pluggable interface for agent backends.
-// Adding a new backend (Gemini, Codex, etc.) means implementing this interface.
+// Adding a new backend (Codex, Agy, etc.) means implementing this interface.
 type Provider interface {
-	// Name returns the provider name (e.g., "claude", "codex", "gemini").
+	// Name returns the provider name (e.g., "claude", "codex", "agy").
 	Name() string
 
 	// Execute runs a prompt with optional worktree context and returns the result.
@@ -312,12 +312,12 @@ func WithProviderStreamTurnGracePeriod(d time.Duration) ExecuteOption {
 //
 //   - claude / cursor / agy: rebuild the underlying session per Execute, so each
 //     call may pass a different endpoint.
-//   - codex / gemini:  bind the endpoint at client construction time (the
-//     first Execute call), since `--config` overrides / acp BinaryArgs are
-//     passed to the subprocess at boot. Subsequent Execute calls must pass
-//     an equal endpoint; divergent endpoints fail with an explicit error
-//     rather than silently routing to the originally-bound endpoint. To
-//     switch endpoints on a codex/gemini provider, construct a fresh one.
+//   - codex: binds the endpoint at client construction time (the first
+//     Execute call), since `--config` overrides are passed to the subprocess
+//     at boot. Subsequent Execute calls must pass an equal endpoint;
+//     divergent endpoints fail with an explicit error rather than silently
+//     routing to the originally-bound endpoint. To switch endpoints on a
+//     codex provider, construct a fresh one.
 //
 // All providers validate the endpoint at the start of Execute (see
 // ExecuteConfig.validate), so partial-but-non-zero endpoints fail loudly
@@ -352,9 +352,14 @@ func applyOptions(opts []ExecuteOption) ExecuteConfig {
 
 // validate enforces invariants that every Provider.Execute call relies on,
 // regardless of whether the provider rebuilds the underlying session per
-// call (claude/cursor) or binds the endpoint at first Execute (codex/gemini).
-// Currently it only gates on LLMEndpoint, but the seam is intentional: any
-// future cross-provider invariant lands here once instead of in four places.
+// call (claude/cursor/agy) or binds the endpoint at first Execute (codex).
 func (c ExecuteConfig) validate() error {
-	return c.LLMEndpoint.Validate()
+	if err := c.LLMEndpoint.Validate(); err != nil {
+		return err
+	}
+	if c.Effort == "" {
+		return nil
+	}
+	_, err := ParseEffort(string(c.Effort))
+	return err
 }

@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
@@ -71,7 +71,7 @@ func (r *plannerRunner) RunTurn(ctx context.Context, message string) (*claude.Tu
 }
 
 // providerRunner adapts agent.Provider to the sessionRunner interface.
-// This allows plugging in any provider backend (Claude, Codex, Gemini, agy)
+// This allows plugging in any provider backend (Claude, Codex, Cursor, agy)
 // via the ManagerConfig.Provider field.
 type providerRunner struct { //nolint:govet // fieldalignment: keep related lifecycle fields grouped
 	provider        agent.Provider
@@ -88,6 +88,17 @@ type providerRunner struct { //nolint:govet // fieldalignment: keep related life
 	sawThinking     bool
 	turnDone        bool
 	turnDoneCh      chan struct{}
+
+	// resumeSessionID lets ephemeral providers resume the prior turn.
+	resumeMu        sync.Mutex
+	resumeSessionID string
+}
+
+func providerPermissionMode(sessionType SessionType) string {
+	if sessionType == SessionTypePlanner || sessionType == SessionTypeCodeTalk {
+		return "plan"
+	}
+	return "bypass"
 }
 
 // trackingEventHandler wraps provider callbacks to record observed event types
@@ -241,16 +252,34 @@ func (r *providerRunner) RunTurn(ctx context.Context, message string) (*claude.T
 		// Give bridged events a brief window to flush before fallback synthesis.
 		r.waitForTurnDone(turnObsSeq, 150*time.Millisecond)
 	} else {
-		// Ephemeral providers create a fresh session each turn
+		// Resume ephemeral providers with the prior turn's session ID.
+		if resumeID := r.getResumeSessionID(); resumeID != "" {
+			opts = append(opts, agent.WithProviderResumeSessionID(resumeID))
+		}
 		var err error
 		result, err = r.provider.Execute(ctx, message, nil, opts...)
 		if err != nil {
 			return nil, err
 		}
+		if result.SessionID != "" {
+			r.setResumeSessionID(result.SessionID)
+		}
 	}
 
 	r.emitFallbackFromResult(turnObsSeq, result)
 	return agentUsageToTurnUsage(result.Usage), nil
+}
+
+func (r *providerRunner) getResumeSessionID() string {
+	r.resumeMu.Lock()
+	defer r.resumeMu.Unlock()
+	return r.resumeSessionID
+}
+
+func (r *providerRunner) setResumeSessionID(id string) {
+	r.resumeMu.Lock()
+	defer r.resumeMu.Unlock()
+	r.resumeSessionID = id
 }
 
 func (r *providerRunner) beginTurnObservation() uint64 {
@@ -1023,7 +1052,7 @@ func (m *Manager) startSessionWithID(sessionID SessionID, sessionType SessionTyp
 	}
 	// validateEndpointBackend is a no-op on an empty backend, but runSession
 	// re-runs it against the *resolved* provider -- so without this, an
-	// endpoint on a gemini/cursor/agy model id with no --backend passed every
+	// endpoint on a cursor/agy model id with no --backend passed every
 	// check here, printed a session ID, and only failed in the background.
 	// That is the exact split the duplicate checks below exist to close, and
 	// startSessionWithID already holds the registry needed to close it.
@@ -1958,52 +1987,11 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				})
 			}
 			runner = &providerRunner{
-				provider:     agent.NewCodexProvider(codexOpts...),
-				eventHandler: eventHandler,
-				model:        session.Model,
-				permissionMode: func() string {
-					if session.Type == SessionTypePlanner || session.Type == SessionTypeCodeTalk {
-						return "plan"
-					}
-					return "bypass"
-				}(),
-				workDir: session.WorktreePath,
-			}
-		} else if agentModel.Provider == ProviderGemini {
-			// Gemini provider backend
-			clientOpts := []acp.ClientOption{
-				acp.WithBinaryArgs("--experimental-acp", "--model", session.Model),
-			}
-
-			geminiOpts, geminiLogHint, geminiStderrHint := m.geminiProviderOptions(session.ID)
-			clientOpts = append(clientOpts, geminiOpts...)
-			if geminiLogHint != "" {
-				m.addOutput(session.ID, OutputLine{
-					Timestamp: time.Now(),
-					Type:      OutputTypeStatus,
-					Content:   geminiLogHint,
-				})
-			}
-			if geminiStderrHint != "" {
-				m.addOutput(session.ID, OutputLine{
-					Timestamp: time.Now(),
-					Type:      OutputTypeStatus,
-					Content:   geminiStderrHint,
-				})
-			}
-
-			// Configure permission handler based on session type
-			if session.Type == SessionTypePlanner || session.Type == SessionTypeCodeTalk {
-				// Planner/codetalk sessions should only be able to read, not write
-				clientOpts = append(clientOpts, acp.WithPermissionHandler(&acp.PlanOnlyPermissionHandler{}))
-			}
-			// Builder sessions use the default BypassPermissionHandler (auto-approve all)
-
-			runner = &providerRunner{
-				provider:     agent.NewGeminiLongRunningProvider(clientOpts, acp.WithSessionCWD(session.WorktreePath)),
-				eventHandler: eventHandler,
-				model:        session.Model,
-				workDir:      session.WorktreePath,
+				provider:       agent.NewCodexProvider(codexOpts...),
+				eventHandler:   eventHandler,
+				model:          session.Model,
+				permissionMode: providerPermissionMode(session.Type),
+				workDir:        session.WorktreePath,
 			}
 		} else if agentModel.Provider == ProviderCursor {
 			// Cursor provider backend
@@ -2014,18 +2002,28 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				workDir:      session.WorktreePath,
 			}
 		} else if agentModel.Provider == ProviderAgy {
-			// Antigravity provider backend
+			// Antigravity uses the shared ephemeral-provider runner.
+			agyOpts, agyLogHint, agyStderrHint := m.agyProviderOptions(session.ID)
+			if agyLogHint != "" {
+				m.addOutput(session.ID, OutputLine{
+					Timestamp: time.Now(),
+					Type:      OutputTypeStatus,
+					Content:   agyLogHint,
+				})
+			}
+			if agyStderrHint != "" {
+				m.addOutput(session.ID, OutputLine{
+					Timestamp: time.Now(),
+					Type:      OutputTypeStatus,
+					Content:   agyStderrHint,
+				})
+			}
 			runner = &providerRunner{
-				provider:     agent.NewAgyProvider(),
-				eventHandler: eventHandler,
-				model:        session.Model,
-				permissionMode: func() string {
-					if session.Type == SessionTypePlanner || session.Type == SessionTypeCodeTalk {
-						return "plan"
-					}
-					return "bypass"
-				}(),
-				workDir: session.WorktreePath,
+				provider:       agent.NewAgyProvider(agyOpts...),
+				eventHandler:   eventHandler,
+				model:          session.Model,
+				permissionMode: providerPermissionMode(session.Type),
+				workDir:        session.WorktreePath,
 			}
 		} else {
 			// Default: use hardcoded planner/builder runners with model from session
@@ -3303,27 +3301,28 @@ func (m *Manager) codexProviderOptions(sessionID SessionID) ([]codex.ClientOptio
 		fmt.Sprintf("Codex stderr log: %s", stderrLogPath)
 }
 
-func (m *Manager) geminiProviderOptions(sessionID SessionID) ([]acp.ClientOption, string, string) {
-	stderrLogPath, ok := m.protocolLogPath(sessionID, "gemini.stderr.log")
+// agyProviderOptions builds log-file and stderr options for an agy print-mode session.
+func (m *Manager) agyProviderOptions(sessionID SessionID) ([]agy.SessionOption, string, string) {
+	stderrLogPath, ok := m.protocolLogPath(sessionID, "agy.stderr.log")
 	if !ok {
 		return nil, "", ""
 	}
 
-	protocolLogPath, _ := m.protocolLogPath(sessionID, "gemini.protocol.jsonl")
+	logFilePath, _ := m.protocolLogPath(sessionID, "agy.log")
 
-	opts := []acp.ClientOption{
-		acp.WithStderrHandler(newFileAppendHandler(stderrLogPath)),
+	opts := []agy.SessionOption{
+		agy.WithStderrHandler(newFileAppendHandler(stderrLogPath)),
 	}
 
-	var protocolLogHint string
-	if protocolLogPath != "" {
-		opts = append(opts, acp.WithProtocolLogger(newFileAppendWriter(protocolLogPath)))
-		protocolLogHint = fmt.Sprintf("Gemini protocol log: %s", protocolLogPath)
+	var logFileHint string
+	if logFilePath != "" {
+		opts = append(opts, agy.WithLogFile(logFilePath))
+		logFileHint = fmt.Sprintf("agy log file: %s", logFilePath)
 	}
 
 	return opts,
-		protocolLogHint,
-		fmt.Sprintf("Gemini stderr log: %s", stderrLogPath)
+		logFileHint,
+		fmt.Sprintf("agy stderr log: %s", stderrLogPath)
 }
 
 // fileAppendWriter implements io.Writer by appending to a file.

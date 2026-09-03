@@ -25,7 +25,6 @@ const (
 const (
 	ProviderClaude = agent.ProviderClaude
 	ProviderCodex  = agent.ProviderCodex
-	ProviderGemini = agent.ProviderGemini
 	ProviderCursor = agent.ProviderCursor
 	ProviderAgy    = agent.ProviderAgy
 )

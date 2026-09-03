@@ -9,7 +9,6 @@
 //   - claude:  claude.WithResume(sessionID) on a new Session
 //   - codex:   codex.Client.ResumeThread(ctx, threadID, ...)
 //   - cursor:  cursor.WithResume(sessionID) on a new Query
-//   - acp:     acp.Client.LoadSession(ctx, sessionID, ...) (used by gemini)
 //
 // To keep the contract of "resume actually preserves conversational context"
 // uniform across backends, each implementation conforms to the resumeBackend
@@ -38,7 +37,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/cursor"
@@ -88,12 +86,6 @@ func TestResume_Backends(t *testing.T) {
 		&claudeResumeBackend{},
 		&codexResumeBackend{},
 		&cursorResumeBackend{},
-		&acpResumeBackend{
-			name:        "gemini",
-			binary:      "gemini",
-			binaryArgs:  []string{"--experimental-acp"},
-			binaryProbe: "gemini",
-		},
 	}
 
 	for _, backend := range backends {
@@ -419,87 +411,4 @@ func cursorOpts(workdir string, t *testing.T) []cursor.SessionOption {
 		cursor.WithForce(),
 		cursor.WithStderrHandler(stderr),
 	}
-}
-
-// ---------------------------------------------------------------------------
-// acp (covers the gemini bridge today; future ACP-speaking agents drop in by
-// constructing another acpResumeBackend)
-// ---------------------------------------------------------------------------
-
-type acpResumeBackend struct {
-	name        string
-	binary      string
-	binaryArgs  []string
-	binaryProbe string
-}
-
-func (a *acpResumeBackend) Name() string { return a.name }
-
-func (a *acpResumeBackend) Available() (bool, string) {
-	if _, err := exec.LookPath(a.binaryProbe); err != nil {
-		return false, fmt.Sprintf("%s CLI not found on PATH", a.binaryProbe)
-	}
-	return true, ""
-}
-
-func (a *acpResumeBackend) newClient() *acp.Client {
-	opts := []acp.ClientOption{
-		acp.WithClientName("agent-cli-wrapper-resume-test"),
-		acp.WithClientVersion("1.0.0"),
-	}
-	if a.binary != "" {
-		opts = append(opts, acp.WithBinaryPath(a.binary))
-	}
-	if len(a.binaryArgs) > 0 {
-		opts = append(opts, acp.WithBinaryArgs(a.binaryArgs...))
-	}
-	return acp.NewClient(opts...)
-}
-
-func (a *acpResumeBackend) StartFresh(ctx context.Context, t *testing.T, workdir, prompt string) (string, string, error) {
-	t.Helper()
-	client := a.newClient()
-	if err := client.Start(ctx); err != nil {
-		return "", "", fmt.Errorf("%s ACP client start: %w", a.name, err)
-	}
-	defer client.Stop()
-
-	session, err := client.NewSession(ctx, acp.WithSessionCWD(workdir))
-	if err != nil {
-		return "", "", fmt.Errorf("%s ACP NewSession: %w", a.name, err)
-	}
-	result, err := session.Prompt(ctx, prompt)
-	if err != nil {
-		return "", "", fmt.Errorf("%s ACP Prompt: %w", a.name, err)
-	}
-	if !result.Success {
-		return "", result.FullText, fmt.Errorf("%s ACP turn failed: %v", a.name, result.Error)
-	}
-	return session.ID(), result.FullText, nil
-}
-
-func (a *acpResumeBackend) Resume(ctx context.Context, t *testing.T, workdir, sessionID, prompt string) (string, string, error) {
-	t.Helper()
-	client := a.newClient()
-	if err := client.Start(ctx); err != nil {
-		return "", "", fmt.Errorf("%s ACP resume client start: %w", a.name, err)
-	}
-	defer client.Stop()
-
-	session, err := client.LoadSession(ctx, sessionID, acp.WithSessionCWD(workdir))
-	if err != nil {
-		if errors.Is(err, acp.ErrSessionNotFound) {
-			return "", "", fmt.Errorf("%s does not advertise LoadSession capability or session %s expired: %w",
-				a.name, sessionID, err)
-		}
-		return "", "", fmt.Errorf("%s ACP LoadSession: %w", a.name, err)
-	}
-	result, err := session.Prompt(ctx, prompt)
-	if err != nil {
-		return session.ID(), "", fmt.Errorf("%s ACP resume Prompt: %w", a.name, err)
-	}
-	if !result.Success {
-		return session.ID(), result.FullText, fmt.Errorf("%s ACP resume turn failed: %v", a.name, result.Error)
-	}
-	return session.ID(), result.FullText, nil
 }

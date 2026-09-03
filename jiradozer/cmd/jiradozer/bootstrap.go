@@ -434,7 +434,7 @@ states:
 const bootstrapAgentBlock = `# Default agent backend; per-step overrides win when set.
 agent:
     # Model ID from agent.AllModels (e.g. "sonnet", "opus", "fable", "gpt-5.5",
-    # "gemini-3.1-pro-preview", "cursor-default").
+    # "gemini-3.8-flash-high", "cursor-default").
     model: sonnet
     # Models to fall back to (in order) when the primary model fails with a
     # workspace-wide "out of credits" error. A same-provider swap can't escape
@@ -443,8 +443,8 @@ agent:
     # Empty = no fallback. Per-step ` + "`fallback_models:`" + ` overrides this.
     #fallback_models: [opus]
     # Reasoning effort: low, medium, high, max, auto. Empty = provider default.
-    # Note: when a fallback model's provider has no effort knob (cursor, gemini,
-    # agy), the effort is dropped automatically for that model's run.
+    # Note: when a fallback model's provider has no effort knob (cursor), the
+    # effort is dropped automatically for that model's run.
     #effort: ""
     # Proactively read Claude plan usage (/api/oauth/usage) before each Claude
     # run and skip to the next fallback when this model's utilization is at the
@@ -453,7 +453,7 @@ agent:
     #disable_limit_preflight: false
     # Optional: route inference through a third-party LLM API endpoint
     # (Baseten, OpenRouter, LiteLLM, etc.). The claude backend requires an
-    # Anthropic-shaped endpoint; codex/gemini accept OpenAI-compatible.
+    # Anthropic-shaped endpoint; codex accepts OpenAI-compatible.
     #llm_endpoint:
     #    base_url: https://inference.baseten.co/v1
     #    api_key_env: BASETEN_API_KEY    # prefer over api_key

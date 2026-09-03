@@ -357,24 +357,24 @@ func TestBuildEnvelope_NilResult(t *testing.T) {
 	}
 }
 
-func TestBuildEnvelope_GeminiBackend(t *testing.T) {
+func TestBuildEnvelope_AgyBackend(t *testing.T) {
 	result := &ReviewResult{
 		ResponseText: `{"verdict":"accepted","summary":"lgtm","issues":[]}`,
 		Success:      true,
 		DurationMs:   5000,
 	}
-	env := BuildEnvelope(result, BackendGemini, "gemini-3.1-flash-lite-preview", "sess-gemini-1", "")
+	env := BuildEnvelope(result, BackendAgy, "gemini-3.8-flash-medium", "sess-agy-1", "")
 	if env.Status != StatusOK {
 		t.Errorf("status = %s, want ok", env.Status)
 	}
-	if env.Backend != "gemini" {
-		t.Errorf("backend = %q, want gemini", env.Backend)
+	if env.Backend != "agy" {
+		t.Errorf("backend = %q, want agy", env.Backend)
 	}
-	if env.Model != "gemini-3.1-flash-lite-preview" {
-		t.Errorf("model = %q, want gemini-3.1-flash-lite-preview", env.Model)
+	if env.Model != "gemini-3.8-flash-medium" {
+		t.Errorf("model = %q, want gemini-3.8-flash-medium", env.Model)
 	}
-	if env.SessionID != "sess-gemini-1" {
-		t.Errorf("session_id = %q, want sess-gemini-1", env.SessionID)
+	if env.SessionID != "sess-agy-1" {
+		t.Errorf("session_id = %q, want sess-agy-1", env.SessionID)
 	}
 	if env.Review.Verdict != "accepted" {
 		t.Errorf("verdict = %q, want accepted", env.Review.Verdict)
@@ -384,20 +384,20 @@ func TestBuildEnvelope_GeminiBackend(t *testing.T) {
 	}
 }
 
-func TestBuildEnvelope_GeminiBackendError(t *testing.T) {
+func TestBuildEnvelope_AgyBackendError(t *testing.T) {
 	result := &ReviewResult{
-		ErrorMessage: "gemini: ACP client failed to start",
+		ErrorMessage: "agy: session ended without result",
 		Success:      false,
 	}
-	env := BuildEnvelope(result, BackendGemini, "gemini-3.1-flash-lite-preview", "", "")
+	env := BuildEnvelope(result, BackendAgy, "gemini-3.8-flash-medium", "", "")
 	if env.Status != StatusError {
 		t.Errorf("status = %s, want error", env.Status)
 	}
-	if env.Backend != "gemini" {
-		t.Errorf("backend = %q, want gemini", env.Backend)
+	if env.Backend != "agy" {
+		t.Errorf("backend = %q, want agy", env.Backend)
 	}
-	if env.Error != "gemini: ACP client failed to start" {
-		t.Errorf("error = %q, want gemini error", env.Error)
+	if env.Error != "agy: session ended without result" {
+		t.Errorf("error = %q, want agy error", env.Error)
 	}
 }
 

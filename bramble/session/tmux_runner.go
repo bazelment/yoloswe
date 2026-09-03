@@ -294,21 +294,6 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		if r.sessionID != "" && r.brambleBin != "" {
 			args = append(args, "-c", codexNotifyConfig(r.brambleBin, r.sessionID))
 		}
-	case ProviderGemini:
-		// Gemini-specific flags
-		// Note: Do NOT use --experimental-acp in tmux mode. ACP is for programmatic
-		// JSON-RPC communication (TUI mode), not interactive CLI usage (tmux mode).
-		//
-		// IMPORTANT: Gemini CLI requires folder trust before running commands.
-		// Users must run `gemini` once in the project directory and select
-		// "Trust folder" from the prompt. Trust is saved to ~/.gemini/trustedFolders.json.
-		// Without this, tmux sessions will hang at the trust prompt.
-		if r.yoloMode {
-			args = append(args, "--yolo")
-		}
-		if r.permissionMode == "plan" {
-			args = append(args, "--approval-mode", "plan")
-		}
 	case ProviderCursor:
 		// Cursor-specific flags. Note: do NOT use -p/--print in tmux mode.
 		// --print is for scripted one-shot calls; a tmux window is an

@@ -14,14 +14,19 @@ func TestBuildCLIArgs_DefaultPrintMode(t *testing.T) {
 
 	pm := newProcessManager("hello", defaultConfig())
 
-	assert.Equal(t, []string{"-p", "hello"}, pm.BuildCLIArgs())
+	assert.Equal(t, []string{"--output-format", "json", "-p", "hello"}, pm.BuildCLIArgs())
 }
 
 func TestBuildCLIArgs_AllOptions(t *testing.T) {
 	t.Parallel()
 
 	cfg := defaultConfig()
-	WithModel("gemini-3.8-flash-low")(&cfg)
+	// An id that pins no level, so --model and --effort both reach the argv:
+	// this test's subject is that every option is emitted, in order, and a
+	// model id ending in -low/-medium/-high would be reconciled with --effort
+	// into a single representation (TestBuildCLIArgs_ReconcilesModelAndEffort
+	// owns that behavior).
+	WithModel("gemini-3.8-flash")(&cfg)
 	WithEffort("low")(&cfg)
 	WithPrintTimeout(2 * time.Minute)(&cfg)
 	WithConversation("conv-123")(&cfg)
@@ -34,7 +39,8 @@ func TestBuildCLIArgs_AllOptions(t *testing.T) {
 	pm := newProcessManager("hello", cfg)
 
 	assert.Equal(t, []string{
-		"--model", "gemini-3.8-flash-low",
+		"--output-format", "json",
+		"--model", "gemini-3.8-flash",
 		"--effort", "low",
 		"--print-timeout", "120s",
 		"--conversation", "conv-123",
@@ -122,13 +128,16 @@ func TestBuildCLIArgs_NoRegressionToLeadingPrintFlag(t *testing.T) {
 	t.Parallel()
 
 	cfg := defaultConfig()
-	WithModel("gemini-3.8-flash-low")(&cfg)
+	// Unpinned id, so both flags survive reconciliation and the pinned slice
+	// below still exercises the full ordering this test guards.
+	WithModel("gemini-3.8-flash")(&cfg)
 	WithEffort("high")(&cfg)
 
 	pm := newProcessManager("hello", cfg)
 
 	assert.Equal(t, []string{
-		"--model", "gemini-3.8-flash-low",
+		"--output-format", "json",
+		"--model", "gemini-3.8-flash",
 		"--effort", "high",
 		"-p", "hello",
 	}, pm.BuildCLIArgs())
@@ -146,5 +155,141 @@ func TestBuildCLIArgs_EmptyModelAndEffortEmitNothing(t *testing.T) {
 
 	assert.Equal(t, -1, slices.Index(args, "--model"))
 	assert.Equal(t, -1, slices.Index(args, "--effort"))
-	assert.Equal(t, []string{"-p", "hello"}, args)
+	assert.Equal(t, []string{"--output-format", "json", "-p", "hello"}, args)
+}
+
+// TestBuildCLIArgs_ReconcilesModelAndEffort pins the invariant that an agy
+// command line carries the reasoning level exactly once.
+//
+// agy encodes the level in the model id AND takes a separate --effort flag, and
+// rejects a command line carrying two that disagree. BuildCLIArgs is the single
+// producer of the argv, so reconciling here is what stops any caller — the
+// yoloswe reviewer backend and bramble's session summarizer both assemble agy
+// options without going through multiagent/agent — from shipping a pair agy
+// refuses.
+func TestBuildCLIArgs_ReconcilesModelAndEffort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		model      string
+		effort     string
+		wantModel  string
+		wantEffort string
+	}{{
+		name: "conflicting pair retargets the model and drops --effort",
+		// The exact shape yoloswe/reviewer produces for
+		// `--backend agy --effort high`: DefaultAgyModel already pins medium.
+		model: "gemini-3.8-flash-medium", effort: "high",
+		wantModel: "gemini-3.8-flash-high", wantEffort: "",
+	}, {
+		name:  "matching pair keeps one representation",
+		model: "gemini-3.8-flash-low", effort: "low",
+		wantModel: "gemini-3.8-flash-low", wantEffort: "",
+	}, {
+		name:  "unpinned model lets --effort carry the level",
+		model: "gemini-3.8-flash", effort: "high",
+		wantModel: "gemini-3.8-flash", wantEffort: "high",
+	}, {
+		name:  "effort with no model is passed through",
+		model: "", effort: "high",
+		wantModel: "", wantEffort: "high",
+	}, {
+		name:  "model with no effort is passed through",
+		model: "gemini-3.1-pro-high", effort: "",
+		wantModel: "gemini-3.1-pro-high", wantEffort: "",
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := defaultConfig()
+			WithModel(tt.model)(&cfg)
+			WithEffort(tt.effort)(&cfg)
+			args := newProcessManager("hi", cfg).BuildCLIArgs()
+
+			gotModel := flagValue(args, "--model")
+			gotEffort := flagValue(args, "--effort")
+			assert.Equal(t, tt.wantModel, gotModel, "--model in %v", args)
+			assert.Equal(t, tt.wantEffort, gotEffort, "--effort in %v", args)
+
+			if tt.wantModel != "" && tt.wantEffort != "" {
+				return
+			}
+			// The whole point: never both halves on one command line.
+			assert.False(t, gotModel != "" && gotEffort != "",
+				"agy rejects a command line carrying the level twice: %v", args)
+		})
+	}
+}
+
+// flagValue returns the argument following flag, or "" when absent.
+func flagValue(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// TestReconcileModelEffort_LeavesUnknownLevelAlone pins the boundary of the
+// retarget.
+//
+// Retargeting splices the requested level into the model id, so it is only safe
+// for a level agy actually spells. `--effort max` is advertised by the shared
+// reviewer/bramble --effort flag (claude serves it), and splicing it in would
+// forge `gemini-3.8-flash-max`, which agy rejects as an unknown MODEL — an
+// error that blames the wrong flag and hides the real cause. Passing both
+// through unchanged lets agy report the real problem instead.
+func TestReconcileModelEffort_LeavesUnknownLevelAlone(t *testing.T) {
+	t.Parallel()
+
+	for _, level := range []string{"max", "hgih", "med", "auto", "MEDIUM"} {
+		t.Run(level, func(t *testing.T) {
+			t.Parallel()
+
+			model, effort := reconcileModelEffort("gemini-3.8-flash-medium", level)
+			assert.Equal(t, "gemini-3.8-flash-medium", model,
+				"a level agy does not spell must not be spliced into the model id")
+			assert.Equal(t, level, effort, "the effort must reach agy so its error names the right flag")
+		})
+	}
+}
+
+// TestEffectiveModel_ReportsTheRetargetedID pins that callers can learn which
+// model actually ran. Reviewer.effectiveModel is published as the review
+// envelope's model, and its doc promises "the model actually used".
+func TestEffectiveModel_ReportsTheRetargetedID(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	WithModel("gemini-3.8-flash-medium")(&cfg)
+	WithEffort("high")(&cfg)
+
+	assert.Equal(t, "gemini-3.8-flash-high", newProcessManager("hi", cfg).EffectiveModel())
+}
+
+// TestAgyEffortLevels_IsTheSingleVocabulary pins that the two views of agy's
+// reasoning vocabulary — model-id suffixes read by SplitModelEffort, and bare
+// --effort values read by isAgyEffortLevel — stay derived from one list. They
+// were briefly two separate enumerations six lines apart, which is exactly the
+// drift SplitModelEffort was exported to prevent.
+func TestAgyEffortLevels_IsTheSingleVocabulary(t *testing.T) {
+	t.Parallel()
+
+	require.NotEmpty(t, agyEffortLevels)
+	for _, level := range agyEffortLevels {
+		assert.True(t, isAgyEffortLevel(level), "%q is in the vocabulary but not accepted as an --effort value", level)
+
+		base, pinned := SplitModelEffort("some-model-" + level)
+		assert.Equal(t, "some-model", base, "%q must split off as a model-id suffix", level)
+		assert.Equal(t, level, pinned)
+	}
+
+	// Longest-first ordering is load-bearing: "-medium" must not be split as a
+	// shorter overlapping suffix.
+	_, pinned := SplitModelEffort("gemini-3.8-flash-medium")
+	assert.Equal(t, "medium", pinned)
 }

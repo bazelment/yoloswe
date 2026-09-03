@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
@@ -91,5 +93,24 @@ func TestCodeTalkCommandHelpDoesNotShowRawAPIKeyFlag(t *testing.T) {
 	help := cmd.Flags().FlagUsages()
 	if strings.Contains(help, "llm-api-key ") {
 		t.Fatalf("help output exposes hidden llm-api-key flag:\n%s", help)
+	}
+}
+
+func TestRunCodeTalkProvider_RejectsAgyCustomEndpoint(t *testing.T) {
+	t.Parallel()
+
+	err := runCodeTalkProvider(
+		context.Background(),
+		agent.ProviderAgy,
+		&codeTalkFlags{},
+		llmendpoint.Endpoint{
+			BaseURL:   "https://example.com/v1",
+			APIKeyEnv: "EXAMPLE_API_KEY",
+		},
+		t.TempDir(),
+		"explain this repository",
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not support custom LLM endpoints") {
+		t.Fatalf("runCodeTalkProvider() error = %v, want unsupported-endpoint error", err)
 	}
 }

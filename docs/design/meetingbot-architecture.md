@@ -316,7 +316,7 @@ type AgentClient interface {
 
 Production uses `ProviderAgentClient`, which dispatches through the existing
 `multiagent/agent` abstraction. That means the meeting bot reuses the repo's
-Codex, Claude, Gemini, and model registry plumbing rather than introducing a
+Codex, Claude, Agy, and model registry plumbing rather than introducing a
 new provider stack.
 
 Offline tests and deterministic evaluations use `LocalAgentClient`, which

@@ -36,7 +36,7 @@ func TestParseFlagsOptions(t *testing.T) {
 		"--until", "2026-04-23T12:00:00Z",
 		"--all",
 		"--summarize",
-		"--model", "gemini",
+		"--model", "agy",
 		"--pricing-file", "pricing.json",
 		"-n", "3",
 		"--max-rows", "7",
@@ -51,7 +51,7 @@ func TestParseFlagsOptions(t *testing.T) {
 	if cfg.summaryWordLimit != 50 || cfg.limit != 3 || cfg.statsMaxRows != 7 || cfg.minTurns != 2 || cfg.concurrency != 4 {
 		t.Fatalf("numeric config = %+v", cfg)
 	}
-	if cfg.sinceStr != "2d" || cfg.untilStr != "2026-04-23T12:00:00Z" || cfg.modelStr != "gemini" || cfg.pricingFile != "pricing.json" {
+	if cfg.sinceStr != "2d" || cfg.untilStr != "2026-04-23T12:00:00Z" || cfg.modelStr != "agy" || cfg.pricingFile != "pricing.json" {
 		t.Fatalf("string config = %+v", cfg)
 	}
 	if !cfg.jsonOutput || !cfg.verbose || !cfg.listProjects || !cfg.allProjects || !cfg.summarize || !cfg.stats || !cfg.topLevelOnly {

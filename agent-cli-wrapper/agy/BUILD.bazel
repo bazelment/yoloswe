@@ -17,7 +17,10 @@ go_library(
 
 go_test(
     name = "agy_test",
-    srcs = ["process_test.go"],
+    srcs = [
+        "process_test.go",
+        "session_test.go",
+    ],
     embed = [":agy"],
     deps = [
         "@com_github_stretchr_testify//assert",

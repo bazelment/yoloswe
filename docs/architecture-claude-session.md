@@ -30,7 +30,7 @@ highest (closest to the user):
 │       scope filtering, turn-complete signaling            │
 ├───────────────────────────────────────────────────────────┤
 │  L2  SDK Wrappers           agent-cli-wrapper/claude/     │
-│                             agent-cli-wrapper/acp/        │
+│                             agent-cli-wrapper/agy/        │
 │                             agent-cli-wrapper/codex/      │
 │       Per-CLI session, state machine, turn management,    │
 │       permission handling, MCP, recording                 │
@@ -70,15 +70,29 @@ CLI ──NDJSON──► SDK stdout    (SystemMessage, StreamEvent, AssistantMe
                                UserMessage, ResultMessage, ControlRequest)
 ```
 
-**ACP protocol flow (Gemini):**
+**ACP protocol flow (historical — removed, nothing in the repo speaks it):**
 ```
 Client ──JSON-RPC──► Agent stdin   (InitializeRequest, NewSessionRequest, PromptRequest)
 Agent  ──JSON-RPC──► Client stdout (InitializeResponse, SessionNotification, PromptResponse)
 ```
+Recorded for readers of older commits only. The `gemini --experimental-acp` CLI, the
+`agent.GeminiProvider`/`agent.NewGeminiProvider` bridge onto it, and the
+`agent-cli-wrapper/acp/` package itself have all been deleted, along with their last
+direct callers (`bramble/sessionanalysis/summarize.go`, `yoloswe/reviewer`'s gemini
+backend). The "Gemini" model IDs (`gemini-3.8-flash-*`, `gemini-3.1-pro-*`) name models
+served by the `agy` CLI and route to `AgyProvider` — a print-mode wrapper with no
+persistent session and no JSON-RPC — see L4 below.
+
+**agy print-mode flow (current):**
+```
+Wrapper ──argv──►  agy --output-format json ... -p <prompt>   (one subprocess per turn)
+Wrapper ◄──stdout── {"conversation_id":…,"status":…,"response":…,"usage":{…}}
+```
+Continuity across turns is `--conversation <id>`, not a live session.
 
 ### L2: SDK Wrappers
 
-**Packages:** `agent-cli-wrapper/claude/`, `agent-cli-wrapper/acp/`, `agent-cli-wrapper/codex/`
+**Packages:** `agent-cli-wrapper/claude/`, `agent-cli-wrapper/agy/`, `agent-cli-wrapper/codex/`
 
 **Responsibility:** Manage a single CLI subprocess, expose a typed Go API for sending
 messages, receiving events, and handling control flow (permissions, MCP, interrupts).
@@ -155,7 +169,7 @@ implements the relevant traits. The generic `bridgeEvents[E]` function reads fro
 
 ```
 claude.Event ──implements──► agentstream.Event ──bridgeEvents──► AgentEvent / EventHandler
-acp.Event    ──implements──► agentstream.Event ──bridgeEvents──► AgentEvent / EventHandler
+cursor.Event ──implements──► agentstream.Event ──bridgeEvents──► AgentEvent / EventHandler
 codex.Event  ──implements──► agentstream.Event ──bridgeEvents──► AgentEvent / EventHandler
 ```
 
@@ -163,7 +177,8 @@ codex.Event  ──implements──► agentstream.Event ──bridgeEvents─�
 - **Scope filtering:** Events implementing `Scoped` can be filtered by ID (used by
   Codex's multiplexed thread model).
 - **Turn-complete callback:** Optional `onTurnComplete` fires once on the first
-  `KindTurnComplete` event, used for synchronization (e.g., Gemini's drain pattern).
+  `KindTurnComplete` event, used for synchronization (e.g., the cursor
+  provider's bridge drain pattern).
 
 ### L4: Provider Abstraction
 
@@ -193,8 +208,25 @@ LongRunningProvider extends Provider {
 |----------|------|---------|
 | `ClaudeProvider` | `claude_provider.go` | Ephemeral `claude.Session` per Execute |
 | `ClaudeLongRunningProvider` | `claude_provider.go` | Persistent `claude.Session` |
-| `GeminiProvider` | `gemini_provider.go` | `acp.Client` with persistent bridge |
+| `AgyProvider` | `agy_provider.go` | Print-mode `agy` CLI wrapper, one `Session` per Execute; implements `Provider` only — no `LongRunningProvider` |
 | `CodexProvider` | `codex_provider.go` | `codex.Client` with thread-based execution |
+
+`GeminiProvider` (`gemini_provider.go`, ACP-backed, persistent bridge) has been
+**deleted**. `gemini-*` model IDs now route to `AgyProvider`. Two behavior gaps
+vs. the deleted Gemini provider (and vs. Claude/Codex) to be aware of:
+- `AgyProvider` emits no tool-call events (agy's print-mode wire format has only
+  `TextEvent`/`TurnCompleteEvent`/`ErrorEvent`) — no `ToolStartAgentEvent`/
+  `ToolCompleteAgentEvent`, so consumers that relied on Gemini's tool-start
+  events for file-change detection must use the git-diff workaround instead
+  (`detectFileChangesGit`, already used for Codex).
+- There is no `AgyLongRunningProvider` — agy has no persistent multi-turn
+  session concept exposed, unlike the old `GeminiLongRunningProvider`. Turn-to-
+  turn continuity is still preserved for non-long-running sessions, though:
+  `AgyProvider.Execute` returns the turn's `conversation_id` as
+  `AgentResult.SessionID`, and `providerRunner.RunTurn` (bramble/session)
+  threads it back in as the next turn's `ResumeSessionID` via
+  `--conversation`, so a bramble session driven through `providerRunner`
+  keeps its agy conversation across turns without a long-running provider.
 
 **Session wrappers (higher-level convenience):**
 | Type | File | Purpose |
@@ -224,7 +256,7 @@ the appropriate runner, routes events to display output, handles follow-up messa
 ```
 Manager.createRunner(session)
   │
-  ├─ Provider configured?  ──► providerRunner (Claude/Codex/Gemini via agent.Provider)
+  ├─ Provider configured?  ──► providerRunner (Claude/Codex/Agy via agent.Provider)
   ├─ SessionTypePlanner?   ──► plannerRunner (wraps planner.PlannerWrapper)
   └─ SessionTypeBuilder?   ──► builderRunner (wraps yoloswe.BuilderSession)
 ```
@@ -256,7 +288,7 @@ Manager ──► sessionRunner.RunTurn(ctx, message)
   │                        └─► claude.Session.Ask()
   │
   └─[providerRunner] ──► agent.Provider.Execute()
-                            └─► claude.Session.Ask()  (or acp/codex equivalent)
+                            └─► claude.Session.Ask()  (or agy/codex equivalent)
                                   │
                                   ▼
                             processManager.WriteMessage(UserMessageToSend)
@@ -429,10 +461,10 @@ implementations. The session's `handleControlRequest` becomes a one-liner delega
 
 ### Issue 5: `bramble/session` Has Direct SDK Dependencies
 
-**Problem:** `bramble/session/manager.go` imports `claude`, `acp`, `codex`, and
+**Problem:** `bramble/session/manager.go` imports `claude`, `codex`, and
 `agent` packages directly. It constructs SDK sessions inline and has provider-specific
-branching (`isClaudeModel`, `isCodexModel`, `isGeminiModel`). This means adding a new
-provider requires touching the session manager.
+branching (`isClaudeModel`, `isCodexModel`, historically `isGeminiModel`). This means
+adding a new provider requires touching the session manager.
 
 **Recommendation:** The session manager should depend only on the `Provider` interface
 (L4). Provider construction should be handled by a factory:
@@ -443,16 +475,16 @@ type ProviderFactory interface {
 }
 ```
 
-The factory encapsulates model→provider mapping (currently in `multiagent/agent/models.go`).
+The factory encapsulates model→provider mapping (currently in `multiagent/agent/model_registry.go`).
 The session manager calls `factory.Create()` and works with the resulting `Provider`
-without knowing whether it's Claude, Gemini, or Codex.
+without knowing whether it's Claude, Agy, or Codex.
 
 ---
 
 ### Issue 6: No Clear Error Contract Across Providers
 
 **Problem:** Each SDK defines its own error types (`claude.ProcessError`,
-`acp.RPCError`, `codex.ProcessError`) with different recoverability semantics.
+`agy.ProcessError`, `codex.ProcessError`) with different recoverability semantics.
 The provider layer has no common error taxonomy.
 
 **Recommendation:** Define provider-level error categories:
@@ -475,7 +507,8 @@ Each provider maps its SDK-specific errors to these categories. Upper layers
 **Problem:** Three near-identical state machines exist:
 
 - `claude/state.go`: `Uninitialized→Starting→Ready⇆Processing→Closed`
-- `acp/state.go`: Client (`Uninitialized→Starting→Ready→Closed`) + Session (`Created→Ready⇆Processing→Closed`)
+- `codex/state.go` and `claude/state.go` are the remaining state machines; the
+  print-mode `agy` wrapper has none (one subprocess per turn, no session state)
 - `codex/state.go`: Client + Thread state machines
 
 Each has its own `sync.RWMutex`, transition table, and error handling.
@@ -533,7 +566,7 @@ the session wrapper, not at the call site.
 │       Runs inside provider, not exposed to upper layers          │
 ├──────────────────────────────────────────────────────────────────┤
 │  L2  SDK Wrappers (unchanged, internal to each provider impl)    │
-│       claude.Session, acp.Client, codex.Client                   │
+│       claude.Session, agy.Session, codex.Client                  │
 │       ControlDispatcher for permission/MCP/interactive tools     │
 │       Generic StateMachine[S]                                    │
 ├──────────────────────────────────────────────────────────────────┤
@@ -591,11 +624,9 @@ The improvements can be implemented incrementally without breaking existing code
 - `agent-cli-wrapper/claude/session_options.go` — Functional options
 - `agent-cli-wrapper/claude/mcp.go` — MCP configuration
 - `agent-cli-wrapper/claude/sdk_mcp.go` — SDK tool handler interface
-- `agent-cli-wrapper/acp/client.go` — ACP/Gemini client
-- `agent-cli-wrapper/acp/session.go` — ACP session
-- `agent-cli-wrapper/acp/protocol.go` — ACP JSON-RPC protocol
-- `agent-cli-wrapper/acp/state.go` — ACP state machines
-- `agent-cli-wrapper/acp/handlers.go` — FS/Terminal/Permission handlers
+- `agent-cli-wrapper/agy/session.go` — agy print-mode session (one subprocess per turn)
+- `agent-cli-wrapper/agy/process.go` — agy argv construction and subprocess execution
+- `agent-cli-wrapper/agy/events.go` — agy events (`TextEvent`/`TurnCompleteEvent`/`ErrorEvent`)
 - `agent-cli-wrapper/codex/client.go` — Codex client
 - `agent-cli-wrapper/codex/state.go` — Codex state machines
 
@@ -606,7 +637,7 @@ The improvements can be implemented incrementally without breaking existing code
 ### L4 Provider Abstraction
 - `multiagent/agent/provider.go` — Provider interface, AgentEvent types, EventHandler
 - `multiagent/agent/claude_provider.go` — Claude provider implementations
-- `multiagent/agent/gemini_provider.go` — Gemini provider
+- `multiagent/agent/agy_provider.go` — Agy provider (replaces the deleted `gemini_provider.go`; print-mode CLI wrapper, no `LongRunningProvider`, no tool-call events)
 - `multiagent/agent/codex_provider.go` — Codex provider
 - `multiagent/agent/session.go` — LongRunningSession, EphemeralSession
 

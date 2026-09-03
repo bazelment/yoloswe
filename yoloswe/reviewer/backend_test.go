@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/cursor"
@@ -141,14 +140,13 @@ func TestProtocolErrorLine_ExtractsAndBounds(t *testing.T) {
 		}
 	})
 
-	t.Run("covers all four backends", func(t *testing.T) {
+	t.Run("covers all three backends", func(t *testing.T) {
 		// The contract is only useful if every backend that carries a Line
 		// implements it. claude was missed on the first pass and its parse
-		// errors reach the same sink, so pin all four.
+		// errors reach the same sink, so pin all three.
 		for name, err := range map[string]error{
 			"cursor": &cursor.ProtocolError{Message: "m", Line: `{"k":1}`},
 			"codex":  &codex.ProtocolError{Message: "m", Line: `{"k":1}`},
-			"acp":    &acp.ProtocolError{Message: "m", Line: `{"k":1}`},
 			"claude": &claude.ProtocolError{Message: "m", Line: `{"k":1}`},
 		} {
 			if _, _, ok := protocolErrorLine(err); !ok {
@@ -202,7 +200,7 @@ func TestProtocolErrorLine_ExtractsAndBounds(t *testing.T) {
 		if _, _, ok := protocolErrorLine(errors.New("plain")); ok {
 			t.Error("a non-protocol error must not report a line")
 		}
-		if _, _, ok := protocolErrorLine(&acp.ProtocolError{Message: "no line"}); ok {
+		if _, _, ok := protocolErrorLine(&claude.ProtocolError{Message: "no line"}); ok {
 			t.Error("an empty Line must be reported absent, not as an empty field")
 		}
 	})

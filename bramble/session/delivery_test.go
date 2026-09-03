@@ -571,7 +571,7 @@ func TestAFailedCaptureYieldsForClaude(t *testing.T) {
 	require.Empty(t, target.markedRunning, "and no turn was started")
 }
 
-// TestAFailedCaptureStillHintsWhereNoGuardApplies is the other half: gemini has
+// TestAFailedCaptureStillHintsWhereNoGuardApplies is the other half: agy has
 // neither an idle probe nor a readable composer, so no guard would have
 // consulted the capture. Yielding there would withhold every hint from those
 // providers for no protection — the capture is skipped, not failed.
@@ -579,7 +579,7 @@ func TestAFailedCaptureStillHintsWhereNoGuardApplies(t *testing.T) {
 	t.Parallel()
 	target := newFakeTarget()
 	target.set("parent", StatusIdle, RunnerTypeTmux)
-	target.setBackend("parent", "gemini", "gemini-3-flash-preview")
+	target.setBackend("parent", "agy", "gemini-3.8-flash-low")
 	target.setChild("child", "parent", StatusIdle, RunnerTypeTmux)
 	target.captureErr = fmt.Errorf("pane is gone")
 	panes := &fakePanes{}

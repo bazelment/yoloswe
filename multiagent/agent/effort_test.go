@@ -3,12 +3,13 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
@@ -82,9 +83,9 @@ func TestClaudeEffortLevel_MapsAllLevels(t *testing.T) {
 // When a provider is added, this table forces a deliberate choice
 // rather than another silent ignore.
 //
-// Claude and Codex accept all five levels; Cursor, Gemini, and agy reject any
-// explicit non-auto effort with ErrEffortUnsupported. EffortAuto and empty
-// effort both mean "use the provider default" and are never rejected.
+// Claude, Codex, and Agy accept all five levels; Cursor rejects any explicit
+// non-auto effort with ErrEffortUnsupported. EffortAuto and empty effort both
+// mean "use the provider default" and are never rejected.
 // (Invalid string parsing is covered by TestParseEffort_RejectsInvalidLevels
 // — providers receive a validated EffortLevel and trust the boundary.)
 func TestProviderEffortMatrix(t *testing.T) {
@@ -96,9 +97,9 @@ func TestProviderEffortMatrix(t *testing.T) {
 	// satisfy fieldalignment.
 	type providerCase struct {
 		// run returns the error a provider produces for the given effort
-		// level. For Claude/Codex we exercise the option-builder paths
-		// (no subprocess); for Cursor/Gemini we call Execute directly
-		// because the early-return happens before any subprocess work.
+		// level. For Claude/Codex/Agy we exercise the option-builder paths
+		// (no subprocess); for Cursor we call Execute directly because the
+		// early-return happens before any subprocess work.
 		run  func(t *testing.T, level EffortLevel) error
 		name string
 	}
@@ -134,23 +135,39 @@ func TestProviderEffortMatrix(t *testing.T) {
 			},
 		},
 		{
-			name: "gemini",
-			run: func(t *testing.T, level EffortLevel) error {
-				t.Helper()
-				p := NewGeminiProvider(acp.WithBinaryPath("missing-gemini-effort-test-binary"))
-				defer p.Close()
-				_, err := p.Execute(context.Background(), "ignored", nil, WithProviderEffort(level))
-				return err
-			},
-		},
-		{
 			name: "agy",
 			run: func(t *testing.T, level EffortLevel) error {
 				t.Helper()
-				p := NewAgyProvider(agy.WithCLIPath("missing-agy-effort-test-binary"))
-				defer p.Close()
-				_, err := p.Execute(context.Background(), "ignored", nil, WithProviderEffort(level))
-				return err
+				if level == "" {
+					return nil
+				}
+				// Assert the level actually reaches the agy command line
+				// rather than discarding the mapping: re-adding an
+				// ErrEffortUnsupported guard, or dropping the WithEffort
+				// wiring, must fail this entry.
+				//
+				// Run it with a curated model too. agy encodes the level in
+				// the model id, so effort survives there as a suffix rather
+				// than as --effort; a level that reaches neither has been
+				// silently dropped, which is what this table exists to catch.
+				for _, model := range []string{"", "gemini-3.8-flash-low"} {
+					var got agy.SessionConfig
+					for _, opt := range agySessionOpts(ExecuteConfig{Model: model, Effort: level}) {
+						opt(&got)
+					}
+					if err := reconcileAgyEffort(&got); err != nil {
+						return err
+					}
+					if level == EffortAuto {
+						continue
+					}
+					want := agyEffortLevel(level)
+					if got.Effort != want && !strings.HasSuffix(got.Model, "-"+want) {
+						return fmt.Errorf("agy dropped effort %q for model %q: got model=%q effort=%q",
+							level, model, got.Model, got.Effort)
+					}
+				}
+				return nil
 			},
 		},
 	}
@@ -161,16 +178,16 @@ func TestProviderEffortMatrix(t *testing.T) {
 			t.Parallel()
 
 			// Empty effort is always a success no-op for the effort path.
-			// (Cursor/Gemini may still fail downstream when the subprocess
-			// can't start in the test environment — we explicitly skip
-			// those providers' empty-effort case to keep the matrix focused
-			// on effort behavior.)
-			if prov.name == "claude" || prov.name == "codex" {
+			// (Cursor may still fail downstream when the subprocess can't
+			// start in the test environment — we explicitly skip its
+			// empty-effort case to keep the matrix focused on effort
+			// behavior.)
+			if prov.name == "claude" || prov.name == "codex" || prov.name == "agy" {
 				err := prov.run(t, "")
 				assert.NoError(t, err, "empty effort should be a no-op")
 			}
 
-			noKnobProvider := prov.name == "cursor" || prov.name == "gemini" || prov.name == "agy"
+			noKnobProvider := prov.name == "cursor"
 			for _, level := range validLevels {
 				err := prov.run(t, level)
 				// EffortAuto means "use provider default" — a no-knob
@@ -230,14 +247,60 @@ func TestProviderSupportsEffort(t *testing.T) {
 		{ProviderClaude, true},
 		{ProviderCodex, true},
 		{ProviderCursor, false},
-		{ProviderGemini, false},
-		{ProviderAgy, false},
+		{ProviderAgy, true},
 		{"unknown-provider", false},
 	} {
 		tc := tc
 		t.Run(tc.provider, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.want, ProviderSupportsEffort(tc.provider))
+		})
+	}
+}
+
+// agy's effort support is model-scoped, not provider-scoped: its catalog is an
+// incomplete matrix, so a specific model can refuse a specific level. Callers
+// holding one model ID need that answer, not the provider-wide one.
+func TestModelSupportsEffort(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		model string
+		level EffortLevel
+		want  bool
+	}{
+		// Non-agy providers answer exactly as ProviderSupportsEffort does.
+		{model: "sonnet", level: EffortHigh, want: true},
+		{model: "gpt-5.5", level: EffortHigh, want: true},
+		{model: "composer-2.5", level: EffortHigh, want: false},
+
+		// agy models the catalog can serve.
+		{model: "gemini-3.8-flash-low", level: EffortHigh, want: true},
+		{model: "gemini-3.8-flash-low", level: EffortMedium, want: true},
+		{model: "gemini-3.1-pro-high", level: EffortLow, want: true},
+		{model: "gemini-3.1-pro-low", level: EffortLow, want: true},
+
+		// gemini-3.1-pro ships -low and -high but no -medium.
+		{model: "gemini-3.1-pro-high", level: EffortMedium, want: false},
+		{model: "gemini-3.1-pro-low", level: EffortMedium, want: false},
+
+		// EffortMax clamps to high, which both pro variants can serve.
+		{model: "gemini-3.1-pro-low", level: EffortMax, want: true},
+
+		// Auto never needs a variant, and an unpinned agy ID is unconstrained.
+		{model: "gemini-3.1-pro-high", level: EffortAuto, want: true},
+		{model: "agy-default", level: EffortMedium, want: true},
+
+		// Uncurated IDs: this list is not the authority on what agy can run.
+		{model: "gemini-9.9-flash-low", level: EffortMedium, want: true},
+
+		// A model no rule can route at all.
+		{model: "totally-unknown-model", level: EffortHigh, want: false},
+	} {
+		tc := tc
+		t.Run(tc.model+"/"+string(tc.level), func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, ModelSupportsEffort(tc.model, tc.level))
 		})
 	}
 }

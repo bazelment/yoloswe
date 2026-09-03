@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -31,6 +33,94 @@ func newProcessManager(prompt string, config SessionConfig) *processManager {
 	}
 }
 
+// agyEffortLevels is the reasoning vocabulary agy accepts, in the order the
+// model-id split must try them: longest first, so "-medium" matches before any
+// shorter overlap. This slice is the single owner of the set - SplitModelEffort
+// reads it as id suffixes and isAgyEffortLevel as bare --effort values, so the
+// two cannot disagree about which levels exist.
+var agyEffortLevels = []string{"medium", "high", "low"}
+
+// SplitModelEffort separates an agy model id from the reasoning level it pins.
+// agy's catalog spells the level as a trailing -low/-medium/-high
+// (gemini-3.8-flash-low, gemini-3.1-pro-high, ...). pinned is empty when the id
+// leaves the level open.
+//
+// Exported as the single owner of this spelling rule: multiagent/agent's
+// catalog-aware reconciliation needs the same split, and two copies of "how an
+// agy id encodes its level" would be free to drift.
+func SplitModelEffort(model string) (base, pinned string) {
+	for _, level := range agyEffortLevels {
+		suffix := "-" + level
+		if strings.HasSuffix(model, suffix) {
+			return strings.TrimSuffix(model, suffix), level
+		}
+	}
+	return model, ""
+}
+
+// reconcileModelEffort settles the two ways one agy command line can carry a
+// reasoning level, so that exactly one representation reaches the CLI.
+//
+// agy encodes the level in the model id AND offers a separate --effort flag,
+// and rejects a command line carrying two that disagree:
+//
+//	Error: invalid model selection (--model "gemini-3.8-flash-medium"
+//	--effort "high"): --model gemini-3.8-flash-medium conflicts with --effort=high
+//
+// This runs in BuildCLIArgs because that is the single producer of the argv:
+// every caller reaching the agy CLI goes through it, so none of them can
+// assemble a self-conflicting command line. It resolves the conflict the way
+// the caller asked for - the requested effort wins by RETARGETING the model id
+// to the variant that encodes it, never by silently dropping the request - and
+// then drops the now-redundant --effort.
+//
+// The decision is purely SYNTACTIC, which is what keeps it here: whether an id
+// pins a level is a property of its spelling, so this wrapper needs no model
+// catalog and stays free of any dependency on the higher-level registry.
+// Whether the retargeted variant actually EXISTS is a catalog question this
+// layer cannot answer; multiagent/agent's reconcileAgyEffort owns that, and
+// rejects an unrepresentable pair up front with ErrEffortUnsupported. When a
+// caller has already reconciled, this is a no-op (the pinned level and the
+// requested effort agree, so only the model survives). For a caller that has
+// not, the retarget is taken optimistically and agy itself judges the result -
+// strictly better than shipping a command line already known to be rejected.
+func reconcileModelEffort(model, effort string) (string, string) {
+	if model == "" || effort == "" {
+		return model, effort
+	}
+	base, pinned := SplitModelEffort(model)
+	if pinned == "" {
+		// Nothing pinned by the model: --effort alone carries the level.
+		return model, effort
+	}
+	if pinned == effort {
+		return model, "" // Same level twice; keep one representation.
+	}
+	if !isAgyEffortLevel(effort) {
+		// Not a level agy spells, so there is no variant to retarget onto and
+		// splicing it in would forge a model id that does not exist
+		// ("gemini-3.8-flash-max"). agy would then reject the MODEL, hiding
+		// that the effort was the bad input. Leave both as the caller set them
+		// and let agy report the real problem against the real flag.
+		return model, effort
+	}
+	return base + "-" + effort, ""
+}
+
+// isAgyEffortLevel reports whether level is one agy spells, i.e. one that has a
+// model-id variant to retarget onto. agy's --effort flag documents exactly
+// low|medium|high, which is what agyEffortLevels holds.
+func isAgyEffortLevel(level string) bool {
+	return slices.Contains(agyEffortLevels, level)
+}
+
+// EffectiveModel is the model id BuildCLIArgs actually passes to agy, after
+// reconciliation. It is what callers should report as "the model we ran".
+func (pm *processManager) EffectiveModel() string {
+	model, _ := reconcileModelEffort(pm.config.Model, pm.config.Effort)
+	return model
+}
+
 // BuildCLIArgs builds the agy print-mode argument list.
 //
 // Two agy argument rules shape this list (verified against agy 1.1.24):
@@ -49,14 +139,21 @@ func newProcessManager(prompt string, config SessionConfig) *processManager {
 // below is not a correctness fix. Emitting every flag - ExtraArgs included -
 // before the trailing `-p <prompt>` pair keeps the list in one canonical
 // shape, which is what the argument-order tests pin. Keep -p <prompt> last.
+//
+// JSON output provides conversation_id and usage without changing event timing:
+// this wrapper already buffers the entire print-mode response before emitting it.
+//
+// It also reconciles --model against --effort so the level reaches agy exactly
+// once; see reconcileModelEffort.
 func (pm *processManager) BuildCLIArgs() []string {
-	var args []string
+	args := []string{"--output-format", "json"}
 
-	if pm.config.Model != "" {
-		args = append(args, "--model", pm.config.Model)
+	model, effort := reconcileModelEffort(pm.config.Model, pm.config.Effort)
+	if model != "" {
+		args = append(args, "--model", model)
 	}
-	if pm.config.Effort != "" {
-		args = append(args, "--effort", pm.config.Effort)
+	if effort != "" {
+		args = append(args, "--effort", effort)
 	}
 	if pm.config.PrintTimeout > 0 {
 		args = append(args, "--print-timeout", formatDuration(pm.config.PrintTimeout))

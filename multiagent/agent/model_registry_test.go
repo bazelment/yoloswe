@@ -23,7 +23,6 @@ func TestModelRegistry_AllInstalled(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  true,
-		ProviderGemini: true,
 		ProviderCursor: true,
 		ProviderAgy:    true,
 	})
@@ -35,7 +34,6 @@ func TestModelRegistry_OnlyClaude(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  false,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -45,25 +43,24 @@ func TestModelRegistry_OnlyClaude(t *testing.T) {
 	}
 	assert.True(t, reg.HasProvider(ProviderClaude))
 	assert.False(t, reg.HasProvider(ProviderCodex))
-	assert.False(t, reg.HasProvider(ProviderGemini))
+	assert.False(t, reg.HasProvider(ProviderAgy))
 }
 
 func TestModelRegistry_FilteredCycling(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  false,
-		ProviderGemini: true,
 		ProviderCursor: false,
-		ProviderAgy:    false,
+		ProviderAgy:    true,
 	})
 	reg := NewModelRegistry(avail, nil)
 
-	// Cycling from last claude model should skip codex and go to gemini
+	// Cycling from last claude model should skip codex and go to agy
 	next := reg.NextModel("claude-haiku-4-5")
-	assert.Equal(t, "gemini-3.1-pro-preview", next.ID)
+	assert.Equal(t, "gemini-3.8-flash-high", next.ID)
 
-	// Cycling from last gemini model should wrap to first claude (cursor not installed)
-	next = reg.NextModel("gemini-2.5-flash-lite")
+	// Cycling from last agy model should wrap to first claude (cursor not installed)
+	next = reg.NextModel("agy-default")
 	assert.Equal(t, "opus", next.ID)
 }
 
@@ -71,7 +68,6 @@ func TestModelRegistry_NotFoundReturnsFirst(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  false,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -84,7 +80,6 @@ func TestModelRegistry_EmptyFallback(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: false,
 		ProviderCodex:  false,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -109,9 +104,8 @@ func TestModelRegistry_RebuildWithEnabled(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  true,
-		ProviderGemini: true,
 		ProviderCursor: false,
-		ProviderAgy:    false,
+		ProviderAgy:    true,
 	})
 
 	reg := NewModelRegistry(avail, []string{ProviderClaude})
@@ -125,29 +119,27 @@ func TestModelRegistry_RebuildWithEnabled(t *testing.T) {
 	reg.Rebuild(avail, []string{ProviderClaude, ProviderCodex})
 	assert.True(t, reg.HasProvider(ProviderClaude))
 	assert.True(t, reg.HasProvider(ProviderCodex))
-	assert.False(t, reg.HasProvider(ProviderGemini))
+	assert.False(t, reg.HasProvider(ProviderAgy))
 }
 
 func TestModelRegistry_InstalledButNotEnabled(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  true,
-		ProviderGemini: true,
 		ProviderCursor: false,
-		ProviderAgy:    false,
+		ProviderAgy:    true,
 	})
-	// Only enable gemini
-	reg := NewModelRegistry(avail, []string{ProviderGemini})
+	// Only enable agy
+	reg := NewModelRegistry(avail, []string{ProviderAgy})
 	assert.False(t, reg.HasProvider(ProviderClaude))
 	assert.False(t, reg.HasProvider(ProviderCodex))
-	assert.True(t, reg.HasProvider(ProviderGemini))
+	assert.True(t, reg.HasProvider(ProviderAgy))
 }
 
 func TestModelRegistry_ModelByID(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  false,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -165,7 +157,6 @@ func TestModelRegistry_FirstModelForProvider(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  true,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -175,7 +166,7 @@ func TestModelRegistry_FirstModelForProvider(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "gpt-5.5", m.ID)
 
-	_, ok = reg.FirstModelForProvider(ProviderGemini)
+	_, ok = reg.FirstModelForProvider(ProviderAgy)
 	assert.False(t, ok)
 }
 
@@ -210,7 +201,7 @@ func TestProviderForModelID(t *testing.T) {
 		{"gpt-5.5", ProviderCodex, true},
 		// Prefix-only matches (forward-compat IDs not in AllModels)
 		{"gpt-future-9000", ProviderCodex, true},
-		{"gemini-99-ultra", ProviderGemini, true},
+		{"gemini-99-ultra", ProviderAgy, true},
 		{"cursor-fast", ProviderCursor, true},
 		{"composer-3", ProviderCursor, true},
 		{"agy-pro", ProviderAgy, true},
@@ -245,7 +236,7 @@ func TestProviderByModelPrefix(t *testing.T) {
 		ok       bool
 	}{
 		{"gpt-future-9000", ProviderCodex, true},
-		{"gemini-99-ultra", ProviderGemini, true},
+		{"gemini-99-ultra", ProviderAgy, true},
 		{"cursor-fast", ProviderCursor, true},
 		{"composer-3", ProviderCursor, true},
 		{"agy-pro", ProviderAgy, true},
@@ -324,13 +315,14 @@ func TestCLIModelArg(t *testing.T) {
 	assert.Equal(t, "", CLIModelArg("opus", ProviderCursor))
 	assert.Equal(t, "", CLIModelArg("gpt-5.5", ProviderCursor))
 	assert.Equal(t, "", CLIModelArg("claude-fable-5", ProviderCodex))
+	assert.Equal(t, "", CLIModelArg("gemini-3.8-flash-high", ProviderCursor))
 	// A model matched to its own provider passes through.
 	assert.Equal(t, "opus", CLIModelArg("opus", ProviderClaude))
 	assert.Equal(t, "gpt-5.5", CLIModelArg("gpt-5.5", ProviderCodex))
 	// Anything the curated list does not name passes through untouched. This is
 	// load-bearing, not laziness: cursor is a gateway that sells other vendors'
 	// models under their own names, so a prefix rule would read these as
-	// "belongs to claude/codex/gemini" and silently discard a model the user
+	// "belongs to claude/codex/agy" and silently discard a model the user
 	// named. `agent --list-models` returns all four of these.
 	assert.Equal(t, "composer-2.5", CLIModelArg("composer-2.5", ProviderCursor))
 	assert.Equal(t, "claude-opus-5-thinking-high", CLIModelArg("claude-opus-5-thinking-high", ProviderCursor))
@@ -352,6 +344,81 @@ func TestAllModels_PlaceholderIDsAreMarked(t *testing.T) {
 			assert.True(t, m.Placeholder, "%q looks like a placeholder ID but is not marked", m.ID)
 		} else {
 			assert.False(t, m.Placeholder, "%q is marked placeholder but names a real model", m.ID)
+		}
+	}
+}
+
+// An uncurated but well-formed model id must reach the provider its prefix rule
+// names, and must reach it consistently: ExecuteWithFiles picks the provider and
+// executeWithProvider builds it, and if those two disagree the id runs through
+// the wrong CLI. This PR narrowed the curated gemini-* set to level-suffixed ids
+// (gemini-3.8-flash-low and friends), so previously-curated ids like
+// gemini-2.5-pro now resolve only by prefix — exactly the case an exact-match
+// lookup drops on the floor and silently routes to Claude.
+func TestResolveModel_UncuratedGeminiIDsRouteToAgy(t *testing.T) {
+	for _, id := range []string{
+		"gemini-2.5-pro",         // curated before this PR, prefix-only now
+		"gemini-3.1-pro-preview", // ditto
+		"gemini-4-flash",         // never curated; forward-compat
+	} {
+		if _, exact := ModelByID(id); exact {
+			t.Fatalf("%s is curated; pick an id that is not, or this proves nothing", id)
+		}
+		m, ok := ResolveModel(id)
+		if !ok {
+			t.Fatalf("ResolveModel(%q) failed; the gemini- prefix rule should serve it", id)
+		}
+		if m.Provider != ProviderAgy {
+			t.Fatalf("ResolveModel(%q).Provider = %q, want %q", id, m.Provider, ProviderAgy)
+		}
+	}
+}
+
+// The routing invariant: the provider chosen to run a model and the provider
+// built to execute it come from ONE resolution, so an uncurated id cannot be
+// selected by one rule and constructed by another.
+//
+// The regression this guards is specific. This PR narrowed the curated gemini-*
+// set to level-suffixed ids, so ids that used to be in AllModels (gemini-2.5-pro,
+// gemini-3.1-pro-preview) now resolve only by the gemini- prefix rule. An
+// exact-match lookup returns false for them, and the caller's default is Claude
+// — so these run through the Claude CLI instead of agy, silently.
+func TestResolveExecutionModel_UncuratedGeminiIDsRunOnAgy(t *testing.T) {
+	for _, id := range []string{
+		"gemini-2.5-pro",         // curated before this PR, prefix-only now
+		"gemini-3.1-pro-preview", // ditto
+		"gemini-4-flash",         // never curated; forward-compat
+	} {
+		if _, exact := ModelByID(id); exact {
+			t.Fatalf("%s is curated; this test needs an uncurated id to prove anything", id)
+		}
+
+		m, useProvider := resolveExecutionModel(id)
+		if !useProvider {
+			t.Fatalf("resolveExecutionModel(%q) fell through to Claude; agy serves this id", id)
+		}
+		if m.Provider != ProviderAgy {
+			t.Fatalf("resolveExecutionModel(%q).Provider = %q, want %q", id, m.Provider, ProviderAgy)
+		}
+
+		// The same resolution must build the provider executeWithProvider uses.
+		p, err := NewProviderForModel(m)
+		if err != nil {
+			t.Fatalf("NewProviderForModel(%q): %v", id, err)
+		}
+		if _, isAgy := p.(*AgyProvider); !isAgy {
+			t.Fatalf("model %q built a %T; selection and construction disagree", id, p)
+		}
+		_ = p.Close()
+	}
+}
+
+// Claude-provider ids must still take the Claude path, and an id nothing
+// resolves must too (its CLI reports the bad name better than a guess here).
+func TestResolveExecutionModel_ClaudeAndUnresolvableTakeTheClaudePath(t *testing.T) {
+	for _, id := range []string{"opus", "sonnet", "claude-4-imaginary", "totally-unknown-model"} {
+		if _, useProvider := resolveExecutionModel(id); useProvider {
+			t.Fatalf("resolveExecutionModel(%q) routed away from Claude", id)
 		}
 	}
 }

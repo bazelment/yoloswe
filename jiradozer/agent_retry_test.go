@@ -320,6 +320,49 @@ func TestRunAgent_OutOfCredits_ExecuteErrorPath_FallsBack(t *testing.T) {
 	require.Empty(t, fallback.resumeSession[0], "fallback must start a fresh session")
 }
 
+// TestRunAgent_OutOfCredits_FallbackDropsUnservableEffort guards F14: the
+// fallback path must ask ModelSupportsEffort about the exact (model, level)
+// pair, not ProviderSupportsEffort about the provider alone. agy's own
+// ProviderSupportsEffort is true, but its catalog is not a full cross
+// product — gemini-3.1-pro ships -low/-high but no -medium — so a naive
+// provider-level check would carry "medium" onto the fallback, which
+// AgyProvider then rejects with ErrEffortUnsupported and turns a rescue
+// fallback into exactly the terminal error the surrounding comment exists to
+// prevent. A regression back to the provider-level check makes this test
+// fail with that error instead of reaching the fallback's fake success.
+func TestRunAgent_OutOfCredits_FallbackDropsUnservableEffort(t *testing.T) {
+	primary := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{
+			{Success: false, SessionID: "sess-primary", Error: &codex.TurnError{Message: "Your workspace is out of credits. Ask your workspace owner to refill."}},
+		},
+		errs: []error{nil},
+	}
+	fallback := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{
+			{Success: true, SessionID: "sess-fallback", Text: "done on fallback"},
+		},
+		errs: []error{nil},
+	}
+	newProvider, order := providersByModel(t, map[string]*fakeRetryProvider{
+		"gpt-5.5":             primary,
+		"gemini-3.1-pro-high": fallback,
+	})
+	runner := agentRunner{newProviderForModel: newProvider, retryBackoffs: []time.Duration{0}}
+
+	got, err := runner.runAgent(context.Background(), "ship", "prompt", StepConfig{
+		Model:            "gpt-5.5",
+		FallbackModels:   []string{"gemini-3.1-pro-high"},
+		Effort:           "medium",
+		TransientRetries: 2,
+	}, t.TempDir(), "resume-orig", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, "done on fallback", got.Output)
+	require.Equal(t, []string{"gpt-5.5", "gemini-3.1-pro-high"}, *order, "both models tried in order")
+
+	require.Len(t, fallback.effortSeen, 1)
+	require.Empty(t, fallback.effortSeen[0], "medium must be dropped: gemini-3.1-pro has no -medium variant")
+}
+
 func TestRunAgent_OutOfCredits_NoFallbackConfigured_Fails(t *testing.T) {
 	primary := &fakeRetryProvider{
 		results: []*agentpkg.AgentResult{

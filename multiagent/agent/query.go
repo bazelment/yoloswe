@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
@@ -19,8 +18,6 @@ func NewProviderForModel(m AgentModel) (Provider, error) {
 	switch m.Provider {
 	case ProviderClaude:
 		return NewClaudeProvider(), nil
-	case ProviderGemini:
-		return NewGeminiProvider(acp.WithBinaryArgs("--experimental-acp", "--model", m.ID)), nil
 	case ProviderCodex:
 		return NewCodexProvider(), nil
 	case ProviderCursor:

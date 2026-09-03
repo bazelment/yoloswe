@@ -8,7 +8,7 @@ import (
 // AgentModel describes a model available for session execution.
 type AgentModel struct {
 	ID       string // Model identifier passed to --model flag (e.g. "opus", "gpt-5.5")
-	Provider string // Binary/provider name: "claude", "codex", "gemini", etc.
+	Provider string // Binary/provider name: "claude", "codex", "agy", etc.
 	Label    string // Display label for the UI (e.g. "opus (claude)")
 	// Placeholder marks an ID that names no real model — it is bramble's own
 	// label for "let this provider's CLI pick its default". Such an ID must
@@ -63,12 +63,11 @@ var AllModels = []AgentModel{
 	{ID: "gpt-5.5", Provider: ProviderCodex, Label: "gpt-5.5"},
 	{ID: "gpt-5.4", Provider: ProviderCodex, Label: "gpt-5.4"},
 	{ID: "gpt-5.4-mini", Provider: ProviderCodex, Label: "gpt-5.4-mini"},
-	{ID: "gemini-3.1-pro-preview", Provider: ProviderGemini, Label: "gemini-3.1-pro-preview"},
-	{ID: "gemini-3-pro-preview", Provider: ProviderGemini, Label: "gemini-3-pro-preview"},
-	{ID: "gemini-3-flash-preview", Provider: ProviderGemini, Label: "gemini-3-flash-preview"},
-	{ID: "gemini-2.5-pro", Provider: ProviderGemini, Label: "gemini-2.5-pro"},
-	{ID: "gemini-2.5-flash", Provider: ProviderGemini, Label: "gemini-2.5-flash"},
-	{ID: "gemini-2.5-flash-lite", Provider: ProviderGemini, Label: "gemini-2.5-flash-lite"},
+	{ID: "gemini-3.8-flash-high", Provider: ProviderAgy, Label: "gemini-3.8-flash-high"},
+	{ID: "gemini-3.8-flash-medium", Provider: ProviderAgy, Label: "gemini-3.8-flash-medium"},
+	{ID: "gemini-3.8-flash-low", Provider: ProviderAgy, Label: "gemini-3.8-flash-low"},
+	{ID: "gemini-3.1-pro-high", Provider: ProviderAgy, Label: "gemini-3.1-pro-high"},
+	{ID: "gemini-3.1-pro-low", Provider: ProviderAgy, Label: "gemini-3.1-pro-low"},
 	{ID: "cursor-default", Provider: ProviderCursor, Label: "cursor-default", Placeholder: true},
 	{ID: "agy-default", Provider: ProviderAgy, Label: "agy-default", Placeholder: true},
 }
@@ -112,7 +111,7 @@ var modelPrefixRules = []struct {
 	provider string
 }{
 	{"gpt-", ProviderCodex},
-	{"gemini-", ProviderGemini},
+	{"gemini-", ProviderAgy},
 	{"cursor-", ProviderCursor},
 	{"composer-", ProviderCursor},
 	{"agy-", ProviderAgy},

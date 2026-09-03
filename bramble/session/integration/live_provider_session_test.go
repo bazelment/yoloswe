@@ -23,7 +23,7 @@ import (
 // Manual run examples:
 //
 //	BRAMBLE_LIVE_PROVIDER=codex bazel test //bramble/session/integration:integration_test --test_timeout=600 --test_filter=TestLiveProvider_NonTmuxSessionRendersAgentResponse
-//	BRAMBLE_LIVE_PROVIDER=gemini bazel test //bramble/session/integration:integration_test --test_timeout=600 --test_filter=TestLiveProvider_NonTmuxSessionRendersAgentResponse
+//	BRAMBLE_LIVE_PROVIDER=agy bazel test //bramble/session/integration:integration_test --test_timeout=600 --test_filter=TestLiveProvider_NonTmuxSessionRendersAgentResponse
 //
 // Optional:
 //
@@ -31,7 +31,7 @@ import (
 func TestLiveProvider_NonTmuxSessionRendersAgentResponse(t *testing.T) {
 	provider := strings.ToLower(strings.TrimSpace(os.Getenv("BRAMBLE_LIVE_PROVIDER")))
 	if provider == "" {
-		t.Skip("set BRAMBLE_LIVE_PROVIDER=codex or gemini to run this manual live-provider test")
+		t.Skip("set BRAMBLE_LIVE_PROVIDER=codex or agy to run this manual live-provider test")
 	}
 
 	model := strings.TrimSpace(os.Getenv("BRAMBLE_LIVE_MODEL"))
@@ -41,13 +41,13 @@ func TestLiveProvider_NonTmuxSessionRendersAgentResponse(t *testing.T) {
 			model = "gpt-5.5"
 		}
 		requireBinary(t, "codex")
-	case session.ProviderGemini:
+	case session.ProviderAgy:
 		if model == "" {
-			model = "gemini-2.5-flash"
+			model = "gemini-3.8-flash-low"
 		}
-		requireBinary(t, "gemini")
+		requireBinary(t, "agy")
 	default:
-		t.Fatalf("unsupported BRAMBLE_LIVE_PROVIDER=%q; expected codex or gemini", provider)
+		t.Fatalf("unsupported BRAMBLE_LIVE_PROVIDER=%q; expected codex or agy", provider)
 	}
 
 	workDir := t.TempDir()
@@ -81,10 +81,10 @@ func TestLiveProvider_NonTmuxSessionRendersAgentResponse(t *testing.T) {
 		matches, err := filepath.Glob(filepath.Join(logDir, "*-codex.protocol.jsonl"))
 		require.NoError(t, err)
 		require.NotEmpty(t, matches, "expected Codex protocol logs in %s", logDir)
-	case session.ProviderGemini:
-		matches, err := filepath.Glob(filepath.Join(logDir, "*-gemini.stderr.log"))
+	case session.ProviderAgy:
+		matches, err := filepath.Glob(filepath.Join(logDir, "*-agy.stderr.log"))
 		require.NoError(t, err)
-		require.NotEmpty(t, matches, "expected Gemini stderr logs in %s", logDir)
+		require.NotEmpty(t, matches, "expected agy stderr logs in %s", logDir)
 	}
 }
 

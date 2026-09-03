@@ -55,7 +55,7 @@ var Cmd = &cobra.Command{
 	Short:        "Run a one-shot code review using an agent backend",
 	Long: `Run a one-shot code review using an agent backend.
 
-Supported backends: claude, cursor, codex, gemini.
+Supported backends: claude, cursor, codex, agy.
 
 Output:
   Default:         NDJSON progress events on stdout, final envelope also on stdout
@@ -76,9 +76,9 @@ analysis. Set $BRAMBLE_RUN_TAG to tag the log with an external run id.`,
 }
 
 func init() {
-	Cmd.Flags().StringVar(&backend, "backend", "cursor", "Backend: claude, cursor, codex, or gemini")
+	Cmd.Flags().StringVar(&backend, "backend", "cursor", "Backend: claude, cursor, codex, or agy")
 	Cmd.Flags().StringVar(&model, "model", "", "Model override (default: backend-specific)")
-	Cmd.Flags().StringVar(&effort, "effort", "", "Reasoning effort level for codex (low, medium, high) and claude (low, medium, high, max)")
+	Cmd.Flags().StringVar(&effort, "effort", "", "Reasoning effort level for codex (low, medium, high), claude (low, medium, high, max), and agy (low, medium, high; max clamps to high)")
 	Cmd.Flags().StringVar(&sandbox, "sandbox", "", "Codex sandbox mode: read-only, workspace-write, danger-full-access (default: danger-full-access)")
 	Cmd.Flags().BoolVar(&readOnly, "read-only", true, "Withhold the write tools from the reviewer (Codex: approval handler; Claude: tools not granted). Not a filesystem guarantee — neither backend blocks shell writes. Default true.")
 	Cmd.Flags().BoolVar(&verbose, "verbose", false, "Show tool call details")
@@ -255,6 +255,13 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		// Scoped to this reviewer instance via Config (not a package global) so
 		// the CLI's opt-in can't impose a stall policy on other reviewer callers.
 		IdleTimeout: idleTimeout,
+		// Wall-clock bound for print-mode backends (agy), which stream nothing
+		// until the turn ends and so cannot be governed by an inactivity
+		// deadline. Same value as the context deadline below, so a print-mode
+		// backend is bounded exactly like a streaming one: by --timeout, not by
+		// --idle-timeout. Zero (the default) leaves agy's own --print-timeout
+		// default in force.
+		TurnTimeout: timeout,
 	}
 
 	logPath2, err := reviewer.ResolveProtocolLogPath(protocolLogDir)

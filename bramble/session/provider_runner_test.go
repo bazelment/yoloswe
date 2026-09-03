@@ -279,9 +279,13 @@ func TestProviderRunner_NoEventBridgeForEphemeralProviders(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// mockEphemeralProvider is a mock ephemeral (non-long-running) provider.
+// mockEphemeralProvider records resume IDs and returns scripted session IDs.
 type mockEphemeralProvider struct {
-	events chan agent.AgentEvent
+	events           chan agent.AgentEvent
+	seenResumeIDs    []string
+	resultSessionIDs []string
+	mu               sync.Mutex
+	callCount        int
 }
 
 func (m *mockEphemeralProvider) Name() string {
@@ -298,9 +302,25 @@ func (m *mockEphemeralProvider) Close() error {
 }
 
 func (m *mockEphemeralProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.WorktreeContext, opts ...agent.ExecuteOption) (*agent.AgentResult, error) {
+	cfg := &agent.ExecuteConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	m.mu.Lock()
+	m.seenResumeIDs = append(m.seenResumeIDs, cfg.ResumeSessionID)
+	idx := m.callCount
+	m.callCount++
+	var sessionID string
+	if idx < len(m.resultSessionIDs) {
+		sessionID = m.resultSessionIDs[idx]
+	}
+	m.mu.Unlock()
+
 	return &agent.AgentResult{
-		Text:    "response",
-		Success: true,
+		Text:      "response",
+		Success:   true,
+		SessionID: sessionID,
 	}, nil
 }
 
@@ -480,4 +500,35 @@ func TestProviderRunner_EventBridgeGracefulShutdown(t *testing.T) {
 	// Verify that the WaitGroup counter is 0 (all goroutines exited)
 	// We can't directly check this, but we can verify Stop() completed without hanging
 	assert.Nil(t, runner.eventBridgeDone, "eventBridgeDone should be nil after Stop")
+}
+
+// TestProviderRunner_RunTurn_CarriesSessionIDAcrossTurns guards ephemeral
+// provider conversation continuity.
+func TestProviderRunner_RunTurn_CarriesSessionIDAcrossTurns(t *testing.T) {
+	mockProvider := &mockEphemeralProvider{
+		events:           make(chan agent.AgentEvent, 10),
+		resultSessionIDs: []string{"conv-turn-1", "conv-turn-1"},
+	}
+
+	runner := &providerRunner{
+		provider: mockProvider,
+	}
+
+	ctx := context.Background()
+	require.NoError(t, runner.Start(ctx))
+
+	_, err := runner.RunTurn(ctx, "Remember this word: PLATYPUS")
+	require.NoError(t, err)
+
+	_, err = runner.RunTurn(ctx, "What was the word?")
+	require.NoError(t, err)
+
+	require.NoError(t, runner.Stop())
+
+	mockProvider.mu.Lock()
+	defer mockProvider.mu.Unlock()
+	require.Len(t, mockProvider.seenResumeIDs, 2)
+	assert.Empty(t, mockProvider.seenResumeIDs[0], "turn 1 must not resume anything (no prior session)")
+	assert.Equal(t, "conv-turn-1", mockProvider.seenResumeIDs[1],
+		"turn 2 must resume turn 1's SessionID so conversation history survives")
 }
