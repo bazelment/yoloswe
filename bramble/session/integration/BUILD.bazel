@@ -12,6 +12,11 @@ go_test(
         "provider_test.go",
         "session_test.go",
     ],
+    env_inherit = [
+        "BRAMBLE_CLAUDE_TRUSTED_WORKDIR",
+        "HOME",
+        "PATH",
+    ],
     shard_count = 4,
     tags = [
         "integration",

@@ -68,6 +68,8 @@ var paneIdleProbes = map[string]paneIdleProbe{
 // Go's \w is ASCII-only and claude's verbs need not be.
 var claudeCompletionPastRe = regexp.MustCompile(`^[✻✢✽✹]\s+\S+ for\s+\d`)
 
+var claudeEffortIndicatorRe = regexp.MustCompile(`^● (low|medium|high|max) · /effort$`)
+
 // isClaudeSeparator matches either claude rule, including the input rule whose
 // box drawing is split by the mode indicator.
 func isClaudeSeparator(trimmed string) bool {
@@ -224,15 +226,7 @@ func claudeLineVerdict(line string) (working, known bool) {
 	}
 	if strings.HasPrefix(line, "●") {
 		if isEffortIndicatorLine(line) {
-			// "● high · /effort": persistent header chrome naming the current
-			// effort level, not a transcript line. It renders on every frame
-			// regardless of turn state — most visibly right above the top rule
-			// on a fresh session with no transcript yet, which is exactly
-			// where claudePaneJudge's tail scan looks first. Unlike it, a real
-			// tool or assistant-text line (see the "some tool output" and
-			// "Sure! Here's a tricky one-liner:" cases this must not touch)
-			// never contains this shape, so the exclusion is narrow rather
-			// than a rewrite of what counts as a tool line.
+			// This is persistent header chrome, not a transcript line.
 			return false, false
 		}
 		// A tool line means work only when nothing below it has already
@@ -243,15 +237,8 @@ func claudeLineVerdict(line string) (working, known bool) {
 	return false, false
 }
 
-// isEffortIndicatorLine reports whether a "●"-prefixed line is claude's
-// persistent effort-level indicator rather than a transcript line.
-//
-// "· /effort" (U+00B7 middot, then a literal slash command name) is the one
-// shape this chrome always has and no tool-call or assistant-text line does:
-// a tool line is "● ToolName(args)" and assistant text is prose, neither of
-// which has any reason to contain a slash-command name after a middot.
 func isEffortIndicatorLine(line string) bool {
-	return strings.Contains(line, "· /effort")
+	return claudeEffortIndicatorRe.MatchString(strings.TrimSpace(line))
 }
 
 // paneIdleConfirmations is how many consecutive polls must agree before a
@@ -544,59 +531,28 @@ func composerDraft(provider string, lines []string) (draft, known bool) {
 	if provider != ProviderClaude {
 		return false, false
 	}
-	if composerIdx, _ := claudeComposerIdx(lines); composerIdx >= 0 {
-		draft, known = judgeComposerLine(strings.TrimSpace(lines[composerIdx]))
-		if !known {
+	line, found, scoped := locateComposerLine(lines)
+	if !found {
+		if scoped {
 			return true, true
 		}
-		return draft, known
+		return false, false
 	}
-	// The composer could not be located by the bounded walk.
-	if searchedForComposer(lines) {
-		// Position still says where the composer is. If that line has the glyph,
-		// it is legible even though the upper region was not bounded.
-		if line, ok := lineAboveStatusRule(lines); ok {
-			if draft, known := judgeComposerLine(line); known {
-				return draft, known
-			}
-		}
-		// The composer region exists but cannot be read, often because a long draft
-		// filled it. Fail closed: the cost is one dropped hint, while writing here
-		// can submit a human draft with this line appended.
+	draft, known = judgeComposerLine(line)
+	if !known && scoped {
 		return true, true
 	}
-	// No status rule means no claude chrome to scope; the tail scan is the only
-	// reader left, and there is no lower chrome competing for those rows.
-	forEachPaneTailLine(lines, func(line string) bool {
-		if !strings.HasPrefix(strings.TrimSpace(line), claudePromptGlyph) {
-			return false
-		}
-		draft, known = judgeComposerLine(line)
-		return true
-	})
 	return draft, known
 }
 
-// composerLiteralText returns the exact text sitting in claude's composer, so
-// a caller that already knows what it is looking for can compare against it
-// without deciding provenance itself.
-//
-// This is deliberately separate from composerDraft rather than folded into
-// it: composerDraft's contract is "any text is a draft, whoever wrote it"
-// (see judgeComposerLine), and that must not change. A caller comparing this
-// text against a known payload is not the composer layer judging ownership —
-// it is the layer that emitted the payload recognizing its own words.
-//
-// ok is false whenever the text cannot be read with confidence: an empty
-// composer has nothing to compare, and the fail-closed "located but
-// unreadable" case (a long draft that fills the region) has no legible line
-// to hand back either. Both must compare unequal to any known payload, not
-// merely absent, so the caller's fallback is always to keep yielding.
+// composerLiteralText returns composer text for a caller that knows the payload
+// it staged. Unreadable and empty composers never match, preserving the draft
+// guard's fail-closed behavior.
 func composerLiteralText(provider string, lines []string) (text string, ok bool) {
 	if provider != ProviderClaude {
 		return "", false
 	}
-	line, found := locateComposerLine(lines)
+	line, found, _ := locateComposerLine(lines)
 	if !found {
 		return "", false
 	}
@@ -607,24 +563,19 @@ func composerLiteralText(provider string, lines []string) (text string, ok bool)
 	return body, true
 }
 
-// locateComposerLine finds the single line claude's live composer is drawn
-// on, walking the same branches composerDraft locates through (bounded walk,
-// then the line above the status rule, then the tail scan) but stopping at
-// location rather than judging the text. found is false in every case that
-// would make composerDraft fail closed, not only the ones with no candidate
-// line at all — a caller comparing text needs "not confidently this text",
-// which unreadable and absent both satisfy identically.
-func locateComposerLine(lines []string) (line string, found bool) {
+// locateComposerLine finds the live composer line. scoped reports whether a
+// status separator proves that an unparseable line must fail closed.
+func locateComposerLine(lines []string) (line string, found, scoped bool) {
 	if composerIdx, _ := claudeComposerIdx(lines); composerIdx >= 0 {
-		return strings.TrimSpace(lines[composerIdx]), true
+		return strings.TrimSpace(lines[composerIdx]), true, true
 	}
-	if searchedForComposer(lines) {
+	scoped = searchedForComposer(lines)
+	if scoped {
 		if l, ok := lineAboveStatusRule(lines); ok {
-			return l, true
+			return l, true, true
 		}
-		return "", false
+		return "", false, true
 	}
-	found = false
 	forEachPaneTailLine(lines, func(l string) bool {
 		if !strings.HasPrefix(strings.TrimSpace(l), claudePromptGlyph) {
 			return false
@@ -632,7 +583,7 @@ func locateComposerLine(lines []string) (line string, found bool) {
 		line, found = l, true
 		return true
 	})
-	return line, found
+	return line, found, false
 }
 
 // lineAboveStatusRule returns the first non-empty line above the lowest status

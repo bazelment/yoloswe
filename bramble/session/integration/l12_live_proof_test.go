@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -28,20 +29,19 @@ import (
 //
 //	bazel test //bramble/session/integration:integration_test \
 //	  --test_filter=TestLiveProof_StrandedNudgeInAResidentPaneIsSubmitted \
-//	  --test_output=all --test_arg=-test.v --test_timeout=120
+//	  --test_output=all --test_arg=-test.v --test_timeout=120 \
+//	  --test_env=BRAMBLE_CLAUDE_TRUSTED_WORKDIR=/path/already/trusted/by/claude
 func TestLiveProof_StrandedNudgeInAResidentPaneIsSubmitted(t *testing.T) {
+	trustedWorkdir := strings.TrimSpace(os.Getenv("BRAMBLE_CLAUDE_TRUSTED_WORKDIR"))
+	if trustedWorkdir == "" {
+		t.Skip("set BRAMBLE_CLAUDE_TRUSTED_WORKDIR to a directory already trusted by claude")
+	}
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not available")
 	}
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skip("claude CLI not available")
 	}
-
-	// A directory claude has already been told to trust (see the L12 notes):
-	// otherwise the pane's first frame is the workspace-trust dialog rather
-	// than the composer, since a bazel test sandbox's runfiles path is new to
-	// claude on every run.
-	const trustedWorkdir = "/home/ubuntu/tmp/claude-1000/-home-ubuntu-worktrees-yoloswe-swarm-bramble-L12-spawn-submit/f956cd07-8afd-408a-a73c-08c7cd2708ad/scratchpad/liveproof/workdir"
 
 	socketPath := filepath.Join(t.TempDir(), "tmux.sock")
 	out, err := exec.Command("tmux", "-S", socketPath, "new-session", "-d",

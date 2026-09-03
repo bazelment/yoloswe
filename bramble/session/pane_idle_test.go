@@ -989,11 +989,23 @@ func TestEffortIndicatorDoesNotMaskARealToolLine(t *testing.T) {
 func TestEffortIndicatorTextDoesNotFoolTheLineVerdict(t *testing.T) {
 	t.Parallel()
 
-	working, known := claudeLineVerdict("● high · /effort")
-	assert.False(t, known, "the indicator says nothing about the turn")
-	assert.False(t, working)
+	for _, line := range []string{
+		"● low · /effort",
+		"● medium · /effort",
+		"● high · /effort",
+		"● max · /effort",
+	} {
+		working, known := claudeLineVerdict(line)
+		assert.False(t, known, "the indicator %q says nothing about the turn", line)
+		assert.False(t, working)
+	}
 
-	for _, line := range []string{"● some tool output", "● Sure! Here's a tricky one-liner:", "● Bash(git status)"} {
+	for _, line := range []string{
+		"● some tool output",
+		"● Sure! Here's a tricky one-liner:",
+		"● Bash(git status)",
+		"● Read(· /effort)",
+	} {
 		working, known := claudeLineVerdict(line)
 		require.True(t, known, "line %q must still produce a verdict", line)
 		assert.True(t, working, "line %q must still read as work in flight", line)
