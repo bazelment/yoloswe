@@ -7,6 +7,7 @@ go_test(
     srcs = [
         "delegator_scenario_test.go",
         "delegator_test.go",
+        "l12_live_proof_test.go",
         "live_provider_session_test.go",
         "provider_test.go",
         "session_test.go",
@@ -20,6 +21,7 @@ go_test(
     deps = [
         "//agent-cli-wrapper/codex",
         "//bramble/session",
+        "//bramble/tmuxctl",
         "//multiagent/agent",
         "//wt",
         "@com_github_stretchr_testify//assert",

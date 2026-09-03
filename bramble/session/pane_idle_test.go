@@ -926,3 +926,76 @@ func TestComposerBoundFollowsTheCapture(t *testing.T) {
 	assert.Less(t, claudeComposerMaxLines, paneCaptureLines,
 		"but never past the capture, or it walks into transcript")
 }
+
+// TestEffortIndicatorIsNotMistakenForATurnInFlight pins a second, independent
+// bug found while live-proving issue #346: a fresh session's header renders
+// "● high · /effort" directly above the top rule (there is no transcript yet
+// to occupy that space), which is exactly where claudePaneJudge's bounded
+// tail scan looks first. Before this fix it read the effort indicator as a
+// tool-call line and called the pane working, which made Notifier.nudge yield
+// on paneSaysWorking before the composer-draft guard ever ran — so this bites
+// hardest on exactly the case #346 is about: a freshly spawned pane with
+// little or no transcript, not a long-running one where real content
+// occupies the tail first.
+func TestEffortIndicatorIsNotMistakenForATurnInFlight(t *testing.T) {
+	t.Parallel()
+
+	pane := []string{
+		" ▐▛███▛█   Claude Code v2.1.259",
+		"▝▜██████▀  Opus 5 (1M context) with high effort · Claude Max",
+		"  ▝▝ ▝▝    ~/wt/branch",
+		"● high · /effort",
+		"────────────────────────────────────────────",
+		"❯ ",
+		"────────────────────────────────────────────",
+		"  ~/wt/branch  main  Opus 5  ctx:1%  tokens:0",
+		"  ⏵⏵ accept edits on (shift+tab to cycle)",
+	}
+
+	working, known := paneShowsWorking(ProviderClaude, pane)
+	assert.False(t, known, "an effort indicator with nothing else in the tail says nothing about the turn")
+	assert.False(t, working, "and must never be read as a tool call in flight")
+}
+
+// TestEffortIndicatorDoesNotMaskARealToolLine pins the narrowness of the fix:
+// a genuine tool-call line right next to the effort indicator must still read
+// as working. The exclusion is a literal-shape match on the effort line
+// itself, not a blanket "skip whatever is nearest the top rule".
+func TestEffortIndicatorDoesNotMaskARealToolLine(t *testing.T) {
+	t.Parallel()
+
+	pane := []string{
+		"● high · /effort",
+		"● Read(delivery.go)",
+		"────────────────────────────────────────────",
+		"❯ ",
+		"────────────────────────────────────────────",
+		"  ~/wt/branch  main  Opus 5  ctx:1%  tokens:0",
+		"  ⏵⏵ accept edits on (shift+tab to cycle)",
+	}
+
+	working, known := paneShowsWorking(ProviderClaude, pane)
+	require.True(t, known, "the real tool line below it still gives a verdict")
+	assert.True(t, working, "a genuine tool call must still be read as work in flight")
+}
+
+// TestEffortIndicatorTextDoesNotFoolTheLineVerdict pins claudeLineVerdict
+// directly against the two shapes that must never be confused: the indicator
+// itself, and ordinary non-tool assistant text that happens to start with the
+// same bullet glyph (see TestOversizedComposerIsHeldNotDelivered's "some tool
+// output" and TestClaudePaneJudge's "Sure! Here's a tricky one-liner:" — both
+// must keep reading as work, since only the literal "· /effort" shape is
+// excluded).
+func TestEffortIndicatorTextDoesNotFoolTheLineVerdict(t *testing.T) {
+	t.Parallel()
+
+	working, known := claudeLineVerdict("● high · /effort")
+	assert.False(t, known, "the indicator says nothing about the turn")
+	assert.False(t, working)
+
+	for _, line := range []string{"● some tool output", "● Sure! Here's a tricky one-liner:", "● Bash(git status)"} {
+		working, known := claudeLineVerdict(line)
+		require.True(t, known, "line %q must still produce a verdict", line)
+		assert.True(t, working, "line %q must still read as work in flight", line)
+	}
+}

@@ -223,12 +223,35 @@ func claudeLineVerdict(line string) (working, known bool) {
 		return false, false // neither shape: say nothing
 	}
 	if strings.HasPrefix(line, "●") {
+		if isEffortIndicatorLine(line) {
+			// "● high · /effort": persistent header chrome naming the current
+			// effort level, not a transcript line. It renders on every frame
+			// regardless of turn state — most visibly right above the top rule
+			// on a fresh session with no transcript yet, which is exactly
+			// where claudePaneJudge's tail scan looks first. Unlike it, a real
+			// tool or assistant-text line (see the "some tool output" and
+			// "Sure! Here's a tricky one-liner:" cases this must not touch)
+			// never contains this shape, so the exclusion is narrow rather
+			// than a rewrite of what counts as a tool line.
+			return false, false
+		}
 		// A tool line means work only when nothing below it has already
 		// reported the turn finished; the caller reaches this first only when
 		// that is the case.
 		return true, true
 	}
 	return false, false
+}
+
+// isEffortIndicatorLine reports whether a "●"-prefixed line is claude's
+// persistent effort-level indicator rather than a transcript line.
+//
+// "· /effort" (U+00B7 middot, then a literal slash command name) is the one
+// shape this chrome always has and no tool-call or assistant-text line does:
+// a tool line is "● ToolName(args)" and assistant text is prose, neither of
+// which has any reason to contain a slash-command name after a middot.
+func isEffortIndicatorLine(line string) bool {
+	return strings.Contains(line, "· /effort")
 }
 
 // paneIdleConfirmations is how many consecutive polls must agree before a
