@@ -1,7 +1,7 @@
 ---
 name: pr-polish
-description: Fully autonomous PR polish loop. Runs N rounds of local bramble review (codex + cursor, optionally + gemini and/or claude), folds in any existing PR comments and CI failures as round-1 input, fixes findings locally, pushes once at the end.
-argument-hint: "[--rounds N] [--gemini] [--claude] [--ask]"
+description: Fully autonomous PR polish loop. Runs N rounds of local bramble review (codex + cursor, optionally + agy and/or claude), folds in any existing PR comments and CI failures as round-1 input, fixes findings locally, pushes once at the end.
+argument-hint: "[--rounds N] [--agy] [--claude] [--ask]"
 disable-model-invocation: true
 ---
 
@@ -25,7 +25,7 @@ Missing/error review streams → log as findings with stderr path cited. A `stat
 | Flag | Default | Meaning |
 |---|---|---|
 | `--rounds N` | `5` | Up to N additional rounds this invocation. Budget resets on re-invoke. `--rounds 0` = no-op. |
-| `--gemini` | off | Extra reviewer (`gemini-3.1-flash-lite-preview`). Sets `USE_GEMINI=1`. |
+| `--agy` | off | Extra reviewer (`agy` backend, `gemini-3.8-flash-low`). Sets `USE_AGY=1`. |
 | `--claude` | off | Extra reviewer (`claude` backend, `opus`). Sets `USE_CLAUDE=1`. |
 | `--ask` / `--interactive` | off | Enable `AskUserQuestion` at gates (Step 3.g). Default: never block. |
 
@@ -49,7 +49,7 @@ Key fields: `rounds[n].comment_actions` (audit trail), `low_only_streak` (conver
 **Actions file** (the `<actions.json>` arg to `state-finalize-round` / `finalize-and-report`): a JSON **array** of action entries, or an object `{"comment_actions": [...]}` — both accepted. Per entry:
 - `action`: one of `fixed`, `false_positive`, `wont_fix`, `ack`, `stale`, `pre_existing`/`flake` (CI only) — validated; an unknown verb is a loud error naming the entry index.
 - `severity`: `high`/`medium`/`low`/`nit` or null (lint advisory) — validated.
-- `source`: `claude`/`codex`/`cursor`/`gemini`/`lint`/`github-inline`/`github-issue`/`ci`/`sweep`.
+- `source`: `claude`/`codex`/`cursor`/`agy`/`lint`/`github-inline`/`github-issue`/`ci`/`sweep`.
 - `path` + `line` (code mode) or `section`/`dimension` (design-doc mode); `notes`/`reason` — interchangeable, every consumer reads `reason` then falls back to `notes` — and `comment_id` (for inline replies).
 - Optional v2: `spiral_refix`, `invariant` — and any other key passes through untouched.
 - Optional v3 (Step 3.d/3.e evidence): `sites_found`/`sites_fixed` (only with the enumerating command in `notes` — see Step 3.d), `negative_check`.
@@ -149,7 +149,7 @@ additional_rounds_run = 0
 while additional_rounds_run < --rounds:
   a0) open the round in state (--pr-summary + --base-branch on round 1)
   a) WIP commit if dirty
-  b) scope_gate → round-bundle → one bg join: launch reviewers (codex+cursor+lint[+gemini][+claude]), wait on exit
+  b) scope_gate → round-bundle → one bg join: launch reviewers (codex+cursor+lint[+agy][+claude]), wait on exit
   c) triage → action plan
   d) apply fixes
   e) quality gates + local commit if changed (NO push)
@@ -186,7 +186,7 @@ Always use `round-bundle` for `$LOG_DIR`, `$GOAL`, resume ids — do not hand-ro
 # orchestrator var. Read in three places below (launch, --stream, --envelope).
 # Leaving one unset is NOT neutral: `[ "$USE_CLAUDE" = "1" ]` is false, so the
 # reviewer silently never launches and looks like you never asked for it.
-USE_GEMINI=0   # 1 when --gemini was passed
+USE_AGY=0   # 1 when --agy was passed
 USE_CLAUDE=0   # 1 when --claude was passed
 
 BUNDLE=$(python3 $SKILL_DIR/scripts/pr_ops.py round-bundle "$CTX" {ROUND})
@@ -194,7 +194,7 @@ LOG_DIR=$(echo "$BUNDLE" | jq -r .log_dir)
 GOAL=$(echo "$BUNDLE" | jq -r .goal_text)
 CODEX_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.codex')
 CURSOR_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.cursor')
-GEMINI_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.gemini')
+AGY_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.agy')
 CLAUDE_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.claude')
 [ "{ROUND}" = "1" ] && GOAL="$PR_SUMMARY"
 mkdir -p "$LOG_DIR"
@@ -267,14 +267,14 @@ PIDS+=($!)
   2>&1 | tee "$LOG_DIR/lint-stderr.txt" | sed 's/^/[lint] /' ) &
 PIDS+=($!)
 
-if [ "$USE_GEMINI" = "1" ]; then
-  ( set -o pipefail; BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:gemini:r{ROUND} \
-    timeout 2400 $BRAMBLE_BIN code-review --backend gemini --model gemini-3.1-flash-lite-preview \
+if [ "$USE_AGY" = "1" ]; then
+  ( set -o pipefail; BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:agy:r{ROUND} \
+    timeout 2400 $BRAMBLE_BIN code-review --backend agy --model gemini-3.8-flash-low \
       --skip-test-execution --verbose --idle-timeout 8m \
       --goal "$GOAL" --scope-hints-file "$SCOPE_HINTS" $DIFF_BASE_ARG \
-      ${GEMINI_RESUME:+--resume-session-id "$GEMINI_RESUME"} \
-      --envelope-file "$LOG_DIR/gemini-envelope.json" \
-    2>&1 | tee "$LOG_DIR/gemini-stderr.txt" | sed 's/^/[gemini] /' ) &
+      ${AGY_RESUME:+--resume-session-id "$AGY_RESUME"} \
+      --envelope-file "$LOG_DIR/agy-envelope.json" \
+    2>&1 | tee "$LOG_DIR/agy-stderr.txt" | sed 's/^/[agy] /' ) &
   PIDS+=($!)
 fi
 
@@ -306,7 +306,7 @@ python3 $SKILL_DIR/scripts/bramble_ops.py triage $STATE_FILE \
   --stream codex=$LOG_DIR/codex-envelope.json \
   --stream cursor=$LOG_DIR/cursor-envelope.json \
   --stream lint=$LOG_DIR/lint-envelope.json \
-  $( [ "$USE_GEMINI" = "1" ] && echo --stream gemini=$LOG_DIR/gemini-envelope.json ) \
+  $( [ "$USE_AGY" = "1" ] && echo --stream agy=$LOG_DIR/agy-envelope.json ) \
   $( [ "$USE_CLAUDE" = "1" ] && echo --stream claude=$LOG_DIR/claude-envelope.json ) \
   $( [ "$IS_NEW_SERIES" = "1" ] && [ "$PR_NUMBER" != "null" ] && \
      echo --pr-comments $STATE_DIR/pp-comments.json --ci-failures $STATE_DIR/pp-ci.json )
@@ -392,7 +392,7 @@ python3 $SKILL_DIR/scripts/pr_ops.py finalize-and-report $CTX $ROUND $(git rev-p
   --envelope codex=$LOG_DIR/codex-envelope.json \
   --envelope cursor=$LOG_DIR/cursor-envelope.json \
   --envelope lint=$LOG_DIR/lint-envelope.json \
-  $( [ "$USE_GEMINI" = "1" ] && echo --envelope gemini=$LOG_DIR/gemini-envelope.json ) \
+  $( [ "$USE_AGY" = "1" ] && echo --envelope agy=$LOG_DIR/agy-envelope.json ) \
   $( [ "$USE_CLAUDE" = "1" ] && echo --envelope claude=$LOG_DIR/claude-envelope.json )
 ```
 
@@ -410,7 +410,7 @@ Stop when any:
 
 **Nobody looked ≠ nothing to find.** "Zero findings" only converges a batch when at least one reviewer actually **produced a verdict** — read `rounds[n].stream_status` (persisted per backend from each envelope's own `status`), not the length of `<backend>_findings`. An empty findings array is produced equally by a clean diff and by a backend that never returned, and the batch protocol makes that gap expensive: the batch pushes on it, and the external reviewers become the first real bar.
 
-**Count only the model reviewers** — `codex`/`cursor`/`gemini`/`claude`. `lint` is in `stream_status` too and `lint_gate.py` hardcodes `"status": "ok"`, so "every stream is error" is never literally true and a rule phrased that way never fires. `verdict.py`'s `_NON_REVIEWER_STREAMS` is the same exclusion. A round where every *model reviewer* is `error`/`absent` (`ok`/`partial` are live) is **inconclusive** — retry it once (it does not consume `--rounds`), then exit `reviewers-unavailable`. Push anyway (the work is real), but say in the Final Summary that the local bar was never met.
+**Count only the model reviewers** — `codex`/`cursor`/`agy`/`claude`. `lint` is in `stream_status` too and `lint_gate.py` hardcodes `"status": "ok"`, so "every stream is error" is never literally true and a rule phrased that way never fires. `verdict.py`'s `_NON_REVIEWER_STREAMS` is the same exclusion. A round where every *model reviewer* is `error`/`absent` (`ok`/`partial` are live) is **inconclusive** — retry it once (it does not consume `--rounds`), then exit `reviewers-unavailable`. Push anyway (the work is real), but say in the Final Summary that the local bar was never met.
 
 Budget exhausted → Final Summary; `--ask` to continue, else `capped-at-max`.
 

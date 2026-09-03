@@ -112,7 +112,32 @@ func reconcileModelEffort(model, effort string) (string, string) {
 	if pinned == effort {
 		return model, "" // Same level twice; keep one representation.
 	}
+	if !isAgyEffortLevel(effort) {
+		// Not a level agy spells, so there is no variant to retarget onto and
+		// splicing it in would forge a model id that does not exist
+		// ("gemini-3.8-flash-max"). agy would then reject the MODEL, hiding
+		// that the effort was the bad input. Leave both as the caller set them
+		// and let agy report the real problem against the real flag.
+		return model, effort
+	}
 	return base + "-" + effort, ""
+}
+
+// isAgyEffortLevel reports whether level is one agy encodes in a model id.
+// agy's --effort flag documents exactly low|medium|high.
+func isAgyEffortLevel(level string) bool {
+	switch level {
+	case "low", "medium", "high":
+		return true
+	}
+	return false
+}
+
+// EffectiveModel is the model id BuildCLIArgs actually passes to agy, after
+// reconciliation. It is what callers should report as "the model we ran".
+func (pm *processManager) EffectiveModel() string {
+	model, _ := reconcileModelEffort(pm.config.Model, pm.config.Effort)
+	return model
 }
 
 func (pm *processManager) BuildCLIArgs() []string {

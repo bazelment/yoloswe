@@ -23,9 +23,15 @@ type Usage struct {
 
 // TurnCompleteEvent marks the end of a print-mode invocation. ConversationID
 // resumes later turns, and Usage comes from agy's JSON result.
+//
+// Model is the id that actually reached the CLI, which is not always the one
+// the caller configured: BuildCLIArgs retargets a model whose pinned level
+// disagrees with an explicit --effort (see reconcileModelEffort). Callers that
+// report "the model we ran" must read this rather than their own config.
 type TurnCompleteEvent struct {
 	Error          error
 	ConversationID string
+	Model          string
 	DurationMs     int64
 	Usage          Usage
 	Success        bool

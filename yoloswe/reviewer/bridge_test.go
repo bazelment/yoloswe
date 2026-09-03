@@ -79,6 +79,7 @@ type recordingHandler struct {
 	// twice (agy learns its conversation id only when the turn completes), so
 	// tests that care about the final id read lastSessionID.
 	sessionIDs []string
+	models     []string
 	texts      []string
 	reasonings []string
 	toolStarts []string
@@ -87,8 +88,20 @@ type recordingHandler struct {
 	errors     []error
 }
 
-func (h *recordingHandler) OnSessionInfo(sessionID, _ string) {
+func (h *recordingHandler) OnSessionInfo(sessionID, model string) {
 	h.sessionIDs = append(h.sessionIDs, sessionID)
+	h.models = append(h.models, model)
+}
+
+// lastModel is the most recent non-empty model reported, i.e. what
+// Reviewer.effectiveModel ends up holding.
+func (h *recordingHandler) lastModel() string {
+	for i := len(h.models) - 1; i >= 0; i-- {
+		if h.models[i] != "" {
+			return h.models[i]
+		}
+	}
+	return ""
 }
 
 // lastSessionID is the most recent non-empty id reported, i.e. what

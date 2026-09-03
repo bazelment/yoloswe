@@ -11,9 +11,13 @@ import (
 )
 
 // QueryResult contains the result of a one-shot agy query.
+//
+// Model is the id that actually reached the CLI; see TurnCompleteEvent.Model
+// for why it can differ from the configured one.
 type QueryResult struct {
 	Text           string
 	ConversationID string
+	Model          string
 	DurationMs     int64
 	Usage          Usage
 	Success        bool
@@ -121,6 +125,7 @@ func (s *Session) run(ctx context.Context) {
 
 	turn := TurnCompleteEvent{
 		ConversationID: payload.ConversationID,
+		Model:          s.process.EffectiveModel(),
 		DurationMs:     duration,
 		Usage:          payload.Usage,
 	}
@@ -166,6 +171,7 @@ func Query(ctx context.Context, prompt string, opts ...SessionOption) (*QueryRes
 			result.DurationMs = e.DurationMs
 			result.Success = e.Success
 			result.ConversationID = e.ConversationID
+			result.Model = e.Model
 			result.Usage = e.Usage
 			return &result, e.Error
 		case ErrorEvent:

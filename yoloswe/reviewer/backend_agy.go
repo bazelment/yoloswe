@@ -3,6 +3,8 @@ package reviewer
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
 )
@@ -43,6 +45,44 @@ func newAgyBackend(config Config) *agyBackend {
 	return &agyBackend{config: config}
 }
 
+// agyEffortLevel maps the reviewer's free-form --effort string onto agy's
+// vocabulary, which its own --effort flag documents as exactly low|medium|high.
+//
+// agy.WithEffort is a deliberately thin transport that "does not validate,
+// normalize, or clamp the value in any way" and leaves that to the caller (see
+// agent-cli-wrapper/agy/session_options.go), so this is the reviewer's half of
+// that contract - the same shape claudeEffortLevel implements next door, and
+// for the same reason: the --effort flag is shared across backends whose
+// vocabularies differ, and losing a whole review round to a typo'd level is a
+// worse outcome than running at the model default.
+//
+// max clamps to high rather than dropping: it is the shared flag's documented
+// "most effort" value, and high is the most agy offers, so honoring the intent
+// beats silently running at the model default. multiagent/agent's own
+// agyEffortLevel makes the identical call.
+func agyEffortLevel(effort string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "":
+		return "", false
+	case "auto":
+		// Explicitly "let the model decide" - same wire effect as unset.
+		return "", false
+	case "low":
+		return "low", true
+	case "medium", "med":
+		return "medium", true
+	case "high":
+		return "high", true
+	case "max":
+		return "high", true
+	default:
+		slog.Warn("unrecognized effort for agy backend; using model default",
+			"effort", effort,
+			"supported", "low, medium, high, max")
+		return "", false
+	}
+}
+
 // Start is a no-op for agy (one-shot per prompt).
 func (b *agyBackend) Start(_ context.Context) error {
 	return nil
@@ -58,8 +98,8 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 	if b.config.Model != "" {
 		sessionOpts = append(sessionOpts, agy.WithModel(b.config.Model))
 	}
-	if b.config.Effort != "" {
-		sessionOpts = append(sessionOpts, agy.WithEffort(b.config.Effort))
+	if effort, ok := agyEffortLevel(b.config.Effort); ok {
+		sessionOpts = append(sessionOpts, agy.WithEffort(effort))
 	}
 	if b.config.WorkDir != "" {
 		sessionOpts = append(sessionOpts, agy.WithWorkDir(b.config.WorkDir))
@@ -100,6 +140,7 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 	var turnErr error
 	var eventErr error
 	var conversationID string
+	var effectiveModel string
 	var inputTokens, outputTokens int64
 	sawTurnComplete := false
 
@@ -124,6 +165,7 @@ loop:
 				durationMs = e.DurationMs
 				success = e.Success
 				conversationID = e.ConversationID
+				effectiveModel = e.Model
 				inputTokens = int64(e.Usage.InputTokens)
 				outputTokens = int64(e.Usage.OutputTokens)
 				if e.Error != nil {
@@ -150,7 +192,17 @@ loop:
 		return reviewPartialResult(resumeStatus, &bridgeResult{responseText: responseText, durationMs: durationMs}, fmt.Errorf("agy: session ended without result"))
 	}
 
-	if handler != nil && conversationID != "" {
+	// Report the model agy actually ran, which is not always the configured
+	// one: the wrapper retargets a model whose pinned level disagrees with an
+	// explicit --effort. Reviewer.effectiveModel is set from here and published
+	// as the envelope's model, and EffectiveModel's own doc promises "the model
+	// actually used by the backend".
+	reportedModel := b.config.Model
+	if effectiveModel != "" {
+		reportedModel = effectiveModel
+	}
+
+	if handler != nil && (conversationID != "" || reportedModel != b.config.Model) {
 		// Report the id agy assigned this conversation. Reviewer.lastSessionID
 		// is set from here (see rendererEventHandler.OnSessionInfo), and it is
 		// what BuildEnvelope publishes as session_id — the only way a caller
@@ -158,7 +210,7 @@ loop:
 		// Every sibling backend reports its own (backend_codex.go's thread id,
 		// backend_claude.go's and backend_cursor.go's session id); agy's simply
 		// is not known until the turn ends.
-		handler.OnSessionInfo(conversationID, b.config.Model)
+		handler.OnSessionInfo(conversationID, reportedModel)
 	}
 
 	if resumeStatus == ResumeStatusUnverified && turnErr == nil && conversationID == b.config.ResumeSessionID {

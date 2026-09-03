@@ -1,7 +1,7 @@
 ---
 name: design-doc-polish
-description: Iterative review of a markdown design document. Reads the doc, proposes a tailored grilling rubric, runs N rounds of codex+cursor (optionally +gemini) against the doc with that rubric, edits between rounds, commits locally each round. Never pushes.
-argument-hint: "<doc-path> [--rounds N] [--gemini] [--rubric-file <path>]"
+description: Iterative review of a markdown design document. Reads the doc, proposes a tailored grilling rubric, runs N rounds of codex+cursor (optionally +agy) against the doc with that rubric, edits between rounds, commits locally each round. Never pushes.
+argument-hint: "<doc-path> [--rounds N] [--agy] [--rubric-file <path>]"
 disable-model-invocation: true
 ---
 
@@ -15,7 +15,7 @@ Loop exits on convergence (zero findings, or all low/nit) or `--rounds N` (defau
 |---|---|---|
 | `<doc-path>` | required | Markdown design doc, must live under the repo worktree. |
 | `--rounds N` | `5` | Round cap. |
-| `--gemini` | off | Add gemini as a third reviewer. Three reviewers produce materially more consensus findings than two; pass when the doc warrants extra scrutiny. |
+| `--agy` | off | Add agy as a third reviewer. Three reviewers produce materially more consensus findings than two; pass when the doc warrants extra scrutiny. |
 | `--rubric-file <path>` | off | Use this rubric verbatim instead of orchestrator-proposed. User still confirms. |
 
 ## Triage rules
@@ -86,7 +86,7 @@ fi
 
 `$GOAL` round 1: `"Reviewing $DOC_KIND doc at $DOC_PATH; rubric tailored for this kind."` — gives the model the one bit of context the rubric alone doesn't carry (which framing the questions came from). Round 2+: brief summary of last round's fixed/skipped, ≤500 chars.
 
-Launch codex + cursor (+ gemini with `--gemini`) as parallel `Monitor` calls:
+Launch codex + cursor (+ agy with `--agy`) as parallel `Monitor` calls:
 
 ```
 Monitor({
@@ -103,7 +103,7 @@ Monitor({
 })
 ```
 
-Backends/models: `codex`/`gpt-5.4-mini`, `cursor`/`composer-2`, `gemini`/`gemini-3.1-flash-lite-preview`. `bramble code-review --backend gemini` is `yoloswe/reviewer`'s standalone ACP-based `geminiBackend` (talks to the real `gemini` CLI directly via `agent-cli-wrapper/acp`) — this is a separate, still-intact code path from the deleted `multiagent/agent.ProviderGemini`/`agy` migration, so `gemini-3.1-flash-lite-preview` is correct here as `reviewer.DefaultGeminiModel`, not a stale ID. Omit `--model` to take the backend's own default, which matches.
+Backends/models: `codex`/`gpt-5.4-mini`, `cursor`/`composer-2`, `agy`/`gemini-3.8-flash-medium`. There is no `gemini` backend: `ValidateBackend` accepts exactly claude, cursor, codex, agy, and the old ACP-based `geminiBackend` (with `agent-cli-wrapper/acp` and the `gemini --experimental-acp` CLI behind it) has been deleted. The `gemini-*` model IDs name models agy serves. Omit `--model` to take the backend's own default (`reviewer.DefaultAgyModel`).
 
 A missing envelope or `status: "error"` is a high-severity finding — surface it with the stderr path.
 
@@ -114,7 +114,7 @@ python3 $SKILL_DIR/scripts/bramble_ops.py triage \
     --mode design-doc \
     --stream codex=$STATE_DIR/r$ROUND/codex-envelope.json \
     --stream cursor=$STATE_DIR/r$ROUND/cursor-envelope.json \
-    $( [ "$USE_GEMINI" = "1" ] && echo --stream gemini=$STATE_DIR/r$ROUND/gemini-envelope.json )
+    $( [ "$USE_AGY" = "1" ] && echo --stream agy=$STATE_DIR/r$ROUND/agy-envelope.json )
 ```
 
 Output buckets:
@@ -144,7 +144,7 @@ Edit the doc. For each triaged finding, append to `$STATE_DIR/actions-r$ROUND.js
 }
 ```
 
-`source`: `codex` | `cursor` | `gemini` | `sweep`. `action`: `fixed` (needs `commit_sha`) | `false_positive` | `wont_fix` | `stale` (last three need `reason`). For class-level fixes touching other sections, write one `sweep` row per swept site with that site's section/dimension.
+`source`: `codex` | `cursor` | `agy` | `sweep`. `action`: `fixed` (needs `commit_sha`) | `false_positive` | `wont_fix` | `stale` (last three need `reason`). For class-level fixes touching other sections, write one `sweep` row per swept site with that site's section/dimension.
 
 ### e) Commit
 
@@ -163,7 +163,7 @@ python3 $SKILL_DIR/scripts/doc_ops.py state-finalize-round $CTX $ROUND \
     --rubric-source "$RUBRIC_SOURCE" \
     --envelope codex=$STATE_DIR/r$ROUND/codex-envelope.json \
     --envelope cursor=$STATE_DIR/r$ROUND/cursor-envelope.json \
-    $( [ "$USE_GEMINI" = "1" ] && echo --envelope gemini=$STATE_DIR/r$ROUND/gemini-envelope.json )
+    $( [ "$USE_AGY" = "1" ] && echo --envelope agy=$STATE_DIR/r$ROUND/agy-envelope.json )
 ```
 
 ### g) Convergence

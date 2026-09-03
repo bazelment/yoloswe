@@ -233,3 +233,40 @@ func flagValue(args []string, flag string) string {
 	}
 	return ""
 }
+
+// TestReconcileModelEffort_LeavesUnknownLevelAlone pins the boundary of the
+// retarget.
+//
+// Retargeting splices the requested level into the model id, so it is only safe
+// for a level agy actually spells. `--effort max` is advertised by the shared
+// reviewer/bramble --effort flag (claude serves it), and splicing it in would
+// forge `gemini-3.8-flash-max`, which agy rejects as an unknown MODEL — an
+// error that blames the wrong flag and hides the real cause. Passing both
+// through unchanged lets agy report the real problem instead.
+func TestReconcileModelEffort_LeavesUnknownLevelAlone(t *testing.T) {
+	t.Parallel()
+
+	for _, level := range []string{"max", "hgih", "med", "auto", "MEDIUM"} {
+		t.Run(level, func(t *testing.T) {
+			t.Parallel()
+
+			model, effort := reconcileModelEffort("gemini-3.8-flash-medium", level)
+			assert.Equal(t, "gemini-3.8-flash-medium", model,
+				"a level agy does not spell must not be spliced into the model id")
+			assert.Equal(t, level, effort, "the effort must reach agy so its error names the right flag")
+		})
+	}
+}
+
+// TestEffectiveModel_ReportsTheRetargetedID pins that callers can learn which
+// model actually ran. Reviewer.effectiveModel is published as the review
+// envelope's model, and its doc promises "the model actually used".
+func TestEffectiveModel_ReportsTheRetargetedID(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	WithModel("gemini-3.8-flash-medium")(&cfg)
+	WithEffort("high")(&cfg)
+
+	assert.Equal(t, "gemini-3.8-flash-high", newProcessManager("hi", cfg).EffectiveModel())
+}

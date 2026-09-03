@@ -330,3 +330,103 @@ func TestAgyBackend_RunPrompt_ReportsConversationIDAndUsage(t *testing.T) {
 		t.Errorf("OutputTokens = %d, want 12", result.OutputTokens)
 	}
 }
+
+// TestAgyEffortLevel maps the reviewer's shared --effort flag onto agy's
+// vocabulary, mirroring claudeEffortLevel's contract next door.
+func TestAgyEffortLevel(t *testing.T) {
+	tests := []struct {
+		in     string
+		want   string
+		wantOK bool
+	}{
+		{"", "", false},
+		{"auto", "", false},
+		{"low", "low", true},
+		{"medium", "medium", true},
+		{"med", "medium", true},
+		{"high", "high", true},
+		{"MAX", "high", true}, // clamps: high is the most agy offers
+		{"hgih", "", false},   // typo warns and drops rather than losing the run
+		{"turbo", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := agyEffortLevel(tt.in)
+		if got != tt.want || ok != tt.wantOK {
+			t.Errorf("agyEffortLevel(%q) = (%q, %v), want (%q, %v)", tt.in, got, ok, tt.want, tt.wantOK)
+		}
+	}
+}
+
+// TestAgyBackend_RunPrompt_UnservableEffortDoesNotForgeAModelID guards the
+// interaction between the two: an effort value agy cannot serve must cost the
+// LEVEL, never corrupt the model id into one that does not exist.
+func TestAgyBackend_RunPrompt_UnservableEffortDoesNotForgeAModelID(t *testing.T) {
+	resultJSON := `{"conversation_id":"conv-max","status":"SUCCESS","response":"AGYOK",` +
+		`"duration_seconds":0.1,"num_turns":1,` +
+		`"usage":{"input_tokens":5,"output_tokens":1,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":6}}`
+	cliPath := fakeAgyCLIRejectingUnknownModel(t, resultJSON)
+
+	handler := &recordingHandler{}
+	b := &agyBackend{cliPath: cliPath, config: Config{Model: DefaultAgyModel, Effort: "max"}}
+
+	result, err := b.RunPrompt(context.Background(), "review this", handler)
+	if err != nil {
+		t.Fatalf("RunPrompt with --effort max failed: %v", err)
+	}
+	if !result.Success {
+		t.Errorf("expected success=true, got %+v", result)
+	}
+	// max clamps to high, so the run retargets onto a real catalog id.
+	if got := handler.lastModel(); got != "gemini-3.8-flash-high" {
+		t.Errorf("reported model = %q, want %q", got, "gemini-3.8-flash-high")
+	}
+}
+
+// TestAgyBackend_RunPrompt_ReportsTheRetargetedModel pins that the id reported
+// upward is the one agy ran, not the one configured.
+func TestAgyBackend_RunPrompt_ReportsTheRetargetedModel(t *testing.T) {
+	resultJSON := `{"conversation_id":"conv-retarget","status":"SUCCESS","response":"AGYOK",` +
+		`"duration_seconds":0.1,"num_turns":1,` +
+		`"usage":{"input_tokens":5,"output_tokens":1,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":6}}`
+	cliPath := fakeAgyCLIRejectingEffortConflict(t, resultJSON)
+
+	handler := &recordingHandler{}
+	b := &agyBackend{cliPath: cliPath, config: Config{Model: DefaultAgyModel, Effort: "high"}}
+
+	if _, err := b.RunPrompt(context.Background(), "review this", handler); err != nil {
+		t.Fatalf("RunPrompt failed: %v", err)
+	}
+	if got := handler.lastModel(); got != "gemini-3.8-flash-high" {
+		t.Errorf("reported model = %q, want %q — EffectiveModel promises the model actually used",
+			got, "gemini-3.8-flash-high")
+	}
+}
+
+// fakeAgyCLIRejectingUnknownModel mirrors agy's refusal of a model id outside
+// its catalog, which is what a forged "-max" suffix would produce.
+func fakeAgyCLIRejectingUnknownModel(t *testing.T, resultJSON string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agy")
+	script := `#!/bin/sh
+model=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --model) model="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$model" in
+  gemini-3.8-flash-low|gemini-3.8-flash-medium|gemini-3.8-flash-high|"") ;;
+  *) echo "Error: invalid model selection (--model \"$model\" --effort \"\"): model $model is not recognized as a known model or custom model in settings" >&2
+     exit 1 ;;
+esac
+cat <<'EOF'
+` + resultJSON + `
+EOF
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake agy CLI: %v", err)
+	}
+	return path
+}
