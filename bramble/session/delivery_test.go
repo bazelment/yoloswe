@@ -305,6 +305,46 @@ func TestADraftInTheComposerSilencesTheNudge(t *testing.T) {
 	require.Empty(t, target.markedRunning, "no turn was started")
 }
 
+// TestAStrandedNudgeIsSubmittedNotDropped pins the fix for issue #346: a
+// previous nudge that pasted its line but never got the Enter that would have
+// submitted it (a killed process, a dropped tmux write) leaves nudgeText
+// sitting alone in the composer. Every later nudge attempt runs straight into
+// the draft guard and reads it as a human's half-written line, so without
+// recognizing its own words the wedge is permanent — nothing else will ever
+// submit that line, and nothing else will ever nudge this parent again either
+// (claimNudge is per-attempt, not a queue).
+func TestAStrandedNudgeIsSubmittedNotDropped(t *testing.T) {
+	t.Parallel()
+	target := newFakeTarget()
+	child := claudeChild(target)
+	target.setPane(claudeComposerPane(nudgeText))
+	panes := echoPanes(target)
+
+	newTestNotifier(t, target, panes).NotifyParent(t.Context(), child)
+
+	require.Equal(t, []string{"enter(@7)"}, panes.recorded(),
+		"the stranded line is submitted with a bare Enter, never pasted again")
+	require.Equal(t, []SessionID{"parent"}, target.markedRunning,
+		"submitting the stranded nudge starts a turn like any other delivery")
+}
+
+// TestAHumanDraftThatMerelyContainsTheNudgeStaysProtected pins the boundary of
+// the ownership comparison: it is exact-match on the whole composer body, not
+// a substring or prefix check, so a human line that happens to quote or
+// reference bramble's hint text is still a human's line.
+func TestAHumanDraftThatMerelyContainsTheNudgeStaysProtected(t *testing.T) {
+	t.Parallel()
+	target := newFakeTarget()
+	child := claudeChild(target)
+	target.setPane(claudeComposerPane(nudgeText + " -- I'm mid-thought, don't submit this"))
+	panes := echoPanes(target)
+
+	newTestNotifier(t, target, panes).NotifyParent(t.Context(), child)
+
+	require.Empty(t, panes.recorded(), "a human draft is never submitted, even one that echoes the hint text")
+	require.Empty(t, target.markedRunning, "no turn was started")
+}
+
 func TestAWorkingPaneSilencesTheNudge(t *testing.T) {
 	t.Parallel()
 	target := newFakeTarget()

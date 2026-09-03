@@ -554,6 +554,64 @@ func composerDraft(provider string, lines []string) (draft, known bool) {
 	return draft, known
 }
 
+// composerLiteralText returns the exact text sitting in claude's composer, so
+// a caller that already knows what it is looking for can compare against it
+// without deciding provenance itself.
+//
+// This is deliberately separate from composerDraft rather than folded into
+// it: composerDraft's contract is "any text is a draft, whoever wrote it"
+// (see judgeComposerLine), and that must not change. A caller comparing this
+// text against a known payload is not the composer layer judging ownership —
+// it is the layer that emitted the payload recognizing its own words.
+//
+// ok is false whenever the text cannot be read with confidence: an empty
+// composer has nothing to compare, and the fail-closed "located but
+// unreadable" case (a long draft that fills the region) has no legible line
+// to hand back either. Both must compare unequal to any known payload, not
+// merely absent, so the caller's fallback is always to keep yielding.
+func composerLiteralText(provider string, lines []string) (text string, ok bool) {
+	if provider != ProviderClaude {
+		return "", false
+	}
+	line, found := locateComposerLine(lines)
+	if !found {
+		return "", false
+	}
+	body, hasGlyph := composerBody(line)
+	if !hasGlyph || body == "" {
+		return "", false
+	}
+	return body, true
+}
+
+// locateComposerLine finds the single line claude's live composer is drawn
+// on, walking the same branches composerDraft locates through (bounded walk,
+// then the line above the status rule, then the tail scan) but stopping at
+// location rather than judging the text. found is false in every case that
+// would make composerDraft fail closed, not only the ones with no candidate
+// line at all — a caller comparing text needs "not confidently this text",
+// which unreadable and absent both satisfy identically.
+func locateComposerLine(lines []string) (line string, found bool) {
+	if composerIdx, _ := claudeComposerIdx(lines); composerIdx >= 0 {
+		return strings.TrimSpace(lines[composerIdx]), true
+	}
+	if searchedForComposer(lines) {
+		if l, ok := lineAboveStatusRule(lines); ok {
+			return l, true
+		}
+		return "", false
+	}
+	found = false
+	forEachPaneTailLine(lines, func(l string) bool {
+		if !strings.HasPrefix(strings.TrimSpace(l), claudePromptGlyph) {
+			return false
+		}
+		line, found = l, true
+		return true
+	})
+	return line, found
+}
+
 // lineAboveStatusRule returns the first non-empty line above the lowest status
 // rule, where claude draws its live composer even if the upper rule is missing.
 func lineAboveStatusRule(lines []string) (string, bool) {

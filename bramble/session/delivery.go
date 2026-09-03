@@ -254,33 +254,54 @@ func (n *Notifier) nudge(ctx context.Context, parent SessionInfo) {
 	// gap rather than a solved case — but the exposure is one disposable line
 	// rather than a queue of reports, and nothing retries it.
 	if draft, known := composerDraft(provider, lines); known && draft {
+		// A draft is not always a human's. If a previous nudge pasted this exact
+		// line and then failed before its Enter landed — a killed process, a
+		// dropped tmux write — the text stranded in the composer is bramble's
+		// own, word for word, and nothing else will ever submit it: the guard
+		// above would keep reading it as a draft and yielding forever, which is
+		// exactly the wedge this comparison exists to break.
+		//
+		// composerLiteralText decides this without composerDraft or
+		// judgeComposerLine ever weighing in on provenance — they still say only
+		// "any text is a draft, whoever wrote it" — so a human's line, or a
+		// bramble line with anything appended or missing, keeps failing this
+		// comparison and stays protected. Submit rather than paste-then-submit:
+		// the text is already there, and pasting again would duplicate it.
+		if text, ok := composerLiteralText(provider, lines); ok && text == nudgeText {
+			n.submitAndTrack(ctx, parent.ID, target)
+		}
 		return
 	}
 
 	if err := n.panes.Paste(ctx, target, nudgeText); err != nil {
 		return
 	}
-	// Marked before the Enter, not after. A submitted prompt starts a turn and
-	// nothing else reports that for a tmux session bramble just typed into —
-	// but a fast parent can answer and fire its completion notify in the gap
-	// between Enter and this call. That notify hits SetSessionIdle's
-	// compare-and-set, sees idle rather than running, and is dropped; this then
-	// marks the parent running with nothing alive to end it, and it reads busy
-	// forever.
-	//
-	// Marking first inverts the failure: if the Enter fails, the parent is
-	// briefly running with no turn, which MarkIdle puts back.
-	// Undo only if this write is what made the parent running. parent.Status was
-	// read before two tmux round-trips, so the parent can legitimately have
-	// started a turn since — and reverting that would tell the orchestrator a
-	// working lane had finished, which is the failure this design exists to
-	// remove.
-	startedTurn := n.target.MarkRunning(parent.ID)
+	n.submitAndTrack(ctx, parent.ID, target)
+}
+
+// submitAndTrack sends the Enter that submits whatever this call already
+// staged in the composer — a fresh paste, or bramble's own stranded line from
+// a previous attempt — and keeps the parent's running status honest around it.
+//
+// Marked before the Enter, not after. A submitted prompt starts a turn and
+// nothing else reports that for a tmux session bramble just typed into — but
+// a fast parent can answer and fire its completion notify in the gap between
+// Enter and this call. That notify hits SetSessionIdle's compare-and-set,
+// sees idle rather than running, and is dropped; this then marks the parent
+// running with nothing alive to end it, and it reads busy forever.
+//
+// Marking first inverts the failure: if the Enter fails, the parent is
+// briefly running with no turn, which MarkIdle puts back. Undo only if this
+// write is what made the parent running: parent.Status may have been read
+// before tmux round-trips that let the parent legitimately start a turn of
+// its own since, and reverting that would tell the orchestrator a working
+// lane had finished, which is the failure this design exists to remove.
+func (n *Notifier) submitAndTrack(ctx context.Context, parentID SessionID, target string) {
+	startedTurn := n.target.MarkRunning(parentID)
 	if err := n.panes.SendEnter(ctx, target); err != nil {
 		if startedTurn {
-			n.target.MarkIdle(parent.ID)
+			n.target.MarkIdle(parentID)
 		}
-		return
 	}
 }
 

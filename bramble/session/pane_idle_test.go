@@ -749,6 +749,74 @@ func TestComposerLayerDoesNotJudgeOwnership(t *testing.T) {
 	}
 }
 
+// TestComposerLiteralTextReadsWhatComposerDraftJudges pins that the
+// text-extraction path (added for issue #346, so a caller can recognize its
+// own stranded paste) finds the same body composerDraft judges, across every
+// branch composerDraft locates through.
+func TestComposerLiteralTextReadsWhatComposerDraftJudges(t *testing.T) {
+	t.Parallel()
+
+	t.Run("located by the bounded walk", func(t *testing.T) {
+		t.Parallel()
+		pane := claudePaneComposer("❯ [bramble] subagent activity — check your run directory", "✻ Worked for 12s")
+		text, ok := composerLiteralText(ProviderClaude, pane)
+		require.True(t, ok)
+		assert.Equal(t, "[bramble] subagent activity — check your run directory", text)
+	})
+
+	t.Run("located via the line above the status rule, upper rule missing", func(t *testing.T) {
+		t.Parallel()
+		pane := []string{
+			"❯ a line the bounded walk cannot bound",
+			"────────────────────────────────────────────",
+			"  ~/wt/branch  main  Opus 4.6  ctx:43%  tokens:20k",
+			"  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+		}
+		text, ok := composerLiteralText(ProviderClaude, pane)
+		require.True(t, ok)
+		assert.Equal(t, "a line the bounded walk cannot bound", text)
+	})
+
+	t.Run("located via the tail scan, no status rule at all", func(t *testing.T) {
+		t.Parallel()
+		pane := []string{"❯ no chrome around this line at all"}
+		text, ok := composerLiteralText(ProviderClaude, pane)
+		require.True(t, ok)
+		assert.Equal(t, "no chrome around this line at all", text)
+	})
+
+	t.Run("an empty composer has no text to compare", func(t *testing.T) {
+		t.Parallel()
+		pane := claudePaneComposer("❯ ", "✻ Worked for 12s")
+		_, ok := composerLiteralText(ProviderClaude, pane)
+		assert.False(t, ok, "nothing to recognize as bramble's own text")
+	})
+
+	t.Run("located but unreadable fails closed to not-ok, same as composerDraft", func(t *testing.T) {
+		t.Parallel()
+		pane := []string{
+			"✻ Worked for 12s",
+			"────────────────────────────────────────────",
+			"⏎ some decorated composer shape we do not parse",
+			"────────────────────────────────────────────",
+			"  ~/wt/branch  main  Opus 4.6  ctx:43%  tokens:20k",
+			"  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+		}
+		draft, known := composerDraft(ProviderClaude, pane)
+		require.True(t, known)
+		require.True(t, draft, "precondition: composerDraft fails closed to draft here")
+
+		_, ok := composerLiteralText(ProviderClaude, pane)
+		assert.False(t, ok, "no legible text means it can never match a known payload")
+	})
+
+	t.Run("non-claude providers have no readable composer", func(t *testing.T) {
+		t.Parallel()
+		_, ok := composerLiteralText(ProviderCodex, []string{"❯ anything"})
+		assert.False(t, ok)
+	})
+}
+
 // TestLocatedButUnreadableComposerHolds pins fail-closed behavior for a located
 // composer whose text cannot be parsed. Unknown means deliver, so unreadable
 // content must report hold.
