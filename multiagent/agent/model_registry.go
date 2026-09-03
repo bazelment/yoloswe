@@ -8,7 +8,7 @@ import (
 // AgentModel describes a model available for session execution.
 type AgentModel struct {
 	ID       string // Model identifier passed to --model flag (e.g. "opus", "gpt-5.5")
-	Provider string // Binary/provider name: "claude", "codex", "gemini", etc.
+	Provider string // Binary/provider name: "claude", "codex", "agy", etc.
 	Label    string // Display label for the UI (e.g. "opus (claude)")
 	// Placeholder marks an ID that names no real model — it is bramble's own
 	// label for "let this provider's CLI pick its default". Such an ID must

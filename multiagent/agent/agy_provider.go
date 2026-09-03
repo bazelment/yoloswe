@@ -55,18 +55,22 @@ func (p *AgyProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Work
 			if cfg.EventHandler != nil {
 				cfg.EventHandler.OnText(e.Text)
 			}
-			p.events <- TextAgentEvent{Text: e.Text}
+			p.emit(TextAgentEvent{Text: e.Text})
 		case agy.TurnCompleteEvent:
 			if cfg.EventHandler != nil {
 				cfg.EventHandler.OnTurnComplete(1, e.Success, e.DurationMs, 0)
 			}
-			p.events <- TurnCompleteAgentEvent{TurnNumber: 1, Success: e.Success, DurationMs: e.DurationMs}
+			p.emit(TurnCompleteAgentEvent{TurnNumber: 1, Success: e.Success, DurationMs: e.DurationMs})
 			return &AgentResult{
 				Text:       resultText.String(),
 				Success:    e.Success,
 				Error:      e.Error,
 				DurationMs: e.DurationMs,
 				SessionID:  e.ConversationID,
+				// agy also reports thinking_tokens, which AgentUsage has no
+				// field for; dropped rather than folded into OutputTokens,
+				// which would silently inflate a number operators compare
+				// across providers. CostUSD stays zero: agy reports no cost.
 				Usage: AgentUsage{
 					InputTokens:     e.Usage.InputTokens,
 					OutputTokens:    e.Usage.OutputTokens,
@@ -77,7 +81,7 @@ func (p *AgyProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Work
 			if cfg.EventHandler != nil {
 				cfg.EventHandler.OnError(e.Error, e.Context)
 			}
-			p.events <- ErrorAgentEvent{Err: e.Error, Context: e.Context}
+			p.emit(ErrorAgentEvent{Err: e.Error, Context: e.Context})
 			return nil, e.Error
 		}
 	}
@@ -86,6 +90,26 @@ func (p *AgyProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Work
 }
 
 func (p *AgyProvider) Events() <-chan AgentEvent { return p.events }
+
+// emit offers an event to the provider's channel and drops it when no consumer
+// is keeping up.
+//
+// The drop is deliberate, and it is the same discipline every other provider
+// already gets for free: they reach this channel through dispatchStreamEvent,
+// which sends under a select with a default arm (see bridge.go). AgyProvider
+// is ephemeral, so bramble's providerRunner never starts an event bridge for
+// it (bridgeProviderEvents runs only for a LongRunningProvider) and nothing
+// drains Events() at all. A blocking send there is not backpressure - there is
+// no reader to catch up - so it wedges Execute permanently once the buffer
+// fills. Events() is a best-effort observation stream; the authoritative
+// result is the AgentResult that Execute returns, and it is unaffected by a
+// drop. Guarded by TestAgyProvider_ExecuteDoesNotBlockOnUndrainedEvents.
+func (p *AgyProvider) emit(ev AgentEvent) {
+	select {
+	case p.events <- ev:
+	default:
+	}
+}
 
 func (p *AgyProvider) Close() error {
 	close(p.events)
@@ -156,21 +180,13 @@ func agySessionOpts(cfg ExecuteConfig) []agy.SessionOption {
 	return opts
 }
 
-// agyEffortSuffixes are the reasoning levels agy encodes in a model id, longest
-// first so splitModelEffort matches "-medium" before any shorter overlap.
-var agyEffortSuffixes = []string{"-medium", "-high", "-low"}
-
 // splitModelEffort separates an agy model id from the reasoning level it pins.
-// agy's catalog spells the level as a trailing -low/-medium/-high
-// (gemini-3.8-flash-low, gemini-3.1-pro-high, ...); base reports the id without
-// it and pinned reports the level, empty when the id leaves the level open.
+//
+// Delegates to the agy wrapper, which owns this spelling rule because it is the
+// package that builds the argv. Kept as a local alias so the catalog-aware
+// logic below reads the same as it always has.
 func splitModelEffort(model string) (base, pinned string) {
-	for _, suffix := range agyEffortSuffixes {
-		if strings.HasSuffix(model, suffix) {
-			return strings.TrimSuffix(model, suffix), strings.TrimPrefix(suffix, "-")
-		}
-	}
-	return model, ""
+	return agy.SplitModelEffort(model)
 }
 
 // reconcileAgyEffort settles the two ways an agy invocation can carry a

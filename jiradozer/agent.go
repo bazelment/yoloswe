@@ -202,12 +202,15 @@ func providerReportsCost(provider string) bool {
 }
 
 // providerReportsTokens reports whether a provider's result carries real
-// input/output token counts. Claude and codex both do (codex populates
-// AgentResult.Usage from its token_count events); cursor and agy
-// leave Usage zero. This is intentionally distinct from providerReportsCost:
-// codex reports tokens but not cost, so the two metrics need separate gates.
+// input/output token counts. Claude, codex and agy all do (codex populates
+// AgentResult.Usage from its token_count events; agy from the usage object in
+// its --output-format json result); cursor leaves Usage zero. This is
+// intentionally distinct from providerReportsCost: codex and agy report tokens
+// but not cost, so the two metrics need separate gates.
 func providerReportsTokens(provider string) bool {
-	return provider == agent.ProviderClaude || provider == agent.ProviderCodex
+	return provider == agent.ProviderClaude ||
+		provider == agent.ProviderCodex ||
+		provider == agent.ProviderAgy
 }
 
 // usageLogAttr returns a single slog key/value pair: the measured value when

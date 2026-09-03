@@ -223,3 +223,110 @@ func TestAgyBackend_RunPrompt_NoToolEvents(t *testing.T) {
 		t.Errorf("expected no tool events, got starts=%v ends=%v", handler.toolStarts, handler.toolEnds)
 	}
 }
+
+// TestAgyBackend_RunPrompt_EffortDoesNotConflictWithPinnedModel covers the
+// documented `--backend agy --effort high` path end to end.
+//
+// DefaultAgyModel pins medium, and reviewer.Config advertises agy effort as
+// (low, medium, high), so a caller asking for high used to produce
+// `--model gemini-3.8-flash-medium --effort high` — a hard agy rejection:
+//
+//	Error: invalid model selection (--model "gemini-3.8-flash-medium"
+//	--effort "high"): --model gemini-3.8-flash-medium conflicts with --effort=high
+//
+// yoloswe/reviewer does not depend on //multiagent/agent, so it cannot reach
+// that package's reconcileAgyEffort; the wrapper's own BuildCLIArgs is what
+// makes this safe for every caller.
+func TestAgyBackend_RunPrompt_EffortDoesNotConflictWithPinnedModel(t *testing.T) {
+	resultJSON := `{"conversation_id":"conv-effort","status":"SUCCESS","response":"AGYOK",` +
+		`"duration_seconds":0.2,"num_turns":1,` +
+		`"usage":{"input_tokens":10,"output_tokens":2,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":12}}`
+	// The fake rejects the conflicting pair exactly as the real CLI does, so
+	// this fails loudly if reconciliation ever stops happening.
+	cliPath := fakeAgyCLIRejectingEffortConflict(t, resultJSON)
+
+	b := &agyBackend{cliPath: cliPath, config: Config{
+		Model:  DefaultAgyModel,
+		Effort: "high",
+	}}
+
+	result, err := b.RunPrompt(context.Background(), "review this", nil)
+	if err != nil {
+		t.Fatalf("RunPrompt with a pinned model plus an explicit effort failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("RunPrompt returned a nil result")
+	}
+	if result.ResponseText != "AGYOK" {
+		t.Errorf("ResponseText = %q, want %q", result.ResponseText, "AGYOK")
+	}
+	if !result.Success {
+		t.Errorf("expected success=true, got %+v", result)
+	}
+}
+
+// fakeAgyCLIRejectingEffortConflict writes a fake agy that mirrors the real
+// CLI's refusal to accept a level pinned by --model and repeated in --effort.
+func fakeAgyCLIRejectingEffortConflict(t *testing.T, resultJSON string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agy")
+	script := `#!/bin/sh
+model=""; effort=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --model) model="$2"; shift 2 ;;
+    --effort) effort="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ -n "$effort" ]; then
+  case "$model" in
+    *-low|*-medium|*-high)
+      echo "Error: invalid model selection (--model \"$model\" --effort \"$effort\"): --model $model conflicts with --effort=$effort" >&2
+      exit 1 ;;
+  esac
+fi
+cat <<'EOF'
+` + resultJSON + `
+EOF
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake agy CLI: %v", err)
+	}
+	return path
+}
+
+// TestAgyBackend_RunPrompt_ReportsConversationIDAndUsage pins the outputs a
+// caller needs from a completed agy turn.
+//
+// Reviewer.lastSessionID is set only from OnSessionInfo, and BuildEnvelope
+// publishes it as session_id — so reporting an empty id makes the conversation
+// id agy assigned unobtainable, and Config.ResumeSessionID unreachable for any
+// caller that did not already have the id from somewhere else. Token counts are
+// reported by backend_codex.go and backend_claude.go from their own turn usage;
+// agy carries the same numbers in its JSON result.
+func TestAgyBackend_RunPrompt_ReportsConversationIDAndUsage(t *testing.T) {
+	resultJSON := `{"conversation_id":"conv-report-1","status":"SUCCESS","response":"AGYOK",` +
+		`"duration_seconds":0.3,"num_turns":1,` +
+		`"usage":{"input_tokens":321,"output_tokens":12,"thinking_tokens":4,"cache_read_tokens":40,"total_tokens":377}}`
+	cliPath := fakeAgyCLIRejectingEffortConflict(t, resultJSON)
+
+	handler := &recordingHandler{}
+	b := &agyBackend{cliPath: cliPath, config: Config{Model: DefaultAgyModel}}
+
+	result, err := b.RunPrompt(context.Background(), "review this", handler)
+	if err != nil {
+		t.Fatalf("RunPrompt failed: %v", err)
+	}
+	if got := handler.lastSessionID(); got != "conv-report-1" {
+		t.Errorf("handler observed session id %q, want %q — a caller cannot resume without it",
+			got, "conv-report-1")
+	}
+	if result.InputTokens != 321 {
+		t.Errorf("InputTokens = %d, want 321", result.InputTokens)
+	}
+	if result.OutputTokens != 12 {
+		t.Errorf("OutputTokens = %d, want 12", result.OutputTokens)
+	}
+}

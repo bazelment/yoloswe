@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -335,4 +336,47 @@ func TestAgyProvider_ResumeSessionIDReachesConversationFlag(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "PLATYPUS", result.Text)
 	assert.Equal(t, "conv-provider-1", result.SessionID)
+}
+
+// TestAgyProvider_ExecuteDoesNotBlockOnUndrainedEvents pins the send discipline
+// on the provider's own event channel.
+//
+// AgyProvider is ephemeral, so bramble's providerRunner never starts an event
+// bridge for it (bridgeProviderEvents runs only for a LongRunningProvider) and
+// nothing drains Events(). Each Execute pushes a TextAgentEvent plus a
+// TurnCompleteAgentEvent, so a session that keeps reusing the provider fills
+// the 100-slot buffer after ~50 turns; a blocking send then wedges Execute for
+// good. Every other provider reaches this channel through
+// dispatchStreamEvent's non-blocking select, which drops rather than blocks.
+func TestAgyProvider_ExecuteDoesNotBlockOnUndrainedEvents(t *testing.T) {
+	resultJSON := `{"conversation_id":"conv-flood","status":"SUCCESS","response":"ok",` +
+		`"duration_seconds":0.1,"num_turns":1,` +
+		`"usage":{"input_tokens":1,"output_tokens":1,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":2}}`
+	cliPath := writeFakeAgy(t, resultJSON)
+
+	p := NewAgyProvider(agy.WithCLIPath(cliPath))
+	defer p.Close()
+
+	// Deliberately never read p.Events(). cap(p.events) is 100 and each turn
+	// emits 2, so this overruns the buffer with margin.
+	turns := cap(p.events)
+
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < turns; i++ {
+			if _, err := p.Execute(context.Background(), "ping", nil); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(60 * time.Second):
+		t.Fatal("Execute blocked on an undrained event channel: no consumer reads " +
+			"AgyProvider.Events() on the ephemeral path, so a bare send wedges the session")
+	}
 }

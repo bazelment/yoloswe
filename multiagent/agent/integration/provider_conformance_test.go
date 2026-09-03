@@ -281,10 +281,13 @@ func TestConformance_BasicPrompt(t *testing.T) {
 				t.Logf("Codex usage: input=%d, output=%d", result.Usage.InputTokens, result.Usage.OutputTokens)
 				assert.Equal(t, float64(0), result.Usage.CostUSD, "Codex should not report cost")
 			case "agy":
-				// AgyProvider does not populate AgentResult.Usage; all fields zero.
-				assert.Equal(t, 0, result.Usage.InputTokens, "Agy usage should be zero")
-				assert.Equal(t, 0, result.Usage.OutputTokens, "Agy usage should be zero")
-				assert.Equal(t, float64(0), result.Usage.CostUSD, "Agy cost should be zero")
+				// AgyProvider maps agy's JSON usage object onto AgentUsage, so a
+				// live turn reports real token counts. CostUSD stays 0: agy's
+				// result carries no cost, and inventing one from a pricing table
+				// would be worse than reporting none (same call as codex).
+				assert.Positive(t, result.Usage.InputTokens, "Agy should report input tokens")
+				assert.Positive(t, result.Usage.OutputTokens, "Agy should report output tokens")
+				assert.Equal(t, float64(0), result.Usage.CostUSD, "Agy should not report cost")
 			}
 		})
 	}

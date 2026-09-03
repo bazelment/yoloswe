@@ -87,8 +87,10 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 	}
 
 	if handler != nil {
-		// agy emits no Ready-equivalent event with a session id, so report
-		// what we configured (empty session id) just like the model.
+		// agy has no Ready-equivalent event, so the conversation id is not
+		// known yet — it arrives with TurnCompleteEvent. Report the model now
+		// (callers render it while the turn streams) and re-report with the id
+		// once the turn completes, below.
 		handler.OnSessionInfo("", b.config.Model)
 	}
 
@@ -98,6 +100,7 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 	var turnErr error
 	var eventErr error
 	var conversationID string
+	var inputTokens, outputTokens int64
 	sawTurnComplete := false
 
 loop:
@@ -121,6 +124,8 @@ loop:
 				durationMs = e.DurationMs
 				success = e.Success
 				conversationID = e.ConversationID
+				inputTokens = int64(e.Usage.InputTokens)
+				outputTokens = int64(e.Usage.OutputTokens)
 				if e.Error != nil {
 					turnErr = e.Error
 				} else {
@@ -145,6 +150,17 @@ loop:
 		return reviewPartialResult(resumeStatus, &bridgeResult{responseText: responseText, durationMs: durationMs}, fmt.Errorf("agy: session ended without result"))
 	}
 
+	if handler != nil && conversationID != "" {
+		// Report the id agy assigned this conversation. Reviewer.lastSessionID
+		// is set from here (see rendererEventHandler.OnSessionInfo), and it is
+		// what BuildEnvelope publishes as session_id — the only way a caller
+		// obtains the id it must later pass back as Config.ResumeSessionID.
+		// Every sibling backend reports its own (backend_codex.go's thread id,
+		// backend_claude.go's and backend_cursor.go's session id); agy's simply
+		// is not known until the turn ends.
+		handler.OnSessionInfo(conversationID, b.config.Model)
+	}
+
 	if resumeStatus == ResumeStatusUnverified && turnErr == nil && conversationID == b.config.ResumeSessionID {
 		// The turn completed with no error and agy echoed back the exact
 		// conversation id we asked to resume — a real check, not an
@@ -159,6 +175,8 @@ loop:
 			DurationMs:   durationMs,
 			ErrorMessage: turnErr.Error(),
 			ResumeStatus: resumeStatus,
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
 		}, fmt.Errorf("agy: turn failed: %w", turnErr)
 	}
 
@@ -167,5 +185,7 @@ loop:
 		Success:      success,
 		DurationMs:   durationMs,
 		ResumeStatus: resumeStatus,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
 	}, nil
 }

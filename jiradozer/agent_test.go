@@ -545,15 +545,18 @@ func TestProviderReportsCost(t *testing.T) {
 }
 
 // Token counts are reported by Claude and codex (codex populates Usage from
-// its token_count events); cursor/agy leave Usage zero. This must be
-// distinct from cost reporting — codex reports tokens but not cost, so gating
-// token logging on providerReportsCost would mislabel real codex tokens "n/a".
+// its token_count events, agy from the usage object in its JSON result);
+// cursor leaves Usage zero. This must be distinct from cost reporting — codex
+// and agy report tokens but not cost, so gating token logging on
+// providerReportsCost would mislabel their real tokens "n/a".
 func TestProviderReportsTokens(t *testing.T) {
 	assert.True(t, providerReportsTokens(agent.ProviderClaude))
 	assert.True(t, providerReportsTokens(agent.ProviderCodex),
 		"codex reports real token counts even though it reports no cost")
+	assert.True(t, providerReportsTokens(agent.ProviderAgy),
+		"agy carries input/output tokens in its --output-format json result")
 	for _, p := range []string{
-		agent.ProviderCursor, agent.ProviderAgy,
+		agent.ProviderCursor,
 	} {
 		assert.False(t, providerReportsTokens(p), "%s does not report tokens", p)
 	}

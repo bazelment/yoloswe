@@ -75,6 +75,10 @@ func (e testUnknownEvent) StreamEventKind() agentstream.EventKind { return agent
 
 // recordingHandler records all EventHandler calls.
 type recordingHandler struct {
+	// sessionIDs records every OnSessionInfo id, in order. A backend may report
+	// twice (agy learns its conversation id only when the turn completes), so
+	// tests that care about the final id read lastSessionID.
+	sessionIDs []string
 	texts      []string
 	reasonings []string
 	toolStarts []string
@@ -83,9 +87,22 @@ type recordingHandler struct {
 	errors     []error
 }
 
-func (h *recordingHandler) OnSessionInfo(_, _ string) {}
-func (h *recordingHandler) OnText(delta string)       { h.texts = append(h.texts, delta) }
-func (h *recordingHandler) OnReasoning(delta string)  { h.reasonings = append(h.reasonings, delta) }
+func (h *recordingHandler) OnSessionInfo(sessionID, _ string) {
+	h.sessionIDs = append(h.sessionIDs, sessionID)
+}
+
+// lastSessionID is the most recent non-empty id reported, i.e. what
+// Reviewer.lastSessionID ends up holding and BuildEnvelope publishes.
+func (h *recordingHandler) lastSessionID() string {
+	for i := len(h.sessionIDs) - 1; i >= 0; i-- {
+		if h.sessionIDs[i] != "" {
+			return h.sessionIDs[i]
+		}
+	}
+	return ""
+}
+func (h *recordingHandler) OnText(delta string)      { h.texts = append(h.texts, delta) }
+func (h *recordingHandler) OnReasoning(delta string) { h.reasonings = append(h.reasonings, delta) }
 func (h *recordingHandler) OnToolStart(name, callID string, _ map[string]interface{}) {
 	h.toolStarts = append(h.toolStarts, name)
 }
