@@ -306,8 +306,16 @@ func TestTmuxRunnerAgyNewProjectPrecedesPrompt(t *testing.T) {
 	if args[len(args)-1] != r.prompt {
 		t.Fatalf("prompt is not the final argument: %v", args)
 	}
-	if idx >= len(args)-1 {
-		t.Errorf("--new-project must precede the prompt, got index %d in %v", idx, args)
+	// --prompt-interactive takes the prompt as its VALUE, so the flag that must
+	// not slip past it is --prompt-interactive itself, not the trailing token:
+	// [..., "--prompt-interactive", "--new-project", prompt] would make agy
+	// consume "--new-project" as the prompt while still leaving the prompt last.
+	promptFlag := slices.Index(args, "--prompt-interactive")
+	if promptFlag < 0 {
+		t.Fatalf("--prompt-interactive not found: %v", args)
+	}
+	if idx >= promptFlag {
+		t.Errorf("--new-project must precede --prompt-interactive, got %d >= %d in %v", idx, promptFlag, args)
 	}
 }
 
