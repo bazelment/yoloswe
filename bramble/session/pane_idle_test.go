@@ -1026,18 +1026,21 @@ func TestEffortIndicatorIsNotMistakenForATurnInFlight(t *testing.T) {
 	assert.False(t, working, "and must never be read as a tool call in flight")
 }
 
-// TestEveryExplicitEffortLevelIsRecognized is the drift guard. The other effort
-// tests enumerate literals, so they would drift together with a hand-written
-// pattern and catch nothing; this one asks the wrapper for the levels instead,
-// so adding one there fails here until the matcher covers it. That direction
-// matters: an unrecognized level reads as a tool call again, which is the wedge
-// this recognition exists to prevent.
+// TestEveryExplicitEffortLevelIsRecognized pins that the matcher's level list
+// is derived, not mirrored. The other effort tests spell out literals, which is
+// fine for what they pin but would say nothing about a level added upstream;
+// this one asks claude.ExplicitEffortLevels for the set, so it fails the moment
+// the matcher stops covering everything that list names — including a level
+// added there later, which today needs no edit in this package at all. That
+// direction is the one that costs: an unrecognized level reads as a tool call
+// again, which is the wedge this recognition exists to prevent.
 func TestEveryExplicitEffortLevelIsRecognized(t *testing.T) {
 	t.Parallel()
 
-	for _, level := range []claude.EffortLevel{
-		claude.EffortLow, claude.EffortMed, claude.EffortHigh, claude.EffortMax,
-	} {
+	levels := claude.ExplicitEffortLevels()
+	require.NotEmpty(t, levels, "the wrapper must name at least one explicit level")
+
+	for _, level := range levels {
 		line := "● " + string(level) + " · /effort"
 		working, known := claudeLineVerdict(line)
 		assert.False(t, known, "%q is header chrome, not a turn verdict", line)

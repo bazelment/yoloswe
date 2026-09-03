@@ -73,21 +73,23 @@ var claudeCompletionPastRe = regexp.MustCompile(`^[✻✢✽✹]\s+\S+ for\s+\d`
 // claudeEffortIndicatorRe matches claude's persistent effort-level header, which
 // shares the "●" glyph the tool-call heuristic keys on.
 //
-// The alternation is built from the wrapper's own EffortLevel constants rather
-// than written out, because a hand-written list drifts silently and in the one
-// direction that costs: a level the pattern does not name reads as a tool call
-// again, paneSaysWorking reports a turn in flight, and the nudge yields before
-// the draft guard runs — the exact wedge this recognition exists to prevent. A
-// literal list also drifts together with any test that enumerates the same
-// literals, so nothing would catch it. EffortAuto is excluded: it clears
-// explicit effort, so the CLI draws no indicator for it.
+// The alternation is asked of claude.ExplicitEffortLevels rather than written
+// out here, so a level added upstream is recognized with no edit in this
+// package. A mirrored list would drift in the one direction that costs: a
+// level the pattern does not name reads as a tool call again, paneSaysWorking
+// reports a turn in flight, and the nudge yields before the draft guard runs —
+// the exact wedge this recognition exists to prevent. Mirroring it in the test
+// too would hide that, since both copies would drift together.
+//
+// EffortAuto is deliberately not in that list: it clears explicit effort, so
+// the CLI draws no indicator for it.
 var claudeEffortIndicatorRe = regexp.MustCompile(
 	`^● (` + strings.Join(claudeEffortLevelNames(), "|") + `) · /effort$`)
 
-// claudeEffortLevelNames is the explicit effort levels, regexp-quoted, in the
-// wrapper's own order.
+// claudeEffortLevelNames is the explicit effort levels, regexp-quoted, asked of
+// the wrapper rather than restated here.
 func claudeEffortLevelNames() []string {
-	levels := []claude.EffortLevel{claude.EffortLow, claude.EffortMed, claude.EffortHigh, claude.EffortMax}
+	levels := claude.ExplicitEffortLevels()
 	names := make([]string, 0, len(levels))
 	for _, level := range levels {
 		names = append(names, regexp.QuoteMeta(string(level)))
