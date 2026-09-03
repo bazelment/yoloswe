@@ -80,7 +80,7 @@ func init() {
 	Cmd.Flags().StringVar(&model, "model", "", "Model override (default: backend-specific)")
 	Cmd.Flags().StringVar(&effort, "effort", "", "Reasoning effort level for codex (low, medium, high), claude (low, medium, high, max), and agy (low, medium, high; max clamps to high)")
 	Cmd.Flags().StringVar(&sandbox, "sandbox", "", "Codex sandbox mode: read-only, workspace-write, danger-full-access (default: danger-full-access)")
-	Cmd.Flags().BoolVar(&readOnly, "read-only", true, "Withhold the write tools from the reviewer (Codex: approval handler; Claude: tools not granted). Not a filesystem guarantee — neither backend blocks shell writes. Default true.")
+	Cmd.Flags().BoolVar(&readOnly, "read-only", true, "Withhold the write tools from the reviewer (Codex: approval handler; Claude: tools not granted). Ignored by Cursor and Agy, which auto-approve writes and shell regardless. Not a filesystem guarantee — no backend blocks shell writes. Default true.")
 	Cmd.Flags().BoolVar(&verbose, "verbose", false, "Show tool call details")
 	Cmd.Flags().StringVar(&goal, "goal", "", "Review goal (default: infer from branch)")
 	Cmd.Flags().DurationVar(&timeout, "timeout", 0, "Absolute hard cap on the whole review (0 = none; rely on --idle-timeout). A review making steady progress is bounded only by --idle-timeout.")

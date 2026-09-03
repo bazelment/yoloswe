@@ -53,6 +53,33 @@ func TestParseResultPayload_Empty(t *testing.T) {
 	assert.Equal(t, resultPayload{}, payload)
 }
 
+func TestIsToolDeniedEmptyResult(t *testing.T) {
+	t.Parallel()
+
+	deniedStderr := []byte(`jetski: no output produced — a tool required the "read_file" permission that headless mode cannot prompt for, so it was auto-denied.`)
+
+	tests := []struct {
+		name     string
+		response string
+		stderr   []byte
+		want     bool
+	}{
+		{"empty response with denial marker", "", deniedStderr, true},
+		{"empty response, generic no-output prefix without a denial clause", "",
+			[]byte("jetski: no output produced \u2014 the model stopped early."), false},
+		{"empty response, no stderr at all", "", nil, false},
+		{"empty response, unrelated stderr", "", []byte("some warning: deprecated flag used"), false},
+		{"non-empty response with denial marker present", "SECRETTOKEN42", deniedStderr, false},
+		{"non-empty response, no stderr", "hi", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, isToolDeniedEmptyResult(tt.response, tt.stderr))
+		})
+	}
+}
+
 func TestParseResultPayload_Malformed(t *testing.T) {
 	t.Parallel()
 
@@ -128,6 +155,135 @@ func TestSession_RoundTrip_ErrorStatusReportsAgyError(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "boom")
+}
+
+// writeFakeAgyWithStderr writes a fake CLI that produces both result JSON and
+// stderr, including the headless tool-denial shape.
+func writeFakeAgyWithStderr(t *testing.T, resultJSON, stderrText string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agy")
+	script := "#!/bin/sh\n" +
+		"cat >&2 <<'EOF'\n" + stderrText + "\nEOF\n" +
+		"cat <<'EOF'\n" + resultJSON + "\nEOF\n"
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	return path
+}
+
+// TestSession_ToolDeniedEmptyResult_ReportsAsFailure keeps denied empty turns
+// from being reported as successful queries.
+func TestSession_ToolDeniedEmptyResult_ReportsAsFailure(t *testing.T) {
+	t.Parallel()
+
+	resultJSON := `{"conversation_id":"conv-denied","status":"SUCCESS","response":"",` +
+		`"duration_seconds":22.09,"num_turns":1,` +
+		`"usage":{"input_tokens":11299,"output_tokens":146,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":11445}}`
+	stderrText := `jetski: no output produced — a tool required the "read_file" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. read_file(<target>)). Alternatively, re-run with --dangerously-skip-permissions to auto-approve all tools.`
+	cliPath := writeFakeAgyWithStderr(t, resultJSON, stderrText)
+
+	result, err := Query(context.Background(), "read sample.go and report the token", WithCLIPath(cliPath))
+	require.Error(t, err, "a denied-tool empty response must not be reported as success")
+	assert.Nil(t, result)
+
+	var toolDenied *ToolDeniedError
+	require.ErrorAs(t, err, &toolDenied, "error must be identifiable as a tool-denial, not a generic failure")
+	assert.Equal(t, "SUCCESS", toolDenied.Status)
+	assert.Contains(t, toolDenied.Stderr, "read_file")
+}
+
+// TestSession_ToolDeniedEmptyResult_CanceledStatusAlsoCaught ensures the guard
+// does not depend on the result status.
+func TestSession_ToolDeniedEmptyResult_CanceledStatusAlsoCaught(t *testing.T) {
+	t.Parallel()
+
+	resultJSON := `{"conversation_id":"conv-canceled","status":"CANCELED","response":"",` +
+		`"duration_seconds":10.3,"num_turns":1,` +
+		`"usage":{"input_tokens":24419,"output_tokens":373,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":24792}}`
+	stderrText := `jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.`
+	cliPath := writeFakeAgyWithStderr(t, resultJSON, stderrText)
+
+	result, err := Query(context.Background(), "run a command", WithCLIPath(cliPath))
+	require.Error(t, err)
+	assert.Nil(t, result)
+
+	var toolDenied *ToolDeniedError
+	require.ErrorAs(t, err, &toolDenied)
+	assert.Equal(t, "CANCELED", toolDenied.Status)
+}
+
+// TestSession_LegitimateEmptyResult_StillSucceeds proves an empty response
+// without the denial marker still succeeds.
+func TestSession_LegitimateEmptyResult_StillSucceeds(t *testing.T) {
+	t.Parallel()
+
+	resultJSON := `{"conversation_id":"conv-quiet","status":"SUCCESS","response":"",` +
+		`"duration_seconds":3.1,"num_turns":1,` +
+		`"usage":{"input_tokens":50,"output_tokens":5,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":55}}`
+	cliPath := writeFakeAgy(t, resultJSON)
+
+	result, err := Query(context.Background(), "silently do nothing", WithCLIPath(cliPath))
+	require.NoError(t, err, "an empty response with no denial marker must still succeed")
+	require.NotNil(t, result)
+	assert.True(t, result.Success)
+	assert.Empty(t, result.Text)
+}
+
+// TestSession_GenericNoOutputPrefixWithoutDenial_StillSucceeds proves the guard
+// keys on the denial clause, not on agy's generic "no output produced" prefix:
+// an empty turn that prints that prefix for some other reason must still
+// succeed rather than be mislabelled a permission denial.
+func TestSession_GenericNoOutputPrefixWithoutDenial_StillSucceeds(t *testing.T) {
+	t.Parallel()
+
+	resultJSON := `{"conversation_id":"conv-generic","status":"SUCCESS","response":"",` +
+		`"duration_seconds":1.2,"num_turns":1,` +
+		`"usage":{"input_tokens":10,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":10}}`
+	stderrText := `jetski: no output produced — the model stopped without emitting text.`
+	cliPath := writeFakeAgyWithStderr(t, resultJSON, stderrText)
+
+	result, err := Query(context.Background(), "do nothing", WithCLIPath(cliPath))
+	require.NoError(t, err, "the generic no-output prefix alone must not be read as a tool denial")
+	require.NotNil(t, result)
+	assert.True(t, result.Success)
+}
+
+// TestSession_ToolDeniedEmptyResult_PreservesAgyError proves a turn that failed
+// for its own reason keeps agy's explanation even when the denial branch wins.
+func TestSession_ToolDeniedEmptyResult_PreservesAgyError(t *testing.T) {
+	t.Parallel()
+
+	resultJSON := `{"conversation_id":"conv-both","status":"ERROR","response":"",` +
+		`"error":"timeout waiting for response",` +
+		`"duration_seconds":178.2,"num_turns":1,` +
+		`"usage":{"input_tokens":10,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":10}}`
+	stderrText := `jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.`
+	cliPath := writeFakeAgyWithStderr(t, resultJSON, stderrText)
+
+	_, err := Query(context.Background(), "do a thing", WithCLIPath(cliPath))
+	require.Error(t, err)
+
+	var toolDenied *ToolDeniedError
+	require.ErrorAs(t, err, &toolDenied)
+	assert.Equal(t, "timeout waiting for response", toolDenied.AgyError,
+		"agy's own failure explanation must not be swallowed by the denial branch")
+	assert.Contains(t, err.Error(), "timeout waiting for response")
+}
+
+// TestSession_NonEmptyResponseWithStderrNoise_StillSucceeds proves a real
+// response still succeeds when stderr contains denial noise.
+func TestSession_NonEmptyResponseWithStderrNoise_StillSucceeds(t *testing.T) {
+	t.Parallel()
+
+	resultJSON := `{"conversation_id":"conv-recovered","status":"SUCCESS","response":"SECRETTOKEN42",` +
+		`"duration_seconds":5.0,"num_turns":1,` +
+		`"usage":{"input_tokens":100,"output_tokens":10,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":110}}`
+	stderrText := `jetski: no output produced — a tool required the "read_file" permission that headless mode cannot prompt for, so it was auto-denied.`
+	cliPath := writeFakeAgyWithStderr(t, resultJSON, stderrText)
+
+	result, err := Query(context.Background(), "read sample.go", WithCLIPath(cliPath))
+	require.NoError(t, err, "a non-empty response must succeed even if stderr carries denial noise from a recovered tool call")
+	require.NotNil(t, result)
+	assert.Equal(t, "SECRETTOKEN42", result.Text)
 }
 
 func TestSession_RoundTrip_ResumesWithConversationFlag(t *testing.T) {

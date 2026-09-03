@@ -155,8 +155,37 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 		sessionOpts = append(sessionOpts, agy.WithEffort(effort))
 	}
 	if b.config.WorkDir != "" {
-		sessionOpts = append(sessionOpts, agy.WithWorkDir(b.config.WorkDir))
+		// --add-dir puts the worktree in agy's workspace so its file tools can
+		// see it at all; agy resolves tools against a registered workspace, not
+		// against the process cwd.
+		sessionOpts = append(sessionOpts, agy.WithWorkDir(b.config.WorkDir), agy.WithAddDir(b.config.WorkDir))
 	}
+	// --add-dir grants reads but NOT the "command" permission, and the review
+	// prompt mandates a shell `git diff` (see diffScopeClause in reviewer.go).
+	// Verified live against agy 1.1.25: with --add-dir alone that command is
+	// auto-denied and the turn returns CANCELED with an empty response, so a
+	// read-only grant does not make an agy review runnable — it only makes the
+	// failure loud. Bash is granted for the same reason every sibling backend
+	// grants it (a reviewer needs git log/diff/show): backend_claude.go uses
+	// PermissionModeBypass, backend_cursor.go uses --trust --force.
+	//
+	// Config.ReadOnly is deliberately NOT consulted, and reviewer.go's Config
+	// doc records that agy ignores it. agy exposes no per-tool lever that would
+	// let it be honoured, and both alternatives were tried live against 1.1.25:
+	//
+	//   --sandbox alone still auto-denies "command", so the review cannot run.
+	//   --sandbox WITH the grant does not restore the boundary — asked to write
+	//   a file, the model shelled around the sandbox and created it.
+	//
+	// The third lever agy's own stderr names, a permissions.allow rule, lives in
+	// a single global settings.json shared by every concurrent agy process on
+	// the host, so writing it per-invocation is a race, not a boundary.
+	//
+	// So this backend is honestly unable to offer a read-only review, and says
+	// so rather than implying one: an agy review must be given a checkout it is
+	// allowed to modify. The prompt is the only remaining constraint, exactly as
+	// for cursor. Callers needing a real boundary must sandbox the process.
+	sessionOpts = append(sessionOpts, agy.WithDangerouslySkipPermissions())
 	if b.config.TurnTimeout > 0 {
 		// agy's --print-timeout is a TOTAL wall-clock bound on print mode (its
 		// own default is 5m), so it is driven by Config.TurnTimeout, never by

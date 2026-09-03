@@ -39,6 +39,10 @@ func fakeAgyCLI(t *testing.T, responseText string, exitCode int) string {
 // for tests that need control over whether the echoed id matches (or does
 // not match) a requested resume.
 func fakeAgyCLIWithConversation(t *testing.T, responseText string, exitCode int, conversationID string) string {
+	return fakeAgyCLIWithConversationRecordingArgs(t, responseText, exitCode, conversationID, "")
+}
+
+func fakeAgyCLIWithConversationRecordingArgs(t *testing.T, responseText string, exitCode int, conversationID, argvPath string) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agy")
@@ -55,12 +59,17 @@ func fakeAgyCLIWithConversation(t *testing.T, responseText string, exitCode int,
 		)
 		body = "printf %s " + shellQuote(envelope) + "\n"
 	}
+	var recordArgs string
+	if argvPath != "" {
+		recordArgs = "printf '%s\\n' \"$*\" > " + shellQuote(argvPath) + "\n"
+	}
 
 	script := "#!/bin/sh\n" +
 		"case \" $* \" in\n" +
 		"  *' --output-format json '*) ;;\n" +
 		"  *) echo 'fakeAgyCLI: missing --output-format json' >&2; exit 99 ;;\n" +
 		"esac\n" +
+		recordArgs +
 		body +
 		"exit " + strconv.Itoa(exitCode) + "\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
@@ -532,6 +541,39 @@ func TestAgyBackend_RunPrompt_TurnTimeoutReachesAgyAsPrintTimeout(t *testing.T) 
 	}
 	if !strings.Contains(string(argv), "--print-timeout 90s") {
 		t.Fatalf("argv should carry --print-timeout 90s, got %q", string(argv))
+	}
+}
+
+// TestAgyBackend_RunPrompt_WorkDirGrantsWorkspaceAndTools ensures a review can
+// actually run: --add-dir puts the worktree in agy's workspace, and the tool
+// grant covers the shell `git diff` the review prompt mandates. Verified live
+// against agy 1.1.25 that --add-dir alone leaves that command auto-denied.
+func TestAgyBackend_RunPrompt_WorkDirGrantsWorkspaceAndTools(t *testing.T) {
+	dir := t.TempDir()
+	argvPath := filepath.Join(dir, "argv.txt")
+	cliPath := fakeAgyCLIWithConversationRecordingArgs(t, "AGYOK", 0, "conv-fake", argvPath)
+
+	reviewWorkDir := filepath.Join(dir, "review-worktree")
+	if err := os.Mkdir(reviewWorkDir, 0o755); err != nil {
+		t.Fatalf("create review worktree dir: %v", err)
+	}
+	b := &agyBackend{
+		config:  Config{Model: "gemini-3.8-flash-medium", WorkDir: reviewWorkDir},
+		cliPath: cliPath,
+	}
+	if _, err := b.RunPrompt(context.Background(), "review this", &recordingHandler{}); err != nil {
+		t.Fatalf("RunPrompt failed: %v", err)
+	}
+
+	argv, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("read recorded argv: %v", err)
+	}
+	if !strings.Contains(string(argv), "--add-dir "+reviewWorkDir) {
+		t.Fatalf("argv should carry --add-dir %s, got %q", reviewWorkDir, string(argv))
+	}
+	if !strings.Contains(string(argv), "--dangerously-skip-permissions") {
+		t.Fatalf("a review must be able to run the git diff its prompt mandates, got %q", string(argv))
 	}
 }
 
