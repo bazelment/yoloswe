@@ -185,6 +185,9 @@ func (r *tmuxRunner) Start(ctx context.Context) error {
 		return fmt.Errorf("tmux window %q already exists", r.windowName)
 	}
 
+	// Pre-trust before the CLI can render its first-run modal.
+	preTrustWorkspace(r.provider, r.workDir)
+
 	createCmd := exec.Command("tmux", r.newWindowArgs()...)
 
 	out, err := createCmd.Output()
