@@ -185,6 +185,11 @@ func (r *tmuxRunner) Start(ctx context.Context) error {
 		return fmt.Errorf("tmux window %q already exists", r.windowName)
 	}
 
+	// Seed the CLI's own trust store before it ever renders a frame, so an
+	// interactive agy/codex session does not stall on a first-run "do you
+	// trust this directory?" modal bramble cannot answer. See provider_trust.go.
+	preTrustWorkspace(r.provider, r.workDir)
+
 	createCmd := exec.Command("tmux", r.newWindowArgs()...)
 
 	out, err := createCmd.Output()
