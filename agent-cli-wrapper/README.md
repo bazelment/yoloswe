@@ -6,7 +6,7 @@ a specific agent binary and emits typed events on a Go channel.
 | Package | Binary | Protocol | Channel type |
 |---------|--------|----------|-------------|
 | `claude` | `claude` CLI | JSON streaming | `<-chan claude.Event` |
-| `acp` | `gemini --experimental-acp` | JSON-RPC over stdio | `<-chan acp.Event` |
+| `agy` | `agy` CLI (print mode) | one-shot JSON stdout | `<-chan agy.Event` |
 | `codex` | `codex app-server` | JSON-RPC over stdio | `<-chan codex.Event` |
 
 Supporting packages:
@@ -37,9 +37,10 @@ Six event kinds cover the common subset needed by the provider layer:
 | `KindError` | `Error` | Error occurred |
 
 `KindUnknown` (zero value) is returned by events that conditionally map to a
-common kind. For example, ACP's `ToolCallUpdateEvent` returns `KindToolEnd`
-only when its status is "completed" or "errored"; otherwise it returns
-`KindUnknown` and the bridge skips it.
+common kind: an event that has not yet reached a terminal state returns
+`KindUnknown` and the bridge skips it (see `agentstream/doc.go`). No current
+SDK event maps conditionally — the last one did so through the deleted `acp`
+package.
 
 ### How it works
 
@@ -68,9 +69,6 @@ type-switch on them.
 | `claude` | `ToolProgressEvent` | Partial tool progress for display; tools use `ToolStart`/`ToolEnd` |
 | `claude` | `CLIToolResultEvent` | CLI-specific tool result detail |
 | `claude` | `StateChangeEvent` | Session lifecycle metadata |
-| `acp` | `ClientReadyEvent` | ACP client init; provider handles internally |
-| `acp` | `SessionCreatedEvent` | Session lifecycle, not agent output |
-| `acp` | `PlanUpdateEvent` | Agent planning metadata; no cross-provider equivalent |
 | `codex` | `ClientReadyEvent` | Codex client init; provider handles internally |
 | `codex` | `ThreadStartedEvent` | Thread lifecycle |
 | `codex` | `ThreadReadyEvent` | Thread-level readiness; `Start()` waits for this internally |

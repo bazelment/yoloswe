@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeAgyCLI writes an executable shell script standing in for the agy
@@ -429,4 +430,173 @@ EOF
 		t.Fatalf("write fake agy CLI: %v", err)
 	}
 	return path
+}
+
+// hangingAgyCLI writes a fake agy that never exits and never prints a result,
+// standing in for a wedged subprocess. It also ignores --print-timeout, so it
+// exercises the backend's own wall-clock backstop rather than agy's flag.
+func hangingAgyCLI(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agy")
+	script := "#!/bin/sh\nwhile :; do sleep 30; done\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write hanging agy CLI: %v", err)
+	}
+	return path
+}
+
+// A wedged agy must not hang the review forever: Config.IdleTimeout is the
+// stall-killer every other backend honors via bridgeStreamEvents, and the
+// code-review CLI sets it from --idle-timeout (default 8m) on every run.
+// Without the backstop in RunPrompt this test hangs until the Go test timeout.
+func TestAgyBackend_RunPrompt_IdleTimeoutBoundsAWedgedProcess(t *testing.T) {
+	b := &agyBackend{
+		config: Config{
+			Model:       "gemini-3.8-flash-medium",
+			IdleTimeout: 150 * time.Millisecond,
+		},
+		cliPath: hangingAgyCLI(t),
+	}
+
+	start := time.Now()
+	done := make(chan struct{})
+	var err error
+	go func() {
+		defer close(done)
+		_, err = b.RunPrompt(context.Background(), "review this", &recordingHandler{})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("RunPrompt did not return: Config.IdleTimeout is not enforced")
+	}
+
+	if err == nil {
+		t.Fatal("expected an error when the agy process never produces a result")
+	}
+	if !strings.Contains(err.Error(), "idle timeout") {
+		t.Fatalf("error should name the idle timeout, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("took %s; the timeout should bound it near 150ms", elapsed)
+	}
+}
+
+// Zero must disable the bound, matching Config.IdleTimeout's documented
+// meaning ("Zero (the default) disables the idle check"). Guards against a
+// backstop that fires immediately on a nil/zero timer.
+func TestAgyBackend_RunPrompt_IdleTimeoutZeroDisablesTheBound(t *testing.T) {
+	b := &agyBackend{
+		config:  Config{Model: "gemini-3.8-flash-medium", IdleTimeout: 0},
+		cliPath: fakeAgyCLI(t, "AGYOK", 0),
+	}
+
+	result, err := b.RunPrompt(context.Background(), "review this", &recordingHandler{})
+	if err != nil {
+		t.Fatalf("RunPrompt failed with IdleTimeout=0: %v", err)
+	}
+	if !result.Success {
+		t.Fatal("expected success with the idle bound disabled")
+	}
+}
+
+// The bound must also reach agy itself as --print-timeout, so the CLI enforces
+// it in the common case instead of relying on the local backstop alone.
+func TestAgyBackend_RunPrompt_IdleTimeoutReachesAgyAsPrintTimeout(t *testing.T) {
+	dir := t.TempDir()
+	argvPath := filepath.Join(dir, "argv.txt")
+	cliPath := filepath.Join(dir, "agy")
+	envelope := `{"conversation_id":"conv-fake","status":"SUCCESS","response":"AGYOK\n",` +
+		`"duration_seconds":0.5,"num_turns":1,` +
+		`"usage":{"input_tokens":1,"output_tokens":1,"thinking_tokens":0,` +
+		`"cache_read_tokens":0,"total_tokens":2}}`
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > " + shellQuote(argvPath) + "\n" +
+		"printf %s " + shellQuote(envelope) + "\nexit 0\n"
+	if err := os.WriteFile(cliPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write argv-recording agy CLI: %v", err)
+	}
+
+	b := &agyBackend{
+		config:  Config{Model: "gemini-3.8-flash-medium", IdleTimeout: 90 * time.Second},
+		cliPath: cliPath,
+	}
+	if _, err := b.RunPrompt(context.Background(), "review this", &recordingHandler{}); err != nil {
+		t.Fatalf("RunPrompt failed: %v", err)
+	}
+
+	argv, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("read recorded argv: %v", err)
+	}
+	if !strings.Contains(string(argv), "--print-timeout 90s") {
+		t.Fatalf("argv should carry --print-timeout 90s, got %q", string(argv))
+	}
+}
+
+// Reviewer.FollowUp sends a purely context-dependent prompt ("the code has been
+// updated based on your previous feedback"), so the second turn must continue
+// the conversation the first one established. agy spawns a fresh process per
+// turn, so only the backend can thread the id — Config is fixed at New().
+func TestAgyBackend_RunPrompt_ThreadsConversationAcrossTurns(t *testing.T) {
+	dir := t.TempDir()
+	argvPath := filepath.Join(dir, "argv.txt")
+	cliPath := filepath.Join(dir, "agy")
+	envelope := `{"conversation_id":"conv-server-1","status":"SUCCESS","response":"AGYOK\n",` +
+		`"duration_seconds":0.5,"num_turns":1,` +
+		`"usage":{"input_tokens":1,"output_tokens":1,"thinking_tokens":0,` +
+		`"cache_read_tokens":0,"total_tokens":2}}`
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(argvPath) + "\n" +
+		"printf %s " + shellQuote(envelope) + "\nexit 0\n"
+	if err := os.WriteFile(cliPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write argv-recording agy CLI: %v", err)
+	}
+
+	// No ResumeSessionID: the id must come from the first turn's own result.
+	b := &agyBackend{config: Config{Model: "gemini-3.8-flash-medium"}, cliPath: cliPath}
+
+	if _, err := b.RunPrompt(context.Background(), "first", &recordingHandler{}); err != nil {
+		t.Fatalf("first RunPrompt failed: %v", err)
+	}
+	if _, err := b.RunPrompt(context.Background(), "follow up", &recordingHandler{}); err != nil {
+		t.Fatalf("second RunPrompt failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("read recorded argv: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 recorded invocations, got %d: %q", len(lines), lines)
+	}
+	if strings.Contains(lines[0], "--conversation") {
+		t.Fatalf("first turn must not request a resume, got %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "--conversation conv-server-1") {
+		t.Fatalf("second turn must continue conv-server-1, got %q", lines[1])
+	}
+}
+
+// A new turn must not erase the id a prior turn published:
+// rendererEventHandler.OnSessionInfo assigns lastSessionID unconditionally, so
+// reporting "" at turn start would blank it whenever a follow-up then fails.
+func TestAgyBackend_RunPrompt_TurnStartDoesNotBlankAKnownConversationID(t *testing.T) {
+	b := &agyBackend{
+		config:  Config{Model: "gemini-3.8-flash-medium", ResumeSessionID: "conv-123"},
+		cliPath: fakeAgyCLIWithConversation(t, "", 1, "conv-123"),
+	}
+
+	handler := &recordingHandler{}
+	if _, err := b.RunPrompt(context.Background(), "follow up", handler); err == nil {
+		t.Fatal("expected the failing agy process to error")
+	}
+
+	if len(handler.sessionIDs) == 0 {
+		t.Fatal("expected OnSessionInfo to be called at turn start")
+	}
+	if got := handler.sessionIDs[0]; got != "conv-123" {
+		t.Fatalf("turn start reported %q; reporting \"\" erases Reviewer.lastSessionID", got)
+	}
 }

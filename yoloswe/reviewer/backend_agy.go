@@ -5,14 +5,27 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
 )
 
 // agyBackend wraps the agy CLI (print mode) as a Backend.
 // Each RunPrompt call is a one-shot execution (no persistent session) — agy
-// has no concept of a long-running process to reuse across turns; resume is
-// requested via --conversation on every invocation instead.
+// has no concept of a long-running process to reuse across turns; conversation
+// continuity is requested via --conversation on every invocation instead.
+//
+// # Conversation threading
+//
+// Continuity across turns is the backend's own job, because each RunPrompt
+// spawns a fresh agy process. The id a completed turn reports is stored on the
+// backend and preferred over Config.ResumeSessionID on the next call, so
+// Reviewer.FollowUp — whose prompt is purely context-dependent ("the code has
+// been updated based on your previous feedback") — continues the conversation
+// that saw the diff instead of starting an empty one. This mirrors
+// providerRunner.RunTurn, which threads result.SessionID back the same way for
+// ephemeral providers (bramble/session/manager.go).
 //
 // # No tool-call events
 //
@@ -23,6 +36,16 @@ import (
 // that need to know what files an agy review touched must fall back to
 // git-diff-based detection (see multiagent/agent/session.go's
 // detectFileChangesGit, the same workaround already used for codex).
+//
+// # Stall protection
+//
+// agy is a print-mode CLI: it emits nothing until the turn ends, so the
+// per-event idle timer the streaming backends use (bridgeStreamEvents' reset-on-
+// every-event deadline) would fire on every healthy long turn. Config.IdleTimeout
+// is therefore honored as a WALL-CLOCK bound on the whole turn — passed to agy
+// as --print-timeout so the CLI enforces it itself, and backed by a local timer
+// so a wedged subprocess that ignores its own flag still returns. Zero disables
+// both, matching Config.IdleTimeout's documented meaning.
 //
 // # Resume verification
 //
@@ -38,7 +61,32 @@ type agyBackend struct {
 	// default, resolved via $PATH) — only tests set this, to point RunPrompt
 	// at a fake binary instead of a live agy install.
 	cliPath string
-	config  Config
+
+	// convID carries the last completed turn's conversation id across RunPrompt
+	// calls, guarded by mu. Config is copied by value at New(), so the thread
+	// state cannot live there.
+	convID string
+
+	config Config
+
+	mu sync.Mutex
+}
+
+// resumeID returns the conversation to continue: the id threaded from a prior
+// completed turn when there is one, else the caller-supplied Config value.
+func (b *agyBackend) resumeID() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.convID != "" {
+		return b.convID
+	}
+	return b.config.ResumeSessionID
+}
+
+func (b *agyBackend) setResumeID(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.convID = id
 }
 
 func newAgyBackend(config Config) *agyBackend {
@@ -104,16 +152,22 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 	if b.config.WorkDir != "" {
 		sessionOpts = append(sessionOpts, agy.WithWorkDir(b.config.WorkDir))
 	}
+	if b.config.IdleTimeout > 0 {
+		// agy enforces this itself via --print-timeout; the select below adds a
+		// local backstop for a subprocess that ignores it. See the type doc.
+		sessionOpts = append(sessionOpts, agy.WithPrintTimeout(b.config.IdleTimeout))
+	}
 
+	requestedResumeID := b.resumeID()
 	var resumeStatus ResumeStatus
-	if b.config.ResumeSessionID != "" {
+	if requestedResumeID != "" {
 		// Start at Unverified so a session that errors out before turn
 		// completion still surfaces "resume was attempted" in the envelope,
 		// instead of letting omitempty erase the signal. Promoted to OK
 		// below once the turn actually completes — see the type doc for why
 		// agy gives us no stronger signal than that.
 		resumeStatus = ResumeStatusUnverified
-		sessionOpts = append(sessionOpts, agy.WithConversation(b.config.ResumeSessionID))
+		sessionOpts = append(sessionOpts, agy.WithConversation(requestedResumeID))
 	}
 
 	sessionOpts = append(sessionOpts, agy.WithStderrHandler(stderrPrefixHandler("agy")))
@@ -130,8 +184,11 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 		// agy has no Ready-equivalent event, so the conversation id is not
 		// known yet — it arrives with TurnCompleteEvent. Report the model now
 		// (callers render it while the turn streams) and re-report with the id
-		// once the turn completes, below.
-		handler.OnSessionInfo("", b.config.Model)
+		// once the turn completes, below. The id reported here is the one we
+		// asked to resume, not "": rendererEventHandler.OnSessionInfo assigns
+		// lastSessionID unconditionally, so passing "" would erase the id a
+		// prior turn published every time a new turn starts.
+		handler.OnSessionInfo(requestedResumeID, b.config.Model)
 	}
 
 	var responseText string
@@ -144,12 +201,30 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 	var inputTokens, outputTokens int64
 	sawTurnComplete := false
 
+	// Wall-clock backstop for Config.IdleTimeout. agy already enforces the same
+	// bound via --print-timeout (set above), so this only fires when the
+	// subprocess ignores its own flag or wedges before parsing it. A nil channel
+	// blocks forever, so IdleTimeout==0 leaves the select with exactly the two
+	// arms it had before. Ordering: the timer starts before the first receive, so
+	// a subprocess that never emits anything is still bounded; a turn that
+	// completes first breaks the loop and the deferred Stop tears the timer down.
+	var stallC <-chan time.Time
+	if b.config.IdleTimeout > 0 {
+		stallTimer := time.NewTimer(b.config.IdleTimeout)
+		defer stallTimer.Stop()
+		stallC = stallTimer.C
+	}
+
 loop:
 	for {
 		select {
 		case <-ctx.Done():
 			_ = session.Stop()
 			return reviewPartialResult(resumeStatus, &bridgeResult{responseText: responseText, durationMs: durationMs}, ctx.Err())
+		case <-stallC:
+			_ = session.Stop()
+			return reviewPartialResult(resumeStatus, &bridgeResult{responseText: responseText, durationMs: durationMs},
+				fmt.Errorf("agy: no result after %s (idle timeout)", b.config.IdleTimeout))
 		case evt, ok := <-session.Events():
 			if !ok {
 				break loop
@@ -202,6 +277,12 @@ loop:
 		reportedModel = effectiveModel
 	}
 
+	if conversationID != "" {
+		// Thread this turn's conversation onto the backend so the next
+		// RunPrompt (Reviewer.FollowUp) continues it. See the type doc.
+		b.setResumeID(conversationID)
+	}
+
 	if handler != nil && (conversationID != "" || reportedModel != b.config.Model) {
 		// Report the id agy assigned this conversation. Reviewer.lastSessionID
 		// is set from here (see rendererEventHandler.OnSessionInfo), and it is
@@ -213,7 +294,7 @@ loop:
 		handler.OnSessionInfo(conversationID, reportedModel)
 	}
 
-	if resumeStatus == ResumeStatusUnverified && turnErr == nil && conversationID == b.config.ResumeSessionID {
+	if resumeStatus == ResumeStatusUnverified && turnErr == nil && conversationID == requestedResumeID {
 		// The turn completed with no error and agy echoed back the exact
 		// conversation id we asked to resume — a real check, not an
 		// optimistic promotion on success alone. See the type doc.

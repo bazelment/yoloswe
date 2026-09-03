@@ -485,6 +485,25 @@ func (e *EphemeralSession) Execute(ctx context.Context, prompt string) (*AgentRe
 	return result, taskID, err
 }
 
+// resolveExecutionModel decides which provider runs a model id, and returns the
+// resolved model the provider must then be built from. Both halves come from one
+// ResolveModel call on purpose: selection and construction disagreeing is how an
+// uncurated id gets routed to one CLI and executed by another.
+//
+// ResolveModel, not ModelByID — a well-formed id that AllModels does not list
+// (any "gemini-*" agy serves, say) resolves by prefix rule. An exact-match
+// lookup returns false for it and the caller falls through to Claude, running
+// the wrong CLI silently. useProvider is false only for ids nothing resolves,
+// which keep the historical behavior of trying Claude, whose own CLI reports an
+// unknown model better than a guess here would.
+func resolveExecutionModel(modelID string) (m AgentModel, useProvider bool) {
+	resolved, ok := ResolveModel(modelID)
+	if !ok || resolved.Provider == ProviderClaude {
+		return AgentModel{}, false
+	}
+	return resolved, true
+}
+
 // ExecuteWithFiles creates a fresh session, runs the prompt, and returns the result with file tracking.
 // For Claude, it tracks Write and Edit tool calls via events.
 // For non-Claude providers, it detects file changes via git diff.
@@ -492,16 +511,12 @@ func (e *EphemeralSession) ExecuteWithFiles(ctx context.Context, prompt string) 
 	// Derive provider from the model to ensure the execution path
 	// is always consistent with the configured model. This prevents
 	// misrouting if SetProviderName was not called or set incorrectly.
-	providerName := ProviderClaude
-	if m, ok := ModelByID(e.config.Model); ok {
-		providerName = m.Provider
+	//
+	m, useProvider := resolveExecutionModel(e.config.Model)
+	if !useProvider {
+		return e.executeWithClaude(ctx, prompt)
 	}
-
-	if providerName != ProviderClaude {
-		return e.executeWithProvider(ctx, prompt, providerName)
-	}
-
-	return e.executeWithClaude(ctx, prompt)
+	return e.executeWithProvider(ctx, prompt, m)
 }
 
 // executeWithClaude is the original Claude-specific execution path.
@@ -565,20 +580,19 @@ func (e *EphemeralSession) executeWithClaude(ctx context.Context, prompt string)
 
 // executeWithProvider runs the prompt using a non-Claude provider
 // and detects file changes via git diff.
-func (e *EphemeralSession) executeWithProvider(ctx context.Context, prompt, providerName string) (*AgentResult, *ExecuteResult, string, error) {
+// The model is resolved by the caller (ExecuteWithFiles) and passed in rather
+// than looked up again here: a second lookup can disagree with the first, which
+// is how an uncurated id gets its provider chosen by one rule and its provider
+// built by another.
+func (e *EphemeralSession) executeWithProvider(ctx context.Context, prompt string, m AgentModel) (*AgentResult, *ExecuteResult, string, error) {
 	taskID := nextTaskID()
 
 	log := e.logger()
 	log.Info("session starting",
 		"taskID", taskID,
 		"model", e.config.Model,
-		"provider", providerName,
+		"provider", m.Provider,
 	)
-
-	m, ok := ModelByID(e.config.Model)
-	if !ok {
-		return nil, nil, "", fmt.Errorf("unknown model %q", e.config.Model)
-	}
 
 	provider, err := NewProviderForModel(m)
 	if err != nil {
@@ -621,7 +635,7 @@ func (e *EphemeralSession) executeWithProvider(ctx context.Context, prompt, prov
 
 	log.Info("task complete",
 		"taskID", taskID,
-		"provider", providerName,
+		"provider", m.Provider,
 		"cost", fmtCost(result.Usage.CostUSD),
 		"filesCreated", len(execResult.FilesCreated),
 		"filesModified", len(execResult.FilesModified),

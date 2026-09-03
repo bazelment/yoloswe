@@ -78,7 +78,7 @@ analysis. Set $BRAMBLE_RUN_TAG to tag the log with an external run id.`,
 func init() {
 	Cmd.Flags().StringVar(&backend, "backend", "cursor", "Backend: claude, cursor, codex, or agy")
 	Cmd.Flags().StringVar(&model, "model", "", "Model override (default: backend-specific)")
-	Cmd.Flags().StringVar(&effort, "effort", "", "Reasoning effort level for codex (low, medium, high) and claude (low, medium, high, max)")
+	Cmd.Flags().StringVar(&effort, "effort", "", "Reasoning effort level for codex (low, medium, high), claude (low, medium, high, max), and agy (low, medium, high; max clamps to high)")
 	Cmd.Flags().StringVar(&sandbox, "sandbox", "", "Codex sandbox mode: read-only, workspace-write, danger-full-access (default: danger-full-access)")
 	Cmd.Flags().BoolVar(&readOnly, "read-only", true, "Withhold the write tools from the reviewer (Codex: approval handler; Claude: tools not granted). Not a filesystem guarantee — neither backend blocks shell writes. Default true.")
 	Cmd.Flags().BoolVar(&verbose, "verbose", false, "Show tool call details")
