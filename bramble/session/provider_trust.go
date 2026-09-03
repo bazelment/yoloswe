@@ -129,6 +129,14 @@ func trustCodexWorkspace(workDir string) error {
 // ~/.codex; without honoring it bramble writes the trust entry to a file codex
 // never reads and the session still stalls on the dialog (verified against
 // codex-cli 0.150.1).
+//
+// This reads bramble's own environment, not the launched window's. Start
+// requires IsInsideTmux, so bramble is itself a pane of the server whose
+// environment the window inherits and the two normally agree; they diverge only
+// for a one-off `CODEX_HOME=... bramble`. Splicing -e CODEX_HOME into
+// newWindowArgs would close that gap but would also decide which config the CLI
+// loads, a wider change than seeding trust. A divergence therefore degrades to
+// the provider's own dialog -- the pre-existing behavior -- never to a bad write.
 func codexHomeDir() (string, error) {
 	if dir := os.Getenv("CODEX_HOME"); dir != "" {
 		return dir, nil
