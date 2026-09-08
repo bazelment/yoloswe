@@ -39,7 +39,7 @@ TARGET="${TARGET:-HEAD}"
 rounds=$(( MAXMIN * 60 / INTERVAL ))
 stall_rounds=$(( STALL_MIN * 60 / INTERVAL ))
 
-before=$(ls "$RUN"/*.done 2>/dev/null | sort)
+before=$(ls "$RUN"/*.done "$RUN"/*.needs-swe 2>/dev/null | sort)
 declare -A LASTC LASTD STALL
 
 while IFS=$'\t' read -r id _phase _branch wt wid; do
@@ -49,22 +49,25 @@ while IFS=$'\t' read -r id _phase _branch wt wid; do
 done < <(lanes)
 
 for _ in $(seq 1 "$rounds"); do
-  now=$(ls "$RUN"/*.done 2>/dev/null | sort)
+  now=$(ls "$RUN"/*.done "$RUN"/*.needs-swe 2>/dev/null | sort)
   new=$(comm -13 <(echo "$before") <(echo "$now"))
   if [ -n "$new" ]; then
-    echo "DONE-FILE:"
+    echo "SIGNAL-FILE:"
     while read -r f; do
       [ -z "$f" ] && continue
-      # <task>.<phase>.done — one signal per phase, so a lane reports each finish.
-      stem=$(basename "$f" .done)
+      case "$f" in
+        *.done) stem=$(basename "$f" .done); sig="done" ;;
+        *.needs-swe) stem=$(basename "$f" .needs-swe); sig="needs-swe" ;;
+        *) stem=$(basename "$f"); sig="signal" ;;
+      esac
       t="${stem%%.*}"; ph="${stem#*.}"; [ "$ph" = "$t" ] && ph="-"
       wt=$(lanes | awk -F'\t' -v t="$t" '$1==t{print $4}')
       c=$(git -C "$wt" log --oneline "$TARGET..HEAD" 2>/dev/null | wc -l)
       d=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l)
-      # A .done is a CLAIM about work, not the work. Check commits before believing it.
+      # A .done or .needs-swe is a CLAIM about work, not the work. Check commits before believing it.
       warn=""
       [ "$c" -eq 0 ] && warn="  <-- EMPTY BRANCH: back up and nudge, do NOT merge"
-      echo "  $t [$ph] (commits=$c dirty=$d)$warn"
+      echo "  $t [$ph] ($sig, commits=$c dirty=$d)$warn"
     done <<<"$new"
     exit 0
   fi
