@@ -1739,7 +1739,12 @@ func init() {
 	newSessionCmd.Flags().StringP("worktree", "w", "", "Existing worktree path (relative paths resolve against the current directory)")
 	newSessionCmd.Flags().StringP("prompt", "p", "", "Prompt for the session")
 	newSessionCmd.Flags().StringP("model", "m", "", "Model ID (e.g. opus, sonnet)")
-	newSessionCmd.Flags().String("backend", "", "CLI backend, independent of model: claude or codex (empty infers from model; naming one requires --model)")
+	// Derived from the same list validateBackend accepts, so the help text cannot
+	// drift from reality again: it read "claude or codex" long after cursor and agy
+	// were supported, and two separate swarm runs wrongly ruled agy out because of it.
+	newSessionCmd.Flags().String("backend", "", fmt.Sprintf(
+		"CLI backend, independent of model: %s (empty infers from model; naming one requires --model)",
+		strings.Join(agent.AllProviders, ", ")))
 	registerLLMEndpointFlags(newSessionCmd.Flags())
 	newSessionCmd.Flags().StringP("goal", "g", "", "Goal for new worktree")
 	newSessionCmd.Flags().Bool("create-worktree", false, "Create a new worktree for the branch")

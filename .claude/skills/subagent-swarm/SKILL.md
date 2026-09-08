@@ -24,6 +24,9 @@ When no lifecycle is supplied, use `swe -> clean -> review -> integrate`:
 | `review` | A fresh session applies the requested review gate. |
 | `integrate` | Create/update a PR, merge, or hand off only as authorized. |
 
+Read [references/standing-rules.md](references/standing-rules.md) at init and brief from
+it. A prompt may override any of it.
+
 Models, effort, tools, skip rules, review thresholds, and approvals come from the prompt.
 A major review finding returns the same lane to `swe` with the finding recorded. If the
 task itself changed shape, create a new lane instead. Read
@@ -63,7 +66,8 @@ python3 "$SW/ledger.py" add "$RUN" --id <id> --title "<task>" \
 - the goal, terminal proof, uncovered goal dimensions, and current proof boundary;
 - pointers to user-named context/progress artifacts rather than copies of them;
 - lifecycle overrides, authorities, approval gates, schedules, and next due times;
-- literal recovery coordinates and the command that recreates the loop after compaction;
+- literal recovery coordinates (`$RUN/env.sh` holds the derivable ones) and the command
+  that recreates the loop after compaction;
 - current integrated work, prioritized gaps, and the next action.
 
 Before dispatch, check that the terminal proof covers every material part of the stated
@@ -81,6 +85,12 @@ live system unless the run contract explicitly serializes them. Brief only the m
 non-derivable context, ownership boundaries, prompt-reserved actions, exit gate, and
 literal report paths.
 
+Lanes signal through files in the run directory, never through pane text:
+`<lane>.<phase>.done` claims a phase is finished, `<lane>.<phase>.needs-swe` returns the
+lane to `swe` with a finding, `<lane>.<phase>.md` carries the report, and
+`<lane>.<phase>.spawn.json` records the session id and worktree at spawn. The watcher
+wakes on the first two; write `.done` last, after committing.
+
 Treat every idle, `.done`, blocked, test, review, and merge report as a claim. Verify the
 artifact or live state before advancing, reworking, integrating, or reaping. The
 orchestrator performs live-system operations reserved by the prompt and feeds measured
@@ -93,12 +103,22 @@ narrow proof beyond the path it exercised.
 ## 3. Loop reminder
 
 After the first dispatch, arm the watcher and schedule a health tick every 20 minutes
-unless the prompt specifies another interval. Track longer recurring jobs separately and
+unless the prompt specifies another interval. **Never schedule a tick under 10 minutes.**
+The watcher is the wake mechanism; polling for a lane yourself is not a faster tick, it
+is a busy-wait — one run that degraded from 20-minute ticks to 60-second timers spent
+320 shell commands an hour against 67 for the same work properly paced. A tick with
+nothing to decide re-arms the watcher and ends.
+
+Your own recurring reminder is a relay channel with no expiry. When you retract a value,
+correct the reminder text too, or it re-injects the stale framing on every wakeup — and
+record who else holds the old value, because a retraction is complete only when it
+reaches them, not when it is written down. Track longer recurring jobs separately and
 run them when due. The reminder must carry literal recovery state:
 
 ~~~text
 /loop Orchestrating <goal>. SELF=<session id>. RUN=<absolute run dir>.
-BRAMBLE_SOCK=<literal socket path>.
+Source <absolute run dir>/env.sh for the socket and coordinates -- do not carry a
+literal socket path, it changes on every bramble restart.
 Read <absolute run dir>/OBJECTIVE.md and run the tick in
 ~/.claude/skills/subagent-swarm/SKILL.md. Terminal proof: <observable>.
 Before ending a nonterminal tick, persist gaps and priorities, arm one watcher,
@@ -107,11 +127,21 @@ and schedule the next tick.
 
 Each tick:
 
-1. Re-read `OBJECTIVE.md`; identify due schedules and the shortest path to proof.
-2. Drain reports and `.done` files; inspect panes and verify each completion claim.
-3. Advance, rework, integrate, or mark lanes; snapshot uncommitted work before reaping.
-4. Reassess proof gaps, materialize due work, reprioritize, and fill free slots.
-5. Update the objective and ledger, audit cleanup, then arm one watcher and the next tick.
+1. `. "$RUN/env.sh"`, then run `poll_panes.sh "$RUN"` **before reading any report or
+   dispatching anything**. A lane blocked on a question emits nothing, moves no git
+   state, and looks identical to one that is merely slow; five at once have gone
+   unnoticed until a human asked. One paste in a composer: `bramble send-key
+   --session-id <id> Enter`. A trust dialog: send `1`, then Enter. Many stacked
+   pastes: stop sending, write `HANDOVER-<lane>.md`, and replace the session.
+2. Re-read `OBJECTIVE.md`; run `ledger.py doctor "$RUN"` and resolve what it reports.
+   Identify due schedules and the shortest path to proof.
+3. Drain reports and `.done`/`.needs-swe` files; verify each completion claim against
+   commits and artifacts.
+4. Advance, rework, integrate, or mark lanes; snapshot uncommitted work before reaping.
+5. Reassess proof gaps, materialize due work, reprioritize, and fill free slots.
+6. Update the objective and ledger, then run `audit_cleanup.sh "$RUN"` — cleanup is
+   done when it exits zero, not when you have gone through the steps. Arm one watcher
+   and schedule the next tick.
 
 Reap the old watcher and arm the new one in separate calls; see
 [references/bramble-mechanics.md](references/bramble-mechanics.md). After compaction,

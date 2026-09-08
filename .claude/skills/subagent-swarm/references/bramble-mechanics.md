@@ -8,16 +8,27 @@ policy in `SKILL.md` and lane semantics in `pr-lane.md`.
 Run before the first spawn:
 
 ~~~bash
-SELF=$(ps -o args= -p "$(ps -o ppid= -p $$)" | sed -n "s/.*session-id '\([^']*\)'.*/\1/p")
-export BRAMBLE_SOCK="${XDG_RUNTIME_DIR:-/tmp}/bramble-$(id -u).sock"
 SW=~/.claude/skills/subagent-swarm/scripts
-test -S "$BRAMBLE_SOCK"
-. "$SW/tmux_safe.sh"
-resolve_self
-bramble ping
-bramble new-session --help | rg -- '--parent'
-bramble list-sessions | rg -- "$SELF"
+. "$SW/swarm_bramble.sh"
+sw_doctor                 # assert the tool surface before trusting it
+sw_preflight "$RUN"       # resolves SELF/TARGET/BASE/socket, writes $RUN/env.sh
+. "$SW/tmux_safe.sh"; resolve_self
 ~~~
+
+Every later command begins `. "$RUN/env.sh"` instead of re-deriving coordinates: shell
+state does not persist between calls.
+
+The socket is `bramble-<uid>-<pid>.sock` — it carries the TUI's pid, so it changes on
+every restart. `sw_socket` resolves it by globbing and **fails loudly on more than one
+match** rather than picking the newest; silently attaching the swarm to the wrong TUI is
+the "select live evidence by identity, never by list position" mistake. Never hardcode
+the path: an earlier version of this file documented `bramble-$(id -u).sock`, which does
+not exist, so `test -S` failed on step one of every run.
+
+Use the wrapper rather than raw `bramble` calls, and prefer reading it over `--help`:
+the help text has been stale before (it listed only `claude or codex` long after `cursor`
+and `agy` worked, and two runs wrongly ruled agy out because of it). `sw_doctor` asserts
+the facts the wrapper depends on, so drift breaks a check instead of a live run.
 
 `BRAMBLE_SESSION_ID` is normally empty inside a session. Pass `--parent "$SELF"` on
 every spawn; otherwise completed lanes report nowhere. If the client accepts `--parent`
@@ -57,12 +68,22 @@ bramble new-session -w "$WORKTREE" --parent "$SELF" \
   -t "$TYPE" -m "$MODEL" -p "$BRIEF"
 ~~~
 
-Record the literal phase, session id, `realpath` worktree, and fork SHA immediately:
+`sw_spawn <lane> <phase> <model> <brief-file> [branch] [worktree]` performs both spawn
+forms and records the result in the same call — ledger row, `spawn.json`, and the brief.
+Recorded separately, those fields decay: a hand step that costs nothing to skip gets
+skipped.
+
+If you spawn by hand, record immediately — the literal phase, session id, `realpath`
+worktree, and fork SHA:
 
 ~~~bash
 python3 "$SW/ledger.py" set "$RUN" --id "$ID" --status running \
-  --phase "$PHASE" --session "$SESSION" --worktree "$(realpath "$WORKTREE")"
+  --phase "$PHASE" --session "$SESSION" --worktree "$(realpath "$WORKTREE")" \
+  --phase-start-sha "$(git -C "$WORKTREE" rev-parse HEAD)"
 ~~~
+
+`--phase-start-sha` pins what "this phase changed" means. Measured against a moving
+TARGET, an empty branch can pass a `.done`.
 
 Briefs must contain literal report paths; child environments do not point back to the run.
 Confirm the wave with `bramble list-sessions --parent "$SELF"` and inspect fresh panes.
@@ -92,6 +113,16 @@ Run `snapshot_at_risk.sh "$RUN"` every tick. It backs up lanes with uncommitted 
 `refs/backup/<lane>` without changing their index or HEAD. Never use an empty branch or
 an idle report as evidence that no backup is needed.
 
+`bramble send-key --session-id <id> <Key>` submits a composer or answers a dialog — use it
+rather than raw `tmux send-keys`. `sw_nudge` sends, refuses to stack onto pending pastes,
+and confirms the pane went busy before returning.
+
+A session whose `list-sessions` row has no `tmux_target` has no pane: it is **gone**, not
+idle. That is decidable immediately, without waiting out a stall timeout, and piping an
+empty target into `capture-pane` errors on precisely the lane most in need of being
+reported dead. Rows carry `worktree_name`, never `worktree_path`, and `list-sessions`
+returns `{"sessions": [...]}` — a dict, not a bare list.
+
 Use the run directory for reports. Send a live-session nudge only to an idle
 session — `--queue` is refused — then inspect the pane:
 Codex can fire idle mid-turn and Cursor can leave pasted instructions unsubmitted.
@@ -114,7 +145,22 @@ pgrep -f '[w]atch_lanes[.]sh' | wc -l
 The count must be zero before arming. The watcher wakes on a new `.done` or static lane,
 not on every commit.
 
-Kill a lane session before removing its worktree. Resolve the tmux window from the session
+There is no `bramble kill-session`. Reaping is three independent layers — process,
+worktree (`wt remove` or `git worktree remove`), and tmux window — and each must be
+verified separately. Kill a lane session before removing its worktree.
+
+**Resolve the session from `bramble list-sessions` by `worktree_name`, never from the
+ledger's `window_id`.** That field decays — one live run has it populated for 1 of 12
+lanes — so a reap plan built from the ledger silently omits the kill step and removes a
+worktree out from under a running agent. Seen live: a lane marked `done` with
+`window_id` empty while an idle session still held pane `@1380` on its worktree.
+`ledger.py doctor --sessions` reports this case by name.
+
+**Gate deletion on a two-dot diff, not three.** `git diff target...branch` compares
+against the merge-base, which predates a squash commit, so a squash-merged branch still
+shows its own changes and reads as unmerged. In a squash-merging repo that makes a reaper
+refuse every completed lane and leak worktrees forever. Compare tips (`target..branch`),
+or better, verify the change is present on the base by content. Resolve the tmux window from the session
 id and use the fail-closed helper:
 
 ~~~bash
@@ -132,9 +178,11 @@ squash or rewritten history. Then remove the worktree, branch, and `refs/backup/
 The loop reminder carries the only required coordinates:
 
 ~~~bash
+. "$RUN/env.sh"                       # socket and coordinates, re-derived
 cat "$RUN/OBJECTIVE.md"
 python3 "$SW/ledger.py" show "$RUN"
-ls "$RUN"/*.done 2>/dev/null
+python3 "$SW/ledger.py" doctor "$RUN" # where the ledger disagrees with reality
+ls "$RUN"/*.done "$RUN"/*.needs-swe 2>/dev/null
 bramble list-sessions --parent "$SELF"
 ~~~
 

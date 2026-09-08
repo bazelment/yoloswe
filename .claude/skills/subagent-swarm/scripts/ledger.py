@@ -27,18 +27,82 @@ so the markdown is always current without anyone hand-editing tables.
 """
 
 import argparse
+import fcntl
 import json
 import os
 import sys
+import tempfile
+import time
 
 STATUSES = ["planned", "running", "done", "blocked", "failed"]
 PRIORITIES = ["p0", "p1", "p2"]
+CHECKS = ["pending", "passing", "failing", "unknown"]
 PRIORITY_RANK = {p: i for i, p in enumerate(PRIORITIES)}
 MARK = {"planned": "·", "running": "▶", "done": "✓", "blocked": "⏸", "failed": "✗"}
 
 
 def paths(run):
     return os.path.join(run, "state.json"), os.path.join(run, "ledger.md")
+
+
+def lock_path(run):
+    # A separate inode from state.json, created on demand and NEVER deleted --
+    # unlinking a lock file is itself a race (two processes can hold locks on two
+    # different inodes with the same name and both believe they are exclusive).
+    return os.path.join(run, "state.json.lock")
+
+
+def acquire(run, exclusive, timeout=10.0):
+    """Hold a flock across the WHOLE read-modify-write, not just the write.
+
+    Every subcommand here is read-modify-write of the entire file, so a lock taken
+    only around the write still lets two processes interleave between load and save
+    and silently lose an update. Writers take LOCK_EX up front rather than upgrading
+    from shared -- the upgrade window is exactly where lost updates hide.
+
+    Readers take LOCK_SH: watch_lanes.sh calls `lanes` inside its polling loop, so
+    exclusive reads would block the writer every INTERVAL seconds for no reason.
+
+    Returns the held file object; the caller keeps it alive until after the replace.
+    """
+    os.makedirs(run, exist_ok=True)
+    f = open(lock_path(run), "a+")
+    mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(f.fileno(), mode | fcntl.LOCK_NB)
+            return f
+        except OSError:
+            if time.monotonic() >= deadline:
+                f.close()
+                # Fail loudly. A tick that cannot get the lock must abort, never
+                # proceed on a read it knows may be stale.
+                sys.exit(f"ledger: could not lock {lock_path(run)} after {timeout:g}s "
+                         f"-- another writer is holding it")
+            time.sleep(0.05)
+
+
+def write_atomic(path, text):
+    """Write via a temp file in the SAME directory, then os.replace().
+
+    os.replace is atomic on POSIX, so a concurrent reader sees either the old file
+    or the new one -- never the truncated middle that open(path, "w") exposes.
+    """
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".{}.".format(os.path.basename(path)))
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def load(run):
@@ -49,17 +113,24 @@ def load(run):
         state = json.load(f)
     for task in state.get("tasks", []):
         task.setdefault("priority", "p2")
+        # Every field added after a run started is absent-by-default and backfilled.
+        # Never test presence as a signal: a lane's contents would otherwise depend on
+        # when it was created, and swarm-queen reads the same file.
+        for key, default in (("pr", 0), ("pr_head", ""), ("approval_sha", ""),
+                             ("checks", "unknown"), ("fork_sha", ""),
+                             ("phase_start_sha", ""), ("round", 0),
+                             ("last_verified_at", "")):
+            task.setdefault(key, default)
     return state
 
 
 def save(run, state):
     state_path, md_path = paths(run)
     os.makedirs(run, exist_ok=True)
-    with open(state_path, "w") as f:
-        json.dump(state, f, indent=2)
-        f.write("\n")
-    with open(md_path, "w") as f:
-        f.write(render(state, run))
+    write_atomic(state_path, json.dumps(state, indent=2) + "\n")
+    # ledger.md is rendered from the same snapshot and written the same way, so
+    # `ledger.py show` can never read a half-rendered table.
+    write_atomic(md_path, render(state, run))
     return md_path
 
 
@@ -134,6 +205,106 @@ def code(v):
     return f"`{v}`" if v else "—"
 
 
+def doctor(state, run, sessions_path=""):
+    """Report where the ledger disagrees with reality. Pure read; changes nothing.
+
+    Every finding here is a drift shape observed in a real run: lanes left `running`
+    over merged work, `done` lanes still holding a worktree, and live sessions the
+    ledger never recorded. The tick is supposed to catch these by hand every 20
+    minutes, which is exactly the kind of step that decays under load.
+    """
+    findings = []
+    live = {}
+    if sessions_path:
+        try:
+            with open(sessions_path) as f:
+                payload = json.load(f)
+            # list-sessions returns {"sessions": [...]}, not a bare list.
+            rows = payload.get("sessions", payload) if isinstance(payload, dict) else payload
+            for row in rows or []:
+                if row.get("id"):
+                    live[row["id"]] = row
+        except (OSError, ValueError) as exc:
+            findings.append(f"sessions file unreadable ({exc}) -- session checks SKIPPED, "
+                            f"not passed")
+
+    recorded = set()
+    for t in state["tasks"]:
+        tid, status = t["id"], t.get("status", "")
+        for sid in t.get("sessions", {}).values():
+            if sid:
+                recorded.add(sid)
+
+        wt = t.get("worktree") or ""
+        wt_name = os.path.basename(wt.rstrip("/")) if wt else ""
+        # A session still sitting on the lane's worktree is the dangerous case: the
+        # ledger's window_id decays to empty, so a reap plan built from the ledger omits
+        # the kill step and removes the worktree out from under a running agent. Resolve
+        # the session from bramble by worktree_name; the ledger is a fallback, not truth.
+        squatter = next((r for r in live.values()
+                         if r.get("worktree_name") and r["worktree_name"] == wt_name), None)
+        if status == "done" and wt and os.path.isdir(wt):
+            if squatter:
+                findings.append(
+                    f"{tid}: status=done but a LIVE SESSION still holds its worktree "
+                    f"({squatter['id']}, status={squatter.get('status', '?')}, "
+                    f"pane={squatter.get('tmux_target') or 'GONE'}) -- kill the session "
+                    f"before removing {wt}, and do not trust window_id "
+                    f"({t.get('window_id') or 'empty'}) to find it")
+            else:
+                findings.append(f"{tid}: status=done but worktree still exists ({wt})")
+        if status == "running" and wt and not os.path.isdir(wt):
+            findings.append(f"{tid}: status=running but worktree is gone ({wt})")
+        if status == "running" and t.get("merge_sha"):
+            findings.append(f"{tid}: status=running but merge_sha is set "
+                            f"({t['merge_sha']}) -- merged work hiding as in-flight")
+        if status in ("running", "done") and not wt:
+            findings.append(f"{tid}: status={status} with no worktree recorded -- "
+                            f"invisible to the watcher and to snapshot_at_risk")
+        if status == "running" and t.get("phase") and not t["sessions"].get(t["phase"]):
+            findings.append(f"{tid}: phase={t['phase']} has no session id recorded")
+
+        # Absence is never evidence of approval: an unknown head or approval sha is
+        # treated as stale, exactly as swarm-queen's ApprovalStale() does.
+        if t.get("pr"):
+            head, appr = t.get("pr_head", ""), t.get("approval_sha", "")
+            if not head or not appr:
+                findings.append(f"{tid}: PR #{t['pr']} approval unverifiable "
+                                f"(pr_head={head or '?'} approval_sha={appr or '?'})")
+            elif head != appr:
+                findings.append(f"{tid}: PR #{t['pr']} approval is STALE "
+                                f"(approved {appr}, head {head}) -- would merge "
+                                f"unapproved bytes")
+
+    # Only sessions sitting on THIS run's worktrees are ours to account for; the box
+    # runs unrelated sessions and flagging those is noise that trains you to ignore
+    # the report. Match on worktree_name -- list-sessions carries no worktree_path.
+    ours = {os.path.basename((t.get("worktree") or "").rstrip("/"))
+            for t in state["tasks"] if t.get("worktree")}
+    ours.discard("")
+    for sid, row in sorted(live.items()):
+        if sid in recorded:
+            continue
+        name = row.get("worktree_name", "")
+        if name not in ours:
+            continue
+        findings.append(f"live session on a run worktree but not in the ledger: {sid} "
+                        f"(status={row.get('status', '?')} worktree={name}) -- "
+                        f"the orchestrator has lost the handle on it")
+        # A session with no tmux_target has no pane: it is gone, not merely idle.
+        if not row.get("tmux_target"):
+            findings.append(f"  ^ {sid} has no tmux_target -- window is gone, "
+                            f"decide now rather than waiting out a stall timeout")
+
+    if not findings:
+        print(f"doctor: {len(state['tasks'])} lane(s), no drift detected")
+        return 0
+    for line in findings:
+        print(f"DRIFT {line}")
+    print(f"doctor: {len(findings)} finding(s) across {len(state['tasks'])} lane(s)")
+    return 1
+
+
 def find(state, task_id):
     for t in state["tasks"]:
         if t["id"] == task_id:
@@ -173,6 +344,14 @@ def main():
     p.add_argument("--window-id")
     p.add_argument("--merge-sha")
     p.add_argument("--note")
+    p.add_argument("--pr", type=int, help="PR number (0 = none)")
+    p.add_argument("--pr-head", help="SHA the PR currently points at")
+    p.add_argument("--approval-sha", help="SHA the approval is pinned to")
+    p.add_argument("--checks", choices=CHECKS, help="CI rollup for the PR head")
+    p.add_argument("--fork-sha")
+    p.add_argument("--phase-start-sha", help="HEAD when the current phase began")
+    p.add_argument("--round", type=int, help="rework round for the current phase")
+    p.add_argument("--verified-at", help="RFC3339 timestamp of the last reconcile")
 
     p = sub.add_parser("advance")
     p.add_argument("run")
@@ -187,10 +366,20 @@ def main():
                    help="skip lanes with no recorded worktree (warns on stderr)")
     p.add_argument("--config", metavar="KEY", help="print one config value and exit")
 
+    p = sub.add_parser("doctor")
+    p.add_argument("run")
+    p.add_argument("--sessions", default="",
+                   help="path to `bramble list-sessions` JSON; omit to skip session checks")
+
     for name in ("show", "ready", "inflight"):
         sub.add_parser(name).add_argument("run")
 
     a = ap.parse_args()
+
+    # Mutating subcommands take LOCK_EX up front and hold it across load..save;
+    # read-only ones take LOCK_SH so the 20s watcher poll never blocks a writer.
+    writers = {"init", "add", "set", "advance"}
+    _lock = acquire(a.run, exclusive=a.cmd in writers)
 
     if a.cmd == "init":
         state = {"config": {"goal": a.goal, "phases": parse_phases(a.phases),
@@ -209,6 +398,13 @@ def main():
             "priority": a.priority, "status": "planned", "phase": "",
             "sessions": {}, "worktree": "",
             "window_id": "", "merge_sha": "", "notes": [],
+            # PR state cached here so a tick never re-derives it from `gh` after a
+            # compaction. approval_sha vs pr_head IS the staleness check: an approval
+            # pinned to an older head is not an approval for what would merge.
+            "pr": 0, "pr_head": "", "approval_sha": "", "checks": "unknown",
+            # fork_sha/phase_start_sha pin what "this phase changed" means. Measuring a
+            # phase against a MOVING target is how an empty branch passes a .done.
+            "fork_sha": "", "phase_start_sha": "", "round": 0, "last_verified_at": "",
         })
         print(save(a.run, state))
 
@@ -220,7 +416,13 @@ def main():
         for field, value in (("status", a.status), ("phase", a.phase),
                              ("priority", a.priority),
                              ("worktree", a.worktree), ("merge_sha", a.merge_sha),
-                             ("window_id", a.window_id)):
+                             ("window_id", a.window_id),
+                             ("pr", a.pr), ("pr_head", a.pr_head),
+                             ("approval_sha", a.approval_sha), ("checks", a.checks),
+                             ("fork_sha", a.fork_sha),
+                             ("phase_start_sha", a.phase_start_sha),
+                             ("round", a.round),
+                             ("last_verified_at", a.verified_at)):
             if value is not None:
                 t[field] = value
         if a.session is not None:
@@ -260,6 +462,9 @@ def main():
 
     elif a.cmd == "inflight":
         print(sum(1 for t in state["tasks"] if t["status"] == "running"))
+
+    elif a.cmd == "doctor":
+        sys.exit(doctor(state, a.run, a.sessions))
 
     elif a.cmd == "lanes":
         if a.config:
