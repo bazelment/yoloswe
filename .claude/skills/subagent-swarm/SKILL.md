@@ -24,10 +24,8 @@ When no lifecycle is supplied, use `swe -> clean -> review -> integrate`:
 | `review` | A fresh session applies the requested review gate. |
 | `integrate` | Create/update a PR, merge, or hand off only as authorized. |
 
-[references/standing-rules.md](references/standing-rules.md) carries the run-independent
-corrections a human has had to give a swarm more than once — ownership, evidence,
-integration, scope, reporting, and per-driver quirks. Read it once at init and brief from
-it; a prompt may override any of it, but silence is not an override.
+Read [references/standing-rules.md](references/standing-rules.md) at init and brief from
+it. A prompt may override any of it.
 
 Models, effort, tools, skip rules, review thresholds, and approvals come from the prompt.
 A major review finding returns the same lane to `swe` with the finding recorded. If the
