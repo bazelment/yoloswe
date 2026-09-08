@@ -56,6 +56,47 @@ done < <(/usr/bin/env python3 "$HERE/ledger.py" lanes "$RUN" --status done 2>/de
 
 echo "audit: $n done task(s), $bad not fully closed"
 
+# Sixth thing: agent processes whose worktree is gone.
+#
+# The five checks above are all about resources the ledger KNOWS about. Nothing
+# watched the processes. One run accumulated 62 orphaned agent processes -- codex,
+# node, claude -- and they surfaced only because a human asked "did you reap" twice;
+# a lane's runner can outlive its session, its window and its worktree, holding
+# memory and API quota with nothing pointing at it.
+#
+# Identified by CWD, not by name: matching on "codex" or "node" would sweep up
+# unrelated work, and the deleted-worktree marker Linux puts on /proc/<pid>/cwd is
+# the unambiguous signal that a process is running somewhere that no longer exists.
+orph=0
+for pid in $(pgrep -u "$(id -u)" -f 'codex|claude|cursor-agent|agy|node' 2>/dev/null); do
+  # Never report ourselves or our own ancestors: this script runs from inside an
+  # agent session, and a sweep that lists its own caller trains you to ignore it.
+  case " $$ $PPID " in *" $pid "*) continue ;; esac
+  cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue
+  case "$cwd" in
+    *" (deleted)")
+      # argv[0] plus one arg: a shell's full script body is pages long and drowns
+      # the finding. The full cmdline still names the lane and round when you need
+      # to identify a process before killing it -- read /proc/<pid>/cmdline then.
+      cmd=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | head -2 | tr '\n' ' ' | cut -c1-70)
+      # Zombies read as alive to a naive check; escalating to kill -9 on one is futile.
+      st=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
+      case "$st" in Z*) note=" (ZOMBIE -- reap its parent, not it)" ;; *) note="" ;; esac
+      echo "ORPHAN pid=$pid stat=${st:-?} cwd=${cwd}${note}"
+      echo "  $cmd"
+      orph=$((orph + 1))
+      ;;
+  esac
+done
+if [ "$orph" -gt 0 ]; then
+  echo "audit: $orph orphaned agent process(es) in deleted worktrees"
+  echo "  identify before killing: /proc/<pid>/cmdline names the lane and round." >&2
+  bad=$((bad + orph))
+else
+  echo "audit: no orphaned agent processes"
+fi
+
 if [ "$bad" -gt 0 ]; then
   echo "Teardown order and branch verification: references/bramble-mechanics.md, 'Watch and reap'." >&2
 fi
+exit $(( bad > 0 ? 1 : 0 ))
