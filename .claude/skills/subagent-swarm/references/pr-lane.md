@@ -35,7 +35,10 @@ finding that the fix belongs elsewhere is a valid phase outcome.
 - Reuse the lane's worktree and branch across phases, but use a fresh cleanup and review
   session so each pass arrives cold.
 - Scope cleanup and review to `FORK_SHA..HEAD`, not the remote base containing siblings.
-- Record the reviewed HEAD; verify it again before integration.
+- Record the reviewed HEAD; verify it again before integration. The gate is
+  `approval_sha == pr_head` in the ledger, not `reviewDecision: APPROVED` — an approval
+  pinned to an older commit is not an approval for what would merge, and a missing
+  `pr_head` or `approval_sha` is stale by default. `ledger.py doctor` reports both.
 - After integrating parallel lanes, test their affected modules together; a clean merge
   does not prove their contracts compose.
 - A phase that changes the branch commits before writing `.done`, and writes `.done`
