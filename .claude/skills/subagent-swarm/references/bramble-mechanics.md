@@ -149,7 +149,20 @@ not on every commit.
 
 There is no `bramble kill-session`. Reaping is three independent layers — process,
 worktree (`wt remove` or `git worktree remove`), and tmux window — and each must be
-verified separately. Kill a lane session before removing its worktree. Resolve the tmux window from the session
+verified separately. Kill a lane session before removing its worktree.
+
+**Resolve the session from `bramble list-sessions` by `worktree_name`, never from the
+ledger's `window_id`.** That field decays — one live run has it populated for 1 of 12
+lanes — so a reap plan built from the ledger silently omits the kill step and removes a
+worktree out from under a running agent. Seen live: a lane marked `done` with
+`window_id` empty while an idle session still held pane `@1380` on its worktree.
+`ledger.py doctor --sessions` reports this case by name.
+
+**Gate deletion on a two-dot diff, not three.** `git diff target...branch` compares
+against the merge-base, which predates a squash commit, so a squash-merged branch still
+shows its own changes and reads as unmerged. In a squash-merging repo that makes a reaper
+refuse every completed lane and leak worktrees forever. Compare tips (`target..branch`),
+or better, verify the change is present on the base by content. Resolve the tmux window from the session
 id and use the fail-closed helper:
 
 ~~~bash

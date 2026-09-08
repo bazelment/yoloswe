@@ -236,8 +236,23 @@ def doctor(state, run, sessions_path=""):
                 recorded.add(sid)
 
         wt = t.get("worktree") or ""
+        wt_name = os.path.basename(wt.rstrip("/")) if wt else ""
+        # A session still sitting on the lane's worktree is the dangerous case: the
+        # ledger's window_id decays to empty, so a reap plan built from the ledger omits
+        # the kill step and removes the worktree out from under a running agent. Resolve
+        # the session from bramble by worktree_name; the ledger is a fallback, not truth.
+        squatter = next((r for r in live.values()
+                         if r.get("worktree_name") and r["worktree_name"] == wt_name), None)
         if status == "done" and wt and os.path.isdir(wt):
-            findings.append(f"{tid}: status=done but worktree still exists ({wt})")
+            if squatter:
+                findings.append(
+                    f"{tid}: status=done but a LIVE SESSION still holds its worktree "
+                    f"({squatter['id']}, status={squatter.get('status', '?')}, "
+                    f"pane={squatter.get('tmux_target') or 'GONE'}) -- kill the session "
+                    f"before removing {wt}, and do not trust window_id "
+                    f"({t.get('window_id') or 'empty'}) to find it")
+            else:
+                findings.append(f"{tid}: status=done but worktree still exists ({wt})")
         if status == "running" and wt and not os.path.isdir(wt):
             findings.append(f"{tid}: status=running but worktree is gone ({wt})")
         if status == "running" and t.get("merge_sha"):

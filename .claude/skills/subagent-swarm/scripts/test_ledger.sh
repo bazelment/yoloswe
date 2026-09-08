@@ -108,6 +108,30 @@ L add "$RUN5" --id ok1 --title t --branch b >/dev/null
 OUT=$(L doctor "$RUN5" 2>&1); RC=$?
 chk "no false positives on a planned lane" "$RC" "0"
 
+echo "== a live session squatting a done lane's worktree is called out =="
+# The destructive case. window_id decays to empty (1/12 populated in a live run), so a
+# reap plan built from the ledger omits the kill step and removes the worktree out from
+# under a running agent. Sessions must be resolved from bramble by worktree_name.
+RUN6="$TMP/squat"; SWT="$TMP/squat-wt"; mkdir -p "$SWT"
+L init "$RUN6" --goal g --phases "swe:" --base main --target main >/dev/null
+L add "$RUN6" --id squatted --title t --branch b >/dev/null
+L set "$RUN6" --id squatted --status done --worktree "$SWT" >/dev/null   # window_id stays empty
+cat > "$TMP/live.json" <<JSON
+{"sessions":[{"id":"squatted-builder-abc","model":"opus","prompt":"p","status":"idle",
+ "type":"builder","worktree_name":"$(basename "$SWT")","tmux_target":"@99"}]}
+JSON
+OUT=$(L doctor "$RUN6" --sessions "$TMP/live.json" 2>&1)
+if echo "$OUT" | grep -q "LIVE SESSION still holds its worktree"; then ok "live squatter flagged"
+else no "silent on a live session holding a done lane's worktree: $OUT"; fi
+if echo "$OUT" | grep -q "@99"; then ok "names the pane to kill"
+else no "does not name the pane"; fi
+# Without a live session the same lane is only a stale worktree, not a kill-first case.
+OUT=$(L doctor "$RUN6" 2>&1)
+if echo "$OUT" | grep -q "worktree still exists"; then ok "no session -> plain stale-worktree finding"
+else no "lost the plain finding when no sessions given"; fi
+if echo "$OUT" | grep -q "LIVE SESSION"; then no "invented a squatter with no session data"
+else ok "does not invent a squatter"; fi
+
 echo "== absence is never evidence of approval =="
 # A PR with no recorded head/approval must be reported unverifiable, never assumed fine.
 L add "$RUN5" --id unverif --title t --branch b2 >/dev/null
