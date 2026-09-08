@@ -1,0 +1,120 @@
+#!/bin/bash
+# Regression test for ledger.py concurrency and schema.
+#
+# The bug: save() was open(path,"w") -- truncate in place, then json.dump -- and every
+# subcommand is a full read-modify-write of the whole file with no lock. One orchestrator
+# owned the ledger, so it never showed. Two writers means a silent lost update: last
+# writer wins, no error, and the ledger quietly stops matching reality. That interleaving
+# is now the design (a Go tick reconciling while an interactive session runs `set`), so
+# it is a correctness bug, not a theoretical one.
+#
+# Measured on the Go side of the same contract: with the lock removed, 7 of 8 concurrent
+# updates vanished. This asserts the shell side the same way.
+set -u
+SW="$(cd "$(dirname "$0")" && pwd)"
+L(){ /usr/bin/env python3 "$SW/ledger.py" "$@"; }
+TMP=$(mktemp -d /tmp/swarm-ledger-test-XXXXXX)
+PASS=0; FAIL=0
+ok(){ PASS=$((PASS+1)); echo "  ok   $1"; }
+no(){ FAIL=$((FAIL+1)); echo "  FAIL $1"; }
+chk(){ [ "$2" = "$3" ] && ok "$1 ($2)" || no "$1: expected $3, got $2"; }
+trap 'rm -rf "$TMP"' EXIT
+
+echo "== concurrent writers do not lose updates =="
+RUN="$TMP/conc"
+L init "$RUN" --goal g --phases "swe:,review:" --base main --target main >/dev/null
+N=8
+for i in $(seq 1 $N); do L add "$RUN" --id "lane$i" --title "t$i" --branch "b$i" >/dev/null; done
+# All N fire at once, each a full read-modify-write of the same file.
+for i in $(seq 1 $N); do L set "$RUN" --id "lane$i" --note "n$i" >/dev/null 2>&1 & done
+wait
+SURV=$(/usr/bin/env python3 -c "
+import json,sys
+d=json.load(open('$RUN/state.json'))
+print(sum(1 for t in d['tasks'] if t['notes']))
+" 2>/dev/null || echo PARSE_ERROR)
+chk "all $N concurrent notes survive" "$SURV" "$N"
+
+echo "== state.json is never observed half-written =="
+# A reader must never see a truncated file. With truncate-in-place it can.
+RUN2="$TMP/atomic"
+L init "$RUN2" --goal g --phases "swe:" --base main --target main >/dev/null
+for i in $(seq 1 40); do L add "$RUN2" --id "l$i" --title "$(head -c 200 /dev/zero | tr '\0' 'x')" --branch "b$i" >/dev/null; done
+BAD=0
+( for i in $(seq 1 60); do L set "$RUN2" --id l1 --note "spin$i" >/dev/null 2>&1; done ) &
+WPID=$!
+for i in $(seq 1 60); do
+  /usr/bin/env python3 -c "import json;json.load(open('$RUN2/state.json'))" 2>/dev/null || BAD=$((BAD+1))
+done
+wait $WPID
+chk "no torn reads during concurrent writes" "$BAD" "0"
+
+echo "== new fields round-trip =="
+RUN3="$TMP/fields"
+L init "$RUN3" --goal g --phases "swe:" --base main --target main >/dev/null
+L add "$RUN3" --id lane1 --title t --branch b >/dev/null
+L set "$RUN3" --id lane1 --pr 123 --pr-head abc123 --approval-sha def456 --checks passing >/dev/null 2>&1
+V=$(/usr/bin/env python3 -c "
+import json
+t=json.load(open('$RUN3/state.json'))['tasks'][0]
+print(t.get('pr'), t.get('pr_head'), t.get('approval_sha'), t.get('checks'))
+" 2>/dev/null || echo ERR)
+chk "pr fields persist" "$V" "123 abc123 def456 passing"
+
+echo "== unknown keys written by another tool survive our writes =="
+# swarm-queen writes fork_sha/phase_start_sha/round/last_verified_at. ledger.py must not
+# drop them: two writers silently deleting each other's fields is the same lost-update
+# bug wearing a different hat.
+/usr/bin/env python3 -c "
+import json
+p='$RUN3/state.json'
+d=json.load(open(p))
+d['tasks'][0]['phase_start_sha']='deadbeef'
+d['config']['custom_key']='keepme'
+json.dump(d,open(p,'w'),indent=2)
+"
+L set "$RUN3" --id lane1 --note touched >/dev/null
+K=$(/usr/bin/env python3 -c "
+import json
+d=json.load(open('$RUN3/state.json'))
+print(d['tasks'][0].get('phase_start_sha'), d['config'].get('custom_key'))
+")
+chk "foreign task+config keys preserved" "$K" "deadbeef keepme"
+
+echo "== doctor catches the drift shapes seen in real runs =="
+RUN4="$TMP/doc"; WT="$TMP/doc-wt"; mkdir -p "$WT"
+L init "$RUN4" --goal g --phases "swe:,review:" --base main --target main >/dev/null
+# The 2026-09-04 shape: 8 lanes sat `running` over work that had already merged.
+L add "$RUN4" --id merged-running --title t --branch b1 >/dev/null
+L set "$RUN4" --id merged-running --status running --phase swe --worktree "$WT" --merge-sha abc >/dev/null
+# Approval pinned to an older head. Fired three times in one run; merging on
+# reviewDecision alone would have shipped unapproved bytes.
+L add "$RUN4" --id stale-appr --title t --branch b2 >/dev/null
+L set "$RUN4" --id stale-appr --status running --phase swe --worktree "$WT"      --pr 11968 --pr-head 837c940 --approval-sha fa365c1 >/dev/null
+# A `done` lane still holding its worktree -- live right now in the 09-08 run.
+L add "$RUN4" --id done-wt --title t --branch b3 >/dev/null
+L set "$RUN4" --id done-wt --status done --worktree "$WT" >/dev/null
+OUT=$(L doctor "$RUN4" 2>&1); RC=$?
+for pat in "merged work hiding as in-flight" "approval is STALE" "status=done but worktree still exists"; do
+  if echo "$OUT" | grep -q "$pat"; then ok "detects: $pat"
+  else no "missed: $pat"; fi
+done
+chk "doctor exits non-zero on drift" "$RC" "1"
+
+echo "== doctor is clean on a healthy ledger, and exits 0 =="
+RUN5="$TMP/clean"
+L init "$RUN5" --goal g --phases "swe:" --base main --target main >/dev/null
+L add "$RUN5" --id ok1 --title t --branch b >/dev/null
+OUT=$(L doctor "$RUN5" 2>&1); RC=$?
+chk "no false positives on a planned lane" "$RC" "0"
+
+echo "== absence is never evidence of approval =="
+# A PR with no recorded head/approval must be reported unverifiable, never assumed fine.
+L add "$RUN5" --id unverif --title t --branch b2 >/dev/null
+L set "$RUN5" --id unverif --status running --phase swe --worktree "$WT" --pr 12000 >/dev/null
+if L doctor "$RUN5" 2>&1 | grep -q "approval unverifiable"; then ok "unverifiable approval flagged"
+else no "silent on a PR with no approval data"; fi
+
+echo
+echo "passed $PASS, failed $FAIL"
+[ "$FAIL" -eq 0 ]
