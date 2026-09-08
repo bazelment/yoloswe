@@ -37,6 +37,12 @@ inside it until sub-phases are visible; a gap with no marker is itself a finding
 retained, min/median/max with n. Never a bare median, never a p90 at small n. Known
 noise sources (pool autoscaling, image pulls) are ruled out with spread, not asserted.
 
+**An enumeration is not proof of completeness**, and an unanswered review question
+stays open — it is a finding, not a nit. Split review threads into open /
+awaiting-re-review (last comment is yours) / unaddressed; only `unaddressed > 0` means
+an agent owes work. That distinction turned "7 unresolved" into "0 unaddressed" on a PR
+about to be needlessly re-seeded.
+
 **Never weaken an assertion to make a gate green.** No deleted assertion, no added skip,
 no widened matcher, no retry-until-pass. A suite that cannot fail is worse than a red
 one. A supported finding that the fix belongs elsewhere is a valid outcome.
