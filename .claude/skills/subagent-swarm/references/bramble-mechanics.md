@@ -15,9 +15,8 @@ sw_preflight "$RUN"       # resolves SELF/TARGET/BASE/socket, writes $RUN/env.sh
 . "$SW/tmux_safe.sh"; resolve_self
 ~~~
 
-Every later command begins `. "$RUN/env.sh"` instead of re-deriving coordinates. Shell
-state does not persist between calls, and hand-retyping this preamble has cost 30-40
-repetitions per run.
+Every later command begins `. "$RUN/env.sh"` instead of re-deriving coordinates: shell
+state does not persist between calls.
 
 The socket is `bramble-<uid>-<pid>.sock` — it carries the TUI's pid, so it changes on
 every restart. `sw_socket` resolves it by globbing and **fails loudly on more than one
@@ -71,9 +70,8 @@ bramble new-session -w "$WORKTREE" --parent "$SELF" \
 
 `sw_spawn <lane> <phase> <model> <brief-file> [branch] [worktree]` performs both spawn
 forms and records the result in the same call — ledger row, `spawn.json`, and the brief.
-Recording used to be a separate step, and the fields that need that step are exactly the
-ones that decayed across runs (`brief` from 13/13 to 0/12, `window_id` from 6/13 to 1/12).
-A hand step that costs nothing to skip gets skipped.
+Recorded separately, those fields decay: a hand step that costs nothing to skip gets
+skipped.
 
 If you spawn by hand, record immediately — the literal phase, session id, `realpath`
 worktree, and fork SHA:
@@ -115,9 +113,9 @@ Run `snapshot_at_risk.sh "$RUN"` every tick. It backs up lanes with uncommitted 
 `refs/backup/<lane>` without changing their index or HEAD. Never use an empty branch or
 an idle report as evidence that no backup is needed.
 
-`bramble send-key --session-id <id> <Key>` submits a composer or answers a dialog; a run
-spent 29 hours fighting raw `tmux send-keys` before noticing it. `sw_nudge` sends, refuses
-to stack onto pending pastes, and confirms the pane went busy before returning.
+`bramble send-key --session-id <id> <Key>` submits a composer or answers a dialog — use it
+rather than raw `tmux send-keys`. `sw_nudge` sends, refuses to stack onto pending pastes,
+and confirms the pane went busy before returning.
 
 A session whose `list-sessions` row has no `tmux_target` has no pane: it is **gone**, not
 idle. That is decidable immediately, without waiting out a stall timeout, and piping an
