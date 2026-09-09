@@ -69,6 +69,19 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	for _, l := range nonTerminal {
 		fmt.Printf("  non-terminal: %s (%s/%s)\n", l.ID, l.Status, orDash(l.Phase))
 	}
+
+	// Exit non-zero on findings so a tick can gate on doctor, and non-zero when a
+	// check could not RUN, because a clean result from a partially-measured run
+	// is not a pass. Exiting 0 in either case is the same false green as printing
+	// an unqualified total: whatever reads the exit code would treat an
+	// unmeasured run as a healthy one.
+	switch {
+	case branchErr != nil:
+		return fmt.Errorf("%d finding(s), and some checks could not run: %w",
+			len(findings), branchErr)
+	case len(findings) > 0:
+		return fmt.Errorf("%d drift finding(s) across %d lane(s)", len(findings), len(st.Lanes))
+	}
 	return nil
 }
 

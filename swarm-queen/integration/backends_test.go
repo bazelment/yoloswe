@@ -464,10 +464,12 @@ func TestDoctorSaysWhenABranchProbeCouldNotRun(t *testing.T) {
 			Sessions: map[string]string{}})
 
 	// stderr discarded on purpose: the caller must still be able to tell.
-	fromNonRepo, err := runCmdStdout(ctx(t), bin, "doctor", runDir, "--repo", t.TempDir())
-	if err != nil {
-		t.Fatalf("doctor: %v\n%s", err, fromNonRepo)
-	}
+	//
+	// A non-zero exit is EXPECTED here and is part of the contract -- a run that
+	// could not be fully measured is not a pass -- so this asserts the output,
+	// not the exit status. Checking `err == nil` would be asserting the false
+	// green from the other side.
+	fromNonRepo, _ := runCmdStdout(ctx(t), bin, "doctor", runDir, "--repo", t.TempDir())
 	if !strings.Contains(fromNonRepo, "SKIPPED") {
 		t.Errorf("an unrunnable branch probe must be reported on stdout:\n%s", fromNonRepo)
 	}
@@ -475,12 +477,51 @@ func TestDoctorSaysWhenABranchProbeCouldNotRun(t *testing.T) {
 		t.Errorf("the summary line must carry the caveat:\n%s", fromNonRepo)
 	}
 
-	// From a real repo the caveat must be absent, or it becomes noise nobody reads.
-	fromRepo, err := runCmdStdout(ctx(t), bin, "doctor", runDir, "--repo", repo)
-	if err != nil {
-		t.Fatalf("doctor: %v\n%s", err, fromRepo)
-	}
+	// From a real repo the caveat must be absent, or it becomes noise nobody
+	// reads. This lane has a dangling worktree, so a non-zero exit is expected
+	// here too; the assertion is again on the output.
+	fromRepo, _ := runCmdStdout(ctx(t), bin, "doctor", runDir, "--repo", repo)
 	if strings.Contains(fromRepo, "SKIPPED") {
 		t.Errorf("a working probe must not claim it was skipped:\n%s", fromRepo)
+	}
+}
+
+// doctor's exit code is what a tick gates on, so it must distinguish three
+// states -- and a clean result from a partially-measured run is NOT a pass.
+// Exiting 0 there is the same false green as printing an unqualified total: the
+// caller treats an unmeasured run as a healthy one.
+func TestDoctorExitCodeDistinguishesCleanFromUnmeasured(t *testing.T) {
+	bin := doctorBinary(t)
+	repo := repoRoot(t)
+
+	cleanRun, _ := seedRun(t,
+		[]state.Phase{{Name: "swe", Model: "sonnet"}},
+		&state.Lane{ID: "sq-clean", Title: "probe", Branch: "swarm-queen-test/never-created",
+			Status: state.StatusDone, Sessions: map[string]string{}})
+
+	driftRun, _ := seedRun(t,
+		[]state.Phase{{Name: "swe", Model: "sonnet"}},
+		&state.Lane{ID: "sq-dirty", Title: "probe", Branch: "swarm-queen-test/never-created",
+			Status: state.StatusDone, Worktree: "/definitely/not/here",
+			Sessions: map[string]string{}})
+
+	// Fully measured and genuinely clean: the only case that may pass.
+	if _, err := runCmdStdout(ctx(t), bin, "doctor", cleanRun, "--repo", repo); err != nil {
+		t.Errorf("a fully measured clean run must exit 0: %v", err)
+	}
+
+	// Fully measured with drift: must fail, or nothing can gate on it.
+	if _, err := runCmdStdout(ctx(t), bin, "doctor", driftRun, "--repo", repo); err == nil {
+		t.Error("a run with drift must exit non-zero")
+	}
+
+	// Clean but NOT fully measured: must fail. This is the case that silently
+	// passed before -- the summary carried the caveat but the exit code did not.
+	out, err := runCmdStdout(ctx(t), bin, "doctor", cleanRun, "--repo", t.TempDir())
+	if err == nil {
+		t.Errorf("a clean-but-unmeasured run must exit non-zero, got success:\n%s", out)
+	}
+	if !strings.Contains(out, "SKIPPED") {
+		t.Errorf("the skip must still be visible on stdout:\n%s", out)
 	}
 }
