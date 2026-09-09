@@ -69,6 +69,30 @@ Each refusal below corresponds to a failure that cost real time in a live run.
   destroys the previous attempt's session id — rounds 2-6 of an 11-round lane
   were lost this way.
 
+## A check that cannot run reports that it could not run
+
+The failure this guards against has three shapes, all found by cross-checking against the
+skill's independently-written `ledger.py doctor` rather than by auditing either side alone:
+
+- a probe whose failure raises nothing, so *unknown* silently becomes *empty*;
+- a probe that keeps *unknown* internally but prints a total that reads as complete;
+- absence of a finding taken as evidence of health.
+
+All three produce the same outcome — a clean bill of health manufactured by a broken
+probe, in the code whose job is finding leaks. `audit_cleanup.sh` documents the original:
+a wrong `BRAMBLE_SOCK` made `list-sessions` fail silently, so every lane audited
+`session=0`.
+
+So: a skipped check is reported **in the summary**, not only on stderr. The summary is
+what gets read, pasted into a report, and gated on, and a correct internal state that
+prints a misleading total is still a false green.
+
+    doctor: 12 finding(s) across 12 lane(s); 0 non-terminal (branch checks skipped)
+
+The corollary, learned from a test of ours that failed at the exact moment the thing it
+tested started working: when a tool signals findings through its **exit code**, a test
+asserting "it ran" has to check something other than the exit code.
+
 ## Shared state
 
 `state.json` is shared with the skill's `ledger.py`. Both take the same
