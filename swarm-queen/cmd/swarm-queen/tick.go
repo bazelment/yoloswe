@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -175,8 +176,13 @@ func runTick(cmd *cobra.Command, args []string) error {
 			"window kills will be refused\n", serr)
 	}
 
+	// Missions are the AUTHORED half of a brief, one file per lane+phase in the
+	// run dir. Without them a brief falls back to the lane title, which is a
+	// label rather than an instruction -- so the lane is told what it is called,
+	// not what to do.
 	applier := &lifecycle.Applier{
-		Store: state.NewStore(runDir), RunDir: runDir, RepoDir: tickRepoDir,
+		Missions: loadMissions(runDir, st, decisions),
+		Store:    state.NewStore(runDir), RunDir: runDir, RepoDir: tickRepoDir,
 		Git: git, Tmux: tmux, Spawner: client,
 		SelfWindow: self, Parent: tickParent, Repo: tickRepo,
 		Standing: standing,
@@ -207,6 +213,13 @@ func runTick(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%d decision(s) failed to apply", failed)
 	}
 	return nil
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // mutatingPhase reports whether a phase is expected to change the branch. A
@@ -258,4 +271,37 @@ func loadBaseline(runDir string) reconcile.SignalSet {
 		return reconcile.SignalSet{}
 	}
 	return current
+}
+
+// loadMissions reads <lane>.<phase>.mission.txt for every lane, falling back to
+// <lane>.mission.txt so a single-instruction lane needs one file.
+//
+// A missing mission is not an error: the brief falls back to the lane title, and
+// the operator finds out by reading the brief rather than by the spawn failing.
+func loadMissions(runDir string, st *state.State, decisions []decide.Decision) map[string]string {
+	// A lane's recorded phase is empty before its first spawn, and stale for a
+	// lane about to advance, so resolve against the phase the DECISION will run.
+	next := map[string]string{}
+	for _, d := range decisions {
+		if d.Phase != "" {
+			next[d.Lane] = state.PhaseRoundKey(d.Phase, max(d.Round, 1))
+		}
+	}
+	out := map[string]string{}
+	for _, lane := range st.Lanes {
+		candidates := []string{}
+		if k, ok := next[lane.ID]; ok {
+			candidates = append(candidates, fmt.Sprintf("%s.%s.mission.txt", lane.ID, k))
+		}
+		candidates = append(candidates,
+			fmt.Sprintf("%s.%s.mission.txt", lane.ID, state.PhaseRoundKey(lane.Phase, lane.Round)),
+			lane.ID+".mission.txt")
+		for _, name := range candidates {
+			if b, err := os.ReadFile(filepath.Join(runDir, name)); err == nil {
+				out[lane.ID] = strings.TrimSpace(string(b))
+				break
+			}
+		}
+	}
+	return out
 }
