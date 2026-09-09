@@ -30,6 +30,7 @@ import argparse
 import fcntl
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -253,8 +254,14 @@ def doctor(state, run, sessions_path=""):
                     f"({t.get('window_id') or 'empty'}) to find it")
             else:
                 findings.append(f"{tid}: status=done but worktree still exists ({wt})")
-        if status == "running" and wt and not os.path.isdir(wt):
-            findings.append(f"{tid}: status=running but worktree is gone ({wt})")
+        # A recorded path that no longer exists is drift whatever the status. Gating this
+        # on `running` made a partial teardown -- worktree removed, ledger never
+        # reconciled, branch left behind -- read as healthy, so a run with every path
+        # dangling reported no drift at all. Absence of the old finding is not cleanliness.
+        if wt and not os.path.isdir(wt):
+            extra = "" if status == "running" else " -- teardown never reconciled"
+            findings.append(f"{tid}: status={status} but its recorded worktree is gone "
+                            f"({wt}){extra}")
         if status == "running" and t.get("merge_sha"):
             findings.append(f"{tid}: status=running but merge_sha is set "
                             f"({t['merge_sha']}) -- merged work hiding as in-flight")
@@ -282,6 +289,20 @@ def doctor(state, run, sessions_path=""):
     ours = {os.path.basename((t.get("worktree") or "").rstrip("/"))
             for t in state["tasks"] if t.get("worktree")}
     ours.discard("")
+    # Reaping is five layers and drifts on whichever is least visible. A worktree removed
+    # by hand leaves the branch, so check it independently of the path.
+    branches = set()
+    try:
+        out = subprocess.run(["git", "branch", "--format=%(refname:short)"],
+                             capture_output=True, text=True, timeout=10)
+        branches = {b.strip() for b in out.stdout.splitlines() if b.strip()}
+    except (OSError, subprocess.SubprocessError):
+        findings.append("could not list branches -- branch checks SKIPPED, not passed")
+    for t in state["tasks"]:
+        br = t.get("branch") or ""
+        if t.get("status") == "done" and br and br in branches:
+            findings.append(f"{t['id']}: status=done but branch `{br}` still exists")
+
     for sid, row in sorted(live.items()):
         if sid in recorded:
             continue
