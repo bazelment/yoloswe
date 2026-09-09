@@ -291,17 +291,30 @@ def doctor(state, run, sessions_path=""):
     ours.discard("")
     # Reaping is five layers and drifts on whichever is least visible. A worktree removed
     # by hand leaves the branch, so check it independently of the path.
-    branches = set()
+    # A probe that cannot run must SKIP, never report zero. `git branch` outside a
+    # repository exits 128 with empty stdout and raises nothing, so trusting stdout alone
+    # turns "I could not look" into "nothing survives" -- a clean bill of health
+    # manufactured by a broken probe, the same shape audit_cleanup.sh guards against with
+    # its socket check. Test the return code, not just the exception.
+    branches = None
     try:
         out = subprocess.run(["git", "branch", "--format=%(refname:short)"],
                              capture_output=True, text=True, timeout=10)
-        branches = {b.strip() for b in out.stdout.splitlines() if b.strip()}
-    except (OSError, subprocess.SubprocessError):
-        findings.append("could not list branches -- branch checks SKIPPED, not passed")
-    for t in state["tasks"]:
-        br = t.get("branch") or ""
-        if t.get("status") == "done" and br and br in branches:
-            findings.append(f"{t['id']}: status=done but branch `{br}` still exists")
+        if out.returncode == 0:
+            branches = {b.strip() for b in out.stdout.splitlines() if b.strip()}
+        else:
+            why = out.stderr.strip().splitlines()[0] if out.stderr.strip() else "no stderr"
+            findings.append(f"branch checks SKIPPED, not passed: `git branch` exited "
+                            f"{out.returncode} ({why}) -- run doctor from the "
+                            f"orchestrator's worktree")
+    except (OSError, subprocess.SubprocessError) as exc:
+        findings.append(f"branch checks SKIPPED, not passed: could not run `git branch` "
+                        f"({exc})")
+    if branches is not None:
+        for t in state["tasks"]:
+            br = t.get("branch") or ""
+            if t.get("status") == "done" and br and br in branches:
+                findings.append(f"{t['id']}: status=done but branch `{br}` still exists")
 
     for sid, row in sorted(live.items()):
         if sid in recorded:
