@@ -205,3 +205,98 @@ func TestLedgerDriftFindsUndeclaredPhases(t *testing.T) {
 		t.Errorf("undeclared phase must be reported: %+v", findings)
 	}
 }
+
+// A dangling worktree path is drift whatever the status. Checking only whether a
+// done lane still HOLDS a worktree makes a partial teardown look complete: once
+// the directory is removed without reconciling the ledger, the finding vanishes
+// and the run reports clean. Observed live on run 20260908-171345.
+func TestLedgerDriftFindsDanglingWorktreePath(t *testing.T) {
+	t.Parallel()
+	st := &state.State{
+		Config: state.Config{Phases: []state.Phase{{Name: "swe"}}},
+		Lanes: []*state.Lane{
+			{ID: "reaped-cleanly", Status: state.StatusDone},
+			{ID: "dangling", Status: state.StatusDone,
+				Worktree: "/home/ubuntu/worktrees/kernel/swarm/deploy-harden-split-cred-0908"},
+			{ID: "still-held", Status: state.StatusDone, Worktree: "/wt/held"},
+		},
+	}
+	wts := map[string]reconcile.WorktreeState{
+		"reaped-cleanly": {Exists: false},
+		"dangling":       {Path: st.Lanes[1].Worktree, Exists: false},
+		"still-held":     {Path: "/wt/held", Exists: true},
+	}
+
+	findings := LedgerDrift(st, wts, nil)
+	var sawDangling, sawHeld bool
+	for _, f := range findings {
+		switch f.Lane {
+		case "dangling":
+			if strings.Contains(f.Evidence, "does not exist") {
+				sawDangling = true
+			}
+		case "still-held":
+			if strings.Contains(f.Evidence, "still exists") {
+				sawHeld = true
+			}
+		case "reaped-cleanly":
+			// A lane with no recorded worktree is properly closed. Flagging it
+			// would fire on every clean lane and train people to mute the check.
+			t.Errorf("a cleanly reaped lane must not be flagged: %+v", f)
+		}
+	}
+	if !sawDangling {
+		t.Errorf("a recorded-but-absent worktree must be reported: %+v", findings)
+	}
+	if !sawHeld {
+		t.Errorf("the original held-worktree finding must survive: %+v", findings)
+	}
+}
+
+// The dangling path says the teardown was partial; the surviving branch says
+// what is left to close.
+func TestLedgerDriftReportsSurvivingBranches(t *testing.T) {
+	t.Parallel()
+	st := &state.State{
+		Config: state.Config{Phases: []state.Phase{{Name: "swe"}}},
+		Lanes: []*state.Lane{
+			{ID: "partial", Status: state.StatusDone,
+				Branch: "swarm/deploy-harden-worker-ha-0908", Worktree: "/gone"},
+			{ID: "closed", Status: state.StatusDone, Branch: "swarm/closed"},
+		},
+	}
+	wts := map[string]reconcile.WorktreeState{
+		"partial": {Path: "/gone", Exists: false},
+		"closed":  {Exists: false},
+	}
+	live := map[string]bool{"swarm/deploy-harden-worker-ha-0908": true}
+
+	findings := LedgerDriftWithBranches(st, wts, nil, live)
+	var sawBranch bool
+	for _, f := range findings {
+		if f.Lane == "partial" && strings.Contains(f.Evidence, "branch swarm/deploy-harden-worker-ha-0908 still exists") {
+			sawBranch = true
+		}
+		if f.Lane == "closed" && f.Claim == "branch" {
+			t.Errorf("a deleted branch must not be reported: %+v", f)
+		}
+	}
+	if !sawBranch {
+		t.Errorf("a surviving branch on a done lane must be reported: %+v", findings)
+	}
+}
+
+// A nil branch set means "not probed". Reporting every branch as absent would
+// manufacture a clean bill of health the probe never measured.
+func TestNilBranchSetSkipsTheBranchCheck(t *testing.T) {
+	t.Parallel()
+	st := &state.State{
+		Config: state.Config{Phases: []state.Phase{{Name: "swe"}}},
+		Lanes:  []*state.Lane{{ID: "a", Status: state.StatusDone, Branch: "swarm/a"}},
+	}
+	for _, f := range LedgerDrift(st, map[string]reconcile.WorktreeState{}, nil) {
+		if f.Claim == "branch" {
+			t.Errorf("branch findings must not appear when branches were not probed: %+v", f)
+		}
+	}
+}

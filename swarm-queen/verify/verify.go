@@ -166,6 +166,21 @@ func orNone(s string) string {
 // where lanes read `running` over merged PRs, `done` lanes still held worktrees,
 // and live sessions appeared nowhere at all.
 func LedgerDrift(st *state.State, worktrees map[string]reconcile.WorktreeState, sessions []bramble.Session) []Finding {
+	return LedgerDriftWithBranches(st, worktrees, sessions, nil)
+}
+
+// LedgerDriftWithBranches is LedgerDrift plus the set of branches that still
+// exist, so a partial teardown can name what is left to do.
+//
+// The dangling path says the teardown was incomplete; the surviving branch says
+// which resource still needs closing. A nil set skips the branch half rather
+// than reporting every branch as absent -- unknown is not evidence of closure.
+func LedgerDriftWithBranches(
+	st *state.State,
+	worktrees map[string]reconcile.WorktreeState,
+	sessions []bramble.Session,
+	liveBranches map[string]bool,
+) []Finding {
 	var out []Finding
 
 	// Index rather than copy: bramble.Session is a large struct and this runs
@@ -188,6 +203,29 @@ func LedgerDrift(st *state.State, worktrees map[string]reconcile.WorktreeState, 
 			out = append(out, Finding{lane.ID, SeverityBlock, "status=running",
 				"worktree " + lane.Worktree + " is gone",
 				"the lane died; recover its branch or mark it failed"})
+		}
+
+		// A recorded path that no longer exists is drift whatever the status.
+		// Asking only whether a done lane still HOLDS a worktree makes a partial
+		// teardown read as healthy: once the directory is removed without
+		// reconciling the ledger, the old finding disappears and the run reports
+		// clean. Observed live -- two lanes had their worktrees removed with
+		// state.json untouched and their branches left behind, and the drift
+		// check went quiet. Absence of the old finding is not cleanliness.
+		//
+		// Guarded on a non-empty path: a cleanly reaped lane has no worktree
+		// recorded, and flagging those would fire on every properly closed lane,
+		// which is how a real signal becomes noise people mute.
+		if lane.Status.Terminal() && lane.Worktree != "" && probed && !wt.Exists {
+			out = append(out, Finding{lane.ID, SeverityWarn, "worktree",
+				"recorded worktree " + lane.Worktree + " does not exist",
+				"the teardown was never reconciled; clear the field once the lane is fully closed"})
+		}
+
+		if liveBranches != nil && lane.Status.Terminal() && lane.Branch != "" && liveBranches[lane.Branch] {
+			out = append(out, Finding{lane.ID, SeverityWarn, "branch",
+				"branch " + lane.Branch + " still exists",
+				"verify integration by content, then delete it; the five-zeros audit is incomplete"})
 		}
 
 		// A lane whose phase the config never declared makes phase-ordered

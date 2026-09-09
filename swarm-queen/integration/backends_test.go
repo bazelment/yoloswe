@@ -415,13 +415,16 @@ func TestDoctorAgreesWithLedgerPy(t *testing.T) {
 	// does, the swarm is running older code than the repo suggests. Say so
 	// rather than skipping quietly.
 	ledger := ledgerPyPath(t)
+	// A non-zero exit means findings, not breakage: doctor reports drift through
+	// its exit code so a tick can gate on it. Only an unusable invocation is a
+	// real failure, so distinguish the two rather than treating any error as one.
 	out, err := runCmd(ctx(t), "/usr/bin/python3", ledger, "doctor", runDir)
-	if err != nil {
-		if strings.Contains(out, "invalid choice: 'doctor'") {
-			t.Skipf("the live ledger.py at %s predates `doctor`; the skill in use is "+
-				"older than the merged one, which is worth fixing but is not a "+
-				"swarm-queen defect\n%s", ledger, out)
-		}
+	switch {
+	case strings.Contains(out, "invalid choice: 'doctor'"):
+		t.Skipf("the live ledger.py at %s predates `doctor`; the skill in use is "+
+			"older than the merged one, which is worth fixing but is not a "+
+			"swarm-queen defect\n%s", ledger, out)
+	case err != nil && !strings.Contains(out, "finding(s)"):
 		t.Fatalf("ledger.py doctor: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "sq-drift") {

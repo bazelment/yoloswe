@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -11,6 +12,8 @@ import (
 	"github.com/bazelment/yoloswe/swarm-queen/state"
 	"github.com/bazelment/yoloswe/swarm-queen/verify"
 )
+
+var doctorRepoDir string
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor <run-dir>",
@@ -23,7 +26,11 @@ It never writes. Run it against a live swarm.`,
 	RunE: runDoctor,
 }
 
-func init() { rootCmd.AddCommand(doctorCmd) }
+func init() {
+	doctorCmd.Flags().StringVar(&doctorRepoDir, "repo", ".",
+		"repository directory for branch checks")
+	rootCmd.AddCommand(doctorCmd)
+}
 
 func runDoctor(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
@@ -37,7 +44,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	worktrees := probeWorktrees(ctx, st)
 	sessions := liveSessions(ctx, cmd)
 
-	findings := verify.LedgerDrift(st, worktrees, sessions)
+	findings := verify.LedgerDriftWithBranches(st, worktrees, sessions, liveBranches(ctx, cmd, st))
 	for _, f := range findings {
 		fmt.Println(f)
 	}
@@ -81,6 +88,33 @@ func liveSessions(ctx context.Context, cmd *cobra.Command) []bramble.Session {
 		return nil
 	}
 	return sessions
+}
+
+// liveBranches lists which of the run's branches still exist.
+//
+// Returns nil when the probe fails, so the branch half is SKIPPED rather than
+// reporting every branch as deleted: a broken probe must not manufacture a clean
+// bill of health.
+func liveBranches(ctx context.Context, cmd *cobra.Command, st *state.State) map[string]bool {
+	out, err := reconcile.ExecGit{}.Run(ctx, doctorRepoDir, "branch", "--format=%(refname:short)")
+	if err != nil {
+		cmd.PrintErrf("warning: cannot list branches in %s (%v); "+
+			"surviving branches not checked\n", doctorRepoDir, err)
+		return nil
+	}
+	existing := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		if b := strings.TrimSpace(line); b != "" {
+			existing[b] = true
+		}
+	}
+	live := map[string]bool{}
+	for _, lane := range st.Lanes {
+		if lane.Branch != "" && existing[lane.Branch] {
+			live[lane.Branch] = true
+		}
+	}
+	return live
 }
 
 func orDash(s string) string {
