@@ -1,0 +1,21 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "reconcile",
+    srcs = [
+        "git.go",
+        "signal.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/swarm-queen/reconcile",
+    visibility = ["//visibility:public"],
+    deps = ["//swarm-queen/state"],
+)
+
+go_test(
+    name = "reconcile_test",
+    srcs = [
+        "git_test.go",
+        "signal_test.go",
+    ],
+    embed = [":reconcile"],
+)

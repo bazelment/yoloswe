@@ -1,0 +1,40 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "lifecycle",
+    srcs = [
+        "apply.go",
+        "brief.go",
+        "reap.go",
+        "snapshot.go",
+        "spawn.go",
+        "tmuxsafe.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/swarm-queen/lifecycle",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//swarm-queen/bramble",
+        "//swarm-queen/decide",
+        "//swarm-queen/reconcile",
+        "//swarm-queen/state",
+    ],
+)
+
+go_test(
+    name = "lifecycle_test",
+    srcs = [
+        "apply_test.go",
+        "brief_test.go",
+        "reap_test.go",
+        "snapshot_test.go",
+        "spawn_test.go",
+        "tmuxsafe_test.go",
+    ],
+    embed = [":lifecycle"],
+    deps = [
+        "//swarm-queen/bramble",
+        "//swarm-queen/decide",
+        "//swarm-queen/reconcile",
+        "//swarm-queen/state",
+    ],
+)

@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "decide",
+    srcs = [
+        "decide.go",
+        "escalate.go",
+        "llm.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/swarm-queen/decide",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//swarm-queen/state",
+        "//swarm-queen/verify",
+    ],
+)
+
+go_test(
+    name = "decide_test",
+    srcs = [
+        "decide_test.go",
+        "escalate_test.go",
+        "llm_test.go",
+    ],
+    embed = [":decide"],
+    deps = [
+        "//swarm-queen/state",
+        "//swarm-queen/verify",
+    ],
+)
