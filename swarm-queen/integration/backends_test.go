@@ -446,3 +446,41 @@ func ledgerPyPath(t *testing.T) string {
 	t.Skip("no ledger.py found")
 	return ""
 }
+
+// A check that cannot run must SAY so, on stdout, in the summary.
+//
+// Reporting only on stderr is not enough: the moment stderr is redirected, a
+// count that silently omits a whole category reads as a complete answer. That is
+// the clean-bill-of-health-from-a-broken-probe failure that audit_cleanup.sh
+// documents for BRAMBLE_SOCK, reproduced in the check whose job is finding leaks.
+func TestDoctorSaysWhenABranchProbeCouldNotRun(t *testing.T) {
+	bin := doctorBinary(t)
+	repo := repoRoot(t)
+
+	runDir, _ := seedRun(t,
+		[]state.Phase{{Name: "swe", Model: "sonnet"}},
+		&state.Lane{ID: "sq-skip", Title: "probe", Branch: "swarm-queen-test/absent",
+			Status: state.StatusDone, Worktree: "/definitely/not/here",
+			Sessions: map[string]string{}})
+
+	// stderr discarded on purpose: the caller must still be able to tell.
+	fromNonRepo, err := runCmdStdout(ctx(t), bin, "doctor", runDir, "--repo", t.TempDir())
+	if err != nil {
+		t.Fatalf("doctor: %v\n%s", err, fromNonRepo)
+	}
+	if !strings.Contains(fromNonRepo, "SKIPPED") {
+		t.Errorf("an unrunnable branch probe must be reported on stdout:\n%s", fromNonRepo)
+	}
+	if !strings.Contains(fromNonRepo, "branch checks skipped") {
+		t.Errorf("the summary line must carry the caveat:\n%s", fromNonRepo)
+	}
+
+	// From a real repo the caveat must be absent, or it becomes noise nobody reads.
+	fromRepo, err := runCmdStdout(ctx(t), bin, "doctor", runDir, "--repo", repo)
+	if err != nil {
+		t.Fatalf("doctor: %v\n%s", err, fromRepo)
+	}
+	if strings.Contains(fromRepo, "SKIPPED") {
+		t.Errorf("a working probe must not claim it was skipped:\n%s", fromRepo)
+	}
+}

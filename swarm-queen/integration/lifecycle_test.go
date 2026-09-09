@@ -192,3 +192,29 @@ func runCmd(c context.Context, name string, args ...string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
+
+// doctorBinary locates the built swarm-queen binary, skipping when absent so the
+// suite does not fail on a missing build artifact.
+func doctorBinary(t *testing.T) string {
+	t.Helper()
+	for _, p := range []string{
+		"../../bazel-bin/swarm-queen/cmd/swarm-queen/swarm-queen_/swarm-queen",
+		os.ExpandEnv("$HOME/worktrees/yoloswe/feat/swarm-agent/bazel-bin/swarm-queen/cmd/swarm-queen/swarm-queen_/swarm-queen"),
+	} {
+		if abs, err := filepath.Abs(p); err == nil {
+			if _, err := os.Stat(abs); err == nil {
+				return abs
+			}
+		}
+	}
+	t.Skip("swarm-queen binary not built; run `bazel build //swarm-queen/cmd/swarm-queen`")
+	return ""
+}
+
+// runCmdStdout returns only stdout, discarding stderr, so a test can assert what
+// a caller sees when stderr is redirected away.
+func runCmdStdout(c context.Context, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(c, name, args...)
+	out, err := cmd.Output()
+	return string(out), err
+}

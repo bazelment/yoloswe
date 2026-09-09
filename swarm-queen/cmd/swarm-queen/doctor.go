@@ -44,14 +44,28 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	worktrees := probeWorktrees(ctx, st)
 	sessions := liveSessions(ctx, cmd)
 
-	findings := verify.LedgerDriftWithBranches(st, worktrees, sessions, liveBranches(ctx, cmd, st))
+	branches, branchErr := liveBranches(ctx, st)
+	findings := verify.LedgerDriftWithBranches(st, worktrees, sessions, branches)
 	for _, f := range findings {
 		fmt.Println(f)
 	}
 
+	// A check that could not run says so IN THE SUMMARY, not only on stderr. A
+	// count that silently omits a whole category reads as a complete answer, and
+	// the omission is invisible the moment stderr is redirected -- which is the
+	// same clean-bill-of-health-from-a-broken-probe failure the audit script
+	// documents.
+	if branchErr != nil {
+		fmt.Printf("\nbranch checks SKIPPED, not passed: %v\n", branchErr)
+	}
+
 	nonTerminal := st.NonTerminal()
-	fmt.Printf("\ndoctor: %d finding(s) across %d lane(s); %d non-terminal\n",
+	fmt.Printf("\ndoctor: %d finding(s) across %d lane(s); %d non-terminal",
 		len(findings), len(st.Lanes), len(nonTerminal))
+	if branchErr != nil {
+		fmt.Print(" (branch checks skipped)")
+	}
+	fmt.Println()
 	for _, l := range nonTerminal {
 		fmt.Printf("  non-terminal: %s (%s/%s)\n", l.ID, l.Status, orDash(l.Phase))
 	}
@@ -92,15 +106,15 @@ func liveSessions(ctx context.Context, cmd *cobra.Command) []bramble.Session {
 
 // liveBranches lists which of the run's branches still exist.
 //
-// Returns nil when the probe fails, so the branch half is SKIPPED rather than
-// reporting every branch as deleted: a broken probe must not manufacture a clean
-// bill of health.
-func liveBranches(ctx context.Context, cmd *cobra.Command, st *state.State) map[string]bool {
+// Returns (nil, err) when the probe fails, so the branch half is SKIPPED rather
+// than reporting every branch as deleted. An empty set and an unmeasurable one
+// are different answers: conflating them manufactures a clean bill of health in
+// the check whose job is finding leaks.
+func liveBranches(ctx context.Context, st *state.State) (map[string]bool, error) {
 	out, err := reconcile.ExecGit{}.Run(ctx, doctorRepoDir, "branch", "--format=%(refname:short)")
 	if err != nil {
-		cmd.PrintErrf("warning: cannot list branches in %s (%v); "+
-			"surviving branches not checked\n", doctorRepoDir, err)
-		return nil
+		return nil, fmt.Errorf("cannot list branches in %s: %w — "+
+			"run doctor from the orchestrator's worktree", doctorRepoDir, err)
 	}
 	existing := map[string]bool{}
 	for _, line := range strings.Split(out, "\n") {
@@ -114,7 +128,7 @@ func liveBranches(ctx context.Context, cmd *cobra.Command, st *state.State) map[
 			live[lane.Branch] = true
 		}
 	}
-	return live
+	return live, nil
 }
 
 func orDash(s string) string {
