@@ -330,12 +330,24 @@ def doctor(state, run, sessions_path=""):
             findings.append(f"  ^ {sid} has no tmux_target -- window is gone, "
                             f"decide now rather than waiting out a stall timeout")
 
+    # The summary is what gets read, pasted into a report, and gated on, so it has to
+    # carry any check that did not run. Skipping correctly is not enough: a correct
+    # internal state that prints an unqualified total is still a false green.
+    skipped = []
+    if branches is None:
+        skipped.append("branch")
+    if not sessions_path:
+        skipped.append("session")
+    caveat = f" ({' and '.join(skipped)} checks SKIPPED)" if skipped else ""
+
     if not findings:
-        print(f"doctor: {len(state['tasks'])} lane(s), no drift detected")
-        return 0
+        print(f"doctor: {len(state['tasks'])} lane(s), no drift detected{caveat}")
+        # An all-clear that could not run every check is not an all-clear.
+        return 1 if skipped else 0
     for line in findings:
         print(f"DRIFT {line}")
-    print(f"doctor: {len(findings)} finding(s) across {len(state['tasks'])} lane(s)")
+    print(f"doctor: {len(findings)} finding(s) across "
+          f"{len(state['tasks'])} lane(s){caveat}")
     return 1
 
 

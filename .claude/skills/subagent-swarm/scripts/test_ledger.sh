@@ -105,8 +105,13 @@ echo "== doctor is clean on a healthy ledger, and exits 0 =="
 RUN5="$TMP/clean"
 L init "$RUN5" --goal g --phases "swe:" --base main --target main >/dev/null
 L add "$RUN5" --id ok1 --title t --branch b >/dev/null
-OUT=$(L doctor "$RUN5" 2>&1); RC=$?
+# Pass an (empty) sessions file so every check actually runs: without one the session
+# check is unmeasured, and doctor now refuses to call an unmeasured run clean.
+echo '{"sessions":[]}' > "$TMP/no-sessions.json"
+OUT=$(L doctor "$RUN5" --sessions "$TMP/no-sessions.json" 2>&1); RC=$?
 chk "no false positives on a planned lane" "$RC" "0"
+if echo "$OUT" | grep -q DRIFT; then no "reported drift on a healthy ledger: $OUT"
+else ok "healthy ledger reports no findings"; fi
 
 echo "== a live session squatting a done lane's worktree is called out =="
 # The destructive case. window_id decays to empty (1/12 populated in a live run), so a
@@ -172,6 +177,28 @@ if echo "$OUT" | grep -q "branch checks SKIPPED, not passed"; then ok "unusable 
 else no "silently treated an unusable probe as 'no branches survive': $OUT"; fi
 if echo "$OUT" | grep -q "exited 128"; then ok "names the exit code"
 else no "does not say why it could not look"; fi
+
+echo "== the SUMMARY carries any check that did not run =="
+# Skipping correctly is not enough. The summary line is what gets read, pasted into a
+# report and gated on, so an unqualified total after a skipped check is still a false
+# green -- the same outcome as a broken probe, reached by a different route.
+RUN9="$TMP/summary"
+L init "$RUN9" --goal g --phases "swe:" --base main --target main >/dev/null
+L add "$RUN9" --id ok1 --title t --branch b >/dev/null
+NOREPO=$(mktemp -d)
+OUT=$(cd "$NOREPO" && L doctor "$RUN9" 2>/dev/null); RC=$?
+if echo "$OUT" | tail -1 | grep -q "SKIPPED"; then ok "summary names the skipped checks"
+else no "summary hid a skipped check: $(echo "$OUT" | tail -1)"; fi
+chk "an all-clear that could not run every check is not clean" "$RC" "1"
+rmdir "$NOREPO" 2>/dev/null
+
+# And the caveat must NOT fire when everything ran -- a warning that is always on is
+# noise people learn to ignore.
+echo '{"sessions":[]}' > "$TMP/empty-sessions.json"
+OUT=$(L doctor "$RUN9" --sessions "$TMP/empty-sessions.json" 2>/dev/null); RC=$?
+if echo "$OUT" | tail -1 | grep -q "SKIPPED"; then no "caveat fired when all checks ran: $OUT"
+else ok "no caveat when every check ran"; fi
+chk "fully-measured clean ledger exits 0" "$RC" "0"
 
 echo "== absence is never evidence of approval =="
 # A PR with no recorded head/approval must be reported unverifiable, never assumed fine.
