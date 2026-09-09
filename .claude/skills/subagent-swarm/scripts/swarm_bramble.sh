@@ -103,13 +103,25 @@ for r in (d.get("sessions",d) if isinstance(d,dict) else d) or []:
 ' "$1" "$2"
 }
 
-# sw_session_live <session-id>
-# A session with NO tmux_target has no pane: it is gone, not merely idle. Absence is
-# the liveness signal, available immediately instead of waiting out a stall timeout --
-# and it is exactly the session a naive `capture-pane` would error on.
+# sw_session_live <session-id> [seconds]
+# A session with no tmux_target has no pane, and one that never gains a pane is gone --
+# exactly the session a naive `capture-pane` would error on.
+#
+# But bramble REGISTERS a session before tmux assigns its window, so a healthy lane
+# reports an empty tmux_target for the first moment of its life. Sampling once and
+# calling that "gone" makes sw_nudge refuse to talk to a lane that just started
+# correctly. Poll instead: absence is only evidence after we have waited for it.
 sw_session_live() {
-  local t; t="$(sw_session_field "$1" tmux_target)"
-  [ -n "$t" ]
+  local sid="${1:?session-id}" budget="${2:-15}" waited=0 t
+  while :; do
+    t="$(sw_session_field "$sid" tmux_target)"
+    [ -n "$t" ] && return 0
+    # A session that has vanished from list-sessions entirely is gone now; only a
+    # registered-but-paneless session is worth waiting on.
+    [ -z "$(sw_session_field "$sid" status)" ] && return 1
+    [ "$waited" -ge "$budget" ] && return 1
+    sleep 1; waited=$((waited + 1))
+  done
 }
 
 # --- spawn ------------------------------------------------------------------------
@@ -182,9 +194,12 @@ EOF
 # send, then CONFIRM the pane went busy before believing it landed.
 sw_nudge() {
   local sid="${1:?session-id}" text="${2:?text}"
-  local target; target="$(sw_session_field "$sid" tmux_target)"
-  [ -n "$target" ] || { echo "sw_nudge: $sid has no tmux_target -- window is gone; "\
+  # Wait for the pane rather than sampling once: a lane nudged immediately after spawn
+  # has not been assigned its tmux window yet, and refusing it would strand a healthy
+  # session at the very moment its brief is delivered.
+  sw_session_live "$sid" || { echo "sw_nudge: $sid never got a pane -- window is gone; "\
 "replace the session rather than nudging it" >&2; return 1; }
+  local target; target="$(sw_session_field "$sid" tmux_target)"
 
   local pending; pending="$(tmux capture-pane -p -t "$target" 2>/dev/null |
                             grep -cE '\[Pasted (text|Content)' || true)"
