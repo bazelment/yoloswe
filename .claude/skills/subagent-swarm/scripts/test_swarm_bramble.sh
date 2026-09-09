@@ -62,6 +62,41 @@ echo "== liveness keys on tmux_target, not on status =="
 sw_session_live live-1 && ok "session with a pane is live" || no "live session called gone"
 sw_session_live dead-1 && no "gone session called live" || ok "session with no pane is gone"
 
+echo "== a paneless-but-registered session is waited for, not declared dead =="
+# bramble registers a session BEFORE tmux assigns its window, so a healthy lane reports
+# an empty tmux_target for the first moment of its life. Sampling once and calling that
+# "gone" makes sw_nudge refuse a lane that just started correctly.
+cat > "$TMP/pending.json" <<'JSON'
+{"sessions":[{"id":"pending-1","model":"opus","prompt":"p","status":"running",
+  "type":"builder","worktree_name":"wt-c"}]}
+JSON
+GAINED="$TMP/gained.json"
+cat > "$GAINED" <<'JSON'
+{"sessions":[{"id":"pending-1","model":"opus","prompt":"p","status":"running",
+  "type":"builder","worktree_name":"wt-c","tmux_target":"@42"}]}
+JSON
+# First read has no pane; the pane appears on the second.
+SWCOUNT="$TMP/count"; echo 0 > "$SWCOUNT"
+sw_sessions(){ n=$(cat "$SWCOUNT"); echo $((n+1)) > "$SWCOUNT"
+               if [ "$n" -eq 0 ]; then cat "$TMP/pending.json"; else cat "$GAINED"; fi; }
+if sw_session_live pending-1 5; then ok "waits for the pane instead of failing on sample 1"
+else no "declared a healthy just-spawned session dead"; fi
+
+echo "== a session that never gains a pane is still reported gone, within budget =="
+sw_sessions(){ cat "$TMP/pending.json"; }
+START=$(date +%s)
+sw_session_live pending-1 3 && no "called a permanently paneless session live" || ok "gives up and reports gone"
+ELAPSED=$(( $(date +%s) - START ))
+[ "$ELAPSED" -le 6 ] && ok "respects its budget (${ELAPSED}s)" || no "overran budget: ${ELAPSED}s"
+
+echo "== a session absent from list-sessions is gone immediately =="
+# Nothing to wait for: no row at all means it is not merely paneless.
+sw_sessions(){ echo '{"sessions":[]}'; }
+START=$(date +%s)
+sw_session_live vanished 10 && no "called a vanished session live" || ok "vanished session fails fast"
+ELAPSED=$(( $(date +%s) - START ))
+[ "$ELAPSED" -le 2 ] && ok "does not wait out the budget (${ELAPSED}s)" || no "waited ${ELAPSED}s for a session that does not exist"
+
 echo "== sw_nudge refuses a session whose window is gone =="
 # Piping an empty tmux_target into capture-pane would error on exactly the session
 # most in need of being reported as gone.

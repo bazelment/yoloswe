@@ -30,6 +30,7 @@ import argparse
 import fcntl
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -253,8 +254,14 @@ def doctor(state, run, sessions_path=""):
                     f"({t.get('window_id') or 'empty'}) to find it")
             else:
                 findings.append(f"{tid}: status=done but worktree still exists ({wt})")
-        if status == "running" and wt and not os.path.isdir(wt):
-            findings.append(f"{tid}: status=running but worktree is gone ({wt})")
+        # A recorded path that no longer exists is drift whatever the status. Gating this
+        # on `running` made a partial teardown -- worktree removed, ledger never
+        # reconciled, branch left behind -- read as healthy, so a run with every path
+        # dangling reported no drift at all. Absence of the old finding is not cleanliness.
+        if wt and not os.path.isdir(wt):
+            extra = "" if status == "running" else " -- teardown never reconciled"
+            findings.append(f"{tid}: status={status} but its recorded worktree is gone "
+                            f"({wt}){extra}")
         if status == "running" and t.get("merge_sha"):
             findings.append(f"{tid}: status=running but merge_sha is set "
                             f"({t['merge_sha']}) -- merged work hiding as in-flight")
@@ -282,6 +289,33 @@ def doctor(state, run, sessions_path=""):
     ours = {os.path.basename((t.get("worktree") or "").rstrip("/"))
             for t in state["tasks"] if t.get("worktree")}
     ours.discard("")
+    # Reaping is five layers and drifts on whichever is least visible. A worktree removed
+    # by hand leaves the branch, so check it independently of the path.
+    # A probe that cannot run must SKIP, never report zero. `git branch` outside a
+    # repository exits 128 with empty stdout and raises nothing, so trusting stdout alone
+    # turns "I could not look" into "nothing survives" -- a clean bill of health
+    # manufactured by a broken probe, the same shape audit_cleanup.sh guards against with
+    # its socket check. Test the return code, not just the exception.
+    branches = None
+    try:
+        out = subprocess.run(["git", "branch", "--format=%(refname:short)"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0:
+            branches = {b.strip() for b in out.stdout.splitlines() if b.strip()}
+        else:
+            why = out.stderr.strip().splitlines()[0] if out.stderr.strip() else "no stderr"
+            findings.append(f"branch checks SKIPPED, not passed: `git branch` exited "
+                            f"{out.returncode} ({why}) -- run doctor from the "
+                            f"orchestrator's worktree")
+    except (OSError, subprocess.SubprocessError) as exc:
+        findings.append(f"branch checks SKIPPED, not passed: could not run `git branch` "
+                        f"({exc})")
+    if branches is not None:
+        for t in state["tasks"]:
+            br = t.get("branch") or ""
+            if t.get("status") == "done" and br and br in branches:
+                findings.append(f"{t['id']}: status=done but branch `{br}` still exists")
+
     for sid, row in sorted(live.items()):
         if sid in recorded:
             continue
@@ -296,12 +330,24 @@ def doctor(state, run, sessions_path=""):
             findings.append(f"  ^ {sid} has no tmux_target -- window is gone, "
                             f"decide now rather than waiting out a stall timeout")
 
+    # The summary is what gets read, pasted into a report, and gated on, so it has to
+    # carry any check that did not run. Skipping correctly is not enough: a correct
+    # internal state that prints an unqualified total is still a false green.
+    skipped = []
+    if branches is None:
+        skipped.append("branch")
+    if not sessions_path:
+        skipped.append("session")
+    caveat = f" ({' and '.join(skipped)} checks SKIPPED)" if skipped else ""
+
     if not findings:
-        print(f"doctor: {len(state['tasks'])} lane(s), no drift detected")
-        return 0
+        print(f"doctor: {len(state['tasks'])} lane(s), no drift detected{caveat}")
+        # An all-clear that could not run every check is not an all-clear.
+        return 1 if skipped else 0
     for line in findings:
         print(f"DRIFT {line}")
-    print(f"doctor: {len(findings)} finding(s) across {len(state['tasks'])} lane(s)")
+    print(f"doctor: {len(findings)} finding(s) across "
+          f"{len(state['tasks'])} lane(s){caveat}")
     return 1
 
 

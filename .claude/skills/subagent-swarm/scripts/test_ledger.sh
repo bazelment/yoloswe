@@ -105,8 +105,13 @@ echo "== doctor is clean on a healthy ledger, and exits 0 =="
 RUN5="$TMP/clean"
 L init "$RUN5" --goal g --phases "swe:" --base main --target main >/dev/null
 L add "$RUN5" --id ok1 --title t --branch b >/dev/null
-OUT=$(L doctor "$RUN5" 2>&1); RC=$?
+# Pass an (empty) sessions file so every check actually runs: without one the session
+# check is unmeasured, and doctor now refuses to call an unmeasured run clean.
+echo '{"sessions":[]}' > "$TMP/no-sessions.json"
+OUT=$(L doctor "$RUN5" --sessions "$TMP/no-sessions.json" 2>&1); RC=$?
 chk "no false positives on a planned lane" "$RC" "0"
+if echo "$OUT" | grep -q DRIFT; then no "reported drift on a healthy ledger: $OUT"
+else ok "healthy ledger reports no findings"; fi
 
 echo "== a live session squatting a done lane's worktree is called out =="
 # The destructive case. window_id decays to empty (1/12 populated in a live run), so a
@@ -131,6 +136,69 @@ if echo "$OUT" | grep -q "worktree still exists"; then ok "no session -> plain s
 else no "lost the plain finding when no sessions given"; fi
 if echo "$OUT" | grep -q "LIVE SESSION"; then no "invented a squatter with no session data"
 else ok "does not invent a squatter"; fi
+
+echo "== a dangling worktree path is drift whatever the status =="
+# The false negative this fixes. A partial teardown -- worktree removed, ledger never
+# reconciled, branch left behind -- used to read as CLEAN, because the dangling-path
+# check was gated on status=running. A real run had all 12 lanes in this shape and
+# doctor reported "no drift detected".
+RUN7="$TMP/dangle"
+L init "$RUN7" --goal g --phases "swe:" --base main --target main >/dev/null
+L add "$RUN7" --id torn-down --title t --branch b7 >/dev/null
+L set "$RUN7" --id torn-down --status done --worktree "$TMP/removed-by-hand" >/dev/null
+OUT=$(L doctor "$RUN7" 2>&1); RC=$?
+if echo "$OUT" | grep -q "recorded worktree is gone"; then ok "done lane with a dangling path flagged"
+else no "silent on a done lane whose worktree path does not exist: $OUT"; fi
+if echo "$OUT" | grep -q "teardown never reconciled"; then ok "names it as an unreconciled teardown"
+else no "does not explain the shape"; fi
+chk "dangling path exits non-zero" "$RC" "1"
+# Still caught for a running lane, which is where the check started.
+L add "$RUN7" --id running-gone --title t --branch b8 >/dev/null
+L set "$RUN7" --id running-gone --status running --phase swe --worktree "$TMP/also-gone" >/dev/null
+if L doctor "$RUN7" 2>&1 | grep -q "running-gone.*recorded worktree is gone"; then ok "running lane still caught"
+else no "regressed the running case"; fi
+# A path that EXISTS must not be reported as dangling.
+mkdir -p "$TMP/present"
+L add "$RUN7" --id present --title t --branch b9 >/dev/null
+L set "$RUN7" --id present --status running --phase swe --worktree "$TMP/present" >/dev/null
+if L doctor "$RUN7" 2>&1 | grep -q "present.*recorded worktree is gone"; then no "false positive on an existing path"
+else ok "no false positive on an existing path"; fi
+
+echo "== a branch probe that cannot run SKIPS rather than reporting zero =="
+# `git branch` outside a repo exits 128 with EMPTY stdout and raises nothing, so reading
+# stdout alone turns "I could not look" into "no branches survive" -- a clean bill of
+# health manufactured by a broken probe, the same shape as audit_cleanup.sh's socket bug.
+RUN8="$TMP/probe"
+L init "$RUN8" --goal g --phases "swe:" --base main --target main >/dev/null
+L add "$RUN8" --id done-lane --title t --branch some-branch >/dev/null
+L set "$RUN8" --id done-lane --status done >/dev/null
+NOREPO=$(mktemp -d); OUT=$(cd "$NOREPO" && L doctor "$RUN8" 2>&1); rmdir "$NOREPO" 2>/dev/null
+if echo "$OUT" | grep -q "branch checks SKIPPED, not passed"; then ok "unusable probe reports SKIPPED"
+else no "silently treated an unusable probe as 'no branches survive': $OUT"; fi
+if echo "$OUT" | grep -q "exited 128"; then ok "names the exit code"
+else no "does not say why it could not look"; fi
+
+echo "== the SUMMARY carries any check that did not run =="
+# Skipping correctly is not enough. The summary line is what gets read, pasted into a
+# report and gated on, so an unqualified total after a skipped check is still a false
+# green -- the same outcome as a broken probe, reached by a different route.
+RUN9="$TMP/summary"
+L init "$RUN9" --goal g --phases "swe:" --base main --target main >/dev/null
+L add "$RUN9" --id ok1 --title t --branch b >/dev/null
+NOREPO=$(mktemp -d)
+OUT=$(cd "$NOREPO" && L doctor "$RUN9" 2>/dev/null); RC=$?
+if echo "$OUT" | tail -1 | grep -q "SKIPPED"; then ok "summary names the skipped checks"
+else no "summary hid a skipped check: $(echo "$OUT" | tail -1)"; fi
+chk "an all-clear that could not run every check is not clean" "$RC" "1"
+rmdir "$NOREPO" 2>/dev/null
+
+# And the caveat must NOT fire when everything ran -- a warning that is always on is
+# noise people learn to ignore.
+echo '{"sessions":[]}' > "$TMP/empty-sessions.json"
+OUT=$(L doctor "$RUN9" --sessions "$TMP/empty-sessions.json" 2>/dev/null); RC=$?
+if echo "$OUT" | tail -1 | grep -q "SKIPPED"; then no "caveat fired when all checks ran: $OUT"
+else ok "no caveat when every check ran"; fi
+chk "fully-measured clean ledger exits 0" "$RC" "0"
 
 echo "== absence is never evidence of approval =="
 # A PR with no recorded head/approval must be reported unverifiable, never assumed fine.
