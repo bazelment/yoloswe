@@ -132,6 +132,33 @@ else no "lost the plain finding when no sessions given"; fi
 if echo "$OUT" | grep -q "LIVE SESSION"; then no "invented a squatter with no session data"
 else ok "does not invent a squatter"; fi
 
+echo "== a dangling worktree path is drift whatever the status =="
+# The false negative this fixes. A partial teardown -- worktree removed, ledger never
+# reconciled, branch left behind -- used to read as CLEAN, because the dangling-path
+# check was gated on status=running. A real run had all 12 lanes in this shape and
+# doctor reported "no drift detected".
+RUN7="$TMP/dangle"
+L init "$RUN7" --goal g --phases "swe:" --base main --target main >/dev/null
+L add "$RUN7" --id torn-down --title t --branch b7 >/dev/null
+L set "$RUN7" --id torn-down --status done --worktree "$TMP/removed-by-hand" >/dev/null
+OUT=$(L doctor "$RUN7" 2>&1); RC=$?
+if echo "$OUT" | grep -q "recorded worktree is gone"; then ok "done lane with a dangling path flagged"
+else no "silent on a done lane whose worktree path does not exist: $OUT"; fi
+if echo "$OUT" | grep -q "teardown never reconciled"; then ok "names it as an unreconciled teardown"
+else no "does not explain the shape"; fi
+chk "dangling path exits non-zero" "$RC" "1"
+# Still caught for a running lane, which is where the check started.
+L add "$RUN7" --id running-gone --title t --branch b8 >/dev/null
+L set "$RUN7" --id running-gone --status running --phase swe --worktree "$TMP/also-gone" >/dev/null
+if L doctor "$RUN7" 2>&1 | grep -q "running-gone.*recorded worktree is gone"; then ok "running lane still caught"
+else no "regressed the running case"; fi
+# A path that EXISTS must not be reported as dangling.
+mkdir -p "$TMP/present"
+L add "$RUN7" --id present --title t --branch b9 >/dev/null
+L set "$RUN7" --id present --status running --phase swe --worktree "$TMP/present" >/dev/null
+if L doctor "$RUN7" 2>&1 | grep -q "present.*recorded worktree is gone"; then no "false positive on an existing path"
+else ok "no false positive on an existing path"; fi
+
 echo "== absence is never evidence of approval =="
 # A PR with no recorded head/approval must be reported unverifiable, never assumed fine.
 L add "$RUN5" --id unverif --title t --branch b2 >/dev/null
