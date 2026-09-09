@@ -159,6 +159,20 @@ L set "$RUN7" --id present --status running --phase swe --worktree "$TMP/present
 if L doctor "$RUN7" 2>&1 | grep -q "present.*recorded worktree is gone"; then no "false positive on an existing path"
 else ok "no false positive on an existing path"; fi
 
+echo "== a branch probe that cannot run SKIPS rather than reporting zero =="
+# `git branch` outside a repo exits 128 with EMPTY stdout and raises nothing, so reading
+# stdout alone turns "I could not look" into "no branches survive" -- a clean bill of
+# health manufactured by a broken probe, the same shape as audit_cleanup.sh's socket bug.
+RUN8="$TMP/probe"
+L init "$RUN8" --goal g --phases "swe:" --base main --target main >/dev/null
+L add "$RUN8" --id done-lane --title t --branch some-branch >/dev/null
+L set "$RUN8" --id done-lane --status done >/dev/null
+NOREPO=$(mktemp -d); OUT=$(cd "$NOREPO" && L doctor "$RUN8" 2>&1); rmdir "$NOREPO" 2>/dev/null
+if echo "$OUT" | grep -q "branch checks SKIPPED, not passed"; then ok "unusable probe reports SKIPPED"
+else no "silently treated an unusable probe as 'no branches survive': $OUT"; fi
+if echo "$OUT" | grep -q "exited 128"; then ok "names the exit code"
+else no "does not say why it could not look"; fi
+
 echo "== absence is never evidence of approval =="
 # A PR with no recorded head/approval must be reported unverifiable, never assumed fine.
 L add "$RUN5" --id unverif --title t --branch b2 >/dev/null
