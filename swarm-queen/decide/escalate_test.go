@@ -34,6 +34,30 @@ func TestAppendEscalationDeduplicatesOpenQuestions(t *testing.T) {
 	}
 }
 
+func TestAppendEscalationsDeduplicatesWithinABatch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	es := []Escalation{
+		{Lane: "a", Question: "completion claim refused"},
+		{Lane: "a", Question: "completion claim refused"},
+		{Lane: "b", Question: "missing approval"},
+	}
+	added, err := AppendEscalations(dir, es)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 2 {
+		t.Fatalf("added %d escalations, want 2", added)
+	}
+	open, err := OpenEscalations(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 2 {
+		t.Errorf("got %d open escalations, want 2", len(open))
+	}
+}
+
 // Answering closes it, and the same question may then be raised again if it
 // genuinely recurs.
 func TestAnswerClosesAndAllowsReRaise(t *testing.T) {

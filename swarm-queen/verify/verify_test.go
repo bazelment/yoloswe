@@ -187,6 +187,35 @@ func TestLedgerDriftFindsRunningLaneWithDeadSession(t *testing.T) {
 	}
 }
 
+func TestLedgerDriftSkipsSessionFindingWhenProbeDidNotRun(t *testing.T) {
+	t.Parallel()
+	st := &state.State{
+		Config: state.Config{Phases: []state.Phase{{Name: "swe"}}},
+		Lanes: []*state.Lane{{
+			ID: "unknown-sessions", Status: state.StatusRunning, Phase: "swe", Worktree: "/wt/lane",
+		}},
+	}
+	findings := LedgerDrift(st, map[string]reconcile.WorktreeState{
+		"unknown-sessions": {Path: "/wt/lane", Exists: true},
+	}, nil)
+	for _, f := range findings {
+		if strings.Contains(f.Evidence, "no live bramble session") {
+			t.Errorf("unmeasured sessions must not be reported as absent: %+v", f)
+		}
+	}
+
+	findings = LedgerDrift(st, map[string]reconcile.WorktreeState{
+		"unknown-sessions": {Path: "/wt/lane", Exists: true},
+	}, []bramble.Session{})
+	var found bool
+	for _, f := range findings {
+		found = found || strings.Contains(f.Evidence, "no live bramble session")
+	}
+	if !found {
+		t.Errorf("a measured empty session list must report drift: %+v", findings)
+	}
+}
+
 // Phases invented at runtime make phase-ordered logic silently wrong.
 func TestLedgerDriftFindsUndeclaredPhases(t *testing.T) {
 	t.Parallel()

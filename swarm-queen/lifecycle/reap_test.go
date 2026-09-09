@@ -225,11 +225,27 @@ func TestPlanReapKillsSessionsObservedNotRecorded(t *testing.T) {
 	}
 }
 
+func TestPlanReapKeepsEveryObservedWindow(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t)
+	lane := &state.Lane{ID: "many", Status: state.StatusDone, Worktree: dir}
+	live := []LiveSession{
+		{ID: "one", TmuxTarget: "@1"},
+		{ID: "two", TmuxTarget: "@2"},
+		{ID: "duplicate", TmuxTarget: "@1"},
+	}
+	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
+		reconcile.WorktreeState{Path: dir, Exists: true}, "main", live)
+	if got, want := len(p.WindowIDs), 2; got != want {
+		t.Fatalf("got window ids %v, want two distinct targets", p.WindowIDs)
+	}
+}
+
 // A session whose window is already gone should be recorded, not "killed".
 func TestPlanReapHandlesPanelessSession(t *testing.T) {
 	t.Parallel()
 	dir := newRepo(t)
-	lane := &state.Lane{ID: "clustererrors", Status: state.StatusFailed, Branch: "b", Worktree: dir}
+	lane := &state.Lane{ID: "clustererrors", Status: state.StatusFailed, Branch: "b", Worktree: dir, WindowID: "@1380"}
 	live := []LiveSession{{ID: "sess-dead", Status: "failed", TmuxTarget: ""}}
 
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
@@ -247,5 +263,8 @@ func TestPlanReapHandlesPanelessSession(t *testing.T) {
 	}
 	if !noted {
 		t.Errorf("a paneless session should be recorded: %v", p.Steps)
+	}
+	if p.WindowID != "" || len(p.WindowIDs) != 0 {
+		t.Errorf("live paneless session must replace the stale ledger target: %+v", p)
 	}
 }

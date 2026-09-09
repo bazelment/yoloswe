@@ -140,16 +140,9 @@ func runTick(cmd *cobra.Command, args []string) error {
 		decide.Summarise(decisions), len(drift), len(st.Lanes), len(st.NonTerminal()))
 	// Escalations are queued even in a dry run: a question needing a person is
 	// worth recording whether or not this tick acts on anything.
-	var queued int
-	for _, e := range decide.EscalationsFrom(decisions) {
-		added, err := decide.AppendEscalation(runDir, e)
-		if err != nil {
-			cmd.PrintErrf("warning: queue escalation for %s: %v\n", e.Lane, err)
-			continue
-		}
-		if added {
-			queued++
-		}
+	queued, err := decide.AppendEscalations(runDir, decide.EscalationsFrom(decisions))
+	if err != nil {
+		cmd.PrintErrf("warning: queue escalations: %v\n", err)
 	}
 	if queued > 0 {
 		fmt.Printf("queued %d new escalation(s); see `swarm-queen escalations %s`\n", queued, runDir)
@@ -213,13 +206,6 @@ func runTick(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%d decision(s) failed to apply", failed)
 	}
 	return nil
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // mutatingPhase reports whether a phase is expected to change the branch. A

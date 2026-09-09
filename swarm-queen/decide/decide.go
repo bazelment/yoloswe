@@ -62,6 +62,9 @@ type Decision struct {
 	// Evidence is what was measured, so `--explain` can show the basis.
 	Evidence []string `json:"evidence,omitempty"`
 	Round    int      `json:"round,omitempty"`
+	// FinalPhaseComplete marks a rule-generated reap after a verified final
+	// phase. The lane remains running until the destructive reap succeeds.
+	FinalPhaseComplete bool `json:"final_phase_complete,omitempty"`
 }
 
 func (d Decision) String() string {
@@ -178,8 +181,9 @@ func signalDecisions(in Inputs) []Decision {
 			if !has {
 				out = append(out, Decision{
 					Lane: lane.ID, Kind: KindReap, Source: SourceRule,
-					Reason:   "final phase verified complete",
-					Evidence: findingStrings(v.Findings),
+					FinalPhaseComplete: true,
+					Reason:             "final phase verified complete",
+					Evidence:           findingStrings(v.Findings),
 				})
 				continue
 			}

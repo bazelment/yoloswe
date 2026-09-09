@@ -170,15 +170,30 @@ func (a *Applier) applyReap(ctx context.Context, d decide.Decision) Outcome {
 	if a.LiveSessions != nil {
 		live = a.LiveSessions(lane)
 	}
-	plan := PlanReap(ctx, a.Git, a.RepoDir, lane, wt, st.Config.Target, live)
+	reapLane := lane
+	if d.FinalPhaseComplete && lane.Status == state.StatusRunning {
+		if _, hasNext := st.Config.NextPhase(lane.Phase); hasNext {
+			return Outcome{Decision: d, Err: fmt.Errorf("lane %q is not in its final phase", lane.ID)}
+		}
+		// A verified final phase has completed the lane's work, but do not write
+		// that terminal status until the destructive cleanup has also succeeded.
+		projected := *lane
+		projected.Status = state.StatusDone
+		reapLane = &projected
+	}
+	plan := PlanReap(ctx, a.Git, a.RepoDir, reapLane, wt, st.Config.Target, live)
 	if !plan.Safe {
 		return Outcome{Decision: d, Err: fmt.Errorf("refused: %v", plan.Blockers)}
 	}
 
 	// Kill the session BEFORE removing its worktree: an agent left running
 	// against a deleted path keeps acting.
-	if plan.WindowID != "" {
-		if err := SafeKillWindow(ctx, a.Tmux, plan.WindowID, a.SelfWindow, lane.ID); err != nil {
+	windowIDs := plan.WindowIDs
+	if len(windowIDs) == 0 && plan.WindowID != "" {
+		windowIDs = []string{plan.WindowID}
+	}
+	for _, windowID := range windowIDs {
+		if err := SafeKillWindow(ctx, a.Tmux, windowID, a.SelfWindow, lane.ID); err != nil {
 			return Outcome{Decision: d, Err: fmt.Errorf("kill window: %w", err)}
 		}
 	}

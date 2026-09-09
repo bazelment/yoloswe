@@ -120,8 +120,12 @@ func TestFinalPhaseCompletionReaps(t *testing.T) {
 		Signals:  []LaneSignal{{Lane: "a", Phase: "github-review"}},
 		Verdicts: map[string]verify.Verdict{"a": {OK: true}},
 	})
-	if _, ok := find(ds, "a", KindReap); !ok {
+	d, ok := find(ds, "a", KindReap)
+	if !ok {
 		t.Errorf("final phase should reap, got %v", ds)
+	}
+	if !d.FinalPhaseComplete {
+		t.Error("final phase reap must carry the verified-completion marker")
 	}
 }
 

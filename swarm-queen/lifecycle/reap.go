@@ -16,13 +16,14 @@ import (
 // leaked backup ref costs nothing operationally, which is exactly why it is the
 // step that survives: it needs a mechanical check, not a habit.
 type ReapPlan struct {
-	Lane     string
-	Worktree string
-	Branch   string
-	WindowID string
-	Blockers []string
-	Steps    []string
-	Safe     bool
+	Lane      string
+	Worktree  string
+	Branch    string
+	WindowID  string
+	WindowIDs []string
+	Blockers  []string
+	Steps     []string
+	Safe      bool
 }
 
 // LiveSession describes a session still attached to a lane's worktree, as
@@ -56,6 +57,11 @@ func PlanReap(
 		Branch:   lane.Branch,
 		WindowID: lane.WindowID,
 		Safe:     true,
+	}
+	if len(live) > 0 {
+		// Live observations replace the decayed ledger field, including when a
+		// session has no pane. A stale recorded target must not be killed.
+		p.WindowID = ""
 	}
 
 	if !lane.Status.Terminal() {
@@ -97,6 +103,7 @@ func PlanReap(
 	// in a real run, so a lane with a live agent can carry an empty window_id --
 	// and planning from the ledger alone would remove the worktree out from under
 	// a running session. Observed sessions win; the ledger is only a fallback.
+	seenWindows := map[string]bool{}
 	for _, s := range live {
 		if s.TmuxTarget == "" {
 			// No pane means the window is already gone; nothing to kill, but the
@@ -104,7 +111,12 @@ func PlanReap(
 			p.Steps = append(p.Steps, "session "+s.ID+" has no pane (already gone)")
 			continue
 		}
-		p.WindowID = s.TmuxTarget
+		if seenWindows[s.TmuxTarget] {
+			continue
+		}
+		seenWindows[s.TmuxTarget] = true
+		p.WindowIDs = append(p.WindowIDs, s.TmuxTarget)
+		p.WindowID = s.TmuxTarget // retained for callers with a single target.
 		p.Steps = append(p.Steps,
 			fmt.Sprintf("kill tmux window %s (session %s, %s)", s.TmuxTarget, s.ID, s.Status))
 	}

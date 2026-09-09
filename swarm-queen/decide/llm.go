@@ -46,8 +46,17 @@ func DefaultInvariants() []Invariant {
 		{
 			Name: "lane must exist",
 			Check: func(st *state.State, d Decision) error {
-				if _, ok := st.Lane(d.Lane); !ok && d.Kind != KindSpawn {
+				if _, ok := st.Lane(d.Lane); !ok {
 					return fmt.Errorf("lane %q is not in the ledger", d.Lane)
+				}
+				return nil
+			},
+		},
+		{
+			Name: "final-phase reap must be rule-generated",
+			Check: func(_ *state.State, d Decision) error {
+				if d.FinalPhaseComplete && d.Source != SourceRule {
+					return fmt.Errorf("only the rule engine may mark a final phase complete")
 				}
 				return nil
 			},

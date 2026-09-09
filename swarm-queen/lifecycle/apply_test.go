@@ -121,6 +121,36 @@ func TestApplyReapReChecksPreconditions(t *testing.T) {
 	}
 }
 
+func TestApplyReapCompletesVerifiedFinalPhase(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	a, store, _, _ := applier(t, repo)
+	if err := store.Update(func(st *state.State) error {
+		lane, _ := st.Lane("lane-a")
+		lane.Status = state.StatusRunning
+		lane.Phase = "clean"
+		lane.Branch = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	outs := a.Apply(context.Background(), []decide.Decision{{
+		Lane: "lane-a", Kind: decide.KindReap, FinalPhaseComplete: true,
+	}})
+	if !outs[0].OK() {
+		t.Fatalf("final-phase reap failed: %v", outs[0].Err)
+	}
+	st, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane, _ := st.Lane("lane-a")
+	if lane.Status != state.StatusDone {
+		t.Errorf("status = %s, want done", lane.Status)
+	}
+}
+
 // A reap must snapshot uncommitted work before removing anything.
 func TestApplyReapSnapshotsBeforeRemoving(t *testing.T) {
 	t.Parallel()

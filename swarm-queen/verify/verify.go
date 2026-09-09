@@ -183,6 +183,10 @@ func LedgerDriftWithBranches(
 ) []Finding {
 	var out []Finding
 
+	// A nil session slice means the bramble probe could not run; it is not proof
+	// that a running lane has no session. A non-nil empty slice is measured
+	// evidence that no sessions were found.
+	sessionsProbed := sessions != nil
 	// Index rather than copy: bramble.Session is a large struct and this runs
 	// once per session per tick.
 	byWorktreeName := map[string][]*bramble.Session{}
@@ -247,7 +251,7 @@ func LedgerDriftWithBranches(
 		}
 
 		// A running lane whose sessions have no live pane is not running.
-		if lane.Status == state.StatusRunning {
+		if lane.Status == state.StatusRunning && sessionsProbed {
 			name := worktreeName(lane.Worktree)
 			live := byWorktreeName[name]
 			if len(live) == 0 {

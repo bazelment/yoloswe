@@ -16,13 +16,29 @@ type GitRunner interface {
 	Run(ctx context.Context, dir string, args ...string) (string, error)
 }
 
+// EnvGitRunner executes a git command with additional environment variables.
+// Snapshotting requires this capability so it never falls back to the lane's
+// real index when using a temporary one.
+type EnvGitRunner interface {
+	GitRunner
+	RunWithEnv(ctx context.Context, dir string, env []string, args ...string) (string, error)
+}
+
 // ExecGit runs the real git binary.
 type ExecGit struct{}
 
 // Run executes git in dir and returns trimmed stdout.
 func (ExecGit) Run(ctx context.Context, dir string, args ...string) (string, error) {
+	return ExecGit{}.RunWithEnv(ctx, dir, nil, args...)
+}
+
+// RunWithEnv executes git with extra environment variables.
+func (ExecGit) RunWithEnv(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -141,19 +157,9 @@ type envGit struct {
 func WithEnv(g GitRunner, env ...string) GitRunner { return envGit{inner: g, env: env} }
 
 func (e envGit) Run(ctx context.Context, dir string, args ...string) (string, error) {
-	if _, ok := e.inner.(ExecGit); !ok {
-		// Non-exec runners (tests) carry no environment of their own.
-		return e.inner.Run(ctx, dir, args...)
+	runner, ok := e.inner.(EnvGitRunner)
+	if !ok {
+		return "", fmt.Errorf("git runner does not support environment variables")
 	}
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), e.env...)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("git %s in %s: %w: %s",
-			strings.Join(args, " "), dir, err, strings.TrimSpace(stderr.String()))
-	}
-	return strings.TrimSpace(string(out)), nil
+	return runner.RunWithEnv(ctx, dir, e.env, args...)
 }

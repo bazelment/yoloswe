@@ -53,6 +53,11 @@ func TestVetRejectsUnsafeProposals(t *testing.T) {
 			want: "not in the ledger",
 		},
 		{
+			name: "spawn unknown lane",
+			d:    Decision{Lane: "ghost", Kind: KindSpawn},
+			want: "not in the ledger",
+		},
+		{
 			name: "rework reusing a round",
 			d:    Decision{Lane: "running", Kind: KindRework, Phase: "swe", Round: 2},
 			want: "would overwrite",

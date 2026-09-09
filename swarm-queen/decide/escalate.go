@@ -67,22 +67,43 @@ func (n Nudge) Pending() bool { return n.Standing || n.AppliedAt == "" }
 // already exists. Re-raising an unanswered question every tick would bury the
 // queue in duplicates and train the operator to ignore it.
 func AppendEscalation(runDir string, e Escalation) (added bool, err error) {
-	if e.ID == "" {
-		e.ID = EscalationID(e.Lane, e.Question)
-	}
-	if e.Raised == "" {
-		e.Raised = time.Now().UTC().Format(time.RFC3339)
-	}
+	count, err := AppendEscalations(runDir, []Escalation{e})
+	return count == 1, err
+}
+
+// AppendEscalations adds every escalation that is not already open. A tick can
+// raise several questions, so load and index the append-only queue once rather
+// than decoding its entire history for every decision.
+func AppendEscalations(runDir string, escalations []Escalation) (int, error) {
 	existing, err := LoadEscalations(runDir)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
+	open := make(map[string]bool, len(existing))
 	for _, prior := range existing {
-		if prior.ID == e.ID && prior.Open() {
-			return false, nil
+		if prior.Open() {
+			open[prior.ID] = true
 		}
 	}
-	return true, appendJSONL(filepath.Join(runDir, EscalationsName), e)
+
+	added := 0
+	for _, e := range escalations {
+		if e.ID == "" {
+			e.ID = EscalationID(e.Lane, e.Question)
+		}
+		if e.Raised == "" {
+			e.Raised = time.Now().UTC().Format(time.RFC3339)
+		}
+		if open[e.ID] {
+			continue
+		}
+		if err := appendJSONL(filepath.Join(runDir, EscalationsName), e); err != nil {
+			return added, err
+		}
+		open[e.ID] = true
+		added++
+	}
+	return added, nil
 }
 
 // LoadEscalations reads the queue, collapsing each id to its latest record so an

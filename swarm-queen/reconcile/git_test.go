@@ -75,6 +75,18 @@ func TestProbeWorktreeCountsCommitsSinceFork(t *testing.T) {
 	}
 }
 
+type noEnvGit struct{}
+
+func (noEnvGit) Run(context.Context, string, ...string) (string, error) { return "", nil }
+
+func TestWithEnvRefusesRunnerWithoutEnvSupport(t *testing.T) {
+	t.Parallel()
+	_, err := WithEnv(noEnvGit{}, "GIT_INDEX_FILE=/tmp/index").Run(context.Background(), ".", "status")
+	if err == nil {
+		t.Fatal("runner without environment support must be refused")
+	}
+}
+
 // An empty branch behind a .done file is the single most dangerous claim in the
 // system: merging on it ships nothing while reporting success.
 func TestEmptyBranchIsDetectable(t *testing.T) {
