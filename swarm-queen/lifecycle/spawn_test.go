@@ -59,7 +59,7 @@ func TestSpawnRecordsLedgerAndSpawnJSONAtomically(t *testing.T) {
 
 	brief := SpawnBrief{
 		Lane: "lane-a", Phase: "swe", Round: 1, Model: "opus", Type: "builder",
-		Text: "Read your brief. Touch /run/lane-a.swe.done LAST.",
+		Text: "Read your brief. Touch " + DonePath(dir, "lane-a", "swe", 1) + " LAST.",
 	}
 	res, err := Spawn(context.Background(), sp, store, dir, brief,
 		bramble.SpawnRequest{Repo: "kernel", Worktree: "/wt/lane-a", Parent: "orch"})
@@ -113,7 +113,8 @@ func TestSpawnRoundTwoPreservesRoundOne(t *testing.T) {
 	dir, store := seedRun(t)
 	sp := &fakeSpawner{res: bramble.SpawnResult{SessionID: "sess-r1"}}
 
-	base := SpawnBrief{Lane: "lane-a", Phase: "swe", Round: 1, Text: "round one"}
+	base := SpawnBrief{Lane: "lane-a", Phase: "swe", Round: 1,
+		Text: "round one; touch " + DonePath(dir, "lane-a", "swe", 1)}
 	if _, err := Spawn(context.Background(), sp, store, dir, base,
 		bramble.SpawnRequest{Worktree: "/wt/a"}); err != nil {
 		t.Fatal(err)
@@ -121,7 +122,7 @@ func TestSpawnRoundTwoPreservesRoundOne(t *testing.T) {
 
 	sp.res = bramble.SpawnResult{SessionID: "sess-r2"}
 	base.Round = 2
-	base.Text = "round two"
+	base.Text = "round two; touch " + DonePath(dir, "lane-a", "swe", 2)
 	if _, err := Spawn(context.Background(), sp, store, dir, base,
 		bramble.SpawnRequest{Worktree: "/wt/a"}); err != nil {
 		t.Fatal(err)
@@ -151,7 +152,8 @@ func TestFailedSpawnRecordsNothing(t *testing.T) {
 	sp := &fakeSpawner{err: errors.New("bramble unreachable")}
 
 	_, err := Spawn(context.Background(), sp, store, dir,
-		SpawnBrief{Lane: "lane-a", Phase: "swe", Round: 1, Text: "brief"},
+		SpawnBrief{Lane: "lane-a", Phase: "swe", Round: 1,
+			Text: "brief; touch " + DonePath(dir, "lane-a", "swe", 1)},
 		bramble.SpawnRequest{Worktree: "/wt/a"})
 	if err == nil {
 		t.Fatal("expected a spawn error")
@@ -186,7 +188,8 @@ func TestRecordFailureNamesTheLiveSession(t *testing.T) {
 	}
 
 	_, err = Spawn(context.Background(), sp, store, dir,
-		SpawnBrief{Lane: "lane-a", Phase: "swe", Round: 1, Text: "brief"},
+		SpawnBrief{Lane: "lane-a", Phase: "swe", Round: 1,
+			Text: "brief; touch " + DonePath(dir, "lane-a", "swe", 1)},
 		bramble.SpawnRequest{Worktree: "/wt/x"})
 	if err == nil {
 		t.Fatal("expected a recording error")
@@ -211,5 +214,31 @@ func TestArtifactPathsAreLiteralAndRoundAware(t *testing.T) {
 	}
 	if got := ReportPath("/run", "a", "github-review", 1); got != "/run/a.github-review.md" {
 		t.Errorf("ReportPath = %q", got)
+	}
+}
+
+// A brief without its literal report path produces a lane that can never report:
+// a child environment does not point back at the run directory, so a relative
+// path or an env var reaches nothing. Refuse rather than spawn a silent lane.
+func TestSpawnRefusesABriefWithNoReportPath(t *testing.T) {
+	t.Parallel()
+	dir, store := seedRun(t)
+	sp := &fakeSpawner{res: bramble.SpawnResult{SessionID: "sess-1"}}
+
+	_, err := Spawn(context.Background(), sp, store, dir,
+		SpawnBrief{Lane: "lane-a", Phase: "swe", Round: 1,
+			Text: "Do the work and touch $RUN/lane-a.swe.done when finished."},
+		bramble.SpawnRequest{Worktree: "/wt/a"})
+	if err == nil {
+		t.Fatal("a brief using $RUN indirection must be refused")
+	}
+	if !strings.Contains(err.Error(), "omits its literal done path") {
+		t.Errorf("err = %v", err)
+	}
+	// Nothing may be recorded for a refused spawn.
+	st, _ := store.Read()
+	lane, _ := st.Lane("lane-a")
+	if lane.Status != state.StatusPlanned {
+		t.Errorf("lane changed state despite the refusal: %s", lane.Status)
 	}
 }

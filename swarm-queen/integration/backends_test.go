@@ -312,9 +312,14 @@ func TestLiveSessionBlocksWorktreeRemoval(t *testing.T) {
 			Status: state.StatusPlanned, Priority: state.P0, Sessions: map[string]string{},
 		})
 
+	st0, _ := store.Read()
+	lane0, _ := st0.Lane(laneID)
 	res, err := lifecycle.Spawn(ctx(t), c, store, runDir, lifecycle.SpawnBrief{
 		Lane: laneID, Phase: "swe", Round: 1, Model: "sonnet", Type: "builder",
-		Text: "You are a harness probe. Wait quietly; do nothing.\n",
+		Text: lifecycle.RenderBrief(lifecycle.BriefContext{
+			RunDir: runDir, Lane: lane0, Phase: "swe", Round: 1,
+			Mission: "You are a harness probe. Wait quietly; do nothing.",
+		}),
 	}, bramble.SpawnRequest{
 		Repo: testRepo, Branch: branch, From: "main", CreateWorktree: true,
 		Model: "sonnet", Goal: "squatter probe",

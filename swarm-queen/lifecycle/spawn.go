@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/bazelment/yoloswe/swarm-queen/bramble"
 	"github.com/bazelment/yoloswe/swarm-queen/state"
@@ -68,6 +69,17 @@ func Spawn(
 	}
 	if req.Backend == "" {
 		req.Backend = brief.Backend
+	}
+
+	// A brief without its literal report paths produces a lane that cannot
+	// report: a child environment does not point back at the run directory, so
+	// a relative path or an env var reaches nothing. Refuse rather than spawn a
+	// session that can only ever go silent.
+	if !strings.Contains(brief.Text, DonePath(runDir, brief.Lane, brief.Phase, brief.Round)) {
+		return bramble.SpawnResult{}, fmt.Errorf(
+			"brief for %s.%s omits its literal done path %q; the lane would have no way "+
+				"to report completion", brief.Lane, brief.Phase,
+			DonePath(runDir, brief.Lane, brief.Phase, brief.Round))
 	}
 
 	// Write the brief BEFORE spawning: the agent is told to read it, and a
