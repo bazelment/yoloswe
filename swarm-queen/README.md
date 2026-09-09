@@ -89,9 +89,18 @@ prints a misleading total is still a false green.
 
     doctor: 12 finding(s) across 12 lane(s); 0 non-terminal (branch checks skipped)
 
-The corollary, learned from a test of ours that failed at the exact moment the thing it
-tested started working: when a tool signals findings through its **exit code**, a test
-asserting "it ran" has to check something other than the exit code.
+The summary and the **exit code** are two separate reports, and fixing the prose one does
+not fix the one automation reads. `doctor` exits 0 only when it was fully measured and
+found nothing; findings exit 1, and so does a clean result from a run where some check
+could not execute.
+
+Two corollaries for tests, both learned from tests of ours that failed at the exact moment
+the thing they tested started working:
+
+- when a tool signals findings through its exit code, a test asserting "it ran" has to
+  check something other than the exit code;
+- an assertion that a run is clean has to establish that the run was fully measured, or it
+  asserts the same false green from the other side.
 
 ## Shared state
 
