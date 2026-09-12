@@ -148,22 +148,31 @@ func signalDecisions(in Inputs) []Decision {
 		}
 
 		// A signal is a report from a LIVE attempt. What must be true for it to
-		// be actionable is that the lane is currently running the phase the
+		// be actionable is that the lane is currently running the attempt the
 		// signal names -- otherwise it is history or a stray file: a `.done`
-		// left in the run dir from a previous wave, or a `.needs-swe` naming a
-		// phase the lane has already moved past. Acting on one reworks a lane
+		// left in the run dir from a previous wave, or a `.needs-swe` naming an
+		// attempt the lane has already moved past. Acting on one reworks a lane
 		// that nothing is wrong with, or advances one that never ran.
+		//
+		// Attempt identity is phase AND round, not phase alone. Rework keeps the
+		// lane in the same phase and increments the round, so a lane on `swe`
+		// round 3 would otherwise still match its own stale `swe2.done`. The
+		// comparison goes through PhaseRoundKey because that is the identity the
+		// run dir itself uses -- it normalises round<=1 to the bare phase name,
+		// so an unsuffixed `lane.swe.done` and a lane on round 1 agree.
 		//
 		// Escalate rather than drop: a signal that cannot be placed is exactly
 		// the thing a person should look at, and silently ignoring it is how a
 		// real completion goes unnoticed.
-		if lane.Status != state.StatusRunning || (sig.Phase != "" && sig.Phase != lane.Phase) {
+		sigKey := state.PhaseRoundKey(sig.Phase, sig.Round)
+		laneKey := state.PhaseRoundKey(lane.Phase, lane.Round)
+		if lane.Status != state.StatusRunning || (sig.Phase != "" && sigKey != laneKey) {
 			out = append(out, Decision{
 				Lane: lane.ID, Kind: KindEscalate, Source: SourceRule,
 				Reason: "signal does not match the lane's current attempt",
 				Evidence: []string{fmt.Sprintf(
-					"signal names %s/%s; lane is %s in phase %q",
-					sig.Lane, orNone(sig.Phase), lane.Status, lane.Phase)},
+					"signal names %s/%s; lane is %s on %s",
+					sig.Lane, orNone(sigKey), lane.Status, orNone(laneKey))},
 			})
 			continue
 		}

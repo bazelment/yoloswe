@@ -14,13 +14,19 @@ import (
 )
 
 type fakeSpawner struct {
-	res  bramble.SpawnResult
-	err  error
-	seen bramble.SpawnRequest
+	err error
+	// onSpawn runs after the session is "created", so a test can observe or
+	// disturb state while the session is already live.
+	onSpawn func()
+	res     bramble.SpawnResult
+	seen    bramble.SpawnRequest
 }
 
 func (f *fakeSpawner) NewSession(_ context.Context, req bramble.SpawnRequest) (bramble.SpawnResult, error) {
 	f.seen = req
+	if f.onSpawn != nil {
+		f.onSpawn()
+	}
 	return f.res, f.err
 }
 

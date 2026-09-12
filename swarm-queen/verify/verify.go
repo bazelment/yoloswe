@@ -79,6 +79,21 @@ func PhaseCompletion(lane *state.Lane, wt reconcile.WorktreeState, mutating bool
 	v := Verdict{OK: true}
 	claim := lane.Phase + ".done"
 
+	// An unmeasured probe cannot verify anything. Reading it as evidence gives a
+	// confidently WRONG answer rather than no answer: Exists is set before the
+	// first git command runs, so a failed status returns Exists=true with
+	// CommitsSinceFork=0 and this gate would announce "EMPTY BRANCH, do NOT
+	// merge" about a lane that may well have committed. The refusal is the same
+	// either way; what differs is what an operator is told to go and fix.
+	if wt.Unknown() {
+		v.OK = false
+		v.add(Finding{lane.ID, SeverityBlock, claim,
+			"worktree " + wt.Path + " could not be measured",
+			"the probe did not complete; its state is UNKNOWN, not empty — " +
+				"fix the probe before judging this claim"})
+		return v
+	}
+
 	if !wt.Exists {
 		v.OK = false
 		v.add(Finding{lane.ID, SeverityBlock, claim,

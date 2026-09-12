@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -304,7 +305,7 @@ func TestApplyReapFailsWhenBranchDeleteFails(t *testing.T) {
 	}
 	// FiveZeros is the audit this protects: it must see the branch, not a clean
 	// close. A nil Err here previously let the tick report a fully closed lane.
-	z := AuditLane(context.Background(), reconcile.ExecGit{}, nil, repo, lane, false)
+	z := AuditLane(context.Background(), reconcile.ExecGit{}, nil, repo, lane, KnownSessions(nil))
 	if !z.Branch {
 		t.Error("the five-zeros audit must report the leaked branch")
 	}
@@ -421,19 +422,23 @@ func TestPhaseBaselineAdvancesButForkSHAIsStampedOnce(t *testing.T) {
 	_ = a
 }
 
-// Retiring a nudge is irreversible, so it must come after every step that can
-// still fail. Consuming before the baseline stamp retired the operator's
-// instruction for a lane whose `.done` would then be refused as an empty branch
-// -- and the error on that path promised a re-delivery the consume had already
-// made impossible.
-func TestSpawnKeepsNudgesWhenTheBaselineCannotBeRecorded(t *testing.T) {
+// A spawn that does not complete must not retire the operator's instruction.
+//
+// This asserts the OUTCOME (the nudge survives a failed spawn), not the internal
+// ordering. The ordering rule in FinishSpawn -- baseline before consume -- is
+// kept as defence, but it is no longer independently observable: since the
+// baseline is established BEFORE the session exists in every path, there is no
+// reachable state between the two steps to construct. Three attempts to build
+// one each ended up failing before the window instead (a rev-parse failure now
+// refuses pre-spawn; deleting the lane fails Spawn's own ledger write), and a
+// test that passes either way is worse than none because it counts as coverage.
+func TestSpawnKeepsNudgesWhenTheSpawnDoesNotComplete(t *testing.T) {
 	t.Parallel()
 	repo := newRepo(t)
-	a, store, runDir, _ := applier(t, repo)
+	a, store, runDir, sp := applier(t, repo)
 	if err := store.Update(func(st *state.State) error {
 		lane, _ := st.Lane("lane-a")
-		// No worktree: forces the post-spawn stamp, which is the failure window.
-		lane.Worktree = ""
+		lane.Worktree = repo
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -441,21 +446,20 @@ func TestSpawnKeepsNudgesWhenTheBaselineCannotBeRecorded(t *testing.T) {
 	if err := decide.AppendNudge(runDir, decide.Nudge{Text: "do the thing", Lane: "lane-a"}); err != nil {
 		t.Fatal(err)
 	}
-	a.Git = failingGit{inner: reconcile.ExecGit{}, fail: map[string]bool{"rev-parse": true}}
+	sp.err = errors.New("bramble refused the session")
 
 	outs := a.Apply(context.Background(), []decide.Decision{
 		{Lane: "lane-a", Kind: decide.KindSpawn, Phase: "swe", Round: 1},
 	})
 	if outs[0].OK() {
-		t.Fatal("a spawn whose baseline could not be recorded must not report success")
+		t.Fatal("a spawn that failed must not report success")
 	}
-	// The instruction must survive for the next spawn to deliver.
-	pending, err := decide.NudgesFor(runDir, "lane-a")
+	pending, err := decide.LaneNudges(runDir, "lane-a")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(pending) != 1 {
-		t.Errorf("the nudge must NOT be consumed when the spawn did not complete, got %v", pending)
+		t.Errorf("the nudge must survive a failed spawn for a later one to deliver, got %v", pending)
 	}
 }
 
@@ -521,5 +525,148 @@ func TestSpawnDeliversAndRetiresNudges(t *testing.T) {
 	}
 	if len(pending) != 0 {
 		t.Errorf("a delivered nudge must be retired, got %v", pending)
+	}
+}
+
+// A run-wide one-shot nudge is addressed to the run, so every lane the tick
+// staffs must receive it. Consuming per-spawn retired it on the first lane, so a
+// nudge whose whole meaning is "tell the run" reached exactly one of its
+// addressees.
+func TestRunWideNudgeReachesEveryLaneStaffedInTheTick(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	a, store, runDir, sp := applier(t, repo)
+	if err := store.Update(func(st *state.State) error {
+		st.Lanes[0].Worktree = repo
+		st.Lanes = append(st.Lanes, &state.Lane{
+			ID: "lane-b", Title: "B", Branch: "b-b", Worktree: repo,
+			Status: state.StatusPlanned, Priority: state.P1, Sessions: map[string]string{},
+		})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := decide.AppendNudge(runDir, decide.Nudge{Text: "SENTINEL-run-wide"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var prompts []string
+	sp.onSpawn = func() { prompts = append(prompts, sp.seen.Prompt) }
+
+	outs := a.Apply(context.Background(), []decide.Decision{
+		{Lane: "lane-a", Kind: decide.KindSpawn, Phase: "swe", Round: 1},
+		{Lane: "lane-b", Kind: decide.KindSpawn, Phase: "swe", Round: 1},
+	})
+	for i := range outs {
+		if !outs[i].OK() {
+			t.Fatalf("spawn %d failed: %v", i, outs[i].Err)
+		}
+	}
+	if len(prompts) != 2 {
+		t.Fatalf("expected two spawns, got %d", len(prompts))
+	}
+	for i, p := range prompts {
+		if !strings.Contains(p, "SENTINEL-run-wide") {
+			t.Errorf("lane %d did not receive the run-wide nudge: %q", i, p)
+		}
+	}
+	// Retired once, at the end of the tick.
+	pending, err := decide.RunWideNudges(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("the run-wide nudge must be retired after the tick, got %v", pending)
+	}
+}
+
+// A tick that spawned nothing has delivered nothing, and must not swallow an
+// instruction the next tick would have carried.
+func TestRunWideNudgeSurvivesATickThatStaffedNobody(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	a, _, runDir, _ := applier(t, repo)
+	if err := decide.AppendNudge(runDir, decide.Nudge{Text: "SENTINEL-undelivered"}); err != nil {
+		t.Fatal(err)
+	}
+
+	a.Apply(context.Background(), []decide.Decision{
+		{Lane: "lane-a", Kind: decide.KindHold, Reason: "nothing to do"},
+	})
+
+	pending, err := decide.RunWideNudges(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Errorf("an undelivered run-wide nudge must survive the tick, got %v", pending)
+	}
+}
+
+// A lane whose worktree does not exist yet still gets its baseline BEFORE the
+// session, resolved from the base it will be created at. Without it the stamp
+// happened after the spawn and a fast agent could commit first, making that
+// commit the recorded starting HEAD and the phase's real work measure as zero.
+func TestSpawnStampsBaselineFromTheBaseBeforeGoingLive(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	a, store, _, sp := applier(t, repo)
+	// origin/main is what `-f` resolves against for a created worktree.
+	git(t, repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+	baseSHA := git(t, repo, "rev-parse", "refs/remotes/origin/main")
+	if err := store.Update(func(st *state.State) error {
+		lane, _ := st.Lane("lane-a")
+		lane.Worktree = "" // bramble will create it
+		st.Config.Base = "main"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The baseline must already be recorded by the time the session is created.
+	var stampedAtSpawn string
+	sp.onSpawn = func() {
+		if st, err := store.Read(); err == nil {
+			lane, _ := st.Lane("lane-a")
+			stampedAtSpawn = lane.PhaseStartSHA
+		}
+	}
+
+	outs := a.Apply(context.Background(), []decide.Decision{
+		{Lane: "lane-a", Kind: decide.KindSpawn, Phase: "swe", Round: 1},
+	})
+	if !outs[0].OK() {
+		t.Fatalf("spawn failed: %v", outs[0].Err)
+	}
+	if stampedAtSpawn != baseSHA {
+		t.Errorf("baseline at spawn time = %q, want the base SHA %q recorded BEFORE the session",
+			stampedAtSpawn, baseSHA)
+	}
+}
+
+// An unresolvable base refuses the spawn rather than leaving a live session with
+// no baseline: a caller that cannot establish one should refuse while nothing is
+// running, not discover it afterwards.
+func TestSpawnRefusesWhenTheBaseCannotBeResolved(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	a, store, _, sp := applier(t, repo)
+	if err := store.Update(func(st *state.State) error {
+		lane, _ := st.Lane("lane-a")
+		lane.Worktree = ""
+		st.Config.Base = "no-such-base"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	outs := a.Apply(context.Background(), []decide.Decision{
+		{Lane: "lane-a", Kind: decide.KindSpawn, Phase: "swe", Round: 1},
+	})
+	if outs[0].OK() {
+		t.Fatal("an unresolvable base must refuse the spawn")
+	}
+	if sp.seen.Prompt != "" {
+		t.Errorf("nothing may go live when the baseline cannot be resolved: %+v", sp.seen)
 	}
 }

@@ -91,9 +91,13 @@ func TestUnverifiedClaimHolds(t *testing.T) {
 // Overwriting is what destroyed rounds 2-6 of an 11-round lane in a real run.
 func TestReworkIncrementsRound(t *testing.T) {
 	t.Parallel()
+	// The lane is ON local-review round 2, and the signal reports that attempt.
+	// Round is part of attempt identity, so a fixture whose lane never ran the
+	// round its signal names is escalated as unplaceable rather than actioned.
 	lane := &state.Lane{
-		ID: "migration-pool-tuning", Status: state.StatusRunning, Phase: "local-review",
-		Sessions: map[string]string{"swe": "s1", "swe2": "s2", "local-review": "r1"},
+		ID: "migration-pool-tuning", Status: state.StatusRunning,
+		Phase: "local-review", Round: 2,
+		Sessions: map[string]string{"swe": "s1", "swe2": "s2", "local-review2": "r1"},
 	}
 	ds := Plan(Inputs{
 		State:   testState(lane),
@@ -301,5 +305,64 @@ func TestSignalMatchingTheCurrentAttemptStillActs(t *testing.T) {
 	})
 	if _, ok := find(ds, "a", KindAdvance); !ok {
 		t.Errorf("a signal from the live attempt must still advance: %v", ds)
+	}
+}
+
+// Attempt identity is phase AND round. Rework keeps the lane in the same phase
+// and increments the round, so a lane on swe round 3 would otherwise still match
+// its own stale swe2.done and advance on work that a later round superseded.
+func TestStaleSignalFromAnEarlierRoundOfTheSamePhaseIsNotActedOn(t *testing.T) {
+	t.Parallel()
+	lane := &state.Lane{
+		ID: "a", Status: state.StatusRunning, Phase: "swe", Round: 3,
+		Sessions: map[string]string{"swe": "s1", "swe2": "s2", "swe3": "s3"},
+	}
+	ds := Plan(Inputs{
+		State:    testState(lane),
+		Signals:  []LaneSignal{{Lane: "a", Phase: "swe", Round: 2}},
+		Verdicts: map[string]verify.Verdict{"a": {OK: true}},
+	})
+	if _, ok := find(ds, "a", KindAdvance); ok {
+		t.Errorf("a round-2 claim must not advance a lane on round 3: %v", ds)
+	}
+	if _, ok := find(ds, "a", KindEscalate); !ok {
+		t.Errorf("expected an escalation for the superseded round: %v", ds)
+	}
+}
+
+// The same for a rework request, which has no verdict gate at all.
+func TestStaleNeedsSWEFromAnEarlierRoundIsNotActedOn(t *testing.T) {
+	t.Parallel()
+	lane := &state.Lane{
+		ID: "a", Status: state.StatusRunning, Phase: "local-review", Round: 3,
+		Sessions: map[string]string{"swe": "s1", "local-review3": "r3"},
+	}
+	ds := Plan(Inputs{
+		State:   testState(lane),
+		Signals: []LaneSignal{{Lane: "a", Phase: "local-review", Round: 1, NeedsSWE: true}},
+	})
+	if _, ok := find(ds, "a", KindRework); ok {
+		t.Errorf("a round-1 rejection must not rework a lane on round 3: %v", ds)
+	}
+	if _, ok := find(ds, "a", KindEscalate); !ok {
+		t.Errorf("expected an escalation for the superseded round: %v", ds)
+	}
+}
+
+// Round <=1 normalises to the bare phase name, which is the identity the run dir
+// itself uses: an unsuffixed `lane.swe.done` and a lane on round 1 must agree, or
+// the guard would reject every first-round signal in the system.
+func TestUnsuffixedSignalMatchesAFirstRoundLane(t *testing.T) {
+	t.Parallel()
+	for _, laneRound := range []int{0, 1} {
+		lane := &state.Lane{ID: "a", Status: state.StatusRunning, Phase: "swe", Round: laneRound}
+		ds := Plan(Inputs{
+			State:    testState(lane),
+			Signals:  []LaneSignal{{Lane: "a", Phase: "swe", Round: 1}},
+			Verdicts: map[string]verify.Verdict{"a": {OK: true}},
+		})
+		if _, ok := find(ds, "a", KindAdvance); !ok {
+			t.Errorf("lane.Round=%d: a first-round signal must still advance: %v", laneRound, ds)
+		}
 	}
 }

@@ -112,10 +112,17 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// Same instructions the tick path builds: standing rules plus the one-shot
 	// nudges addressed to this lane. Rendering only the standing rules here made
 	// `swarm-queen nudge` followed by `dispatch --apply` drop the instruction.
-	instructions, nudges, err := lifecycle.BriefInstructions(runDir, lane.ID, standing)
+	// dispatch stages ONE lane, so the run-wide nudges have a single addressee
+	// here and retire with this spawn like any other.
+	runWide, err := decide.RunWideNudges(runDir)
 	if err != nil {
 		return err
 	}
+	instructions, own, err := lifecycle.BriefInstructions(runDir, lane.ID, standing, runWide)
+	if err != nil {
+		return err
+	}
+	nudges := append(append([]decide.Nudge(nil), runWide...), own...)
 
 	brief := lifecycle.SpawnBrief{
 		Lane: lane.ID, Phase: phase, Round: round,

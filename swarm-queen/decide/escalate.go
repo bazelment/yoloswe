@@ -230,16 +230,39 @@ func PendingNudges(runDir string) ([]Nudge, error) {
 // one-shot nudge never reached a brief, was never marked AppliedAt, and the
 // command had no effect on orchestration at all.
 func NudgesFor(runDir, lane string) ([]Nudge, error) {
+	return oneShotNudges(runDir, func(n Nudge) bool {
+		return n.Lane == "" || n.Lane == lane
+	})
+}
+
+// LaneNudges returns the pending one-shot nudges addressed to this lane ALONE.
+//
+// Separate from the run-wide ones because they retire on different schedules: a
+// lane-scoped nudge has one addressee and is consumed with that lane's spawn,
+// while a run-wide one is addressed to every lane the tick staffs and must
+// survive until they all have it.
+func LaneNudges(runDir, lane string) ([]Nudge, error) {
+	if lane == "" {
+		return nil, fmt.Errorf("LaneNudges needs a lane; use RunWideNudges for the run-wide queue")
+	}
+	return oneShotNudges(runDir, func(n Nudge) bool { return n.Lane == lane })
+}
+
+// RunWideNudges returns the pending one-shot nudges addressed to the whole run.
+func RunWideNudges(runDir string) ([]Nudge, error) {
+	return oneShotNudges(runDir, func(n Nudge) bool { return n.Lane == "" })
+}
+
+// oneShotNudges returns pending non-standing nudges matching want. Standing
+// rules are excluded because they are rendered separately and on every tick.
+func oneShotNudges(runDir string, want func(Nudge) bool) ([]Nudge, error) {
 	all, err := PendingNudges(runDir)
 	if err != nil {
 		return nil, err
 	}
 	var out []Nudge
 	for _, n := range all {
-		if n.Standing {
-			continue
-		}
-		if n.Lane == "" || n.Lane == lane {
+		if !n.Standing && want(n) {
 			out = append(out, n)
 		}
 	}

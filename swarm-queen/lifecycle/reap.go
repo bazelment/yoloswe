@@ -229,15 +229,23 @@ func (f FiveZeros) String() string {
 }
 
 // AuditLane checks all five resources for a terminal lane.
+//
+// Takes the SessionProbe rather than a bare "has a live session" bool so the
+// pane check can use what bramble OBSERVED. Auditing panes from the ledger's
+// window_id made the check whose job is finding leaks trust the field that
+// decayed to 1-of-12 populated: an empty or stale one reported no tmux leak
+// while a pane was still running. Observed targets are checked first; the ledger
+// is consulted only when the probe did not run, and then it is the best evidence
+// available rather than a preference.
 func AuditLane(
 	ctx context.Context,
 	g reconcile.GitRunner,
 	tm Tmux,
 	repoDir string,
 	lane *state.Lane,
-	hasLiveSession bool,
+	probe SessionProbe,
 ) FiveZeros {
-	f := FiveZeros{Lane: lane.ID, Session: hasLiveSession}
+	f := FiveZeros{Lane: lane.ID, Session: len(probe.Sessions) > 0}
 
 	if lane.Worktree != "" {
 		if fi, err := os.Stat(lane.Worktree); err == nil && fi.IsDir() {
@@ -250,8 +258,23 @@ func AuditLane(
 		}
 	}
 	f.BackupRef = HasBackup(ctx, g, repoDir, lane.ID)
-	if lane.WindowID != "" && WindowExists(ctx, tm, lane.WindowID) {
-		f.TmuxPane = true
+
+	// Panes to check: every target bramble observed for this lane, plus the
+	// ledger's own claim when there was no observation to replace it.
+	targets := map[string]bool{}
+	for _, sess := range probe.Sessions {
+		if sess.TmuxTarget != "" {
+			targets[sess.TmuxTarget] = true
+		}
+	}
+	if !probe.Known && lane.WindowID != "" {
+		targets[lane.WindowID] = true
+	}
+	for target := range targets {
+		if WindowExists(ctx, tm, target) {
+			f.TmuxPane = true
+			break
+		}
 	}
 	return f
 }

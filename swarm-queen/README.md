@@ -83,7 +83,16 @@ Each refusal below corresponds to a failure that cost real time in a live run.
   were lost this way.
 - **Report a partial teardown as a clean one.** A worktree removed but a branch
   left behind is a FAILED reap: the outcome carries the error, the lane is not
-  recorded closed, and the five-zeros audit sees the leak.
+  recorded closed, and the five-zeros audit sees the leak. The audit finds panes
+  from what bramble observed, not from `window_id` — a leak check that trusts the
+  field which decayed to 1-of-12 populated is a leak check that reports clean.
+- **Act on a signal from another attempt.** Attempt identity is phase AND round,
+  so a lane on `swe` round 3 does not act on its own stale `swe2.done`. A signal
+  that cannot be placed escalates rather than being dropped.
+- **Verify against a probe that did not run.** `PhaseCompletion` refuses an
+  unmeasured worktree instead of reading `Exists=true, commits=0` as an empty
+  branch — the same refusal either way, but an operator is told to fix the probe
+  rather than the lane.
 - **Advance past a signal it failed to act on.** The baseline moves only after
   every decision applied, so a failed spawn or reap re-sees its `.done` on the
   next tick instead of dropping it permanently.

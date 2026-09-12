@@ -329,3 +329,51 @@ func TestNilBranchSetSkipsTheBranchCheck(t *testing.T) {
 		}
 	}
 }
+
+// An unmeasured probe cannot verify anything, and reading it as evidence gives a
+// confidently WRONG answer rather than no answer: Exists is set before the first
+// git command runs, so a failed status returns Exists=true with
+// CommitsSinceFork=0 and this gate would announce "EMPTY BRANCH, do NOT merge"
+// about a lane that may well have committed.
+func TestPhaseCompletionRefusesAnUnmeasuredWorktree(t *testing.T) {
+	t.Parallel()
+	lane := &state.Lane{ID: "unmeasured", Phase: "swe"}
+	// Exactly the shape a mid-probe git failure returns.
+	wt := reconcile.WorktreeState{Path: "/wt/x", Exists: true, CommitsSinceFork: 0}
+
+	v := PhaseCompletion(lane, wt, true)
+	if v.OK || !v.Blocked() {
+		t.Fatalf("an unmeasured worktree must block the claim: %+v", v)
+	}
+	var saidUnknown, saidEmpty bool
+	for _, f := range v.Findings {
+		if strings.Contains(f.Evidence, "could not be measured") {
+			saidUnknown = true
+		}
+		if strings.Contains(f.Evidence, "0 commits") {
+			saidEmpty = true
+		}
+	}
+	if !saidUnknown {
+		t.Errorf("the finding must name the unmeasured probe: %+v", v.Findings)
+	}
+	if saidEmpty {
+		t.Errorf("an unknown probe must NOT be reported as an empty branch: %+v", v.Findings)
+	}
+}
+
+// A read-only phase legitimately commits nothing -- but an unmeasured worktree
+// must not pass it either, since nothing about that worktree was established.
+func TestPhaseCompletionRefusesUnmeasuredEvenForAReadOnlyPhase(t *testing.T) {
+	t.Parallel()
+	lane := &state.Lane{ID: "unmeasured", Phase: "report"}
+	wt := reconcile.WorktreeState{Path: "/wt/x", Exists: true}
+
+	if v := PhaseCompletion(lane, wt, false); v.OK {
+		t.Errorf("an unmeasured worktree must not pass a read-only completion: %+v", v)
+	}
+	// Measured and clean, the same read-only claim passes.
+	if v := PhaseCompletion(lane, wt.Measure(), false); !v.OK {
+		t.Errorf("a measured read-only phase with no commits must pass: %+v", v)
+	}
+}

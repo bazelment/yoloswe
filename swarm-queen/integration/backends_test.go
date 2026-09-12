@@ -187,7 +187,7 @@ func TestSpawnLifecycleAcrossBackends(t *testing.T) {
 			// Five zeros: session, worktree, branch, backup ref, tmux pane.
 			lane.WindowID = sess.TmuxTarget
 			lane.Worktree = ""
-			audit := lifecycle.AuditLane(ctx(t), git, tmux, repo, lane, false)
+			audit := lifecycle.AuditLane(ctx(t), git, tmux, repo, lane, lifecycle.KnownSessions(nil))
 			if !audit.Clean() {
 				t.Errorf("teardown left something behind: %s", audit)
 			}

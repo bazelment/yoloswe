@@ -122,24 +122,33 @@ func Spawn(
 	return res, nil
 }
 
-// BriefInstructions returns the standing rules plus the pending one-shot nudges
-// addressed to a lane, in the order they should appear in its brief, along with
-// the nudges themselves so the caller can retire them once the spawn is usable.
+// BriefInstructions returns what a lane's brief should carry beyond its mission:
+// the standing rules, then the run-wide one-shot nudges, then the ones addressed
+// to this lane. It returns the LANE-SCOPED nudges separately, because only those
+// retire with this spawn.
+//
+// extra carries nudges the caller is retiring on a different schedule -- the
+// run-wide ones a tick delivers to every lane it staffs, and retires once at the
+// end. They are rendered here but not returned for consumption, so a lane cannot
+// retire an instruction addressed to its siblings.
 //
 // Shared by both spawn paths. dispatch --apply rendered only the standing rules,
 // so `swarm-queen nudge` followed by a dispatch silently dropped the operator's
 // instruction -- the same bug the tick path had, surviving in the sibling
 // command because the wiring was written twice.
-func BriefInstructions(runDir, laneID string, standing []string) ([]string, []decide.Nudge, error) {
-	nudges, err := decide.NudgesFor(runDir, laneID)
+func BriefInstructions(runDir, laneID string, standing []string, extra []decide.Nudge) ([]string, []decide.Nudge, error) {
+	own, err := decide.LaneNudges(runDir, laneID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read nudges: %w", err)
 	}
 	out := append([]string(nil), standing...)
-	for _, n := range nudges {
+	for _, n := range extra {
 		out = append(out, n.Text)
 	}
-	return out, nudges, nil
+	for _, n := range own {
+		out = append(out, n.Text)
+	}
+	return out, own, nil
 }
 
 // SpawnBaseline stamps a lane's phase baseline and reports whether it could be
@@ -156,6 +165,51 @@ func SpawnBaseline(ctx context.Context, g reconcile.GitRunner, store *state.Stor
 		return false, nil
 	}
 	return true, RecordPhaseBaseline(ctx, g, store, laneID, worktree)
+}
+
+// SpawnBaselineFromBase stamps the baseline for a lane whose worktree does not
+// exist yet, resolving the fork point from the base it will be created at.
+//
+// This closes the last window in which an agent could commit before its own
+// baseline was recorded -- which would make that commit the recorded starting
+// HEAD and the phase's real work measure as zero commits. It cannot be read from
+// the worktree, because bramble has not created it; but `-f` resolves against
+// the REMOTE, so origin/<base> is the HEAD the new worktree will start at and is
+// resolvable here, before anything is live.
+//
+// A base that cannot be resolved returns an error rather than falling back to
+// the post-spawn stamp: a caller that cannot establish a baseline should refuse
+// while nothing is running, not discover it afterwards.
+func SpawnBaselineFromBase(
+	ctx context.Context,
+	g reconcile.GitRunner,
+	store *state.Store,
+	repoDir, laneID, base string,
+) error {
+	if base == "" {
+		return fmt.Errorf("no base recorded for %s; its phase baseline cannot be resolved", laneID)
+	}
+	head, err := g.Run(ctx, repoDir, "rev-parse", "origin/"+base)
+	if err != nil {
+		// Fall back to a local ref: a run whose base is not pushed is
+		// misconfigured for `-f`, but resolving it locally still beats stamping
+		// nothing and is the same SHA whenever the two agree.
+		head, err = g.Run(ctx, repoDir, "rev-parse", base)
+		if err != nil {
+			return fmt.Errorf("resolve base %q for %s: %w", base, laneID, err)
+		}
+	}
+	return store.Update(func(st *state.State) error {
+		lane, ok := st.Lane(laneID)
+		if !ok {
+			return fmt.Errorf("lane %q is not in the ledger", laneID)
+		}
+		lane.PhaseStartSHA = head
+		if lane.ForkSHA == "" {
+			lane.ForkSHA = head
+		}
+		return nil
+	})
 }
 
 // FinishSpawn performs the post-spawn steps a live session is owed, in the order

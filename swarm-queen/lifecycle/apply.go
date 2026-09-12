@@ -42,6 +42,12 @@ type Applier struct {
 	Repo string
 	// Standing rules injected into every brief.
 	Standing []string
+
+	// tickNudges holds the run-wide one-shot nudges for the Apply call in
+	// progress, and tickDelivered records whether a spawn rendered them. Both
+	// are reset by Apply; they are per-call scratch, not configuration.
+	tickNudges    []decide.Nudge
+	tickDelivered bool
 }
 
 // Outcome records what one decision actually did.
@@ -67,10 +73,37 @@ func (o Outcome) String() string {
 // entirely because a single worktree was unreadable is how free slots go
 // unstaffed for hours.
 func (a *Applier) Apply(ctx context.Context, ds []decide.Decision) []Outcome {
+	// Run-wide one-shot nudges are delivered to every lane staffed by THIS tick,
+	// then retired once at the end. Consuming them per-spawn retired them on the
+	// first lane, so a nudge whose whole meaning is "tell the run" reached
+	// exactly one of the lanes it was addressed to.
+	//
+	// Lane-scoped nudges are unaffected: they have one addressee, and
+	// applySpawn still retires each as its own spawn completes.
+	a.tickNudges = nil
+	a.tickDelivered = false
+	if runWide, err := decide.RunWideNudges(a.RunDir); err == nil {
+		a.tickNudges = runWide
+	}
+
 	out := make([]Outcome, 0, len(ds))
 	for _, d := range ds {
 		out = append(out, a.applyOne(ctx, d))
 	}
+
+	// Retire only if a spawn actually rendered them into a brief. A tick that
+	// spawned nothing has not delivered anything, and must not silently swallow
+	// an instruction the next tick would have carried.
+	if a.tickDelivered {
+		if err := decide.ConsumeNudges(a.RunDir, a.tickNudges); err != nil {
+			out = append(out, Outcome{
+				Decision: decide.Decision{Kind: decide.KindHold, Lane: "(run)"},
+				Err: fmt.Errorf("run-wide nudges were delivered but not marked "+
+					"consumed (%w) — they will be re-delivered next tick", err),
+			})
+		}
+	}
+	a.tickNudges, a.tickDelivered = nil, false
 	return out
 }
 
@@ -113,7 +146,7 @@ func (a *Applier) applySpawn(ctx context.Context, d decide.Decision) Outcome {
 	// One-shot nudges addressed to this lane ride along with the standing rules,
 	// and are retired once the spawn is usable. Queued but never read,
 	// `swarm-queen nudge` had no effect on orchestration at all.
-	instructions, nudges, nerr := BriefInstructions(a.RunDir, lane.ID, a.Standing)
+	instructions, nudges, nerr := BriefInstructions(a.RunDir, lane.ID, a.Standing, a.tickNudges)
 	if nerr != nil {
 		return Outcome{Decision: d, Err: nerr}
 	}
@@ -154,6 +187,12 @@ func (a *Applier) applySpawn(ctx context.Context, d decide.Decision) Outcome {
 	// after-the-fact stamp, and its failure is reported as an explicit repair
 	// obligation naming the live session.
 	preStamped, err := SpawnBaseline(ctx, a.Git, a.Store, lane.ID, lane.Worktree)
+	if err == nil && !preStamped {
+		// No worktree yet: resolve the fork point from the base it will be
+		// created at, so the baseline is recorded before anything can commit.
+		err = SpawnBaselineFromBase(ctx, a.Git, a.Store, a.RepoDir, lane.ID, st.Config.Base)
+		preStamped = err == nil
+	}
 	if err != nil {
 		return Outcome{Decision: d, Err: fmt.Errorf(
 			"refusing to spawn %s: its phase baseline could not be recorded (%w); "+
@@ -168,6 +207,11 @@ func (a *Applier) applySpawn(ctx context.Context, d decide.Decision) Outcome {
 	worktree := res.WorktreePath
 	if worktree == "" {
 		worktree = lane.Worktree
+	}
+	// The brief carrying them is written, so the run-wide nudges have now been
+	// delivered to at least one lane and may be retired at the end of the tick.
+	if len(a.tickNudges) > 0 {
+		a.tickDelivered = true
 	}
 	if err := FinishSpawn(ctx, a.Git, a.Store, a.RunDir, lane.ID, worktree, nudges, preStamped); err != nil {
 		return Outcome{Decision: d, Err: fmt.Errorf(

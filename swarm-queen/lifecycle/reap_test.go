@@ -158,7 +158,7 @@ func TestAuditLaneDetectsLeakedBackupRef(t *testing.T) {
 	tm, _ := privateTmux(t)
 
 	lane := &state.Lane{ID: "leaky", Status: state.StatusDone}
-	f := AuditLane(context.Background(), reconcile.ExecGit{}, tm, dir, lane, false)
+	f := AuditLane(context.Background(), reconcile.ExecGit{}, tm, dir, lane, KnownSessions(nil))
 	if f.Clean() {
 		t.Error("a leaked backup ref must not read as fully closed")
 	}
@@ -169,7 +169,7 @@ func TestAuditLaneDetectsLeakedBackupRef(t *testing.T) {
 	if err := ReleaseBackup(context.Background(), reconcile.ExecGit{}, dir, "leaky"); err != nil {
 		t.Fatal(err)
 	}
-	f = AuditLane(context.Background(), reconcile.ExecGit{}, tm, dir, lane, false)
+	f = AuditLane(context.Background(), reconcile.ExecGit{}, tm, dir, lane, KnownSessions(nil))
 	if !f.Clean() {
 		t.Errorf("after release the lane should be fully closed: %s", f)
 	}
@@ -186,7 +186,8 @@ func TestAuditLaneDetectsEachLayer(t *testing.T) {
 		ID: "full", Status: state.StatusDone,
 		Branch: "lane-branch", Worktree: dir, WindowID: win,
 	}
-	f := AuditLane(context.Background(), reconcile.ExecGit{}, tm, dir, lane, true)
+	f := AuditLane(context.Background(), reconcile.ExecGit{}, tm, dir, lane,
+		KnownSessions([]LiveSession{{ID: "sess-full", Status: "idle", TmuxTarget: win}}))
 	if f.Clean() {
 		t.Fatal("expected findings")
 	}
@@ -415,5 +416,51 @@ func TestPlanReapShowsUnverifiedLedgerWindowOnlyWhenUnprobed(t *testing.T) {
 	}
 	if !shown {
 		t.Errorf("the refusal should still show the ledger's unverified claim: %v", p.Steps)
+	}
+}
+
+// The five-zeros audit must find a pane from what bramble OBSERVED. Auditing
+// from the ledger's window_id made the check whose job is finding leaks trust
+// the field that decayed to 1-of-12 populated: an empty one reported no tmux
+// leak while a pane was still running.
+func TestAuditLaneFindsPanesFromObservationsNotTheLedger(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t)
+	tm, _ := privateTmux(t)
+	win := newWindow(t, tm, "observed")
+
+	// Exactly the live shape: a real pane, and an EMPTY ledger window_id.
+	lane := &state.Lane{ID: "decayed", Status: state.StatusDone, WindowID: ""}
+
+	blind := AuditLane(context.Background(), reconcile.ExecGit{}, tm, dir, lane, KnownSessions(nil))
+	if blind.TmuxPane {
+		t.Fatalf("premise: with nothing observed and no ledger field there is nothing to find: %+v", blind)
+	}
+
+	seeing := AuditLane(context.Background(), reconcile.ExecGit{}, tm, dir, lane,
+		KnownSessions([]LiveSession{{ID: "sess-observed", Status: "idle", TmuxTarget: win}}))
+	if !seeing.TmuxPane {
+		t.Errorf("an observed pane must be reported even with an empty window_id: %+v", seeing)
+	}
+	if seeing.Clean() {
+		t.Errorf("a lane with a live pane is not fully closed: %s", seeing)
+	}
+}
+
+// When the probe did not run, the ledger is the best evidence available and is
+// still consulted -- it is a fallback, not a preference.
+func TestAuditLaneFallsBackToTheLedgerOnlyWhenUnprobed(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t)
+	tm, _ := privateTmux(t)
+	win := newWindow(t, tm, "ledger-only")
+	lane := &state.Lane{ID: "unprobed", Status: state.StatusDone, WindowID: win}
+
+	if f := AuditLane(context.Background(), reconcile.ExecGit{}, tm, dir, lane, UnknownSessions()); !f.TmuxPane {
+		t.Errorf("an unmeasured probe should still check the ledger's claim: %+v", f)
+	}
+	// With a successful probe that saw nothing, the stale field is not a target.
+	if f := AuditLane(context.Background(), reconcile.ExecGit{}, tm, dir, lane, KnownSessions(nil)); f.TmuxPane {
+		t.Errorf("a successful probe replaces the ledger; the stale field must not be audited: %+v", f)
 	}
 }
