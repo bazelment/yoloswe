@@ -22,7 +22,7 @@ func hasBlock(v Verdict, substr string) bool {
 func TestPhaseCompletionRefusesEmptyBranch(t *testing.T) {
 	t.Parallel()
 	lane := &state.Lane{ID: "url-ready-backoff", Phase: "swe"}
-	wt := reconcile.WorktreeState{Path: "/wt/x", Exists: true, CommitsSinceFork: 0}
+	wt := reconcile.WorktreeState{Path: "/wt/x", Exists: true, CommitsSinceFork: 0}.Measure()
 
 	v := PhaseCompletion(lane, wt, true)
 	if v.OK || !v.Blocked() {
@@ -37,7 +37,7 @@ func TestPhaseCompletionRefusesEmptyBranch(t *testing.T) {
 func TestPhaseCompletionAllowsEmptyForReadOnlyPhase(t *testing.T) {
 	t.Parallel()
 	lane := &state.Lane{ID: "gaps", Phase: "gaps"}
-	wt := reconcile.WorktreeState{Path: "/wt/x", Exists: true, CommitsSinceFork: 0}
+	wt := reconcile.WorktreeState{Path: "/wt/x", Exists: true, CommitsSinceFork: 0}.Measure()
 
 	if v := PhaseCompletion(lane, wt, false); !v.OK {
 		t.Errorf("read-only phase must not be refused for zero commits: %+v", v.Findings)
@@ -51,7 +51,7 @@ func TestPhaseCompletionFlagsUntrackedWork(t *testing.T) {
 	wt := reconcile.WorktreeState{
 		Path: "/wt/x", Exists: true, CommitsSinceFork: 2,
 		DirtyCount: 1, HasUntracked: true,
-	}
+	}.Measure()
 	v := PhaseCompletion(lane, wt, true)
 	if !v.OK {
 		t.Errorf("dirty-but-committed must not be refused outright: %+v", v.Findings)
@@ -70,7 +70,7 @@ func TestPhaseCompletionFlagsUntrackedWork(t *testing.T) {
 func TestPhaseCompletionRefusesMissingWorktree(t *testing.T) {
 	t.Parallel()
 	lane := &state.Lane{ID: "ghost", Phase: "swe"}
-	v := PhaseCompletion(lane, reconcile.WorktreeState{Path: "/gone"}, true)
+	v := PhaseCompletion(lane, reconcile.WorktreeState{Path: "/gone"}.Measure(), true)
 	if v.OK || !v.Blocked() {
 		t.Fatalf("missing worktree must be refused: %+v", v)
 	}
@@ -137,8 +137,8 @@ func TestLedgerDriftFindsDoneLanesHoldingWorktrees(t *testing.T) {
 		},
 	}
 	wts := map[string]reconcile.WorktreeState{
-		"transient-split-credential": {Path: "/wt/split-cred", Exists: true},
-		"clean-lane":                 {Path: "/wt/clean", Exists: false},
+		"transient-split-credential": {Path: "/wt/split-cred", Exists: true, Measured: true},
+		"clean-lane":                 {Path: "/wt/clean", Exists: false, Measured: true},
 	}
 	findings := LedgerDrift(st, wts, nil)
 	var got int
@@ -166,7 +166,7 @@ func TestLedgerDriftFindsRunningLaneWithDeadSession(t *testing.T) {
 		}},
 	}
 	wts := map[string]reconcile.WorktreeState{
-		"clustererrors": {Path: st.Lanes[0].Worktree, Exists: true},
+		"clustererrors": {Path: st.Lanes[0].Worktree, Exists: true, Measured: true},
 	}
 	sessions := []bramble.Session{{
 		ID:           "deploy-harden-clustererrors-0905-builder-3782400b",
@@ -196,7 +196,7 @@ func TestLedgerDriftSkipsSessionFindingWhenProbeDidNotRun(t *testing.T) {
 		}},
 	}
 	findings := LedgerDrift(st, map[string]reconcile.WorktreeState{
-		"unknown-sessions": {Path: "/wt/lane", Exists: true},
+		"unknown-sessions": {Path: "/wt/lane", Exists: true, Measured: true},
 	}, nil)
 	for _, f := range findings {
 		if strings.Contains(f.Evidence, "no live bramble session") {
@@ -205,7 +205,7 @@ func TestLedgerDriftSkipsSessionFindingWhenProbeDidNotRun(t *testing.T) {
 	}
 
 	findings = LedgerDrift(st, map[string]reconcile.WorktreeState{
-		"unknown-sessions": {Path: "/wt/lane", Exists: true},
+		"unknown-sessions": {Path: "/wt/lane", Exists: true, Measured: true},
 	}, []bramble.Session{})
 	var found bool
 	for _, f := range findings {
@@ -251,9 +251,9 @@ func TestLedgerDriftFindsDanglingWorktreePath(t *testing.T) {
 		},
 	}
 	wts := map[string]reconcile.WorktreeState{
-		"reaped-cleanly": {Exists: false},
-		"dangling":       {Path: st.Lanes[1].Worktree, Exists: false},
-		"still-held":     {Path: "/wt/held", Exists: true},
+		"reaped-cleanly": {Exists: false, Measured: true},
+		"dangling":       {Path: st.Lanes[1].Worktree, Exists: false, Measured: true},
+		"still-held":     {Path: "/wt/held", Exists: true, Measured: true},
 	}
 
 	findings := LedgerDrift(st, wts, nil)
@@ -295,8 +295,8 @@ func TestLedgerDriftReportsSurvivingBranches(t *testing.T) {
 		},
 	}
 	wts := map[string]reconcile.WorktreeState{
-		"partial": {Path: "/gone", Exists: false},
-		"closed":  {Exists: false},
+		"partial": {Path: "/gone", Exists: false, Measured: true},
+		"closed":  {Exists: false, Measured: true},
 	}
 	live := map[string]bool{"swarm/deploy-harden-worker-ha-0908": true}
 

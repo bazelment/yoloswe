@@ -114,9 +114,23 @@ func runReap(cmd *cobra.Command, args []string) error {
 	if !reapApply {
 		fmt.Print(" (dry run; pass --apply to act)")
 	}
+	if sessionErr != nil {
+		fmt.Print(" (session checks skipped)")
+	}
 	fmt.Println()
-	if failed > 0 {
+	if sessionErr != nil {
+		fmt.Printf("\nsession checks SKIPPED, not passed: %v\n", sessionErr)
+	}
+	switch {
+	case failed > 0:
 		return fmt.Errorf("%d lane(s) failed to close", failed)
+	case sessionErr != nil:
+		// An unmeasured probe must not read as success via the exit code. Every
+		// lane is refused in this state, so `failed` stays 0 and a caller gating
+		// on the exit status would treat an unmeasured run as a clean one --
+		// the same false green doctor already refuses to print.
+		return fmt.Errorf("session probe could not run, so no lane could be "+
+			"proven safe to reap: %w", sessionErr)
 	}
 	return nil
 }

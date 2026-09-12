@@ -147,6 +147,27 @@ func signalDecisions(in Inputs) []Decision {
 			continue
 		}
 
+		// A signal is a report from a LIVE attempt. What must be true for it to
+		// be actionable is that the lane is currently running the phase the
+		// signal names -- otherwise it is history or a stray file: a `.done`
+		// left in the run dir from a previous wave, or a `.needs-swe` naming a
+		// phase the lane has already moved past. Acting on one reworks a lane
+		// that nothing is wrong with, or advances one that never ran.
+		//
+		// Escalate rather than drop: a signal that cannot be placed is exactly
+		// the thing a person should look at, and silently ignoring it is how a
+		// real completion goes unnoticed.
+		if lane.Status != state.StatusRunning || (sig.Phase != "" && sig.Phase != lane.Phase) {
+			out = append(out, Decision{
+				Lane: lane.ID, Kind: KindEscalate, Source: SourceRule,
+				Reason: "signal does not match the lane's current attempt",
+				Evidence: []string{fmt.Sprintf(
+					"signal names %s/%s; lane is %s in phase %q",
+					sig.Lane, orNone(sig.Phase), lane.Status, lane.Phase)},
+			})
+			continue
+		}
+
 		// A review rejection sends the lane back to the first phase with an
 		// incremented round, so the previous attempt's session is preserved
 		// rather than overwritten.
@@ -276,4 +297,12 @@ func Summarise(ds []Decision) string {
 		return "no decisions"
 	}
 	return strings.Join(parts, " · ")
+}
+
+// orNone renders an empty phase name legibly in evidence.
+func orNone(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
 }

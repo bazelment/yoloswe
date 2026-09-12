@@ -59,10 +59,39 @@ type WorktreeState struct {
 	DirtyCount       int
 	Exists           bool
 	HasUntracked     bool
+	// Measured reports that every probe git command actually ran. False means
+	// the fields below Path are UNKNOWN, not zero.
+	//
+	// This bit exists because the zero value of this struct is indistinguishable
+	// from a real measurement of a clean worktree, and Exists is set BEFORE the
+	// first git command runs -- so a failed `status` or `rev-list` returns
+	// Exists=true, DirtyCount=0, which reads as "present and clean" and is
+	// exactly the state that permits a destructive reap. Four callers shared one
+	// copy-pasted idiom that discarded the error; only one acted on it. A field
+	// every caller must pass through is harder to drop than an error every
+	// caller must remember to check.
+	Measured bool
 }
 
 // Clean reports whether the worktree has no uncommitted changes.
-func (w WorktreeState) Clean() bool { return w.Exists && w.DirtyCount == 0 }
+//
+// An unmeasured worktree is never clean: "we could not look" must not answer
+// the question "is there anything here to lose".
+func (w WorktreeState) Clean() bool { return w.Measured && w.Exists && w.DirtyCount == 0 }
+
+// Unknown reports that the probe could not complete, so nothing below Path can
+// be trusted. Destructive paths must refuse on this.
+func (w WorktreeState) Unknown() bool { return !w.Measured }
+
+// Measure marks a hand-built WorktreeState as measured.
+//
+// For tests and for callers constructing a state from evidence they gathered
+// themselves. Named rather than a bare field so that the unmeasured zero value
+// stays the default and reaching for this is a deliberate claim.
+func (w WorktreeState) Measure() WorktreeState {
+	w.Measured = true
+	return w
+}
 
 // ErrNoWorktree means the recorded path is not a directory.
 var ErrNoWorktree = errors.New("worktree does not exist")
@@ -75,10 +104,24 @@ var ErrNoWorktree = errors.New("worktree does not exist")
 func ProbeWorktree(ctx context.Context, g GitRunner, path, forkRef string) (WorktreeState, error) {
 	st := WorktreeState{Path: path}
 	if path == "" {
+		// No path recorded is a complete answer: there is no worktree.
+		st.Measured = true
 		return st, ErrNoWorktree
 	}
-	if fi, err := os.Stat(path); err != nil || !fi.IsDir() {
+	fi, err := os.Stat(path)
+	switch {
+	case err == nil && !fi.IsDir():
+		st.Measured = true
 		return st, ErrNoWorktree
+	case errors.Is(err, os.ErrNotExist):
+		// Genuinely absent, which is measured evidence rather than an unknown:
+		// there is nothing to destroy and nothing left to look at.
+		st.Measured = true
+		return st, ErrNoWorktree
+	case err != nil:
+		// Anything else (a permission error, an unreadable mount) means we could
+		// not look. That is NOT evidence that the worktree is gone.
+		return st, fmt.Errorf("stat worktree %s: %w", path, err)
 	}
 	st.Exists = true
 
@@ -115,6 +158,7 @@ func ProbeWorktree(ctx context.Context, g GitRunner, path, forkRef string) (Work
 		}
 		st.CommitsSinceFork = n
 	}
+	st.Measured = true
 	return st, nil
 }
 

@@ -33,8 +33,19 @@ type Proposal struct {
 //
 // These exist because a proposal is generated text: plausible, fluent, and
 // entirely capable of suggesting a merge on a stale approval or a spawn onto an
-// occupied worktree. The rules that refuse those are the same ones the
-// deterministic path uses.
+// occupied worktree.
+//
+// WHAT THEY CANNOT CHECK. Check sees only the ledger, so every invariant here is
+// a property of RECORDED state: lane exists, status is terminal, round is not
+// reused, phase is declared. The deterministic path additionally refuses on
+// OBSERVATIONS the ledger does not hold -- a `.done` without a passing
+// verify.Verdict, a branch whose content is not on the target, a slot policy
+// computed from a live count. A proposal cannot be accepted on the strength of
+// these invariants alone; it must also be routed through the same verified
+// inputs Plan uses, which is why the advisor is not wired into any command yet.
+//
+// Vet is therefore a NECESSARY, not a sufficient, condition. Keep it that way or
+// state the stronger claim only once Check receives observations too.
 type Invariant struct {
 	Check func(*state.State, Decision) error
 	Name  string
@@ -129,6 +140,11 @@ func DefaultInvariants() []Invariant {
 //
 // Rejections are returned rather than silently dropped: a model repeatedly
 // proposing the same refused action is itself a finding.
+//
+// "Accepted" means "not refused by a ledger-level invariant". It does NOT mean
+// verified -- see the Invariant doc. A caller that applies these without also
+// checking the observations Plan checks is trusting the model for the half Vet
+// cannot see.
 func Vet(st *state.State, p Proposal, invs []Invariant) (accepted []Decision, rejected []string) {
 	for _, d := range p.Decisions {
 		d.Source = SourceLLM

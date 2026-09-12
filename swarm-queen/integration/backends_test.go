@@ -398,7 +398,7 @@ func TestDoctorAgreesWithLedgerPy(t *testing.T) {
 		t.Fatal(err)
 	}
 	wts := map[string]reconcile.WorktreeState{
-		"sq-drift": {Path: repo, Exists: true},
+		"sq-drift": {Path: repo, Exists: true, Measured: true},
 	}
 	findings := verify.LedgerDrift(st, wts, nil)
 	var goSawIt bool

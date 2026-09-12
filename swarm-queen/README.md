@@ -32,9 +32,14 @@ swarm-queen tick   (fresh process, state read from disk)
 ```
 
 Dry run by default. Steps 1, 2 and 4 never call a model. An LLM may propose
-decisions, but `decide.Vet` re-checks each one against the same invariants the
-deterministic path uses, so a fluent-but-wrong suggestion is refused rather than
-executed.
+decisions, but `decide.Vet` re-checks each one against the ledger-level
+invariants the deterministic path uses, so a fluent-but-wrong suggestion is
+refused rather than executed.
+
+`Vet` is a necessary condition, not a sufficient one: its checks see only
+recorded state, while the rule engine also refuses on observations the ledger
+does not hold — a `.done` with no passing verdict, a branch whose content is not
+on the target. That is why no command wires the advisor in yet.
 
 ## Commands
 

@@ -196,7 +196,13 @@ func LedgerDriftWithBranches(
 	}
 
 	for _, lane := range st.Lanes {
-		wt, probed := worktrees[lane.ID]
+		wt, inMap := worktrees[lane.ID]
+		// Present in the map is not the same as measured: the probe helpers
+		// insert a lane whether or not its git commands succeeded, and an
+		// unmeasured state carries Exists=true with zeroed fields. Drift claims
+		// below all rest on comparing the ledger against REALITY, so a lane we
+		// could not look at supports none of them.
+		probed := inMap && wt.Measured
 
 		if lane.Status == state.StatusDone && probed && wt.Exists {
 			out = append(out, Finding{lane.ID, SeverityWarn, "status=done",

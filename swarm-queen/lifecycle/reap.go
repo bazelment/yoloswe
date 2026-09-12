@@ -84,9 +84,14 @@ func PlanReap(
 		WindowID: lane.WindowID,
 		Safe:     true,
 	}
-	if len(live) > 0 {
-		// Live observations replace the decayed ledger field, including when a
-		// session has no pane. A stale recorded target must not be killed.
+	if probe.Known {
+		// A successful probe REPLACES the ledger, it does not merely supplement
+		// it. window_id decayed to 1-of-12 populated in a real run, so the
+		// recorded target is as likely to name a window tmux has since reused for
+		// something else as it is to name this lane's. Once bramble has answered,
+		// only what bramble observed may be killed -- including when it observed
+		// nothing, which is the case this previously got wrong: with no live
+		// sessions the stale field survived init and was emitted as a kill step.
 		p.WindowID = ""
 	}
 
@@ -97,6 +102,17 @@ func PlanReap(
 		p.Safe = false
 		p.Blockers = append(p.Blockers,
 			"bramble session probe did not run; cannot prove no live session holds this lane")
+	}
+
+	// Same rule for the worktree. A probe that could not complete returns
+	// Exists=true with DirtyCount=0 -- the shape of a measured, clean worktree --
+	// so planning from it advertises a safe teardown built on unknown git state.
+	// Refusing HERE rather than only in the applier is what makes the dry run
+	// honest: an operator reads the plan and trusts it.
+	if wt.Unknown() {
+		p.Safe = false
+		p.Blockers = append(p.Blockers,
+			"worktree "+wt.Path+" could not be measured; its state is unknown, not clean")
 	}
 
 	if !lane.Status.Terminal() {
@@ -162,8 +178,12 @@ func PlanReap(
 	// Order matters: kill the session before removing its worktree, or the
 	// agent keeps running against a path that no longer exists. A freeze the
 	// lane must choose to obey is weaker than one enforced by it not existing.
-	if len(live) == 0 && p.WindowID != "" {
-		p.Steps = append(p.Steps, "kill tmux window "+p.WindowID)
+	// The ledger's window_id is a last resort, reachable only when the probe did
+	// NOT run -- and that case is already refused above, so this step can only
+	// appear in a plan that is not Safe. It is kept so the refusal still shows an
+	// operator what the ledger claimed.
+	if !probe.Known && len(live) == 0 && p.WindowID != "" {
+		p.Steps = append(p.Steps, "kill tmux window "+p.WindowID+" (from the ledger; UNVERIFIED)")
 	}
 	if wt.Exists {
 		p.Steps = append(p.Steps, "remove worktree "+p.Worktree)

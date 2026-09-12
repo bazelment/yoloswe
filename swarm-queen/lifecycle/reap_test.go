@@ -23,7 +23,7 @@ func TestPlanReapRefusesNonTerminalLane(t *testing.T) {
 	dir := newRepo(t)
 	lane := &state.Lane{ID: "x", Status: state.StatusRunning, Branch: "b", Worktree: dir}
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Path: dir, Exists: true}, "main", KnownSessions(nil))
+		reconcile.WorktreeState{Path: dir, Exists: true}.Measure(), "main", KnownSessions(nil))
 	if p.Safe || !blocked(p, "not terminal") {
 		t.Errorf("a running lane must not be reapable: %+v", p)
 	}
@@ -35,7 +35,7 @@ func TestPlanReapRefusesUnsnapshottedWork(t *testing.T) {
 	t.Parallel()
 	dir := newRepo(t)
 	lane := &state.Lane{ID: "replay", Status: state.StatusDone, Branch: "b", Worktree: dir}
-	wt := reconcile.WorktreeState{Path: dir, Exists: true, DirtyCount: 1, HasUntracked: true}
+	wt := reconcile.WorktreeState{Path: dir, Exists: true, DirtyCount: 1, HasUntracked: true}.Measure()
 
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane, wt, "main", KnownSessions(nil))
 	if p.Safe {
@@ -57,7 +57,7 @@ func TestPlanReapAllowsAfterSnapshot(t *testing.T) {
 	write(t, dir, "wip.txt", "work")
 
 	lane := &state.Lane{ID: "replay", Status: state.StatusDone, Branch: "b", Worktree: dir}
-	wt := reconcile.WorktreeState{Path: dir, Exists: true, DirtyCount: 1, HasUntracked: true}
+	wt := reconcile.WorktreeState{Path: dir, Exists: true, DirtyCount: 1, HasUntracked: true}.Measure()
 
 	if p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane, wt, "main", KnownSessions(nil)); p.Safe {
 		t.Fatal("precondition: should be unsafe before the snapshot")
@@ -83,7 +83,7 @@ func TestPlanReapRefusesUnmergedPR(t *testing.T) {
 
 	lane := &state.Lane{ID: "pr-lane", Status: state.StatusDone, Branch: "feature", PR: 11968}
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Exists: false}, "main", KnownSessions(nil))
+		reconcile.WorktreeState{Exists: false}.Measure(), "main", KnownSessions(nil))
 	if p.Safe || !blocked(p, "not merged") {
 		t.Errorf("unmerged PR branch must block: %+v", p)
 	}
@@ -104,7 +104,7 @@ func TestPlanReapAcceptsSquashMergedPR(t *testing.T) {
 
 	lane := &state.Lane{ID: "pr-lane", Status: state.StatusDone, Branch: "feature", PR: 11968}
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Exists: false}, "main", KnownSessions(nil))
+		reconcile.WorktreeState{Exists: false}.Measure(), "main", KnownSessions(nil))
 	if !p.Safe {
 		t.Errorf("squash-merged branch must be reapable: %v", p.Blockers)
 	}
@@ -116,12 +116,15 @@ func TestPlanReapAcceptsSquashMergedPR(t *testing.T) {
 func TestReapStepsKillSessionBeforeRemovingWorktree(t *testing.T) {
 	t.Parallel()
 	dir := newRepo(t)
+	git(t, dir, "branch", "b")
 	lane := &state.Lane{
 		ID: "ordered", Status: state.StatusDone,
 		Branch: "b", Worktree: dir, WindowID: "@1380",
 	}
+	// An OBSERVED session: a kill step only exists for a window bramble reported.
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Path: dir, Exists: true}, "main", KnownSessions(nil))
+		reconcile.WorktreeState{Path: dir, Exists: true}.Measure(), "main",
+		KnownSessions([]LiveSession{{ID: "sess-ordered", Status: "idle", TmuxTarget: "@1380"}}))
 
 	var killIdx, rmIdx = -1, -1
 	for i, s := range p.Steps {
@@ -210,7 +213,7 @@ func TestPlanReapKillsSessionsObservedNotRecorded(t *testing.T) {
 	}}
 
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Path: dir, Exists: true}, "main", KnownSessions(live))
+		reconcile.WorktreeState{Path: dir, Exists: true}.Measure(), "main", KnownSessions(live))
 
 	var killIdx, rmIdx = -1, -1
 	for i, s := range p.Steps {
@@ -239,7 +242,7 @@ func TestPlanReapKeepsEveryObservedWindow(t *testing.T) {
 		{ID: "duplicate", TmuxTarget: "@1"},
 	}
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Path: dir, Exists: true}, "main", KnownSessions(live))
+		reconcile.WorktreeState{Path: dir, Exists: true}.Measure(), "main", KnownSessions(live))
 	if got, want := len(p.WindowIDs), 2; got != want {
 		t.Fatalf("got window ids %v, want two distinct targets", p.WindowIDs)
 	}
@@ -253,7 +256,7 @@ func TestPlanReapHandlesPanelessSession(t *testing.T) {
 	live := []LiveSession{{ID: "sess-dead", Status: "failed", TmuxTarget: ""}}
 
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Path: dir, Exists: true}, "main", KnownSessions(live))
+		reconcile.WorktreeState{Path: dir, Exists: true}.Measure(), "main", KnownSessions(live))
 	for _, s := range p.Steps {
 		if strings.Contains(s, "kill tmux window ") && !strings.Contains(s, "session") {
 			t.Errorf("must not attempt to kill a nonexistent pane: %v", p.Steps)
@@ -282,7 +285,7 @@ func TestPlanReapRefusesUnknownSessionProbe(t *testing.T) {
 	dir := newRepo(t)
 	git(t, dir, "branch", "b")
 	lane := &state.Lane{ID: "unmeasured", Status: state.StatusDone, Branch: "b", Worktree: dir}
-	wt := reconcile.WorktreeState{Path: dir, Exists: true}
+	wt := reconcile.WorktreeState{Path: dir, Exists: true}.Measure()
 
 	// Same lane, same worktree: only the probe's Known bit differs.
 	if p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane, wt, "main",
@@ -327,7 +330,7 @@ func TestPlanReapVerifiesIntegrationWithoutAPR(t *testing.T) {
 	// No PR recorded at all -- the case the old gate skipped entirely.
 	lane := &state.Lane{ID: "no-pr", Status: state.StatusDone, Branch: "orphan"}
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Exists: false}, "main", KnownSessions(nil))
+		reconcile.WorktreeState{Exists: false}.Measure(), "main", KnownSessions(nil))
 	if p.Safe {
 		t.Errorf("an unintegrated branch must block even with no PR: %+v", p)
 	}
@@ -353,8 +356,64 @@ func TestPlanReapVerifiesIntegrationDespiteRecordedMergeSHA(t *testing.T) {
 		PR: 42, MergeSHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
 	}
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Exists: false}, "main", KnownSessions(nil))
+		reconcile.WorktreeState{Exists: false}.Measure(), "main", KnownSessions(nil))
 	if p.Safe {
 		t.Errorf("a recorded MergeSHA must not substitute for the content check: %+v", p)
+	}
+}
+
+// Once bramble has answered, only what bramble OBSERVED may be killed --
+// including when it observed nothing. The ledger's window_id decayed to 1-of-12
+// populated in a real run, so a recorded target is as likely to name a window
+// tmux has since reused for something unrelated as it is to name this lane's.
+func TestPlanReapNeverKillsFromTheLedgerOnceProbed(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t)
+	git(t, dir, "branch", "b")
+	lane := &state.Lane{
+		ID: "stale-window", Status: state.StatusDone,
+		Branch: "b", Worktree: dir, WindowID: "@1380",
+	}
+	wt := reconcile.WorktreeState{Path: dir, Exists: true}.Measure()
+
+	// bramble answered and found no session on this lane.
+	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane, wt, "main", KnownSessions(nil))
+	if !p.Safe {
+		t.Fatalf("a measured-empty fleet must still be reapable: %v", p.Blockers)
+	}
+	for _, step := range p.Steps {
+		if strings.Contains(step, "kill tmux window") {
+			t.Errorf("nothing observed holds this lane, so nothing may be killed: %v", p.Steps)
+		}
+	}
+	if p.WindowID != "" || len(p.WindowIDs) != 0 {
+		t.Errorf("no kill target may survive a successful probe, got %q / %v", p.WindowID, p.WindowIDs)
+	}
+}
+
+// When the probe did NOT run the plan is refused anyway, but the ledger's claim
+// is still shown -- marked unverified -- so an operator can see what it said.
+func TestPlanReapShowsUnverifiedLedgerWindowOnlyWhenUnprobed(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t)
+	git(t, dir, "branch", "b")
+	lane := &state.Lane{
+		ID: "unprobed", Status: state.StatusDone,
+		Branch: "b", Worktree: dir, WindowID: "@1380",
+	}
+	wt := reconcile.WorktreeState{Path: dir, Exists: true}.Measure()
+
+	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane, wt, "main", UnknownSessions())
+	if p.Safe {
+		t.Fatal("an unmeasured fleet must refuse the reap")
+	}
+	var shown bool
+	for _, step := range p.Steps {
+		if strings.Contains(step, "@1380") && strings.Contains(step, "UNVERIFIED") {
+			shown = true
+		}
+	}
+	if !shown {
+		t.Errorf("the refusal should still show the ledger's unverified claim: %v", p.Steps)
 	}
 }

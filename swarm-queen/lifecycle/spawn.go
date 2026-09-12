@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bazelment/yoloswe/swarm-queen/bramble"
+	"github.com/bazelment/yoloswe/swarm-queen/decide"
 	"github.com/bazelment/yoloswe/swarm-queen/reconcile"
 	"github.com/bazelment/yoloswe/swarm-queen/state"
 )
@@ -119,6 +120,68 @@ func Spawn(
 			res.SessionID, res.WorktreePath, recErr, ledErr)
 	}
 	return res, nil
+}
+
+// BriefInstructions returns the standing rules plus the pending one-shot nudges
+// addressed to a lane, in the order they should appear in its brief, along with
+// the nudges themselves so the caller can retire them once the spawn is usable.
+//
+// Shared by both spawn paths. dispatch --apply rendered only the standing rules,
+// so `swarm-queen nudge` followed by a dispatch silently dropped the operator's
+// instruction -- the same bug the tick path had, surviving in the sibling
+// command because the wiring was written twice.
+func BriefInstructions(runDir, laneID string, standing []string) ([]string, []decide.Nudge, error) {
+	nudges, err := decide.NudgesFor(runDir, laneID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read nudges: %w", err)
+	}
+	out := append([]string(nil), standing...)
+	for _, n := range nudges {
+		out = append(out, n.Text)
+	}
+	return out, nudges, nil
+}
+
+// SpawnBaseline stamps a lane's phase baseline and reports whether it could be
+// done BEFORE the session exists.
+//
+// Pre-stamping is possible whenever the worktree already exists, which is every
+// case but a lane's first spawn. Nothing is live yet, so a git failure then costs
+// a refused decision rather than a session that can never have its completion
+// verified. A lane whose worktree bramble is about to create has no HEAD to read,
+// so it must be stamped afterwards and its failure reported as a repair
+// obligation naming the live session.
+func SpawnBaseline(ctx context.Context, g reconcile.GitRunner, store *state.Store, laneID, worktree string) (pre bool, err error) {
+	if worktree == "" {
+		return false, nil
+	}
+	return true, RecordPhaseBaseline(ctx, g, store, laneID, worktree)
+}
+
+// FinishSpawn performs the post-spawn steps a live session is owed, in the order
+// their failure modes demand.
+//
+// The baseline is stamped first (skipped when it was already pre-stamped, which
+// is what preStamped records) because a lane without one has every mutating
+// `.done` refused as an empty branch. The nudges are retired LAST because
+// retiring is irreversible and must not happen for a spawn that is not yet
+// usable: reversing these consumed an operator's instruction for a lane that
+// then could not report completion, while the error text promised a re-delivery
+// the consume had already made impossible.
+func FinishSpawn(
+	ctx context.Context,
+	g reconcile.GitRunner,
+	store *state.Store,
+	runDir, laneID, worktree string,
+	nudges []decide.Nudge,
+	preStamped bool,
+) error {
+	if !preStamped {
+		if err := RecordPhaseBaseline(ctx, g, store, laneID, worktree); err != nil {
+			return fmt.Errorf("%w; its nudges are NOT consumed and will be re-delivered", err)
+		}
+	}
+	return decide.ConsumeNudges(runDir, nudges)
 }
 
 // RecordPhaseBaseline stamps the worktree HEAD a phase starts from.

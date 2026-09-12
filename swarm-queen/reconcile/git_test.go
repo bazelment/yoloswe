@@ -224,3 +224,55 @@ func TestBranchMergedDetectsPlainAncestry(t *testing.T) {
 		t.Error("fast-forward/no-ff merged branch reported as unmerged")
 	}
 }
+
+// A probe that could not COMPLETE is unknown; one that completed and found
+// nothing is measured. They are different answers, and only the second is safe
+// to act on: Exists is set before the first git command runs, so a failed status
+// returns Exists=true with DirtyCount=0 -- the shape of a clean worktree, which
+// is the shape that permits a destructive reap.
+func TestProbeWorktreeMarksWhatItActuallyMeasured(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t)
+	fork := git(t, dir, "rev-parse", "HEAD")
+
+	st, err := ProbeWorktree(context.Background(), ExecGit{}, dir, fork)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Measured || st.Unknown() {
+		t.Errorf("a probe that ran every command is measured: %+v", st)
+	}
+
+	// An absent path is a complete answer: there is nothing to look at, and
+	// nothing to destroy.
+	gone, err := ProbeWorktree(context.Background(), ExecGit{}, filepath.Join(t.TempDir(), "nope"), "")
+	if !errors.Is(err, ErrNoWorktree) {
+		t.Fatalf("expected ErrNoWorktree, got %v", err)
+	}
+	if !gone.Measured {
+		t.Errorf("an absent worktree is measured evidence, not an unknown: %+v", gone)
+	}
+	if gone.Exists {
+		t.Errorf("an absent worktree must not report Exists: %+v", gone)
+	}
+
+	// A git failure mid-probe leaves the state unknown, and Clean() must refuse
+	// to call it clean.
+	broken, err := ProbeWorktree(context.Background(), failingRunner{}, dir, fork)
+	if err == nil {
+		t.Fatal("a failing git must surface an error")
+	}
+	if broken.Measured || !broken.Unknown() {
+		t.Errorf("a failed probe must not claim to be measured: %+v", broken)
+	}
+	if broken.Clean() {
+		t.Error("an unmeasured worktree must never report Clean()")
+	}
+}
+
+// failingRunner fails every git command, standing in for an unreadable repo.
+type failingRunner struct{}
+
+func (failingRunner) Run(context.Context, string, ...string) (string, error) {
+	return "", errors.New("simulated git failure")
+}

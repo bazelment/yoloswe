@@ -420,3 +420,106 @@ func TestPhaseBaselineAdvancesButForkSHAIsStampedOnce(t *testing.T) {
 	}
 	_ = a
 }
+
+// Retiring a nudge is irreversible, so it must come after every step that can
+// still fail. Consuming before the baseline stamp retired the operator's
+// instruction for a lane whose `.done` would then be refused as an empty branch
+// -- and the error on that path promised a re-delivery the consume had already
+// made impossible.
+func TestSpawnKeepsNudgesWhenTheBaselineCannotBeRecorded(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	a, store, runDir, _ := applier(t, repo)
+	if err := store.Update(func(st *state.State) error {
+		lane, _ := st.Lane("lane-a")
+		// No worktree: forces the post-spawn stamp, which is the failure window.
+		lane.Worktree = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := decide.AppendNudge(runDir, decide.Nudge{Text: "do the thing", Lane: "lane-a"}); err != nil {
+		t.Fatal(err)
+	}
+	a.Git = failingGit{inner: reconcile.ExecGit{}, fail: map[string]bool{"rev-parse": true}}
+
+	outs := a.Apply(context.Background(), []decide.Decision{
+		{Lane: "lane-a", Kind: decide.KindSpawn, Phase: "swe", Round: 1},
+	})
+	if outs[0].OK() {
+		t.Fatal("a spawn whose baseline could not be recorded must not report success")
+	}
+	// The instruction must survive for the next spawn to deliver.
+	pending, err := decide.NudgesFor(runDir, "lane-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Errorf("the nudge must NOT be consumed when the spawn did not complete, got %v", pending)
+	}
+}
+
+// Where the worktree already exists the baseline is stamped BEFORE the session,
+// so a git failure refuses the decision instead of leaving a live session whose
+// completion can never be verified.
+func TestSpawnRefusesBeforeGoingLiveWhenBaselineFails(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	a, store, _, sp := applier(t, repo)
+	if err := store.Update(func(st *state.State) error {
+		lane, _ := st.Lane("lane-a")
+		lane.Worktree = repo
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a.Git = failingGit{inner: reconcile.ExecGit{}, fail: map[string]bool{"rev-parse": true}}
+
+	outs := a.Apply(context.Background(), []decide.Decision{
+		{Lane: "lane-a", Kind: decide.KindSpawn, Phase: "swe", Round: 1},
+	})
+	if outs[0].OK() {
+		t.Fatal("the spawn must be refused when its baseline cannot be recorded")
+	}
+	// Nothing may have gone live: that is the whole point of stamping first.
+	if sp.seen.Prompt != "" {
+		t.Errorf("no session may be created when the baseline failed: %+v", sp.seen)
+	}
+	if !strings.Contains(outs[0].Err.Error(), "refusing to spawn") {
+		t.Errorf("the error should say the spawn was refused, got %v", outs[0].Err)
+	}
+}
+
+// One-shot nudges reach the brief, and are retired once the spawn is usable.
+func TestSpawnDeliversAndRetiresNudges(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	a, store, runDir, sp := applier(t, repo)
+	if err := store.Update(func(st *state.State) error {
+		lane, _ := st.Lane("lane-a")
+		lane.Worktree = repo
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := decide.AppendNudge(runDir, decide.Nudge{Text: "SENTINEL-run-the-suite", Lane: "lane-a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	outs := a.Apply(context.Background(), []decide.Decision{
+		{Lane: "lane-a", Kind: decide.KindSpawn, Phase: "swe", Round: 1},
+	})
+	if !outs[0].OK() {
+		t.Fatalf("spawn failed: %v", outs[0].Err)
+	}
+	if !strings.Contains(sp.seen.Prompt, "SENTINEL-run-the-suite") {
+		t.Errorf("the one-shot nudge must reach the brief: %q", sp.seen.Prompt)
+	}
+	pending, err := decide.NudgesFor(runDir, "lane-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("a delivered nudge must be retired, got %v", pending)
+	}
+}

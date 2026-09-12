@@ -109,6 +109,13 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	standing, _ := decide.StandingRules(runDir)
+	// Same instructions the tick path builds: standing rules plus the one-shot
+	// nudges addressed to this lane. Rendering only the standing rules here made
+	// `swarm-queen nudge` followed by `dispatch --apply` drop the instruction.
+	instructions, nudges, err := lifecycle.BriefInstructions(runDir, lane.ID, standing)
+	if err != nil {
+		return err
+	}
 
 	brief := lifecycle.SpawnBrief{
 		Lane: lane.ID, Phase: phase, Round: round,
@@ -116,7 +123,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		Text: lifecycle.RenderBrief(lifecycle.BriefContext{
 			RunDir: runDir, Lane: lane, Phase: phase, Round: round,
 			Goal: st.Config.Goal, Target: st.Config.Target,
-			Mission: mission, Standing: standing,
+			Mission: mission, Standing: instructions,
 		}),
 	}
 
@@ -140,19 +147,26 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Same pre-stamp as the tick path: where the worktree already exists, a
+	// baseline failure refuses the dispatch instead of leaving a live session
+	// whose completion can never be verified.
+	preStamped, err := lifecycle.SpawnBaseline(ctx, reconcile.ExecGit{}, store, lane.ID, lane.Worktree)
+	if err != nil {
+		return fmt.Errorf("refusing to dispatch %s: its phase baseline could not be "+
+			"recorded: %w", lane.ID, err)
+	}
+
 	res, err := lifecycle.Spawn(ctx, mustClient(), store, runDir, brief, req)
 	if err != nil {
 		return err
 	}
-	// Same baseline stamp as the tick path: a phase spawned without one has no
-	// measurable notion of "committed nothing", so its `.done` cannot be verified.
 	worktree := res.WorktreePath
 	if worktree == "" {
 		worktree = lane.Worktree
 	}
-	if err := lifecycle.RecordPhaseBaseline(ctx, reconcile.ExecGit{}, store, lane.ID, worktree); err != nil {
-		return fmt.Errorf("session %s IS LIVE at %s but its phase baseline was not recorded: %w",
-			res.SessionID, orDash(worktree), err)
+	if err := lifecycle.FinishSpawn(ctx, reconcile.ExecGit{}, store, runDir, lane.ID, worktree, nudges, preStamped); err != nil {
+		return fmt.Errorf("REPAIR REQUIRED: session %s IS LIVE at %s but the spawn did "+
+			"not complete: %w", res.SessionID, orDash(worktree), err)
 	}
 	fmt.Printf("dispatched %s [%s r%d]: session %s on %s\n",
 		lane.ID, phase, round, res.SessionID, orDash(res.WorktreePath))

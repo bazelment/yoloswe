@@ -2,7 +2,6 @@ package lifecycle
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/bazelment/yoloswe/swarm-queen/bramble"
@@ -112,15 +111,11 @@ func (a *Applier) applySpawn(ctx context.Context, d decide.Decision) Outcome {
 		mission = lane.Title
 	}
 	// One-shot nudges addressed to this lane ride along with the standing rules,
-	// and are marked consumed once the spawn succeeds. Queued but never read,
+	// and are retired once the spawn is usable. Queued but never read,
 	// `swarm-queen nudge` had no effect on orchestration at all.
-	nudges, nerr := decide.NudgesFor(a.RunDir, lane.ID)
+	instructions, nudges, nerr := BriefInstructions(a.RunDir, lane.ID, a.Standing)
 	if nerr != nil {
-		return Outcome{Decision: d, Err: fmt.Errorf("read nudges: %w", nerr)}
-	}
-	instructions := a.Standing
-	for _, n := range nudges {
-		instructions = append(instructions, n.Text)
+		return Outcome{Decision: d, Err: nerr}
 	}
 
 	brief := SpawnBrief{
@@ -149,28 +144,34 @@ func (a *Applier) applySpawn(ctx context.Context, d decide.Decision) Outcome {
 		req.From = st.Config.Base
 	}
 
+	// Stamp the baseline BEFORE spawning where the worktree already exists, which
+	// is every case but a first spawn. Nothing is live yet, so a git failure here
+	// costs a refused decision rather than an unverifiable session -- and the
+	// window in which a session exists without a baseline closes entirely.
+	//
+	// It cannot be done first for a lane whose worktree bramble is about to
+	// create: there is no HEAD to read until it exists. That case keeps the
+	// after-the-fact stamp, and its failure is reported as an explicit repair
+	// obligation naming the live session.
+	preStamped, err := SpawnBaseline(ctx, a.Git, a.Store, lane.ID, lane.Worktree)
+	if err != nil {
+		return Outcome{Decision: d, Err: fmt.Errorf(
+			"refusing to spawn %s: its phase baseline could not be recorded (%w); "+
+				"a session without one has every mutating `.done` refused",
+			lane.ID, err)}
+	}
+
 	res, err := Spawn(ctx, a.Spawner, a.Store, a.RunDir, brief, req)
 	if err != nil {
 		return Outcome{Decision: d, Err: err}
 	}
-	// Stamp the baseline the phase starts from, or its completion cannot be
-	// verified: an empty PhaseStartSHA leaves CommitsSinceFork at 0 and every
-	// mutating `.done` is refused as an empty branch.
 	worktree := res.WorktreePath
 	if worktree == "" {
 		worktree = lane.Worktree
 	}
-	// Consume only after the session exists: a nudge marked applied for a spawn
-	// that then failed would be silently dropped.
-	if err := decide.ConsumeNudges(a.RunDir, nudges); err != nil {
+	if err := FinishSpawn(ctx, a.Git, a.Store, a.RunDir, lane.ID, worktree, nudges, preStamped); err != nil {
 		return Outcome{Decision: d, Err: fmt.Errorf(
-			"session %s IS LIVE but its nudges were not marked consumed (%w) — "+
-				"they will be re-delivered on the next spawn", res.SessionID, err)}
-	}
-	if err := RecordPhaseBaseline(ctx, a.Git, a.Store, lane.ID, worktree); err != nil {
-		return Outcome{Decision: d, Err: fmt.Errorf(
-			"session %s IS LIVE at %s but its phase baseline was not recorded (%w) — "+
-				"its completion cannot be verified until this is repaired",
+			"REPAIR REQUIRED: session %s IS LIVE at %s but the spawn did not complete: %w",
 			res.SessionID, orNoneBrief(worktree), err)}
 	}
 	return Outcome{Decision: d, Detail: fmt.Sprintf("session %s on %s",
@@ -191,13 +192,10 @@ func (a *Applier) applyReap(ctx context.Context, d decide.Decision) Outcome {
 	if probeErr != nil && wt.Path == "" {
 		wt.Path = lane.Worktree
 	}
-	// A git failure mid-probe is UNKNOWN, not clean. ProbeWorktree sets
-	// Exists=true before running any git command, so a failed status or rev-list
-	// returns Exists=true with DirtyCount=0 -- exactly the shape of a measured,
-	// clean worktree, and exactly the shape that permits removal. Only a
-	// genuinely absent worktree is a safe error to continue past: there is then
-	// nothing to destroy, and the lane still needs its branch and refs released.
-	if probeErr != nil && !errors.Is(probeErr, reconcile.ErrNoWorktree) {
+	// A git failure mid-probe is UNKNOWN, not clean. A genuinely absent worktree
+	// is measured (nothing to destroy, branch and refs still to release); a probe
+	// that could not complete is not.
+	if wt.Unknown() {
 		return Outcome{Decision: d, Err: fmt.Errorf(
 			"worktree %s could not be measured (%w); refusing to reap on an unknown state",
 			lane.Worktree, probeErr)}

@@ -43,6 +43,15 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	worktrees := probeWorktrees(ctx, st)
 	sessions, sessionErr := liveSessions(ctx, cmd)
+	// A lane whose worktree could not be measured was not checked, whatever the
+	// other findings say. Naming them is the same rule the branch and session
+	// probes already follow: a check that could not run says so in the summary.
+	var unmeasured []string
+	for _, lane := range st.Lanes {
+		if wt, ok := worktrees[lane.ID]; ok && wt.Unknown() && lane.Worktree != "" {
+			unmeasured = append(unmeasured, lane.ID)
+		}
+	}
 
 	branches, branchErr := liveBranches(ctx, st)
 	findings := verify.LedgerDriftWithBranches(st, worktrees, sessions, branches)
@@ -61,17 +70,26 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	if sessionErr != nil {
 		fmt.Printf("\nsession checks SKIPPED, not passed: %v\n", sessionErr)
 	}
+	if len(unmeasured) > 0 {
+		fmt.Printf("\nworktree checks SKIPPED for %d lane(s), not passed: %s\n",
+			len(unmeasured), strings.Join(unmeasured, ", "))
+	}
 
 	nonTerminal := st.NonTerminal()
 	fmt.Printf("\ndoctor: %d finding(s) across %d lane(s); %d non-terminal",
 		len(findings), len(st.Lanes), len(nonTerminal))
-	switch {
-	case branchErr != nil && sessionErr != nil:
-		fmt.Print(" (branch and session checks skipped)")
-	case branchErr != nil:
-		fmt.Print(" (branch checks skipped)")
-	case sessionErr != nil:
-		fmt.Print(" (session checks skipped)")
+	var skipped []string
+	if branchErr != nil {
+		skipped = append(skipped, "branch")
+	}
+	if sessionErr != nil {
+		skipped = append(skipped, "session")
+	}
+	if len(unmeasured) > 0 {
+		skipped = append(skipped, "worktree")
+	}
+	if len(skipped) > 0 {
+		fmt.Printf(" (%s checks skipped)", strings.Join(skipped, ", "))
 	}
 	fmt.Println()
 	for _, l := range nonTerminal {
@@ -90,6 +108,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	case sessionErr != nil:
 		return fmt.Errorf("%d finding(s), and some checks could not run: %w",
 			len(findings), sessionErr)
+	case len(unmeasured) > 0:
+		return fmt.Errorf("%d finding(s), and %d lane(s) could not be measured: %s",
+			len(findings), len(unmeasured), strings.Join(unmeasured, ", "))
 	case len(findings) > 0:
 		return fmt.Errorf("%d drift finding(s) across %d lane(s)", len(findings), len(st.Lanes))
 	}

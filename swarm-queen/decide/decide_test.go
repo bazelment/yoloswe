@@ -248,3 +248,58 @@ func TestSummarise(t *testing.T) {
 		t.Errorf("empty Summarise = %q", got)
 	}
 }
+
+// A signal is a report from a LIVE attempt. A `.done` left over from a previous
+// wave, or one naming a lane that never ran, is history rather than a claim --
+// acting on it advances a lane that did no work.
+func TestSignalForANonRunningLaneIsNotActedOn(t *testing.T) {
+	t.Parallel()
+	st := testState(&state.Lane{ID: "a", Status: state.StatusPlanned})
+	ds := Plan(Inputs{
+		State:    st,
+		Signals:  []LaneSignal{{Lane: "a", Phase: "swe", Round: 1}},
+		Verdicts: map[string]verify.Verdict{"a": {OK: true}},
+	})
+	if _, ok := find(ds, "a", KindAdvance); ok {
+		t.Errorf("a planned lane's stray .done must not advance it: %v", ds)
+	}
+	if _, ok := find(ds, "a", KindEscalate); !ok {
+		t.Errorf("an unplaceable signal must be escalated, not dropped: %v", ds)
+	}
+}
+
+// The same rule protects the rework path, which has no verdict gate at all: a
+// stale `.needs-swe` naming a phase the lane has moved past would otherwise send
+// a healthy lane back to the start and burn a round.
+func TestStaleNeedsSWEForAnotherPhaseIsNotActedOn(t *testing.T) {
+	t.Parallel()
+	lane := &state.Lane{
+		ID: "a", Status: state.StatusRunning, Phase: "clean",
+		Sessions: map[string]string{"swe": "s1", "local-review": "r1"},
+	}
+	ds := Plan(Inputs{
+		State:   testState(lane),
+		Signals: []LaneSignal{{Lane: "a", Phase: "local-review", Round: 1, NeedsSWE: true}},
+	})
+	if _, ok := find(ds, "a", KindRework); ok {
+		t.Errorf("a signal for a phase the lane has left must not rework it: %v", ds)
+	}
+	if _, ok := find(ds, "a", KindEscalate); !ok {
+		t.Errorf("expected an escalation for the mismatched signal: %v", ds)
+	}
+}
+
+// A signal matching the lane's current attempt is still actioned; the guard must
+// not swallow the live case it exists to protect.
+func TestSignalMatchingTheCurrentAttemptStillActs(t *testing.T) {
+	t.Parallel()
+	st := testState(&state.Lane{ID: "a", Status: state.StatusRunning, Phase: "swe"})
+	ds := Plan(Inputs{
+		State:    st,
+		Signals:  []LaneSignal{{Lane: "a", Phase: "swe", Round: 1}},
+		Verdicts: map[string]verify.Verdict{"a": {OK: true}},
+	})
+	if _, ok := find(ds, "a", KindAdvance); !ok {
+		t.Errorf("a signal from the live attempt must still advance: %v", ds)
+	}
+}
