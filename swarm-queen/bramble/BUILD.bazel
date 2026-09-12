@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "bramble",
+    srcs = ["client.go"],
+    importpath = "github.com/bazelment/yoloswe/swarm-queen/bramble",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "bramble_test",
+    srcs = ["client_test.go"],
+    data = glob(["testdata/**"]),
+    embed = [":bramble"],
+)

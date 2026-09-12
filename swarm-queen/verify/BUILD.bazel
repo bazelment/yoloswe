@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "verify",
+    srcs = ["verify.go"],
+    importpath = "github.com/bazelment/yoloswe/swarm-queen/verify",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//swarm-queen/bramble",
+        "//swarm-queen/reconcile",
+        "//swarm-queen/state",
+    ],
+)
+
+go_test(
+    name = "verify_test",
+    srcs = ["verify_test.go"],
+    embed = [":verify"],
+    deps = [
+        "//swarm-queen/bramble",
+        "//swarm-queen/reconcile",
+        "//swarm-queen/state",
+    ],
+)

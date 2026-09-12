@@ -11,6 +11,7 @@ use (
 	./multiagent
 	./notify
 	./prdozer
+	./swarm-queen
 	./symphony
 	./voice
 	./wt

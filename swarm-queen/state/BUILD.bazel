@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "state",
+    srcs = [
+        "lane.go",
+        "lock.go",
+        "reflect.go",
+        "rounds.go",
+        "run.go",
+        "sort.go",
+        "store.go",
+        "types.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/swarm-queen/state",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "state_test",
+    srcs = [
+        "rounds_test.go",
+        "store_test.go",
+    ],
+    embed = [":state"],
+)

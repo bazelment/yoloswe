@@ -1,0 +1,17 @@
+# gazelle:ignore
+#
+# Hand-maintained: the test is behind a build tag Gazelle cannot see, and Gazelle
+# cannot add gotags/tags. Verify unmodified after `bazel run //:gazelle`.
+
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "integration_test",
+    srcs = ["interop_test.go"],
+    gotags = ["integration"],
+    tags = [
+        "local",
+        "manual",
+    ],
+    deps = ["//swarm-queen/state"],
+)
