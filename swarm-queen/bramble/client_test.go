@@ -223,3 +223,38 @@ func TestParseSpawnResult(t *testing.T) {
 		t.Error("JSON without a session_id must be an error")
 	}
 }
+
+// The live failure, end to end: a swarm running against a suffixed socket, the
+// TUI dies, and it comes back on the un-suffixed path. Discovery must follow it.
+//
+// This is not hypothetical -- it happened during a run. Every probe began
+// reporting "no socket" while bramble was up and answering pings, because
+// discovery was pinned to the form that existed when the run started.
+func TestSocketPathFollowsATUIRestartThatChangesForm(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	uid := os.Getuid()
+
+	suffixed := filepath.Join(dir, fmt.Sprintf("bramble-%d-2015796.sock", uid))
+	if err := os.WriteFile(suffixed, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := SocketPath()
+	if err != nil || got != suffixed {
+		t.Fatalf("before restart: got (%q, %v), want %q", got, err, suffixed)
+	}
+
+	// The TUI dies and comes back on the other form.
+	os.Remove(suffixed)
+	unsuffixed := filepath.Join(dir, fmt.Sprintf("bramble-%d.sock", uid))
+	if err := os.WriteFile(unsuffixed, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = SocketPath()
+	if err != nil {
+		t.Fatalf("after restart the TUI is unreachable: %v", err)
+	}
+	if got != unsuffixed {
+		t.Errorf("after restart: got %q, want %q", got, unsuffixed)
+	}
+}
