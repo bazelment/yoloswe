@@ -95,6 +95,10 @@ func TestMissingTmuxTargetIsToleratedAndMeaningful(t *testing.T) {
 func TestSocketPathAcceptsBothForms(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", dir)
+	// Neutralise any ambient BRAMBLE_SOCK: the override short-circuits
+	// discovery, so without this the test would pass by reading the
+	// developer's real socket and never exercise the scan at all.
+	t.Setenv("BRAMBLE_SOCK", "")
 	uid := os.Getuid()
 
 	touch := func(name string) string {
@@ -135,6 +139,10 @@ func TestSocketPathAcceptsBothForms(t *testing.T) {
 // No socket at all is an error, not an empty answer.
 func TestSocketPathReportsAbsence(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	// Neutralise any ambient BRAMBLE_SOCK: the override short-circuits
+	// discovery, so without this the test would pass by reading the
+	// developer's real socket and never exercise the scan at all.
+	t.Setenv("BRAMBLE_SOCK", "")
 	if got, err := SocketPath(); err == nil {
 		t.Errorf("expected an error when no socket exists, got %q", got)
 	}
@@ -234,6 +242,10 @@ func TestParseSpawnResult(t *testing.T) {
 func TestSocketPathFollowsATUIRestartThatChangesForm(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", dir)
+	// Neutralise any ambient BRAMBLE_SOCK: the override short-circuits
+	// discovery, so without this the test would pass by reading the
+	// developer's real socket and never exercise the scan at all.
+	t.Setenv("BRAMBLE_SOCK", "")
 	uid := os.Getuid()
 
 	suffixed := filepath.Join(dir, fmt.Sprintf("bramble-%d-2015796.sock", uid))
@@ -277,6 +289,9 @@ func mkSocket(t *testing.T, path string) string {
 func TestSocketPathHonoursExplicitOverride(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", dir)
+	// Clear first: the precondition below asserts the *unset* behaviour,
+	// so an ambient override would satisfy it for the wrong reason.
+	t.Setenv("BRAMBLE_SOCK", "")
 	uid := os.Getuid()
 
 	// Two candidates: without the override this is the ambiguity that refuses.
