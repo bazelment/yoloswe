@@ -118,6 +118,34 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	req := bramble.SpawnRequest{
+		Repo: dispatchRepo, Parent: dispatchParent, Goal: lane.Title,
+		Model: model, Backend: dispatchBackend,
+	}
+	if lane.Worktree != "" {
+		req.Worktree = lane.Worktree
+	} else {
+		req.CreateWorktree = true
+		req.Branch = lane.Branch
+		req.From = st.Config.Base
+	}
+
+	// A dry run reports; it does not write. This return comes BEFORE
+	// PrepareSpawn because that call stamps PhaseStartSHA/ForkSHA through the
+	// ledger via store.Update -- so a default `dispatch` (no --apply) mutated
+	// the run's recorded baseline while printing that nothing would be spawned.
+	// A preview that changes what it previews is worse than no preview: the
+	// operator's next real dispatch measures its phase from a SHA this dry run
+	// silently recorded.
+	if !dispatchApply {
+		fmt.Printf("WOULD DISPATCH %s [%s r%d] model=%s mission=%s\n",
+			lane.ID, phase, round, orDash(model), missionPath)
+		fmt.Printf("  bramble %v\n", req.Args())
+		fmt.Println("dry run; pass --apply to spawn")
+		return nil
+	}
+
 	// The whole pre-spawn sequence, shared with the tick path: instructions, and
 	// a baseline recorded while a failure still costs only a refusal.
 	// Hand-rolling these steps here is how dispatch fell behind three rounds
@@ -138,26 +166,6 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			Goal: st.Config.Goal, Target: st.Config.Target,
 			Mission: mission, Standing: instructions,
 		}),
-	}
-
-	req := bramble.SpawnRequest{
-		Repo: dispatchRepo, Parent: dispatchParent, Goal: lane.Title,
-		Model: model, Backend: dispatchBackend,
-	}
-	if lane.Worktree != "" {
-		req.Worktree = lane.Worktree
-	} else {
-		req.CreateWorktree = true
-		req.Branch = lane.Branch
-		req.From = st.Config.Base
-	}
-
-	if !dispatchApply {
-		fmt.Printf("WOULD DISPATCH %s [%s r%d] model=%s mission=%s\n",
-			lane.ID, phase, round, orDash(model), missionPath)
-		fmt.Printf("  bramble %v\n", req.Args())
-		fmt.Println("dry run; pass --apply to spawn")
-		return nil
 	}
 
 	client, err := bramble.New()

@@ -7,6 +7,7 @@ import (
 
 	"github.com/bazelment/yoloswe/swarm-queen/bramble"
 	"github.com/bazelment/yoloswe/swarm-queen/decide"
+	"github.com/bazelment/yoloswe/swarm-queen/reconcile"
 	"github.com/bazelment/yoloswe/swarm-queen/state"
 )
 
@@ -130,6 +131,89 @@ func TestLaneProbeIsUnknownWhenTheFleetQueryFailed(t *testing.T) {
 	t.Parallel()
 	if p := laneProbe(nil, false, "/wt/lane-a"); p.Known {
 		t.Errorf("a failed list-sessions must be unknown: %+v", p)
+	}
+}
+
+// A phase-less `<lane>.done` must reach BOTH consumers as the first declared
+// phase, because an empty string is a wildcard to each of them in a different
+// direction.
+//
+// This asserts the wiring, not a helper's arithmetic. Reverting the resolution
+// in readClaims must fail this test, which is what a resolver tested in
+// isolation cannot detect: the first version of this test called the helper
+// directly and passed against the reverted call site.
+//
+// Two properties, one signal:
+//   - the LaneSignal carries `swe`, so decide's attempt-identity guard compares
+//     it against the lane's real attempt instead of skipping the comparison;
+//   - the verdict is BLOCKED, because MutatingPhase("swe") re-arms the
+//     empty-branch refusal that MutatingPhase("") switches off.
+func TestReadClaimsResolvesThePhaseLessShorthand(t *testing.T) {
+	t.Parallel()
+	st := &state.State{
+		Config: state.Config{Phases: []state.Phase{
+			{Name: "swe"}, {Name: "local-review"},
+		}},
+		Lanes: []*state.Lane{
+			{ID: "a", Status: state.StatusRunning, Phase: "swe", Round: 1},
+		},
+	}
+	// A measured worktree that exists and committed NOTHING since the phase
+	// began: the empty-branch case the refusal exists for.
+	worktrees := map[string]reconcile.WorktreeState{
+		"a": reconcile.WorktreeState{Path: "/wt/a", Exists: true, CommitsSinceFork: 0}.Measure(),
+	}
+	// `a.done` -- no phase segment, exactly what ParseSignalName yields for the
+	// run dir's first-phase shorthand.
+	signals := []reconcile.Signal{
+		{Lane: "a", Phase: "", Round: 1, Kind: reconcile.SignalDone, Path: "/run/a.done"},
+	}
+
+	laneSignals, verdicts := readClaims(st, signals, worktrees)
+
+	if len(laneSignals) != 1 {
+		t.Fatalf("the claim must be passed to the rule engine, got %v", laneSignals)
+	}
+	if laneSignals[0].Phase != "swe" {
+		t.Errorf("phase = %q, want the resolved first phase swe; an empty phase is "+
+			"a wildcard to decide's attempt-identity guard", laneSignals[0].Phase)
+	}
+	v, ok := verdicts["a"]
+	if !ok {
+		t.Fatalf("a .done must be verified, got verdicts %v", verdicts)
+	}
+	if !v.Blocked() {
+		t.Errorf("an empty branch claiming a mutating phase must be REFUSED, got %+v", v)
+	}
+}
+
+// A lane already past the first phase must not have a stale shorthand `.done`
+// treated as its current attempt. Together with the resolution above, the claim
+// reaches decide naming `swe` while the lane is on `clean`, so the guard
+// escalates instead of advancing -- covered end to end in
+// decide.TestPhaseLessSignalDoesNotAdvanceALaneThatMovedOn.
+func TestReadClaimsSkipsTerminalLanesButKeepsLiveOnes(t *testing.T) {
+	t.Parallel()
+	st := &state.State{
+		Config: state.Config{Phases: []state.Phase{{Name: "swe"}, {Name: "clean"}}},
+		Lanes: []*state.Lane{
+			{ID: "done-lane", Status: state.StatusDone, Phase: "clean", Round: 1},
+			{ID: "live", Status: state.StatusRunning, Phase: "clean", Round: 1},
+		},
+	}
+	signals := []reconcile.Signal{
+		{Lane: "done-lane", Kind: reconcile.SignalDone, Path: "/run/done-lane.done"},
+		{Lane: "live", Kind: reconcile.SignalDone, Path: "/run/live.done"},
+	}
+
+	laneSignals, _ := readClaims(st, signals, map[string]reconcile.WorktreeState{})
+
+	if len(laneSignals) != 1 || laneSignals[0].Lane != "live" {
+		t.Fatalf("a reaped lane's old .done is history, not a claim: %v", laneSignals)
+	}
+	// And the live lane's shorthand still resolved rather than staying empty.
+	if laneSignals[0].Phase != "swe" {
+		t.Errorf("phase = %q, want swe", laneSignals[0].Phase)
 	}
 }
 

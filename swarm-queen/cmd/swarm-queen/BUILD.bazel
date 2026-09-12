@@ -37,6 +37,7 @@ go_test(
     deps = [
         "//swarm-queen/bramble",
         "//swarm-queen/decide",
+        "//swarm-queen/reconcile",
         "//swarm-queen/state",
     ],
 )

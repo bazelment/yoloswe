@@ -349,6 +349,37 @@ func TestStaleNeedsSWEFromAnEarlierRoundIsNotActedOn(t *testing.T) {
 	}
 }
 
+// A phase-less signal is shorthand for the FIRST phase, not a wildcard.
+//
+// `<lane>.done` omits the phase segment, and the guard used to skip its
+// comparison entirely when sig.Phase was empty. That made one stale file match
+// whatever the lane happened to be running: a `foo.done` left over from the swe
+// phase of an earlier wave advanced a lane already on `clean`, on the strength
+// of a verdict computed for different work. The producer resolves the shorthand
+// before it reaches here, so an empty phase is genuinely unplaceable.
+func TestPhaseLessSignalDoesNotAdvanceALaneThatMovedOn(t *testing.T) {
+	t.Parallel()
+	// testState declares swe -> clean -> local-review -> github-review. The lane
+	// is on `clean`; the stale shorthand names the first phase, `swe`.
+	lane := &state.Lane{
+		ID: "a", Status: state.StatusRunning, Phase: "clean", Round: 1,
+		Sessions: map[string]string{"swe": "s1", "clean": "c1"},
+	}
+	for _, phase := range []string{"", "swe"} {
+		ds := Plan(Inputs{
+			State:    testState(lane),
+			Signals:  []LaneSignal{{Lane: "a", Phase: phase, Round: 1}},
+			Verdicts: map[string]verify.Verdict{"a": {OK: true}},
+		})
+		if _, ok := find(ds, "a", KindAdvance); ok {
+			t.Errorf("phase %q: a first-phase claim must not advance a lane on clean: %v", phase, ds)
+		}
+		if _, ok := find(ds, "a", KindEscalate); !ok {
+			t.Errorf("phase %q: an unplaceable signal must escalate, not be dropped: %v", phase, ds)
+		}
+	}
+}
+
 // Round <=1 normalises to the bare phase name, which is the identity the run dir
 // itself uses: an unsuffixed `lane.swe.done` and a lane on round 1 must agree, or
 // the guard would reject every first-round signal in the system.

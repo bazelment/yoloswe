@@ -62,7 +62,15 @@ func runTick(cmd *cobra.Command, args []string) error {
 
 	// 1. RECONCILE — measure reality. No model involved.
 	git := reconcile.ExecGit{}
-	sessions, sessionErr := liveSessions(ctx, cmd)
+	// The error is deliberately dropped HERE, and only here. LedgerDrift reads
+	// measurement from the slice itself -- a nil slice means the probe could not
+	// run and the session half of the drift report is SKIPPED rather than read as
+	// "no sessions" -- and liveSessions has already printed the warning naming
+	// what failed. The reap path does NOT reuse this snapshot: it re-probes per
+	// lane at apply time, where a failed query becomes UnknownSessions and
+	// refuses the reap. Keeping a stale error here would only invite someone to
+	// answer an apply-time question with a tick-start measurement.
+	sessions, _ := liveSessions(ctx, cmd)
 	worktrees := make(map[string]reconcile.WorktreeState, len(st.Lanes))
 	for _, lane := range st.Lanes {
 		wt, err := reconcile.ProbeWorktree(ctx, git, lane.Worktree, lane.PhaseStartSHA)
@@ -82,25 +90,7 @@ func runTick(cmd *cobra.Command, args []string) error {
 	}
 
 	// 2. VERIFY — every claim checked against what was measured.
-	verdicts := make(map[string]verify.Verdict, len(signals))
-	var laneSignals []decide.LaneSignal
-	for _, sig := range signals {
-		lane, ok := st.Lane(sig.Lane)
-		// A signal for a lane that is already terminal is history, not a claim:
-		// its worktree is legitimately gone once reaped, so re-verifying it
-		// would refuse a completion that already succeeded.
-		if ok && lane.Status.Terminal() {
-			continue
-		}
-		laneSignals = append(laneSignals, decide.LaneSignal{
-			Lane: sig.Lane, Phase: sig.Phase, Round: sig.Round,
-			NeedsSWE: sig.Kind == reconcile.SignalNeedsSWE,
-		})
-		if ok && sig.Kind == reconcile.SignalDone {
-			verdicts[lane.ID] = verify.PhaseCompletion(lane, worktrees[lane.ID],
-				state.MutatingPhase(sig.Phase))
-		}
-	}
+	laneSignals, verdicts := readClaims(st, signals, worktrees)
 	drift := verify.LedgerDrift(st, worktrees, sessions)
 
 	// 3. DECIDE — rules first; anything unsettled escalates.
@@ -173,10 +163,25 @@ func runTick(cmd *cobra.Command, args []string) error {
 		Git: git, Tmux: tmux, Spawner: client,
 		SelfWindow: self, Parent: tickParent, Repo: tickRepo,
 		Standing: standing,
+		// Re-probe the fleet HERE, per lane, at the moment of the reap -- not
+		// from the `sessions` slice reconciled at the top of this tick.
+		//
+		// applyReap already re-probes the worktree because state moves between
+		// deciding and acting; session ownership moves the same way and was the
+		// one precondition still answered from a stale snapshot. A session that
+		// started after reconciliation was invisible, so its worktree could be
+		// removed with the agent still live -- the exact failure the ledger
+		// window_id fallback was removed to prevent, reintroduced by the
+		// closure's captured slice.
+		//
 		// An unmeasured fleet reaches PlanReap as unknown, which refuses the
-		// reap, rather than as an empty one, which would permit it.
+		// reap, rather than as an empty one, which would permit it. That holds
+		// for the fresh probe too: a bramble query that fails at apply time is
+		// UnknownSessions, so the reap is refused rather than proceeding on the
+		// older, more optimistic answer.
 		LiveSessions: func(l *state.Lane) lifecycle.SessionProbe {
-			return laneProbe(sessions, sessionErr == nil, l.Worktree)
+			fresh, ferr := liveSessions(ctx, cmd)
+			return laneProbe(fresh, ferr == nil, l.Worktree)
 		},
 	}
 
@@ -236,6 +241,68 @@ func laneProbe(sessions []bramble.Session, probed bool, worktree string) lifecyc
 		})
 	}
 	return lifecycle.KnownSessions(out)
+}
+
+// readClaims turns the signal files a tick found into the claims the rule engine
+// judges, and verifies each one against what was measured.
+//
+// Kept separate from runTick for the same reason planInputs is: wiring that only
+// exists inside the command body cannot be tested, and this package has already
+// shipped a correct rule that nothing called. Every branch here is a decision
+// about whether a file on disk is a live claim, so each needs to be assertable
+// without a bramble TUI, a tmux server, or a real run directory.
+func readClaims(
+	st *state.State,
+	signals []reconcile.Signal,
+	worktrees map[string]reconcile.WorktreeState,
+) ([]decide.LaneSignal, map[string]verify.Verdict) {
+	verdicts := make(map[string]verify.Verdict, len(signals))
+	var laneSignals []decide.LaneSignal
+	for _, sig := range signals {
+		lane, ok := st.Lane(sig.Lane)
+		// A signal for a lane that is already terminal is history, not a claim:
+		// its worktree is legitimately gone once reaped, so re-verifying it
+		// would refuse a completion that already succeeded.
+		if ok && lane.Status.Terminal() {
+			continue
+		}
+		// `<lane>.done` omits the phase segment, and ParseSignalName documents
+		// that shorthand as naming the FIRST declared phase. Resolve it HERE,
+		// once, before either consumer sees it: an empty phase was a wildcard to
+		// both of them, and in opposite directions. decide's attempt-identity
+		// guard skipped its comparison, so a stale shorthand `.done` from an
+		// earlier wave matched whatever the lane was running now; and
+		// MutatingPhase("") is false, which switched off the empty-branch
+		// refusal for exactly the mutating first-phase work it protects. A lane
+		// could therefore be advanced past unverified work by a leftover file.
+		phase := sig.Phase
+		if phase == "" {
+			phase = firstDeclaredPhase(st)
+		}
+		laneSignals = append(laneSignals, decide.LaneSignal{
+			Lane: sig.Lane, Phase: phase, Round: sig.Round,
+			NeedsSWE: sig.Kind == reconcile.SignalNeedsSWE,
+		})
+		if ok && sig.Kind == reconcile.SignalDone {
+			verdicts[lane.ID] = verify.PhaseCompletion(lane, worktrees[lane.ID],
+				state.MutatingPhase(phase))
+		}
+	}
+	return laneSignals, verdicts
+}
+
+// firstDeclaredPhase is the phase a bare `<lane>.done` names.
+//
+// The run dir's shorthand omits the phase segment for first-phase signals, so
+// resolving it needs the run's own contract rather than a hardcoded name: the
+// first phase is `swe` in some runs and `simplify` or `plan` in others. An empty
+// result means the config declares no phases at all, in which case the signal is
+// genuinely unplaceable and the attempt-identity guard escalates it.
+func firstDeclaredPhase(st *state.State) string {
+	if names := st.Config.PhaseNames(); len(names) > 0 {
+		return names[0]
+	}
+	return ""
 }
 
 // baselineName is where a tick records which signals it has already seen.

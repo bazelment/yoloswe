@@ -164,9 +164,17 @@ func signalDecisions(in Inputs) []Decision {
 		// Escalate rather than drop: a signal that cannot be placed is exactly
 		// the thing a person should look at, and silently ignoring it is how a
 		// real completion goes unnoticed.
+		//
+		// The comparison is UNCONDITIONAL. An empty sig.Phase used to skip it,
+		// which made a phase-less `<lane>.done` a wildcard matching whatever the
+		// lane happened to be running: ParseSignalName documents the shorthand as
+		// naming the FIRST phase, so a stale `foo.done` from an earlier wave
+		// advanced a lane already on `clean` or `local-review`. The producer
+		// resolves the shorthand to a concrete phase before it gets here, so an
+		// empty phase reaching this point is genuinely unplaceable and escalates.
 		sigKey := state.PhaseRoundKey(sig.Phase, sig.Round)
 		laneKey := state.PhaseRoundKey(lane.Phase, lane.Round)
-		if lane.Status != state.StatusRunning || (sig.Phase != "" && sigKey != laneKey) {
+		if lane.Status != state.StatusRunning || sigKey != laneKey {
 			out = append(out, Decision{
 				Lane: lane.ID, Kind: KindEscalate, Source: SourceRule,
 				Reason: "signal does not match the lane's current attempt",
