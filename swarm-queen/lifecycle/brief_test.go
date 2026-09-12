@@ -22,8 +22,6 @@ func TestRenderBriefCarriesLiteralPaths(t *testing.T) {
 	for _, want := range []string{
 		"/runs/deploy-harden/lane-a.swe.md",
 		"/runs/deploy-harden/lane-a.swe.done",
-		"swarm/lane-a",
-		"/wt/lane-a",
 		"Fix the retry backoff.",
 		"touch",
 		"LAST",
@@ -35,6 +33,24 @@ func TestRenderBriefCarriesLiteralPaths(t *testing.T) {
 	// No relative paths or env indirection: they reach nothing from a child.
 	if strings.Contains(got, "$RUN") || strings.Contains(got, "./lane-a") {
 		t.Errorf("brief must not use indirection for report paths:\n%s", got)
+	}
+
+	// The MISSION leads. A brief that opens with preamble buries the line the
+	// agent has to act on -- and a mission whose first line must be sent
+	// verbatim is actively harmed by anything printed above it.
+	if !strings.HasPrefix(got, "Fix the retry backoff.") {
+		t.Errorf("the mission must be the first thing in the brief, got:\n%s", got)
+	}
+
+	// Identity, branch, worktree and goal are derivable from the agent's own git,
+	// cwd and pane title. Restating them spends the top of the brief on what the
+	// agent can already see.
+	for _, unwanted := range []string{
+		"You are the", "Run goal:", "Integrating into:", "Your branch is",
+	} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("brief restates derivable context %q:\n%s", unwanted, got)
+		}
 	}
 }
 

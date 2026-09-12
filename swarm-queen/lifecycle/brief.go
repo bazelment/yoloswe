@@ -37,16 +37,14 @@ type BriefContext struct {
 func RenderBrief(c BriefContext) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "You are the %q lane of a swarm, phase %s (round %d).\n\n",
-		c.Lane.ID, c.Phase, c.Round)
-
-	if c.Goal != "" {
-		fmt.Fprintf(&b, "Run goal: %s\n", c.Goal)
-	}
-	if c.Target != "" {
-		fmt.Fprintf(&b, "Integrating into: %s\n", c.Target)
-	}
-	b.WriteString("\n## Mission\n\n")
+	// The mission goes FIRST, with no preamble above it. A brief that opens by
+	// telling the agent who it is buries the one line it has to act on -- and a
+	// mission whose first line must be sent verbatim (a slash command, say) is
+	// actively harmed by anything printed before it.
+	//
+	// Identity, branch, worktree and goal are all derivable: the agent reads its
+	// own git and cwd, and bramble already puts the goal in the pane title.
+	// Saying them again spends the top of the brief on what the agent can see.
 	b.WriteString(strings.TrimSpace(c.Mission))
 	b.WriteString("\n")
 
@@ -58,8 +56,6 @@ func RenderBrief(c BriefContext) string {
 	}
 
 	b.WriteString("\n## Ownership\n\n")
-	fmt.Fprintf(&b, "- Your branch is `%s`; your worktree is `%s`.\n",
-		c.Lane.Branch, orNoneBrief(c.Lane.Worktree))
 	b.WriteString("- Do not edit files owned by another lane, and do not mutate shared live state.\n")
 	if len(c.Reserved) > 0 {
 		b.WriteString("- Reserved for the orchestrator, do not do these yourself:\n")
