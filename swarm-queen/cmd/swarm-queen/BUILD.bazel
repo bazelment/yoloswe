@@ -35,6 +35,7 @@ go_test(
     srcs = ["tick_test.go"],
     embed = [":swarm-queen_lib"],
     deps = [
+        "//swarm-queen/bramble",
         "//swarm-queen/decide",
         "//swarm-queen/state",
     ],

@@ -139,16 +139,17 @@ func (a *Applier) applySpawn(ctx context.Context, d decide.Decision) Outcome {
 			d.Round, lane.MaxRound(d.Phase))}
 	}
 
+	// Everything the lane needs before its session exists: its instructions, and
+	// a phase baseline recorded while a failure still costs only a refusal.
+	instructions, nudges, preStamped, perr := PrepareSpawn(ctx, a.Git, a.Store,
+		a.RunDir, a.RepoDir, lane.ID, st.Config.Base, a.Standing, a.tickNudges)
+	if perr != nil {
+		return Outcome{Decision: d, Err: perr}
+	}
+
 	mission := a.Missions[lane.ID]
 	if mission == "" {
 		mission = lane.Title
-	}
-	// One-shot nudges addressed to this lane ride along with the standing rules,
-	// and are retired once the spawn is usable. Queued but never read,
-	// `swarm-queen nudge` had no effect on orchestration at all.
-	instructions, nudges, nerr := BriefInstructions(a.RunDir, lane.ID, a.Standing, a.tickNudges)
-	if nerr != nil {
-		return Outcome{Decision: d, Err: nerr}
 	}
 
 	brief := SpawnBrief{
@@ -186,19 +187,6 @@ func (a *Applier) applySpawn(ctx context.Context, d decide.Decision) Outcome {
 	// create: there is no HEAD to read until it exists. That case keeps the
 	// after-the-fact stamp, and its failure is reported as an explicit repair
 	// obligation naming the live session.
-	preStamped, err := SpawnBaseline(ctx, a.Git, a.Store, lane.ID, lane.Worktree)
-	if err == nil && !preStamped {
-		// No worktree yet: resolve the fork point from the base it will be
-		// created at, so the baseline is recorded before anything can commit.
-		err = SpawnBaselineFromBase(ctx, a.Git, a.Store, a.RepoDir, lane.ID, st.Config.Base)
-		preStamped = err == nil
-	}
-	if err != nil {
-		return Outcome{Decision: d, Err: fmt.Errorf(
-			"refusing to spawn %s: its phase baseline could not be recorded (%w); "+
-				"a session without one has every mutating `.done` refused",
-			lane.ID, err)}
-	}
 
 	res, err := Spawn(ctx, a.Spawner, a.Store, a.RunDir, brief, req)
 	if err != nil {

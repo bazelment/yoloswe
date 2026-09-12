@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/bazelment/yoloswe/swarm-queen/bramble"
+	"github.com/bazelment/yoloswe/swarm-queen/decide"
+	"github.com/bazelment/yoloswe/swarm-queen/reconcile"
 	"github.com/bazelment/yoloswe/swarm-queen/state"
 )
 
@@ -246,5 +248,63 @@ func TestSpawnRefusesABriefWithNoReportPath(t *testing.T) {
 	lane, _ := st.Lane("lane-a")
 	if lane.Status != state.StatusPlanned {
 		t.Errorf("lane changed state despite the refusal: %s", lane.Status)
+	}
+}
+
+// PrepareSpawn is the one entry point both commands use, so a caller cannot
+// omit a step. dispatch hand-rolled this sequence and fell behind three rounds
+// running -- on nudge delivery, then the pre-stamp, then the base-resolved
+// pre-stamp, one missing step each time.
+func TestPrepareSpawnStampsFromTheBaseWhenThereIsNoWorktree(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	runDir, store := seedRun(t)
+	git(t, repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+	baseSHA := git(t, repo, "rev-parse", "refs/remotes/origin/main")
+
+	if err := decide.AppendNudge(runDir, decide.Nudge{Text: "SENTINEL-lane", Lane: "lane-a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	instructions, nudges, preStamped, err := PrepareSpawn(context.Background(),
+		reconcile.ExecGit{}, store, runDir, repo, "lane-a", "main",
+		[]string{"a standing rule"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preStamped {
+		t.Error("a lane with no worktree must still be stamped from its base, before the session")
+	}
+	st, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane, _ := st.Lane("lane-a")
+	if lane.PhaseStartSHA != baseSHA {
+		t.Errorf("PhaseStartSHA = %q, want the base SHA %q", lane.PhaseStartSHA, baseSHA)
+	}
+	// And the instructions carry both the standing rule and the lane's nudge.
+	joined := strings.Join(instructions, "\n")
+	if !strings.Contains(joined, "a standing rule") || !strings.Contains(joined, "SENTINEL-lane") {
+		t.Errorf("instructions must carry the standing rules AND the nudge: %v", instructions)
+	}
+	if len(nudges) != 1 {
+		t.Errorf("the lane's own nudge must be returned for retirement: %v", nudges)
+	}
+}
+
+// An unresolvable base refuses while nothing is live.
+func TestPrepareSpawnRefusesAnUnresolvableBase(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	runDir, store := seedRun(t)
+
+	_, _, _, err := PrepareSpawn(context.Background(), reconcile.ExecGit{}, store,
+		runDir, repo, "lane-a", "no-such-base", nil, nil)
+	if err == nil {
+		t.Fatal("an unresolvable base must refuse before anything is spawned")
+	}
+	if !strings.Contains(err.Error(), "refusing to spawn") {
+		t.Errorf("the error should say the spawn was refused, got %v", err)
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -52,12 +53,16 @@ func runReap(cmd *cobra.Command, args []string) error {
 	// empty one and would otherwise have its worktree pulled out from under it.
 	sessions, sessionErr := liveSessions(ctx, cmd)
 	var safe, refused, failed int
+	var unmeasured []string
 	var applier *lifecycle.Applier
 
 	for _, lane := range st.Lanes {
 		wt, err := reconcile.ProbeWorktree(ctx, git, lane.Worktree, lane.ForkSHA)
 		if err != nil && wt.Path == "" {
 			wt.Path = lane.Worktree
+		}
+		if wt.Unknown() {
+			unmeasured = append(unmeasured, lane.ID)
 		}
 		// Snapshot before planning: work at risk should be protected whether or
 		// not the lane turns out to be reapable.
@@ -71,10 +76,7 @@ func runReap(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		probe := lifecycle.UnknownSessions()
-		if sessionErr == nil {
-			probe = lifecycle.KnownSessions(sessionsForLane(sessions, lane.Worktree))
-		}
+		probe := laneProbe(sessions, sessionErr == nil, lane.Worktree)
 		plan := lifecycle.PlanReap(ctx, git, reapRepoDir, lane, wt, st.Config.Target, probe)
 		if !plan.Safe {
 			refused++
@@ -114,21 +116,42 @@ func runReap(cmd *cobra.Command, args []string) error {
 	if !reapApply {
 		fmt.Print(" (dry run; pass --apply to act)")
 	}
+	var skipped []string
 	if sessionErr != nil {
-		fmt.Print(" (session checks skipped)")
+		skipped = append(skipped, "session")
+	}
+	if len(unmeasured) > 0 {
+		skipped = append(skipped, "worktree")
+	}
+	if len(skipped) > 0 {
+		fmt.Printf(" (%s checks skipped)", strings.Join(skipped, ", "))
 	}
 	fmt.Println()
 	if sessionErr != nil {
 		fmt.Printf("\nsession checks SKIPPED, not passed: %v\n", sessionErr)
 	}
+	if len(unmeasured) > 0 {
+		fmt.Printf("\nworktree checks SKIPPED for %d lane(s), not passed: %s\n",
+			len(unmeasured), strings.Join(unmeasured, ", "))
+	}
+	return reapExit(failed, unmeasured, sessionErr)
+}
+
+// reapExit decides the command's exit status.
+//
+// Separate from runReap because the rule it encodes is the one this whole class
+// of fix exists to remove: an unmeasured run must not read as a pass. Every lane
+// is REFUSED when a probe could not run, so `failed` stays 0 and a caller gating
+// on the exit code would see a clean sweep -- which is exactly the false green
+// doctor already refuses to print.
+func reapExit(failed int, unmeasured []string, sessionErr error) error {
 	switch {
 	case failed > 0:
 		return fmt.Errorf("%d lane(s) failed to close", failed)
+	case len(unmeasured) > 0:
+		return fmt.Errorf("%d lane(s) could not be measured: %s",
+			len(unmeasured), strings.Join(unmeasured, ", "))
 	case sessionErr != nil:
-		// An unmeasured probe must not read as success via the exit code. Every
-		// lane is refused in this state, so `failed` stays 0 and a caller gating
-		// on the exit status would treat an unmeasured run as a clean one --
-		// the same false green doctor already refuses to print.
 		return fmt.Errorf("session probe could not run, so no lane could be "+
 			"proven safe to reap: %w", sessionErr)
 	}
@@ -160,10 +183,7 @@ func newReapApplier(ctx context.Context, cmd *cobra.Command, runDir string) (*li
 		Store: state.NewStore(runDir), RunDir: runDir, RepoDir: reapRepoDir,
 		SelfWindow: self,
 		LiveSessions: func(l *state.Lane) lifecycle.SessionProbe {
-			if sessionErr != nil {
-				return lifecycle.UnknownSessions()
-			}
-			return lifecycle.KnownSessions(sessionsForLane(sessions, l.Worktree))
+			return laneProbe(sessions, sessionErr == nil, l.Worktree)
 		},
 	}, nil
 }

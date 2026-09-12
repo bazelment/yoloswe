@@ -23,6 +23,7 @@ var (
 	dispatchBackend string
 	dispatchParent  string
 	dispatchRepo    string
+	dispatchRepoDir string
 	dispatchApply   bool
 )
 
@@ -51,6 +52,8 @@ func init() {
 	dispatchCmd.Flags().StringVar(&dispatchBackend, "backend", "", "CLI backend; empty infers from the model")
 	dispatchCmd.Flags().StringVar(&dispatchParent, "parent", "",
 		"orchestrator session id; without it a completed lane reports nowhere")
+	dispatchCmd.Flags().StringVar(&dispatchRepoDir, "repo", ".",
+		"repository directory, used to resolve the base a new worktree forks from")
 	dispatchCmd.Flags().StringVar(&dispatchRepo, "bramble-repo", "",
 		"bramble repository name; inference can pick an unrelated repo")
 	dispatchCmd.Flags().BoolVar(&dispatchApply, "apply", false, "actually spawn (default: dry run)")
@@ -109,16 +112,19 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	standing, _ := decide.StandingRules(runDir)
-	// Same instructions the tick path builds: standing rules plus the one-shot
-	// nudges addressed to this lane. Rendering only the standing rules here made
-	// `swarm-queen nudge` followed by `dispatch --apply` drop the instruction.
 	// dispatch stages ONE lane, so the run-wide nudges have a single addressee
 	// here and retire with this spawn like any other.
 	runWide, err := decide.RunWideNudges(runDir)
 	if err != nil {
 		return err
 	}
-	instructions, own, err := lifecycle.BriefInstructions(runDir, lane.ID, standing, runWide)
+	// The whole pre-spawn sequence, shared with the tick path: instructions, and
+	// a baseline recorded while a failure still costs only a refusal.
+	// Hand-rolling these steps here is how dispatch fell behind three rounds
+	// running -- on nudge delivery, then the pre-stamp, then the base-resolved
+	// pre-stamp, one missing step each time.
+	instructions, own, preStamped, err := lifecycle.PrepareSpawn(ctx, reconcile.ExecGit{},
+		store, runDir, dispatchRepoDir, lane.ID, st.Config.Base, standing, runWide)
 	if err != nil {
 		return err
 	}
@@ -154,16 +160,28 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Same pre-stamp as the tick path: where the worktree already exists, a
-	// baseline failure refuses the dispatch instead of leaving a live session
-	// whose completion can never be verified.
-	preStamped, err := lifecycle.SpawnBaseline(ctx, reconcile.ExecGit{}, store, lane.ID, lane.Worktree)
+	client, err := bramble.New()
 	if err != nil {
-		return fmt.Errorf("refusing to dispatch %s: its phase baseline could not be "+
-			"recorded: %w", lane.ID, err)
+		// A missing or ambiguous socket is ordinary infrastructure trouble, not
+		// a programming error. Panicking on it crashed the CLI with a stack
+		// trace instead of naming the problem and what to do about it.
+		return fmt.Errorf("--apply needs a reachable bramble TUI: %w", err)
+	}
+	// Re-read immediately before spawning: a lane that started running since the
+	// checks above must not get a second agent on its worktree, which would
+	// overwrite its phase and session state. dispatch bypasses the rule engine
+	// and its Vet invariants, so it owes this check itself.
+	fresh, err := store.Read()
+	if err != nil {
+		return err
+	}
+	if cur, ok := fresh.Lane(lane.ID); ok && cur.Status == state.StatusRunning {
+		return fmt.Errorf("refusing to dispatch %s: it is already running (%s); "+
+			"a second agent on one worktree is a concurrent-ownership collision",
+			lane.ID, orDash(cur.Worktree))
 	}
 
-	res, err := lifecycle.Spawn(ctx, mustClient(), store, runDir, brief, req)
+	res, err := lifecycle.Spawn(ctx, client, store, runDir, brief, req)
 	if err != nil {
 		return err
 	}
@@ -210,12 +228,4 @@ func readMission(runDir, lane, phase string, round int) (text, path string, err 
 		"%s.%s.mission.txt, %s.%s.mission.txt, or %s.mission.txt in %s",
 		lane, phase, round,
 		lane, state.PhaseRoundKey(phase, round), lane, phase, lane, runDir)
-}
-
-func mustClient() *bramble.Client {
-	c, err := bramble.New()
-	if err != nil {
-		panic(err)
-	}
-	return c
 }

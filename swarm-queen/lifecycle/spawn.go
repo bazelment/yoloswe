@@ -167,6 +167,55 @@ func SpawnBaseline(ctx context.Context, g reconcile.GitRunner, store *state.Stor
 	return true, RecordPhaseBaseline(ctx, g, store, laneID, worktree)
 }
 
+// PrepareSpawn establishes everything a lane needs BEFORE its session exists,
+// and reports whether the baseline was pre-stamped.
+//
+// One entry point because the sequence has been got wrong once per command per
+// round: dispatch missed the nudge delivery, then the pre-stamp, then the
+// base-resolved pre-stamp -- each time because the two commands hand-rolled the
+// same steps and only one of them was updated. A caller that cannot skip a step
+// cannot fall behind.
+//
+// Every failure here happens with nothing live, which is the point: a lane whose
+// baseline cannot be established should be refused while it costs a refused
+// decision rather than an unverifiable running session.
+func PrepareSpawn(
+	ctx context.Context,
+	g reconcile.GitRunner,
+	store *state.Store,
+	runDir, repoDir, laneID, base string,
+	standing []string,
+	extra []decide.Nudge,
+) (instructions []string, nudges []decide.Nudge, preStamped bool, err error) {
+	st, err := store.Read()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	lane, ok := st.Lane(laneID)
+	if !ok {
+		return nil, nil, false, fmt.Errorf("lane %q is not in the ledger", laneID)
+	}
+
+	instructions, nudges, err = BriefInstructions(runDir, laneID, standing, extra)
+	if err != nil {
+		return nil, nil, false, err
+	}
+
+	preStamped, err = SpawnBaseline(ctx, g, store, laneID, lane.Worktree)
+	if err == nil && !preStamped {
+		// No worktree yet: resolve the fork point from the base it will be
+		// created at, so the baseline is recorded before anything can commit.
+		err = SpawnBaselineFromBase(ctx, g, store, repoDir, laneID, base)
+		preStamped = err == nil
+	}
+	if err != nil {
+		return nil, nil, false, fmt.Errorf(
+			"refusing to spawn %s: its phase baseline could not be recorded (%w); "+
+				"a session without one has every mutating `.done` refused", laneID, err)
+	}
+	return instructions, nudges, preStamped, nil
+}
+
 // SpawnBaselineFromBase stamps the baseline for a lane whose worktree does not
 // exist yet, resolving the fork point from the base it will be created at.
 //

@@ -176,10 +176,7 @@ func runTick(cmd *cobra.Command, args []string) error {
 		// An unmeasured fleet reaches PlanReap as unknown, which refuses the
 		// reap, rather than as an empty one, which would permit it.
 		LiveSessions: func(l *state.Lane) lifecycle.SessionProbe {
-			if sessionErr != nil {
-				return lifecycle.UnknownSessions()
-			}
-			return lifecycle.KnownSessions(sessionsForLane(sessions, l.Worktree))
+			return laneProbe(sessions, sessionErr == nil, l.Worktree)
 		},
 	}
 
@@ -207,12 +204,26 @@ func runTick(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// sessionsForLane selects the live sessions attached to a lane's worktree.
-// bramble reports worktree_name and never a path, so match on the basename.
-func sessionsForLane(sessions []bramble.Session, worktree string) []lifecycle.LiveSession {
+// laneProbe correlates the fleet's live sessions to one lane.
+//
+// bramble reports worktree_name and never a path, so the ledger's Worktree is
+// the only key available -- which means a lane with no recorded worktree cannot
+// be correlated AT ALL. That is a third state, and conflating it with "nothing
+// holds this lane" is how a successful fleet probe produced a confident empty
+// answer: the probe ran, the correlation did not, and PlanReap would clear the
+// ledger fallback and proceed as if ownership had been disproved.
+//
+// probed says the fleet query itself succeeded. An uncorrelatable lane returns
+// UnknownSessions regardless, because what the caller needs to know is whether
+// THIS LANE's ownership was established, not whether some query somewhere
+// returned rows.
+func laneProbe(sessions []bramble.Session, probed bool, worktree string) lifecycle.SessionProbe {
+	if !probed {
+		return lifecycle.UnknownSessions()
+	}
 	name := filepath.Base(strings.TrimRight(worktree, "/"))
 	if name == "" || name == "." || name == "/" {
-		return nil
+		return lifecycle.UnknownSessions()
 	}
 	var out []lifecycle.LiveSession
 	for i := range sessions {
@@ -224,7 +235,7 @@ func sessionsForLane(sessions []bramble.Session, worktree string) []lifecycle.Li
 			ID: s.ID, Status: s.Status, TmuxTarget: s.TmuxTarget,
 		})
 	}
-	return out
+	return lifecycle.KnownSessions(out)
 }
 
 // baselineName is where a tick records which signals it has already seen.

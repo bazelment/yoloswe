@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
+	"github.com/bazelment/yoloswe/swarm-queen/bramble"
 	"github.com/bazelment/yoloswe/swarm-queen/decide"
 	"github.com/bazelment/yoloswe/swarm-queen/state"
 )
@@ -83,5 +86,70 @@ func TestTickPassesSlotExemptToThePlanner(t *testing.T) {
 	}
 	if !staffed {
 		t.Errorf("a report lane must not block staffing at --max-concurrent=1: %v", ds)
+	}
+}
+
+// A lane with no recorded worktree cannot be correlated to a bramble session at
+// all: bramble reports worktree_name and never a path, so the ledger's Worktree
+// is the only key. Reporting that as a MEASURED empty set asserts that nothing
+// holds the lane, when in fact nobody looked -- and PlanReap would then clear
+// the ledger fallback and proceed as if ownership had been disproved.
+func TestLaneProbeTreatsAnUncorrelatableLaneAsUnknown(t *testing.T) {
+	t.Parallel()
+	sessions := []bramble.Session{
+		{ID: "s1", WorktreeName: "lane-a", Status: "idle", TmuxTarget: "@1"},
+	}
+
+	if p := laneProbe(sessions, true, ""); p.Known {
+		t.Errorf("a lane with no worktree cannot be correlated; it must be unknown: %+v", p)
+	}
+	for _, worktree := range []string{".", "/"} {
+		if p := laneProbe(sessions, true, worktree); p.Known {
+			t.Errorf("worktree %q yields no usable key; it must be unknown: %+v", worktree, p)
+		}
+	}
+
+	// A correlatable lane that genuinely has no session IS measured-empty.
+	p := laneProbe(sessions, true, "/wt/lane-b")
+	if !p.Known {
+		t.Errorf("a correlatable lane must be measured: %+v", p)
+	}
+	if len(p.Sessions) != 0 {
+		t.Errorf("lane-b holds no session: %+v", p)
+	}
+
+	// And a correlatable lane that does have one reports it.
+	held := laneProbe(sessions, true, "/wt/lane-a")
+	if !held.Known || len(held.Sessions) != 1 || held.Sessions[0].ID != "s1" {
+		t.Errorf("lane-a's live session must be reported: %+v", held)
+	}
+}
+
+// A failed fleet query is unknown for every lane, correlatable or not.
+func TestLaneProbeIsUnknownWhenTheFleetQueryFailed(t *testing.T) {
+	t.Parallel()
+	if p := laneProbe(nil, false, "/wt/lane-a"); p.Known {
+		t.Errorf("a failed list-sessions must be unknown: %+v", p)
+	}
+}
+
+// An unmeasured run must not read as a pass. Every lane is REFUSED when a probe
+// could not run, so `failed` stays 0 and a caller gating on the exit code would
+// see a clean sweep -- the same false green doctor refuses to print.
+func TestReapExitRefusesToPassAnUnmeasuredRun(t *testing.T) {
+	t.Parallel()
+	if err := reapExit(0, nil, nil); err != nil {
+		t.Errorf("a fully measured run with nothing failing is a pass: %v", err)
+	}
+	if err := reapExit(0, []string{"lane-a"}, nil); err == nil {
+		t.Error("a lane whose worktree could not be measured must not exit 0")
+	}
+	if err := reapExit(0, nil, errors.New("list-sessions failed")); err == nil {
+		t.Error("an unmeasured session probe must not exit 0")
+	}
+	// A real failure still wins the message, since it is the more actionable one.
+	err := reapExit(2, []string{"lane-a"}, errors.New("probe"))
+	if err == nil || !strings.Contains(err.Error(), "failed to close") {
+		t.Errorf("a genuine failure should be reported first, got %v", err)
 	}
 }
