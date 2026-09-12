@@ -2,7 +2,9 @@ package bramble
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -85,14 +87,55 @@ func TestMissingTmuxTargetIsToleratedAndMeaningful(t *testing.T) {
 	}
 }
 
-// SocketPath must exclude the separate control socket, which shares the prefix.
-func TestSocketPathIgnoresControlSocket(t *testing.T) {
-	t.Parallel()
-	// Documented-but-nonexistent path from references/bramble-mechanics.md.
-	// Kept as a regression note: the real path carries a PID suffix.
-	const documented = "/run/user/1000/bramble-1000.sock"
-	if _, err := os.Stat(documented); err == nil {
-		t.Skip("the documented un-suffixed socket now exists; skill docs may be correct again")
+// The socket comes in two forms and which one exists FLIPS when the TUI
+// restarts. Matching only the suffixed form meant swarm-queen silently could not
+// find bramble at all after a restart -- observed live: a TUI came back on the
+// un-suffixed path and every probe started reporting "no socket".
+func TestSocketPathAcceptsBothForms(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	uid := os.Getuid()
+
+	touch := func(name string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// Un-suffixed alone.
+	want := touch(fmt.Sprintf("bramble-%d.sock", uid))
+	// The control socket shares the prefix and must never be chosen.
+	touch(fmt.Sprintf("bramble-control-%d.sock", uid))
+	got, err := SocketPath()
+	if err != nil || got != want {
+		t.Fatalf("un-suffixed form: got (%q, %v), want %q", got, err, want)
+	}
+
+	// Suffixed alone.
+	os.Remove(want)
+	want = touch(fmt.Sprintf("bramble-%d-2015796.sock", uid))
+	touch(fmt.Sprintf("bramble-control-%d-2015796.sock", uid))
+	got, err = SocketPath()
+	if err != nil || got != want {
+		t.Fatalf("suffixed form: got (%q, %v), want %q", got, err, want)
+	}
+
+	// Both present: refuse rather than guess. A stale socket outliving its
+	// process looks identical to a live one from the filename alone.
+	touch(fmt.Sprintf("bramble-%d.sock", uid))
+	if _, err := SocketPath(); err == nil {
+		t.Error("two candidate sockets must be refused, not silently resolved")
+	}
+}
+
+// No socket at all is an error, not an empty answer.
+func TestSocketPathReportsAbsence(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	if got, err := SocketPath(); err == nil {
+		t.Errorf("expected an error when no socket exists, got %q", got)
 	}
 }
 

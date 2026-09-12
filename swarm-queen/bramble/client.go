@@ -4,9 +4,11 @@
 // mined run rediscovered that the hard way. The facts below were verified by
 // invocation against a live TUI, not read from help text:
 //
-//   - The socket path carries a PID suffix. The skill's documented preflight
-//     (`${XDG_RUNTIME_DIR}/bramble-$(id -u).sock`) does not exist, so
-//     `test -S "$BRAMBLE_SOCK"` fails on step 1 of every documented run.
+//   - The socket path comes in TWO forms: an un-suffixed
+//     `bramble-<uid>.sock` and a PID-suffixed `bramble-<uid>-<pid>.sock`.
+//     Which one exists depends on how the running TUI was started, and it
+//     CHANGES when the TUI restarts. Matching only one form means swarm-queen
+//     silently cannot find bramble after a restart, so both are accepted.
 //   - list-sessions returns a DICT wrapping a list, not a bare list. One
 //     orchestrator re-derived a defensive `isinstance` guard ~15 times because
 //     it never learned the shape.
@@ -82,26 +84,46 @@ type Client struct {
 // that the mined runs learned the expensive way.
 func SocketPath() (string, error) {
 	uid := os.Getuid()
-	pattern := fmt.Sprintf("/run/user/%d/bramble-%d-*.sock", uid, uid)
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return "", err
+	dir := os.Getenv("XDG_RUNTIME_DIR")
+	if dir == "" {
+		dir = fmt.Sprintf("/run/user/%d", uid)
 	}
-	// bramble-control-<uid>-<pid>.sock is a different socket; exclude it.
+	// Both forms are real. The un-suffixed one is what the skill documents; the
+	// suffixed one is what a TUI started differently produces. Which exists
+	// flips on restart, so accept either.
+	patterns := []string{
+		filepath.Join(dir, fmt.Sprintf("bramble-%d.sock", uid)),
+		filepath.Join(dir, fmt.Sprintf("bramble-%d-*.sock", uid)),
+	}
+
+	seen := map[string]bool{}
 	var socks []string
-	for _, m := range matches {
-		if !strings.Contains(filepath.Base(m), "-control-") {
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return "", err
+		}
+		for _, m := range matches {
+			// bramble-control-<uid>[-<pid>].sock is a different socket.
+			if strings.Contains(filepath.Base(m), "-control-") || seen[m] {
+				continue
+			}
+			seen[m] = true
 			socks = append(socks, m)
 		}
 	}
+
 	switch len(socks) {
 	case 1:
 		return socks[0], nil
 	case 0:
-		return "", fmt.Errorf("no bramble socket matching %s — is the TUI running?", pattern)
+		return "", fmt.Errorf("no bramble socket in %s matching bramble-%d[.-]*.sock — is the TUI running?", dir, uid)
 	default:
-		return "", fmt.Errorf("%d bramble sockets match %s (%s) — refusing to guess which TUI owns this swarm",
-			len(socks), pattern, strings.Join(socks, ", "))
+		// Never newest-wins: picking silently would attach the swarm to the
+		// wrong TUI, and a stale socket outliving its process looks identical to
+		// a live one from the filename alone.
+		return "", fmt.Errorf("%d bramble sockets in %s (%s) — refusing to guess which TUI owns this swarm; set BRAMBLE_SOCK",
+			len(socks), dir, strings.Join(socks, ", "))
 	}
 }
 
