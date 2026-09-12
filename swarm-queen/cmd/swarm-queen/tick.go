@@ -62,7 +62,7 @@ func runTick(cmd *cobra.Command, args []string) error {
 
 	// 1. RECONCILE — measure reality. No model involved.
 	git := reconcile.ExecGit{}
-	sessions := liveSessions(ctx, cmd)
+	sessions, sessionErr := liveSessions(ctx, cmd)
 	worktrees := make(map[string]reconcile.WorktreeState, len(st.Lanes))
 	for _, lane := range st.Lanes {
 		wt, err := reconcile.ProbeWorktree(ctx, git, lane.Worktree, lane.PhaseStartSHA)
@@ -179,8 +179,13 @@ func runTick(cmd *cobra.Command, args []string) error {
 		Git: git, Tmux: tmux, Spawner: client,
 		SelfWindow: self, Parent: tickParent, Repo: tickRepo,
 		Standing: standing,
-		LiveSessions: func(l *state.Lane) []lifecycle.LiveSession {
-			return sessionsForLane(sessions, l.Worktree)
+		// An unmeasured fleet reaches PlanReap as unknown, which refuses the
+		// reap, rather than as an empty one, which would permit it.
+		LiveSessions: func(l *state.Lane) lifecycle.SessionProbe {
+			if sessionErr != nil {
+				return lifecycle.UnknownSessions()
+			}
+			return lifecycle.KnownSessions(sessionsForLane(sessions, l.Worktree))
 		},
 	}
 
@@ -193,17 +198,17 @@ func runTick(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// The baseline advances only after acting, so a failed tick re-sees its
-	// signals rather than silently dropping them.
-	current, err := reconcile.Baseline(runDir)
+	// The baseline advances only after acting, and only when every decision
+	// applied. Saving it first marked this tick's signals as seen, so a lane
+	// whose spawn or reap failed had its .done / .needs-swe dropped permanently:
+	// the next tick would not see the claim again and nothing would retry it.
+	advanced, err := reconcile.CommitBaseline(runDir, filepath.Join(runDir, baselineName), failed)
 	if err != nil {
 		return err
 	}
-	if err := reconcile.SaveBaseline(filepath.Join(runDir, baselineName), current); err != nil {
-		return err
-	}
-	if failed > 0 {
-		return fmt.Errorf("%d decision(s) failed to apply", failed)
+	if !advanced {
+		return fmt.Errorf("%d decision(s) failed to apply; "+
+			"signals left unconsumed for the next tick", failed)
 	}
 	return nil
 }

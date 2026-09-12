@@ -128,6 +128,30 @@ func NewSince(runDir string, base SignalSet) ([]Signal, error) {
 	return fresh, nil
 }
 
+// CommitBaseline advances the baseline only when every decision applied.
+//
+// A tick that saved the baseline and THEN reported failures marked this tick's
+// signals as seen regardless: a lane whose spawn or reap failed had its `.done`
+// or `.needs-swe` dropped permanently, because the next tick no longer saw the
+// claim and nothing retried it. Consuming a signal is a claim to have acted on
+// it, so the two must not be separable -- hence one function that takes the
+// failure count rather than two calls a caller can order wrongly.
+//
+// Returns (false, nil) when the baseline was deliberately left unadvanced.
+func CommitBaseline(runDir, baselinePath string, failed int) (bool, error) {
+	if failed > 0 {
+		return false, nil
+	}
+	current, err := Baseline(runDir)
+	if err != nil {
+		return false, err
+	}
+	if err := SaveBaseline(baselinePath, current); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // SaveBaseline persists a signal set so the next tick reports only what is new.
 //
 // Stored as sorted paths, one per line: a plain text file is legible to a human

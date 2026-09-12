@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/bazelment/yoloswe/swarm-queen/bramble"
@@ -24,9 +25,10 @@ type Applier struct {
 	Missions map[string]string
 	// LiveSessions resolves a lane's sessions from bramble rather than from the
 	// ledger: window_id decayed to 1-of-12 populated in real runs, so a lane
-	// with a live agent can carry an empty one. Nil means no session data, which
-	// makes a reap plan omit the kill step.
-	LiveSessions func(*state.Lane) []LiveSession
+	// with a live agent can carry an empty one. It returns a SessionProbe, so a
+	// probe that could not run refuses the reap instead of reading as an empty
+	// fleet. A nil func is itself unknown, and therefore also refuses.
+	LiveSessions func(*state.Lane) SessionProbe
 	RunDir       string
 	RepoDir      string
 	// SelfWindow is this process's tmux window, used to refuse killing itself.
@@ -139,6 +141,19 @@ func (a *Applier) applySpawn(ctx context.Context, d decide.Decision) Outcome {
 	if err != nil {
 		return Outcome{Decision: d, Err: err}
 	}
+	// Stamp the baseline the phase starts from, or its completion cannot be
+	// verified: an empty PhaseStartSHA leaves CommitsSinceFork at 0 and every
+	// mutating `.done` is refused as an empty branch.
+	worktree := res.WorktreePath
+	if worktree == "" {
+		worktree = lane.Worktree
+	}
+	if err := RecordPhaseBaseline(ctx, a.Git, a.Store, lane.ID, worktree); err != nil {
+		return Outcome{Decision: d, Err: fmt.Errorf(
+			"session %s IS LIVE at %s but its phase baseline was not recorded (%w) — "+
+				"its completion cannot be verified until this is repaired",
+			res.SessionID, orNoneBrief(worktree), err)}
+	}
 	return Outcome{Decision: d, Detail: fmt.Sprintf("session %s on %s",
 		res.SessionID, orNoneBrief(res.WorktreePath))}
 }
@@ -157,6 +172,17 @@ func (a *Applier) applyReap(ctx context.Context, d decide.Decision) Outcome {
 	if probeErr != nil && wt.Path == "" {
 		wt.Path = lane.Worktree
 	}
+	// A git failure mid-probe is UNKNOWN, not clean. ProbeWorktree sets
+	// Exists=true before running any git command, so a failed status or rev-list
+	// returns Exists=true with DirtyCount=0 -- exactly the shape of a measured,
+	// clean worktree, and exactly the shape that permits removal. Only a
+	// genuinely absent worktree is a safe error to continue past: there is then
+	// nothing to destroy, and the lane still needs its branch and refs released.
+	if probeErr != nil && !errors.Is(probeErr, reconcile.ErrNoWorktree) {
+		return Outcome{Decision: d, Err: fmt.Errorf(
+			"worktree %s could not be measured (%w); refusing to reap on an unknown state",
+			lane.Worktree, probeErr)}
+	}
 
 	// Snapshot before anything is removed. Untracked work is protected by no
 	// branch, so a worktree removal destroys it with nothing to recover from.
@@ -166,9 +192,11 @@ func (a *Applier) applyReap(ctx context.Context, d decide.Decision) Outcome {
 		}
 	}
 
-	var live []LiveSession
+	// No resolver is not "no sessions": it is no measurement, and PlanReap
+	// refuses on that rather than falling back to the decayed ledger field.
+	probe := UnknownSessions()
 	if a.LiveSessions != nil {
-		live = a.LiveSessions(lane)
+		probe = a.LiveSessions(lane)
 	}
 	reapLane := lane
 	if d.FinalPhaseComplete && lane.Status == state.StatusRunning {
@@ -181,7 +209,7 @@ func (a *Applier) applyReap(ctx context.Context, d decide.Decision) Outcome {
 		projected.Status = state.StatusDone
 		reapLane = &projected
 	}
-	plan := PlanReap(ctx, a.Git, a.RepoDir, reapLane, wt, st.Config.Target, live)
+	plan := PlanReap(ctx, a.Git, a.RepoDir, reapLane, wt, st.Config.Target, probe)
 	if !plan.Safe {
 		return Outcome{Decision: d, Err: fmt.Errorf("refused: %v", plan.Blockers)}
 	}
@@ -206,7 +234,13 @@ func (a *Applier) applyReap(ctx context.Context, d decide.Decision) Outcome {
 		// -D rather than -d: the branch was squash-merged, so -d refuses even
 		// though the content landed. PlanReap already verified integration.
 		if _, err := a.Git.Run(ctx, a.RepoDir, "branch", "-D", lane.Branch); err != nil {
-			return Outcome{Decision: d, Detail: "worktree removed; branch delete failed: " + err.Error()}
+			// A leaked branch is a FAILED reap, not a footnote on a successful
+			// one. Returning a nil Err here made OK() true, so the tick counted
+			// the lane closed, wrote StatusDone below, and the five-zeros audit
+			// reported a clean close while the branch was still there.
+			return Outcome{Decision: d,
+				Detail: "worktree removed; branch NOT deleted",
+				Err:    fmt.Errorf("delete branch %s: %w", lane.Branch, err)}
 		}
 	}
 	if err := ReleaseBackup(ctx, a.Git, a.RepoDir, lane.ID); err != nil {

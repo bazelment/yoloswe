@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bazelment/yoloswe/swarm-queen/bramble"
+	"github.com/bazelment/yoloswe/swarm-queen/reconcile"
 	"github.com/bazelment/yoloswe/swarm-queen/state"
 )
 
@@ -118,6 +119,42 @@ func Spawn(
 			res.SessionID, res.WorktreePath, recErr, ledErr)
 	}
 	return res, nil
+}
+
+// RecordPhaseBaseline stamps the worktree HEAD a phase starts from.
+//
+// Without it PhaseStartSHA stays empty, ProbeWorktree skips commit counting
+// (counting against a moving branch produces a meaningless number), so
+// CommitsSinceFork stays 0 and PhaseCompletion rejects EVERY mutating `.done`
+// as an empty branch. The refusal that exists to catch a lane that committed
+// nothing instead fires on every lane that worked.
+//
+// ForkSHA is the lane's original fork point and is stamped once; PhaseStartSHA
+// moves to the current head at each phase, so a phase is measured against what
+// it inherited rather than against the whole lane.
+//
+// A failure here is returned, not swallowed: a lane spawned without a baseline
+// cannot have its completion verified, and finding that out at `.done` time is
+// how an empty branch reaches a merge.
+func RecordPhaseBaseline(ctx context.Context, g reconcile.GitRunner, store *state.Store, laneID, worktree string) error {
+	if worktree == "" {
+		return nil
+	}
+	head, err := g.Run(ctx, worktree, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("resolve phase baseline for %s: %w", laneID, err)
+	}
+	return store.Update(func(st *state.State) error {
+		lane, ok := st.Lane(laneID)
+		if !ok {
+			return fmt.Errorf("lane %q is not in the ledger", laneID)
+		}
+		lane.PhaseStartSHA = head
+		if lane.ForkSHA == "" {
+			lane.ForkSHA = head
+		}
+		return nil
+	})
 }
 
 func writeSpawnRecord(runDir string, brief SpawnBrief, res bramble.SpawnResult) error {

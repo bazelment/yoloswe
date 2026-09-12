@@ -34,6 +34,29 @@ type LiveSession struct {
 	TmuxTarget string
 }
 
+// SessionProbe is the RESULT of asking bramble which sessions hold a lane, and
+// it distinguishes the two answers a bare slice cannot.
+//
+// "No sessions" and "could not ask" arrive as the same empty slice, and the
+// second is the dangerous one: it takes the ledger-fallback path and can remove
+// a worktree out from under a live agent. Doctor already draws this distinction
+// for branches -- an unmeasurable probe is SKIPPED, never reported as empty --
+// and this is the same rule for sessions.
+//
+// The zero value is deliberately the unknown one: a caller that forgets to set
+// Known gets the refusal, not the destructive path.
+type SessionProbe struct {
+	Sessions []LiveSession
+	// Known reports that bramble actually answered. False means unmeasured.
+	Known bool
+}
+
+// KnownSessions records a successful probe, including one that found nothing.
+func KnownSessions(s []LiveSession) SessionProbe { return SessionProbe{Sessions: s, Known: true} }
+
+// UnknownSessions records a probe that could not run.
+func UnknownSessions() SessionProbe { return SessionProbe{} }
+
 // PlanReap decides whether a lane can be reaped, without touching anything.
 //
 // The preconditions encode failures that each cost real time:
@@ -41,7 +64,9 @@ type LiveSession struct {
 //   - its integration must be verified BY CONTENT, since squash-merges rewrite
 //     history and ancestry alone is insufficient;
 //   - uncommitted work must already be snapshotted, because a worktree removal
-//     destroys untracked files with nothing to recover from.
+//     destroys untracked files with nothing to recover from;
+//   - the session probe must have actually RUN, because an unmeasured fleet is
+//     indistinguishable from an empty one and only the latter is safe.
 func PlanReap(
 	ctx context.Context,
 	g reconcile.GitRunner,
@@ -49,8 +74,9 @@ func PlanReap(
 	lane *state.Lane,
 	wt reconcile.WorktreeState,
 	target string,
-	live []LiveSession,
+	probe SessionProbe,
 ) ReapPlan {
+	live := probe.Sessions
 	p := ReapPlan{
 		Lane:     lane.ID,
 		Worktree: lane.Worktree,
@@ -64,14 +90,28 @@ func PlanReap(
 		p.WindowID = ""
 	}
 
+	// An unmeasured fleet blocks the reap outright. Proceeding would fall back to
+	// the ledger's window_id -- which decayed to 1-of-12 populated -- and remove a
+	// worktree without having proved that no live session owns it.
+	if !probe.Known {
+		p.Safe = false
+		p.Blockers = append(p.Blockers,
+			"bramble session probe did not run; cannot prove no live session holds this lane")
+	}
+
 	if !lane.Status.Terminal() {
 		p.Safe = false
 		p.Blockers = append(p.Blockers,
 			fmt.Sprintf("lane is %s, not terminal", lane.Status))
 	}
 
-	// An open PR still needs its worktree; reaping one strands the review.
-	if lane.PR != 0 && lane.MergeSHA == "" {
+	// What must be TRUE to delete a branch: its content is observably present on
+	// the target, measured now. Not "it has no PR", not "the ledger remembers a
+	// MergeSHA" -- those are cases where nobody looked. Gating on
+	// `PR != 0 && MergeSHA == ""` skipped the check for a lane with no PR and for
+	// one carrying a stale MergeSHA, and deleted the branch on the strength of a
+	// field rather than of the repository.
+	if lane.Branch != "" {
 		merged, err := BranchMerged(ctx, g, repoDir, lane.Branch, target)
 		switch {
 		case err != nil:
@@ -81,8 +121,7 @@ func PlanReap(
 		case !merged:
 			p.Safe = false
 			p.Blockers = append(p.Blockers,
-				fmt.Sprintf("PR #%d is recorded but %s is not merged into %s",
-					lane.PR, lane.Branch, target))
+				fmt.Sprintf("%s is not merged into %s", lane.Branch, target))
 		}
 	}
 

@@ -145,7 +145,8 @@ func TestSpawnLifecycleAcrossBackends(t *testing.T) {
 
 			wt, _ := reconcile.ProbeWorktree(ctx(t), git, lane.Worktree, "")
 			plan := lifecycle.PlanReap(ctx(t), git, repo, lane, wt, "main",
-				[]lifecycle.LiveSession{{ID: sess.ID, Status: sess.Status, TmuxTarget: sess.TmuxTarget}})
+				lifecycle.KnownSessions([]lifecycle.LiveSession{
+					{ID: sess.ID, Status: sess.Status, TmuxTarget: sess.TmuxTarget}}))
 			if !plan.Safe {
 				t.Fatalf("reap refused: %v", plan.Blockers)
 			}
@@ -350,7 +351,7 @@ func TestLiveSessionBlocksWorktreeRemoval(t *testing.T) {
 	wt, _ := reconcile.ProbeWorktree(ctx(t), git, lane.Worktree, "")
 
 	// Planning from the ledger alone omits the kill entirely.
-	blind := lifecycle.PlanReap(ctx(t), git, repo, lane, wt, "main", nil)
+	blind := lifecycle.PlanReap(ctx(t), git, repo, lane, wt, "main", lifecycle.KnownSessions(nil))
 	for _, s := range blind.Steps {
 		if strings.Contains(s, "kill tmux window") {
 			t.Errorf("premise broken: a ledger-only plan should not know about the session: %v", blind.Steps)
@@ -359,7 +360,7 @@ func TestLiveSessionBlocksWorktreeRemoval(t *testing.T) {
 
 	// Resolving from bramble finds the squatter and kills it first.
 	live := []lifecycle.LiveSession{{ID: sess.ID, Status: sess.Status, TmuxTarget: sess.TmuxTarget}}
-	seeing := lifecycle.PlanReap(ctx(t), git, repo, lane, wt, "main", live)
+	seeing := lifecycle.PlanReap(ctx(t), git, repo, lane, wt, "main", lifecycle.KnownSessions(live))
 	killAt := -1
 	rmAt := -1
 	for i, s := range seeing.Steps {

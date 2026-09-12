@@ -54,11 +54,19 @@ Each refusal below corresponds to a failure that cost real time in a live run.
 - **Merge on a stale approval.** `reviewDecision: APPROVED` is a PR-level field;
   it must be pinned to the current head. Caught stale three times in one run.
 - **Treat absence as success.** Unknown checks, unknown approval, missing verdict
-  — all refusals, never permission.
+  — all refusals, never permission. This includes probes that could not run: a
+  session list that could not be fetched and a worktree that could not be
+  measured are `unknown`, never `empty` and never `clean`. The distinction is
+  carried in the types (`lifecycle.SessionProbe`), because "no sessions" and
+  "could not ask" are otherwise the same empty slice — and only the first is safe
+  to reap on.
 - **Reap a lane holding unsnapshotted work.** Untracked files are protected by no
   branch; a worktree removal destroys them outright.
 - **Reap on ancestry alone.** Branches are squash-merged, so integration is
-  verified by content (a two-dot diff), not by ancestry.
+  verified by content (a two-dot diff), not by ancestry. Every branch is checked
+  this way before deletion — not only lanes with an open PR, and never on the
+  strength of a recorded `merge_sha`, which is a ledger field rather than a
+  measurement.
 - **Kill a tmux window it cannot prove is not itself.** See the 2026-08-27
   incident in `lifecycle/tmuxsafe.go`: 18 healthy sessions killed, including the
   orchestrator's own.
@@ -68,6 +76,12 @@ Each refusal below corresponds to a failure that cost real time in a live run.
 - **Overwrite a rework round.** `sessions` is keyed by phase, so a naive rework
   destroys the previous attempt's session id — rounds 2-6 of an 11-round lane
   were lost this way.
+- **Report a partial teardown as a clean one.** A worktree removed but a branch
+  left behind is a FAILED reap: the outcome carries the error, the lane is not
+  recorded closed, and the five-zeros audit sees the leak.
+- **Advance past a signal it failed to act on.** The baseline moves only after
+  every decision applied, so a failed spawn or reap re-sees its `.done` on the
+  next tick instead of dropping it permanently.
 
 ## A check that cannot run reports that it could not run
 

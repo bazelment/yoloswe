@@ -192,3 +192,65 @@ func TestLoadBaselineDistinguishesMissingFromEmpty(t *testing.T) {
 		t.Errorf("expected an empty set, got %+v", set)
 	}
 }
+
+// A tick that failed to apply a decision must NOT consume the signals it saw.
+// Saving the baseline first and reporting the failure afterwards marked them seen
+// anyway, so the next tick never saw the claim again and nothing retried it.
+func TestCommitBaselineHoldsSignalsWhenDecisionsFailed(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "lane-a.swe.done"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	basePath := filepath.Join(dir, ".baseline")
+
+	advanced, err := CommitBaseline(dir, basePath, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if advanced {
+		t.Error("the baseline must not advance while a decision failed to apply")
+	}
+	if _, err := os.Stat(basePath); !os.IsNotExist(err) {
+		t.Errorf("no baseline should have been written, stat err = %v", err)
+	}
+
+	// The signal is therefore still new to the next tick, which is the whole
+	// point: a dropped .done is a lane that reported completion to nobody.
+	fresh, err := NewSince(dir, SignalSet{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh) != 1 {
+		t.Fatalf("the unconsumed signal must still be visible, got %d", len(fresh))
+	}
+}
+
+// With every decision applied, the baseline advances and the signal is consumed.
+func TestCommitBaselineAdvancesWhenNothingFailed(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "lane-a.swe.done"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	basePath := filepath.Join(dir, ".baseline")
+
+	advanced, err := CommitBaseline(dir, basePath, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !advanced {
+		t.Fatal("the baseline must advance once every decision applied")
+	}
+	saved, err := LoadBaseline(basePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := NewSince(dir, saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh) != 0 {
+		t.Errorf("a consumed signal must not be new to the next tick, got %v", fresh)
+	}
+}

@@ -42,7 +42,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	worktrees := probeWorktrees(ctx, st)
-	sessions := liveSessions(ctx, cmd)
+	sessions, sessionErr := liveSessions(ctx, cmd)
 
 	branches, branchErr := liveBranches(ctx, st)
 	findings := verify.LedgerDriftWithBranches(st, worktrees, sessions, branches)
@@ -58,12 +58,20 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	if branchErr != nil {
 		fmt.Printf("\nbranch checks SKIPPED, not passed: %v\n", branchErr)
 	}
+	if sessionErr != nil {
+		fmt.Printf("\nsession checks SKIPPED, not passed: %v\n", sessionErr)
+	}
 
 	nonTerminal := st.NonTerminal()
 	fmt.Printf("\ndoctor: %d finding(s) across %d lane(s); %d non-terminal",
 		len(findings), len(st.Lanes), len(nonTerminal))
-	if branchErr != nil {
+	switch {
+	case branchErr != nil && sessionErr != nil:
+		fmt.Print(" (branch and session checks skipped)")
+	case branchErr != nil:
 		fmt.Print(" (branch checks skipped)")
+	case sessionErr != nil:
+		fmt.Print(" (session checks skipped)")
 	}
 	fmt.Println()
 	for _, l := range nonTerminal {
@@ -79,6 +87,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	case branchErr != nil:
 		return fmt.Errorf("%d finding(s), and some checks could not run: %w",
 			len(findings), branchErr)
+	case sessionErr != nil:
+		return fmt.Errorf("%d finding(s), and some checks could not run: %w",
+			len(findings), sessionErr)
 	case len(findings) > 0:
 		return fmt.Errorf("%d drift finding(s) across %d lane(s)", len(findings), len(st.Lanes))
 	}
@@ -100,21 +111,26 @@ func probeWorktrees(ctx context.Context, st *state.State) map[string]reconcile.W
 	return out
 }
 
-// liveSessions asks bramble what is running. An unreachable TUI is reported and
-// treated as "unknown", never as "no sessions" -- an empty list would read as a
-// healthy idle swarm.
-func liveSessions(ctx context.Context, cmd *cobra.Command) []bramble.Session {
+// liveSessions asks bramble what is running.
+//
+// Returns (nil, err) when the probe could not run, so "unknown" reaches the
+// caller as a distinct answer from "no sessions". They are the same empty slice
+// otherwise, and the difference decides whether a worktree may be removed: an
+// empty fleet is safe to reap, an unmeasured one is not. The stderr warning is
+// kept, but a warning is not a mechanism -- it vanishes the moment stderr is
+// redirected, which is how a broken probe writes a clean bill of health.
+func liveSessions(ctx context.Context, cmd *cobra.Command) ([]bramble.Session, error) {
 	client, err := bramble.New()
 	if err != nil {
 		cmd.PrintErrf("warning: bramble unreachable (%v); session drift not checked\n", err)
-		return nil
+		return nil, fmt.Errorf("bramble unreachable: %w", err)
 	}
 	sessions, err := client.ListSessions(ctx)
 	if err != nil {
 		cmd.PrintErrf("warning: list-sessions failed (%v); session drift not checked\n", err)
-		return nil
+		return nil, fmt.Errorf("list-sessions: %w", err)
 	}
-	return sessions
+	return sessions, nil
 }
 
 // liveBranches lists which of the run's branches still exist.

@@ -10,6 +10,7 @@ import (
 	"github.com/bazelment/yoloswe/swarm-queen/bramble"
 	"github.com/bazelment/yoloswe/swarm-queen/decide"
 	"github.com/bazelment/yoloswe/swarm-queen/lifecycle"
+	"github.com/bazelment/yoloswe/swarm-queen/reconcile"
 	"github.com/bazelment/yoloswe/swarm-queen/state"
 )
 
@@ -142,6 +143,16 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	res, err := lifecycle.Spawn(ctx, mustClient(), store, runDir, brief, req)
 	if err != nil {
 		return err
+	}
+	// Same baseline stamp as the tick path: a phase spawned without one has no
+	// measurable notion of "committed nothing", so its `.done` cannot be verified.
+	worktree := res.WorktreePath
+	if worktree == "" {
+		worktree = lane.Worktree
+	}
+	if err := lifecycle.RecordPhaseBaseline(ctx, reconcile.ExecGit{}, store, lane.ID, worktree); err != nil {
+		return fmt.Errorf("session %s IS LIVE at %s but its phase baseline was not recorded: %w",
+			res.SessionID, orDash(worktree), err)
 	}
 	fmt.Printf("dispatched %s [%s r%d]: session %s on %s\n",
 		lane.ID, phase, round, res.SessionID, orDash(res.WorktreePath))

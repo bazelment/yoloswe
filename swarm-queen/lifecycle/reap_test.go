@@ -23,7 +23,7 @@ func TestPlanReapRefusesNonTerminalLane(t *testing.T) {
 	dir := newRepo(t)
 	lane := &state.Lane{ID: "x", Status: state.StatusRunning, Branch: "b", Worktree: dir}
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Path: dir, Exists: true}, "main", nil)
+		reconcile.WorktreeState{Path: dir, Exists: true}, "main", KnownSessions(nil))
 	if p.Safe || !blocked(p, "not terminal") {
 		t.Errorf("a running lane must not be reapable: %+v", p)
 	}
@@ -37,7 +37,7 @@ func TestPlanReapRefusesUnsnapshottedWork(t *testing.T) {
 	lane := &state.Lane{ID: "replay", Status: state.StatusDone, Branch: "b", Worktree: dir}
 	wt := reconcile.WorktreeState{Path: dir, Exists: true, DirtyCount: 1, HasUntracked: true}
 
-	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane, wt, "main", nil)
+	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane, wt, "main", KnownSessions(nil))
 	if p.Safe {
 		t.Fatalf("unsnapshotted work must block the reap: %+v", p)
 	}
@@ -50,18 +50,22 @@ func TestPlanReapRefusesUnsnapshottedWork(t *testing.T) {
 func TestPlanReapAllowsAfterSnapshot(t *testing.T) {
 	t.Parallel()
 	dir := newRepo(t)
+	// Branch "b" must exist and be integrated, or the integration check blocks
+	// for that reason instead and this test would never reach the snapshot
+	// question it is asking.
+	git(t, dir, "branch", "b")
 	write(t, dir, "wip.txt", "work")
 
 	lane := &state.Lane{ID: "replay", Status: state.StatusDone, Branch: "b", Worktree: dir}
 	wt := reconcile.WorktreeState{Path: dir, Exists: true, DirtyCount: 1, HasUntracked: true}
 
-	if p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane, wt, "main", nil); p.Safe {
+	if p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane, wt, "main", KnownSessions(nil)); p.Safe {
 		t.Fatal("precondition: should be unsafe before the snapshot")
 	}
 	if _, err := SnapshotAtRisk(context.Background(), reconcile.ExecGit{}, "replay", dir); err != nil {
 		t.Fatal(err)
 	}
-	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane, wt, "main", nil)
+	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane, wt, "main", KnownSessions(nil))
 	if !p.Safe {
 		t.Errorf("snapshotted work should be reapable: %v", p.Blockers)
 	}
@@ -79,7 +83,7 @@ func TestPlanReapRefusesUnmergedPR(t *testing.T) {
 
 	lane := &state.Lane{ID: "pr-lane", Status: state.StatusDone, Branch: "feature", PR: 11968}
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Exists: false}, "main", nil)
+		reconcile.WorktreeState{Exists: false}, "main", KnownSessions(nil))
 	if p.Safe || !blocked(p, "not merged") {
 		t.Errorf("unmerged PR branch must block: %+v", p)
 	}
@@ -100,7 +104,7 @@ func TestPlanReapAcceptsSquashMergedPR(t *testing.T) {
 
 	lane := &state.Lane{ID: "pr-lane", Status: state.StatusDone, Branch: "feature", PR: 11968}
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Exists: false}, "main", nil)
+		reconcile.WorktreeState{Exists: false}, "main", KnownSessions(nil))
 	if !p.Safe {
 		t.Errorf("squash-merged branch must be reapable: %v", p.Blockers)
 	}
@@ -117,7 +121,7 @@ func TestReapStepsKillSessionBeforeRemovingWorktree(t *testing.T) {
 		Branch: "b", Worktree: dir, WindowID: "@1380",
 	}
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Path: dir, Exists: true}, "main", nil)
+		reconcile.WorktreeState{Path: dir, Exists: true}, "main", KnownSessions(nil))
 
 	var killIdx, rmIdx = -1, -1
 	for i, s := range p.Steps {
@@ -206,7 +210,7 @@ func TestPlanReapKillsSessionsObservedNotRecorded(t *testing.T) {
 	}}
 
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Path: dir, Exists: true}, "main", live)
+		reconcile.WorktreeState{Path: dir, Exists: true}, "main", KnownSessions(live))
 
 	var killIdx, rmIdx = -1, -1
 	for i, s := range p.Steps {
@@ -235,7 +239,7 @@ func TestPlanReapKeepsEveryObservedWindow(t *testing.T) {
 		{ID: "duplicate", TmuxTarget: "@1"},
 	}
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Path: dir, Exists: true}, "main", live)
+		reconcile.WorktreeState{Path: dir, Exists: true}, "main", KnownSessions(live))
 	if got, want := len(p.WindowIDs), 2; got != want {
 		t.Fatalf("got window ids %v, want two distinct targets", p.WindowIDs)
 	}
@@ -249,7 +253,7 @@ func TestPlanReapHandlesPanelessSession(t *testing.T) {
 	live := []LiveSession{{ID: "sess-dead", Status: "failed", TmuxTarget: ""}}
 
 	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
-		reconcile.WorktreeState{Path: dir, Exists: true}, "main", live)
+		reconcile.WorktreeState{Path: dir, Exists: true}, "main", KnownSessions(live))
 	for _, s := range p.Steps {
 		if strings.Contains(s, "kill tmux window ") && !strings.Contains(s, "session") {
 			t.Errorf("must not attempt to kill a nonexistent pane: %v", p.Steps)
@@ -266,5 +270,91 @@ func TestPlanReapHandlesPanelessSession(t *testing.T) {
 	}
 	if p.WindowID != "" || len(p.WindowIDs) != 0 {
 		t.Errorf("live paneless session must replace the stale ledger target: %+v", p)
+	}
+}
+
+// An unmeasured session probe must block the reap. "No sessions" and "could not
+// ask" arrive as the same empty slice, and only the first is safe: proceeding on
+// the second falls back to the ledger's window_id -- 1-of-12 populated in a real
+// run -- and removes a worktree without proving no live agent holds it.
+func TestPlanReapRefusesUnknownSessionProbe(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t)
+	git(t, dir, "branch", "b")
+	lane := &state.Lane{ID: "unmeasured", Status: state.StatusDone, Branch: "b", Worktree: dir}
+	wt := reconcile.WorktreeState{Path: dir, Exists: true}
+
+	// Same lane, same worktree: only the probe's Known bit differs.
+	if p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane, wt, "main",
+		KnownSessions(nil)); !p.Safe {
+		t.Fatalf("precondition: a MEASURED empty fleet must be reapable: %v", p.Blockers)
+	}
+	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane, wt, "main",
+		UnknownSessions())
+	if p.Safe {
+		t.Errorf("an unmeasured session probe must block the reap: %+v", p)
+	}
+	if !blocked(p, "session probe did not run") {
+		t.Errorf("the blocker must name the unmeasured probe, got %v", p.Blockers)
+	}
+}
+
+// The zero SessionProbe is unknown, so a caller that forgets to set it gets the
+// refusal rather than the destructive path.
+func TestZeroSessionProbeIsUnknown(t *testing.T) {
+	t.Parallel()
+	if (SessionProbe{}).Known {
+		t.Error("the zero SessionProbe must be unknown, or forgetting to set it permits a reap")
+	}
+	if !KnownSessions(nil).Known {
+		t.Error("KnownSessions must record that the probe ran, even with no sessions")
+	}
+}
+
+// A branch is deleted only when its content is observably on the target. Gating
+// the check on `PR != 0 && MergeSHA == ""` skipped it for a lane with no PR and
+// for one carrying a stale MergeSHA, deleting the branch on the strength of a
+// ledger field rather than of the repository.
+func TestPlanReapVerifiesIntegrationWithoutAPR(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t)
+	git(t, dir, "checkout", "-q", "-b", "orphan")
+	write(t, dir, "only-here.txt", "never landed")
+	git(t, dir, "add", "only-here.txt")
+	git(t, dir, "commit", "-q", "-m", "work that never merged")
+	git(t, dir, "checkout", "-q", "main")
+
+	// No PR recorded at all -- the case the old gate skipped entirely.
+	lane := &state.Lane{ID: "no-pr", Status: state.StatusDone, Branch: "orphan"}
+	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
+		reconcile.WorktreeState{Exists: false}, "main", KnownSessions(nil))
+	if p.Safe {
+		t.Errorf("an unintegrated branch must block even with no PR: %+v", p)
+	}
+	if !blocked(p, "not merged") {
+		t.Errorf("expected the integration blocker, got %v", p.Blockers)
+	}
+}
+
+// A recorded MergeSHA is a ledger field, not a measurement. It must not stand in
+// for the content check: the SHA can name a merge that was reverted, or a branch
+// that was force-pushed since.
+func TestPlanReapVerifiesIntegrationDespiteRecordedMergeSHA(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t)
+	git(t, dir, "checkout", "-q", "-b", "claimed")
+	write(t, dir, "unlanded.txt", "still only here")
+	git(t, dir, "add", "unlanded.txt")
+	git(t, dir, "commit", "-q", "-m", "work")
+	git(t, dir, "checkout", "-q", "main")
+
+	lane := &state.Lane{
+		ID: "stale-merge", Status: state.StatusDone, Branch: "claimed",
+		PR: 42, MergeSHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+	}
+	p := PlanReap(context.Background(), reconcile.ExecGit{}, dir, lane,
+		reconcile.WorktreeState{Exists: false}, "main", KnownSessions(nil))
+	if p.Safe {
+		t.Errorf("a recorded MergeSHA must not substitute for the content check: %+v", p)
 	}
 }

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/swarm-queen/bramble"
+	"github.com/bazelment/yoloswe/swarm-queen/decide"
 	"github.com/bazelment/yoloswe/swarm-queen/lifecycle"
 	"github.com/bazelment/yoloswe/swarm-queen/reconcile"
 	"github.com/bazelment/yoloswe/swarm-queen/state"
@@ -47,8 +50,9 @@ func runReap(cmd *cobra.Command, args []string) error {
 	// Sessions come from bramble, never from the ledger: window_id decayed to
 	// 1-of-12 populated in a real run, so a lane with a live agent can carry an
 	// empty one and would otherwise have its worktree pulled out from under it.
-	sessions := liveSessions(ctx, cmd)
-	var safe, refused int
+	sessions, sessionErr := liveSessions(ctx, cmd)
+	var safe, refused, failed int
+	var applier *lifecycle.Applier
 
 	for _, lane := range st.Lanes {
 		wt, err := reconcile.ProbeWorktree(ctx, git, lane.Worktree, lane.ForkSHA)
@@ -67,8 +71,11 @@ func runReap(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		plan := lifecycle.PlanReap(ctx, git, reapRepoDir, lane, wt, st.Config.Target,
-			sessionsForLane(sessions, lane.Worktree))
+		probe := lifecycle.UnknownSessions()
+		if sessionErr == nil {
+			probe = lifecycle.KnownSessions(sessionsForLane(sessions, lane.Worktree))
+		}
+		plan := lifecycle.PlanReap(ctx, git, reapRepoDir, lane, wt, st.Config.Target, probe)
 		if !plan.Safe {
 			refused++
 			fmt.Printf("REFUSE %s: %v\n", lane.ID, plan.Blockers)
@@ -78,11 +85,29 @@ func runReap(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		safe++
-		verb := "WOULD REAP"
-		if reapApply {
-			verb = "REAP"
+		if !reapApply {
+			fmt.Printf("WOULD REAP %s: %v\n", lane.ID, plan.Steps)
+			continue
 		}
-		fmt.Printf("%s %s: %v\n", verb, lane.ID, plan.Steps)
+		// --apply means apply. Printing a different verb and doing nothing left
+		// worktrees, branches, sessions and the ledger untouched while reporting
+		// a teardown, so route every safe plan through the same transactional
+		// Applier that `tick --apply` uses.
+		if applier == nil {
+			if applier, err = newReapApplier(ctx, cmd, args[0]); err != nil {
+				return err
+			}
+		}
+		out := applier.Apply(ctx, []decide.Decision{{
+			Lane: lane.ID, Kind: decide.KindReap, Source: decide.SourceRule,
+			Reason: "reap --apply",
+		}})
+		for i := range out {
+			fmt.Println(out[i])
+			if !out[i].OK() {
+				failed++
+			}
+		}
 	}
 
 	fmt.Printf("\nreap: %d reapable, %d refused, %d lane(s)", safe, refused, len(st.Lanes))
@@ -90,5 +115,41 @@ func runReap(cmd *cobra.Command, args []string) error {
 		fmt.Print(" (dry run; pass --apply to act)")
 	}
 	fmt.Println()
+	if failed > 0 {
+		return fmt.Errorf("%d lane(s) failed to close", failed)
+	}
 	return nil
+}
+
+// newReapApplier builds the same Applier tick uses, so the two commands share
+// one teardown path rather than growing a second, less-checked one.
+//
+// Built lazily: a dry run and a run with nothing reapable both need no bramble
+// TUI, and requiring one would make `reap` unusable for the reporting it exists
+// to do.
+func newReapApplier(ctx context.Context, cmd *cobra.Command, runDir string) (*lifecycle.Applier, error) {
+	client, err := bramble.New()
+	if err != nil {
+		return nil, fmt.Errorf("--apply needs a reachable bramble TUI: %w", err)
+	}
+	tmux := lifecycle.ExecTmux{}
+	self, serr := lifecycle.ResolveSelf(ctx, tmux)
+	if serr != nil {
+		// Fail-closed rather than fatal: an unresolvable self only means window
+		// kills are refused, which is the safe direction.
+		cmd.PrintErrf("warning: cannot resolve own tmux window (%v); "+
+			"window kills will be refused\n", serr)
+	}
+	sessions, sessionErr := liveSessions(ctx, cmd)
+	return &lifecycle.Applier{
+		Git: reconcile.ExecGit{}, Tmux: tmux, Spawner: client,
+		Store: state.NewStore(runDir), RunDir: runDir, RepoDir: reapRepoDir,
+		SelfWindow: self,
+		LiveSessions: func(l *state.Lane) lifecycle.SessionProbe {
+			if sessionErr != nil {
+				return lifecycle.UnknownSessions()
+			}
+			return lifecycle.KnownSessions(sessionsForLane(sessions, l.Worktree))
+		},
+	}, nil
 }
