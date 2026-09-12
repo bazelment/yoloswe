@@ -98,19 +98,13 @@ func runTick(cmd *cobra.Command, args []string) error {
 		})
 		if ok && sig.Kind == reconcile.SignalDone {
 			verdicts[lane.ID] = verify.PhaseCompletion(lane, worktrees[lane.ID],
-				mutatingPhase(sig.Phase))
+				state.MutatingPhase(sig.Phase))
 		}
 	}
 	drift := verify.LedgerDrift(st, worktrees, sessions)
 
 	// 3. DECIDE — rules first; anything unsettled escalates.
-	decisions := decide.Plan(decide.Inputs{
-		State:         st,
-		Signals:       laneSignals,
-		Verdicts:      verdicts,
-		Drift:         drift,
-		MaxConcurrent: tickMaxConcurrent,
-	})
+	decisions := decide.Plan(planInputs(st, laneSignals, verdicts, drift, tickMaxConcurrent))
 
 	// Standing rules are re-read every tick, so a correction survives the
 	// compaction that would otherwise drop it.
@@ -213,18 +207,6 @@ func runTick(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// mutatingPhase reports whether a phase is expected to change the branch. A
-// read-only phase legitimately commits nothing, so the empty-branch refusal must
-// not apply to it.
-func mutatingPhase(phase string) bool {
-	switch phase {
-	case "gaps", "replay", "report", "verify", "":
-		return false
-	default:
-		return !strings.HasPrefix(phase, "review")
-	}
-}
-
 // sessionsForLane selects the live sessions attached to a lane's worktree.
 // bramble reports worktree_name and never a path, so match on the basename.
 func sessionsForLane(sessions []bramble.Session, worktree string) []lifecycle.LiveSession {
@@ -293,6 +275,53 @@ func loadMissions(runDir string, st *state.State, decisions []decide.Decision) m
 				break
 			}
 		}
+	}
+	return out
+}
+
+// planInputs assembles what the rule engine decides from. Kept separate from
+// runTick so the wiring is testable: SlotExempt was implemented in decide and
+// documented in decide_test while tick passed nothing, which made the exemption
+// correct, tested, and dead.
+func planInputs(
+	st *state.State,
+	signals []decide.LaneSignal,
+	verdicts map[string]verify.Verdict,
+	drift []verify.Finding,
+	maxConcurrent int,
+) decide.Inputs {
+	return decide.Inputs{
+		State:         st,
+		Signals:       signals,
+		Verdicts:      verdicts,
+		Drift:         drift,
+		MaxConcurrent: maxConcurrent,
+		// A read-only phase is not the work a concurrency cap exists to limit.
+		// Unset, report/gaps/review lanes occupied slots and blocked staffing of
+		// dependency-ready lanes -- the stall this harness exists to prevent.
+		SlotExempt: slotExempt(st),
+	}
+}
+
+// slotExempt marks every non-mutating phase as not consuming concurrency
+// capacity, derived from the one shared predicate rather than from a second list
+// to remember to update.
+//
+// Covers the phases a lane is actually IN as well as those the contract
+// declares: a lane can carry a phase the config no longer lists (a contract
+// edited mid-run), and such a lane still must not hold a slot it does not need.
+func slotExempt(st *state.State) map[string]bool {
+	out := map[string]bool{}
+	mark := func(name string) {
+		if name != "" && !state.MutatingPhase(name) {
+			out[name] = true
+		}
+	}
+	for _, name := range st.Config.PhaseNames() {
+		mark(name)
+	}
+	for _, lane := range st.Lanes {
+		mark(lane.Phase)
 	}
 	return out
 }

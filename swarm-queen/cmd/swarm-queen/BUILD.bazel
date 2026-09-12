@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "swarm-queen_lib",
@@ -28,4 +28,14 @@ go_binary(
     name = "swarm-queen",
     embed = [":swarm-queen_lib"],
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "swarm-queen_test",
+    srcs = ["tick_test.go"],
+    embed = [":swarm-queen_lib"],
+    deps = [
+        "//swarm-queen/decide",
+        "//swarm-queen/state",
+    ],
 )

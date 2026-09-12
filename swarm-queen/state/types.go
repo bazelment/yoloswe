@@ -12,6 +12,8 @@
 // verified", so a stale write looked exactly like a fresh one. Hence Evidence.
 package state
 
+import "strings"
+
 // Status is where a lane is in its life. It is deliberately separate from Phase:
 // `running` covers working, wedged and awaiting-input, so the two axes must not
 // be collapsed into one enum.
@@ -49,4 +51,39 @@ func (p Priority) Rank() int {
 	default:
 		return 2
 	}
+}
+
+// MutatingPhase reports whether a phase is expected to change the branch.
+//
+// One predicate, because it answers two questions that must not be allowed to
+// disagree. A read-only phase legitimately commits nothing, so the empty-branch
+// refusal must not apply to it; and a read-only phase is not the work a
+// concurrency cap exists to limit, so it must not consume a slot. Held as two
+// lists in two packages they drifted immediately: the verifier knew about
+// `verify` and a `review` PREFIX, while the slot accounting knew only `report`
+// and `gaps`.
+//
+// The prefix was itself wrong. Every review phase this system actually runs is
+// named `local-review` or `github-review` (see reconcile/signal_test.go and
+// state/rounds_test.go), and neither has `review` as a prefix -- so every real
+// review lane was classified as mutating and its `.done` refused as an empty
+// branch for committing nothing, which is exactly what a review is supposed to
+// do. Matching a dash-delimited segment is what the naming convention actually
+// is.
+//
+// Lives in state because decide and the CLI both import it and neither imports
+// the other.
+func MutatingPhase(phase string) bool {
+	switch phase {
+	case "gaps", "replay", "report", "verify", "":
+		return false
+	}
+	// A segment scan also covers the round suffix convention (local-review-r2)
+	// without needing to strip it first.
+	for _, part := range strings.Split(phase, "-") {
+		if part == "review" {
+			return false
+		}
+	}
+	return true
 }

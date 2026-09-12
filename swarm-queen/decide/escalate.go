@@ -173,24 +173,96 @@ func AppendNudge(runDir string, n Nudge) error {
 	return appendJSONL(filepath.Join(runDir, NudgesName), n)
 }
 
-// PendingNudges returns nudges a tick should apply: every standing rule, plus
-// one-shot nudges not yet consumed.
-func PendingNudges(runDir string) ([]Nudge, error) {
+// nudgeKey identifies a nudge across its superseding records. Nudges carry no
+// id, so identity is the timestamp AppendNudge stamps plus the text itself.
+func nudgeKey(n Nudge) string { return n.At + "\x00" + n.Lane + "\x00" + n.Text }
+
+// loadNudges reads the queue with later records superseding earlier ones, the
+// same last-record-wins rule LoadEscalations uses, so a consumed one-shot nudge
+// does not reappear behind its own original record.
+func loadNudges(runDir string) ([]Nudge, error) {
 	lines, err := readJSONL(filepath.Join(runDir, NudgesName))
 	if err != nil {
 		return nil, err
 	}
-	var out []Nudge
+	latest := map[string]Nudge{}
+	var order []string
 	for _, raw := range lines {
 		var n Nudge
 		if err := json.Unmarshal(raw, &n); err != nil {
-			continue
+			continue // a malformed line must not hide the rest of the queue
 		}
+		k := nudgeKey(n)
+		if _, seen := latest[k]; !seen {
+			order = append(order, k)
+		}
+		latest[k] = n
+	}
+	out := make([]Nudge, 0, len(order))
+	for _, k := range order {
+		out = append(out, latest[k])
+	}
+	return out, nil
+}
+
+// PendingNudges returns nudges a tick should apply: every standing rule, plus
+// one-shot nudges not yet consumed.
+func PendingNudges(runDir string) ([]Nudge, error) {
+	all, err := loadNudges(runDir)
+	if err != nil {
+		return nil, err
+	}
+	var out []Nudge
+	for _, n := range all {
 		if n.Pending() {
 			out = append(out, n)
 		}
 	}
 	return out, nil
+}
+
+// NudgesFor returns the pending nudge text addressed to one lane: its own
+// lane-scoped nudges plus the run-wide ones. Standing rules are excluded because
+// they are rendered separately and on every tick.
+//
+// One-shot nudges were queued by `swarm-queen nudge` and then read by nobody:
+// only StandingRules consumed the queue, and it filters to Standing, so a
+// one-shot nudge never reached a brief, was never marked AppliedAt, and the
+// command had no effect on orchestration at all.
+func NudgesFor(runDir, lane string) ([]Nudge, error) {
+	all, err := PendingNudges(runDir)
+	if err != nil {
+		return nil, err
+	}
+	var out []Nudge
+	for _, n := range all {
+		if n.Standing {
+			continue
+		}
+		if n.Lane == "" || n.Lane == lane {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
+
+// ConsumeNudges marks one-shot nudges applied by appending a superseding record,
+// so the same instruction is not re-delivered on every subsequent tick.
+//
+// Standing nudges are never consumed: re-applying them each tick is what makes a
+// correction survive the compaction that would otherwise drop it.
+func ConsumeNudges(runDir string, ns []Nudge) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, n := range ns {
+		if n.Standing || n.AppliedAt != "" {
+			continue
+		}
+		n.AppliedAt = now
+		if err := appendJSONL(filepath.Join(runDir, NudgesName), n); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // StandingRules returns the text of every standing nudge, oldest first. These

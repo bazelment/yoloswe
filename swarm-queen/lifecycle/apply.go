@@ -111,13 +111,25 @@ func (a *Applier) applySpawn(ctx context.Context, d decide.Decision) Outcome {
 	if mission == "" {
 		mission = lane.Title
 	}
+	// One-shot nudges addressed to this lane ride along with the standing rules,
+	// and are marked consumed once the spawn succeeds. Queued but never read,
+	// `swarm-queen nudge` had no effect on orchestration at all.
+	nudges, nerr := decide.NudgesFor(a.RunDir, lane.ID)
+	if nerr != nil {
+		return Outcome{Decision: d, Err: fmt.Errorf("read nudges: %w", nerr)}
+	}
+	instructions := a.Standing
+	for _, n := range nudges {
+		instructions = append(instructions, n.Text)
+	}
+
 	brief := SpawnBrief{
 		Lane: lane.ID, Phase: d.Phase, Round: max(d.Round, 1),
 		Type: "builder",
 		Text: RenderBrief(BriefContext{
 			RunDir: a.RunDir, Lane: lane, Phase: d.Phase, Round: max(d.Round, 1),
 			Goal: st.Config.Goal, Target: st.Config.Target,
-			Mission: mission, Standing: a.Standing, Findings: d.Evidence,
+			Mission: mission, Standing: instructions, Findings: d.Evidence,
 		}),
 	}
 	for _, p := range st.Config.Phases {
@@ -147,6 +159,13 @@ func (a *Applier) applySpawn(ctx context.Context, d decide.Decision) Outcome {
 	worktree := res.WorktreePath
 	if worktree == "" {
 		worktree = lane.Worktree
+	}
+	// Consume only after the session exists: a nudge marked applied for a spawn
+	// that then failed would be silently dropped.
+	if err := decide.ConsumeNudges(a.RunDir, nudges); err != nil {
+		return Outcome{Decision: d, Err: fmt.Errorf(
+			"session %s IS LIVE but its nudges were not marked consumed (%w) — "+
+				"they will be re-delivered on the next spawn", res.SessionID, err)}
 	}
 	if err := RecordPhaseBaseline(ctx, a.Git, a.Store, lane.ID, worktree); err != nil {
 		return Outcome{Decision: d, Err: fmt.Errorf(

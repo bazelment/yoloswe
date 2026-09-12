@@ -82,7 +82,25 @@ type Client struct {
 // newest-wins guess: picking silently would attach the swarm to the wrong TUI,
 // and "select live evidence by identity, never by list position" is the rule
 // that the mined runs learned the expensive way.
+// It also honours an explicit BRAMBLE_SOCK, which is the override the
+// multiple-socket error tells the operator to set. Nothing read that variable,
+// so the one documented way out of the ambiguity did not exist and the operator
+// had no way to resolve it.
 func SocketPath() (string, error) {
+	if sock := os.Getenv("BRAMBLE_SOCK"); sock != "" {
+		// Validate rather than trust: an exported path left over from a dead TUI
+		// would otherwise send every probe to a socket nothing is listening on,
+		// and the failure would read as "bramble is down" instead of "this
+		// override is stale".
+		fi, err := os.Stat(sock)
+		if err != nil {
+			return "", fmt.Errorf("BRAMBLE_SOCK=%s: %w", sock, err)
+		}
+		if fi.Mode()&os.ModeSocket == 0 {
+			return "", fmt.Errorf("BRAMBLE_SOCK=%s is not a socket", sock)
+		}
+		return sock, nil
+	}
 	uid := os.Getuid()
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {

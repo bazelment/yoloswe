@@ -196,3 +196,108 @@ func TestMissingQueuesReadAsEmpty(t *testing.T) {
 		t.Errorf("PendingNudges on a fresh run: %v %v", ns, err)
 	}
 }
+
+// A one-shot nudge must actually reach the lane it addresses. Queued by
+// `swarm-queen nudge` and read by nobody -- only StandingRules consumed the
+// queue and it filters to Standing -- a one-shot nudge never reached a brief,
+// was never marked AppliedAt, and the command had no effect on orchestration.
+func TestNudgesForDeliversOneShotNudges(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, n := range []Nudge{
+		{Text: "run the integration suite", Lane: "lane-a"},
+		{Text: "a rule for everyone", Standing: true},
+		{Text: "for someone else", Lane: "lane-b"},
+		{Text: "run-wide one-shot"},
+	} {
+		if err := AppendNudge(dir, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := NudgesFor(dir, "lane-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var texts []string
+	for _, n := range got {
+		texts = append(texts, n.Text)
+	}
+	want := []string{"run the integration suite", "run-wide one-shot"}
+	if len(texts) != len(want) {
+		t.Fatalf("got %v, want its own nudge and the run-wide one", texts)
+	}
+	for i := range want {
+		if texts[i] != want[i] {
+			t.Errorf("got %v, want %v", texts, want)
+		}
+	}
+}
+
+// A consumed one-shot nudge is not re-delivered; a standing rule always is.
+func TestConsumeNudgesRetiresOneShotButNotStanding(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, n := range []Nudge{
+		{Text: "once", Lane: "lane-a"},
+		{Text: "every tick", Standing: true},
+	} {
+		if err := AppendNudge(dir, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first, err := NudgesFor(dir, "lane-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || first[0].Text != "once" {
+		t.Fatalf("precondition: expected the one-shot nudge, got %v", first)
+	}
+	if err := ConsumeNudges(dir, first); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := NudgesFor(dir, "lane-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again) != 0 {
+		t.Errorf("a consumed nudge must not be re-delivered, got %v", again)
+	}
+	// The standing rule survives: re-applying it every tick is what makes a
+	// correction outlive the compaction that would otherwise drop it.
+	rules, err := StandingRules(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 || rules[0] != "every tick" {
+		t.Errorf("standing rules must survive consumption, got %v", rules)
+	}
+}
+
+// Consuming is idempotent: a second call must not append forever or resurrect
+// the nudge behind its own original record.
+func TestConsumeNudgesIsIdempotent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := AppendNudge(dir, Nudge{Text: "once", Lane: "lane-a"}); err != nil {
+		t.Fatal(err)
+	}
+	ns, err := NudgesFor(dir, "lane-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if err := ConsumeNudges(dir, ns); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := PendingNudges(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("the nudge must stay consumed, got %v", pending)
+	}
+}

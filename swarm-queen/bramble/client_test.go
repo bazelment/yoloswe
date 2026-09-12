@@ -3,6 +3,7 @@ package bramble
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -256,5 +257,81 @@ func TestSocketPathFollowsATUIRestartThatChangesForm(t *testing.T) {
 	}
 	if got != unsuffixed {
 		t.Errorf("after restart: got %q, want %q", got, unsuffixed)
+	}
+}
+
+// mkSocket creates a real unix socket, which is what SocketPath validates.
+func mkSocket(t *testing.T, path string) string {
+	t.Helper()
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	return path
+}
+
+// BRAMBLE_SOCK is the override the multiple-socket error tells the operator to
+// set. Nothing read it, so the one documented way out of the ambiguity did not
+// exist: the error named a lever that was not connected to anything.
+func TestSocketPathHonoursExplicitOverride(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	uid := os.Getuid()
+
+	// Two candidates: without the override this is the ambiguity that refuses.
+	for _, name := range []string{
+		fmt.Sprintf("bramble-%d.sock", uid),
+		fmt.Sprintf("bramble-%d-2015796.sock", uid),
+	} {
+		mkSocket(t, filepath.Join(dir, name))
+	}
+	if _, err := SocketPath(); err == nil {
+		t.Fatal("precondition: two candidates must be ambiguous without the override")
+	}
+
+	want := mkSocket(t, filepath.Join(t.TempDir(), "chosen.sock"))
+	t.Setenv("BRAMBLE_SOCK", want)
+	got, err := SocketPath()
+	if err != nil {
+		t.Fatalf("the documented override must resolve the ambiguity: %v", err)
+	}
+	if got != want {
+		t.Errorf("got %q, want the overridden socket %q", got, want)
+	}
+}
+
+// A stale override is reported as a stale override. Trusting it would send every
+// probe to a socket nothing listens on, and the failure would read as "bramble
+// is down" rather than "this variable is wrong".
+func TestSocketPathRejectsStaleOverride(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("BRAMBLE_SOCK", filepath.Join(t.TempDir(), "gone.sock"))
+
+	_, err := SocketPath()
+	if err == nil {
+		t.Fatal("an override pointing at nothing must be an error")
+	}
+	if !strings.Contains(err.Error(), "BRAMBLE_SOCK") {
+		t.Errorf("the error must name the variable at fault, got %v", err)
+	}
+}
+
+// A path that exists but is not a socket is also refused: a leftover regular
+// file at the expected path would otherwise be handed to every probe.
+func TestSocketPathRejectsNonSocketOverride(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	notASocket := filepath.Join(t.TempDir(), "regular-file")
+	if err := os.WriteFile(notASocket, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BRAMBLE_SOCK", notASocket)
+
+	_, err := SocketPath()
+	if err == nil {
+		t.Fatal("a regular file must not be accepted as a control socket")
+	}
+	if !strings.Contains(err.Error(), "not a socket") {
+		t.Errorf("the error must say what is wrong with it, got %v", err)
 	}
 }

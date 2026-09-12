@@ -285,3 +285,38 @@ func TestUpdatePreservesUnknownConfigKeys(t *testing.T) {
 		t.Errorf("goal = %s, want \"changed\"", probe.Config["goal"])
 	}
 }
+
+// One predicate answers two questions: whether the empty-branch refusal applies,
+// and whether the phase consumes a concurrency slot. They must not disagree.
+func TestMutatingPhase(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		phase    string
+		mutating bool
+	}{
+		{"swe", true},
+		{"clean", true},
+		{"polish", true},
+		{"gaps", false},
+		{"replay", false},
+		{"report", false},
+		{"verify", false},
+		{"", false},
+		// The phase names this system actually runs. A `review` PREFIX matched
+		// none of them, so every real review lane was classified as mutating and
+		// its `.done` refused as an empty branch for committing nothing -- which
+		// is what a review does.
+		{"review", false},
+		{"local-review", false},
+		{"github-review", false},
+		// PhaseRoundKey suffixes the round onto the name.
+		{"local-review-r2", false},
+		{"github-review-r11", false},
+		// Not a review: "reviewer" is a different word, and a segment scan says so.
+		{"reviewer-notes", true},
+	} {
+		if got := MutatingPhase(c.phase); got != c.mutating {
+			t.Errorf("MutatingPhase(%q) = %v, want %v", c.phase, got, c.mutating)
+		}
+	}
+}
