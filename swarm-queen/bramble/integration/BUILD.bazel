@@ -1,0 +1,18 @@
+# gazelle:ignore
+#
+# Hand-maintained: the test file is behind a build tag Gazelle cannot see, and
+# Gazelle cannot add gotags/tags. Verify this file is unmodified after running
+# `bazel run //:gazelle`.
+
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "integration_test",
+    srcs = ["capability_test.go"],
+    gotags = ["integration"],
+    tags = [
+        "local",
+        "manual",
+    ],
+    deps = ["//swarm-queen/bramble"],
+)

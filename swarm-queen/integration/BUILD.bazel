@@ -1,0 +1,29 @@
+# gazelle:ignore
+#
+# Hand-maintained: these tests are behind a build tag Gazelle cannot see, and
+# Gazelle cannot add gotags/tags. They spawn REAL bramble sessions in REAL tmux
+# windows on REAL worktrees, so they must never run under `bazel test //...`.
+# Verify this file is unmodified after `bazel run //:gazelle`.
+
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "integration_test",
+    srcs = [
+        "backends_test.go",
+        "lifecycle_test.go",
+    ],
+    gotags = ["integration"],
+    tags = [
+        "local",
+        "manual",
+    ],
+    deps = [
+        "//swarm-queen/bramble",
+        "//swarm-queen/decide",
+        "//swarm-queen/lifecycle",
+        "//swarm-queen/reconcile",
+        "//swarm-queen/state",
+        "//swarm-queen/verify",
+    ],
+)

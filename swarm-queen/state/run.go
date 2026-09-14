@@ -1,0 +1,210 @@
+package state
+
+import (
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
+)
+
+// Phase is one step in a lane's lifecycle, with the model that runs it.
+type Phase struct {
+	Name  string `json:"name"`
+	Model string `json:"model"`
+}
+
+// Config is the run-level contract. Shared with ledger.py's "config" object.
+//
+// Like Lane, it retains unmodelled keys so a round-trip through swarm-queen
+// never deletes a field another tool wrote.
+type Config struct {
+	extra  map[string]json.RawMessage `json:"-"`
+	Goal   string                     `json:"goal"`
+	Base   string                     `json:"base"`
+	Target string                     `json:"target"`
+	Phases []Phase                    `json:"phases"`
+}
+
+type configAlias Config
+
+// UnmarshalJSON decodes the config and retains any unmodelled keys.
+func (c *Config) UnmarshalJSON(b []byte) error {
+	var alias configAlias
+	if err := json.Unmarshal(b, &alias); err != nil {
+		return err
+	}
+	*c = Config(alias)
+
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(b, &all); err != nil {
+		return err
+	}
+	for _, known := range structJSONKeys(Config{}) {
+		delete(all, known)
+	}
+	if len(all) > 0 {
+		c.extra = all
+	}
+	return nil
+}
+
+// MarshalJSON re-emits retained unknown keys alongside the modelled ones.
+func (c Config) MarshalJSON() ([]byte, error) {
+	b, err := json.Marshal(configAlias(c))
+	if err != nil {
+		return nil, err
+	}
+	if len(c.extra) == 0 {
+		return b, nil
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(b, &merged); err != nil {
+		return nil, err
+	}
+	for k, v := range c.extra {
+		if _, clash := merged[k]; clash {
+			continue
+		}
+		merged[k] = v
+	}
+	return json.Marshal(merged)
+}
+
+// State is the whole ledger: <run>/state.json.
+type State struct {
+	Config Config  `json:"config"`
+	Lanes  []*Lane `json:"tasks"` // "tasks" is ledger.py's key; do not rename
+}
+
+// PhaseNames returns the ordered phase names.
+func (c *Config) PhaseNames() []string {
+	names := make([]string, len(c.Phases))
+	for i, p := range c.Phases {
+		names[i] = p.Name
+	}
+	return names
+}
+
+// Lane returns the lane with the given id.
+func (s *State) Lane(id string) (*Lane, bool) {
+	for _, l := range s.Lanes {
+		if l.ID == id {
+			return l, true
+		}
+	}
+	return nil, false
+}
+
+// NextPhase returns the phase after the given one, and whether one exists.
+// An empty current phase yields the first phase.
+func (c *Config) NextPhase(current string) (string, bool) {
+	names := c.PhaseNames()
+	if len(names) == 0 {
+		return "", false
+	}
+	if current == "" {
+		return names[0], true
+	}
+	for i, n := range names {
+		if n == current && i+1 < len(names) {
+			return names[i+1], true
+		}
+	}
+	return "", false
+}
+
+// Ready returns dependency-ready planned lanes, highest priority first. This is
+// the dispatch queue.
+func (s *State) Ready() []*Lane {
+	done := make(map[string]bool, len(s.Lanes))
+	for _, l := range s.Lanes {
+		if l.Status == StatusDone {
+			done[l.ID] = true
+		}
+	}
+	var ready []*Lane
+	for _, l := range s.Lanes {
+		if l.Status != StatusPlanned {
+			continue
+		}
+		blocked := false
+		for _, dep := range l.DependsOn {
+			if !done[dep] {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			ready = append(ready, l)
+		}
+	}
+	stableSortByPriority(ready)
+	return ready
+}
+
+// NonTerminal returns lanes still needing work. A run is not finished while this
+// is non-empty — one real run was shut down with 6 of 21 lanes non-terminal,
+// three of them p1 lanes that were never staffed at all.
+func (s *State) NonTerminal() []*Lane {
+	var out []*Lane
+	for _, l := range s.Lanes {
+		if !l.Status.Terminal() {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// phaseNameRe rejects the phase names that cannot survive a round-trip through
+// PhaseRoundKey/SplitPhaseRound.
+//
+// Round keys are `<phase><round>` with no delimiter, so a phase name ending in a
+// digit is ambiguous in BOTH directions and in both languages: `phase2` round 1
+// stays "phase2" and reads back as phase "phase" round 2, while round 2 writes
+// "phase22" and reads back as round 22. The attempt identity is then wrong,
+// MaxRound is wrong, and signal filenames misroute to a phase no config
+// declares. Escaping the suffix would fork the key format shared with
+// ledger.py's phase_round_key; refusing the name at the point it enters the
+// ledger states the condition under which the encoding IS sound and keeps one
+// format across both tools.
+var phaseNameRe = regexp.MustCompile(`\d$`)
+
+// ValidatePhases checks that every declared phase name can round-trip.
+func (c *Config) ValidatePhases() error {
+	seen := map[string]bool{}
+	for _, p := range c.Phases {
+		if p.Name == "" {
+			return fmt.Errorf("a phase has no name")
+		}
+		if seen[p.Name] {
+			return fmt.Errorf("duplicate phase name %q", p.Name)
+		}
+		seen[p.Name] = true
+		if phaseNameRe.MatchString(p.Name) {
+			return fmt.Errorf("phase name %q ends in a digit; round keys are "+
+				"`<phase><round>` with no delimiter, so %q round 1 is indistinguishable "+
+				"from phase %q round %s -- rename the phase",
+				p.Name, p.Name, strings.TrimRight(p.Name, "0123456789"),
+				strings.TrimLeft(p.Name, strings.TrimRight(p.Name, "0123456789")))
+		}
+	}
+	return nil
+}
+
+// Validate checks the whole ledger for structural problems.
+func (s *State) Validate() error {
+	if err := s.Config.ValidatePhases(); err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(s.Lanes))
+	for _, l := range s.Lanes {
+		if err := l.Validate(); err != nil {
+			return err
+		}
+		if seen[l.ID] {
+			return fmt.Errorf("duplicate lane id %q", l.ID)
+		}
+		seen[l.ID] = true
+	}
+	return nil
+}

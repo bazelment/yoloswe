@@ -1,0 +1,350 @@
+// Package decide turns verified state into actions.
+//
+// The rule engine runs FIRST and settles everything it can. An LLM is consulted
+// only for genuinely open questions -- which gap to staff, whether a review
+// finding is major, how to word a brief -- and its answers are proposals, not
+// commands: every one is re-checked against the same invariants before it is
+// applied.
+//
+// Decisions are typed rather than prose so they can be logged, replayed, and
+// refused. A decision nobody can audit is how a swarm ends up with a ledger that
+// describes work it never did.
+package decide
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/bazelment/yoloswe/swarm-queen/state"
+	"github.com/bazelment/yoloswe/swarm-queen/verify"
+)
+
+// Kind is what a decision does.
+type Kind string
+
+const (
+	// KindSpawn staffs a dependency-ready lane.
+	KindSpawn Kind = "spawn"
+	// KindAdvance moves a lane to its next phase after its claim verified.
+	KindAdvance Kind = "advance"
+	// KindRework returns a lane to an earlier phase, incrementing its round.
+	KindRework Kind = "rework"
+	// KindReap tears a terminal lane down.
+	KindReap Kind = "reap"
+	// KindEscalate hands a question to a human. Escalation is a first-class
+	// outcome, not a failure: improvising past a question nobody answered is
+	// how a run acquires claims it cannot support.
+	KindEscalate Kind = "escalate"
+	// KindHold takes no action and records why.
+	KindHold Kind = "hold"
+)
+
+// Source records who decided, so a bad decision can be traced to its origin.
+type Source string
+
+const (
+	// SourceRule is the deterministic engine.
+	SourceRule Source = "rule"
+	// SourceLLM is a model proposal that passed invariant checks.
+	SourceLLM Source = "llm"
+	// SourceHuman is an operator nudge.
+	SourceHuman Source = "human"
+)
+
+// Decision is one action, with the evidence that produced it.
+type Decision struct {
+	Lane   string `json:"lane"`
+	Kind   Kind   `json:"kind"`
+	Source Source `json:"source"`
+	Phase  string `json:"phase,omitempty"`
+	Reason string `json:"reason"`
+	// Evidence is what was measured, so `--explain` can show the basis.
+	Evidence []string `json:"evidence,omitempty"`
+	Round    int      `json:"round,omitempty"`
+	// FinalPhaseComplete marks a rule-generated reap after a verified final
+	// phase. The lane remains running until the destructive reap succeeds.
+	FinalPhaseComplete bool `json:"final_phase_complete,omitempty"`
+}
+
+func (d Decision) String() string {
+	s := fmt.Sprintf("%-8s %-28s %s", d.Kind, d.Lane, d.Reason)
+	if d.Phase != "" {
+		s = fmt.Sprintf("%-8s %-28s [%s r%d] %s", d.Kind, d.Lane, d.Phase, d.Round, d.Reason)
+	}
+	return s
+}
+
+// Inputs is everything the engine needs. All of it is already verified: decide
+// never probes, so it is pure and fully testable.
+type Inputs struct {
+	State         *state.State
+	Verdicts      map[string]verify.Verdict
+	SlotExempt    map[string]bool
+	Signals       []LaneSignal
+	Drift         []verify.Finding
+	MaxConcurrent int
+}
+
+// LaneSignal is a claim a lane made.
+type LaneSignal struct {
+	Lane     string
+	Phase    string
+	Round    int
+	NeedsSWE bool
+}
+
+// Plan runs the rule engine and returns the decisions it can justify, plus the
+// questions it cannot settle.
+//
+// Anything ambiguous becomes an escalation rather than a guess. That is the
+// deliberate bias: a swarm that stops and asks is recoverable, one that
+// improvises is not.
+func Plan(in Inputs) []Decision {
+	var out []Decision
+	if in.State == nil {
+		return out
+	}
+
+	// Drift first: a lane whose ledger row disagrees with reality must be
+	// reconciled before anything is dispatched on top of it.
+	out = append(out, driftDecisions(in)...)
+
+	// Signals: advance or rework lanes whose claims verified.
+	out = append(out, signalDecisions(in)...)
+
+	// Refill: staff dependency-ready lanes up to the concurrency cap.
+	out = append(out, spawnDecisions(in, out)...)
+
+	return out
+}
+
+func driftDecisions(in Inputs) []Decision {
+	var out []Decision
+	for _, f := range in.Drift {
+		if f.Severity != verify.SeverityBlock {
+			continue
+		}
+		out = append(out, Decision{
+			Lane: f.Lane, Kind: KindEscalate, Source: SourceRule,
+			Reason:   f.Action,
+			Evidence: []string{f.Claim + ": " + f.Evidence},
+		})
+	}
+	return out
+}
+
+func signalDecisions(in Inputs) []Decision {
+	var out []Decision
+	for _, sig := range in.Signals {
+		lane, ok := in.State.Lane(sig.Lane)
+		if !ok {
+			out = append(out, Decision{
+				Lane: sig.Lane, Kind: KindEscalate, Source: SourceRule,
+				Reason:   "signal names a lane that is not in the ledger",
+				Evidence: []string{fmt.Sprintf("signal %s.%s", sig.Lane, sig.Phase)},
+			})
+			continue
+		}
+
+		// A signal is a report from a LIVE attempt. What must be true for it to
+		// be actionable is that the lane is currently running the attempt the
+		// signal names -- otherwise it is history or a stray file: a `.done`
+		// left in the run dir from a previous wave, or a `.needs-swe` naming an
+		// attempt the lane has already moved past. Acting on one reworks a lane
+		// that nothing is wrong with, or advances one that never ran.
+		//
+		// Attempt identity is phase AND round, not phase alone. Rework keeps the
+		// lane in the same phase and increments the round, so a lane on `swe`
+		// round 3 would otherwise still match its own stale `swe2.done`. The
+		// comparison goes through PhaseRoundKey because that is the identity the
+		// run dir itself uses -- it normalises round<=1 to the bare phase name,
+		// so an unsuffixed `lane.swe.done` and a lane on round 1 agree.
+		//
+		// Escalate rather than drop: a signal that cannot be placed is exactly
+		// the thing a person should look at, and silently ignoring it is how a
+		// real completion goes unnoticed.
+		//
+		// The comparison is UNCONDITIONAL. An empty sig.Phase used to skip it,
+		// which made a phase-less `<lane>.done` a wildcard matching whatever the
+		// lane happened to be running: ParseSignalName documents the shorthand as
+		// naming the FIRST phase, so a stale `foo.done` from an earlier wave
+		// advanced a lane already on `clean` or `local-review`. The producer
+		// resolves the shorthand to a concrete phase before it gets here, so an
+		// empty phase reaching this point is genuinely unplaceable and escalates.
+		sigKey := state.PhaseRoundKey(sig.Phase, sig.Round)
+		laneKey := state.PhaseRoundKey(lane.Phase, lane.Round)
+		if lane.Status != state.StatusRunning || sigKey != laneKey {
+			out = append(out, Decision{
+				Lane: lane.ID, Kind: KindEscalate, Source: SourceRule,
+				Reason: "signal does not match the lane's current attempt",
+				Evidence: []string{fmt.Sprintf(
+					"signal names %s/%s; lane is %s on %s",
+					sig.Lane, orNone(sigKey), lane.Status, orNone(laneKey))},
+			})
+			continue
+		}
+
+		// A review rejection sends the lane back to the first phase with an
+		// incremented round, so the previous attempt's session is preserved
+		// rather than overwritten.
+		if sig.NeedsSWE {
+			first := firstPhase(in.State)
+			out = append(out, Decision{
+				Lane: lane.ID, Kind: KindRework, Source: SourceRule,
+				Phase: first, Round: lane.MaxRound(first) + 1,
+				Reason:   "review returned the lane for rework",
+				Evidence: []string{fmt.Sprintf("%s.%s.needs-swe", sig.Lane, sig.Phase)},
+			})
+			continue
+		}
+
+		// A .done is a CLAIM. It advances only if verification agreed.
+		v, verified := in.Verdicts[lane.ID]
+		switch {
+		case !verified:
+			out = append(out, Decision{
+				Lane: lane.ID, Kind: KindHold, Source: SourceRule,
+				Reason:   "claim not yet verified",
+				Evidence: []string{fmt.Sprintf("%s.%s.done", sig.Lane, sig.Phase)},
+			})
+		case v.Blocked():
+			out = append(out, Decision{
+				Lane: lane.ID, Kind: KindEscalate, Source: SourceRule,
+				Reason:   "completion claim refused by verification",
+				Evidence: findingStrings(v.Findings),
+			})
+		default:
+			next, has := in.State.Config.NextPhase(lane.Phase)
+			if !has {
+				out = append(out, Decision{
+					Lane: lane.ID, Kind: KindReap, Source: SourceRule,
+					FinalPhaseComplete: true,
+					Reason:             "final phase verified complete",
+					Evidence:           findingStrings(v.Findings),
+				})
+				continue
+			}
+			// The next phase's round is its next UNUSED one, not 1. After a
+			// rework (swe -> clean -> local-review -> needs-swe -> swe r2) the
+			// lane returns to a phase it has already run, and a hardcoded 1 made
+			// the advance re-record that phase's round 1: RecordSession wrote the
+			// same key and the earlier attempt's session id was lost -- the
+			// "overwrite a rework round" failure this harness refuses. It also
+			// re-pointed the brief at a `.done` path already in the baseline, and
+			// signal freshness is keyed by path, so touching it again was
+			// invisible and the lane never advanced again.
+			out = append(out, Decision{
+				Lane: lane.ID, Kind: KindAdvance, Source: SourceRule,
+				Phase: next, Round: lane.MaxRound(next) + 1,
+				Reason:   "phase verified complete",
+				Evidence: findingStrings(v.Findings),
+			})
+		}
+	}
+	return out
+}
+
+// spawnDecisions refills free slots from the dependency-ready queue.
+//
+// A free slot with ready work and no spawn is the stall this harness exists to
+// prevent: "idle, available" repeated tick after tick is the stall signal, not a
+// status.
+func spawnDecisions(in Inputs, already []Decision) []Decision {
+	if in.MaxConcurrent <= 0 {
+		return nil
+	}
+	occupied := 0
+	for _, l := range in.State.Lanes {
+		if l.Status == state.StatusRunning && !in.SlotExempt[l.Phase] {
+			occupied++
+		}
+	}
+	// Decisions made earlier this tick change the count.
+	for _, d := range already {
+		switch d.Kind {
+		case KindReap:
+			// Only a lane that was COUNTED as occupying a slot can free one.
+			// Decrementing for every reap over-staffed past --max-concurrent:
+			// a slot-exempt phase was never counted, so releasing it invented
+			// capacity that did not exist.
+			if l, ok := in.State.Lane(d.Lane); ok &&
+				l.Status == state.StatusRunning && !in.SlotExempt[l.Phase] {
+				occupied--
+			}
+		case KindRework, KindAdvance:
+			// Still occupying its slot.
+		}
+	}
+
+	free := in.MaxConcurrent - occupied
+	if free <= 0 {
+		return nil
+	}
+
+	var out []Decision
+	for _, lane := range in.State.Ready() {
+		if free <= 0 {
+			break
+		}
+		first := firstPhase(in.State)
+		// The THIRD producer of a round, and the one round 7 missed while fixing
+		// the other two. Ready() returns any planned lane, including one an
+		// operator re-queued with `ledger.py set --status planned` after it had
+		// already recorded sessions. Emitting round 1 there collides with a
+		// recorded attempt, and round 7's widened guard now REFUSES that spawn --
+		// every tick, forever: the refusal is a failed outcome, so CommitBaseline
+		// holds the baseline and `tick --apply` exits non-zero while every other
+		// lane's signals are re-seen indefinitely. Claiming the next unused round
+		// is what the rework and advance producers already do.
+		out = append(out, Decision{
+			Lane: lane.ID, Kind: KindSpawn, Source: SourceRule,
+			Phase: first, Round: lane.MaxRound(first) + 1,
+			Reason: fmt.Sprintf("dependency-ready %s lane, slot available", lane.Priority),
+		})
+		free--
+	}
+	return out
+}
+
+func firstPhase(st *state.State) string {
+	if names := st.Config.PhaseNames(); len(names) > 0 {
+		return names[0]
+	}
+	return ""
+}
+
+func findingStrings(fs []verify.Finding) []string {
+	var out []string
+	for _, f := range fs {
+		out = append(out, f.Evidence)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Summarise counts decisions by kind, for a terse tick report.
+func Summarise(ds []Decision) string {
+	counts := map[Kind]int{}
+	for _, d := range ds {
+		counts[d.Kind]++
+	}
+	var parts []string
+	for _, k := range []Kind{KindSpawn, KindAdvance, KindRework, KindReap, KindEscalate, KindHold} {
+		if counts[k] > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", k, counts[k]))
+		}
+	}
+	if len(parts) == 0 {
+		return "no decisions"
+	}
+	return strings.Join(parts, " · ")
+}
+
+// orNone renders an empty phase name legibly in evidence.
+func orNone(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
+}

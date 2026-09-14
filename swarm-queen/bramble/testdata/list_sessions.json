@@ -1,0 +1,87 @@
+{
+  "sessions": [
+    {
+      "id": "fast-merge-planner-25df7f34",
+      "model": "opus",
+      "prompt": "<redacted>",
+      "status": "running",
+      "tmux_target": "@1384",
+      "type": "planner",
+      "worktree_name": "fast-merge"
+    },
+    {
+      "backend": "claude",
+      "id": "deploy-harden-worker-ha-0908-builder-71c1de2e",
+      "model": "opus",
+      "prompt": "<redacted>",
+      "status": "idle",
+      "tmux_target": "@1380",
+      "type": "builder",
+      "worktree_name": "deploy-harden-worker-ha-0908"
+    },
+    {
+      "id": "frontend-domain-host-takeover-builder-05c148be",
+      "model": "opus",
+      "parent_session_id": "builder-lite-planner-f5d1afed",
+      "prompt": "<redacted>",
+      "status": "idle",
+      "tmux_target": "@1320",
+      "type": "builder",
+      "worktree_name": "frontend-domain-host-takeover"
+    },
+    {
+      "id": "builder-lite-planner-f5d1afed",
+      "model": "opus",
+      "prompt": "<redacted>",
+      "status": "running",
+      "tmux_target": "@1319",
+      "type": "planner",
+      "worktree_name": "builder-lite"
+    },
+    {
+      "id": "builder-lite-planner-22e6e89b",
+      "model": "opus",
+      "prompt": "<redacted>",
+      "status": "idle",
+      "tmux_target": "@1187",
+      "type": "planner",
+      "worktree_name": "builder-lite"
+    },
+    {
+      "id": "deploy-harden-clustererrors-0905-builder-3782400b",
+      "model": "claude",
+      "parent_session_id": "deploy-harden-builder-5106206e",
+      "prompt": "<redacted>",
+      "status": "failed",
+      "type": "builder",
+      "worktree_name": "deploy-harden-clustererrors-0905"
+    },
+    {
+      "id": "deploy-harden-builder-5106206e",
+      "model": "",
+      "prompt": "<redacted>",
+      "status": "running",
+      "tmux_target": "@1117",
+      "type": "builder",
+      "worktree_name": "deploy-harden"
+    },
+    {
+      "id": "swarm-agent-planner-d7afc4a7",
+      "model": "opus",
+      "prompt": "<redacted>",
+      "status": "running",
+      "tmux_target": "@1383",
+      "type": "planner",
+      "worktree_name": "swarm-agent"
+    },
+    {
+      "id": "swarm-agent-planner-f58589bc",
+      "model": "opus",
+      "prompt": "<redacted>",
+      "status": "running",
+      "tmux_target": "@1381",
+      "type": "planner",
+      "worktree_name": "swarm-agent"
+    }
+  ]
+}
