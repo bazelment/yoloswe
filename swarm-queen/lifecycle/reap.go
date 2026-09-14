@@ -213,19 +213,48 @@ type FiveZeros struct {
 	Branch    bool
 	BackupRef bool
 	TmuxPane  bool
+	// backupIntentional is set via BackupIntentional, never by a caller reading
+	// a ledger field: intent is something the closure decision establishes.
+	backupIntentional bool
+}
+
+// BackupIntentional marks a snapshot kept on purpose after a dirty reap, so the
+// audit does not report the one protection this harness adds as a leak.
+//
+// applyReap retains the backup of a lane reaped while dirty because that work
+// exists nowhere else. Counting it as a leak meant the only way to pass the
+// audit was to delete it -- the audit arguing for the data loss it exists to
+// prevent. A retained ref is still REPORTED, just not as a failure.
+//
+// It must be CALLED by something that knows the reap decision. AuditLane cannot
+// infer it: a ref kept on purpose and a ref that leaked look identical in git,
+// and refs did leak repeatedly in real runs, which is what this audit exists to
+// catch. Inferring intent from "everything else is zero" would silently retire
+// that check.
+func (f FiveZeros) BackupIntentional() FiveZeros {
+	f.backupIntentional = true
+	return f
 }
 
 // Clean reports whether every resource is released.
 func (f FiveZeros) Clean() bool {
-	return !f.Session && !f.Worktree && !f.Branch && !f.BackupRef && !f.TmuxPane
+	leakedBackup := f.BackupRef && !f.backupIntentional
+	return !f.Session && !f.Worktree && !f.Branch && !leakedBackup && !f.TmuxPane
 }
 
 func (f FiveZeros) String() string {
+	backup := fmt.Sprintf("%v", f.BackupRef)
+	if f.BackupRef && f.backupIntentional {
+		backup = "retained"
+	}
 	if f.Clean() {
+		if f.BackupRef && f.backupIntentional {
+			return f.Lane + ": fully closed (backup retained at " + BackupRef(f.Lane) + ")"
+		}
 		return f.Lane + ": fully closed"
 	}
-	return fmt.Sprintf("%s NOT FULLY CLOSED: session=%v worktree=%v branch=%v backupref=%v tmux=%v",
-		f.Lane, f.Session, f.Worktree, f.Branch, f.BackupRef, f.TmuxPane)
+	return fmt.Sprintf("%s NOT FULLY CLOSED: session=%v worktree=%v branch=%v backupref=%s tmux=%v",
+		f.Lane, f.Session, f.Worktree, f.Branch, backup, f.TmuxPane)
 }
 
 // AuditLane checks all five resources for a terminal lane.

@@ -464,3 +464,111 @@ func TestAuditLaneFallsBackToTheLedgerOnlyWhenUnprobed(t *testing.T) {
 		t.Errorf("a successful probe replaces the ledger; the stale field must not be audited: %+v", f)
 	}
 }
+
+// The audit must not report the one protection this harness adds as a leak.
+//
+// applyReap retains the snapshot of a lane reaped while dirty, because that work
+// exists nowhere else. FiveZeros counted the ref as a failure, so the only way
+// to pass the audit was to delete it -- the leak check arguing for the data loss
+// it exists to prevent. reap said CLOSED and doctor exited 0 while both audits
+// said NOT FULLY CLOSED for the same lane.
+func TestAuditLaneTreatsARetainedBackupOnAClosedLaneAsIntentional(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t)
+	write(t, dir, "wip.txt", "uncommitted")
+	if _, err := SnapshotAtRisk(context.Background(), reconcile.ExecGit{}, "kept", dir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Everything else released: no worktree path, no branch, no session, no pane.
+	lane := &state.Lane{ID: "kept", Status: state.StatusDone}
+	f := AuditLane(context.Background(), reconcile.ExecGit{}, nil, dir, lane, KnownSessions(nil))
+
+	if !f.BackupRef {
+		t.Fatal("premise: the backup ref must exist for this test to mean anything")
+	}
+	// Unmarked, it is a LEAK -- which is what this audit exists to catch, and a
+	// ref kept on purpose is indistinguishable from a leaked one in git.
+	if f.Clean() {
+		t.Error("an unmarked backup ref must still read as a leak")
+	}
+	// The caller that made the reap decision marks it; only then is it clean.
+	f = f.BackupIntentional()
+	if !f.Clean() {
+		t.Errorf("a closed lane whose snapshot was kept on purpose must audit "+
+			"clean once marked: %s", f)
+	}
+	if !strings.Contains(f.String(), "retained") {
+		t.Errorf("the audit must still REPORT the retained snapshot: %s", f)
+	}
+}
+
+// A backup ref alongside anything else still unreleased remains a leak: the
+// exemption is for an otherwise fully closed lane, not a blanket amnesty.
+func TestAuditLaneStillReportsABackupWhenSomethingElseIsUnreleased(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t)
+	write(t, dir, "wip.txt", "uncommitted")
+	if _, err := SnapshotAtRisk(context.Background(), reconcile.ExecGit{}, "leaky", dir); err != nil {
+		t.Fatal(err)
+	}
+	git(t, dir, "branch", "b-leaky")
+
+	lane := &state.Lane{ID: "leaky", Status: state.StatusDone, Branch: "b-leaky"}
+	f := AuditLane(context.Background(), reconcile.ExecGit{}, nil, dir, lane, KnownSessions(nil))
+	if f.Clean() {
+		t.Errorf("a surviving branch must still fail the audit: %s", f)
+	}
+}
+
+// The three consumers of "is this lane closed" must give ONE answer.
+//
+// This is the defect claude named in round 10: the test existed in three places
+// and they disagreed. For a lane reaped while dirty -- worktree gone, branch
+// gone, snapshot deliberately kept -- `reap` printed CLOSED, tick's drift rule
+// called it unreconciled, and both audits called it NOT FULLY CLOSED. The only
+// way to satisfy the audit was to delete the snapshot the reaper kept on
+// purpose. All three now route through state.Lane.ClosedLane, so this pins that
+// they agree on the same facts.
+func TestClosedLaneAndAuditAgreeOnADirtyReapedLane(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t)
+	write(t, dir, "wip.txt", "uncommitted, on no branch")
+	if _, err := SnapshotAtRisk(context.Background(), reconcile.ExecGit{}, "dirty", dir); err != nil {
+		t.Fatal(err)
+	}
+
+	lane := &state.Lane{ID: "dirty", Status: state.StatusDone}
+
+	// (1) The shared predicate: closed, with the snapshot reported separately.
+	closure := lane.ClosedLane(
+		true, false, // worktree measured, gone
+		true, false, // branch measured, gone
+		true, 0, // fleet measured, empty
+		true, // backup retained
+	)
+	if !closure.Closed {
+		t.Fatalf("the shared predicate must call this lane closed: %s", closure.Why)
+	}
+	if !closure.BackupRetained {
+		t.Error("the retained snapshot must be reported by the predicate")
+	}
+
+	// (2) The audit, told what the closure decision established.
+	f := AuditLane(context.Background(), reconcile.ExecGit{}, nil, dir, lane, KnownSessions(nil))
+	if closure.BackupRetained {
+		f = f.BackupIntentional()
+	}
+	if !f.Clean() {
+		t.Errorf("the audit must agree with the closure decision: %s", f)
+	}
+	if !strings.Contains(f.String(), "retained") {
+		t.Errorf("the audit must still REPORT the snapshot it is not failing on: %s", f)
+	}
+
+	// (3) And the snapshot is still there: agreement must not be bought by
+	// deleting the work.
+	if !HasBackup(context.Background(), reconcile.ExecGit{}, dir, "dirty") {
+		t.Fatal("the retained snapshot must survive: it holds the only copy")
+	}
+}

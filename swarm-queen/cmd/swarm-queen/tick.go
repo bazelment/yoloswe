@@ -102,7 +102,20 @@ func runTick(cmd *cobra.Command, args []string) error {
 
 	// 2. VERIFY — every claim checked against what was measured.
 	laneSignals, verdicts := readClaims(st, signals, worktrees)
-	drift := verify.LedgerDrift(st, worktrees, sessions)
+	// Measure branches HERE rather than passing nil. Drift treats an unmeasured
+	// branch set as "closure unproven", which is correct -- but a tick that never
+	// measured them therefore warned about every lane it had ever closed, on
+	// every tick, and those warnings grow with the number of closed lanes. That
+	// is the noise-people-mute failure the rule's own comment warns about. One
+	// `git branch --list` per tick buys the measurement.
+	branches, branchErr := laneBranches(ctx, tickRepoDir, st)
+	if branchErr != nil {
+		// Unmeasured is the safe direction: nil keeps every closed lane flagged
+		// rather than silently declaring closure from a failed probe.
+		cmd.PrintErrf("warning: branch checks could not run (%v); "+
+			"closed lanes will be reported as unreconciled\n", branchErr)
+	}
+	drift := verify.LedgerDriftWithBranches(st, worktrees, sessions, branches)
 
 	// 3. DECIDE — rules first; anything unsettled escalates.
 	decisions := decide.Plan(planInputs(st, laneSignals, verdicts, drift, tickMaxConcurrent))

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -278,5 +279,58 @@ func TestLoadMissionsPrefersThePhaseBeingSpawnedOverTheOneBeingLeft(t *testing.T
 	got := loadMissions(runDir, st, decisions)["lane-a"]
 	if got != "the CLEAN mission" {
 		t.Errorf("mission = %q, want the mission for the phase being ENTERED", got)
+	}
+}
+
+// tick must MEASURE branches rather than passing nil.
+//
+// Drift treats an unmeasured branch set as "closure unproven", which is correct
+// -- but a tick that never measured them warned about every lane it had ever
+// closed, on every tick, and those warnings grow with the number of closed
+// lanes: the noise-people-mute failure the rule's own comment warns about. One
+// `git branch --list` per tick buys the measurement. This pins the helper both
+// tick and doctor now share.
+func TestLaneBranchesReportsOnlyTheRunsBranchesThatStillExist(t *testing.T) {
+	t.Parallel()
+	repo := orDashRepo(t)
+	g := reconcile.ExecGit{}
+	ctx := context.Background()
+	if _, err := g.Run(ctx, repo, "branch", "b-alive"); err != nil {
+		t.Fatal(err)
+	}
+
+	st := &state.State{Lanes: []*state.Lane{
+		{ID: "alive", Branch: "b-alive"},
+		{ID: "reaped", Branch: "b-gone"},
+		{ID: "nobranch"},
+	}}
+
+	live, err := laneBranches(ctx, repo, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !live["b-alive"] {
+		t.Error("a branch that still exists must be reported as live")
+	}
+	if live["b-gone"] {
+		t.Error("a deleted branch must not be reported as live")
+	}
+	if len(live) != 1 {
+		t.Errorf("only the run's own surviving branches belong in the set: %v", live)
+	}
+}
+
+// An unreadable repo yields nil, NOT an empty set: nil means unmeasured, and
+// drift must keep treating unknown as unproven closure rather than declaring
+// every branch gone.
+func TestLaneBranchesReturnsNilWhenTheRepoCannotBeRead(t *testing.T) {
+	t.Parallel()
+	st := &state.State{Lanes: []*state.Lane{{ID: "a", Branch: "b"}}}
+	live, err := laneBranches(context.Background(), t.TempDir(), st)
+	if err == nil {
+		t.Fatal("a directory that is not a git repo must report an error")
+	}
+	if live != nil {
+		t.Errorf("a failed measurement must be nil, not an empty set: %v", live)
 	}
 }

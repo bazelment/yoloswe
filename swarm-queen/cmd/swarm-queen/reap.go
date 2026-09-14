@@ -76,18 +76,24 @@ func runReap(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// A lane this harness already closed has nothing left to reap. Skip it
-		// on measured evidence -- terminal status, worktree gone from disk,
-		// branch gone from the repo -- rather than by erasing the ledger fields
-		// the five-zeros audit reads. Re-planning it produced a REFUSE with
-		// "cannot verify integration" and an unknown-session blocker on every
-		// run, which buried the real refusals.
-		if closed, why := laneFullyClosed(ctx, git, lane, wt); closed {
-			fmt.Printf("CLOSED %s: %s\n", lane.ID, why)
+		// The session probe comes FIRST, because closure depends on it.
+		//
+		// The skip below used to run before this and judged closure from the
+		// worktree and branch alone. A bramble session can outlive its worktree
+		// directory, so a lane with an orphaned agent still attached read as
+		// CLOSED and skipped the very probe that would have found it -- the
+		// unmeasured-is-not-safe rule this harness exists to enforce, bypassed by
+		// its own fast path.
+		probe := laneProbe(sessions, sessionErr == nil, lane.Worktree)
+
+		// A lane this harness already closed has nothing left to reap. Skip it on
+		// MEASURED evidence only -- terminal, worktree gone, branch gone, and a
+		// probe that actually ran and found no session -- rather than by erasing
+		// the ledger fields the five-zeros audit reads.
+		if closure := laneFullyClosed(ctx, git, lane, wt, probe); closure.Closed {
+			fmt.Printf("CLOSED %s: %s\n", lane.ID, closure.Why)
 			continue
 		}
-
-		probe := laneProbe(sessions, sessionErr == nil, lane.Worktree)
 		plan := lifecycle.PlanReap(ctx, git, reapRepoDir, lane, wt, st.Config.Target, probe)
 		if !plan.Safe {
 			refused++
@@ -230,27 +236,25 @@ func laneFullyClosed(
 	g reconcile.GitRunner,
 	lane *state.Lane,
 	wt reconcile.WorktreeState,
-) (bool, string) {
-	if !lane.Status.Terminal() || wt.Unknown() || wt.Exists {
-		return false, ""
-	}
+	probe lifecycle.SessionProbe,
+) state.Closure {
+	// Measure the branch rather than inferring it from an empty ledger field.
+	branchPresent, branchMeasured := false, true
 	if lane.Branch != "" {
 		out, err := g.Run(ctx, reapRepoDir, "branch", "--list", lane.Branch)
-		if err != nil || strings.TrimSpace(out) != "" {
-			return false, ""
+		if err != nil {
+			branchMeasured = false
+		} else {
+			branchPresent = strings.TrimSpace(out) != ""
 		}
 	}
-	// A RETAINED backup does not make a lane unclosed.
-	//
-	// applyReap deliberately keeps the snapshot of a lane reaped while dirty --
-	// that work exists nowhere else. Treating the ref as "not closed" sent the
-	// lane back through PlanReap, whose branch was already deleted, so
-	// BranchMerged failed and it printed "cannot verify integration of <branch>"
-	// on every run: the misleading REFUSE noise this skip exists to remove,
-	// reappearing on exactly the lanes whose work was most worth protecting.
-	if lifecycle.HasBackup(ctx, g, reapRepoDir, lane.ID) {
-		return true, "terminal, worktree gone, branch gone; backup retained at " +
-			lifecycle.BackupRef(lane.ID)
+	c := lane.ClosedLane(
+		!wt.Unknown(), wt.Exists,
+		branchMeasured, branchPresent,
+		probe.Known, len(probe.Sessions),
+		lifecycle.HasBackup(ctx, g, reapRepoDir, lane.ID))
+	if c.Closed && c.BackupRetained {
+		c.Why += " at " + lifecycle.BackupRef(lane.ID)
 	}
-	return true, "terminal, worktree gone, branch gone, no backup ref"
+	return c
 }

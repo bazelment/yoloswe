@@ -172,10 +172,19 @@ func liveSessions(ctx context.Context, cmd *cobra.Command) ([]bramble.Session, e
 // are different answers: conflating them manufactures a clean bill of health in
 // the check whose job is finding leaks.
 func liveBranches(ctx context.Context, st *state.State) (map[string]bool, error) {
-	out, err := reconcile.ExecGit{}.Run(ctx, doctorRepoDir, "branch", "--format=%(refname:short)")
+	return laneBranches(ctx, doctorRepoDir, st)
+}
+
+// laneBranches lists which of the run's lane branches still exist.
+//
+// One implementation for doctor and tick: both need the same measurement, and a
+// nil result means UNMEASURED, never "no branches" -- callers must keep treating
+// unknown as unproven closure.
+func laneBranches(ctx context.Context, repoDir string, st *state.State) (map[string]bool, error) {
+	out, err := reconcile.ExecGit{}.Run(ctx, repoDir, "branch", "--format=%(refname:short)")
 	if err != nil {
 		return nil, fmt.Errorf("cannot list branches in %s: %w — "+
-			"run doctor from the orchestrator's worktree", doctorRepoDir, err)
+			"run from the orchestrator's worktree", repoDir, err)
 	}
 	existing := map[string]bool{}
 	for _, line := range strings.Split(out, "\n") {

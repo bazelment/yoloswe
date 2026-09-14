@@ -142,3 +142,63 @@ func (l *Lane) Validate() error {
 	}
 	return nil
 }
+
+// Closure is the one answer to "is this lane finished".
+//
+// The test used to exist in three places that disagreed: the drift rule in
+// verify, the skip in `reap`, and the five-zeros audit. A lane reaped while
+// dirty was CLOSED to reap, drift to tick, and a LEAK to both audits -- and the
+// only way to make the audit pass was to delete the snapshot the reaper kept on
+// purpose. Three answers to one question is how a real signal becomes noise.
+//
+// It lives in state, on plain booleans, because closure is a rule about LEDGER
+// FACTS. Putting it in lifecycle would have forced verify to import lifecycle,
+// which (via decide -> verify) drags the destructive half of the system into the
+// dependency graph of the half that only measures.
+type Closure struct {
+	// Why names the evidence, so a CLOSED line can be audited, not trusted.
+	// First for field alignment: the string header leads, the bools pack after.
+	Why string
+	// Closed reports that every resource this lane owned is provably released.
+	Closed bool
+	// BackupRetained reports a snapshot deliberately kept after closure. It is
+	// NOT a reason to call the lane unclosed: the work it holds exists nowhere
+	// else, which is why the reaper keeps it.
+	BackupRetained bool
+}
+
+// ClosedLane decides closure from measured facts alone.
+//
+// Every *Measured flag says whether the corresponding probe actually RAN.
+// Unknown is never evidence of closure: an unmeasured worktree, an unlisted
+// branch set or an unreachable session fleet each leave the lane not-closed. A
+// bramble session can outlive its worktree directory, so an absent directory is
+// not evidence that no agent is still running against it.
+func (l *Lane) ClosedLane(
+	worktreeMeasured, worktreeExists bool,
+	branchMeasured, branchPresent bool,
+	sessionsMeasured bool, liveSessions int,
+	backupRetained bool,
+) Closure {
+	switch {
+	case !l.Status.Terminal():
+		return Closure{Why: "lane is not terminal"}
+	case !worktreeMeasured:
+		return Closure{Why: "worktree could not be measured"}
+	case worktreeExists:
+		return Closure{Why: "worktree still exists"}
+	case !branchMeasured:
+		return Closure{Why: "branch state was not measured"}
+	case branchPresent:
+		return Closure{Why: "branch still exists"}
+	case !sessionsMeasured:
+		return Closure{Why: "session probe did not run"}
+	case liveSessions > 0:
+		return Closure{Why: "a live session still holds this lane"}
+	}
+	why := "terminal, worktree gone, branch gone, no live session"
+	if backupRetained {
+		why += "; backup retained"
+	}
+	return Closure{Closed: true, BackupRetained: backupRetained, Why: why}
+}

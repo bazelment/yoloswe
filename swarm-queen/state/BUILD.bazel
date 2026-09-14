@@ -20,6 +20,7 @@ go_test(
     name = "state_test",
     srcs = [
         "base_test.go",
+        "lane_test.go",
         "rounds_test.go",
         "store_test.go",
     ],

@@ -408,7 +408,10 @@ func TestLedgerDriftExemptsAFullyClosedLaneButNotAPartialTeardown(t *testing.T) 
 	// Measured branch state: only the partial lane's branch survives.
 	live := map[string]bool{"b-partial": true}
 
-	findings := LedgerDriftWithBranches(st, wts, nil, live)
+	// A non-nil empty slice is MEASURED evidence that no session holds these
+	// lanes. nil would mean the fleet was never probed, and closure is rightly
+	// refused for want of that measurement -- see the sibling test below.
+	findings := LedgerDriftWithBranches(st, wts, []bramble.Session{}, live)
 	for _, f := range findings {
 		if f.Lane == "closed" && strings.Contains(f.Evidence, "does not exist") {
 			t.Errorf("a fully closed lane must not be drift: %+v", f)

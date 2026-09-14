@@ -43,6 +43,7 @@ go_test(
     deps = [
         "//swarm-queen/bramble",
         "//swarm-queen/decide",
+        "//swarm-queen/lifecycle",
         "//swarm-queen/reconcile",
         "//swarm-queen/state",
         "@com_github_spf13_cobra//:cobra",

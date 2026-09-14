@@ -184,12 +184,32 @@ func TestLaneFullyClosedAcceptsALaneThatRetainedItsBackup(t *testing.T) {
 	}
 	wt := reconcile.WorktreeState{Path: "/wt/gone", Exists: false, Measured: true}
 
-	closed, why := laneFullyClosed(context.Background(), g, lane, wt)
-	if !closed {
-		t.Fatal("a terminal lane with no worktree and no branch is closed even " +
-			"when its snapshot was deliberately retained")
+	// A probe that RAN and found nothing: closure now requires measured session
+	// evidence, not merely an absent worktree directory.
+	c := laneFullyClosed(context.Background(), g, lane, wt, lifecycle.KnownSessions(nil))
+	if !c.Closed {
+		t.Fatalf("a terminal lane with no worktree, no branch and a measured empty "+
+			"fleet is closed even when its snapshot was deliberately retained: %s", c.Why)
 	}
-	if !strings.Contains(why, "backup retained") {
-		t.Errorf("the reason must say the backup was kept on purpose, got %q", why)
+	if !c.BackupRetained {
+		t.Error("the retained snapshot must be reported, not silently dropped")
+	}
+	if !strings.Contains(c.Why, "backup retained") {
+		t.Errorf("the reason must say the backup was kept on purpose, got %q", c.Why)
+	}
+
+	// codex r10 (0.97): a bramble session can outlive its worktree directory, so
+	// an absent directory is not evidence that no agent is still attached. The
+	// skip used to run BEFORE the probe and judged closure without it, so a lane
+	// with an orphaned agent read as CLOSED and skipped the very probe that would
+	// have found it.
+	live := lifecycle.KnownSessions([]lifecycle.LiveSession{
+		{ID: "sess-orphan", Status: "running", TmuxTarget: "@9"},
+	})
+	if c := laneFullyClosed(context.Background(), g, lane, wt, live); c.Closed {
+		t.Errorf("a lane whose session is still live must not read as closed: %s", c.Why)
+	}
+	if c := laneFullyClosed(context.Background(), g, lane, wt, lifecycle.UnknownSessions()); c.Closed {
+		t.Errorf("an unmeasured fleet is not evidence of closure: %s", c.Why)
 	}
 }

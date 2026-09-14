@@ -45,7 +45,14 @@ while IFS=$'\t' read -r id _phase branch wt wid; do
     t=$(printf '%s' "$tw" | wc -w)
   fi
 
-  if [ "$s$w$b$r$t" != "00000" ]; then
+  # A backup ref on an OTHERWISE closed lane is a snapshot kept on purpose: the
+  # Go reaper retains the snapshot of a lane reaped while dirty, because that
+  # work exists nowhere else. Counting it as a leak made the only way to pass
+  # this audit deleting it -- the leak check arguing for the data loss it exists
+  # to prevent. It is still reported, just not as a failure.
+  if [ "$s$w$b$t" = "0000" ] && [ "$r" = "1" ]; then
+    echo "FULLY CLOSED $id (backup retained at refs/backup/$id)"
+  elif [ "$s$w$b$r$t" != "00000" ]; then
     echo "NOT FULLY CLOSED $id: session=$s worktree=$w branch=$b backupref=$r tmux=$t${tw:+ [$tw]}"
     for _w in $tw; do
       [ -n "$SELFWIN" ] && [ "$_w" = "$SELFWIN" ] && echo "  ^ $_w IS YOU -- never kill it"

@@ -248,15 +248,21 @@ func LedgerDriftWithBranches(
 		// lane, so tick warned on each one and doctor, which exits non-zero on any
 		// finding, could never exit 0 on a run that had reaped anything.
 		//
-		// One definition of a closed lane, shared with the reaper: terminal, its
-		// worktree measured absent, and its branch gone from the repo. Anything
-		// still present is a partial teardown and still drift.
+		// ONE definition of a closed lane, and this is the call to it: the same
+		// lifecycle.ClosedLane that `reap` and the five-zeros audit use. The test
+		// used to be written out separately here, in reap, and in the audit, and
+		// the three disagreed -- a lane reaped while dirty was CLOSED to reap,
+		// drift to tick, and a LEAK to the audit.
 		//
-		// liveBranches nil means the branch half was NOT measured, and unknown is
-		// never evidence of closure -- so the finding stands, exactly as before.
-		fullyClosed := liveBranches != nil && lane.Status.Terminal() &&
-			probed && !wt.Exists && !liveBranches[lane.Branch]
-		if lane.Status.Terminal() && lane.Worktree != "" && probed && !wt.Exists && !fullyClosed {
+		// Every input is a measurement. An unmeasured branch set or an unmeasured
+		// fleet leaves the lane not-closed, so the finding stands: unknown is
+		// never evidence of closure.
+		closure := lane.ClosedLane(
+			probed, wt.Exists,
+			liveBranches != nil, liveBranches[lane.Branch],
+			sessionsProbed, len(byWorktreeName[worktreeName(lane.Worktree)]),
+			false)
+		if lane.Status.Terminal() && lane.Worktree != "" && probed && !wt.Exists && !closure.Closed {
 			out = append(out, Finding{lane.ID, SeverityWarn, "worktree",
 				"recorded worktree " + lane.Worktree + " does not exist",
 				"the teardown was never reconciled; finish closing the lane"})
