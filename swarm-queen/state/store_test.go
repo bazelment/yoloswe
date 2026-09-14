@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -318,5 +319,32 @@ func TestMutatingPhase(t *testing.T) {
 		if got := MutatingPhase(c.phase); got != c.mutating {
 			t.Errorf("MutatingPhase(%q) = %v, want %v", c.phase, got, c.mutating)
 		}
+	}
+}
+
+// A ledger that ALREADY holds an unusable phase name must be refused on read,
+// not only when swarm-queen creates it.
+//
+// Validating in Create alone left exactly the ledgers most likely to carry a bad
+// name unchecked: a run initialised by ledger.py, or by an older binary, never
+// passes through Create. A phase ending in a digit cannot round-trip through the
+// `<phase><round>` key -- "v2" round 1 is written "v2" and reads back as phase
+// "v" round 2 -- so every attempt identity derived from it is wrong.
+func TestReadRefusesALedgerWithADigitEndingPhase(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Written directly, the way another tool would, bypassing Create.
+	body := `{"config":{"goal":"g","base":"main","target":"t",` +
+		`"phases":[{"name":"v2","model":""}]},"tasks":[]}`
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := NewStore(dir).Read()
+	if err == nil {
+		t.Fatal("a ledger whose phase name cannot round-trip must be refused on read")
+	}
+	if !strings.Contains(err.Error(), "ends in a digit") {
+		t.Errorf("the error must name the problem, got %v", err)
 	}
 }

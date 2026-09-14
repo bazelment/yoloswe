@@ -240,8 +240,17 @@ func laneFullyClosed(
 			return false, ""
 		}
 	}
+	// A RETAINED backup does not make a lane unclosed.
+	//
+	// applyReap deliberately keeps the snapshot of a lane reaped while dirty --
+	// that work exists nowhere else. Treating the ref as "not closed" sent the
+	// lane back through PlanReap, whose branch was already deleted, so
+	// BranchMerged failed and it printed "cannot verify integration of <branch>"
+	// on every run: the misleading REFUSE noise this skip exists to remove,
+	// reappearing on exactly the lanes whose work was most worth protecting.
 	if lifecycle.HasBackup(ctx, g, reapRepoDir, lane.ID) {
-		return false, ""
+		return true, "terminal, worktree gone, branch gone; backup retained at " +
+			lifecycle.BackupRef(lane.ID)
 	}
 	return true, "terminal, worktree gone, branch gone, no backup ref"
 }

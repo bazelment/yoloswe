@@ -238,13 +238,28 @@ func LedgerDriftWithBranches(
 		// state.json untouched and their branches left behind, and the drift
 		// check went quiet. Absence of the old finding is not cleanliness.
 		//
-		// Guarded on a non-empty path: a cleanly reaped lane has no worktree
-		// recorded, and flagging those would fire on every properly closed lane,
-		// which is how a real signal becomes noise people mute.
-		if lane.Status.Terminal() && lane.Worktree != "" && probed && !wt.Exists {
+		// Guarded on a non-empty path, and on the lane not being FULLY CLOSED.
+		//
+		// This guard used to rest on "a cleanly reaped lane has no worktree
+		// recorded" -- true only while the reaper erased the field. It no longer
+		// does: the audit reads Worktree and Branch to check two of its five
+		// zeros, so erasing them made every lane this code closed pass those two
+		// trivially. Retaining them left THIS rule matching every properly closed
+		// lane, so tick warned on each one and doctor, which exits non-zero on any
+		// finding, could never exit 0 on a run that had reaped anything.
+		//
+		// One definition of a closed lane, shared with the reaper: terminal, its
+		// worktree measured absent, and its branch gone from the repo. Anything
+		// still present is a partial teardown and still drift.
+		//
+		// liveBranches nil means the branch half was NOT measured, and unknown is
+		// never evidence of closure -- so the finding stands, exactly as before.
+		fullyClosed := liveBranches != nil && lane.Status.Terminal() &&
+			probed && !wt.Exists && !liveBranches[lane.Branch]
+		if lane.Status.Terminal() && lane.Worktree != "" && probed && !wt.Exists && !fullyClosed {
 			out = append(out, Finding{lane.ID, SeverityWarn, "worktree",
 				"recorded worktree " + lane.Worktree + " does not exist",
-				"the teardown was never reconciled; clear the field once the lane is fully closed"})
+				"the teardown was never reconciled; finish closing the lane"})
 		}
 
 		if liveBranches != nil && lane.Status.Terminal() && lane.Branch != "" && liveBranches[lane.Branch] {

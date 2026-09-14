@@ -377,3 +377,78 @@ func TestPhaseCompletionRefusesUnmeasuredEvenForAReadOnlyPhase(t *testing.T) {
 		t.Errorf("a measured read-only phase with no commits must pass: %+v", v)
 	}
 }
+
+// A lane the reaper genuinely closed must not read as drift, and a partial
+// teardown must still be caught.
+//
+// The reaper now RETAINS Worktree and Branch after a successful reap, because
+// AuditLane reads both to check two of its five zeros and erasing them made a
+// closed lane pass those two trivially. This rule was written when a clean reap
+// left the field empty, so retention made it fire on every properly closed lane:
+// tick warned each tick and doctor, which exits non-zero on any finding, could
+// never exit 0 on a run that had reaped anything. One definition of closed,
+// shared with the reaper: terminal, worktree measured absent, branch gone.
+func TestLedgerDriftExemptsAFullyClosedLaneButNotAPartialTeardown(t *testing.T) {
+	t.Parallel()
+	st := &state.State{
+		Config: state.Config{Phases: []state.Phase{{Name: "swe"}}},
+		Lanes: []*state.Lane{
+			// Reaped properly: identity retained for the audit, nothing left.
+			{ID: "closed", Status: state.StatusDone,
+				Worktree: "/wt/closed", Branch: "b-closed"},
+			// Worktree gone, but the branch was never deleted.
+			{ID: "partial", Status: state.StatusDone,
+				Worktree: "/wt/partial", Branch: "b-partial"},
+		},
+	}
+	wts := map[string]reconcile.WorktreeState{
+		"closed":  {Path: "/wt/closed", Exists: false, Measured: true},
+		"partial": {Path: "/wt/partial", Exists: false, Measured: true},
+	}
+	// Measured branch state: only the partial lane's branch survives.
+	live := map[string]bool{"b-partial": true}
+
+	findings := LedgerDriftWithBranches(st, wts, nil, live)
+	for _, f := range findings {
+		if f.Lane == "closed" && strings.Contains(f.Evidence, "does not exist") {
+			t.Errorf("a fully closed lane must not be drift: %+v", f)
+		}
+	}
+	var sawPartial bool
+	for _, f := range findings {
+		if f.Lane == "partial" && strings.Contains(f.Evidence, "does not exist") {
+			sawPartial = true
+		}
+	}
+	if !sawPartial {
+		t.Errorf("a partial teardown must still be reported: %+v", findings)
+	}
+}
+
+// Unknown is never evidence of closure: with the branch set UNMEASURED (nil),
+// the same closed-looking lane must still be flagged, because nothing proved the
+// branch was gone. Only doctor gathers branches; tick passes nil.
+func TestLedgerDriftStillFlagsWhenTheBranchSetWasNotMeasured(t *testing.T) {
+	t.Parallel()
+	st := &state.State{
+		Config: state.Config{Phases: []state.Phase{{Name: "swe"}}},
+		Lanes: []*state.Lane{
+			{ID: "closed", Status: state.StatusDone,
+				Worktree: "/wt/closed", Branch: "b-closed"},
+		},
+	}
+	wts := map[string]reconcile.WorktreeState{
+		"closed": {Path: "/wt/closed", Exists: false, Measured: true},
+	}
+
+	var saw bool
+	for _, f := range LedgerDrift(st, wts, nil) {
+		if f.Lane == "closed" && strings.Contains(f.Evidence, "does not exist") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Error("with the branch set unmeasured, closure is unproven and the " +
+			"dangling path must still be reported")
+	}
+}

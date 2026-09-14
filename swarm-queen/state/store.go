@@ -75,6 +75,15 @@ func (s *Store) readLocked() (*State, error) {
 	if err := json.Unmarshal(b, &st); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", s.statePath(), err)
 	}
+	// Phase names are validated on READ, not only on Create. A run initialised by
+	// ledger.py -- or by an older binary -- never passed through Store.Create, so
+	// validating only there left exactly the ledgers most likely to carry a bad
+	// name unchecked. A phase ending in a digit cannot round-trip through
+	// `<phase><round>`, and every attempt identity read from it is then wrong.
+	if err := st.Config.ValidatePhases(); err != nil {
+		return nil, fmt.Errorf("ledger %s: %w", s.statePath(), err)
+	}
+
 	// ledger.py defaults a missing priority to p2 on load; match it so the two
 	// tools agree on dispatch order.
 	for _, l := range st.Lanes {

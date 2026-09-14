@@ -3,12 +3,17 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
 	"github.com/bazelment/yoloswe/swarm-queen/bramble"
+	"github.com/bazelment/yoloswe/swarm-queen/lifecycle"
+	"github.com/bazelment/yoloswe/swarm-queen/reconcile"
 	"github.com/bazelment/yoloswe/swarm-queen/state"
 )
 
@@ -126,5 +131,65 @@ func TestFreshLaneProbeReportsUnknownWhenTheQueryFails(t *testing.T) {
 	cmd.SetContext(context.Background())
 	if p := freshLaneProbe(context.Background(), cmd)(&state.Lane{Worktree: "/wt/lane-a"}); p.Known {
 		t.Error("a failed probe must be UNKNOWN, not an empty fleet")
+	}
+}
+
+// A lane that kept its snapshot on purpose is still CLOSED.
+//
+// applyReap deliberately retains the backup of a lane reaped while dirty: that
+// work exists nowhere else. laneFullyClosed treated any backup ref as "not
+// closed", so the lane went back through PlanReap every run -- and its branch
+// was already deleted, so BranchMerged failed and it printed "cannot verify
+// integration of <branch>". The lanes whose work was most worth protecting were
+// exactly the ones reported as a branch-integration failure.
+func TestLaneFullyClosedAcceptsALaneThatRetainedItsBackup(t *testing.T) {
+	repo := orDashRepo(t)
+	prev := reapRepoDir
+	reapRepoDir = repo
+	t.Cleanup(func() { reapRepoDir = prev })
+
+	// A real backup ref, written the way applyReap writes one.
+	wtDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wtDir, "wip.txt"), []byte("uncommitted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := exec.Command("git", "init", "-q", "-b", "main", ".")
+	run.Dir = wtDir
+	if out, err := run.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	for _, args := range [][]string{
+		{"config", "user.email", "t@e.com"}, {"config", "user.name", "T"},
+		{"commit", "-q", "--allow-empty", "-m", "base"},
+	} {
+		c := exec.Command("git", args...)
+		c.Dir = wtDir
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	g := reconcile.ExecGit{}
+	if _, err := lifecycle.SnapshotAtRisk(context.Background(), g, "lane-a", wtDir); err != nil {
+		t.Fatal(err)
+	}
+	// Move the ref into the repo doctor/reap looks at.
+	if _, err := g.Run(context.Background(), repo,
+		"update-ref", lifecycle.BackupRef("lane-a"), "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+
+	lane := &state.Lane{
+		ID: "lane-a", Status: state.StatusDone,
+		Worktree: "/wt/gone", Branch: "",
+	}
+	wt := reconcile.WorktreeState{Path: "/wt/gone", Exists: false, Measured: true}
+
+	closed, why := laneFullyClosed(context.Background(), g, lane, wt)
+	if !closed {
+		t.Fatal("a terminal lane with no worktree and no branch is closed even " +
+			"when its snapshot was deliberately retained")
+	}
+	if !strings.Contains(why, "backup retained") {
+		t.Errorf("the reason must say the backup was kept on purpose, got %q", why)
 	}
 }
