@@ -331,6 +331,7 @@ func (a *Applier) applyReap(ctx context.Context, d decide.Decision) Outcome {
 	//
 	// A retained ref costs nothing operationally and `audit` reports it, so the
 	// leak is visible and recoverable; the deletion was not.
+	backupRetained := !wt.Clean() && HasBackup(ctx, a.Git, a.RepoDir, lane.ID)
 	if wt.Clean() {
 		if err := ReleaseBackup(ctx, a.Git, a.RepoDir, lane.ID); err != nil {
 			return Outcome{Decision: d, Err: fmt.Errorf("release backup ref: %w", err)}
@@ -344,6 +345,13 @@ func (a *Applier) applyReap(ctx context.Context, d decide.Decision) Outcome {
 		}
 		l.Status = state.StatusDone
 		l.WindowID = ""
+		// Record that the snapshot was kept ON PURPOSE, in the same transaction
+		// that closes the lane. Both audits read this rather than inferring
+		// intent from "everything else is zero" -- backup refs are released LAST,
+		// so a genuinely leaked ref almost always appears on a lane whose other
+		// four checks are already zero, and inferring intent there would pass
+		// exactly the leak this audit exists to catch.
+		l.BackupRetained = backupRetained
 		// Worktree and Branch are RETAINED, deliberately.
 		//
 		// Round 7 cleared them so a closed lane would stop being re-planned and

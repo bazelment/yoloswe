@@ -860,3 +860,88 @@ func TestApplyReapKeepsTheIdentityTheAuditReads(t *testing.T) {
 		t.Errorf("a fully reaped lane must audit clean: %s", audit)
 	}
 }
+
+// A reap that KEEPS a snapshot must record that it did.
+//
+// Intent cannot be recovered later: a ref kept on purpose and a ref that leaked
+// are identical in git, and backup refs are released LAST, so a genuinely leaked
+// ref almost always appears on a lane whose other four checks are already zero.
+// Both audits read this field rather than inferring from that shape, which would
+// pass exactly the leak the five-zeros audit exists to catch.
+func TestApplyReapRecordsThatItKeptTheBackup(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	a, store, _, _ := applier(t, repo)
+	a.SelfWindow = "@1"
+	git(t, repo, "branch", "swarm/t")
+
+	wt := filepath.Join(t.TempDir(), "lane-a-wt")
+	git(t, repo, "worktree", "add", "-q", "-b", "lane-a-branch", wt)
+	write(t, wt, "wip.txt", "uncommitted, on no branch")
+
+	if err := store.Update(func(st *state.State) error {
+		lane, _ := st.Lane("lane-a")
+		lane.Status = state.StatusDone
+		lane.Worktree = wt
+		lane.Branch = "lane-a-branch"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	outs := a.Apply(context.Background(), []decide.Decision{{Lane: "lane-a", Kind: decide.KindReap}})
+	if !outs[0].OK() {
+		t.Fatalf("reap failed: %v", outs[0].Err)
+	}
+
+	st, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane, _ := st.Lane("lane-a")
+	if !HasBackup(context.Background(), reconcile.ExecGit{}, repo, "lane-a") {
+		t.Fatal("premise: the dirty lane's snapshot must have been kept")
+	}
+	if !lane.BackupRetained {
+		t.Error("the reap kept a snapshot but did not record it; both audits will " +
+			"read the surviving ref as a leak")
+	}
+}
+
+// A CLEAN reap releases the snapshot and must not claim one was retained.
+func TestApplyReapDoesNotClaimRetentionWhenItReleased(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	a, store, _, _ := applier(t, repo)
+	a.SelfWindow = "@1"
+	git(t, repo, "branch", "swarm/t")
+
+	// A clean worktree: nothing to snapshot, so nothing to retain.
+	wt := filepath.Join(t.TempDir(), "lane-a-wt")
+	git(t, repo, "worktree", "add", "-q", "-b", "lane-a-branch", wt)
+
+	if err := store.Update(func(st *state.State) error {
+		lane, _ := st.Lane("lane-a")
+		lane.Status = state.StatusDone
+		lane.Worktree = wt
+		lane.Branch = "lane-a-branch"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	outs := a.Apply(context.Background(), []decide.Decision{{Lane: "lane-a", Kind: decide.KindReap}})
+	if !outs[0].OK() {
+		t.Fatalf("reap failed: %v", outs[0].Err)
+	}
+
+	st, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane, _ := st.Lane("lane-a")
+	if lane.BackupRetained {
+		t.Error("a clean reap retains nothing; claiming retention would excuse a " +
+			"future leaked ref on this lane")
+	}
+}

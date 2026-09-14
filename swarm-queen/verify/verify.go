@@ -249,10 +249,15 @@ func LedgerDriftWithBranches(
 		// finding, could never exit 0 on a run that had reaped anything.
 		//
 		// ONE definition of a closed lane, and this is the call to it: the same
-		// lifecycle.ClosedLane that `reap` and the five-zeros audit use. The test
-		// used to be written out separately here, in reap, and in the audit, and
-		// the three disagreed -- a lane reaped while dirty was CLOSED to reap,
-		// drift to tick, and a LEAK to the audit.
+		// state.Lane.ClosedLane that `reap`'s skip uses (cmd/swarm-queen/reap.go).
+		// The test used to be written out separately here and in reap, and the
+		// two disagreed -- a lane reaped while dirty was CLOSED to reap and drift
+		// to tick.
+		//
+		// The five-zeros audit (lifecycle.AuditLane) does NOT route through this
+		// predicate: it answers a different question, "what is still on disk for
+		// this lane", and it is told about a deliberately kept snapshot through
+		// the ledger's backup_retained field rather than deciding closure itself.
 		//
 		// Every input is a measurement. An unmeasured branch set or an unmeasured
 		// fleet leaves the lane not-closed, so the finding stands: unknown is

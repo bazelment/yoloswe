@@ -28,14 +28,50 @@ git rev-parse --git-dir >/dev/null 2>&1 || {
   exit 2
 }
 
-sessions=$(bramble list-sessions 2>/dev/null)
-panes=$(tmux list-panes -a -F '#{window_id} #{pane_current_path}' 2>/dev/null)
+# Every probe is CHECKED. Discarding exit status made a failed `bramble
+# list-sessions` or `tmux list-panes` indistinguishable from a measured empty
+# fleet: session=0 and tmux=0 for every lane, and the audit whose whole job is
+# finding leaks would print a clean bill of health from observations it never
+# made. A probe that could not run is UNKNOWN, and unknown must refuse.
+if ! sessions=$(bramble list-sessions 2>/dev/null); then
+  echo "audit: bramble list-sessions FAILED -- session counts would be false, not zero" >&2
+  exit 3
+fi
+if ! panes=$(tmux list-panes -a -F '#{window_id} #{pane_current_path}' 2>/dev/null); then
+  echo "audit: tmux list-panes FAILED -- pane counts would be false, not zero" >&2
+  exit 3
+fi
 SELFWIN=$(. "$HERE/tmux_safe.sh" 2>/dev/null && resolve_self 2>/dev/null || echo '')
 
 bad=0; n=0
 while IFS=$'\t' read -r id _phase branch wt wid; do
+  # Retention intent is read STRAIGHT FROM THE LEDGER, not from an extra column
+  # on `ledger.py lanes`. That output is a five-field contract shared with
+  # poll_panes.sh, watch_lanes.sh and snapshot_at_risk.sh, and bash puts a
+  # surplus field into the last variable -- so widening it for this one consumer
+  # silently corrupts `wid` in the other three.
+  retained=$(/usr/bin/env python3 -c "
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]+'/state.json'))
+except Exception:
+    sys.exit(2)
+print('1' if any(t.get('id')==sys.argv[2] and t.get('backup_retained') for t in d.get('tasks',[])) else '0')
+" "$RUN" "$id" 2>/dev/null) || retained=""
+  if [ -z "$retained" ]; then
+    echo "audit: cannot read backup_retained for $id -- refusing to guess intent" >&2
+    exit 3
+  fi
   n=$((n + 1))
-  s=$(printf '%s' "$sessions" | grep -c "\"$id-")
+  # Ownership comes from worktree_name, which is the only key bramble reports
+  # (swarm-queen/bramble/client.go: "Note the absence of a worktree PATH"). The
+  # old test grepped for a session id beginning with the lane id, so a live
+  # session whose id did not embed the lane name counted as absent and passed.
+  wtname=""; [ -n "$wt" ] && wtname=$(basename "$wt")
+  s=0
+  if [ -n "$wtname" ]; then
+    s=$(printf '%s' "$sessions" | grep -c "\"worktree_name\"[[:space:]]*:[[:space:]]*\"$wtname\"")
+  fi
   w=0; [ -n "$wt" ] && [ -d "$wt" ] && w=1
   b=0; [ -n "$branch" ] && b=$(git branch --list "$branch" | grep -c .)
   r=0; git rev-parse -q --verify "refs/backup/$id" >/dev/null 2>&1 && r=1
@@ -45,13 +81,17 @@ while IFS=$'\t' read -r id _phase branch wt wid; do
     t=$(printf '%s' "$tw" | wc -w)
   fi
 
-  # A backup ref on an OTHERWISE closed lane is a snapshot kept on purpose: the
-  # Go reaper retains the snapshot of a lane reaped while dirty, because that
-  # work exists nowhere else. Counting it as a leak made the only way to pass
-  # this audit deleting it -- the leak check arguing for the data loss it exists
-  # to prevent. It is still reported, just not as a failure.
-  if [ "$s$w$b$t" = "0000" ] && [ "$r" = "1" ]; then
-    echo "FULLY CLOSED $id (backup retained at refs/backup/$id)"
+  # A kept snapshot is only "kept" if the reaper SAID SO. `retained` is the
+  # ledger's backup_retained field, written by applyReap in the same transaction
+  # that closes the lane.
+  #
+  # This was briefly inferred from "the other four checks are zero", which is
+  # wrong in the most dangerous direction: backup refs are released LAST, so a
+  # genuinely leaked ref almost always appears on a lane whose session,
+  # worktree, branch and pane are already gone. That inference passed exactly
+  # the leak this script's header says leaked repeatedly in real runs.
+  if [ "$s$w$b$t" = "0000" ] && [ "$r" = "1" ] && [ "$retained" = "1" ]; then
+    echo "FULLY CLOSED $id (backup retained on purpose at refs/backup/$id)"
   elif [ "$s$w$b$r$t" != "00000" ]; then
     echo "NOT FULLY CLOSED $id: session=$s worktree=$w branch=$b backupref=$r tmux=$t${tw:+ [$tw]}"
     for _w in $tw; do

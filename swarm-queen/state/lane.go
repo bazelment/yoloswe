@@ -45,6 +45,15 @@ type Lane struct {
 	Notes         []string `json:"notes"`
 	PR            int      `json:"pr,omitempty"`
 	Round         int      `json:"round,omitempty"`
+	// BackupRetained records that a reap deliberately KEPT this lane's snapshot
+	// because the lane was dirty when it closed. Intent is recorded, never
+	// inferred: a ref kept on purpose and a ref that leaked are identical in git,
+	// and refs leaked repeatedly in real runs, which is what the five-zeros audit
+	// exists to catch. Both audits read this field; an unmarked ref is a leak.
+	//
+	// Last in the struct so the bool packs after the pointer-bearing fields
+	// instead of splitting them (govet fieldalignment).
+	BackupRetained bool `json:"backup_retained,omitempty"`
 }
 
 // ForkBase is the branch a new worktree for this lane must fork from: the
