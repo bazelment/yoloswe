@@ -15,6 +15,17 @@ import (
 
 var doctorRepoDir string
 
+// doctorSessions probes the live fleet. It is a variable so a test can supply a
+// measurement without a live bramble TUI.
+//
+// Without this seam doctor's THIRD exit state -- clean and fully measured, the
+// only one that exits 0 -- was unreachable from a hermetic test process:
+// liveSessions calls bramble.New() directly, which needs a real socket, so the
+// session probe always failed and every test could only ever observe the
+// refusals. The one branch asserting "this run is genuinely healthy" was the
+// one branch nothing could pin.
+var doctorSessions = liveSessions
+
 var doctorCmd = &cobra.Command{
 	Use:   "doctor <run-dir>",
 	Short: "Report drift between the ledger and reality (read-only)",
@@ -42,7 +53,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	worktrees := probeWorktrees(ctx, st)
-	sessions, sessionErr := liveSessions(ctx, cmd)
+	sessions, sessionErr := doctorSessions(ctx, cmd)
 	// A lane whose worktree could not be measured was not checked, whatever the
 	// other findings say. Naming them is the same rule the branch and session
 	// probes already follow: a check that could not run says so in the summary.

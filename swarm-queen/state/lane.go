@@ -29,16 +29,31 @@ type Lane struct {
 	ID             string                     `json:"id"`
 	LastVerifiedAt string                     `json:"last_verified_at,omitempty"`
 	Branch         string                     `json:"branch"`
-	MergeSHA       string                     `json:"merge_sha"`
-	PRHead         string                     `json:"pr_head,omitempty"`
-	ApprovalSHA    string                     `json:"approval_sha,omitempty"`
-	Checks         string                     `json:"checks,omitempty"`
-	ForkSHA        string                     `json:"fork_sha,omitempty"`
-	PhaseStartSHA  string                     `json:"phase_start_sha,omitempty"`
-	DependsOn      []string                   `json:"depends_on"`
-	Notes          []string                   `json:"notes"`
-	PR             int                        `json:"pr,omitempty"`
-	Round          int                        `json:"round,omitempty"`
+	// Base is the branch THIS lane forks from, overriding the run-wide
+	// Config.Base. A lane whose work builds on another lane's branch (tests for
+	// code that exists only on a feature branch, say) forked from the run's base
+	// instead and got a tree without the code under test. Absent means "use the
+	// run's base", so existing ledgers are unaffected.
+	Base          string   `json:"base,omitempty"`
+	MergeSHA      string   `json:"merge_sha"`
+	PRHead        string   `json:"pr_head,omitempty"`
+	ApprovalSHA   string   `json:"approval_sha,omitempty"`
+	Checks        string   `json:"checks,omitempty"`
+	ForkSHA       string   `json:"fork_sha,omitempty"`
+	PhaseStartSHA string   `json:"phase_start_sha,omitempty"`
+	DependsOn     []string `json:"depends_on"`
+	Notes         []string `json:"notes"`
+	PR            int      `json:"pr,omitempty"`
+	Round         int      `json:"round,omitempty"`
+}
+
+// ForkBase is the branch a new worktree for this lane must fork from: the
+// lane's own Base when set, otherwise the run-wide default passed in.
+func (l *Lane) ForkBase(runBase string) string {
+	if l.Base != "" {
+		return l.Base
+	}
+	return runBase
 }
 
 // ApprovalStale reports whether the recorded approval no longer covers the

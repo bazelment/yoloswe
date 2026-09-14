@@ -22,11 +22,13 @@ package bramble
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Session is one row of `bramble list-sessions`.
@@ -349,7 +351,58 @@ func (c *Client) SendInput(ctx context.Context, sessionID, text string) error {
 
 // SendKey sends one named key (Enter, Escape, C-c, ...) to a session's pane.
 // This is the supported way to submit a composer; raw tmux send-keys fights it.
+//
+// A nil error means the COMMAND succeeded, not that the key changed anything.
+// Use SendKeyConfirmed when the point is that the session acted on it.
 func (c *Client) SendKey(ctx context.Context, sessionID, key string) error {
 	_, err := c.run(ctx, "send-key", "--session-id", sessionID, "--key", key)
 	return err
+}
+
+// ErrNotDelivered reports a send that the command accepted but the pane did not
+// react to.
+var ErrNotDelivered = errors.New("send reported success but the pane did not change")
+
+// SendKeyConfirmed sends a key and verifies the pane actually changed.
+//
+// Observed live: three separate sends -- `send-key` with a wrong flag name, the
+// same with the right one, and a raw tmux send-keys to the correct active pane
+// -- each exited 0 against a session whose pane stayed byte-identical, holding a
+// typed-but-unsubmitted line. The process was alive and foreground, and the
+// session's own status read `running`, so every liveness check agreed it was
+// fine. An exit code describes the request, never the effect.
+//
+// The caller is told which of the two happened, because they need opposite
+// responses: a delivered key means wait, an undelivered one means the session
+// is wedged and must be replaced. Resending is the wrong move either way -- one
+// lane was found holding 465 stacked pastes.
+func (c *Client) SendKeyConfirmed(ctx context.Context, sessionID, key string, settle time.Duration) error {
+	before, err := c.CapturePane(ctx, sessionID, 0)
+	if err != nil {
+		return fmt.Errorf("capture pane before send: %w", err)
+	}
+	if err := c.SendKey(ctx, sessionID, key); err != nil {
+		return err
+	}
+	// The pane needs a moment to repaint; without a settle window this reports
+	// every successful send as undelivered.
+	deadline := time.Now().Add(settle)
+	for {
+		after, err := c.CapturePane(ctx, sessionID, 0)
+		if err != nil {
+			return fmt.Errorf("capture pane after send: %w", err)
+		}
+		if after != before {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%w: session %s pane unchanged %s after key %q",
+				ErrNotDelivered, sessionID, settle, key)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }

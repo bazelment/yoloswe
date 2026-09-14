@@ -9,7 +9,10 @@ go_library(
 
 go_test(
     name = "bramble_test",
-    srcs = ["client_test.go"],
+    srcs = [
+        "client_test.go",
+        "sendconfirm_test.go",
+    ],
     data = glob(["testdata/**"]),
     embed = [":bramble"],
 )

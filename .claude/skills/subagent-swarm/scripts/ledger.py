@@ -134,6 +134,45 @@ def save(run, state):
     return md_path
 
 
+def phase_round_key(phase, round_):
+    """Round 1 (and 0/absent) is the bare phase name; later rounds suffix the number.
+
+    Mirrors swarm-queen's state.PhaseRoundKey byte for byte -- the two write the
+    same map and a disagreement here is a silently forked schema.
+    """
+    if not phase:
+        return phase
+    try:
+        r = int(round_ or 0)
+    except (TypeError, ValueError):
+        r = 0
+    return phase if r <= 1 else f"{phase}{r}"
+
+
+def session_for(task, phase):
+    """The session for a phase's LATEST recorded round.
+
+    Readers used to index sessions[phase] directly, which sees only round 1 and
+    reports a lane on round 3 as having no session at all.
+    """
+    sessions = task.get("sessions", {})
+    best, best_round = "", -1
+    for key, sid in sessions.items():
+        if not sid:
+            continue
+        name, _, suffix = key.partition("-")
+        del name, suffix
+        if key == phase:
+            r = 1
+        elif key.startswith(phase) and key[len(phase):].isdigit():
+            r = int(key[len(phase):])
+        else:
+            continue
+        if r > best_round:
+            best, best_round = sid, r
+    return best
+
+
 def phase_names(state):
     return [p["name"] for p in state["config"]["phases"]]
 
@@ -175,7 +214,7 @@ def render(state, run):
                + " | ".join(names) + " | merge |")
     out.append("|---|---|---|---|---|---|" + "---|" * (len(names) + 1))
     for t in tasks:
-        cells = " | ".join(code(t["sessions"].get(n, "")) for n in names)
+        cells = " | ".join(code(session_for(t, n)) for n in names)
         out.append("| {m} | {priority} | **{id}**<br>{title} | {status} | {phase} | `{branch}` | "
                    "{cells} | {merge} |".format(
                        m=MARK.get(t["status"], "?"), id=t["id"], title=t["title"],
@@ -261,7 +300,7 @@ def doctor(state, run, sessions_path=""):
         if status in ("running", "done") and not wt:
             findings.append(f"{tid}: status={status} with no worktree recorded -- "
                             f"invisible to the watcher and to snapshot_at_risk")
-        if status == "running" and t.get("phase") and not t["sessions"].get(t["phase"]):
+        if status == "running" and t.get("phase") and not session_for(t, t["phase"]):
             findings.append(f"{tid}: phase={t['phase']} has no session id recorded")
 
         # Absence is never evidence of approval: an unknown head or approval sha is
@@ -428,7 +467,12 @@ def main():
         if a.session is not None:
             if not t["phase"]:
                 sys.exit(f"lane `{a.id}` has no current phase — set --phase first")
-            t["sessions"][t["phase"]] = a.session
+            # Key by ROUND. Writing the bare phase key destroyed the previous
+            # attempt's session id on every retry: `--round 5` recorded round 5
+            # over round 4, and the id of the session still holding the worktree
+            # was gone -- so nothing could find it to reap it. --round is applied
+            # above, so t["round"] is already the round being recorded.
+            t["sessions"][phase_round_key(t["phase"], t.get("round", 0))] = a.session
         if a.note:
             t["notes"].append(a.note)
         print(save(a.run, state))

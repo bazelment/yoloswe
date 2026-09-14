@@ -34,6 +34,7 @@ go_test(
     name = "swarm-queen_test",
     srcs = [
         "dispatch_test.go",
+        "doctor_exit0_test.go",
         "doctor_test.go",
         "reap_test.go",
         "tick_test.go",

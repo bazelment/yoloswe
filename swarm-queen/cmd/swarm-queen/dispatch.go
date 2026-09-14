@@ -24,6 +24,7 @@ var (
 	dispatchParent  string
 	dispatchRepo    string
 	dispatchRepoDir string
+	dispatchFrom    string
 	dispatchApply   bool
 )
 
@@ -54,6 +55,10 @@ func init() {
 		"orchestrator session id; without it a completed lane reports nowhere")
 	dispatchCmd.Flags().StringVar(&dispatchRepoDir, "repo", ".",
 		"repository directory, used to resolve the base a new worktree forks from")
+	dispatchCmd.Flags().StringVar(&dispatchFrom, "from", "",
+		"branch a NEW worktree forks from; overrides the lane's base and the run's. "+
+			"The run-wide base is wrong whenever a lane's work builds on another "+
+			"branch -- forking from it yields a tree without the code under test")
 	dispatchCmd.Flags().StringVar(&dispatchRepo, "bramble-repo", "",
 		"bramble repository name; inference can pick an unrelated repo")
 	dispatchCmd.Flags().BoolVar(&dispatchApply, "apply", false, "actually spawn (default: dry run)")
@@ -128,7 +133,15 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	} else {
 		req.CreateWorktree = true
 		req.Branch = lane.Branch
-		req.From = st.Config.Base
+		// --from beats the lane's own base, which beats the run's. Only the
+		// run-wide value existed before, so a lane whose work builds on another
+		// branch was forked from the run's base and handed a tree missing the
+		// code it was staffed to work on -- with nothing in the dry run to say so
+		// beyond a `-f main` that looks perfectly ordinary.
+		req.From = lane.ForkBase(st.Config.Base)
+		if dispatchFrom != "" {
+			req.From = dispatchFrom
+		}
 	}
 
 	// A dry run reports; it does not write. This return comes BEFORE

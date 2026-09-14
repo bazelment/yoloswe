@@ -142,3 +142,42 @@ else no "silent on a PR with no approval data"; fi
 echo
 echo "passed $PASS, failed $FAIL"
 [ "$FAIL" -eq 0 ]
+
+echo "== a retry does not destroy the previous round's session id =="
+# The bug: `set --session` wrote t["sessions"][phase], so recording round 5 over
+# round 4 deleted round 4's id. The session still holding the worktree became
+# unfindable -- nothing could reap it. Observed live on the pr353 lane.
+RUN6="$TMP/rounds"
+L init "$RUN6" --goal g --phases "swe:,polish:" --base main --target main >/dev/null
+L add "$RUN6" --id lane1 --title t --branch b >/dev/null
+L set "$RUN6" --id lane1 --phase polish --session sess-r1 >/dev/null 2>&1
+L set "$RUN6" --id lane1 --phase polish --round 2 --session sess-r2 >/dev/null 2>&1
+L set "$RUN6" --id lane1 --phase polish --round 3 --session sess-r3 >/dev/null 2>&1
+KEPT=$(/usr/bin/env python3 -c "
+import json
+s=json.load(open('$RUN6/state.json'))['tasks'][0]['sessions']
+print(','.join(f'{k}={v}' for k,v in sorted(s.items())))
+")
+chk "every round's session survives" "$KEPT" "polish=sess-r1,polish2=sess-r2,polish3=sess-r3"
+
+# The rendered table must show the NEWEST attempt, not the first. Verified
+# falsifiable: reverting the reader to sessions[phase] turns this red (it prints
+# sess-r1), while the write-side assertion above stays green -- so the two halves
+# of the fix are pinned independently.
+REND=$(L show "$RUN6" 2>/dev/null | grep -c 'sess-r3' || true)
+chk "ledger.md renders the latest round" "$REND" "1"
+
+# A lane whose CURRENT round is recorded only under a suffixed key must still
+# read as having a session. This is the doctor-side reader, and it only bites
+# when round 1 was never written -- otherwise the bare `polish` key holds
+# something and the check cannot fail whatever the reader does.
+RUN7="$TMP/rounds-nofirst"
+L init "$RUN7" --goal g --phases "swe:,polish:" --base main --target main >/dev/null
+L add "$RUN7" --id lane2 --title t --branch b >/dev/null
+L set "$RUN7" --id lane2 --phase polish --round 3 --session only-r3 >/dev/null 2>&1
+L set "$RUN7" --id lane2 --status running >/dev/null 2>&1
+DOC=$(L doctor "$RUN7" 2>&1 || true)
+case "$DOC" in
+  *"has no session id recorded"*) no "doctor sees a session recorded only at round 3" ;;
+  *) ok "doctor sees a session recorded only at round 3" ;;
+esac

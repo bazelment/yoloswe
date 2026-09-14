@@ -175,7 +175,11 @@ func (a *Applier) applySpawn(ctx context.Context, d decide.Decision) Outcome {
 		// lane forking from a pushed base.
 		req.CreateWorktree = true
 		req.Branch = lane.Branch
-		req.From = st.Config.Base
+		// The lane's own base wins over the run's; see Lane.ForkBase. dispatch
+		// and tick resolve this identically on purpose -- the two commands
+		// hand-rolling the same spawn step is how dispatch fell behind the tick
+		// path three rounds running.
+		req.From = lane.ForkBase(st.Config.Base)
 	}
 
 	// Stamp the baseline BEFORE spawning where the worktree already exists, which
