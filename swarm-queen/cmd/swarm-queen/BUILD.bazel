@@ -32,12 +32,18 @@ go_binary(
 
 go_test(
     name = "swarm-queen_test",
-    srcs = ["tick_test.go"],
+    srcs = [
+        "dispatch_test.go",
+        "doctor_test.go",
+        "reap_test.go",
+        "tick_test.go",
+    ],
     embed = [":swarm-queen_lib"],
     deps = [
         "//swarm-queen/bramble",
         "//swarm-queen/decide",
         "//swarm-queen/reconcile",
         "//swarm-queen/state",
+        "@com_github_spf13_cobra//:cobra",
     ],
 )
