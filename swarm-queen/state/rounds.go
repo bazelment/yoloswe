@@ -9,7 +9,14 @@ import (
 
 // roundSuffix matches the ad-hoc round encodings real runs put in session keys
 // and signal filenames: `swe2`, `local-review7`, `local-review-r3`.
-var roundSuffix = regexp.MustCompile(`^(.*?)-?r?(\d+)$`)
+//
+// The stem is lazy but non-empty, and `-r` is consumed as a UNIT. Matching `-?r?`
+// separately let the optional `r` eat a phase's own last letter: `tester2` split
+// to ("teste", 2) and `docs-writer2` to ("docs-write", 2), so PhaseRoundKey was
+// not in fact its inverse for any phase ending in `r`. MaxRound then never saw
+// rounds >= 2, rework kept choosing round 2 and overwriting it, and signals
+// parsed to a phase no config declares.
+var roundSuffix = regexp.MustCompile(`^(.+?)(?:-r)?(\d+)$`)
 
 // Attempt is one execution of a phase for a lane. Rework creates a new attempt
 // rather than overwriting the previous one.

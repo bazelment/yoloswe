@@ -83,9 +83,6 @@ func runReap(cmd *cobra.Command, args []string) error {
 			fmt.Printf("REFUSE %s: %v\n", lane.ID, plan.Blockers)
 			continue
 		}
-		if len(plan.Steps) == 0 {
-			continue
-		}
 		safe++
 		if !reapApply {
 			fmt.Printf("WOULD REAP %s: %v\n", lane.ID, plan.Steps)
@@ -177,13 +174,34 @@ func newReapApplier(ctx context.Context, cmd *cobra.Command, runDir string) (*li
 		cmd.PrintErrf("warning: cannot resolve own tmux window (%v); "+
 			"window kills will be refused\n", serr)
 	}
-	sessions, sessionErr := liveSessions(ctx, cmd)
 	return &lifecycle.Applier{
 		Git: reconcile.ExecGit{}, Tmux: tmux, Spawner: client,
 		Store: state.NewStore(runDir), RunDir: runDir, RepoDir: reapRepoDir,
-		SelfWindow: self,
-		LiveSessions: func(l *state.Lane) lifecycle.SessionProbe {
-			return laneProbe(sessions, sessionErr == nil, l.Worktree)
-		},
+		SelfWindow:   self,
+		LiveSessions: freshLaneProbe(ctx, cmd),
 	}, nil
 }
+
+// freshLaneProbe resolves a lane's sessions by asking bramble AT THE MOMENT OF
+// THE CALL, which is what makes it safe to use for a destructive decision.
+//
+// Capturing one snapshot and reusing it for every lane meant a session that
+// started after the snapshot -- or after an earlier lane's kill in the same run
+// -- was invisible, so its worktree could be removed with the agent still live.
+// tick re-probes per lane for exactly this reason; reap shared lifecycle.Applier
+// but not the wiring, so the two drifted while reap's doc claimed one teardown
+// path. Both commands now build the probe here, so there is one implementation
+// to keep correct rather than two to keep in step.
+//
+// A query that FAILS at apply time yields UnknownSessions, which refuses the
+// reap, rather than an empty answer, which would permit it.
+func freshLaneProbe(ctx context.Context, cmd *cobra.Command) func(*state.Lane) lifecycle.SessionProbe {
+	return func(l *state.Lane) lifecycle.SessionProbe {
+		fresh, ferr := reapSessions(ctx, cmd)
+		return laneProbe(fresh, ferr == nil, l.Worktree)
+	}
+}
+
+// reapSessions probes the live fleet. A variable so a test can supply a
+// measurement without a live bramble TUI, matching doctorSessions.
+var reapSessions = liveSessions

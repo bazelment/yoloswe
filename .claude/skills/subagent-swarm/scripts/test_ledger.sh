@@ -140,22 +140,20 @@ if L doctor "$RUN5" 2>&1 | grep -q "approval unverifiable"; then ok "unverifiabl
 else no "silent on a PR with no approval data"; fi
 
 echo
-echo "passed $PASS, failed $FAIL"
-[ "$FAIL" -eq 0 ]
 
 echo "== a retry does not destroy the previous round's session id =="
 # The bug: `set --session` wrote t["sessions"][phase], so recording round 5 over
 # round 4 deleted round 4's id. The session still holding the worktree became
 # unfindable -- nothing could reap it. Observed live on the pr353 lane.
-RUN6="$TMP/rounds"
-L init "$RUN6" --goal g --phases "swe:,polish:" --base main --target main >/dev/null
-L add "$RUN6" --id lane1 --title t --branch b >/dev/null
-L set "$RUN6" --id lane1 --phase polish --session sess-r1 >/dev/null 2>&1
-L set "$RUN6" --id lane1 --phase polish --round 2 --session sess-r2 >/dev/null 2>&1
-L set "$RUN6" --id lane1 --phase polish --round 3 --session sess-r3 >/dev/null 2>&1
+RUN8="$TMP/rounds"
+L init "$RUN8" --goal g --phases "swe:,polish:" --base main --target main >/dev/null
+L add "$RUN8" --id lane1 --title t --branch b >/dev/null
+L set "$RUN8" --id lane1 --phase polish --session sess-r1 >/dev/null 2>&1
+L set "$RUN8" --id lane1 --phase polish --round 2 --session sess-r2 >/dev/null 2>&1
+L set "$RUN8" --id lane1 --phase polish --round 3 --session sess-r3 >/dev/null 2>&1
 KEPT=$(/usr/bin/env python3 -c "
 import json
-s=json.load(open('$RUN6/state.json'))['tasks'][0]['sessions']
+s=json.load(open('$RUN8/state.json'))['tasks'][0]['sessions']
 print(','.join(f'{k}={v}' for k,v in sorted(s.items())))
 ")
 chk "every round's session survives" "$KEPT" "polish=sess-r1,polish2=sess-r2,polish3=sess-r3"
@@ -164,7 +162,7 @@ chk "every round's session survives" "$KEPT" "polish=sess-r1,polish2=sess-r2,pol
 # falsifiable: reverting the reader to sessions[phase] turns this red (it prints
 # sess-r1), while the write-side assertion above stays green -- so the two halves
 # of the fix are pinned independently.
-REND=$(L show "$RUN6" 2>/dev/null | grep -c 'sess-r3' || true)
+REND=$(L show "$RUN8" 2>/dev/null | grep -c 'sess-r3' || true)
 chk "ledger.md renders the latest round" "$REND" "1"
 
 # A lane whose CURRENT round is recorded only under a suffixed key must still
@@ -181,3 +179,7 @@ case "$DOC" in
   *"has no session id recorded"*) no "doctor sees a session recorded only at round 3" ;;
   *) ok "doctor sees a session recorded only at round 3" ;;
 esac
+
+echo
+echo "passed $PASS, failed $FAIL"
+[ "$FAIL" -eq 0 ]

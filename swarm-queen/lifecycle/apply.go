@@ -133,16 +133,32 @@ func (a *Applier) applySpawn(ctx context.Context, d decide.Decision) Outcome {
 
 	// Re-check the round against current state: a decision computed earlier in
 	// the tick could otherwise overwrite an attempt recorded since.
-	if d.Kind == decide.KindRework && d.Round <= lane.MaxRound(d.Phase) {
-		return Outcome{Decision: d, Err: fmt.Errorf(
-			"round %d would overwrite an existing attempt (max recorded %d)",
-			d.Round, lane.MaxRound(d.Phase))}
+	//
+	// Every kind that records a session, not just rework -- an advance onto a
+	// phase the lane already ran (swe -> clean -> local-review -> needs-swe ->
+	// swe r2 -> advance to clean) overwrites that phase's recorded attempt just
+	// as a reused rework round does. Round 0 and 1 both mean "first attempt",
+	// matching the max(d.Round, 1) normalisation below, and only a round already
+	// RECORDED can be overwritten.
+	if d.Phase != "" {
+		round := max(d.Round, 1)
+		if recorded := lane.MaxRound(d.Phase); recorded > 0 && round <= recorded {
+			return Outcome{Decision: d, Err: fmt.Errorf(
+				"round %d would overwrite an existing attempt (max recorded %d)",
+				round, recorded)}
+		}
 	}
+
+	// Resolve the fork ref ONCE and give it to both consumers: the worktree is
+	// created at it (req.From below) and the phase baseline is stamped from it.
+	// Passing st.Config.Base here while req.From used lane.ForkBase meant any
+	// lane with its own Base was measured against a ref it never forked from.
+	forkBase := lane.ForkBase(st.Config.Base)
 
 	// Everything the lane needs before its session exists: its instructions, and
 	// a phase baseline recorded while a failure still costs only a refusal.
 	instructions, nudges, preStamped, perr := PrepareSpawn(ctx, a.Git, a.Store,
-		a.RunDir, a.RepoDir, lane.ID, st.Config.Base, a.Standing, a.tickNudges)
+		a.RunDir, a.RepoDir, lane.ID, forkBase, a.Standing, a.tickNudges)
 	if perr != nil {
 		return Outcome{Decision: d, Err: perr}
 	}
@@ -179,7 +195,7 @@ func (a *Applier) applySpawn(ctx context.Context, d decide.Decision) Outcome {
 		// and tick resolve this identically on purpose -- the two commands
 		// hand-rolling the same spawn step is how dispatch fell behind the tick
 		// path three rounds running.
-		req.From = lane.ForkBase(st.Config.Base)
+		req.From = forkBase
 	}
 
 	// Stamp the baseline BEFORE spawning where the worktree already exists, which
@@ -296,8 +312,22 @@ func (a *Applier) applyReap(ctx context.Context, d decide.Decision) Outcome {
 				Err:    fmt.Errorf("delete branch %s: %w", lane.Branch, err)}
 		}
 	}
-	if err := ReleaseBackup(ctx, a.Git, a.RepoDir, lane.ID); err != nil {
-		return Outcome{Decision: d, Err: fmt.Errorf("release backup ref: %w", err)}
+	// Release the backup ONLY when this reap did not create it.
+	//
+	// A dirty worktree is snapshotted above, PlanReap requires that snapshot
+	// before it allows the reap, and the worktree is then force-removed. Dropping
+	// the ref here deleted the only copy of work that exists nowhere else: the
+	// committed branch is verified integrated, but uncommitted and untracked
+	// files are not on it. "Refuse to reap a lane holding unsnapshotted work"
+	// became "snapshot it, then destroy the snapshot" -- ReleaseBackup's own doc
+	// says release is safe only once the lane is committed AND clean.
+	//
+	// A retained ref costs nothing operationally and `audit` already reports it,
+	// so the leak is visible and recoverable; the deletion was not.
+	if wt.DirtyCount == 0 {
+		if err := ReleaseBackup(ctx, a.Git, a.RepoDir, lane.ID); err != nil {
+			return Outcome{Decision: d, Err: fmt.Errorf("release backup ref: %w", err)}
+		}
 	}
 
 	if err := a.Store.Update(func(s *state.State) error {
@@ -308,6 +338,11 @@ func (a *Applier) applyReap(ctx context.Context, d decide.Decision) Outcome {
 		l.Status = state.StatusDone
 		l.Worktree = ""
 		l.WindowID = ""
+		// The branch was deleted above, so clear it too. Retaining it made every
+		// LATER reap re-plan BranchMerged against a ref that no longer exists:
+		// the lane reported REFUSE with "cannot verify integration" plus an
+		// unknown-session blocker on every run, burying the real refusals.
+		l.Branch = ""
 		return nil
 	}); err != nil {
 		return Outcome{Decision: d, Err: err}

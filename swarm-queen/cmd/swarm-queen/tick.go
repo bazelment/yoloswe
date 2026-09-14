@@ -84,9 +84,20 @@ func runTick(cmd *cobra.Command, args []string) error {
 	// everything re-litigates history: a run dir accumulates dozens of signal
 	// files (44 in one observed run), and a completed lane's old .done would be
 	// re-verified against a worktree that was correctly reaped long ago.
-	signals, err := reconcile.NewSince(runDir, loadBaseline(runDir))
+	// Capture what THIS tick saw, before it acts. The baseline committed at the
+	// end is exactly this set: a signal that appears while the tick is applying
+	// must stay new to the next one.
+	startBaseline := loadBaseline(runDir)
+	signals, err := reconcile.NewSince(runDir, startBaseline)
 	if err != nil {
 		return err
+	}
+	processed := make(reconcile.SignalSet, len(startBaseline)+len(signals))
+	for path, sig := range startBaseline {
+		processed[path] = sig
+	}
+	for _, sig := range signals {
+		processed[sig.Path] = sig
 	}
 
 	// 2. VERIFY — every claim checked against what was measured.
@@ -179,10 +190,7 @@ func runTick(cmd *cobra.Command, args []string) error {
 		// for the fresh probe too: a bramble query that fails at apply time is
 		// UnknownSessions, so the reap is refused rather than proceeding on the
 		// older, more optimistic answer.
-		LiveSessions: func(l *state.Lane) lifecycle.SessionProbe {
-			fresh, ferr := liveSessions(ctx, cmd)
-			return laneProbe(fresh, ferr == nil, l.Worktree)
-		},
+		LiveSessions: freshLaneProbe(ctx, cmd),
 	}
 
 	var failed int
@@ -198,7 +206,7 @@ func runTick(cmd *cobra.Command, args []string) error {
 	// applied. Saving it first marked this tick's signals as seen, so a lane
 	// whose spawn or reap failed had its .done / .needs-swe dropped permanently:
 	// the next tick would not see the claim again and nothing would retry it.
-	advanced, err := reconcile.CommitBaseline(runDir, filepath.Join(runDir, baselineName), failed)
+	advanced, err := reconcile.CommitBaseline(runDir, filepath.Join(runDir, baselineName), failed, processed)
 	if err != nil {
 		return err
 	}

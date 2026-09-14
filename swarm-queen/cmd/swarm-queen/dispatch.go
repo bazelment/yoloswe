@@ -124,6 +124,15 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// One resolved fork ref for both the worktree and the baseline stamp:
+	// --from beats the lane's own base, which beats the run's. PrepareSpawn below
+	// is handed this same value, so a --from dispatch can no longer stamp its
+	// baseline from the run base while forking the tree from somewhere else.
+	forkBase := lane.ForkBase(st.Config.Base)
+	if dispatchFrom != "" {
+		forkBase = dispatchFrom
+	}
+
 	req := bramble.SpawnRequest{
 		Repo: dispatchRepo, Parent: dispatchParent, Goal: lane.Title,
 		Model: model, Backend: dispatchBackend,
@@ -138,10 +147,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		// branch was forked from the run's base and handed a tree missing the
 		// code it was staffed to work on -- with nothing in the dry run to say so
 		// beyond a `-f main` that looks perfectly ordinary.
-		req.From = lane.ForkBase(st.Config.Base)
-		if dispatchFrom != "" {
-			req.From = dispatchFrom
-		}
+		req.From = forkBase
 	}
 
 	// A dry run reports; it does not write. This return comes BEFORE
@@ -165,7 +171,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// running -- on nudge delivery, then the pre-stamp, then the base-resolved
 	// pre-stamp, one missing step each time.
 	instructions, own, preStamped, err := lifecycle.PrepareSpawn(ctx, reconcile.ExecGit{},
-		store, runDir, dispatchRepoDir, lane.ID, st.Config.Base, standing, runWide)
+		store, runDir, dispatchRepoDir, lane.ID, forkBase, standing, runWide)
 	if err != nil {
 		return err
 	}

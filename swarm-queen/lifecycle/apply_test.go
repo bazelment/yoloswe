@@ -670,3 +670,53 @@ func TestSpawnRefusesWhenTheBaseCannotBeResolved(t *testing.T) {
 		t.Errorf("nothing may go live when the baseline cannot be resolved: %+v", sp.seen)
 	}
 }
+
+// A reap must not destroy the snapshot it just took.
+//
+// PlanReap REQUIRES a backup before it will reap a dirty worktree; applyReap then
+// force-removes the worktree. Releasing the ref in the same transaction deleted
+// the only copy of work that exists nowhere else -- the committed branch is
+// verified integrated, but uncommitted and untracked files are not on it.
+//
+// This uses a REAL linked worktree, unlike TestApplyReapSnapshotsBeforeRemoving,
+// whose lane worktree is the main repo: there `git worktree remove --force`
+// fails, wip.txt survives on disk, and its fallback assertion passes whether or
+// not the snapshot was destroyed.
+func TestApplyReapKeepsTheBackupItCreatedForDirtyWork(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	a, store, _, _ := applier(t, repo)
+	a.SelfWindow = "@1"
+
+	// A genuine linked worktree, so the removal actually succeeds.
+	wt := filepath.Join(t.TempDir(), "lane-a-wt")
+	git(t, repo, "worktree", "add", "-q", "-b", "lane-a-branch", wt)
+	write(t, wt, "wip.txt", "uncommitted and on no branch")
+
+	if err := store.Update(func(st *state.State) error {
+		lane, _ := st.Lane("lane-a")
+		lane.Status = state.StatusDone
+		lane.Worktree = wt
+		lane.Branch = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	outs := a.Apply(context.Background(), []decide.Decision{{Lane: "lane-a", Kind: decide.KindReap}})
+	if !outs[0].OK() {
+		t.Fatalf("reap failed: %v", outs[0].Err)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "wip.txt")); err == nil {
+		t.Fatal("fixture is not exercising the bug: the worktree was not removed")
+	}
+
+	// The work is gone from disk, so the ref is the only thing holding it.
+	if !HasBackup(context.Background(), reconcile.ExecGit{}, repo, "lane-a") {
+		t.Fatal("the snapshot was released by the same reap that created it; " +
+			"the uncommitted work is now unreachable")
+	}
+	if body := git(t, repo, "show", BackupRef("lane-a")+":wip.txt"); body != "uncommitted and on no branch" {
+		t.Errorf("backup contents = %q", body)
+	}
+}

@@ -179,6 +179,13 @@ func SpawnBaseline(ctx context.Context, g reconcile.GitRunner, store *state.Stor
 // Every failure here happens with nothing live, which is the point: a lane whose
 // baseline cannot be established should be refused while it costs a refused
 // decision rather than an unverifiable running session.
+// `base` must be the SAME ref the worktree will be forked from -- the lane's own
+// base, or a --from override -- not the run-wide default. The baseline stamped
+// here is what PhaseCompletion later counts commits against, so stamping it from
+// `origin/<run base>` while the tree forked from somewhere else measured the
+// lane against a point it never branched from: `rev-list --count <run base>..HEAD`
+// then counts the OTHER base's commits, and a lane that committed nothing reads
+// as having work, bypassing the empty-branch refusal.
 func PrepareSpawn(
 	ctx context.Context,
 	g reconcile.GitRunner,

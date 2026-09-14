@@ -115,19 +115,35 @@ func DefaultInvariants() []Invariant {
 			},
 		},
 		{
-			Name: "rework must not reuse a round",
+			Name: "a spawn must not reuse a round",
 			Check: func(st *state.State, d Decision) error {
-				if d.Kind != KindRework || d.Phase == "" {
+				// Every kind that records a session, not just rework: an advance
+				// onto a phase the lane already ran overwrites that phase's
+				// recorded attempt exactly as a reused rework round does.
+				if d.Phase == "" {
+					return nil
+				}
+				switch d.Kind {
+				case KindRework, KindAdvance, KindSpawn:
+				default:
 					return nil
 				}
 				lane, ok := st.Lane(d.Lane)
 				if !ok {
 					return nil
 				}
-				if d.Round <= lane.MaxRound(d.Phase) {
+				// Round 0 and 1 both mean "first attempt" -- applySpawn normalises
+				// with max(d.Round, 1) -- so compare on the normalised value, and
+				// only against a round actually RECORDED. Refusing when nothing
+				// is recorded (0 <= 0) would reject every first spawn.
+				round := d.Round
+				if round < 1 {
+					round = 1
+				}
+				if recorded := lane.MaxRound(d.Phase); recorded > 0 && round <= recorded {
 					return fmt.Errorf("round %d would overwrite an existing attempt "+
 						"(max recorded is %d); its session id would be lost",
-						d.Round, lane.MaxRound(d.Phase))
+						round, recorded)
 				}
 				return nil
 			},

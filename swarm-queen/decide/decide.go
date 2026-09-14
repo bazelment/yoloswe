@@ -225,9 +225,18 @@ func signalDecisions(in Inputs) []Decision {
 				})
 				continue
 			}
+			// The next phase's round is its next UNUSED one, not 1. After a
+			// rework (swe -> clean -> local-review -> needs-swe -> swe r2) the
+			// lane returns to a phase it has already run, and a hardcoded 1 made
+			// the advance re-record that phase's round 1: RecordSession wrote the
+			// same key and the earlier attempt's session id was lost -- the
+			// "overwrite a rework round" failure this harness refuses. It also
+			// re-pointed the brief at a `.done` path already in the baseline, and
+			// signal freshness is keyed by path, so touching it again was
+			// invisible and the lane never advanced again.
 			out = append(out, Decision{
 				Lane: lane.ID, Kind: KindAdvance, Source: SourceRule,
-				Phase: next, Round: 1,
+				Phase: next, Round: lane.MaxRound(next) + 1,
 				Reason:   "phase verified complete",
 				Evidence: findingStrings(v.Findings),
 			})
@@ -255,7 +264,14 @@ func spawnDecisions(in Inputs, already []Decision) []Decision {
 	for _, d := range already {
 		switch d.Kind {
 		case KindReap:
-			occupied--
+			// Only a lane that was COUNTED as occupying a slot can free one.
+			// Decrementing for every reap over-staffed past --max-concurrent:
+			// a slot-exempt phase was never counted, so releasing it invented
+			// capacity that did not exist.
+			if l, ok := in.State.Lane(d.Lane); ok &&
+				l.Status == state.StatusRunning && !in.SlotExempt[l.Phase] {
+				occupied--
+			}
 		case KindRework, KindAdvance:
 			// Still occupying its slot.
 		}

@@ -397,3 +397,41 @@ func TestUnsuffixedSignalMatchesAFirstRoundLane(t *testing.T) {
 		}
 	}
 }
+
+// After a rework, advancing into a phase the lane has ALREADY run must claim the
+// next unused round. A hardcoded Round: 1 made the advance re-record that
+// phase's round 1, so RecordSession overwrote the earlier attempt's session id
+// -- the "overwrite a rework round" failure this harness refuses -- and pointed
+// the brief at a `.done` path already in the baseline, which signal freshness
+// (keyed by path) could never see again.
+func TestAdvanceAfterReworkClaimsAnUnusedRound(t *testing.T) {
+	t.Parallel()
+	lane := &state.Lane{
+		ID: "a", Status: state.StatusRunning, Phase: "swe", Round: 2,
+		Sessions: map[string]string{},
+	}
+	// The lane already ran clean once, before the rework sent it back to swe.
+	lane.RecordSession("swe", 1, "sess-swe-1")
+	lane.RecordSession("clean", 1, "sess-clean-1")
+	lane.RecordSession("swe", 2, "sess-swe-2")
+
+	ds := Plan(Inputs{
+		State:    testState(lane),
+		Signals:  []LaneSignal{{Lane: "a", Phase: "swe", Round: 2}},
+		Verdicts: map[string]verify.Verdict{"a": {OK: true}},
+	})
+
+	d, ok := find(ds, "a", KindAdvance)
+	if !ok {
+		t.Fatalf("expected an advance into clean: %v", ds)
+	}
+	if d.Phase != "clean" {
+		t.Fatalf("advance phase = %q, want clean", d.Phase)
+	}
+	if d.Round != 2 {
+		t.Errorf("advance round = %d, want 2 (clean round 1 is already recorded)", d.Round)
+	}
+	if _, taken := lane.SessionFor(d.Phase, d.Round); taken {
+		t.Errorf("advance targets round %d of %q, which already has a session", d.Round, d.Phase)
+	}
+}

@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/swarm-queen/bramble"
 	"github.com/bazelment/yoloswe/swarm-queen/state"
 )
 
@@ -76,5 +78,53 @@ func TestNewReapApplierRefusesWithoutAReachableBramble(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "needs a reachable bramble TUI") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// The session fleet must be re-probed FOR EACH LANE at apply time, not captured
+// once and reused.
+//
+// reap built its applier's LiveSessions from a single snapshot taken when the
+// applier was constructed, so a session that started after that snapshot -- or
+// after an earlier lane's kill in the same run -- was invisible, and its
+// worktree could be removed with the agent still live. tick already re-probed
+// per lane; reap shared lifecycle.Applier but not the wiring.
+func TestFreshLaneProbeAsksBrambleForEveryLane(t *testing.T) {
+	calls := 0
+	prev := reapSessions
+	t.Cleanup(func() { reapSessions = prev })
+	reapSessions = func(context.Context, *cobra.Command) ([]bramble.Session, error) {
+		calls++
+		return []bramble.Session{}, nil
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	probe := freshLaneProbe(context.Background(), cmd)
+
+	for _, wt := range []string{"/wt/lane-a", "/wt/lane-b", "/wt/lane-c"} {
+		if p := probe(&state.Lane{ID: wt, Worktree: wt}); !p.Known {
+			t.Errorf("%s: a successful probe must be Known", wt)
+		}
+	}
+	if calls != 3 {
+		t.Errorf("bramble was asked %d time(s) for 3 lanes; a reused snapshot "+
+			"cannot see a session that started mid-run", calls)
+	}
+}
+
+// A probe that FAILS is unknown, never an empty fleet: absence of a measurement
+// must refuse the reap rather than permit it.
+func TestFreshLaneProbeReportsUnknownWhenTheQueryFails(t *testing.T) {
+	prev := reapSessions
+	t.Cleanup(func() { reapSessions = prev })
+	reapSessions = func(context.Context, *cobra.Command) ([]bramble.Session, error) {
+		return nil, errors.New("bramble unreachable")
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if p := freshLaneProbe(context.Background(), cmd)(&state.Lane{Worktree: "/wt/lane-a"}); p.Known {
+		t.Error("a failed probe must be UNKNOWN, not an empty fleet")
 	}
 }

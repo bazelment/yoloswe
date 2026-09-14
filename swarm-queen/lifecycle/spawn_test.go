@@ -528,3 +528,67 @@ func TestSpawnBaselineFromBaseDoesNotClobberExistingForkSHA(t *testing.T) {
 		t.Errorf("ForkSHA was clobbered: got %q, want the original %q", lane.ForkSHA, originalFork)
 	}
 }
+
+// The worktree fork and the baseline stamp must resolve to the SAME ref.
+//
+// req.From used lane.ForkBase while PrepareSpawn was handed st.Config.Base, so a
+// lane with its own Base was measured against a point it never branched from:
+// PhaseCompletion counts `rev-list <stamped>..HEAD`, which then counts the OTHER
+// base's commits, and a lane that committed nothing reads as having work --
+// bypassing the empty-branch refusal this harness exists to enforce.
+//
+// Driven through applySpawn rather than by calling PrepareSpawn directly: the
+// defect was in the WIRING between the two consumers, so a test that resolves
+// the fork ref itself and hands it over cannot fail when the wiring regresses.
+func TestSpawnForksAndStampsFromTheSameBase(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	a, store, _, sp := applier(t, repo)
+
+	// Two distinct bases: the run's, and the one this lane actually forks from.
+	git(t, repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+	runBaseSHA := git(t, repo, "rev-parse", "refs/remotes/origin/main")
+	write(t, repo, "other.txt", "work the lane builds on")
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-q", "-m", "other base")
+	git(t, repo, "update-ref", "refs/remotes/origin/feature-base", "HEAD")
+	laneBaseSHA := git(t, repo, "rev-parse", "refs/remotes/origin/feature-base")
+	if runBaseSHA == laneBaseSHA {
+		t.Fatal("fixture is not exercising the bug: both bases resolve alike")
+	}
+
+	// No worktree yet, so the spawn creates one -- the path that carries From.
+	if err := store.Update(func(st *state.State) error {
+		lane, _ := st.Lane("lane-a")
+		lane.Base = "feature-base"
+		lane.Worktree = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	outs := a.Apply(context.Background(), []decide.Decision{
+		{Lane: "lane-a", Kind: decide.KindSpawn, Phase: "swe", Round: 1},
+	})
+	if !outs[0].OK() {
+		t.Fatalf("spawn failed: %v", outs[0].Err)
+	}
+
+	// Consumer 1: the worktree is forked from the lane's own base.
+	if sp.seen.From != "feature-base" {
+		t.Errorf("-f = %q, want the lane's own base %q", sp.seen.From, "feature-base")
+	}
+
+	// Consumer 2: the baseline is stamped from that SAME ref, not the run base.
+	st, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane, _ := st.Lane("lane-a")
+	if lane.PhaseStartSHA != laneBaseSHA {
+		t.Errorf("PhaseStartSHA = %q, want the lane's base %q (run base is %q); "+
+			"the fork and the baseline disagree, so commits are counted from a "+
+			"point the lane never branched from",
+			lane.PhaseStartSHA, laneBaseSHA, runBaseSHA)
+	}
+}

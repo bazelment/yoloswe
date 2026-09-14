@@ -19,6 +19,10 @@ func TestSplitPhaseRound(t *testing.T) {
 		{"local-review", "local-review", 1},
 		{"local-review7", "local-review", 7},
 		{"local-review-r3", "local-review", 3}, // the other convention seen live
+		{"tester2", "tester", 2},               // a phase whose name ends in `r`
+		{"reviewer11", "reviewer", 11},
+		{"docs-writer2", "docs-writer", 2},
+		{"tester-r3", "tester", 3}, // ...in the `-r` convention too
 		{"github-review", "github-review", 1},
 	}
 	for _, tc := range cases {
@@ -32,7 +36,14 @@ func TestSplitPhaseRound(t *testing.T) {
 
 func TestPhaseRoundKeyRoundTrips(t *testing.T) {
 	t.Parallel()
-	for _, phase := range []string{"swe", "local-review", "github-review"} {
+	// Phases ending in `r` are the ones the old `-?r?` pattern broke: the
+	// optional `r` ate the phase's own last letter, so `tester2` split to
+	// ("teste", 2). None of the three original phases end in `r`, so the
+	// round-trip was asserted only where it could not fail.
+	for _, phase := range []string{
+		"swe", "local-review", "github-review",
+		"tester", "reviewer", "docs-writer", "integrator",
+	} {
 		for round := 1; round <= 12; round++ {
 			key := PhaseRoundKey(phase, round)
 			gotPhase, gotRound := SplitPhaseRound(key)

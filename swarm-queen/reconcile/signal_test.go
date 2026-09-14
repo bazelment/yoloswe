@@ -204,7 +204,11 @@ func TestCommitBaselineHoldsSignalsWhenDecisionsFailed(t *testing.T) {
 	}
 	basePath := filepath.Join(dir, ".baseline")
 
-	advanced, err := CommitBaseline(dir, basePath, 1)
+	seen, err := Baseline(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := CommitBaseline(dir, basePath, 1, seen)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +239,11 @@ func TestCommitBaselineAdvancesWhenNothingFailed(t *testing.T) {
 	}
 	basePath := filepath.Join(dir, ".baseline")
 
-	advanced, err := CommitBaseline(dir, basePath, 0)
+	seen, err := Baseline(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := CommitBaseline(dir, basePath, 0, seen)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,5 +260,50 @@ func TestCommitBaselineAdvancesWhenNothingFailed(t *testing.T) {
 	}
 	if len(fresh) != 0 {
 		t.Errorf("a consumed signal must not be new to the next tick, got %v", fresh)
+	}
+}
+
+// A signal that appears while the tick is APPLYING must not be consumed by that
+// tick's baseline. Applying takes seconds to minutes (bramble spawns, git
+// reaps); a .done written in that window was previously swept into a post-apply
+// re-scan and marked seen without ever being evaluated. The agent touches its
+// signal last and goes idle, so nothing rewrites it and the lane stalls forever.
+func TestCommitBaselineDoesNotConsumeSignalsThatArrivedMidTick(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "lane-a.swe.done"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	basePath := filepath.Join(dir, ".baseline")
+
+	// What the tick saw when it scanned.
+	seen, err := Baseline(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ... then a second lane reports while the tick is still applying.
+	if err := os.WriteFile(filepath.Join(dir, "lane-b.swe.done"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	advanced, err := CommitBaseline(dir, basePath, 0, seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !advanced {
+		t.Fatal("the baseline must advance once every decision applied")
+	}
+
+	saved, err := LoadBaseline(basePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := NewSince(dir, saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh) != 1 || fresh[0].Lane != "lane-b" {
+		t.Fatalf("the mid-tick signal must still be new to the next tick, got %v", fresh)
 	}
 }

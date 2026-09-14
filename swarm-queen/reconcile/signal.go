@@ -138,15 +138,19 @@ func NewSince(runDir string, base SignalSet) ([]Signal, error) {
 // failure count rather than two calls a caller can order wrongly.
 //
 // Returns (false, nil) when the baseline was deliberately left unadvanced.
-func CommitBaseline(runDir, baselinePath string, failed int) (bool, error) {
+//
+// `seen` is the signal set the tick actually PROCESSED, captured before it
+// acted. Re-scanning the run dir here instead consumed whatever had appeared in
+// the meantime: applying a tick takes seconds to minutes (bramble spawns, git
+// reaps), and a `.done` written inside that window was recorded as history
+// without ever being evaluated. The agent touches its signal last and goes idle,
+// so nothing rewrites it and the lane stalls permanently -- the dropped-signal
+// failure this function exists to prevent, reintroduced by the re-scan.
+func CommitBaseline(runDir, baselinePath string, failed int, seen SignalSet) (bool, error) {
 	if failed > 0 {
 		return false, nil
 	}
-	current, err := Baseline(runDir)
-	if err != nil {
-		return false, err
-	}
-	if err := SaveBaseline(baselinePath, current); err != nil {
+	if err := SaveBaseline(baselinePath, seen); err != nil {
 		return false, err
 	}
 	return true, nil
