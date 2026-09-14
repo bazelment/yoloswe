@@ -147,3 +147,31 @@ func TestAttemptsAreOrdered(t *testing.T) {
 		t.Errorf("Attempts() = %+v, want %+v", got, want)
 	}
 }
+
+// A phase name ending in a digit cannot round-trip through the round-key
+// encoding, so it must be refused where it enters the ledger rather than
+// silently corrupting attempt identity.
+//
+// `v2` round 1 is written "v2" and read back as phase "v" round 2; round 2 is
+// written "v22" and read back as round 22. ledger.py's parse_phases refuses the
+// same names, so both tools keep one key format.
+func TestValidatePhasesRejectsDigitEndingNames(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"v2", "phase2", "step1", "gpt4"} {
+		cfg := Config{Phases: []Phase{{Name: name}}}
+		if err := cfg.ValidatePhases(); err == nil {
+			key := PhaseRoundKey(name, 1)
+			gotPhase, gotRound := SplitPhaseRound(key)
+			t.Errorf("phase %q was accepted, but PhaseRoundKey(%q,1)=%q reads back "+
+				"as (%q,%d)", name, name, key, gotPhase, gotRound)
+		}
+	}
+	// The ordinary names every real run uses must still be accepted.
+	cfg := Config{Phases: []Phase{
+		{Name: "swe"}, {Name: "clean"}, {Name: "local-review"},
+		{Name: "tester"}, {Name: "docs-writer"},
+	}}
+	if err := cfg.ValidatePhases(); err != nil {
+		t.Errorf("ordinary phase names must be accepted: %v", err)
+	}
+}

@@ -76,6 +76,17 @@ func runReap(cmd *cobra.Command, args []string) error {
 			}
 		}
 
+		// A lane this harness already closed has nothing left to reap. Skip it
+		// on measured evidence -- terminal status, worktree gone from disk,
+		// branch gone from the repo -- rather than by erasing the ledger fields
+		// the five-zeros audit reads. Re-planning it produced a REFUSE with
+		// "cannot verify integration" and an unknown-session blocker on every
+		// run, which buried the real refusals.
+		if closed, why := laneFullyClosed(ctx, git, lane, wt); closed {
+			fmt.Printf("CLOSED %s: %s\n", lane.ID, why)
+			continue
+		}
+
 		probe := laneProbe(sessions, sessionErr == nil, lane.Worktree)
 		plan := lifecycle.PlanReap(ctx, git, reapRepoDir, lane, wt, st.Config.Target, probe)
 		if !plan.Safe {
@@ -205,3 +216,32 @@ func freshLaneProbe(ctx context.Context, cmd *cobra.Command) func(*state.Lane) l
 // reapSessions probes the live fleet. A variable so a test can supply a
 // measurement without a live bramble TUI, matching doctorSessions.
 var reapSessions = liveSessions
+
+// laneFullyClosed reports whether a terminal lane has no resources left, on
+// MEASURED evidence rather than on the absence of a ledger field.
+//
+// Absence of a field is not evidence of closure -- that conflation is what made
+// clearing Worktree and Branch look like a fix while it disarmed the audit. The
+// worktree must be measured and gone, and the branch must be absent from the
+// repo; an unmeasured probe returns false so the lane is planned and refused in
+// the ordinary way.
+func laneFullyClosed(
+	ctx context.Context,
+	g reconcile.GitRunner,
+	lane *state.Lane,
+	wt reconcile.WorktreeState,
+) (bool, string) {
+	if !lane.Status.Terminal() || wt.Unknown() || wt.Exists {
+		return false, ""
+	}
+	if lane.Branch != "" {
+		out, err := g.Run(ctx, reapRepoDir, "branch", "--list", lane.Branch)
+		if err != nil || strings.TrimSpace(out) != "" {
+			return false, ""
+		}
+	}
+	if lifecycle.HasBackup(ctx, g, reapRepoDir, lane.ID) {
+		return false, ""
+	}
+	return true, "terminal, worktree gone, branch gone, no backup ref"
+}

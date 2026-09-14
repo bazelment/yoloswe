@@ -199,6 +199,24 @@ func (f failingGit) Run(ctx context.Context, dir string, args ...string) (string
 	return f.inner.Run(ctx, dir, args...)
 }
 
+// RunWithEnv makes failingGit a reconcile.EnvGitRunner, which SnapshotAtRisk
+// requires: it stages through a throwaway index via reconcile.WithEnv, and that
+// helper type-asserts its runner to EnvGitRunner. Without this method the
+// assertion failed and every snapshot under a failingGit died with "git runner
+// does not support environment variables" -- so a test could not break one git
+// subcommand on a DIRTY worktree at all, because the reap refused at the
+// snapshot long before reaching the step under test.
+func (f failingGit) RunWithEnv(ctx context.Context, dir string, env []string, args ...string) (string, error) {
+	if len(args) > 0 && f.fail[args[0]] {
+		return "", fmt.Errorf("simulated failure: git %s", strings.Join(args, " "))
+	}
+	inner, ok := f.inner.(reconcile.EnvGitRunner)
+	if !ok {
+		return "", fmt.Errorf("failingGit wraps a runner that is not an EnvGitRunner")
+	}
+	return inner.RunWithEnv(ctx, dir, env, args...)
+}
+
 // A git probe that could not run is UNKNOWN, not clean. ProbeWorktree sets
 // Exists=true before running any git command, so a failed status returns
 // Exists=true with DirtyCount=0 -- the exact shape of a measured, clean worktree,
@@ -718,5 +736,127 @@ func TestApplyReapKeepsTheBackupItCreatedForDirtyWork(t *testing.T) {
 	}
 	if body := git(t, repo, "show", BackupRef("lane-a")+":wip.txt"); body != "uncommitted and on no branch" {
 		t.Errorf("backup contents = %q", body)
+	}
+}
+
+// A backup must survive a reap that FAILED partway, and the retry that follows.
+//
+// The round-7 guard asked "is this attempt's worktree dirty", which reads as
+// clean for a worktree that is simply GONE. Attempt 1 snapshots the dirty
+// worktree, removes it, then fails at `branch -D` and returns; attempt 2
+// measures Exists=false, DirtyCount=0, PlanReap does not require a backup for an
+// absent worktree, the branch delete succeeds, and the release destroys attempt
+// 1's only copy of the work. The rule is about whether the protected work is
+// reachable elsewhere, not about this attempt.
+func TestApplyReapKeepsTheBackupAcrossAFailedAttempt(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	a, store, _, _ := applier(t, repo)
+	a.SelfWindow = "@1"
+
+	// The branch must be genuinely integrated into the run's target, or the reap
+	// is refused at the integration check and never reaches the removal at all.
+	git(t, repo, "branch", "swarm/t")
+	wt := filepath.Join(t.TempDir(), "lane-a-wt")
+	git(t, repo, "worktree", "add", "-q", "-b", "lane-a-branch", wt)
+	write(t, wt, "wip.txt", "uncommitted and on no branch")
+
+	if err := store.Update(func(st *state.State) error {
+		lane, _ := st.Lane("lane-a")
+		lane.Status = state.StatusDone
+		lane.Worktree = wt
+		lane.Branch = "lane-a-branch"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Attempt 1: everything succeeds until the branch delete, which fails.
+	// failingGit matches on the subcommand, so `worktree remove` still runs.
+	a.Git = failingGit{inner: reconcile.ExecGit{}, fail: map[string]bool{"branch": true}}
+	outs := a.Apply(context.Background(), []decide.Decision{{Lane: "lane-a", Kind: decide.KindReap}})
+	if outs[0].OK() {
+		t.Fatal("fixture is not exercising the bug: attempt 1 was supposed to fail at branch -D")
+	}
+	// Name WHICH failure: "attempt 1 failed" is satisfied equally by a refused
+	// plan or a failed worktree removal, and both leave the worktree in place,
+	// so an assertion on presence alone cannot tell the intended path from a
+	// broken fixture.
+	if !strings.Contains(outs[0].Err.Error(), "delete branch") {
+		t.Fatalf("attempt 1 must fail at the branch delete, not earlier: %v", outs[0].Err)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "wip.txt")); err == nil {
+		t.Fatalf("fixture is not exercising the bug: the worktree survived attempt 1 (err=%v)", outs[0].Err)
+	}
+	if !HasBackup(context.Background(), reconcile.ExecGit{}, repo, "lane-a") {
+		t.Fatal("attempt 1 must leave the snapshot in place")
+	}
+
+	// Attempt 2: the worktree is already gone, so it measures clean-by-absence.
+	a.Git = reconcile.ExecGit{}
+	outs = a.Apply(context.Background(), []decide.Decision{{Lane: "lane-a", Kind: decide.KindReap}})
+	if !outs[0].OK() {
+		t.Fatalf("attempt 2 should complete the teardown: %v", outs[0].Err)
+	}
+	if !HasBackup(context.Background(), reconcile.ExecGit{}, repo, "lane-a") {
+		t.Fatal("attempt 2 released the snapshot attempt 1 created; the only copy " +
+			"of the uncommitted work is now unreachable")
+	}
+	if body := git(t, repo, "show", BackupRef("lane-a")+":wip.txt"); body != "uncommitted and on no branch" {
+		t.Errorf("backup contents = %q", body)
+	}
+}
+
+// A closed lane must keep the identity the five-zeros audit reads.
+//
+// Clearing Worktree and Branch silenced the repeated REFUSE, but AuditLane gates
+// its worktree probe on lane.Worktree != "" and its branch probe on
+// lane.Branch != "", so an erased lane passes two of the five zeros trivially --
+// the leak check trusting a field the reaper cleared.
+func TestApplyReapKeepsTheIdentityTheAuditReads(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	a, store, _, _ := applier(t, repo)
+	a.SelfWindow = "@1"
+
+	// Integrated into the run target, so the reap reaches the teardown rather
+	// than refusing at the integration check.
+	git(t, repo, "branch", "swarm/t")
+	wt := filepath.Join(t.TempDir(), "lane-a-wt")
+	git(t, repo, "worktree", "add", "-q", "-b", "lane-a-branch", wt)
+
+	if err := store.Update(func(st *state.State) error {
+		lane, _ := st.Lane("lane-a")
+		lane.Status = state.StatusDone
+		lane.Worktree = wt
+		lane.Branch = "lane-a-branch"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	outs := a.Apply(context.Background(), []decide.Decision{{Lane: "lane-a", Kind: decide.KindReap}})
+	if !outs[0].OK() {
+		t.Fatalf("reap failed: %v", outs[0].Err)
+	}
+
+	st, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane, _ := st.Lane("lane-a")
+	if lane.Worktree != wt {
+		t.Errorf("lane.Worktree = %q, want the real path %q: the audit skips its "+
+			"worktree probe when this field is empty", lane.Worktree, wt)
+	}
+	if lane.Branch != "lane-a-branch" {
+		t.Errorf("lane.Branch = %q, want the real branch: the audit skips its "+
+			"branch probe when this field is empty", lane.Branch)
+	}
+
+	// And with the identity retained, the audit genuinely checks all five.
+	audit := AuditLane(context.Background(), reconcile.ExecGit{}, nil, repo, lane, KnownSessions(nil))
+	if !audit.Clean() {
+		t.Errorf("a fully reaped lane must audit clean: %s", audit)
 	}
 }

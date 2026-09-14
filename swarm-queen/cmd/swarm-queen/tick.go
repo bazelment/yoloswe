@@ -346,15 +346,33 @@ func loadMissions(runDir string, st *state.State, decisions []decide.Decision) m
 			next[d.Lane] = state.PhaseRoundKey(d.Phase, max(d.Round, 1))
 		}
 	}
+	// Which PHASE each decision will run, so the round-less file for the phase
+	// being spawned can be tried -- the candidate this resolver was missing.
+	nextPhase := map[string]string{}
+	for _, d := range decisions {
+		if d.Phase != "" {
+			nextPhase[d.Lane] = d.Phase
+		}
+	}
 	out := map[string]string{}
 	for _, lane := range st.Lanes {
+		// Same order as dispatch's readMission: round-specific, then the phase
+		// being spawned, then the lane. The two resolvers had drifted -- this one
+		// tried the lane's CURRENT phase key instead of the round-less file for
+		// the phase being spawned, which by construction names the phase the lane
+		// is LEAVING. Harmless while everything ran round 1; once advances and
+		// reworks began targeting round >= 2, an advance into `clean` round 2
+		// with an authored `<lane>.clean.mission.txt` skipped that file and
+		// briefed the agent with the swe mission instead. The mission leads the
+		// brief, so the agent acts on instructions written for another phase.
 		candidates := []string{}
 		if k, ok := next[lane.ID]; ok {
 			candidates = append(candidates, fmt.Sprintf("%s.%s.mission.txt", lane.ID, k))
 		}
-		candidates = append(candidates,
-			fmt.Sprintf("%s.%s.mission.txt", lane.ID, state.PhaseRoundKey(lane.Phase, lane.Round)),
-			lane.ID+".mission.txt")
+		if p, ok := nextPhase[lane.ID]; ok {
+			candidates = append(candidates, fmt.Sprintf("%s.%s.mission.txt", lane.ID, p))
+		}
+		candidates = append(candidates, lane.ID+".mission.txt")
 		for _, name := range candidates {
 			if b, err := os.ReadFile(filepath.Join(runDir, name)); err == nil {
 				out[lane.ID] = strings.TrimSpace(string(b))

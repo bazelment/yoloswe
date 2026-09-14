@@ -185,8 +185,13 @@ func TestSpawnLifecycleAcrossBackends(t *testing.T) {
 			}
 
 			// Five zeros: session, worktree, branch, backup ref, tmux pane.
+			//
+			// Audit with the lane's REAL worktree path. Blanking it first made
+			// AuditLane skip the worktree probe entirely (it gates on
+			// lane.Worktree != ""), so the "clean five-zeros audit" this test
+			// reports never actually checked the worktree -- a leak check that
+			// passes because the field it reads was erased.
 			lane.WindowID = sess.TmuxTarget
-			lane.Worktree = ""
 			audit := lifecycle.AuditLane(ctx(t), git, tmux, repo, lane, lifecycle.KnownSessions(nil))
 			if !audit.Clean() {
 				t.Errorf("teardown left something behind: %s", audit)

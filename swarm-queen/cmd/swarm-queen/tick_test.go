@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -235,5 +237,46 @@ func TestReapExitRefusesToPassAnUnmeasuredRun(t *testing.T) {
 	err := reapExit(2, []string{"lane-a"}, errors.New("probe"))
 	if err == nil || !strings.Contains(err.Error(), "failed to close") {
 		t.Errorf("a genuine failure should be reported first, got %v", err)
+	}
+}
+
+// An advance into round 2 must read the mission written for the phase it is
+// ENTERING, even when only the round-less file exists.
+//
+// tick's resolver and dispatch's readMission had drifted: this one tried the
+// lane's CURRENT phase key -- by construction the phase being LEFT -- instead of
+// the round-less file for the phase being spawned. Harmless while everything ran
+// round 1; once advances and reworks began targeting round >= 2, an advance into
+// `clean` round 2 with an authored `<lane>.clean.mission.txt` skipped that file
+// and briefed the agent with the swe mission. The mission leads the brief, so
+// the agent acts on instructions written for a different phase.
+func TestLoadMissionsPrefersThePhaseBeingSpawnedOverTheOneBeingLeft(t *testing.T) {
+	t.Parallel()
+	runDir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(runDir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The lane is finishing swe round 2 and advancing into clean round 2. Only a
+	// round-less mission exists for clean.
+	write("lane-a.swe2.mission.txt", "the SWE mission")
+	write("lane-a.clean.mission.txt", "the CLEAN mission")
+	write("lane-a.mission.txt", "the lane fallback")
+
+	st := &state.State{
+		Config: state.Config{Phases: []state.Phase{{Name: "swe"}, {Name: "clean"}}},
+		Lanes: []*state.Lane{{
+			ID: "lane-a", Status: state.StatusRunning, Phase: "swe", Round: 2,
+		}},
+	}
+	decisions := []decide.Decision{{
+		Lane: "lane-a", Kind: decide.KindAdvance, Phase: "clean", Round: 2,
+	}}
+
+	got := loadMissions(runDir, st, decisions)["lane-a"]
+	if got != "the CLEAN mission" {
+		t.Errorf("mission = %q, want the mission for the phase being ENTERED", got)
 	}
 }

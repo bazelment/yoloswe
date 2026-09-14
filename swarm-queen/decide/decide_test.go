@@ -435,3 +435,35 @@ func TestAdvanceAfterReworkClaimsAnUnusedRound(t *testing.T) {
 		t.Errorf("advance targets round %d of %q, which already has a session", d.Round, d.Phase)
 	}
 }
+
+// A re-queued lane that already has recorded sessions must be spawned at its
+// next UNUSED round.
+//
+// Round 7 fixed the advance and rework producers and widened the overwrite guard
+// to every spawn kind, but left spawnDecisions emitting Round: 1. An operator
+// re-planning a lane (`ledger.py set --status planned`) then produced a spawn
+// that applySpawn refuses as an overwrite on EVERY tick -- and because a refusal
+// is a failed outcome, CommitBaseline holds the baseline and `tick --apply`
+// exits non-zero forever while every other lane's signals are re-seen.
+func TestSpawnOfARePlannedLaneClaimsAnUnusedRound(t *testing.T) {
+	t.Parallel()
+	lane := &state.Lane{
+		ID: "a", Status: state.StatusPlanned, Priority: state.P1,
+		Sessions: map[string]string{},
+	}
+	lane.RecordSession("swe", 1, "sess-swe-1")
+	lane.RecordSession("swe", 2, "sess-swe-2")
+
+	ds := Plan(Inputs{State: testState(lane), MaxConcurrent: 2})
+
+	d, ok := find(ds, "a", KindSpawn)
+	if !ok {
+		t.Fatalf("expected a spawn for the ready lane: %v", ds)
+	}
+	if d.Round != 3 {
+		t.Errorf("spawn round = %d, want 3 (swe rounds 1 and 2 are recorded)", d.Round)
+	}
+	if _, taken := lane.SessionFor(d.Phase, d.Round); taken {
+		t.Errorf("spawn targets round %d of %q, which already has a session", d.Round, d.Phase)
+	}
+}

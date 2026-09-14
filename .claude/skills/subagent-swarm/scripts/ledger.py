@@ -190,6 +190,15 @@ def parse_phases(spec):
             sys.exit(f"phase spec `{item}` has no name")
         if name in [p["name"] for p in phases]:
             sys.exit(f"duplicate phase name `{name}`")
+        if name[-1].isdigit():
+            # Round keys are `<phase><round>` with no delimiter (phase_round_key),
+            # so a name ending in a digit is ambiguous in both directions: `v2`
+            # round 1 is written "v2" and reads back as phase "v" round 2. Go's
+            # state.Config.ValidatePhases refuses the same names, so the two
+            # tools keep one key format rather than forking an escaping scheme.
+            sys.exit(f"phase name `{name}` ends in a digit; round keys are "
+                     f"`<phase><round>` with no delimiter, so it cannot be told "
+                     f"apart from a rounded key -- rename the phase")
         phases.append({"name": name, "model": model.strip()})
     if not phases:
         sys.exit("--phases must name at least one phase")

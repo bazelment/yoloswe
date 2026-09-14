@@ -288,9 +288,18 @@ func spawnDecisions(in Inputs, already []Decision) []Decision {
 			break
 		}
 		first := firstPhase(in.State)
+		// The THIRD producer of a round, and the one round 7 missed while fixing
+		// the other two. Ready() returns any planned lane, including one an
+		// operator re-queued with `ledger.py set --status planned` after it had
+		// already recorded sessions. Emitting round 1 there collides with a
+		// recorded attempt, and round 7's widened guard now REFUSES that spawn --
+		// every tick, forever: the refusal is a failed outcome, so CommitBaseline
+		// holds the baseline and `tick --apply` exits non-zero while every other
+		// lane's signals are re-seen indefinitely. Claiming the next unused round
+		// is what the rework and advance producers already do.
 		out = append(out, Decision{
 			Lane: lane.ID, Kind: KindSpawn, Source: SourceRule,
-			Phase: first, Round: 1,
+			Phase: first, Round: lane.MaxRound(first) + 1,
 			Reason: fmt.Sprintf("dependency-ready %s lane, slot available", lane.Priority),
 		})
 		free--

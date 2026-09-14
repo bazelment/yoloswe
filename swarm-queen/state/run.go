@@ -3,6 +3,8 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strings"
 )
 
 // Phase is one step in a lane's lifecycle, with the model that runs it.
@@ -153,8 +155,47 @@ func (s *State) NonTerminal() []*Lane {
 	return out
 }
 
+// phaseNameRe rejects the phase names that cannot survive a round-trip through
+// PhaseRoundKey/SplitPhaseRound.
+//
+// Round keys are `<phase><round>` with no delimiter, so a phase name ending in a
+// digit is ambiguous in BOTH directions and in both languages: `phase2` round 1
+// stays "phase2" and reads back as phase "phase" round 2, while round 2 writes
+// "phase22" and reads back as round 22. The attempt identity is then wrong,
+// MaxRound is wrong, and signal filenames misroute to a phase no config
+// declares. Escaping the suffix would fork the key format shared with
+// ledger.py's phase_round_key; refusing the name at the point it enters the
+// ledger states the condition under which the encoding IS sound and keeps one
+// format across both tools.
+var phaseNameRe = regexp.MustCompile(`\d$`)
+
+// ValidatePhases checks that every declared phase name can round-trip.
+func (c *Config) ValidatePhases() error {
+	seen := map[string]bool{}
+	for _, p := range c.Phases {
+		if p.Name == "" {
+			return fmt.Errorf("a phase has no name")
+		}
+		if seen[p.Name] {
+			return fmt.Errorf("duplicate phase name %q", p.Name)
+		}
+		seen[p.Name] = true
+		if phaseNameRe.MatchString(p.Name) {
+			return fmt.Errorf("phase name %q ends in a digit; round keys are "+
+				"`<phase><round>` with no delimiter, so %q round 1 is indistinguishable "+
+				"from phase %q round %s -- rename the phase",
+				p.Name, p.Name, strings.TrimRight(p.Name, "0123456789"),
+				strings.TrimLeft(p.Name, strings.TrimRight(p.Name, "0123456789")))
+		}
+	}
+	return nil
+}
+
 // Validate checks the whole ledger for structural problems.
 func (s *State) Validate() error {
+	if err := s.Config.ValidatePhases(); err != nil {
+		return err
+	}
 	seen := make(map[string]bool, len(s.Lanes))
 	for _, l := range s.Lanes {
 		if err := l.Validate(); err != nil {

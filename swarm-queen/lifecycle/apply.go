@@ -312,19 +312,26 @@ func (a *Applier) applyReap(ctx context.Context, d decide.Decision) Outcome {
 				Err:    fmt.Errorf("delete branch %s: %w", lane.Branch, err)}
 		}
 	}
-	// Release the backup ONLY when this reap did not create it.
+	// Release the backup only against a worktree we LOOKED AT and found clean.
 	//
-	// A dirty worktree is snapshotted above, PlanReap requires that snapshot
-	// before it allows the reap, and the worktree is then force-removed. Dropping
-	// the ref here deleted the only copy of work that exists nowhere else: the
-	// committed branch is verified integrated, but uncommitted and untracked
-	// files are not on it. "Refuse to reap a lane holding unsnapshotted work"
-	// became "snapshot it, then destroy the snapshot" -- ReleaseBackup's own doc
-	// says release is safe only once the lane is committed AND clean.
+	// The rule is about the work the ref protects, not about this attempt: a
+	// backup may only be released once what it holds is reachable elsewhere.
+	// Round 7 expressed that as `wt.DirtyCount == 0`, which is the dirty count
+	// of the CURRENT attempt and reads as "clean" for a worktree that is simply
+	// GONE. That admitted a two-attempt loss: attempt 1 snapshots a dirty
+	// worktree, removes it, then fails at `branch -D` and returns above; attempt
+	// 2 measures Exists=false, DirtyCount=0, PlanReap does not require a backup
+	// for an absent worktree, the branch delete now succeeds, and the release
+	// destroys attempt 1's only copy. Refs written by `reap`'s dry-run snapshot
+	// and by the watcher's snapshot_at_risk.sh die the same way.
 	//
-	// A retained ref costs nothing operationally and `audit` already reports it,
-	// so the leak is visible and recoverable; the deletion was not.
-	if wt.DirtyCount == 0 {
+	// wt.Clean() is Measured && Exists && DirtyCount == 0 -- we looked, it is
+	// there, and there is nothing on it to lose. An absent or unmeasured
+	// worktree is never evidence that the protected work landed somewhere.
+	//
+	// A retained ref costs nothing operationally and `audit` reports it, so the
+	// leak is visible and recoverable; the deletion was not.
+	if wt.Clean() {
 		if err := ReleaseBackup(ctx, a.Git, a.RepoDir, lane.ID); err != nil {
 			return Outcome{Decision: d, Err: fmt.Errorf("release backup ref: %w", err)}
 		}
@@ -336,13 +343,18 @@ func (a *Applier) applyReap(ctx context.Context, d decide.Decision) Outcome {
 			return nil
 		}
 		l.Status = state.StatusDone
-		l.Worktree = ""
 		l.WindowID = ""
-		// The branch was deleted above, so clear it too. Retaining it made every
-		// LATER reap re-plan BranchMerged against a ref that no longer exists:
-		// the lane reported REFUSE with "cannot verify integration" plus an
-		// unknown-session blocker on every run, burying the real refusals.
-		l.Branch = ""
+		// Worktree and Branch are RETAINED, deliberately.
+		//
+		// Round 7 cleared them so a closed lane would stop being re-planned and
+		// printed as REFUSE. That fixed the symptom by erasing the identity the
+		// leak check depends on: AuditLane skips its worktree probe when
+		// lane.Worktree is empty and its branch probe when lane.Branch is empty
+		// (reap.go), and audit_cleanup.sh gates the same way -- so a lane this
+		// code closed would pass two of the five zeros trivially, which is the
+		// "leak check that trusts a field" failure the README names. The noisy
+		// re-plan is fixed where it belongs instead: runReap skips lanes that are
+		// already terminal with nothing left on disk.
 		return nil
 	}); err != nil {
 		return Outcome{Decision: d, Err: err}
