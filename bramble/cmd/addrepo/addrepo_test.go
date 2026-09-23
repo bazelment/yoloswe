@@ -72,19 +72,18 @@ func TestParseGitHubRepoRejects(t *testing.T) {
 func TestAddRepoClonesAndPrintsWorktree(t *testing.T) {
 	t.Parallel()
 
-	var gotRoot, gotName, gotURL string
+	var gotRoot, gotURL string
 	var buf bytes.Buffer
 	err := addRepo(context.Background(), "https://github.com/bazelment/yoloswe", "/worktrees", &buf,
-		func(root, repoName string) repoInitializer {
-			gotRoot, gotName = root, repoName
+		func(root string) repoInitializer {
+			gotRoot = root
 			return initFunc(func(_ context.Context, cloneURL string) (string, error) {
 				gotURL = cloneURL
-				return filepath.Join(root, repoName, "main"), nil
+				return filepath.Join(root, "yoloswe", "main"), nil
 			})
 		})
 	require.NoError(t, err)
 	assert.Equal(t, "/worktrees", gotRoot)
-	assert.Equal(t, "yoloswe", gotName)
 	assert.Equal(t, "https://github.com/bazelment/yoloswe.git", gotURL)
 	assert.Equal(t, "added yoloswe at /worktrees/yoloswe/main\n", buf.String())
 }
@@ -94,7 +93,7 @@ func TestAddRepoKeepsSSHURL(t *testing.T) {
 
 	var gotURL string
 	err := addRepo(context.Background(), "git@github.com:bazelment/yoloswe.git", "/worktrees", io.Discard,
-		func(string, string) repoInitializer {
+		func(string) repoInitializer {
 			return initFunc(func(_ context.Context, cloneURL string) (string, error) {
 				gotURL = cloneURL
 				return "/worktrees/yoloswe/main", nil
@@ -115,7 +114,7 @@ func TestAddRepoDoesNotCloneRejectedURL(t *testing.T) {
 
 	called := false
 	err := addRepo(context.Background(), "https://gitlab.com/bazelment/yoloswe", "/worktrees", io.Discard,
-		func(string, string) repoInitializer {
+		func(string) repoInitializer {
 			called = true
 			return initFunc(func(context.Context, string) (string, error) {
 				return "", nil
@@ -129,7 +128,7 @@ func TestAddRepoReturnsCloneError(t *testing.T) {
 	t.Parallel()
 
 	err := addRepo(context.Background(), "bazelment/yoloswe", "/worktrees", io.Discard,
-		func(string, string) repoInitializer {
+		func(string) repoInitializer {
 			return initFunc(func(context.Context, string) (string, error) {
 				return "", assert.AnError
 			})
@@ -140,7 +139,7 @@ func TestAddRepoReturnsCloneError(t *testing.T) {
 func TestAddRepoRequiresWTRoot(t *testing.T) {
 	t.Parallel()
 
-	err := addRepo(context.Background(), "bazelment/yoloswe", "  ", io.Discard, func(string, string) repoInitializer {
+	err := addRepo(context.Background(), "bazelment/yoloswe", "  ", io.Discard, func(string) repoInitializer {
 		t.Fatal("initializer should not be called")
 		return nil
 	})
@@ -159,11 +158,11 @@ func TestCommandUsesWTRoot(t *testing.T) {
 		Cmd.SetErr(nil)
 		Cmd.SetArgs(nil)
 	})
-	newInitializer = func(root, repoName string) repoInitializer {
+	newInitializer = func(root string) repoInitializer {
 		gotRoot = root
 		return initFunc(func(_ context.Context, cloneURL string) (string, error) {
 			gotURL = cloneURL
-			return filepath.Join(root, repoName, "main"), nil
+			return filepath.Join(root, "yoloswe", "main"), nil
 		})
 	}
 

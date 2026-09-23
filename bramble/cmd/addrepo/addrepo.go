@@ -1,5 +1,4 @@
-// Package addrepo provides the "bramble add-repo" subcommand, which clones a
-// GitHub repository into WT_ROOT so it appears in the repo picker.
+// Package addrepo provides the "bramble add-repo" subcommand.
 package addrepo
 
 import (
@@ -17,7 +16,7 @@ import (
 	"github.com/bazelment/yoloswe/wt"
 )
 
-// Cmd clones a GitHub repository into the worktree root.
+// Cmd implements "bramble add-repo".
 var Cmd = &cobra.Command{
 	Use:          "add-repo <repo>",
 	Short:        "Add a GitHub repository to the repo list",
@@ -39,14 +38,12 @@ WT_ROOT selects the destination (default: ~/worktrees).`,
 	RunE: runAddRepo,
 }
 
-// repoInitializer clones a remote into the worktree layout.
 type repoInitializer interface {
 	Init(ctx context.Context, url string) (string, error)
 }
 
-// newInitializer builds the manager that performs the clone. Tests replace it.
-var newInitializer = func(wtRoot, repoName string) repoInitializer {
-	return wt.NewManager(wtRoot, repoName, wt.WithOutput(wt.NewOutput(os.Stderr, false)))
+var newInitializer = func(wtRoot string) repoInitializer {
+	return wt.NewManager(wtRoot, "", wt.WithOutput(wt.NewOutput(os.Stderr, false)))
 }
 
 func runAddRepo(cmd *cobra.Command, args []string) error {
@@ -61,7 +58,7 @@ func runAddRepo(cmd *cobra.Command, args []string) error {
 	return addRepo(ctx, args[0], wtRoot, cmd.OutOrStdout(), newInitializer)
 }
 
-func addRepo(ctx context.Context, raw, wtRoot string, stdout io.Writer, newInit func(root, repoName string) repoInitializer) error {
+func addRepo(ctx context.Context, raw, wtRoot string, stdout io.Writer, newInit func(root string) repoInitializer) error {
 	if strings.TrimSpace(wtRoot) == "" {
 		return fmt.Errorf("WT_ROOT is empty")
 	}
@@ -70,10 +67,7 @@ func addRepo(ctx context.Context, raw, wtRoot string, stdout io.Writer, newInit 
 		return err
 	}
 	repoName := wt.GetRepoNameFromURL(cloneURL)
-	if err := validateRepoName(repoName); err != nil {
-		return err
-	}
-	mainPath, err := newInit(wtRoot, repoName).Init(ctx, cloneURL)
+	mainPath, err := newInit(wtRoot).Init(ctx, cloneURL)
 	if err != nil {
 		return err
 	}
@@ -141,7 +135,7 @@ func parseGitHubRepo(raw string) (string, error) {
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "https", "http", "git":
-		// The git protocol is retired on GitHub, so those URLs clone over https.
+		// GitHub's retired git protocol clones over HTTPS.
 		return httpsClone(owner, repo), nil
 	case "ssh":
 		return sshClone(owner, repo), nil
@@ -196,11 +190,4 @@ func httpsClone(owner, repo string) string {
 
 func sshClone(owner, repo string) string {
 	return "git@github.com:" + owner + "/" + repo + ".git"
-}
-
-func validateRepoName(name string) error {
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
-		return fmt.Errorf("could not determine repository name from URL")
-	}
-	return nil
 }
