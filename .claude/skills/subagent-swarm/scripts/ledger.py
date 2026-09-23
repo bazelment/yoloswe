@@ -254,6 +254,17 @@ def code(v):
     return f"`{v}`" if v else "—"
 
 
+def repo_dir():
+    """The cwd's shared git dir (common to all its worktrees), or "" outside a repo."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "--path-format=absolute",
+                              "--git-common-dir"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
 def doctor(state, run, sessions_path=""):
     """Report where the ledger disagrees with reality. Pure read; changes nothing.
 
@@ -264,6 +275,7 @@ def doctor(state, run, sessions_path=""):
     """
     findings = []
     live = {}
+    sessions_ok = False
     if sessions_path:
         try:
             with open(sessions_path) as f:
@@ -273,6 +285,7 @@ def doctor(state, run, sessions_path=""):
             for row in rows or []:
                 if row.get("id"):
                     live[row["id"]] = row
+            sessions_ok = True
         except (OSError, ValueError) as exc:
             findings.append(f"sessions file unreadable ({exc}) -- session checks SKIPPED, "
                             f"not passed")
@@ -335,17 +348,23 @@ def doctor(state, run, sessions_path=""):
             for t in state["tasks"] if t.get("worktree")}
     ours.discard("")
     # Check branches independently; an unusable probe is skipped, never treated as empty.
+    # Probe the repo recorded at init: another checkout answers with a valid but wrong
+    # branch set, which reads as "nothing left to reap". Ledgers from before the field
+    # existed fall back to the cwd repo.
+    repo = state["config"].get("repo", "")
+    git = ["git", "--git-dir", repo] if repo else ["git"]
     branches = None
     try:
-        out = subprocess.run(["git", "branch", "--format=%(refname:short)"],
+        out = subprocess.run(git + ["branch", "--format=%(refname:short)"],
                              capture_output=True, text=True, timeout=10)
         if out.returncode == 0:
             branches = {b.strip() for b in out.stdout.splitlines() if b.strip()}
         else:
             why = out.stderr.strip().splitlines()[0] if out.stderr.strip() else "no stderr"
+            hint = (f"recorded repo {repo} is unusable" if repo else
+                    "run doctor from the orchestrator's worktree")
             findings.append(f"branch checks SKIPPED, not passed: `git branch` exited "
-                            f"{out.returncode} ({why}) -- run doctor from the "
-                            f"orchestrator's worktree")
+                            f"{out.returncode} ({why}) -- {hint}")
     except (OSError, subprocess.SubprocessError) as exc:
         findings.append(f"branch checks SKIPPED, not passed: could not run `git branch` "
                         f"({exc})")
@@ -364,16 +383,21 @@ def doctor(state, run, sessions_path=""):
         findings.append(f"live session on a run worktree but not in the ledger: {sid} "
                         f"(status={row.get('status', '?')} worktree={name}) -- "
                         f"the orchestrator has lost the handle on it")
-        # A session with no tmux_target has no pane: it is gone, not merely idle.
+        # No tmux_target means gone only once the session has stopped running; a
+        # just-spawned running session may not have been assigned its pane yet.
         if not row.get("tmux_target"):
-            findings.append(f"  ^ {sid} has no tmux_target -- window is gone, "
-                            f"decide now rather than waiting out a stall timeout")
+            if row.get("status") == "running":
+                findings.append(f"  ^ {sid} is running with no pane yet -- re-check "
+                                f"before treating it as gone")
+            else:
+                findings.append(f"  ^ {sid} has no tmux_target -- window is gone, "
+                                f"decide now rather than waiting out a stall timeout")
 
     # Include skipped checks in the summary so it cannot imply a false all-clear.
     skipped = []
     if branches is None:
         skipped.append("branch")
-    if not sessions_path:
+    if not sessions_ok:
         skipped.append("session")
     caveat = f" ({' and '.join(skipped)} checks SKIPPED)" if skipped else ""
 
@@ -465,7 +489,8 @@ def main():
 
     if a.cmd == "init":
         state = {"config": {"goal": a.goal, "phases": parse_phases(a.phases),
-                            "base": a.base, "target": a.target or a.base}, "tasks": []}
+                            "base": a.base, "target": a.target or a.base,
+                            "repo": repo_dir()}, "tasks": []}
         print(save(a.run, state))
         return
 

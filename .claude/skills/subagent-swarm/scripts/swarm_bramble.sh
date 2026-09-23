@@ -103,8 +103,9 @@ for r in (d.get("sessions",d) if isinstance(d,dict) else d) or []:
 ' "$1" "$2"
 }
 
-# sw_session_live <session-id> [seconds] [poll-seconds]
-# A newly registered running session may not have a tmux pane yet, so poll briefly.
+# sw_session_live <session-id> [max-polls] [poll-seconds]
+# A newly registered running session may not have a tmux pane yet, so poll briefly:
+# at most max-polls re-reads, poll-seconds apart (defaults: ~15s).
 sw_session_live() {
   local sid="${1:?session-id}" budget="${2:-15}" poll="${3:-1}" waited=0 state
   while :; do

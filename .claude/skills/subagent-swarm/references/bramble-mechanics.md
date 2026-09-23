@@ -117,10 +117,12 @@ an idle report as evidence that no backup is needed.
 rather than raw `tmux send-keys`. `sw_nudge` sends, refuses to stack onto pending pastes,
 and confirms the pane went busy before returning.
 
-A session whose `list-sessions` row has no `tmux_target` has no pane: it is **gone**, not
-idle. That is decidable immediately, without waiting out a stall timeout, and piping an
-empty target into `capture-pane` errors on precisely the lane most in need of being
-reported dead. Rows carry `worktree_name`, never `worktree_path`, and `list-sessions`
+A session whose `list-sessions` row has no `tmux_target` and is no longer `running` has
+no pane: it is **gone**, not idle. That is decidable immediately, without waiting out a
+stall timeout, and piping an empty target into `capture-pane` errors on precisely the
+lane most in need of being reported dead. A `running` row with no `tmux_target` may be a
+just-spawned session whose pane is not assigned yet: `sw_session_live` re-polls it
+briefly before calling it gone. Rows carry `worktree_name`, never `worktree_path`, and `list-sessions`
 returns `{"sessions": [...]}` — a dict, not a bare list.
 
 Use the run directory for reports. Send a live-session nudge only to an idle

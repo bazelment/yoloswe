@@ -81,9 +81,11 @@ else no "declared a healthy just-spawned session dead"; fi
 chk "uses one session snapshot per poll" "$(cat "$SWCOUNT")" "2"
 
 echo "== a session that never gains a pane is still reported gone, within budget =="
-sw_sessions(){ cat "$TMP/pending.json"; }
+echo 0 > "$SWCOUNT"
+sw_sessions(){ n=$(cat "$SWCOUNT"); echo $((n+1)) > "$SWCOUNT"; cat "$TMP/pending.json"; }
 START=$(date +%s)
 sw_session_live pending-1 3 0 && no "called a permanently paneless session live" || ok "gives up and reports gone"
+chk "max-polls bounds the re-reads (first read + 3)" "$(cat "$SWCOUNT")" "4"
 ELAPSED=$(( $(date +%s) - START ))
 [ "$ELAPSED" -le 2 ] && ok "respects its budget without waiting (${ELAPSED}s)" || no "overran budget: ${ELAPSED}s"
 

@@ -162,11 +162,13 @@ else ok "no false positive on an existing path"; fi
 
 echo "== a branch probe that cannot run SKIPS rather than reporting zero =="
 # A failed branch probe must be reported as skipped rather than empty.
+# Init outside a repo, so no repo is recorded and doctor probes its cwd.
 RUN8="$TMP/probe"
-L init "$RUN8" --goal g --phases "swe:" --base main --target main >/dev/null
+NOREPO=$(mktemp -d)
+(cd "$NOREPO" && L init "$RUN8" --goal g --phases "swe:" --base main --target main >/dev/null)
 L add "$RUN8" --id done-lane --title t --branch some-branch >/dev/null
 L set "$RUN8" --id done-lane --status done >/dev/null
-NOREPO=$(mktemp -d); OUT=$(cd "$NOREPO" && L doctor "$RUN8" 2>&1); rmdir "$NOREPO" 2>/dev/null
+OUT=$(cd "$NOREPO" && L doctor "$RUN8" 2>&1); rmdir "$NOREPO" 2>/dev/null
 if echo "$OUT" | grep -q "branch checks SKIPPED, not passed"; then ok "unusable probe reports SKIPPED"
 else no "silently treated an unusable probe as 'no branches survive': $OUT"; fi
 if echo "$OUT" | grep -q "exited 128"; then ok "names the exit code"
@@ -175,9 +177,9 @@ else no "does not say why it could not look"; fi
 echo "== the SUMMARY carries any check that did not run =="
 # The summary must name skipped checks.
 RUN9="$TMP/summary"
-L init "$RUN9" --goal g --phases "swe:" --base main --target main >/dev/null
-L add "$RUN9" --id ok1 --title t --branch b >/dev/null
 NOREPO=$(mktemp -d)
+(cd "$NOREPO" && L init "$RUN9" --goal g --phases "swe:" --base main --target main >/dev/null)
+L add "$RUN9" --id ok1 --title t --branch b >/dev/null
 OUT=$(cd "$NOREPO" && L doctor "$RUN9" 2>/dev/null); RC=$?
 if echo "$OUT" | tail -1 | grep -q "SKIPPED"; then ok "summary names the skipped checks"
 else no "summary hid a skipped check: $(echo "$OUT" | tail -1)"; fi
@@ -190,6 +192,44 @@ OUT=$(L doctor "$RUN9" --sessions "$TMP/empty-sessions.json" 2>/dev/null); RC=$?
 if echo "$OUT" | tail -1 | grep -q "SKIPPED"; then no "caveat fired when all checks ran: $OUT"
 else ok "no caveat when every check ran"; fi
 chk "fully-measured clean ledger exits 0" "$RC" "0"
+
+# An unreadable sessions file is a skipped check too, not only an omitted one.
+OUT=$(L doctor "$RUN9" --sessions "$TMP/does-not-exist.json" 2>/dev/null); RC=$?
+if echo "$OUT" | tail -1 | grep -q "session checks SKIPPED"; then ok "summary names an unreadable sessions file"
+else no "summary hid an unreadable sessions file: $(echo "$OUT" | tail -1)"; fi
+chk "an unreadable sessions file is not clean" "$RC" "1"
+
+echo "== the branch probe reads the run's repo, not doctor's cwd =="
+# From another checkout, the cwd answers with a valid but wrong branch set.
+REPO_A="$TMP/repo-a"; REPO_B="$TMP/repo-b"
+for r in "$REPO_A" "$REPO_B"; do
+  git init -q -b main "$r" && git -C "$r" -c user.name=t -c user.email=t@t \
+    commit -q --allow-empty -m init
+done
+git -C "$REPO_A" branch leftover
+RUN10="$TMP/bound"
+(cd "$REPO_A" && L init "$RUN10" --goal g --phases "swe:" --base main --target main >/dev/null)
+L add "$RUN10" --id reaped --title t --branch leftover >/dev/null
+L set "$RUN10" --id reaped --status done >/dev/null
+OUT=$(cd "$REPO_B" && L doctor "$RUN10" 2>&1)
+if echo "$OUT" | grep -q "branch \`leftover\` still exists"; then ok "surviving branch found from another checkout"
+else no "probed the cwd repo and missed the run's surviving branch: $OUT"; fi
+
+echo "== an untracked paneless session is gone only once it stops running =="
+RUN11="$TMP/paneless"
+L init "$RUN11" --goal g --phases "swe:" --base main --target main >/dev/null
+L add "$RUN11" --id lane --title t --branch b11 >/dev/null
+mkdir -p "$TMP/wt-p"
+L set "$RUN11" --id lane --status running --phase swe --worktree "$TMP/wt-p" >/dev/null
+cat > "$TMP/paneless.json" <<'JSON'
+{"sessions":[{"id":"spawning","status":"running","worktree_name":"wt-p"},
+             {"id":"stopped","status":"idle","worktree_name":"wt-p"}]}
+JSON
+OUT=$(L doctor "$RUN11" --sessions "$TMP/paneless.json" 2>&1)
+if echo "$OUT" | grep -q "spawning is running with no pane yet"; then ok "running paneless session is pending"
+else no "called a just-spawned session gone: $OUT"; fi
+if echo "$OUT" | grep -q "stopped has no tmux_target -- window is gone"; then ok "stopped paneless session is gone"
+else no "lost the gone case: $OUT"; fi
 
 echo "== absence is never evidence of approval =="
 # A PR with no recorded head/approval must be reported unverifiable, never assumed fine.
