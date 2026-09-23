@@ -63,9 +63,7 @@ const (
 	DefaultAgyModel = "gemini-3.8-flash-medium"
 
 	// DefaultCodexModel is the model used when BackendCodex is selected and
-	// no --model flag is provided. gpt-6-luna is the latest lightweight/fast
-	// generation of Codex's luna family. gpt-5.4-mini is no longer accepted
-	// by ChatGPT accounts.
+	// no --model flag is provided.
 	DefaultCodexModel = "gpt-6-luna"
 
 	// DefaultCursorModel is the model used when BackendCursor is selected and
