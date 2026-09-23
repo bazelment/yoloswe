@@ -302,10 +302,7 @@ def doctor(state, run, sessions_path=""):
                     f"({t.get('window_id') or 'empty'}) to find it")
             else:
                 findings.append(f"{tid}: status=done but worktree still exists ({wt})")
-        # A recorded path that no longer exists is drift whatever the status. Gating this
-        # on `running` made a partial teardown -- worktree removed, ledger never
-        # reconciled, branch left behind -- read as healthy, so a run with every path
-        # dangling reported no drift at all. Absence of the old finding is not cleanliness.
+        # Any missing recorded worktree is drift; finished lanes also need reconciliation.
         if wt and not os.path.isdir(wt):
             extra = "" if status == "running" else " -- teardown never reconciled"
             findings.append(f"{tid}: status={status} but its recorded worktree is gone "
@@ -337,13 +334,7 @@ def doctor(state, run, sessions_path=""):
     ours = {os.path.basename((t.get("worktree") or "").rstrip("/"))
             for t in state["tasks"] if t.get("worktree")}
     ours.discard("")
-    # Reaping is five layers and drifts on whichever is least visible. A worktree removed
-    # by hand leaves the branch, so check it independently of the path.
-    # A probe that cannot run must SKIP, never report zero. `git branch` outside a
-    # repository exits 128 with empty stdout and raises nothing, so trusting stdout alone
-    # turns "I could not look" into "nothing survives" -- a clean bill of health
-    # manufactured by a broken probe, the same shape audit_cleanup.sh guards against with
-    # its socket check. Test the return code, not just the exception.
+    # Check branches independently; an unusable probe is skipped, never treated as empty.
     branches = None
     try:
         out = subprocess.run(["git", "branch", "--format=%(refname:short)"],
@@ -378,9 +369,7 @@ def doctor(state, run, sessions_path=""):
             findings.append(f"  ^ {sid} has no tmux_target -- window is gone, "
                             f"decide now rather than waiting out a stall timeout")
 
-    # The summary is what gets read, pasted into a report, and gated on, so it has to
-    # carry any check that did not run. Skipping correctly is not enough: a correct
-    # internal state that prints an unqualified total is still a false green.
+    # Include skipped checks in the summary so it cannot imply a false all-clear.
     skipped = []
     if branches is None:
         skipped.append("branch")
@@ -390,7 +379,6 @@ def doctor(state, run, sessions_path=""):
 
     if not findings:
         print(f"doctor: {len(state['tasks'])} lane(s), no drift detected{caveat}")
-        # An all-clear that could not run every check is not an all-clear.
         return 1 if skipped else 0
     for line in findings:
         print(f"DRIFT {line}")
