@@ -251,21 +251,9 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 		stallC = stallTimer.C
 	}
 
-	// Print mode emits no stream events, so publish heartbeats when requested.
-	var beatC <-chan time.Time
-	var beatStart time.Time
-	if b.config.HeartbeatWriter != nil {
-		beatStart = time.Now()
-		beat := time.NewTicker(heartbeatInterval)
-		defer beat.Stop()
-		beatC = beat.C
-	}
-
 loop:
 	for {
 		select {
-		case <-beatC:
-			fmt.Fprintln(b.config.HeartbeatWriter, renderHeartbeat(true, time.Since(beatStart), heartbeatWindow{}, 0))
 		case <-ctx.Done():
 			_ = session.Stop()
 			return reviewPartialResult(resumeStatus, &bridgeResult{responseText: responseText, durationMs: durationMs}, ctx.Err())

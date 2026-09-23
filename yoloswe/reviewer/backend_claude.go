@@ -397,7 +397,7 @@ func (b *claudeBackend) runPromptWithOptions(ctx context.Context, prompt string,
 		},
 	}
 	stream := adapter.filtered(adapterCtx)
-	bridged, err := bridgeStreamEventsWithHeartbeat(adapterCtx, stream, handler, "", b.config.IdleTimeout, b.config.HeartbeatWriter)
+	bridged, err := bridgeStreamEvents(adapterCtx, stream, handler, "", b.config.IdleTimeout)
 	sessionMu.Lock()
 	readySessionID := actualSessionID
 	sessionMu.Unlock()

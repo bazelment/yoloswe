@@ -79,9 +79,9 @@ class SuperviseTests(unittest.TestCase):
         self.assertIn("terminal event", env["error"])
 
     def test_reading_diff_does_not_arm_hang_clock(self) -> None:
-        # reading_diff covers backend start, which can outlast 2x the
-        # heartbeat interval. Only analyzing/heartbeat arm the clock, and
-        # a prompt done after reading_diff must not be killed.
+        # Only analyzing/heartbeat arm the clock. bramble's heartbeat timer
+        # starts with reading_diff, so the clock is armed by the first
+        # heartbeat rather than by the phase line.
         script = textwrap.dedent(
             """\
             import json, sys
@@ -115,6 +115,65 @@ class SuperviseTests(unittest.TestCase):
         )
         self.assertEqual(code, 1)
         self.assertLess(time.monotonic() - start, 1)
+
+    def test_forwarded_events_and_stderr_name_their_backend(self) -> None:
+        # Reviewers share one job stdout. Every forwarded JSON event carries
+        # the backend, including a hang terminal event review_push writes
+        # itself. Stderr lines are prefixed. Non-JSON stdout passes through
+        # unchanged.
+        import contextlib
+        import io
+
+        script = textwrap.dedent(
+            """\
+            import json, sys
+            print("stderr detail", file=sys.stderr, flush=True)
+            print("not json", flush=True)
+            print(json.dumps({"event": "phase", "phase": "analyzing"}), flush=True)
+            print(json.dumps({"event": "heartbeat", "elapsed_ms": 1, "interval_ms": 60000}), flush=True)
+            print(json.dumps({"event": "done", "verdict": "accepted", "envelope": "x", "status": "ok", "issues": 0}), flush=True)
+            """
+        )
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = review_push.supervise(
+                [sys.executable, "-c", script],
+                envelope=self.envelope,
+                backend="claude",
+                sigterm_grace_s=0.2,
+            )
+        self.assertEqual(code, 0)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(lines[0], "not json")
+        events = [json.loads(line) for line in lines[1:]]
+        self.assertEqual([e["event"] for e in events], ["phase", "heartbeat", "done"])
+        self.assertEqual({e["backend"] for e in events}, {"claude"})
+        self.assertEqual(err.getvalue(), "[claude] stderr detail\n")
+
+    def test_hang_terminal_event_names_backend(self) -> None:
+        import contextlib
+        import io
+
+        script = textwrap.dedent(
+            """\
+            import json, time
+            print(json.dumps({"event": "phase", "phase": "analyzing"}), flush=True)
+            time.sleep(30)
+            """
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = review_push.supervise(
+                [sys.executable, "-c", script],
+                envelope=self.envelope,
+                interval_ms=100,
+                backend="codex",
+                sigterm_grace_s=0.2,
+            )
+        self.assertEqual(code, 1)
+        terminal = json.loads(out.getvalue().splitlines()[-1])
+        self.assertEqual(terminal["event"], "error")
+        self.assertEqual(terminal["backend"], "codex")
 
 
 if __name__ == "__main__":

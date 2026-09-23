@@ -2,7 +2,6 @@ package reviewer
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,7 +16,13 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/framelog"
 )
 
-// heartbeatInterval is overridable by tests.
+// heartbeatInterval bounds how often bridgeStreamEvents emits a liveness line
+// to heartbeatOut while a review is in progress. A review can sit silent for
+// minutes while a backend "thinks"; without a periodic pulse a healthy long
+// review is indistinguishable from a hung one in the logs. Overridable in
+// tests via a sub-second value. heartbeatOut defaults to os.Stderr so the line
+// lands in the same stream pr-polish captures per backend (…-stderr.txt) and
+// the klogfmt run log; the envelope on stdout/--envelope-file is untouched.
 var (
 	heartbeatInterval           = 20 * time.Second
 	heartbeatOut      io.Writer = os.Stderr
@@ -61,43 +66,6 @@ func formatHeartbeat(elapsed time.Duration, w heartbeatWindow, toolsInFlight int
 		fmt.Fprintf(&b, " · +%s reasoning", formatCharCount(w.reasoningChars))
 	}
 	return b.String()
-}
-
-// pushHeartbeat is the machine-parsable liveness event.
-type pushHeartbeat struct {
-	Tools          string `json:"tools,omitempty"`
-	Event          string `json:"event"`
-	ElapsedMs      int64  `json:"elapsed_ms"`
-	IntervalMs     int64  `json:"interval_ms"`
-	TextChars      int    `json:"text_chars,omitempty"`
-	ReasoningChars int    `json:"reasoning_chars,omitempty"`
-	ToolsInFlight  int    `json:"tools_in_flight"`
-	Idle           bool   `json:"idle"`
-}
-
-func formatHeartbeatEvent(elapsed time.Duration, w heartbeatWindow, toolsInFlight int) string {
-	ev := pushHeartbeat{
-		Event:          "heartbeat",
-		ElapsedMs:      elapsed.Milliseconds(),
-		IntervalMs:     heartbeatInterval.Milliseconds(),
-		Idle:           w.events == 0,
-		ToolsInFlight:  toolsInFlight,
-		Tools:          summarizeTools(w.toolsCompleted),
-		TextChars:      w.textChars,
-		ReasoningChars: w.reasoningChars,
-	}
-	b, err := json.Marshal(ev)
-	if err != nil {
-		return `{"event":"heartbeat"}`
-	}
-	return string(b)
-}
-
-func renderHeartbeat(push bool, elapsed time.Duration, w heartbeatWindow, toolsInFlight int) string {
-	if push {
-		return formatHeartbeatEvent(elapsed, w, toolsInFlight)
-	}
-	return formatHeartbeat(elapsed, w, toolsInFlight)
 }
 
 // summarizeTools renders completed tool names with per-name counts, e.g.
@@ -203,29 +171,17 @@ func bridgeStreamEvents[E any](
 	scopeID string,
 	idleTimeout time.Duration,
 ) (*bridgeResult, error) {
-	return bridgeStreamEventsWithHeartbeat(ctx, events, handler, scopeID, idleTimeout, nil)
-}
-
-func bridgeStreamEventsWithHeartbeat[E any](
-	ctx context.Context,
-	events <-chan E,
-	handler EventHandler,
-	scopeID string,
-	idleTimeout time.Duration,
-	pushWriter io.Writer,
-) (*bridgeResult, error) {
 	if events == nil {
 		return nil, fmt.Errorf("nil event channel")
 	}
 
 	var responseText strings.Builder
 
-	// A non-nil writer opts this review into structured heartbeat events.
-	heartbeatWriter := heartbeatOut
-	pushHeartbeat := pushWriter != nil
-	if pushHeartbeat {
-		heartbeatWriter = pushWriter
-	}
+	// Liveness telemetry: a periodic, event-aware heartbeat written to
+	// heartbeatOut (stderr). window accumulates activity since the last tick;
+	// toolsInFlight spans windows (a tool started in one window may finish in a
+	// later one). This is operator/log telemetry only — it never touches the
+	// handler, the response text, or the envelope.
 	start := time.Now()
 	lastEvent := start
 	lastHeartbeat := start
@@ -242,7 +198,25 @@ func bridgeStreamEventsWithHeartbeat[E any](
 	var window heartbeatWindow
 	toolsInFlight := 0
 
-	// Every failure preserves any streamed text and elapsed time.
+	// failed is the ONLY way this function reports a failure. Every terminal
+	// error path routes through it, so "does this exit preserve partial work?"
+	// has exactly one answer for all of them: yes, always. The exits are
+	// ctx.Done, the idle timeout, channel-close (both arms), and the KindError
+	// event; `nil event channel` returns before any text can accumulate.
+	// TestBridgeStreamEvents_EveryFailurePathPreservesPartialWork covers each —
+	// keep a subtest there when adding an exit, or this comment becomes a claim
+	// nothing checks. Four consecutive review rounds each found a different exit
+	// that dropped accumulated text (idle timeout, channel close, ctx
+	// cancellation, KindError) because each was
+	// deciding that question for itself — the fix is one rule, not a fourth
+	// case. A caller that ignores the result is unaffected; the error is
+	// unchanged.
+	//
+	// The ctx path is the one that matters most in production: SKILL Step 3.b
+	// wraps every reviewer in `timeout 2400`, GNU timeout sends SIGTERM, and
+	// codereview.go installs signal.NotifyContext(SIGINT, SIGTERM) on the
+	// review context — so the absolute backstop cancels here, not at the idle
+	// timeout.
 	failed := func(err error) (*bridgeResult, error) {
 		text := responseText.String()
 		if text == "" {
@@ -291,7 +265,24 @@ func bridgeStreamEventsWithHeartbeat[E any](
 			}
 		}
 
-		// Any in-scope event proves liveness, even when it cannot be rendered.
+		// Liveness is a TRANSPORT fact, not a semantic one: any event that
+		// belongs to this scope proves the backend is alive, whether or not the
+		// bridge knows how to render it. Everything below only decides what to
+		// DO with the event; it must never decide whether the stream is alive.
+		//
+		// Why this is separate from the kind switch: agentstream is a deliberate
+		// common SUBSET (see agentstream/doc.go) — SDK-specific events like
+		// codex.ItemStartedEvent, ItemCompletedEvent, TokenUsageEvent and
+		// CommandOutputEvent intentionally don't implement agentstream.Event, and
+		// conditional events legitimately return KindUnknown. Treating either as
+		// "not alive" conflated "I can't render this" with "nothing happened".
+		//
+		// Measured on kernel#8682 r2: codex sent item/started 17s after the last
+		// renderable event, then went quiet. The bridge ignored it and tripped a
+		// 300s idle timer at 309s on a stream whose real silence was 293s,
+		// discarding a review holding ~2M input tokens. Round 3's 132s gap
+		// carried item/started + item/completed and nothing else. Fleet-wide this
+		// was the largest single failure bucket (143 of 1,734 envelopes).
 		sev, isStreamEvent := any(ev).(agentstream.Event)
 		if !isStreamEvent {
 			return nil, false, true, nil
@@ -429,7 +420,7 @@ func bridgeStreamEventsWithHeartbeat[E any](
 			// Emit a heartbeat line at most every heartbeatInterval even if the
 			// ticker fires more often for idle-check precision.
 			if time.Since(lastHeartbeat) >= heartbeatInterval {
-				fmt.Fprintln(heartbeatWriter, renderHeartbeat(pushHeartbeat, time.Since(start), window, toolsInFlight))
+				fmt.Fprintln(heartbeatOut, formatHeartbeat(time.Since(start), window, toolsInFlight))
 				window = heartbeatWindow{}
 				lastHeartbeat = time.Now()
 			}

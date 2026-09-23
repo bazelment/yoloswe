@@ -2,7 +2,6 @@ package reviewer
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -361,47 +360,6 @@ func TestBridgeStreamEvents_IdleIgnoresPerpetualOutOfScopeTraffic(t *testing.T) 
 	}
 	if err == nil || !strings.Contains(err.Error(), "review idle") {
 		t.Fatalf("expected idle-timeout despite perpetual out-of-scope traffic, got: %v", err)
-	}
-}
-
-func TestFormatHeartbeatEvent_PushShape(t *testing.T) {
-	prev := heartbeatInterval
-	heartbeatInterval = 30 * time.Second
-	t.Cleanup(func() { heartbeatInterval = prev })
-
-	idle := formatHeartbeatEvent(95*time.Second, heartbeatWindow{}, 1)
-	var ev map[string]any
-	if err := json.Unmarshal([]byte(idle), &ev); err != nil {
-		t.Fatalf("idle heartbeat is not JSON: %v\n%s", err, idle)
-	}
-	if ev["event"] != "heartbeat" || ev["idle"] != true {
-		t.Errorf("idle event = %v", ev)
-	}
-	if ev["interval_ms"] != float64(30000) {
-		t.Errorf("interval_ms = %v, want 30000", ev["interval_ms"])
-	}
-	if ev["elapsed_ms"] != float64(95000) {
-		t.Errorf("elapsed_ms = %v, want 95000", ev["elapsed_ms"])
-	}
-	if ev["tools_in_flight"] != float64(1) {
-		t.Errorf("tools_in_flight = %v, want 1", ev["tools_in_flight"])
-	}
-
-	active := renderHeartbeat(false, 10*time.Second, heartbeatWindow{events: 2, toolsCompleted: []string{"Read"}}, 0)
-	if strings.Contains(active, `"event"`) {
-		t.Fatalf("human heartbeat rendered as JSON: %s", active)
-	}
-	active = renderHeartbeat(
-		true,
-		10*time.Second,
-		heartbeatWindow{events: 2, toolsCompleted: []string{"Read"}, textChars: 10},
-		0,
-	)
-	if err := json.Unmarshal([]byte(active), &ev); err != nil {
-		t.Fatalf("push heartbeat is not JSON: %v\n%s", err, active)
-	}
-	if ev["event"] != "heartbeat" || ev["idle"] != false || ev["tools"] != "Read" {
-		t.Errorf("active push event = %v", ev)
 	}
 }
 

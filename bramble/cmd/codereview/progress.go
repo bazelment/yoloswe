@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/bazelment/yoloswe/yoloswe/reviewer"
 )
@@ -29,6 +31,61 @@ type terminalEvent struct {
 
 func emitPhase(phase string) {
 	writeStdoutJSON(phaseEvent{Event: "phase", Phase: phase})
+}
+
+// heartbeatInterval is how often startHeartbeats publishes. review_push.py
+// treats 2x interval_ms of silence as a hang. Overridable by tests.
+var heartbeatInterval = 20 * time.Second
+
+// heartbeatEvent is the push-stream liveness event.
+type heartbeatEvent struct {
+	Event      string `json:"event"`
+	ElapsedMs  int64  `json:"elapsed_ms"`
+	IntervalMs int64  `json:"interval_ms"`
+}
+
+// startHeartbeats publishes a heartbeat every heartbeatInterval until the
+// returned stop is called. It runs in this process and does not depend on the
+// backend. Backend start, a resume fallback that respawns the CLI, and
+// print-mode backends that stream nothing all get heartbeats, so the
+// watchdog's hang clock is never running while nothing is emitting.
+// Heartbeats show that bramble is alive. They do not show that the backend is
+// making progress. A stalled backend is killed by --idle-timeout, and that
+// path still produces a terminal event.
+//
+// stop is idempotent. It waits for the ticker goroutine to exit. A heartbeat
+// that is mid-write when stop is called completes before stop returns, and
+// no heartbeat is written after that. Call it before writing_envelope so the
+// terminal event is the stream's last line.
+func startHeartbeats() (stop func()) {
+	interval := heartbeatInterval
+	start := time.Now()
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				writeStdoutJSON(heartbeatEvent{
+					Event:      "heartbeat",
+					ElapsedMs:  time.Since(start).Milliseconds(),
+					IntervalMs: interval.Milliseconds(),
+				})
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-exited
+		})
+	}
 }
 
 // Partial reviews emit done because their envelope contains findings.

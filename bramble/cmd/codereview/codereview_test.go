@@ -1,6 +1,7 @@
 package codereview
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1726,6 +1727,69 @@ func TestReadOnlyFlagHelpNamesTheBackendsThatIgnoreIt(t *testing.T) {
 	for _, backend := range []string{"Cursor", "Agy"} {
 		if !strings.Contains(flag.Usage, backend) {
 			t.Errorf("--read-only help must name %s as ignoring the flag, got %q", backend, flag.Usage)
+		}
+	}
+}
+
+// Heartbeats come from this process on a timer, with no backend events at all.
+// A backend that is still starting, respawning on resume fallback, or running
+// in print mode emits nothing, and review_push.py kills a run after 2x
+// interval of silence. After stop returns, nothing more may be written, so the
+// terminal event stays the last line.
+func TestStartHeartbeats_IndependentOfBackendAndSilentAfterStop(t *testing.T) {
+	prevInterval := heartbeatInterval
+	heartbeatInterval = 10 * time.Millisecond
+	t.Cleanup(func() { heartbeatInterval = prevInterval })
+
+	origOut := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = origOut })
+
+	lines := make(chan string, 64)
+	go func() {
+		defer close(lines)
+		sc := bufio.NewScanner(r)
+		for sc.Scan() {
+			lines <- sc.Text()
+		}
+	}()
+
+	stop := startHeartbeats()
+	for i := 0; i < 2; i++ {
+		select {
+		case line := <-lines:
+			var ev map[string]any
+			if err := json.Unmarshal([]byte(line), &ev); err != nil {
+				t.Fatalf("heartbeat is not JSON: %v\n%s", err, line)
+			}
+			if ev["event"] != "heartbeat" || ev["interval_ms"] != float64(10) {
+				t.Fatalf("heartbeat = %v, want event=heartbeat interval_ms=10", ev)
+			}
+		case <-time.After(5 * time.Second):
+			stop()
+			t.Fatalf("no heartbeat %d within 5s", i+1)
+		}
+	}
+	stop()
+	stop() // idempotent
+	emitPhase("writing_envelope")
+	_ = w.Close()
+
+	var tail []string
+	for line := range lines {
+		tail = append(tail, line)
+	}
+	if len(tail) == 0 || !strings.Contains(tail[len(tail)-1], `"writing_envelope"`) {
+		t.Fatalf("last line after stop = %v, want writing_envelope", tail)
+	}
+	for _, line := range tail[:len(tail)-1] {
+		// Only heartbeats written before stop returned may precede the sentinel.
+		if !strings.Contains(line, `"heartbeat"`) {
+			t.Errorf("unexpected line before sentinel: %s", line)
 		}
 	}
 }

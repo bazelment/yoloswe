@@ -250,7 +250,9 @@ per-reviewer `BRAMBLE_RUN_TAG` is how runs are attributed.
 # review off well before the 18min+ a large diff needs. 35m sits under the 2400s
 # backstop so the CLI reports a timeout rather than being killed outright.
 # review_push.py forwards stdout (the push stream) and kills the child when
-# heartbeats stop for 2x the interval. It does not tee a progress file.
+# heartbeats stop for 2x the interval. It does not tee a progress file. It
+# stamps `"backend"` on every forwarded event and prefixes forwarded stderr
+# with `[backend]`, so the interleaved job output stays attributable.
 # Do not add `tee`, `2>`, or a sed prefix — a prefix breaks the JSON events,
 # and a file is what the loop used to poll.
 PIDS=()
@@ -407,7 +409,7 @@ Skip if no file changes. Run project gates, then commit locally (`pr-polish roun
 ```bash
 python3 $SKILL_DIR/scripts/pr_ops.py finalize-and-report $CTX $ROUND $(git rev-parse HEAD) \
   $STATE_DIR/actions-r$ROUND.json \
-  --review-wall-ms "$REVIEW_WALL_MS" \
+  ${REVIEW_WALL_MS:+--review-wall-ms "$REVIEW_WALL_MS"} \
   --envelope codex=$LOG_DIR/codex-envelope.json \
   --envelope cursor=$LOG_DIR/cursor-envelope.json \
   --envelope lint=$LOG_DIR/lint-envelope.json \
@@ -415,7 +417,7 @@ python3 $SKILL_DIR/scripts/pr_ops.py finalize-and-report $CTX $ROUND $(git rev-p
   $( [ "$USE_CLAUDE" = "1" ] && echo --envelope claude=$LOG_DIR/claude-envelope.json )
 ```
 
-`$REVIEW_WALL_MS` is the `review_wall_ms` field from the Monitor job's `review_join` line. The round summary then shows review time vs orchestrator time.
+`$REVIEW_WALL_MS` is the `review_wall_ms` field from the Monitor job's `review_join` line. Substitute the literal value, because shell state from the launch job does not carry over. The round summary then shows review time vs orchestrator time. If the line is missing, leave it empty: the `${…:+…}` form drops the flag and the summary shows `review=n/a`. An empty `--review-wall-ms ""` would instead fail argparse's int check and the round would never finalize.
 
 (`state-finalize-round` has the same finalize semantics, without the round summary hints.)
 

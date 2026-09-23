@@ -7,8 +7,18 @@ child has emitted ``analyzing`` or a heartbeat, silence for two heartbeat
 intervals is a hang: the child is killed and an error envelope plus a
 terminal event are published so the join can finish.
 
-``reading_diff`` does not arm the hang clock. Backend start sits in that
-phase and can outlast two intervals without being stuck.
+Heartbeats come from a timer in the bramble process that runs from
+``reading_diff`` until the envelope is written. They do not depend on the
+backend's event stream, so backend start and resume fallback are covered
+and nothing is at risk of being mistaken for a hang. A hang therefore means
+the bramble process itself stopped writing. A backend that is up but stalled
+is bramble's ``--idle-timeout``'s job, and that path still ends in a terminal
+event.
+
+Several reviewers share one job stdout, so ``--backend`` is stamped onto
+every forwarded JSON event, and each forwarded stderr line gets a
+``[backend]`` prefix. Stdout lines stay valid JSON, and every line says
+which reviewer wrote it.
 
 Exit status is the child's, except a hang or a child that exits with no
 terminal event exits 1. The envelope, not the status, is what triage reads.
@@ -121,22 +131,41 @@ def _close_pipes(proc: subprocess.Popen[str]) -> None:
             stream.close()
 
 
-def _emit_terminal(message: str, envelope: Path) -> None:
-    line = json.dumps(
-        {
-            "event": "error",
-            "verdict": "",
-            "envelope": str(envelope),
-            "status": "error",
-            "issues": 0,
-            "error": message,
-        }
-    )
-    sys.stdout.write(line + "\n")
+def _forward(line: str, backend: str) -> dict[str, Any] | None:
+    """Write one child stdout line with ``backend`` stamped on JSON events.
+
+    Returns the parsed event, or None for a non-JSON line (forwarded as-is).
+    """
+    ev = _parse_event(line)
+    if ev is not None and backend:
+        ev.setdefault("backend", backend)
+        line = json.dumps(ev) + "\n"
+    sys.stdout.write(line)
+    sys.stdout.flush()
+    return ev
+
+
+def _emit_terminal(message: str, envelope: Path, backend: str) -> None:
+    ev: dict[str, Any] = {
+        "event": "error",
+        "verdict": "",
+        "envelope": str(envelope),
+        "status": "error",
+        "issues": 0,
+        "error": message,
+    }
+    if backend:
+        ev["backend"] = backend
+    sys.stdout.write(json.dumps(ev) + "\n")
     sys.stdout.flush()
 
 
-def _drain(stream: IO[str] | None, dest: IO[str] | None, out: queue.Queue[str | None]) -> None:
+def _drain(
+    stream: IO[str] | None,
+    dest: IO[str] | None,
+    out: queue.Queue[str | None],
+    prefix: str = "",
+) -> None:
     if stream is None:
         if dest is None:
             out.put(None)
@@ -145,7 +174,7 @@ def _drain(stream: IO[str] | None, dest: IO[str] | None, out: queue.Queue[str | 
         if dest is None:
             out.put(line)
         else:
-            dest.write(line)
+            dest.write(prefix + line)
             dest.flush()
     if dest is None:
         out.put(None)
@@ -156,6 +185,7 @@ def _kill_and_collect(
     lines: queue.Queue[str | None],
     *,
     grace_s: float,
+    backend: str,
 ) -> bool:
     """SIGTERM, forward any terminal event the child emits, then SIGKILL.
 
@@ -173,9 +203,7 @@ def _kill_and_collect(
             continue
         if line is None:
             break
-        sys.stdout.write(line)
-        sys.stdout.flush()
-        ev = _parse_event(line)
+        ev = _forward(line, backend)
         if ev and ev.get("event") in _TERMINAL_EVENTS:
             saw = True
     if proc.poll() is None:
@@ -228,7 +256,9 @@ def supervise(
         target=_drain, args=(proc.stdout, None, lines), daemon=True
     ).start()
     err_thread = threading.Thread(
-        target=_drain, args=(proc.stderr, sys.stderr, lines), daemon=True
+        target=_drain,
+        args=(proc.stderr, sys.stderr, lines, f"[{backend}] " if backend else ""),
+        daemon=True,
     )
     err_thread.start()
 
@@ -244,17 +274,15 @@ def supervise(
             line = lines.get(timeout=timeout)
         except queue.Empty:
             message = f"hang: no heartbeat for {_format_wait(hang_after)} (2x the liveness interval)"
-            if not _kill_and_collect(proc, lines, grace_s=sigterm_grace_s):
+            if not _kill_and_collect(proc, lines, grace_s=sigterm_grace_s, backend=backend):
                 _write_error_envelope(envelope, message, backend)
-                _emit_terminal(message, envelope)
+                _emit_terminal(message, envelope, backend)
             err_thread.join(timeout=1)
             _close_pipes(proc)
             return 1
         if line is None:
             break
-        sys.stdout.write(line)
-        sys.stdout.flush()
-        ev = _parse_event(line)
+        ev = _forward(line, backend)
         if ev is None:
             continue
         if ev.get("event") in _TERMINAL_EVENTS:
@@ -275,7 +303,7 @@ def supervise(
     if not saw_terminal:
         message = "review exited without a terminal event"
         _write_error_envelope(envelope, message, backend)
-        _emit_terminal(message, envelope)
+        _emit_terminal(message, envelope, backend)
         return code if code not in (0, None) else 1
     return code if code is not None else 1
 

@@ -119,7 +119,7 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 		return reviewErrorResult(resumeStatus, fmt.Errorf("failed to send message: %w", err))
 	}
 
-	bridged, err := bridgeStreamEventsWithHeartbeat(ctx, b.client.Events(), handler, b.thread.ID(), b.config.IdleTimeout, b.config.HeartbeatWriter)
+	bridged, err := bridgeStreamEvents(ctx, b.client.Events(), handler, b.thread.ID(), b.config.IdleTimeout)
 	if err != nil {
 		// Carry any text the reviewer streamed before it failed. An idle
 		// timeout that fires after real findings is partial work, and

@@ -116,9 +116,6 @@ const (
 // ApprovalHandler; without one the codex process blocks indefinitely
 // waiting for approval responses.
 type Config struct {
-	// HeartbeatWriter publishes structured heartbeat events for this review.
-	// A nil writer keeps human-readable heartbeats on stderr.
-	HeartbeatWriter io.Writer
 	ApprovalPolicy  codex.ApprovalPolicy // Codex approval policy; see doc above for constraints
 	WorkDir         string
 	Goal            string

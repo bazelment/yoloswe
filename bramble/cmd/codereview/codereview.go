@@ -115,7 +115,12 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	// unable to distinguish "run succeeded with zero findings" from "run
 	// produced nothing at all".
 	var envelopeWritten bool
+	// stopHeartbeats is replaced once heartbeats start (at reading_diff).
+	// Every envelope path stops them first, so no heartbeat can follow the
+	// terminal event.
+	stopHeartbeats := func() {}
 	emitEnvelope := func(env reviewer.ResultEnvelope) {
+		stopHeartbeats()
 		wrote, err := deliverEnvelope(env)
 		if wrote {
 			// Mark written only after a complete flush. deliverEnvelope
@@ -237,8 +242,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		// backend is bounded exactly like a streaming one: by --timeout, not by
 		// --idle-timeout. Zero (the default) leaves agy's own --print-timeout
 		// default in force.
-		TurnTimeout:     timeout,
-		HeartbeatWriter: os.Stdout,
+		TurnTimeout: timeout,
 	}
 
 	logPath2, err := reviewer.ResolveProtocolLogPath(protocolLogDir)
@@ -253,11 +257,13 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	// dropping it. Setting it before any work that could panic guarantees the
 	// guard never observes a stale nil.
 	activeReviewer = r
-	// reading_diff covers prompt and scope setup, including backend start.
-	// It is not a hang signal: start can sit longer than a heartbeat
-	// interval while the CLI comes up. analyzing (below) is when the
-	// liveness clock starts.
+	// Heartbeats start with reading_diff and run until the envelope is
+	// emitted. Backend start happens in reading_diff and analyzing: codex
+	// creates its thread, and claude and cursor spawn their CLI inside
+	// RunPrompt. The heartbeat source therefore cannot be the backend's event
+	// loop.
 	emitPhase("reading_diff")
+	stopHeartbeats = startHeartbeats()
 	// Snapshot before Start for early-failure paths. After the backend
 	// session begins (OnSessionInfo), call r.EffectiveModel() fresh so the
 	// envelope reports the model the backend actually ran (Cursor picks its
