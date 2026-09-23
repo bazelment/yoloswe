@@ -33,6 +33,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,7 @@ from _common import (  # noqa: E402 — sys.path tweak above
     changed_files,
     current_branch,
     detect_base_branch,
+    format_duration_ms,
     print_json,
     read_json,
     run,
@@ -1052,10 +1054,15 @@ def state_append_round(
                 "noise_filtered": noise_filtered,
                 "noise_samples": samples,
                 "is_new_series": is_new_series,
+                # Epoch millis, not the second-resolution UTC string: the
+                # review-vs-orchestrator split is a difference of these
+                # stamps, and a 1s clock hides a degenerate round.
+                "opened_at_ms": _epoch_ms(),
             }
         )
     else:
         existing["head_before"] = head_before
+        existing.setdefault("opened_at_ms", _epoch_ms())
         # Sticky: the first append of this round made the call while
         # `completed` was still readable. A resumed round re-appends after
         # the flag was already cleared, so re-deriving now would always say
@@ -1370,6 +1377,7 @@ def state_finalize_round(
     *,
     envelope_overrides: dict[str, Path] | None = None,
     auto_reply: bool = True,
+    review_wall_ms: int | None = None,
 ) -> dict[str, Any]:
     """Finalize a round and persist its results.
 
@@ -1420,8 +1428,134 @@ def state_finalize_round(
         entry.get("top_severity"),
         had_live_reviewer=_round_had_live_reviewer(entry),
     )
+    _apply_round_timing(entry, review_wall_ms)
     atomic_write_json(path, state)
     return state
+
+
+def _epoch_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _apply_round_timing(entry: dict[str, Any], review_wall_ms: int | None) -> None:
+    """Record review wall time vs orchestrator wall time for this round.
+
+    Orchestrator time is everything in the round that was not the review
+    join: triage, fixes, and — the case this field exists to make obvious —
+    polling a push channel. Issue 247: ~7 minutes of review, ~3 hours of
+    wall clock, invisible until someone asked. ``review_wall_ms`` is the
+    join duration the launch script measured; it is not inferred from
+    heartbeats.
+    """
+    now = _epoch_ms()
+    entry["finalized_at_ms"] = now
+    opened = entry.get("opened_at_ms")
+    if isinstance(review_wall_ms, int) and review_wall_ms >= 0:
+        entry["review_wall_ms"] = review_wall_ms
+    if not isinstance(opened, int):
+        return
+    round_wall = max(0, now - opened)
+    entry["round_wall_ms"] = round_wall
+    if isinstance(review_wall_ms, int) and review_wall_ms >= 0:
+        entry["orchestrator_wall_ms"] = max(0, round_wall - review_wall_ms)
+
+
+# How many consecutive quiet rounds, after a root was already named, justify
+# stopping before the round cap. Two matches the low-only streak: one quiet
+# round can be noise, the second says the loop is no longer learning.
+_EARLY_CONVERGENCE_ROUNDS = 2
+
+
+def _action_root(action: dict[str, Any]) -> str | None:
+    """The root-issue id a finding was tied to, if the orchestrator named one.
+
+    ``invariant`` is the class key reviewers already emit; ``topic`` and
+    ``root_issue`` are the spellings the actions file uses for the same idea.
+    """
+    for key in ("root_issue", "invariant", "topic"):
+        val = action.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+
+def _round_reports_more_work(entry: dict[str, Any]) -> bool:
+    claims = entry.get("sufficiency_claims") or {}
+    if not isinstance(claims, dict):
+        return False
+    return any(
+        isinstance(c, dict) and c.get("is_confident_complete") is False
+        for c in claims.values()
+    )
+
+
+def _quiet_round_root(entry: dict[str, Any]) -> str | None:
+    """The single root this round's findings trace to, or None if the round
+    is not quiet.
+
+    Quiet means a live reviewer, no critical/high (blocking) finding, no
+    regression marker, no backend saying more sites remain, and every
+    action naming the same root. An empty action list is not quiet here —
+    that is the existing zero-findings rule, which has its own exit reason.
+    """
+    if not _round_had_live_reviewer(entry):
+        return None
+    if _round_reports_more_work(entry):
+        return None
+    actions = entry.get("comment_actions") or []
+    if not actions:
+        return None
+    root: str | None = None
+    for action in actions:
+        if severity_rank(action.get("severity")) >= severity_rank("high"):
+            return None
+        if action.get("regression") or action.get("spiral_refix"):
+            return None
+        this = _action_root(action)
+        if this is None:
+            return None
+        if root is None:
+            root = this
+        elif this != root:
+            return None
+    return root
+
+
+def early_convergence_justification(rounds: list[dict[str, Any]]) -> str | None:
+    """One-line reason to stop before the round cap, or None.
+
+    Fires when the last ``_EARLY_CONVERGENCE_ROUNDS`` rounds are quiet and
+    their findings all trace to one root issue that an earlier round already
+    identified. Continuing would re-review the same class. The string is the
+    record: a run that stops early without it is indistinguishable from one
+    that hit the cap and gave up.
+    """
+    ordered = sorted(rounds, key=lambda r: r.get("n") or 0)
+    if len(ordered) < _EARLY_CONVERGENCE_ROUNDS + 1:
+        return None
+    tail = ordered[-_EARLY_CONVERGENCE_ROUNDS:]
+    prior = ordered[:-_EARLY_CONVERGENCE_ROUNDS]
+    roots = [_quiet_round_root(r) for r in tail]
+    if any(r is None for r in roots):
+        return None
+    root = roots[0]
+    if any(r != root for r in roots):
+        return None
+    identified_in: int | None = None
+    for rnd in prior:
+        for action in rnd.get("comment_actions") or []:
+            if _action_root(action) == root:
+                identified_in = rnd.get("n")
+                break
+        if identified_in is not None:
+            break
+    if identified_in is None:
+        return None
+    return (
+        f"early-convergence: {_EARLY_CONVERGENCE_ROUNDS} consecutive rounds "
+        "with no consensus, critical, or blocking findings and no regressions; "
+        f"remaining findings trace to root issue {root!r} identified in round {identified_in}"
+    )
 
 
 # Action verbs eligible for an auto-reply on the inline comment they
@@ -1815,7 +1949,9 @@ def _action_key(action: dict[str, Any]) -> tuple:
     )
 
 
-def state_mark_complete(ctx: int | str, reason: str) -> dict[str, Any]:
+def state_mark_complete(
+    ctx: int | str, reason: str, *, justification: str = ""
+) -> dict[str, Any]:
     pr_number, branch = _resolve_ctx(ctx)
     _, path = state_paths(pr_number, branch=branch)
     state = read_json(path, default=None)
@@ -1824,6 +1960,10 @@ def state_mark_complete(ctx: int | str, reason: str) -> dict[str, Any]:
     state["completed"] = True
     state["exit_reason"] = reason
     state["completed_at"] = _utc_now()
+    # The early-exit reason without this sentence is just a label. The
+    # justification is what a later reader checks against the rounds.
+    if justification:
+        state["exit_justification"] = justification
     atomic_write_json(path, state)
     return state
 
@@ -2117,6 +2257,7 @@ def finalize_and_report(
     actions: list[dict[str, Any]],
     *,
     envelope_overrides: dict[str, Path] | None = None,
+    review_wall_ms: int | None = None,
 ) -> dict[str, Any]:
     """Finalize a round and return a one-shot orchestrator-readable report.
 
@@ -2127,9 +2268,10 @@ def finalize_and_report(
     signals consistently so the agent doesn't grep state JSON per field.
 
     Returns: ``{converged_signal: bool|null, exit_reason_hint: str|null,
-    low_only_streak: int, top_severity: str|null, sufficiency_consensus:
-    bool|null, sufficiency_claims: dict, next_round_n: int,
-    round_summary: str}``.
+    convergence_justification: str|null, low_only_streak: int,
+    top_severity: str|null, sufficiency_consensus: bool|null,
+    sufficiency_claims: dict, next_round_n: int, round_summary: str,
+    review_wall_ms: int|null, orchestrator_wall_ms: int|null}``.
 
     ``converged_signal`` is True when the existing rules would fire
     (``low_only_streak >= 2`` OR ``len(action_plan.must_fix) == 0 and
@@ -2140,6 +2282,7 @@ def finalize_and_report(
     """
     state = state_finalize_round(
         ctx, n, head_after, actions, envelope_overrides=envelope_overrides,
+        review_wall_ms=review_wall_ms,
     )
     rounds = state.get("rounds") or []
     entry = next((r for r in rounds if r.get("n") == n), None)
@@ -2191,38 +2334,61 @@ def finalize_and_report(
     no_live_reviewer = not _round_had_live_reviewer(entry)
 
     deferred_high = _has_unresolved_high_deferral(rounds)
+    justification: str | None = None
     if deferred_high or no_live_reviewer:
         converged = None
         exit_reason_hint = None
+    elif (early := early_convergence_justification(rounds)):
+        # Before the streak/all-low rules so a run that is still finding
+        # medium notes of one known root stops with the reason that matches
+        # the evidence, instead of waiting for a low-only streak that medium
+        # findings reset.
+        converged = True
+        exit_reason_hint = "early-convergence"
+        justification = early
     elif streak >= 2 and low_top:
         converged = True
         exit_reason_hint = "converged"
+        justification = (
+            f"low_only_streak={streak}: consecutive rounds had no blocking findings"
+        )
     elif top_sev in (None, "low", "nit") and fixed == 0 and skipped == 0:
         converged = True
         exit_reason_hint = "all-low"
+        justification = "no findings left to fix or skip"
     else:
         converged = None
         exit_reason_hint = None
+    if justification:
+        entry["convergence_justification"] = justification
+        pr_number, branch = _resolve_ctx(ctx)
+        _, path = state_paths(pr_number, branch=branch)
+        atomic_write_json(path, state)
 
     suffix = ""
     if consensus is True:
         suffix = " (both backends signalled sufficiency)"
     elif consensus is False:
         suffix = " (one backend signalled more sites remain)"
+    review_s = format_duration_ms(entry.get("review_wall_ms"))
+    orch_s = format_duration_ms(entry.get("orchestrator_wall_ms"))
     round_summary = (
         f"Round {n}: top={top_sev or 'none'}, fixed {fixed}, skipped {skipped}, "
-        f"low_only_streak={streak}{suffix}"
+        f"low_only_streak={streak}, review={review_s} orchestrator={orch_s}{suffix}"
     )
 
     return {
         "converged_signal": converged,
         "exit_reason_hint": exit_reason_hint,
+        "convergence_justification": justification,
         "low_only_streak": streak,
         "top_severity": top_sev,
         "sufficiency_consensus": consensus,
         "sufficiency_claims": claims,
         "next_round_n": n + 1,
         "round_summary": round_summary,
+        "review_wall_ms": entry.get("review_wall_ms"),
+        "orchestrator_wall_ms": entry.get("orchestrator_wall_ms"),
     }
 
 
@@ -2431,10 +2597,28 @@ def _build_parser() -> argparse.ArgumentParser:
             "Backends not passed are skipped."
         ),
     )
+    sp.add_argument(
+        "--review-wall-ms",
+        type=int,
+        default=None,
+        help=(
+            "Wall time of this round's review join, in milliseconds. "
+            "Orchestrator time is the rest of the round. Omit and the "
+            "summary shows review=n/a."
+        ),
+    )
 
     sp = sub.add_parser("state-mark-complete")
     sp.add_argument("ctx", help="PR number or 'branch:<name>'")
     sp.add_argument("reason")
+    sp.add_argument(
+        "--justification",
+        default="",
+        help=(
+            "One-line reason the loop stopped, required for early-convergence "
+            "so the exit is auditable."
+        ),
+    )
 
     sp = sub.add_parser(
         "state-mark-abandoned",
@@ -2484,6 +2668,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="BACKEND=PATH",
         help="Same shape as state-finalize-round; repeat per backend.",
+    )
+    sp.add_argument(
+        "--review-wall-ms",
+        type=int,
+        default=None,
+        help="Wall time of this round's review join, in milliseconds.",
     )
 
     return p
@@ -2595,10 +2785,15 @@ def main(argv: list[str] | None = None) -> int:
                     args.head_after,
                     actions,
                     envelope_overrides=envelope_overrides,
+                    review_wall_ms=args.review_wall_ms,
                 )
             )
         elif args.cmd == "state-mark-complete":
-            print_json(state_mark_complete(args.ctx, args.reason))
+            print_json(
+                state_mark_complete(
+                    args.ctx, args.reason, justification=args.justification
+                )
+            )
         elif args.cmd == "state-mark-abandoned":
             print_json(state_mark_abandoned(args.ctx))
         elif args.cmd == "preflight":
@@ -2626,6 +2821,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.head_after,
                     actions,
                     envelope_overrides=envelope_overrides,
+                    review_wall_ms=args.review_wall_ms,
                 )
             )
         else:  # pragma: no cover — argparse enforces.

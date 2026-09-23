@@ -683,6 +683,37 @@ func TestAgyBackend_RunPrompt_IdleTimeoutDoesNotTruncateAProgressingTurn(t *test
 	}
 }
 
+// Print mode is silent until the turn ends. The push-stream watchdog treats
+// 2× a missing heartbeat as a hang, so a healthy agy review has to pulse
+// while it waits or the skill kills it at ~40s.
+func TestAgyBackend_PushHeartbeatDuringSilence(t *testing.T) {
+	buf := withHeartbeat(t, 30*time.Millisecond)
+	prevJSON := heartbeatJSON
+	heartbeatJSON = true
+	t.Cleanup(func() { heartbeatJSON = prevJSON })
+
+	dir := t.TempDir()
+	cliPath := filepath.Join(dir, "agy")
+	envelope := `{"conversation_id":"conv-beat","status":"SUCCESS","response":"AGYOK\n",` +
+		`"duration_seconds":0.2,"num_turns":1,` +
+		`"usage":{"input_tokens":1,"output_tokens":1,"thinking_tokens":0,` +
+		`"cache_read_tokens":0,"total_tokens":2}}`
+	script := "#!/bin/sh\nsleep 0.15\nprintf %s " + shellQuote(envelope) + "\nexit 0\n"
+	if err := os.WriteFile(cliPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b := &agyBackend{
+		config:  Config{Model: "gemini-3.8-flash-medium", TurnTimeout: 10 * time.Second},
+		cliPath: cliPath,
+	}
+	if _, err := b.RunPrompt(context.Background(), "review this", &recordingHandler{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"event":"heartbeat"`) {
+		t.Fatalf("expected a push heartbeat during agy silence, got:\n%s", buf.String())
+	}
+}
+
 // IdleTimeout must not leak into agy's argv either: --print-timeout is a total
 // wall-clock bound, so driving it from the inactivity value would cap the turn
 // at the wrong quantity inside the CLI itself.

@@ -58,15 +58,20 @@ var Cmd = &cobra.Command{
 Supported backends: claude, cursor, codex, agy.
 
 Output:
-  Default:         NDJSON progress events on stdout, final envelope also on stdout
-                   (last line with "schema_version"). Diagnostics on stderr.
- --envelope-file: Write the final ResultEnvelope to a file instead of stdout.
-                   stdout then carries only progress events — ideal for the
-                   Monitor tool, which streams stdout line-by-line.
+  stdout is a push stream of machine-parsable phase lines
+  (reading_diff, analyzing, writing_envelope), heartbeat liveness events,
+  and a final done/error event carrying the verdict and envelope path.
+  That terminal event is readiness. Do not stat or tail a file to see
+  whether the review is done.
+  Default:         the envelope JSON is also on stdout, immediately before
+                   the terminal event (the line with "schema_version").
+ --envelope-file: the envelope is published by atomic rename. stdout then
+                   carries only the push stream. The path appears in the
+                   terminal event after the rename; it is not a progress file.
 
-Every run also writes a structured klogfmt log to
-~/.bramble/logs/code-review/code-review-{timestamp}-{pid}.log for later
-analysis. Set $BRAMBLE_RUN_TAG to tag the log with an external run id.`,
+A klogfmt log is written under ~/.bramble/logs/code-review/ for later
+analysis. It is not a progress channel and its path is not printed.
+Set $BRAMBLE_RUN_TAG to tag the log with an external run id.`,
 	Example: `  bramble code-review --backend cursor
   bramble code-review --backend claude --model opus
   bramble code-review --backend codex --model gpt-5.4-mini --effort medium
@@ -103,6 +108,11 @@ func init() {
 
 func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	runStart := time.Now()
+	// Heartbeats join the stdout push stream for this process. Restored on
+	// the way out so an in-process caller (a test) does not leave the
+	// reviewer package emitting JSON at stderr consumers.
+	reviewer.EnablePushProgress(os.Stdout)
+	defer reviewer.EnablePushProgress(nil)
 	// envelopeWritten tracks whether the envelope has already been flushed. A
 	// top-level defer uses it to guarantee exactly one envelope is written
 	// (to stdout or --envelope-file) even on panic or unexpected return.
@@ -111,48 +121,16 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	// produced nothing at all".
 	var envelopeWritten bool
 	emitEnvelope := func(env reviewer.ResultEnvelope) {
-		w, closeW, openErr := openEnvelopeWriter()
-		if openErr != nil {
-			// --envelope-file path is unwritable. Don't return empty —
-			// codex round 12 caught that finalizeEnvelope would then call
-			// emitEnvelope a second time for the synthesized fallback,
-			// which would hit the same broken sink and leave automation
-			// with no machine-readable result at all. Last-ditch fallback:
-			// dump the envelope to stdout so the orchestrator at least
-			// has something parseable on the streamed channel.
-			slog.Error("failed to open envelope-file; falling back to stdout", "error", openErr.Error())
-			if retErr == nil {
-				retErr = fmt.Errorf("failed to open envelope-file: %w", openErr)
-			}
-			if printErr := reviewer.PrintJSONResult(os.Stdout, env); printErr != nil {
-				reportEnvelopePrintError(printErr)
-				// stdout itself failed — nothing more we can do.
-				return
-			}
+		wrote, err := deliverEnvelope(env)
+		if wrote {
+			// Mark written only after a complete flush. deliverEnvelope
+			// emits the terminal event after that flush, so the event and
+			// the flag describe the same successful publication.
 			envelopeWritten = true
-			return
 		}
-		defer closeW()
-		if err := reviewer.PrintJSONResult(w, env); err != nil {
-			reportEnvelopePrintError(err)
-			if retErr == nil {
-				retErr = fmt.Errorf("failed to write JSON envelope: %w", err)
-			}
-			// Mid-write failure leaves the file in an indeterminate state
-			// (partial JSON or empty after O_TRUNC). Same fallback as the
-			// open-failure branch: emit the envelope to stdout so the
-			// orchestrator's stdout-streaming path still gets the result.
-			if printErr := reviewer.PrintJSONResult(os.Stdout, env); printErr != nil {
-				reportEnvelopePrintError(printErr)
-				return
-			}
-			envelopeWritten = true
-			return
+		if err != nil && retErr == nil {
+			retErr = err
 		}
-		// Mark written only after a successful flush. A partial write would
-		// be detected by PrintJSONResult and surface above; a clean write
-		// trips the flag so finalizeEnvelope's idempotency guard fires.
-		envelopeWritten = true
 	}
 	// activeReviewer is observed by the deferred guard so the synthesized
 	// panic/error envelope can report the reviewer's authoritative
@@ -177,12 +155,15 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		})
 	}()
 
-	logPath, logClose, logErr := reviewer.SetupRunLog()
+	// The run log is a post-mortem record. Printing its path (or teeing
+	// stderr into a file the skill names) is the affordance issue 247's
+	// loop polled for hours: progress and completion leave only as stdout
+	// events, so a setup failure is logged and not advertised as a file to
+	// tail while the review runs.
+	_, logClose, logErr := reviewer.SetupRunLog()
 	defer logClose()
 	if logErr != nil {
-		fmt.Fprintf(os.Stderr, "[code-review] run log setup failed: %v\n", logErr)
-	} else if logPath != "" {
-		fmt.Fprintf(os.Stderr, "[code-review] logging run to %s\n", logPath)
+		slog.Error("run log setup failed", "error", logErr.Error())
 	}
 
 	// requestedMode echoes the operator's --review-mode literal back into
@@ -276,6 +257,11 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	// dropping it. Setting it before any work that could panic guarantees the
 	// guard never observes a stale nil.
 	activeReviewer = r
+	// reading_diff covers prompt and scope setup, including backend start.
+	// It is not a hang signal: start can sit longer than a heartbeat
+	// interval while the CLI comes up. analyzing (below) is when the
+	// liveness clock starts.
+	emitPhase("reading_diff")
 	// Snapshot before Start for early-failure paths. After the backend
 	// session begins (OnSessionInfo), call r.EffectiveModel() fresh so the
 	// envelope reports the model the backend actually ran (Cursor picks its
@@ -307,6 +293,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	if err != nil {
 		return emitEarlyFailure(err, r.EffectiveModel(), mode, emitEnvelope)
 	}
+	emitPhase("analyzing")
 	result, err := r.ReviewWithResult(ctx, prompt)
 	if err != nil {
 		slog.Error("review failed", "error", err.Error())
@@ -320,7 +307,6 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 			effectiveResumeStatus(activeReviewer, resumeSessionID))
 		env := reviewer.BuildEnvelope(failed,
 			reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID(), mode)
-		emitVerdictLine(env)
 		emitEnvelope(env)
 		return fmt.Errorf("review failed: %w", err)
 	}
@@ -345,7 +331,6 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		"issue_count", len(env.Review.Issues),
 		"max_severity", maxSeverity(env.Review.Issues),
 		"total_duration_ms", time.Since(runStart).Milliseconds())
-	emitVerdictLine(env)
 	emitEnvelope(env)
 	return retErr
 }
@@ -389,36 +374,6 @@ func failedReviewResult(result *reviewer.ReviewResult, err error, resume reviewe
 	return failed
 }
 
-// emitVerdictLine prints a single human-readable summary to stdout so the
-// Monitor tool can surface the outcome to Claude before the envelope file is
-// flushed. When --resume-session-id was set, the line ends with a
-// [resume=ok|fallback|unverified] suffix so callers streaming stdout can see
-// resume health without parsing the envelope. All three outcomes share this so
-// resume signal isn't lost on early errors: success ("verdict: ..."), a run
-// that produced findings and then failed ("partial: ..."), and a bramble-level
-// failure ("error: ...").
-func emitVerdictLine(env reviewer.ResultEnvelope) {
-	resumeSuffix := ""
-	if env.ResumeStatus != "" {
-		resumeSuffix = fmt.Sprintf(" [resume=%s]", env.ResumeStatus)
-	}
-	switch env.Status {
-	case reviewer.StatusOK:
-		fmt.Fprintf(os.Stdout, "verdict: %s (%d issues)%s\n", env.Review.Verdict, len(env.Review.Issues), resumeSuffix)
-	case reviewer.StatusPartial:
-		// stdout is the surface an orchestrator reads first, and "error: …"
-		// alone is what produced `ack … no envelope` on kernel#8682 r1. A
-		// partial run parsed a schema-valid body, so it has a verdict and
-		// usually findings — an accepted body with zero issues also validates,
-		// hence the count rather than a claim that findings exist. Report both
-		// halves so the line does not contradict the envelope beside it.
-		fmt.Fprintf(os.Stdout, "partial: %s (%d issues kept) after: %s%s\n",
-			env.Review.Verdict, len(env.Review.Issues), env.Error, resumeSuffix)
-	default:
-		fmt.Fprintf(os.Stdout, "error: %s%s\n", env.Error, resumeSuffix)
-	}
-}
-
 // maxSeverity returns the highest severity label in issues, using the order
 // critical > high > medium > low. Unknown (non-empty, unrecognized) labels
 // rank above "low" so they remain visible in logs instead of being silently
@@ -457,21 +412,6 @@ func redactPath(p string) string {
 		return ""
 	}
 	return fmt.Sprintf("<redacted:%d>/%s", len(p), filepath.Base(p))
-}
-
-// openEnvelopeWriter returns the writer to use for the JSON envelope and a
-// close function. When --envelope-file is set, it opens/creates the file;
-// otherwise it returns os.Stdout with a no-op close. The caller must always
-// invoke close() after writing.
-func openEnvelopeWriter() (w *os.File, close func(), err error) {
-	if envelopeFile == "" {
-		return os.Stdout, func() {}, nil
-	}
-	f, err := os.OpenFile(envelopeFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return nil, func() {}, err
-	}
-	return f, func() { _ = f.Close() }, nil
 }
 
 // envelopeGuardArgs is the input to finalizeEnvelope. Extracted so tests can

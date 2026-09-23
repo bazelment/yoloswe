@@ -2,6 +2,7 @@ package reviewer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,14 +20,35 @@ import (
 // heartbeatInterval bounds how often bridgeStreamEvents emits a liveness line
 // to heartbeatOut while a review is in progress. A review can sit silent for
 // minutes while a backend "thinks"; without a periodic pulse a healthy long
-// review is indistinguishable from a hung one in the logs. Overridable in
-// tests via a sub-second value. heartbeatOut defaults to os.Stderr so the line
-// lands in the same stream pr-polish captures per backend (…-stderr.txt) and
-// the klogfmt run log; the envelope on stdout/--envelope-file is untouched.
+// review is indistinguishable from a hung one. Overridable in tests via a
+// sub-second value.
+//
+// heartbeatOut defaults to os.Stderr as a human line for callers that have not
+// opted into the push stream. The code-review CLI calls EnablePushProgress so
+// the same pulse is NDJSON on stdout — the channel a Monitor already streams —
+// instead of a file the orchestrator can tail. Issue 247: one round's review
+// was ~7 minutes and the wall clock was ~3 hours of re-reading that file,
+// because silence and a hang looked the same. heartbeatJSON selects the shape.
 var (
 	heartbeatInterval           = 20 * time.Second
 	heartbeatOut      io.Writer = os.Stderr
+	heartbeatJSON     bool
 )
+
+// EnablePushProgress opts review heartbeats into w as NDJSON liveness events
+// (event=heartbeat, elapsed_ms, interval_ms). A nil writer restores the
+// default human line on stderr. The code-review CLI passes os.Stdout so phase
+// lines and heartbeats share one push stream; the envelope stays in
+// --envelope-file.
+func EnablePushProgress(w io.Writer) {
+	if w == nil {
+		heartbeatOut = os.Stderr
+		heartbeatJSON = false
+		return
+	}
+	heartbeatOut = w
+	heartbeatJSON = true
+}
 
 // heartbeatWindow accumulates per-interval activity so each heartbeat reports
 // what the agent actually did since the last tick (tools, streamed text)
@@ -66,6 +88,52 @@ func formatHeartbeat(elapsed time.Duration, w heartbeatWindow, toolsInFlight int
 		fmt.Fprintf(&b, " · +%s reasoning", formatCharCount(w.reasoningChars))
 	}
 	return b.String()
+}
+
+// pushHeartbeat is the machine-parsable liveness event. interval_ms is the
+// contract a supervisor uses for hang detection: no heartbeat for 2× that
+// interval means the review loop is stuck, not thinking. Field order is
+// alignment-driven; consumers match on keys.
+type pushHeartbeat struct {
+	Tools          string `json:"tools,omitempty"`
+	Event          string `json:"event"`
+	ElapsedMs      int64  `json:"elapsed_ms"`
+	IntervalMs     int64  `json:"interval_ms"`
+	TextChars      int    `json:"text_chars,omitempty"`
+	ReasoningChars int    `json:"reasoning_chars,omitempty"`
+	ToolsInFlight  int    `json:"tools_in_flight"`
+	Idle           bool   `json:"idle"`
+}
+
+// formatHeartbeatEvent renders one NDJSON liveness event. idle is true when
+// the window saw no stream events — the review is alive and waiting on the
+// backend, which is the case a tail-the-log loop used to mistake for a hang.
+func formatHeartbeatEvent(elapsed time.Duration, w heartbeatWindow, toolsInFlight int) string {
+	ev := pushHeartbeat{
+		Event:          "heartbeat",
+		ElapsedMs:      elapsed.Milliseconds(),
+		IntervalMs:     heartbeatInterval.Milliseconds(),
+		Idle:           w.events == 0,
+		ToolsInFlight:  toolsInFlight,
+		Tools:          summarizeTools(w.toolsCompleted),
+		TextChars:      w.textChars,
+		ReasoningChars: w.reasoningChars,
+	}
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return `{"event":"heartbeat"}`
+	}
+	return string(b)
+}
+
+// renderHeartbeat selects the push-stream event or the human stderr line.
+// One function so the bridge cannot emit one shape from one path and the
+// other from a second.
+func renderHeartbeat(elapsed time.Duration, w heartbeatWindow, toolsInFlight int) string {
+	if heartbeatJSON {
+		return formatHeartbeatEvent(elapsed, w, toolsInFlight)
+	}
+	return formatHeartbeat(elapsed, w, toolsInFlight)
 }
 
 // summarizeTools renders completed tool names with per-name counts, e.g.
@@ -420,7 +488,7 @@ func bridgeStreamEvents[E any](
 			// Emit a heartbeat line at most every heartbeatInterval even if the
 			// ticker fires more often for idle-check precision.
 			if time.Since(lastHeartbeat) >= heartbeatInterval {
-				fmt.Fprintln(heartbeatOut, formatHeartbeat(time.Since(start), window, toolsInFlight))
+				fmt.Fprintln(heartbeatOut, renderHeartbeat(time.Since(start), window, toolsInFlight))
 				window = heartbeatWindow{}
 				lastHeartbeat = time.Now()
 			}

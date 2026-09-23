@@ -251,9 +251,25 @@ func (b *agyBackend) RunPrompt(ctx context.Context, prompt string, handler Event
 		stallC = stallTimer.C
 	}
 
+	// Print mode emits nothing until the turn ends, so the streaming bridge's
+	// heartbeat never runs. A push-stream watchdog that treats 2× a silent
+	// interval as a hang would kill a healthy agy review (the skill allows
+	// 35m). Pulse only when the CLI opted into the push stream; the default
+	// stderr line stays off so tests that capture agy stderr are unchanged.
+	var beatC <-chan time.Time
+	var beatStart time.Time
+	if heartbeatJSON {
+		beatStart = time.Now()
+		beat := time.NewTicker(heartbeatInterval)
+		defer beat.Stop()
+		beatC = beat.C
+	}
+
 loop:
 	for {
 		select {
+		case <-beatC:
+			fmt.Fprintln(heartbeatOut, renderHeartbeat(time.Since(beatStart), heartbeatWindow{}, 0))
 		case <-ctx.Done():
 			_ = session.Stop()
 			return reviewPartialResult(resumeStatus, &bridgeResult{responseText: responseText, durationMs: durationMs}, ctx.Err())
