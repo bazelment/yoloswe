@@ -78,25 +78,29 @@ class SuperviseTests(unittest.TestCase):
         self.assertEqual(env["status"], "error")
         self.assertIn("terminal event", env["error"])
 
-    def test_reading_diff_does_not_arm_hang_clock(self) -> None:
-        # Only analyzing/heartbeat arm the clock. bramble's heartbeat timer
-        # starts with reading_diff, so the clock is armed by the first
-        # heartbeat rather than by the phase line.
+    def test_silence_after_reading_diff_is_a_hang(self) -> None:
+        # bramble starts its heartbeat timer at reading_diff, so a child
+        # that goes quiet before the first tick is hung. If the clock waited
+        # for the first heartbeat, only the outer timeout would catch it.
         script = textwrap.dedent(
             """\
-            import json, sys
+            import json, time
             print(json.dumps({"event": "phase", "phase": "reading_diff"}), flush=True)
-            print(json.dumps({"event": "done", "verdict": "accepted", "envelope": "", "status": "ok", "issues": 0}), flush=True)
+            time.sleep(30)
             """
         )
+        start = time.monotonic()
         code = review_push.supervise(
             [sys.executable, "-c", script],
             envelope=self.envelope,
-            interval_ms=50,
+            interval_ms=100,
+            backend="codex",
             sigterm_grace_s=0.2,
         )
-        self.assertEqual(code, 0)
-        self.assertFalse(self.envelope.exists())
+        self.assertEqual(code, 1)
+        self.assertLess(time.monotonic() - start, 5)
+        env = json.loads(self.envelope.read_text())
+        self.assertIn("hang", env["error"])
 
     def test_terminal_event_bounds_teardown_wait(self) -> None:
         script = textwrap.dedent(

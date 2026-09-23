@@ -3,7 +3,7 @@
 
 Progress is the child's stdout (phase lines, heartbeats, a terminal
 done/error event). This process does not write a log to tail. After the
-child has emitted ``analyzing`` or a heartbeat, silence for two heartbeat
+child has emitted a phase or a heartbeat, silence for two heartbeat
 intervals is a hang: the child is killed and an error envelope plus a
 terminal event are published so the join can finish.
 
@@ -47,7 +47,9 @@ from _common import atomic_write_json  # noqa: E402
 # Matches reviewer.heartbeatInterval (20s) until a heartbeat event says
 # otherwise. Hang threshold is always 2× the interval in force.
 _DEFAULT_INTERVAL_MS = 20_000
-_LIVENESS_PHASES = frozenset({"analyzing", "writing_envelope"})
+# reading_diff arms the clock because bramble starts its heartbeat timer in
+# the same step. Every phase after it is covered by heartbeats.
+_LIVENESS_PHASES = frozenset({"reading_diff", "analyzing", "writing_envelope"})
 _TERMINAL_EVENTS = frozenset({"done", "error"})
 
 
