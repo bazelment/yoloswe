@@ -385,6 +385,11 @@ func TestEmitPhase_MachineParsable(t *testing.T) {
 		if got["event"] != "phase" || got["phase"] != phase {
 			t.Errorf("phase event = %v, want phase %s", got, phase)
 		}
+		// review_push.py sizes its hang clock from this before the first
+		// heartbeat, so it must be bramble's own interval.
+		if got["interval_ms"] != float64(heartbeatInterval.Milliseconds()) {
+			t.Errorf("phase %s interval_ms = %v, want %d", phase, got["interval_ms"], heartbeatInterval.Milliseconds())
+		}
 	}
 }
 

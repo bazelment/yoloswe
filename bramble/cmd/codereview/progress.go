@@ -12,10 +12,13 @@ import (
 	"github.com/bazelment/yoloswe/yoloswe/reviewer"
 )
 
-// phaseEvent is a machine-parsable stdout progress event.
+// phaseEvent is a machine-parsable stdout progress event. IntervalMs is the
+// heartbeat interval, so a watchdog armed by a phase line uses bramble's
+// interval before the first heartbeat arrives.
 type phaseEvent struct {
-	Event string `json:"event"`
-	Phase string `json:"phase"`
+	Event      string `json:"event"`
+	Phase      string `json:"phase"`
+	IntervalMs int64  `json:"interval_ms"`
 }
 
 // terminalEvent is emitted after the envelope is ready.
@@ -30,7 +33,7 @@ type terminalEvent struct {
 }
 
 func emitPhase(phase string) {
-	writeStdoutJSON(phaseEvent{Event: "phase", Phase: phase})
+	writeStdoutJSON(phaseEvent{Event: "phase", Phase: phase, IntervalMs: heartbeatInterval.Milliseconds()})
 }
 
 // heartbeatInterval is how often startHeartbeats publishes. review_push.py

@@ -44,8 +44,9 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from _common import atomic_write_json  # noqa: E402
 
-# Matches reviewer.heartbeatInterval (20s) until a heartbeat event says
-# otherwise. Hang threshold is always 2× the interval in force.
+# Fallback for bramble's codereview heartbeatInterval (progress.go). Every
+# phase and heartbeat event carries interval_ms, and that value replaces
+# this one. The hang threshold is always 2x the interval in force.
 _DEFAULT_INTERVAL_MS = 20_000
 # reading_diff arms the clock because bramble starts its heartbeat timer in
 # the same step. Every phase after it is covered by heartbeats.
@@ -295,11 +296,23 @@ def supervise(
             return code
         if not _is_liveness(ev):
             continue
-        if ev.get("event") == "heartbeat":
-            hang_after = 2 * _interval_s(ev, hang_after / 2)
+        hang_after = 2 * _interval_s(ev, hang_after / 2)
         deadline = time.monotonic() + hang_after
 
-    code = proc.wait()
+    # stdout closed without a terminal event. No more events can arrive, but
+    # the child may still be alive, so the wait for its exit is bounded by the
+    # same hang deadline as the loop above.
+    remaining = hang_after if deadline is None else max(0.0, deadline - time.monotonic())
+    try:
+        code = proc.wait(timeout=remaining)
+    except subprocess.TimeoutExpired:
+        message = f"hang: stdout closed without a terminal event and the process did not exit within {_format_wait(remaining)}"
+        _kill_and_collect(proc, lines, grace_s=sigterm_grace_s, backend=backend)
+        _write_error_envelope(envelope, message, backend)
+        _emit_terminal(message, envelope, backend)
+        err_thread.join(timeout=1)
+        _close_pipes(proc)
+        return 1
     err_thread.join(timeout=1)
     _close_pipes(proc)
     if not saw_terminal:

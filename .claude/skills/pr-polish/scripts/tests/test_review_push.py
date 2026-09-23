@@ -102,6 +102,48 @@ class SuperviseTests(unittest.TestCase):
         env = json.loads(self.envelope.read_text())
         self.assertIn("hang", env["error"])
 
+    def test_stdout_closed_while_alive_is_a_hang(self) -> None:
+        # EOF on stdout without a terminal event must not become an
+        # unbounded wait on a child that is still running.
+        script = textwrap.dedent(
+            """\
+            import json, os, sys, time
+            print(json.dumps({"event": "phase", "phase": "analyzing", "interval_ms": 100}), flush=True)
+            os.close(1)
+            time.sleep(30)
+            """
+        )
+        start = time.monotonic()
+        code = review_push.supervise(
+            [sys.executable, "-c", script],
+            envelope=self.envelope,
+            backend="cursor",
+            sigterm_grace_s=0.2,
+        )
+        self.assertEqual(code, 1)
+        self.assertLess(time.monotonic() - start, 5)
+        env = json.loads(self.envelope.read_text())
+        self.assertIn("stdout closed", env["error"])
+
+    def test_phase_interval_sizes_clock_before_first_heartbeat(self) -> None:
+        # With the 20s default a silent child would survive 40s. The phase
+        # line's interval_ms (100ms) must size the clock instead.
+        script = textwrap.dedent(
+            """\
+            import json, time
+            print(json.dumps({"event": "phase", "phase": "reading_diff", "interval_ms": 100}), flush=True)
+            time.sleep(30)
+            """
+        )
+        start = time.monotonic()
+        code = review_push.supervise(
+            [sys.executable, "-c", script],
+            envelope=self.envelope,
+            sigterm_grace_s=0.2,
+        )
+        self.assertEqual(code, 1)
+        self.assertLess(time.monotonic() - start, 5)
+
     def test_terminal_event_bounds_teardown_wait(self) -> None:
         script = textwrap.dedent(
             """\
