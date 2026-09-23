@@ -74,7 +74,7 @@ analysis. It is not a progress channel and its path is not printed.
 Set $BRAMBLE_RUN_TAG to tag the log with an external run id.`,
 	Example: `  bramble code-review --backend cursor
   bramble code-review --backend claude --model opus
-  bramble code-review --backend codex --model gpt-5.4-mini --effort medium
+  bramble code-review --backend codex --model gpt-6-luna --effort medium
   bramble code-review --backend codex --envelope-file /tmp/envelope.json --skip-test-execution --goal "review auth changes"`,
 	Args: cobra.NoArgs,
 	RunE: runCodeReview,

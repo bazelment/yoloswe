@@ -35,6 +35,8 @@ func ValidateConfig(config Config) error {
 
 	// Validate reviewer model
 	validReviewerModels := map[string]bool{
+		"gpt-6-luna":   true,
+		"gpt-5.6-luna": true,
 		"gpt-5.4-mini": true,
 		"gpt-5.4":      true,
 		"gpt-5.5":      true,
