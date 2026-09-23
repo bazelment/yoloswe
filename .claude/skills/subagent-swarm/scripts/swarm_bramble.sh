@@ -103,13 +103,27 @@ for r in (d.get("sessions",d) if isinstance(d,dict) else d) or []:
 ' "$1" "$2"
 }
 
-# sw_session_live <session-id>
-# A session with NO tmux_target has no pane: it is gone, not merely idle. Absence is
-# the liveness signal, available immediately instead of waiting out a stall timeout --
-# and it is exactly the session a naive `capture-pane` would error on.
+# sw_session_live <session-id> [max-polls] [poll-seconds]
+# A newly registered running session may not have a tmux pane yet, so poll briefly:
+# at most max-polls re-reads, poll-seconds apart (defaults: ~15s).
 sw_session_live() {
-  local t; t="$(sw_session_field "$1" tmux_target)"
-  [ -n "$t" ]
+  local sid="${1:?session-id}" budget="${2:-15}" poll="${3:-1}" waited=0 state
+  while :; do
+    state="$(sw_sessions | /usr/bin/env python3 -c '
+import json,sys
+try: rows=json.load(sys.stdin)
+except ValueError: sys.exit(0)
+for row in (rows.get("sessions", rows) if isinstance(rows, dict) else rows) or []:
+    if row.get("id") == sys.argv[1]:
+        print("pane" if row.get("tmux_target") else row.get("status", ""))
+        break
+' "$sid")"
+    [ "$state" = "pane" ] && return 0
+    # Only a running session can still be assigned a pane.
+    [ "$state" = "running" ] || return 1
+    [ "$waited" -ge "$budget" ] && return 1
+    sleep "$poll"; waited=$((waited + 1))
+  done
 }
 
 # --- spawn ------------------------------------------------------------------------
@@ -182,9 +196,10 @@ EOF
 # send, then CONFIRM the pane went busy before believing it landed.
 sw_nudge() {
   local sid="${1:?session-id}" text="${2:?text}"
-  local target; target="$(sw_session_field "$sid" tmux_target)"
-  [ -n "$target" ] || { echo "sw_nudge: $sid has no tmux_target -- window is gone; "\
+  # A lane nudged immediately after spawn may not have a tmux window yet.
+  sw_session_live "$sid" || { echo "sw_nudge: $sid never got a pane -- window is gone; "\
 "replace the session rather than nudging it" >&2; return 1; }
+  local target; target="$(sw_session_field "$sid" tmux_target)"
 
   local pending; pending="$(tmux capture-pane -p -t "$target" 2>/dev/null |
                             grep -cE '\[Pasted (text|Content)' || true)"

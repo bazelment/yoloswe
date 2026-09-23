@@ -105,8 +105,12 @@ echo "== doctor is clean on a healthy ledger, and exits 0 =="
 RUN5="$TMP/clean"
 L init "$RUN5" --goal g --phases "swe:" --base main --target main >/dev/null
 L add "$RUN5" --id ok1 --title t --branch b >/dev/null
-OUT=$(L doctor "$RUN5" 2>&1); RC=$?
+# An empty sessions file marks the session check as measured.
+echo '{"sessions":[]}' > "$TMP/no-sessions.json"
+OUT=$(L doctor "$RUN5" --sessions "$TMP/no-sessions.json" 2>&1); RC=$?
 chk "no false positives on a planned lane" "$RC" "0"
+if echo "$OUT" | grep -q DRIFT; then no "reported drift on a healthy ledger: $OUT"
+else ok "healthy ledger reports no findings"; fi
 
 echo "== a live session squatting a done lane's worktree is called out =="
 # The destructive case. window_id decays to empty (1/12 populated in a live run), so a
@@ -131,6 +135,101 @@ if echo "$OUT" | grep -q "worktree still exists"; then ok "no session -> plain s
 else no "lost the plain finding when no sessions given"; fi
 if echo "$OUT" | grep -q "LIVE SESSION"; then no "invented a squatter with no session data"
 else ok "does not invent a squatter"; fi
+
+echo "== a dangling worktree path is drift whatever the status =="
+# A removed worktree must be drift for every lane status.
+RUN7="$TMP/dangle"
+L init "$RUN7" --goal g --phases "swe:" --base main --target main >/dev/null
+L add "$RUN7" --id torn-down --title t --branch b7 >/dev/null
+L set "$RUN7" --id torn-down --status done --worktree "$TMP/removed-by-hand" >/dev/null
+OUT=$(L doctor "$RUN7" 2>&1); RC=$?
+if echo "$OUT" | grep -q "recorded worktree is gone"; then ok "done lane with a dangling path flagged"
+else no "silent on a done lane whose worktree path does not exist: $OUT"; fi
+if echo "$OUT" | grep -q "teardown never reconciled"; then ok "names it as an unreconciled teardown"
+else no "does not explain the shape"; fi
+chk "dangling path exits non-zero" "$RC" "1"
+# Running lanes remain covered.
+L add "$RUN7" --id running-gone --title t --branch b8 >/dev/null
+L set "$RUN7" --id running-gone --status running --phase swe --worktree "$TMP/also-gone" >/dev/null
+if L doctor "$RUN7" 2>&1 | grep -q "running-gone.*recorded worktree is gone"; then ok "running lane still caught"
+else no "regressed the running case"; fi
+# Existing paths are not dangling.
+mkdir -p "$TMP/present"
+L add "$RUN7" --id present --title t --branch b9 >/dev/null
+L set "$RUN7" --id present --status running --phase swe --worktree "$TMP/present" >/dev/null
+if L doctor "$RUN7" 2>&1 | grep -q "present.*recorded worktree is gone"; then no "false positive on an existing path"
+else ok "no false positive on an existing path"; fi
+
+echo "== a branch probe that cannot run SKIPS rather than reporting zero =="
+# A failed branch probe must be reported as skipped rather than empty.
+# Init outside a repo, so no repo is recorded and doctor probes its cwd.
+RUN8="$TMP/probe"
+NOREPO=$(mktemp -d)
+(cd "$NOREPO" && L init "$RUN8" --goal g --phases "swe:" --base main --target main >/dev/null)
+L add "$RUN8" --id done-lane --title t --branch some-branch >/dev/null
+L set "$RUN8" --id done-lane --status done >/dev/null
+OUT=$(cd "$NOREPO" && L doctor "$RUN8" 2>&1); rmdir "$NOREPO" 2>/dev/null
+if echo "$OUT" | grep -q "branch checks SKIPPED, not passed"; then ok "unusable probe reports SKIPPED"
+else no "silently treated an unusable probe as 'no branches survive': $OUT"; fi
+if echo "$OUT" | grep -q "exited 128"; then ok "names the exit code"
+else no "does not say why it could not look"; fi
+
+echo "== the SUMMARY carries any check that did not run =="
+# The summary must name skipped checks.
+RUN9="$TMP/summary"
+NOREPO=$(mktemp -d)
+(cd "$NOREPO" && L init "$RUN9" --goal g --phases "swe:" --base main --target main >/dev/null)
+L add "$RUN9" --id ok1 --title t --branch b >/dev/null
+OUT=$(cd "$NOREPO" && L doctor "$RUN9" 2>/dev/null); RC=$?
+if echo "$OUT" | tail -1 | grep -q "SKIPPED"; then ok "summary names the skipped checks"
+else no "summary hid a skipped check: $(echo "$OUT" | tail -1)"; fi
+chk "an all-clear that could not run every check is not clean" "$RC" "1"
+rmdir "$NOREPO" 2>/dev/null
+
+# No caveat is needed when every check ran.
+echo '{"sessions":[]}' > "$TMP/empty-sessions.json"
+OUT=$(L doctor "$RUN9" --sessions "$TMP/empty-sessions.json" 2>/dev/null); RC=$?
+if echo "$OUT" | tail -1 | grep -q "SKIPPED"; then no "caveat fired when all checks ran: $OUT"
+else ok "no caveat when every check ran"; fi
+chk "fully-measured clean ledger exits 0" "$RC" "0"
+
+# An unreadable sessions file is a skipped check too, not only an omitted one.
+OUT=$(L doctor "$RUN9" --sessions "$TMP/does-not-exist.json" 2>/dev/null); RC=$?
+if echo "$OUT" | tail -1 | grep -q "session checks SKIPPED"; then ok "summary names an unreadable sessions file"
+else no "summary hid an unreadable sessions file: $(echo "$OUT" | tail -1)"; fi
+chk "an unreadable sessions file is not clean" "$RC" "1"
+
+echo "== the branch probe reads the run's repo, not doctor's cwd =="
+# From another checkout, the cwd answers with a valid but wrong branch set.
+REPO_A="$TMP/repo-a"; REPO_B="$TMP/repo-b"
+for r in "$REPO_A" "$REPO_B"; do
+  git init -q -b main "$r" && git -C "$r" -c user.name=t -c user.email=t@t \
+    commit -q --allow-empty -m init
+done
+git -C "$REPO_A" branch leftover
+RUN10="$TMP/bound"
+(cd "$REPO_A" && L init "$RUN10" --goal g --phases "swe:" --base main --target main >/dev/null)
+L add "$RUN10" --id reaped --title t --branch leftover >/dev/null
+L set "$RUN10" --id reaped --status done >/dev/null
+OUT=$(cd "$REPO_B" && L doctor "$RUN10" 2>&1)
+if echo "$OUT" | grep -q "branch \`leftover\` still exists"; then ok "surviving branch found from another checkout"
+else no "probed the cwd repo and missed the run's surviving branch: $OUT"; fi
+
+echo "== an untracked paneless session is gone only once it stops running =="
+RUN11="$TMP/paneless"
+L init "$RUN11" --goal g --phases "swe:" --base main --target main >/dev/null
+L add "$RUN11" --id lane --title t --branch b11 >/dev/null
+mkdir -p "$TMP/wt-p"
+L set "$RUN11" --id lane --status running --phase swe --worktree "$TMP/wt-p" >/dev/null
+cat > "$TMP/paneless.json" <<'JSON'
+{"sessions":[{"id":"spawning","status":"running","worktree_name":"wt-p"},
+             {"id":"stopped","status":"idle","worktree_name":"wt-p"}]}
+JSON
+OUT=$(L doctor "$RUN11" --sessions "$TMP/paneless.json" 2>&1)
+if echo "$OUT" | grep -q "spawning is running with no pane yet"; then ok "running paneless session is pending"
+else no "called a just-spawned session gone: $OUT"; fi
+if echo "$OUT" | grep -q "stopped has no tmux_target -- window is gone"; then ok "stopped paneless session is gone"
+else no "lost the gone case: $OUT"; fi
 
 echo "== absence is never evidence of approval =="
 # A PR with no recorded head/approval must be reported unverifiable, never assumed fine.

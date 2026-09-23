@@ -57,10 +57,44 @@ chk "reads a field"           "$(sw_session_field live-1 tmux_target)" "@10"
 chk "absent field is empty"   "$(sw_session_field dead-1 tmux_target)" ""
 chk "unknown session is empty" "$(sw_session_field nope tmux_target)"  ""
 
-echo "== liveness keys on tmux_target, not on status =="
-# A session with no pane is GONE. That is decidable now, without waiting out a stall.
-sw_session_live live-1 && ok "session with a pane is live" || no "live session called gone"
-sw_session_live dead-1 && no "gone session called live" || ok "session with no pane is gone"
+echo "== terminal pane-less sessions are gone immediately =="
+sw_session_live live-1 0 0 && ok "session with a pane is live" || no "live session called gone"
+sw_session_live dead-1 0 0 && no "gone session called live" || ok "session with no pane is gone"
+
+echo "== a paneless-but-registered session is waited for, not declared dead =="
+# A running session can be registered before tmux assigns its pane.
+cat > "$TMP/pending.json" <<'JSON'
+{"sessions":[{"id":"pending-1","model":"opus","prompt":"p","status":"running",
+  "type":"builder","worktree_name":"wt-c"}]}
+JSON
+GAINED="$TMP/gained.json"
+cat > "$GAINED" <<'JSON'
+{"sessions":[{"id":"pending-1","model":"opus","prompt":"p","status":"running",
+  "type":"builder","worktree_name":"wt-c","tmux_target":"@42"}]}
+JSON
+# The pane appears on the second read.
+SWCOUNT="$TMP/count"; echo 0 > "$SWCOUNT"
+sw_sessions(){ n=$(cat "$SWCOUNT"); echo $((n+1)) > "$SWCOUNT"
+               if [ "$n" -eq 0 ]; then cat "$TMP/pending.json"; else cat "$GAINED"; fi; }
+if sw_session_live pending-1 5 0; then ok "waits for the pane instead of failing on sample 1"
+else no "declared a healthy just-spawned session dead"; fi
+chk "uses one session snapshot per poll" "$(cat "$SWCOUNT")" "2"
+
+echo "== a session that never gains a pane is still reported gone, within budget =="
+echo 0 > "$SWCOUNT"
+sw_sessions(){ n=$(cat "$SWCOUNT"); echo $((n+1)) > "$SWCOUNT"; cat "$TMP/pending.json"; }
+START=$(date +%s)
+sw_session_live pending-1 3 0 && no "called a permanently paneless session live" || ok "gives up and reports gone"
+chk "max-polls bounds the re-reads (first read + 3)" "$(cat "$SWCOUNT")" "4"
+ELAPSED=$(( $(date +%s) - START ))
+[ "$ELAPSED" -le 2 ] && ok "respects its budget without waiting (${ELAPSED}s)" || no "overran budget: ${ELAPSED}s"
+
+echo "== a session absent from list-sessions is gone immediately =="
+sw_sessions(){ echo '{"sessions":[]}'; }
+START=$(date +%s)
+sw_session_live vanished 10 0 && no "called a vanished session live" || ok "vanished session fails fast"
+ELAPSED=$(( $(date +%s) - START ))
+[ "$ELAPSED" -le 2 ] && ok "does not wait out the budget (${ELAPSED}s)" || no "waited ${ELAPSED}s for a session that does not exist"
 
 echo "== sw_nudge refuses a session whose window is gone =="
 # Piping an empty tmux_target into capture-pane would error on exactly the session
