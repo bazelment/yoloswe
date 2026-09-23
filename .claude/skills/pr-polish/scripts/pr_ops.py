@@ -1553,7 +1553,7 @@ def early_convergence_justification(rounds: list[dict[str, Any]]) -> str | None:
         return None
     return (
         f"early-convergence: {_EARLY_CONVERGENCE_ROUNDS} consecutive rounds "
-        "with no consensus, critical, or blocking findings and no regressions; "
+        "with no critical or high (blocking) findings and no regressions; "
         f"remaining findings trace to root issue {root!r} identified in round {identified_in}"
     )
 

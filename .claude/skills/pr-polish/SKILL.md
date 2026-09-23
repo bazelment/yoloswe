@@ -428,7 +428,7 @@ Stop when any:
 - Empty triage plan
 - `low_only_streak >= 2` (every low fixed or `ack`/`wont_fix` with reason)
 - Top finding documented false positive + prior round had no `must_fix`
-- `finalize-and-report` sets `convergence_justification` (early convergence). Stop before the round cap. `state-mark-complete` with reason `early-convergence` and `--justification` set to that string. The justification is the record of why the loop stopped — a cap exit with no sentence is a different outcome. Early convergence is N=2 consecutive rounds with no consensus, critical, or blocking findings, no regressions, and every remaining finding tracing to one root issue an earlier round already named (`topic` / `invariant` / `root_issue` on the action). Tag that root when you record the action or the rule cannot see it.
+- `finalize-and-report` sets `convergence_justification` (early convergence). Stop before the round cap. `state-mark-complete` with reason `early-convergence` and `--justification` set to that string. The justification is the record of why the loop stopped — a cap exit with no sentence is a different outcome. Early convergence is N=2 consecutive rounds with no critical or high (blocking) findings, no regressions, and every remaining finding tracing to one root issue an earlier round already named (`topic` / `invariant` / `root_issue` on the action). Tag that root when you record the action or the rule cannot see it.
 
 When any other stop above fires and the report includes `convergence_justification`, pass it to `state-mark-complete --justification` as well.
 
