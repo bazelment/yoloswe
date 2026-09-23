@@ -146,33 +146,39 @@ func TestAddRepoRequiresWTRoot(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestCommandUsesWTRoot(t *testing.T) {
-	wtRoot := t.TempDir()
-	t.Setenv("WT_ROOT", wtRoot)
+func TestCommandUsesInjectedWTRoot(t *testing.T) {
+	t.Parallel()
 
+	wtRoot := t.TempDir()
 	var gotRoot, gotURL string
-	orig := newInitializer
-	t.Cleanup(func() {
-		newInitializer = orig
-		Cmd.SetOut(nil)
-		Cmd.SetErr(nil)
-		Cmd.SetArgs(nil)
-	})
-	newInitializer = func(root string) repoInitializer {
+	cmd := newCmd(func() (string, error) { return wtRoot, nil }, func(root string) repoInitializer {
 		gotRoot = root
 		return initFunc(func(_ context.Context, cloneURL string) (string, error) {
 			gotURL = cloneURL
 			return filepath.Join(root, "yoloswe", "main"), nil
 		})
-	}
+	})
 
 	var buf bytes.Buffer
-	Cmd.SetOut(&buf)
-	Cmd.SetErr(io.Discard)
-	Cmd.SetArgs([]string{"bazelment/yoloswe"})
-	require.NoError(t, Cmd.Execute())
+	cmd.SetOut(&buf)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"bazelment/yoloswe"})
+	require.NoError(t, cmd.Execute())
 
 	assert.Equal(t, wtRoot, gotRoot)
 	assert.Equal(t, "https://github.com/bazelment/yoloswe.git", gotURL)
-	assert.Contains(t, buf.String(), "added yoloswe at ")
+	assert.Equal(t, "added yoloswe at "+filepath.Join(wtRoot, "yoloswe", "main")+"\n", buf.String())
+}
+
+func TestCommandReturnsWTRootError(t *testing.T) {
+	t.Parallel()
+
+	cmd := newCmd(func() (string, error) { return "", assert.AnError }, func(string) repoInitializer {
+		t.Fatal("initializer should not be called")
+		return nil
+	})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"bazelment/yoloswe"})
+	require.ErrorIs(t, cmd.Execute(), assert.AnError)
 }

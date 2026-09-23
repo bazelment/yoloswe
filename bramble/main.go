@@ -1792,7 +1792,7 @@ func init() {
 
 	restartCmd.Flags().Bool("force", false, "Restart without confirming, even if in-process sessions would be lost")
 
-	rootCmd.AddCommand(addrepo.Cmd)
+	rootCmd.AddCommand(addrepo.NewCmd(resolveWTRoot))
 	rootCmd.AddCommand(pingCmd)
 	rootCmd.AddCommand(restartCmd)
 	rootCmd.AddCommand(newSessionCmd)

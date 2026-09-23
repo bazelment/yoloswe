@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -16,12 +15,18 @@ import (
 	"github.com/bazelment/yoloswe/wt"
 )
 
-// Cmd implements "bramble add-repo".
-var Cmd = &cobra.Command{
-	Use:          "add-repo <repo>",
-	Short:        "Add a GitHub repository to the repo list",
-	SilenceUsage: true,
-	Long: `Clone a GitHub repository into WT_ROOT as a bare repo plus its default-branch
+// NewCmd returns the "bramble add-repo" command. resolveWTRoot must be the
+// same resolver the repo picker uses, so added repos land where it looks.
+func NewCmd(resolveWTRoot func() (string, error)) *cobra.Command {
+	return newCmd(resolveWTRoot, newManagerInitializer)
+}
+
+func newCmd(resolveWTRoot func() (string, error), newInit func(root string) repoInitializer) *cobra.Command {
+	return &cobra.Command{
+		Use:          "add-repo <repo>",
+		Short:        "Add a GitHub repository to the repo list",
+		SilenceUsage: true,
+		Long: `Clone a GitHub repository into WT_ROOT as a bare repo plus its default-branch
 worktree. The new repo then shows up in the bramble repo picker, the same as
 adding it from that screen.
 
@@ -32,30 +37,29 @@ adding it from that screen.
   bramble add-repo git@github.com:owner/repo.git
 
 WT_ROOT selects the destination (default: ~/worktrees).`,
-	Example: `  bramble add-repo bazelment/yoloswe
+		Example: `  bramble add-repo bazelment/yoloswe
   bramble add-repo https://github.com/bazelment/yoloswe.git`,
-	Args: cobra.ExactArgs(1),
-	RunE: runAddRepo,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			wtRoot, err := resolveWTRoot()
+			if err != nil {
+				return err
+			}
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			return addRepo(ctx, args[0], wtRoot, cmd.OutOrStdout(), newInit)
+		},
+	}
 }
 
 type repoInitializer interface {
 	Init(ctx context.Context, url string) (string, error)
 }
 
-var newInitializer = func(wtRoot string) repoInitializer {
+func newManagerInitializer(wtRoot string) repoInitializer {
 	return wt.NewManager(wtRoot, "", wt.WithOutput(wt.NewOutput(os.Stderr, false)))
-}
-
-func runAddRepo(cmd *cobra.Command, args []string) error {
-	wtRoot, err := resolveWTRoot()
-	if err != nil {
-		return err
-	}
-	ctx := cmd.Context()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return addRepo(ctx, args[0], wtRoot, cmd.OutOrStdout(), newInitializer)
 }
 
 func addRepo(ctx context.Context, raw, wtRoot string, stdout io.Writer, newInit func(root string) repoInitializer) error {
@@ -75,17 +79,6 @@ func addRepo(ctx context.Context, raw, wtRoot string, stdout io.Writer, newInit 
 		return err
 	}
 	return nil
-}
-
-func resolveWTRoot() (string, error) {
-	if v := os.Getenv("WT_ROOT"); v != "" {
-		return v, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-	return filepath.Join(home, "worktrees"), nil
 }
 
 var (
