@@ -2,10 +2,11 @@
 """Run one reviewer and forward its stdout push stream.
 
 Progress is the child's stdout (phase lines, heartbeats, a terminal
-done/error event). This process does not write a log to tail. After the
-child has emitted a phase or a heartbeat, silence for two heartbeat
-intervals is a hang: the child is killed and an error envelope plus a
-terminal event are published so the join can finish.
+done/error event). This process does not write a log to tail. The hang
+clock starts when the child spawns. Silence for two heartbeat intervals,
+counted from spawn or from the last phase or heartbeat, is a hang: the
+child is killed and an error envelope plus a terminal event are published
+so the join can finish.
 
 Heartbeats come from a timer in the bramble process that runs from
 ``reading_diff`` until the envelope is written. They do not depend on the
@@ -265,16 +266,17 @@ def supervise(
     )
     err_thread.start()
 
+    # The clock is armed from spawn and never unarmed, so no wait below is
+    # unbounded. Before the first event the threshold comes from interval_ms
+    # (the fallback). Pre-reading_diff setup is local and takes well under
+    # one interval.
     hang_after = 2 * (interval_ms / 1000.0)
-    deadline: float | None = None
+    deadline = time.monotonic() + hang_after
     saw_terminal = False
 
     while True:
-        timeout: float | None = None
-        if deadline is not None:
-            timeout = max(0.0, deadline - time.monotonic())
         try:
-            line = lines.get(timeout=timeout)
+            line = lines.get(timeout=max(0.0, deadline - time.monotonic()))
         except queue.Empty:
             message = f"hang: no heartbeat for {_format_wait(hang_after)} (2x the liveness interval)"
             if not _kill_and_collect(proc, lines, grace_s=sigterm_grace_s, backend=backend):
@@ -302,7 +304,7 @@ def supervise(
     # stdout closed without a terminal event. No more events can arrive, but
     # the child may still be alive, so the wait for its exit is bounded by the
     # same hang deadline as the loop above.
-    remaining = hang_after if deadline is None else max(0.0, deadline - time.monotonic())
+    remaining = max(0.0, deadline - time.monotonic())
     try:
         code = proc.wait(timeout=remaining)
     except subprocess.TimeoutExpired:

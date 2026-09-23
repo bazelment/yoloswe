@@ -144,6 +144,22 @@ class SuperviseTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertLess(time.monotonic() - start, 5)
 
+    def test_child_that_never_prints_is_a_hang(self) -> None:
+        # The clock is armed at spawn. A child silent from the start (a
+        # frozen setup, a wrong binary) must not wait for the outer timeout.
+        start = time.monotonic()
+        code = review_push.supervise(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            envelope=self.envelope,
+            interval_ms=100,
+            backend="codex",
+            sigterm_grace_s=0.2,
+        )
+        self.assertEqual(code, 1)
+        self.assertLess(time.monotonic() - start, 5)
+        env = json.loads(self.envelope.read_text())
+        self.assertIn("hang", env["error"])
+
     def test_terminal_event_bounds_teardown_wait(self) -> None:
         script = textwrap.dedent(
             """\
