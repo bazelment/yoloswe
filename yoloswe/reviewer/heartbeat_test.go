@@ -387,16 +387,12 @@ func TestFormatHeartbeatEvent_PushShape(t *testing.T) {
 		t.Errorf("tools_in_flight = %v, want 1", ev["tools_in_flight"])
 	}
 
-	active := renderHeartbeat(10*time.Second, heartbeatWindow{events: 2, toolsCompleted: []string{"Read"}}, 0)
-	// Default mode is the human line. Flipping the flag must switch the
-	// same renderer onto the push event, or the CLI's opt-in is a no-op.
+	active := renderHeartbeat(false, 10*time.Second, heartbeatWindow{events: 2, toolsCompleted: []string{"Read"}}, 0)
 	if strings.Contains(active, `"event"`) {
 		t.Fatalf("human heartbeat rendered as JSON: %s", active)
 	}
-	prevJSON := heartbeatJSON
-	heartbeatJSON = true
-	t.Cleanup(func() { heartbeatJSON = prevJSON })
 	active = renderHeartbeat(
+		true,
 		10*time.Second,
 		heartbeatWindow{events: 2, toolsCompleted: []string{"Read"}, textChars: 10},
 		0,

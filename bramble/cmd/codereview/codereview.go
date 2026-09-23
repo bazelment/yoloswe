@@ -108,11 +108,6 @@ func init() {
 
 func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	runStart := time.Now()
-	// Heartbeats join the stdout push stream for this process. Restored on
-	// the way out so an in-process caller (a test) does not leave the
-	// reviewer package emitting JSON at stderr consumers.
-	reviewer.EnablePushProgress(os.Stdout)
-	defer reviewer.EnablePushProgress(nil)
 	// envelopeWritten tracks whether the envelope has already been flushed. A
 	// top-level defer uses it to guarantee exactly one envelope is written
 	// (to stdout or --envelope-file) even on panic or unexpected return.
@@ -242,7 +237,8 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		// backend is bounded exactly like a streaming one: by --timeout, not by
 		// --idle-timeout. Zero (the default) leaves agy's own --print-timeout
 		// default in force.
-		TurnTimeout: timeout,
+		TurnTimeout:     timeout,
+		HeartbeatWriter: os.Stdout,
 	}
 
 	logPath2, err := reviewer.ResolveProtocolLogPath(protocolLogDir)

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sys
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -96,6 +97,24 @@ class SuperviseTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertFalse(self.envelope.exists())
+
+    def test_terminal_event_bounds_teardown_wait(self) -> None:
+        script = textwrap.dedent(
+            """\
+            import json, time
+            print(json.dumps({"event": "done", "verdict": "accepted", "envelope": "", "status": "ok", "issues": 0}), flush=True)
+            time.sleep(30)
+            """
+        )
+        start = time.monotonic()
+        code = review_push.supervise(
+            [sys.executable, "-c", script],
+            envelope=self.envelope,
+            sigterm_grace_s=0.1,
+            terminal_grace_s=0.1,
+        )
+        self.assertEqual(code, 1)
+        self.assertLess(time.monotonic() - start, 1)
 
 
 if __name__ == "__main__":

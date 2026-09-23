@@ -683,14 +683,9 @@ func TestAgyBackend_RunPrompt_IdleTimeoutDoesNotTruncateAProgressingTurn(t *test
 	}
 }
 
-// Print mode is silent until the turn ends. The push-stream watchdog treats
-// 2× a missing heartbeat as a hang, so a healthy agy review has to pulse
-// while it waits or the skill kills it at ~40s.
+// Print mode needs heartbeats while it waits for the turn result.
 func TestAgyBackend_PushHeartbeatDuringSilence(t *testing.T) {
 	buf := withHeartbeat(t, 30*time.Millisecond)
-	prevJSON := heartbeatJSON
-	heartbeatJSON = true
-	t.Cleanup(func() { heartbeatJSON = prevJSON })
 
 	dir := t.TempDir()
 	cliPath := filepath.Join(dir, "agy")
@@ -703,7 +698,7 @@ func TestAgyBackend_PushHeartbeatDuringSilence(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := &agyBackend{
-		config:  Config{Model: "gemini-3.8-flash-medium", TurnTimeout: 10 * time.Second},
+		config:  Config{Model: "gemini-3.8-flash-medium", TurnTimeout: 10 * time.Second, HeartbeatWriter: buf},
 		cliPath: cliPath,
 	}
 	if _, err := b.RunPrompt(context.Background(), "review this", &recordingHandler{}); err != nil {

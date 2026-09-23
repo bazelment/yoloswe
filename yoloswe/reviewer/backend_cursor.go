@@ -95,7 +95,7 @@ func (b *cursorBackend) runPromptWithOptions(ctx context.Context, prompt string,
 			actualSessionID = id
 		},
 	}
-	bridged, err := bridgeStreamEvents(adapterCtx, adapter.filtered(adapterCtx), handler, "", b.config.IdleTimeout)
+	bridged, err := bridgeStreamEventsWithHeartbeat(adapterCtx, adapter.filtered(adapterCtx), handler, "", b.config.IdleTimeout, b.config.HeartbeatWriter)
 	sessionMu.Lock()
 	readySessionID := actualSessionID
 	sessionMu.Unlock()

@@ -10,19 +10,13 @@ import (
 	"github.com/bazelment/yoloswe/yoloswe/reviewer"
 )
 
-// phaseEvent is one machine-parsable progress line on stdout. Monitor streams
-// stdout, so these lines are the push notifications. There is no progress
-// file to tail: issue 247's multi-hour rounds were the orchestrator re-reading
-// a tee of stderr while a completed review sat unread.
+// phaseEvent is a machine-parsable stdout progress event.
 type phaseEvent struct {
 	Event string `json:"event"`
 	Phase string `json:"phase"`
 }
 
-// terminalEvent is the last stdout line of a review. It is the readiness
-// signal: verdict and envelope path ride on it, and the envelope file is
-// already renamed into place before this is written. An orchestrator that
-// stats the envelope to see if the review is done is polling.
+// terminalEvent is emitted after the envelope is ready.
 type terminalEvent struct {
 	Envelope string `json:"envelope"`
 	Event    string `json:"event"`
@@ -33,16 +27,11 @@ type terminalEvent struct {
 	Issues   int    `json:"issues"`
 }
 
-// emitPhase writes one phase line (reading_diff, analyzing, writing_envelope)
-// to stdout and returns. The write is the notification.
 func emitPhase(phase string) {
 	writeStdoutJSON(phaseEvent{Event: "phase", Phase: phase})
 }
 
-// emitTerminal writes the done/error line. Partial reviews use done: the
-// envelope is ready and still holds findings. status=error is the only error
-// event — a partial reported as "error:" is what made an orchestrator record
-// "no envelope" while findings were on disk (kernel#8682 r1).
+// Partial reviews emit done because their envelope contains findings.
 func emitTerminal(env reviewer.ResultEnvelope, envelopePath string) {
 	kind := "done"
 	if env.Status == reviewer.StatusError || env.Status == "" {
@@ -69,12 +58,7 @@ func writeStdoutJSON(v any) {
 	_, _ = os.Stdout.Write(append(b, '\n'))
 }
 
-// writeEnvelopeAtomic publishes env at path by writing a temp file in the
-// same directory and renaming it over the destination. O_TRUNC on the
-// destination made a partial envelope observable mid-write; a stat of that
-// path then looked like readiness. Rename is the publication, and the
-// terminal event is what the orchestrator waits for — the path is not a
-// progress channel.
+// writeEnvelopeAtomic publishes an envelope only after its complete write.
 func writeEnvelopeAtomic(path string, env reviewer.ResultEnvelope) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -105,11 +89,7 @@ func writeEnvelopeAtomic(path string, env reviewer.ResultEnvelope) error {
 	return nil
 }
 
-// deliverEnvelope writes the envelope (stdout, or --envelope-file via atomic
-// rename) and then the terminal event. The terminal line is always last, so
-// a reader that treats "the last stdout line" as readiness cannot observe a
-// half-written file. wrote reports whether a complete envelope was flushed;
-// the caller uses it to suppress a second synthesized envelope.
+// deliverEnvelope publishes the envelope before its terminal event.
 func deliverEnvelope(env reviewer.ResultEnvelope) (wrote bool, err error) {
 	emitPhase("writing_envelope")
 	if envelopeFile == "" {

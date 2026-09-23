@@ -187,6 +187,23 @@ def _kill_and_collect(
     return saw
 
 
+def _wait_after_terminal(proc: subprocess.Popen[str], grace_s: float) -> int:
+    try:
+        return proc.wait(timeout=grace_s)
+    except subprocess.TimeoutExpired:
+        _signal_group(proc, signal.SIGTERM)
+        try:
+            proc.wait(timeout=grace_s)
+            return 1
+        except subprocess.TimeoutExpired:
+            _signal_group(proc, signal.SIGKILL)
+            try:
+                proc.wait(timeout=grace_s)
+            except subprocess.TimeoutExpired:
+                pass
+            return 1
+
+
 def supervise(
     cmd: list[str],
     *,
@@ -194,6 +211,7 @@ def supervise(
     interval_ms: int = _DEFAULT_INTERVAL_MS,
     backend: str = "",
     sigterm_grace_s: float = 3.0,
+    terminal_grace_s: float = 3.0,
 ) -> int:
     """Run ``cmd``. Forward stdout. Hang-kill after 2× the heartbeat interval."""
     if not cmd:
@@ -241,8 +259,10 @@ def supervise(
             continue
         if ev.get("event") in _TERMINAL_EVENTS:
             saw_terminal = True
-            deadline = None
-            continue
+            code = _wait_after_terminal(proc, terminal_grace_s)
+            err_thread.join(timeout=1)
+            _close_pipes(proc)
+            return code
         if not _is_liveness(ev):
             continue
         if ev.get("event") == "heartbeat":
