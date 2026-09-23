@@ -2550,8 +2550,106 @@ class TestFinalizeAndReport(unittest.TestCase):
         self.assertIn("Round 1", out["round_summary"])
         self.assertIn("top=medium", out["round_summary"])
         self.assertIn("fixed 1", out["round_summary"])
+        self.assertIn("review=", out["round_summary"])
+        self.assertIn("orchestrator=", out["round_summary"])
         self.assertEqual(out["next_round_n"], 2)
 
+    def _quiet(self, n: int, root: str, *, severity: str = "medium") -> dict:
+        return {
+            "comment_id": n,
+            "action": "ack",
+            "severity": severity,
+            "topic": root,
+        }
+
+    def test_early_convergence_stops_before_cap_with_justification(self) -> None:
+        # Medium findings reset low_only_streak, so the older rules would
+        # run this to the cap. Two quiet rounds that only restate a root
+        # named in round 1 are not new signal.
+        root = "parser-root"
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 1, "sha1",
+            [{"comment_id": 1, "action": "fixed", "severity": "high",
+              "topic": root, "commit_sha": "sha1"}],
+        )
+        pr_ops.state_append_round(99, 2, "sha1", verify_head=False)
+        pr_ops.state_finalize_round(99, 2, "sha2", [self._quiet(2, root)])
+        pr_ops.state_append_round(99, 3, "sha2", verify_head=False)
+        out = pr_ops.finalize_and_report(99, 3, "sha3", [self._quiet(3, root)])
+        self.assertEqual(out["exit_reason_hint"], "early-convergence")
+        self.assertTrue(out["converged_signal"])
+        justification = out["convergence_justification"]
+        self.assertIn("parser-root", justification)
+        self.assertIn("round 1", justification)
+        self.assertLess(out["next_round_n"] - 1, 5)  # stopped before the default cap
+        done = pr_ops.state_mark_complete(
+            99, "early-convergence", justification=justification,
+        )
+        self.assertEqual(done["exit_reason"], "early-convergence")
+        self.assertEqual(done["exit_justification"], justification)
+        self.assertEqual(len(done["rounds"]), 3)
+
+    def test_early_convergence_requires_two_quiet_rounds_and_one_root(self) -> None:
+        root = "parser-root"
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 1, "sha1",
+            [{"comment_id": 1, "action": "fixed", "severity": "high",
+              "topic": root, "commit_sha": "sha1"}],
+        )
+        pr_ops.state_append_round(99, 2, "sha1", verify_head=False)
+        one = pr_ops.finalize_and_report(99, 2, "sha2", [self._quiet(2, root)])
+        self.assertIsNone(one["converged_signal"])
+
+        pr_ops.state_append_round(99, 3, "sha2", verify_head=False)
+        split = pr_ops.finalize_and_report(
+            99, 3, "sha3",
+            [self._quiet(3, root), self._quiet(4, "other-root")],
+        )
+        self.assertIsNone(split["converged_signal"])
+
+    def test_early_convergence_blocked_by_high_or_regression(self) -> None:
+        root = "parser-root"
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 1, "sha1",
+            [{"comment_id": 1, "action": "ack", "severity": "medium", "topic": root}],
+        )
+        pr_ops.state_append_round(99, 2, "sha1", verify_head=False)
+        pr_ops.state_finalize_round(99, 2, "sha2", [self._quiet(2, root)])
+        pr_ops.state_append_round(99, 3, "sha2", verify_head=False)
+        high = pr_ops.finalize_and_report(
+            99, 3, "sha3", [self._quiet(3, root, severity="high")],
+        )
+        self.assertIsNone(high["converged_signal"])
+
+        pr_ops.state_append_round(99, 4, "sha3", verify_head=False)
+        pr_ops.state_finalize_round(99, 4, "sha4", [self._quiet(4, root)])
+        pr_ops.state_append_round(99, 5, "sha4", verify_head=False)
+        regressed = dict(self._quiet(5, root), spiral_refix=True)
+        out = pr_ops.finalize_and_report(99, 5, "sha5", [regressed])
+        self.assertIsNone(out["converged_signal"])
+
+    def test_round_summary_splits_review_and_orchestrator_time(self) -> None:
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        _, path = pr_ops.state_paths(99)
+        state = json.loads(path.read_text())
+        state["rounds"][0]["opened_at_ms"] = pr_ops._epoch_ms() - 7_200_000
+        path.write_text(json.dumps(state))
+        out = pr_ops.finalize_and_report(
+            99, 1, "sha1f",
+            [{"comment_id": 1, "action": "ack", "severity": "low"}],
+            review_wall_ms=420_000,
+        )
+        self.assertEqual(out["review_wall_ms"], 420_000)
+        self.assertGreater(out["orchestrator_wall_ms"], 6_000_000)
+        self.assertIn("review=7m0s", out["round_summary"])
+        self.assertIn("orchestrator=", out["round_summary"])
+        self.assertLess(
+            out["review_wall_ms"],
+            out["orchestrator_wall_ms"],
+        )
 
 
 class TestPRSummaryReachesStateViaCLI(unittest.TestCase):

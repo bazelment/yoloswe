@@ -18,7 +18,7 @@ Helpers: `python3 $SKILL_DIR/scripts/<helper>.py`. `$SKILL_DIR` = directory cont
 | `lint_gate.py` | Diff lint (ruff/golangci/eslint) |
 | `scope_gate.py` | `scope-hints.json` for bramble |
 
-Missing/error review streams → log as findings with stderr path cited. A `status: "partial"` envelope (the reviewer found things, then hit the idle timeout) keeps its findings **and** reports the failure — triage sees both.
+Missing/error review streams → log as findings citing the terminal `error` event and the envelope path it names. There is no stderr file to cite. A `status: "partial"` envelope (the reviewer found things, then hit the idle timeout) keeps its findings **and** reports the failure — triage sees both. The terminal event for a partial is `done` with `status: "partial"`.
 
 ## Arguments
 
@@ -221,7 +221,9 @@ fi
 
 The warning branch writes no state. When it fires, YOU must add an `ack` entry (source `sweep`, notes naming the unpinned scope) to this round's actions file in step (f) — nothing else records which rounds were scoped by inference.
 
-**The join rule: launch every reviewer inside ONE `run_in_background` Bash job, then wait only for that job's single completion notification before triaging** — steps b→c in one turn, no tool calls in between. Streaming per-reviewer output is visibility only, never a cue to act; don't poll envelopes, `sleep`, `ScheduleWakeup`, or end the turn with a "standing by" reply. Non-interactive runs (e.g. jiradozer, one bounded agent turn) have no harness to re-invoke you on a wakeup, so a yielded turn strands the round permanently.
+**Arm one Monitor, then wait for its completion notification.** Launch every reviewer inside ONE `run_in_background` Bash job. That job is the Monitor. Its return is the completion notification. Do not triage until it arrives. Non-interactive runs (e.g. jiradozer, one bounded agent turn) have no harness to re-invoke you on a wakeup, so a yielded turn strands the round permanently — stay inside this one tool call.
+
+**Polling is forbidden between Monitor-arm and notification.** Between arming the Monitor and receiving its completion notification, do not `tail`, `cat`, `ls`, `stat`, `date`, or read any envelope, log, stderr capture, or task-output file. If you are about to call a read-only inspection tool and the reason is "check if the review is done," that is polling — stop. The notification is the sole trigger to read envelopes and triage. Progress and completion arrive as push events on the job's stdout (`phase`, `heartbeat`, terminal `done`/`error`). You do not fetch them. There is no progress file. A hang (no heartbeat for 2× the interval) is killed inside the job; you do not detect it by looking.
 
 Two non-obvious properties: `wait` returns as soon as every child has *exited*, so a crashed reviewer never hangs the round; and the join's **exit code is not how failure is detected** — multi-PID `wait` reports only the last PID's status, so failure surfaces after the join, in triage, via a missing/empty envelope. Background: `references/why-one-background-join.md`.
 
@@ -247,63 +249,75 @@ per-reviewer `BRAMBLE_RUN_TAG` is how runs are attributed.
 # agy applies its OWN --print-timeout default of 5m — which would cut an agy
 # review off well before the 18min+ a large diff needs. 35m sits under the 2400s
 # backstop so the CLI reports a timeout rather than being killed outright.
-# `set -o pipefail` keeps each subshell's status the reviewer's, not `sed`'s 0.
+# review_push.py forwards stdout (the push stream) and kills the child when
+# heartbeats stop for 2x the interval. It does not tee a progress file. It
+# stamps `"backend"` on every forwarded event and prefixes forwarded stderr
+# with `[backend]`, so the interleaved job output stays attributable.
+# Do not add `tee`, `2>`, or a sed prefix — a prefix breaks the JSON events,
+# and a file is what the loop used to poll.
 PIDS=()
+REVIEW_START_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
 
-( set -o pipefail; BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:codex:r{ROUND} \
+( BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:codex:r{ROUND} \
+  python3 $SKILL_DIR/scripts/review_push.py \
+    --backend codex --envelope "$LOG_DIR/codex-envelope.json" -- \
   timeout 2400 $BRAMBLE_BIN code-review --backend codex --model gpt-5.6-luna --effort medium \
     --skip-test-execution --verbose --idle-timeout 8m \
     --goal "$GOAL" --scope-hints-file "$SCOPE_HINTS" $DIFF_BASE_ARG \
     ${CODEX_RESUME:+--resume-session-id "$CODEX_RESUME"} \
-    --envelope-file "$LOG_DIR/codex-envelope.json" \
-  2>&1 | tee "$LOG_DIR/codex-stderr.txt" | sed 's/^/[codex] /' ) &
+    --envelope-file "$LOG_DIR/codex-envelope.json" ) &
 PIDS+=($!)
 
-( set -o pipefail; BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:cursor:r{ROUND} \
+( BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:cursor:r{ROUND} \
+  python3 $SKILL_DIR/scripts/review_push.py \
+    --backend cursor --envelope "$LOG_DIR/cursor-envelope.json" -- \
   timeout 2400 $BRAMBLE_BIN code-review --backend cursor --model composer-2.5 \
     --skip-test-execution --verbose --idle-timeout 8m \
     --goal "$GOAL" --scope-hints-file "$SCOPE_HINTS" $DIFF_BASE_ARG \
     ${CURSOR_RESUME:+--resume-session-id "$CURSOR_RESUME"} \
-    --envelope-file "$LOG_DIR/cursor-envelope.json" \
-  2>&1 | tee "$LOG_DIR/cursor-stderr.txt" | sed 's/^/[cursor] /' ) &
+    --envelope-file "$LOG_DIR/cursor-envelope.json" ) &
 PIDS+=($!)
 
-( set -o pipefail; timeout 120 python3 $SKILL_DIR/scripts/lint_gate.py \
-    --state-dir "$STATE_DIR" --round {ROUND} --log-dir "$LOG_DIR" \
-  2>&1 | tee "$LOG_DIR/lint-stderr.txt" | sed 's/^/[lint] /' ) &
+( timeout 120 python3 $SKILL_DIR/scripts/lint_gate.py \
+    --state-dir "$STATE_DIR" --round {ROUND} --log-dir "$LOG_DIR" ) &
 PIDS+=($!)
 
 if [ "$USE_AGY" = "1" ]; then
-  ( set -o pipefail; BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:agy:r{ROUND} \
+  ( BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:agy:r{ROUND} \
+    python3 $SKILL_DIR/scripts/review_push.py \
+      --backend agy --envelope "$LOG_DIR/agy-envelope.json" -- \
     timeout 2400 $BRAMBLE_BIN code-review --backend agy --model gemini-3.8-flash-low \
       --skip-test-execution --verbose --idle-timeout 8m --timeout 35m \
       --goal "$GOAL" --scope-hints-file "$SCOPE_HINTS" $DIFF_BASE_ARG \
       ${AGY_RESUME:+--resume-session-id "$AGY_RESUME"} \
-      --envelope-file "$LOG_DIR/agy-envelope.json" \
-    2>&1 | tee "$LOG_DIR/agy-stderr.txt" | sed 's/^/[agy] /' ) &
+      --envelope-file "$LOG_DIR/agy-envelope.json" ) &
   PIDS+=($!)
 fi
 
 if [ "$USE_CLAUDE" = "1" ]; then
-  ( set -o pipefail; BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:claude:r{ROUND} \
+  ( BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:claude:r{ROUND} \
+    python3 $SKILL_DIR/scripts/review_push.py \
+      --backend claude --envelope "$LOG_DIR/claude-envelope.json" -- \
     timeout 2400 $BRAMBLE_BIN code-review --backend claude --model opus \
       --skip-test-execution --verbose --idle-timeout 8m \
       --goal "$GOAL" --scope-hints-file "$SCOPE_HINTS" $DIFF_BASE_ARG \
       ${CLAUDE_RESUME:+--resume-session-id "$CLAUDE_RESUME"} \
-      --envelope-file "$LOG_DIR/claude-envelope.json" \
-    2>&1 | tee "$LOG_DIR/claude-stderr.txt" | sed 's/^/[claude] /' ) &
+      --envelope-file "$LOG_DIR/claude-envelope.json" ) &
   PIDS+=($!)
 fi
 
 # Join on EVERY launched reviewer so triage never starts while one is still
-# running or has yet to write its envelope. A skipped reviewer is simply one
-# fewer element — the wait can't desync from the launches.
+# running. A skipped reviewer is simply one fewer element — the wait can't
+# desync from the launches. This wait returning is the Monitor notification.
 wait "${PIDS[@]}"
+REVIEW_END_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
+REVIEW_WALL_MS=$((REVIEW_END_MS - REVIEW_START_MS))
+echo "{\"event\":\"review_join\",\"review_wall_ms\":$REVIEW_WALL_MS}"
 ```
 
-Before triage: `recover-envelope` on each stream path (idempotent). A reviewer that exited without a valid envelope → `stream-missing` finding, not a deadlock.
+Only after the Monitor notification: `recover-envelope` on each stream path (idempotent). Read `review_wall_ms` from the job's final `review_join` line and pass it to finalize. A reviewer that exited without a valid envelope → `stream-missing` finding, not a deadlock. A hang killed by `review_push.py` is that finding: the terminal event is `error` and the envelope's `error` starts with `hang:`.
 
-**`stream-missing` requires that no envelope file exists — check before you write it.** On #8682 r1 the orchestrator recorded `ack … no envelope` while `codex-envelope.json` was on disk with `status: ok` and 3 findings (including a 0.98-confidence bug that then took four more rounds to rediscover). `finalize-and-report` now rejects a round that ignores an envelope present in `$LOG_DIR`, so this fails loudly rather than silently costing a reviewer. If a stream really produced nothing, `cat` the envelope's `status`/`error` and cite it — "the backend stalled" is a claim about the backend, and codex keeps its own log (`~/.codex/logs_2.sqlite`, table `logs`) that will say whether it actually did.
+**`stream-missing` requires that no envelope file exists — check before you write it.** This check is after the notification, not instead of it. On #8682 r1 the orchestrator recorded `ack … no envelope` while `codex-envelope.json` was on disk with `status: ok` and 3 findings (including a 0.98-confidence bug that then took four more rounds to rediscover). `finalize-and-report` now rejects a round that ignores an envelope present in `$LOG_DIR`, so this fails loudly rather than silently costing a reviewer. If a stream really produced nothing, read the envelope's `status`/`error` (the terminal event names the path) and cite it — "the backend stalled" is a claim about the backend, and codex keeps its own log (`~/.codex/logs_2.sqlite`, table `logs`) that will say whether it actually did.
 
 ### c) Triage
 
@@ -395,12 +409,15 @@ Skip if no file changes. Run project gates, then commit locally (`pr-polish roun
 ```bash
 python3 $SKILL_DIR/scripts/pr_ops.py finalize-and-report $CTX $ROUND $(git rev-parse HEAD) \
   $STATE_DIR/actions-r$ROUND.json \
+  ${REVIEW_WALL_MS:+--review-wall-ms "$REVIEW_WALL_MS"} \
   --envelope codex=$LOG_DIR/codex-envelope.json \
   --envelope cursor=$LOG_DIR/cursor-envelope.json \
   --envelope lint=$LOG_DIR/lint-envelope.json \
   $( [ "$USE_AGY" = "1" ] && echo --envelope agy=$LOG_DIR/agy-envelope.json ) \
   $( [ "$USE_CLAUDE" = "1" ] && echo --envelope claude=$LOG_DIR/claude-envelope.json )
 ```
+
+`$REVIEW_WALL_MS` is the `review_wall_ms` field from the Monitor job's `review_join` line. Substitute the literal value, because shell state from the launch job does not carry over. The round summary then shows review time vs orchestrator time. If the line is missing, leave it empty: the `${…:+…}` form drops the flag and the summary shows `review=n/a`. An empty `--review-wall-ms ""` would instead fail argparse's int check and the round would never finalize.
 
 (`state-finalize-round` has the same finalize semantics, without the round summary hints.)
 
@@ -411,6 +428,9 @@ Stop when any:
 - Empty triage plan
 - `low_only_streak >= 2` (every low fixed or `ack`/`wont_fix` with reason)
 - Top finding documented false positive + prior round had no `must_fix`
+- `finalize-and-report` sets `convergence_justification` (early convergence). Stop before the round cap. `state-mark-complete` with reason `early-convergence` and `--justification` set to that string. The justification is the record of why the loop stopped — a cap exit with no sentence is a different outcome. Early convergence is N=2 consecutive rounds with no critical or high (blocking) findings, no regressions, and every remaining finding tracing to one root issue an earlier round already named (`topic` / `invariant` / `root_issue` on the action). Tag that root when you record the action or the rule cannot see it.
+
+When any other stop above fires and the report includes `convergence_justification`, pass it to `state-mark-complete --justification` as well.
 
 **Acknowledged ≠ resolved.** None of the above fire while a high/critical finding (this round or a prior one) is still only `ack`'d/`wont_fix`'d without a cited reason — a deferred high issue keeps the loop open. A `wont_fix`/`false_positive` with a real rationale is a resolution and does not block convergence; a bare `ack` on a high/critical does.
 
@@ -449,9 +469,9 @@ python3 $SKILL_DIR/scripts/pr_ops.py state-mark-complete $CTX <reason>
 python3 $SKILL_DIR/scripts/verdict.py "$STATE_DIR" --repo-root "$(pwd)" --write || true
 ```
 
-Reasons: `converged`, `all-low`, `false-positive-top`, `capped-at-max`, `spiral-escalated`, `pr-mismatch-abort`, `sync-conflict`, `dirty-tree-preflight`, `user-paused`, `abandoned`, `reviewers-unavailable`.
+Reasons: `converged`, `early-convergence`, `all-low`, `false-positive-top`, `capped-at-max`, `spiral-escalated`, `pr-mismatch-abort`, `sync-conflict`, `dirty-tree-preflight`, `user-paused`, `abandoned`, `reviewers-unavailable`.
 
-Print: metrics, round table, full `comment_actions` table (`Round | Source | Path:Line | Severity | Action | Notes`), state file path.
+Print: metrics, round table, full `comment_actions` table (`Round | Source | Path:Line | Severity | Action | Notes`), state file path, and per-round review vs orchestrator wall time from `evidence.round_timing` (each row's `summary`). A round whose orchestrator time dwarfs its review time is the degenerate poll — surface it, do not bury it.
 
 **Report `verdict.py`'s output, do not re-derive it.** Its `blockers` are checkable
 facts; prose that contradicts one is the failure this replaces. `|| true` keeps the

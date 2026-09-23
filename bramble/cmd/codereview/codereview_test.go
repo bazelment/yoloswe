@@ -1,6 +1,7 @@
 package codereview
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -247,29 +248,36 @@ func TestEmitEarlyFailure_TagsEnvelopeWithReviewMode(t *testing.T) {
 	}
 }
 
-func TestEmitVerdictLine_ResumeSuffixOnSuccessAndError(t *testing.T) {
-	// Round-7 review (cursor low-ack): emitVerdictLine drives the new
-	// stdout contract that orchestrators read mid-stream, but had no
-	// focused unit tests so a regression in the success vs error suffix
-	// formatting (or in dropping the suffix when resume_status is empty)
-	// would only surface in a real bramble run.
+func TestEmitTerminal_DoneAndError(t *testing.T) {
+	// The terminal event is the readiness signal on the push stream. A
+	// regression that drops resume, hides a partial's findings behind
+	// event=error, or omits the envelope path would only show up in a
+	// real bramble run — the same gap the old human verdict line had.
 	cases := []struct {
-		// Group both string fields together before the heavier ResultEnvelope
-		// to satisfy fieldalignment (govet) — placing strings on either side
-		// of the embedded struct wastes pointer-aligned padding.
-		name     string
-		wantLine string
-		env      reviewer.ResultEnvelope
+		name         string
+		envelopePath string
+		wantEvent    string
+		wantVerdict  string
+		wantStatus   string
+		wantResume   string
+		wantErr      string
+		env          reviewer.ResultEnvelope
+		wantIssues   int
 	}{
 		{
 			name: "success with resume ok",
 			env: reviewer.ResultEnvelope{
 				Status:        reviewer.StatusOK,
-				Review:        reviewer.ReviewBody{Verdict: "accepted", Issues: []reviewer.ReviewIssue{}},
+				Review:        reviewer.ReviewBody{Verdict: "accepted"},
 				ResumeStatus:  reviewer.ResumeStatusOK,
 				SchemaVersion: reviewer.JSONSchemaVersion,
 			},
-			wantLine: "verdict: accepted (0 issues) [resume=ok]\n",
+			envelopePath: "/tmp/env.json",
+			wantEvent:    "done",
+			wantVerdict:  "accepted",
+			wantStatus:   "ok",
+			wantResume:   "ok",
+			wantIssues:   0,
 		},
 		{
 			name: "success without resume",
@@ -278,7 +286,10 @@ func TestEmitVerdictLine_ResumeSuffixOnSuccessAndError(t *testing.T) {
 				Review:        reviewer.ReviewBody{Verdict: "rejected", Issues: []reviewer.ReviewIssue{{Severity: "high"}, {Severity: "low"}}},
 				SchemaVersion: reviewer.JSONSchemaVersion,
 			},
-			wantLine: "verdict: rejected (2 issues)\n",
+			wantEvent:   "done",
+			wantVerdict: "rejected",
+			wantStatus:  "ok",
+			wantIssues:  2,
 		},
 		{
 			name: "error with resume unverified",
@@ -288,7 +299,10 @@ func TestEmitVerdictLine_ResumeSuffixOnSuccessAndError(t *testing.T) {
 				ResumeStatus:  reviewer.ResumeStatusUnverified,
 				SchemaVersion: reviewer.JSONSchemaVersion,
 			},
-			wantLine: "error: backend unreachable [resume=unverified]\n",
+			wantEvent:  "error",
+			wantStatus: "error",
+			wantResume: "unverified",
+			wantErr:    "backend unreachable",
 		},
 		{
 			name: "error without resume",
@@ -297,30 +311,187 @@ func TestEmitVerdictLine_ResumeSuffixOnSuccessAndError(t *testing.T) {
 				Error:         "auth denied",
 				SchemaVersion: reviewer.JSONSchemaVersion,
 			},
-			wantLine: "error: auth denied\n",
+			wantEvent:  "error",
+			wantStatus: "error",
+			wantErr:    "auth denied",
 		},
 		{
-			// stdout is the surface an orchestrator reads first, and a bare
-			// "error: ..." is the reading that produced `ack ... no envelope`
-			// on kernel#8682 r1 — while the envelope beside it carries
-			// findings. A partial has issues by construction, so say so.
-			name: "partial keeps its findings visible",
+			// event=error on a partial is the reading that produced
+			// `ack ... no envelope` on kernel#8682 r1 while the envelope
+			// beside it carried findings. A partial is done: the body is
+			// ready, and status/error say the run still failed.
+			name: "partial stays done and keeps its findings",
 			env: reviewer.ResultEnvelope{
 				Status:        reviewer.StatusPartial,
 				Error:         "codex: review idle: no events for 8m0s (stalled backend)",
 				Review:        reviewer.ReviewBody{Verdict: "rejected", Issues: []reviewer.ReviewIssue{{Severity: "high"}}},
 				SchemaVersion: reviewer.JSONSchemaVersion,
 			},
-			wantLine: "partial: rejected (1 issues kept) after: codex: review idle: no events for 8m0s (stalled backend)\n",
+			envelopePath: "/tmp/partial.json",
+			wantEvent:    "done",
+			wantVerdict:  "rejected",
+			wantStatus:   "partial",
+			wantErr:      "codex: review idle: no events for 8m0s (stalled backend)",
+			wantIssues:   1,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			stdout, _ := captureStdStreams(t, func() { emitVerdictLine(tc.env) })
-			if stdout != tc.wantLine {
-				t.Errorf("stdout = %q, want %q", stdout, tc.wantLine)
+			stdout, _ := captureStdStreams(t, func() { emitTerminal(tc.env, tc.envelopePath) })
+			var got map[string]any
+			if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &got); err != nil {
+				t.Fatalf("terminal event is not JSON: %v\n%s", err, stdout)
+			}
+			if got["event"] != tc.wantEvent {
+				t.Errorf("event = %v, want %s", got["event"], tc.wantEvent)
+			}
+			if got["verdict"] != tc.wantVerdict {
+				t.Errorf("verdict = %v, want %s", got["verdict"], tc.wantVerdict)
+			}
+			if got["status"] != tc.wantStatus {
+				t.Errorf("status = %v, want %s", got["status"], tc.wantStatus)
+			}
+			if got["envelope"] != tc.envelopePath {
+				t.Errorf("envelope = %v, want %q", got["envelope"], tc.envelopePath)
+			}
+			if int(got["issues"].(float64)) != tc.wantIssues {
+				t.Errorf("issues = %v, want %d", got["issues"], tc.wantIssues)
+			}
+			if tc.wantResume == "" {
+				if _, ok := got["resume"]; ok {
+					t.Errorf("resume = %v, want omitted", got["resume"])
+				}
+			} else if got["resume"] != tc.wantResume {
+				t.Errorf("resume = %v, want %s", got["resume"], tc.wantResume)
+			}
+			if tc.wantErr == "" {
+				if _, ok := got["error"]; ok {
+					t.Errorf("error = %v, want omitted", got["error"])
+				}
+			} else if got["error"] != tc.wantErr {
+				t.Errorf("error = %v, want %s", got["error"], tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestEmitPhase_MachineParsable(t *testing.T) {
+	for _, phase := range []string{"reading_diff", "analyzing", "writing_envelope"} {
+		stdout, _ := captureStdStreams(t, func() { emitPhase(phase) })
+		var got map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &got); err != nil {
+			t.Fatalf("phase %s: %v", phase, err)
+		}
+		if got["event"] != "phase" || got["phase"] != phase {
+			t.Errorf("phase event = %v, want phase %s", got, phase)
+		}
+		// review_push.py sizes its hang clock from this before the first
+		// heartbeat, so it must be bramble's own interval.
+		if got["interval_ms"] != float64(heartbeatInterval.Milliseconds()) {
+			t.Errorf("phase %s interval_ms = %v, want %d", phase, got["interval_ms"], heartbeatInterval.Milliseconds())
+		}
+	}
+}
+
+func TestWriteEnvelopeAtomic_ReplacesPartialFile(t *testing.T) {
+	// A truncated in-place write was briefly observable and got misread as
+	// "the review is done". The destination must go from the previous bytes
+	// to a complete envelope, with no temp file left behind.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "envelope.json")
+	if err := os.WriteFile(path, []byte("{partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := reviewer.ResultEnvelope{
+		SchemaVersion: reviewer.JSONSchemaVersion,
+		Status:        reviewer.StatusOK,
+		Backend:       "codex",
+		Review:        reviewer.ReviewBody{Verdict: "accepted"},
+	}
+	if err := writeEnvelopeAtomic(path, env); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "{partial") {
+		t.Fatalf("destination still contains the partial prefix: %s", data)
+	}
+	var got reviewer.ResultEnvelope
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("destination is not a complete envelope: %v\n%s", err, data)
+	}
+	if got.Review.Verdict != "accepted" || got.Status != reviewer.StatusOK {
+		t.Errorf("envelope = %+v, want accepted/ok", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "envelope.json" {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("dir entries = %v, want only envelope.json", names)
+	}
+}
+
+func TestDeliverEnvelope_TerminalIsLastAndNamesFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "envelope.json")
+	prev := envelopeFile
+	envelopeFile = path
+	t.Cleanup(func() { envelopeFile = prev })
+
+	env := reviewer.ResultEnvelope{
+		SchemaVersion: reviewer.JSONSchemaVersion,
+		Status:        reviewer.StatusOK,
+		Backend:       "cursor",
+		Review:        reviewer.ReviewBody{Verdict: "rejected", Issues: []reviewer.ReviewIssue{{Severity: "low"}}},
+	}
+	var wrote bool
+	var deliverErr error
+	stdout, _ := captureStdStreams(t, func() {
+		wrote, deliverErr = deliverEnvelope(env)
+	})
+	if deliverErr != nil {
+		t.Fatal(deliverErr)
+	}
+	if !wrote {
+		t.Fatal("expected a completed envelope write")
+	}
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("stdout lines = %d, want phase then terminal\n%s", len(lines), stdout)
+	}
+	var phase, terminal map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &phase); err != nil {
+		t.Fatal(err)
+	}
+	if phase["phase"] != "writing_envelope" {
+		t.Errorf("first event = %v, want writing_envelope", phase)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &terminal); err != nil {
+		t.Fatal(err)
+	}
+	if terminal["event"] != "done" || terminal["envelope"] != path || terminal["verdict"] != "rejected" {
+		t.Errorf("terminal = %v", terminal)
+	}
+	// The file is complete before the terminal line is the readiness signal.
+	// A reader of the terminal event must not need to stat the path to learn
+	// that, but the bytes at the path must already be the envelope.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk reviewer.ResultEnvelope
+	if err := json.Unmarshal(data, &onDisk); err != nil {
+		t.Fatalf("envelope on disk: %v", err)
+	}
+	if onDisk.Review.Verdict != "rejected" {
+		t.Errorf("on-disk verdict = %s", onDisk.Review.Verdict)
 	}
 }
 
@@ -1561,6 +1732,69 @@ func TestReadOnlyFlagHelpNamesTheBackendsThatIgnoreIt(t *testing.T) {
 	for _, backend := range []string{"Cursor", "Agy"} {
 		if !strings.Contains(flag.Usage, backend) {
 			t.Errorf("--read-only help must name %s as ignoring the flag, got %q", backend, flag.Usage)
+		}
+	}
+}
+
+// Heartbeats come from this process on a timer, with no backend events at all.
+// A backend that is still starting, respawning on resume fallback, or running
+// in print mode emits nothing, and review_push.py kills a run after 2x
+// interval of silence. After stop returns, nothing more may be written, so the
+// terminal event stays the last line.
+func TestStartHeartbeats_IndependentOfBackendAndSilentAfterStop(t *testing.T) {
+	prevInterval := heartbeatInterval
+	heartbeatInterval = 10 * time.Millisecond
+	t.Cleanup(func() { heartbeatInterval = prevInterval })
+
+	origOut := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = origOut })
+
+	lines := make(chan string, 64)
+	go func() {
+		defer close(lines)
+		sc := bufio.NewScanner(r)
+		for sc.Scan() {
+			lines <- sc.Text()
+		}
+	}()
+
+	stop := startHeartbeats()
+	for i := 0; i < 2; i++ {
+		select {
+		case line := <-lines:
+			var ev map[string]any
+			if err := json.Unmarshal([]byte(line), &ev); err != nil {
+				t.Fatalf("heartbeat is not JSON: %v\n%s", err, line)
+			}
+			if ev["event"] != "heartbeat" || ev["interval_ms"] != float64(10) {
+				t.Fatalf("heartbeat = %v, want event=heartbeat interval_ms=10", ev)
+			}
+		case <-time.After(5 * time.Second):
+			stop()
+			t.Fatalf("no heartbeat %d within 5s", i+1)
+		}
+	}
+	stop()
+	stop() // idempotent
+	emitPhase("writing_envelope")
+	_ = w.Close()
+
+	var tail []string
+	for line := range lines {
+		tail = append(tail, line)
+	}
+	if len(tail) == 0 || !strings.Contains(tail[len(tail)-1], `"writing_envelope"`) {
+		t.Fatalf("last line after stop = %v, want writing_envelope", tail)
+	}
+	for _, line := range tail[:len(tail)-1] {
+		// Only heartbeats written before stop returned may precede the sentinel.
+		if !strings.Contains(line, `"heartbeat"`) {
+			t.Errorf("unexpected line before sentinel: %s", line)
 		}
 	}
 }

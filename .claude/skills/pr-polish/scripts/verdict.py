@@ -38,7 +38,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from _common import action_reason, atomic_write_json, severity_rank  # noqa: E402
+from _common import (  # noqa: E402
+    action_reason,
+    atomic_write_json,
+    format_duration_ms,
+    severity_rank,
+)
 
 # Producer-side backend roster; ``reviewer_stream_health`` derives its
 # state keys from it so a new backend cannot go unreported.
@@ -485,8 +490,33 @@ def compute_verdict(state: dict, *, repo_root: Optional[Path] = None) -> dict:
             "reviewer_streams": streams,
             "reviewer_stream_statuses": stream_statuses,
             "open_high_deferrals": len(open_high_deferrals(state)),
+            # Per-round review vs orchestrator wall time. A round whose
+            # orchestrator time dwarfs its review time is the degenerate
+            # poll (issue 247); the numbers are how it shows up without
+            # someone asking.
+            "round_timing": round_timing(state),
         },
     }
+
+
+def round_timing(state: dict) -> list[dict]:
+    """One row per round: review wall time and orchestrator wall time."""
+    rows = []
+    for rnd in sorted(state.get("rounds") or [], key=lambda r: r.get("n") or 0):
+        review_ms = rnd.get("review_wall_ms")
+        orch_ms = rnd.get("orchestrator_wall_ms")
+        rows.append(
+            {
+                "n": rnd.get("n"),
+                "review_wall_ms": review_ms,
+                "orchestrator_wall_ms": orch_ms,
+                "summary": (
+                    f"review={format_duration_ms(review_ms)} "
+                    f"orchestrator={format_duration_ms(orch_ms)}"
+                ),
+            }
+        )
+    return rows
 
 
 def reviewer_stream_health(state: dict) -> dict[str, int]:

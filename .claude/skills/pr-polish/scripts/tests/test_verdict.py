@@ -138,6 +138,18 @@ class OpenHighDeferralTests(unittest.TestCase):
 
 
 class VerdictTests(unittest.TestCase):
+    def test_summary_surfaces_review_vs_orchestrator_wall_time(self):
+        st = _state(rounds=[{
+            "n": 1,
+            "review_wall_ms": 420_000,
+            "orchestrator_wall_ms": 10_800_000,
+        }])
+        row = v.compute_verdict(st)["evidence"]["round_timing"][0]
+        self.assertEqual(row["review_wall_ms"], 420_000)
+        self.assertEqual(row["orchestrator_wall_ms"], 10_800_000)
+        self.assertIn("review=7m0s", row["summary"])
+        self.assertIn("orchestrator=3h0m0s", row["summary"])
+
     def test_capped_at_max_can_never_be_ready(self):
         # The headline conflation: budget exhaustion previously reached the
         # same summary as genuine convergence.

@@ -254,6 +254,26 @@ def severity_rank(sev: str | None) -> int:
     return SEVERITY_ORDER.get(sev or "", -1)
 
 
+def format_duration_ms(ms: int | None) -> str:
+    """Render a millisecond duration for the run summary.
+
+    ``None`` is ``n/a`` so a round that never recorded a split stays visible
+    instead of looking like a zero-length review.
+    """
+    if not isinstance(ms, int):
+        return "n/a"
+    if ms < 0:
+        ms = 0
+    sec = ms // 1000
+    hours, rem = divmod(sec, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes}m{seconds}s"
+    if minutes:
+        return f"{minutes}m{seconds}s"
+    return f"{seconds}s"
+
+
 # The recognized comment-action verbs, split into the two buckets that
 # classification keys on. Shared here (not in pr_ops) so pr_ops.recompute_counts
 # and bramble_ops's goal-channel labelling derive from one source of truth.

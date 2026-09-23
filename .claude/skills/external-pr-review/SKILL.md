@@ -130,8 +130,7 @@ cd "$WORKTREE_DIR" && \
     --backend "$BACKEND" $MODEL_FLAG $EFFORT_FLAG \
     --skip-test-execution --verbose --timeout 10m \
     --goal "$(cat "$WORKTREE_DIR/.external-review-goal.txt")" \
-    --envelope-file "$ENVELOPE" \
-    2> "$LOG_DIR/stderr.txt"
+    --envelope-file "$ENVELOPE"
 ```
 
 Run it under `Monitor` (typical 2–6 min):
@@ -145,9 +144,9 @@ Monitor({
 })
 ```
 
-**Do not also call `ScheduleWakeup` or any sleep loop while waiting.** Monitor's completion event is the only signal needed. `ScheduleWakeup` with a slash-command prompt will re-fire the whole skill and double-post the review.
+**Polling is forbidden between Monitor-arm and notification.** Do not `tail`, `cat`, `ls`, `stat`, `date`, or read the envelope or any log until Monitor's completion notification. If the reason for a read-only tool call is "check if the review is done," that is polling — stop. Stdout phase and heartbeat events are the push stream; the terminal `done`/`error` event names the envelope. Do not also call `ScheduleWakeup` or any sleep loop while waiting — `ScheduleWakeup` with a slash-command prompt will re-fire the whole skill and double-post the review.
 
-If the envelope reports `status: "error"` but `review.raw_text` contains a fenced ```json``` block, recover by extracting the inner JSON. Otherwise report stderr path and stop.
+If the envelope reports `status: "error"` but `review.raw_text` contains a fenced ```json``` block, recover by extracting the inner JSON. Otherwise report the terminal event's `error` and stop.
 
 ## Step 5: Triage
 

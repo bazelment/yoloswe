@@ -5,9 +5,15 @@ one, collects PIDs, and `wait`s. That shape is load-bearing:
 
 **One notification, not N.** The orchestrator has nothing useful to do between
 "reviewer 1 finished" and "all reviewers finished" — triage needs every
-envelope. Acting on a single reviewer's completion strands the round; polling
-for it (Read-in-a-loop, `sleep`, `ScheduleWakeup`, or ending the turn with a
-"standing by" reply) burns turns for no signal.
+envelope. Acting on a single reviewer's completion strands the round.
+
+**Inspection between Monitor-arm and that notification is polling.** Do not
+`tail` / `cat` / `ls` / `stat` / `date` / read any envelope, log, or task-output
+file to see if the review is done. If the reason for a read-only tool call is
+"check if the review is done," that is polling — stop. The completion
+notification is the sole trigger. Stdout phase and heartbeat events are push;
+there is no progress file to open. `sleep`, `ScheduleWakeup`, or ending the
+turn with a "standing by" reply are the same failure.
 
 **Yielding the turn can be fatal.** This skill may run non-interactively — e.g.
 driven by jiradozer inside one bounded agent turn. There is no harness to

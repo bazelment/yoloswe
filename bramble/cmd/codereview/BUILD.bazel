@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "codereview",
-    srcs = ["codereview.go"],
+    srcs = [
+        "codereview.go",
+        "progress.go",
+    ],
     importpath = "github.com/bazelment/yoloswe/bramble/cmd/codereview",
     visibility = ["//visibility:public"],
     deps = [

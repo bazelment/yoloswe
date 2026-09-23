@@ -86,7 +86,9 @@ fi
 
 `$GOAL` round 1: `"Reviewing $DOC_KIND doc at $DOC_PATH; rubric tailored for this kind."` — gives the model the one bit of context the rubric alone doesn't carry (which framing the questions came from). Round 2+: brief summary of last round's fixed/skipped, ≤500 chars.
 
-Launch codex + cursor (+ agy with `--agy`) as parallel `Monitor` calls:
+Launch codex + cursor (+ agy with `--agy`) as parallel `Monitor` calls.
+
+**Polling is forbidden between Monitor-arm and notification.** Do not `tail`, `cat`, `ls`, `stat`, `date`, or read any envelope, log, or task-output file until that Monitor's completion notification arrives. If you are about to call a read-only inspection tool because you want to know whether the review is done, that is polling — stop. The notification is the sole trigger. Stdout is the push stream (`phase`, `heartbeat`, terminal `done`/`error` with the envelope path). There is no stderr file to tail.
 
 ```
 Monitor({
@@ -98,14 +100,13 @@ Monitor({
     --review-mode design-doc --review-rubric-file \"$STATE_DIR/rubric.txt\" \
     --verbose --timeout 10m \
     --goal \"$GOAL\" \
-    --envelope-file \"$STATE_DIR/r$ROUND/<backend>-envelope.json\" \
-    2>\"$STATE_DIR/r$ROUND/<backend>-stderr.txt\""
+    --envelope-file \"$STATE_DIR/r$ROUND/<backend>-envelope.json\""
 })
 ```
 
 Backends/models: `codex`/`gpt-5.4-mini`, `cursor`/`composer-2`, `agy`/`gemini-3.8-flash-medium`. There is no `gemini` backend: `ValidateBackend` accepts exactly claude, cursor, codex, agy, and the old ACP-based `geminiBackend` (with `agent-cli-wrapper/acp` and the `gemini --experimental-acp` CLI behind it) has been deleted. The `gemini-*` model IDs name models agy serves. Omit `--model` to take the backend's own default (`reviewer.DefaultAgyModel`).
 
-A missing envelope or `status: "error"` is a high-severity finding — surface it with the stderr path.
+A missing envelope or `status: "error"` is a high-severity finding — surface it with the terminal event's `error` and envelope path, after the Monitor notification.
 
 ### c) Triage
 
