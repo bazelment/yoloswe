@@ -30,6 +30,7 @@ import (
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/bramble/app"
+	"github.com/bazelment/yoloswe/bramble/cmd/addrepo"
 	"github.com/bazelment/yoloswe/bramble/cmd/codereview"
 	"github.com/bazelment/yoloswe/bramble/cmd/delegator"
 	"github.com/bazelment/yoloswe/bramble/cmd/meetingbot"
@@ -1791,6 +1792,7 @@ func init() {
 
 	restartCmd.Flags().Bool("force", false, "Restart without confirming, even if in-process sessions would be lost")
 
+	rootCmd.AddCommand(addrepo.NewCmd(resolveWTRoot))
 	rootCmd.AddCommand(pingCmd)
 	rootCmd.AddCommand(restartCmd)
 	rootCmd.AddCommand(newSessionCmd)
