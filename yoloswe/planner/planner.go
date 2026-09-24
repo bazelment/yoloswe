@@ -160,6 +160,7 @@ type Config struct {
 	Output              io.Writer
 	EventHandler        render.EventHandler
 	Model               string
+	Effort              claude.EffortLevel // empty uses the CLI default
 	LLMEndpoint         llmendpoint.Endpoint
 	WorkDir             string
 	RecordingDir        string
@@ -336,6 +337,9 @@ func (p *PlannerWrapper) Start(ctx context.Context) error {
 
 	if !p.config.LLMEndpoint.IsZero() {
 		opts = append(opts, claude.WithLLMEndpoint(p.config.LLMEndpoint))
+	}
+	if p.config.Effort != "" {
+		opts = append(opts, claude.WithEffort(p.config.Effort))
 	}
 
 	p.session = claude.NewSession(opts...)
@@ -734,6 +738,9 @@ func (p *PlannerWrapper) executeInNewSession(ctx context.Context) (bool, error) 
 	}
 	if !p.config.LLMEndpoint.IsZero() {
 		newOpts = append(newOpts, claude.WithLLMEndpoint(p.config.LLMEndpoint))
+	}
+	if p.config.Effort != "" {
+		newOpts = append(newOpts, claude.WithEffort(p.config.Effort))
 	}
 
 	p.session = claude.NewSession(newOpts...)

@@ -103,17 +103,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			"pick a higher round rather than overwriting it", round, phase, existing)
 	}
 
-	model := dispatchModel
-	var phaseEffort string
-	for _, p := range st.Config.Phases {
-		if p.Name == phase {
-			if model == "" {
-				model = p.Model
-			}
-			phaseEffort = p.Effort
-			break
-		}
-	}
+	model, phaseEffort := phaseModelEffort(st.Config.Phases, phase, dispatchModel)
 
 	mission, missionPath, err := readMission(runDir, lane.ID, phase, round)
 	if err != nil {
@@ -258,4 +248,21 @@ func readMission(runDir, lane, phase string, round int) (text, path string, err 
 		"%s.%s.mission.txt, %s.%s.mission.txt, or %s.mission.txt in %s",
 		lane, phase, round,
 		lane, state.PhaseRoundKey(phase, round), lane, phase, lane, runDir)
+}
+
+// phaseModelEffort resolves the model and effort for a phase's spawn. The
+// phase's effort was chosen for the phase's model, so a --model override that
+// names a different model drops it: an xhigh meant for Codex would make a
+// Cursor override fail outright.
+func phaseModelEffort(phases []state.Phase, phase, modelOverride string) (model, effort string) {
+	for _, p := range phases {
+		if p.Name != phase {
+			continue
+		}
+		if modelOverride == "" || modelOverride == p.Model {
+			return p.Model, p.Effort
+		}
+		return modelOverride, ""
+	}
+	return modelOverride, ""
 }

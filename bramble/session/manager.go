@@ -1794,6 +1794,7 @@ func validateEndpointBackend(endpoint llmendpoint.Endpoint, backend string) erro
 func (m *Manager) plannerConfigFor(session *Session, eventHandler *sessionEventHandler) planner.Config {
 	return planner.Config{
 		Model:           session.Model,
+		Effort:          claude.EffortLevel(session.Effort),
 		LLMEndpoint:     session.LLMEndpoint.Clone(),
 		WorkDir:         session.WorktreePath,
 		Simple:          true,
@@ -1808,6 +1809,7 @@ func (m *Manager) plannerConfigFor(session *Session, eventHandler *sessionEventH
 func (m *Manager) builderConfigFor(session *Session) yoloswe.BuilderConfig {
 	return yoloswe.BuilderConfig{
 		Model:           session.Model,
+		Effort:          claude.EffortLevel(session.Effort),
 		LLMEndpoint:     session.LLMEndpoint.Clone(),
 		WorkDir:         session.WorktreePath,
 		ResumeSessionID: session.CLISessionID,
@@ -1818,6 +1820,7 @@ func (m *Manager) builderConfigFor(session *Session) yoloswe.BuilderConfig {
 func (m *Manager) codeTalkConfigFor(session *Session) yoloswe.CodeTalkConfig {
 	return yoloswe.CodeTalkConfig{
 		Model:           session.Model,
+		Effort:          claude.EffortLevel(session.Effort),
 		LLMEndpoint:     session.LLMEndpoint.Clone(),
 		WorkDir:         session.WorktreePath,
 		ResumeSessionID: session.CLISessionID,
@@ -2071,6 +2074,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					eventHandler: eventHandler,
 					worktreePath: session.WorktreePath,
 					model:        session.Model,
+					effort:       claude.EffortLevel(session.Effort),
 					recordingDir: m.config.RecordingDir,
 				}
 			case SessionTypeCodeTalk:

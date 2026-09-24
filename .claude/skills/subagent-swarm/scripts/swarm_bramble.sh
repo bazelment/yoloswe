@@ -143,21 +143,23 @@ sw_spawn() {
   [ -n "$repo" ] || { echo "sw_spawn: not in a git repo" >&2; return 1; }
 
   # A phase spec of name:model:effort lands in state.json. Callers that only
-  # pass the model still pick the effort up from the phase they named.
+  # pass the model still pick the effort up from the phase they named -- but
+  # only when they spawn the phase's own model: the effort was chosen for it,
+  # and e.g. Cursor rejects any explicit effort.
   if [ -z "$effort" ] && [ -f "$RUN/state.json" ]; then
     effort="$(/usr/bin/env python3 -c '
 import json, sys
-phase, path = sys.argv[1], sys.argv[2]
+phase, model, path = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     with open(path) as f:
         state = json.load(f)
 except (OSError, ValueError):
     sys.exit(0)
 for p in state.get("config", {}).get("phases", []):
-    if p.get("name") == phase and p.get("effort"):
+    if p.get("name") == phase and p.get("model") == model and p.get("effort"):
         print(p["effort"])
         break
-' "$phase" "$RUN/state.json" 2>/dev/null || true)"
+' "$phase" "$model" "$RUN/state.json" 2>/dev/null || true)"
   fi
 
   local -a args=(new-session -r "$repo" -t builder -m "$model"
