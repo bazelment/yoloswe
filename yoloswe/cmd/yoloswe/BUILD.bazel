@@ -13,6 +13,7 @@ go_library(
         "//wt",
         "//yoloswe",
         "//yoloswe/planner",
+        "//yoloswe/reviewer",
         "@com_github_spf13_cobra//:cobra",
     ],
 )

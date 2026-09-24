@@ -15,6 +15,7 @@ go_library(
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/claude/render",
         "//agent-cli-wrapper/llmendpoint",
+        "//multiagent/agent",
         "//yoloswe/reviewer",
     ],
 )

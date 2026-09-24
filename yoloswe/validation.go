@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bazelment/yoloswe/multiagent/agent"
+	"github.com/bazelment/yoloswe/yoloswe/reviewer"
 )
 
 // ValidateConfig validates the configuration and returns an error if invalid.
@@ -33,17 +36,8 @@ func ValidateConfig(config Config) error {
 		errors = append(errors, fmt.Sprintf("invalid builder model %q (must be a Claude alias or model ID)", config.BuilderModel))
 	}
 
-	// Validate reviewer model
-	validReviewerModels := map[string]bool{
-		"gpt-6-luna":   true,
-		"gpt-5.6-luna": true,
-		"gpt-5.4-mini": true,
-		"gpt-5.4":      true,
-		"gpt-5.5":      true,
-		"o4-mini":      true,
-		"o4":           true,
-	}
-	if config.ReviewerModel != "" && !validReviewerModels[config.ReviewerModel] {
+	// Validate reviewer model against the Codex models in the shared registry.
+	if config.ReviewerModel != "" && !isKnownCodexModel(config.ReviewerModel) {
 		// Warning only, allow custom models
 		if config.Verbose {
 			fmt.Fprintf(os.Stderr, "Warning: unknown reviewer model %q, proceeding anyway\n", config.ReviewerModel)
@@ -181,7 +175,7 @@ func ValidatePrompt(prompt string) error {
 //
 // Default values applied:
 //   - BuilderModel: "sonnet" (good balance of capability and cost)
-//   - ReviewerModel: "gpt-5.4-mini" (specialized code reviewer)
+//   - ReviewerModel: reviewer.DefaultCodexModel
 //   - RecordingDir: "~/.yoloswe" (home directory for session logs)
 //   - MaxBudgetUSD: $100.00 (prevents runaway costs)
 //   - MaxTimeSeconds: 3600 (1 hour wall-clock time)
@@ -198,7 +192,7 @@ func SanitizeConfig(config *Config) {
 		config.BuilderModel = "sonnet"
 	}
 	if config.ReviewerModel == "" {
-		config.ReviewerModel = "gpt-5.4-mini"
+		config.ReviewerModel = reviewer.DefaultCodexModel
 	}
 
 	// Apply recording directory default (expand ~ to home directory)
@@ -230,4 +224,10 @@ func SanitizeConfig(config *Config) {
 	config.RecordingDir = strings.TrimSpace(config.RecordingDir)
 	config.SystemPrompt = strings.TrimSpace(config.SystemPrompt)
 	config.Goal = strings.TrimSpace(config.Goal)
+}
+
+// isKnownCodexModel reports whether id is a Codex model in agent.AllModels.
+func isKnownCodexModel(id string) bool {
+	m, ok := agent.ModelByID(id)
+	return ok && m.Provider == agent.ProviderCodex
 }

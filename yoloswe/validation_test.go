@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bazelment/yoloswe/yoloswe/reviewer"
 )
 
 func TestValidateConfig(t *testing.T) {
@@ -212,7 +214,7 @@ func TestSanitizeConfig(t *testing.T) {
 			input: Config{},
 			expected: Config{
 				BuilderModel:   "sonnet",
-				ReviewerModel:  "gpt-5.4-mini",
+				ReviewerModel:  reviewer.DefaultCodexModel,
 				RecordingDir:   defaultRecordingDir,
 				MaxBudgetUSD:   100.0,
 				MaxTimeSeconds: 3600,
@@ -248,7 +250,7 @@ func TestSanitizeConfig(t *testing.T) {
 			},
 			expected: Config{
 				BuilderModel:   "haiku",
-				ReviewerModel:  "gpt-5.4-mini",
+				ReviewerModel:  reviewer.DefaultCodexModel,
 				RecordingDir:   defaultRecordingDir,
 				MaxBudgetUSD:   100.0,
 				MaxTimeSeconds: 3600,
@@ -264,7 +266,7 @@ func TestSanitizeConfig(t *testing.T) {
 			},
 			expected: Config{
 				BuilderModel:   "sonnet",
-				ReviewerModel:  "gpt-5.4-mini",
+				ReviewerModel:  reviewer.DefaultCodexModel,
 				RecordingDir:   defaultRecordingDir,
 				MaxBudgetUSD:   100.0,
 				MaxTimeSeconds: 3600,
@@ -281,7 +283,7 @@ func TestSanitizeConfig(t *testing.T) {
 			},
 			expected: Config{
 				BuilderModel:   "sonnet",
-				ReviewerModel:  "gpt-5.4-mini",
+				ReviewerModel:  reviewer.DefaultCodexModel,
 				BuilderWorkDir: "/tmp/work",
 				RecordingDir:   "/tmp/recordings",
 				SystemPrompt:   "custom prompt",
@@ -409,4 +411,24 @@ func TestValidateConfigWarnings(t *testing.T) {
 			t.Errorf("unknown reviewer model should only warn, not error: %v", err)
 		}
 	})
+}
+
+func TestIsKnownCodexModel(t *testing.T) {
+	tests := []struct {
+		id   string
+		want bool
+	}{
+		{reviewer.DefaultCodexModel, true},
+		{"gpt-6-sol", true},
+		{"gpt-5.6-terra", true},
+		{"gpt-5.4-mini", true},
+		{"opus", false},
+		{"gpt-99-unreleased", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isKnownCodexModel(tt.id); got != tt.want {
+			t.Errorf("isKnownCodexModel(%q) = %v, want %v", tt.id, got, tt.want)
+		}
+	}
 }
