@@ -67,7 +67,7 @@ func TestSpawnRecordsLedgerAndSpawnJSONAtomically(t *testing.T) {
 	}}
 
 	brief := SpawnBrief{
-		Lane: "lane-a", Phase: "swe", Round: 1, Model: "opus", Type: "builder",
+		Lane: "lane-a", Phase: "swe", Round: 1, Model: "opus", Effort: "xhigh", Type: "builder",
 		Text: "Read your brief. Touch " + DonePath(dir, "lane-a", "swe", 1) + " LAST.",
 	}
 	res, err := Spawn(context.Background(), sp, store, dir, brief,
@@ -77,6 +77,9 @@ func TestSpawnRecordsLedgerAndSpawnJSONAtomically(t *testing.T) {
 	}
 	if res.SessionID != "lane-a-builder-abc123" {
 		t.Errorf("result = %+v", res)
+	}
+	if sp.seen.Model != "opus" || sp.seen.Effort != "xhigh" {
+		t.Errorf("spawn request dropped model/effort: %+v", sp.seen)
 	}
 
 	st, err := store.Read()

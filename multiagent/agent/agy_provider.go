@@ -283,7 +283,8 @@ func agyEffortLevel(level EffortLevel) string {
 		return "low"
 	case EffortMedium:
 		return "medium"
-	case EffortHigh, EffortMax:
+	case EffortHigh, EffortMax, EffortXHigh:
+		// Agy's scale stops at high. max and Codex's xhigh both clamp there.
 		return "high"
 	}
 	return ""

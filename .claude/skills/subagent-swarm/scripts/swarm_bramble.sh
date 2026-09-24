@@ -28,7 +28,8 @@ sw_socket() {
   local d="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" uid; uid=$(id -u)
   local -a m=()
   local f
-  for f in "$d"/bramble-"$uid"-*.sock; do
+  # Match both bramble-<uid>.sock and bramble-<uid>-<pid>.sock.
+  for f in "$d"/bramble-"$uid"*.sock; do
     [ -S "$f" ] || continue
     case "$f" in *bramble-control-*) continue ;; esac
     m+=("$f")
@@ -127,7 +128,7 @@ for row in (rows.get("sessions", rows) if isinstance(rows, dict) else rows) or [
 }
 
 # --- spawn ------------------------------------------------------------------------
-# sw_spawn <lane> <phase> <model> <brief-file> [branch] [worktree]
+# sw_spawn <lane> <phase> <model> <brief-file> [branch] [worktree] [effort]
 #
 # One call does the spawn AND records it. Recording used to be a separate step, and
 # the ledger fields needing that step are precisely the ones that decayed across runs
@@ -135,11 +136,29 @@ for row in (rows.get("sessions", rows) if isinstance(rows, dict) else rows) or [
 # refs in audit_cleanup.sh: a hand step that costs nothing to skip gets skipped.
 sw_spawn() {
   local lane="${1:?lane}" phase="${2:?phase}" model="${3:?model}" brief="${4:?brief-file}"
-  local branch="${5:-}" worktree="${6:-}"
+  local branch="${5:-}" worktree="${6:-}" effort="${7:-}"
   : "${RUN:?run sw_preflight first}"
   [ -r "$brief" ] || { echo "sw_spawn: brief not readable: $brief" >&2; return 1; }
   local repo; repo="$(basename "$(git rev-parse --show-toplevel 2>/dev/null)")"
   [ -n "$repo" ] || { echo "sw_spawn: not in a git repo" >&2; return 1; }
+
+  # A phase spec of name:model:effort lands in state.json. Callers that only
+  # pass the model still pick the effort up from the phase they named.
+  if [ -z "$effort" ] && [ -f "$RUN/state.json" ]; then
+    effort="$(/usr/bin/env python3 -c '
+import json, sys
+phase, path = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        state = json.load(f)
+except (OSError, ValueError):
+    sys.exit(0)
+for p in state.get("config", {}).get("phases", []):
+    if p.get("name") == phase and p.get("effort"):
+        print(p["effort"])
+        break
+' "$phase" "$RUN/state.json" 2>/dev/null || true)"
+  fi
 
   local -a args=(new-session -r "$repo" -t builder -m "$model"
                  -g "$lane" -p "$(cat "$brief")")
@@ -162,6 +181,9 @@ sw_spawn() {
     else
       args+=(--create-worktree -b "$branch" -f "$BASE")
     fi
+  fi
+  if [ -n "$effort" ]; then
+    args+=(--effort "$effort")
   fi
 
   local out sid
@@ -205,13 +227,13 @@ sw_nudge() {
                             grep -cE '\[Pasted (text|Content)' || true)"
   if [ "${pending:-0}" -gt 0 ]; then
     echo "sw_nudge: $sid already holds $pending unsent paste(s) -- NOT sending." >&2
-    echo "  submit with: bramble send-key --session-id $sid Enter" >&2
+    echo "  submit with: bramble send-key --session-id $sid --key Enter" >&2
     echo "  if they keep stacking, write $RUN/HANDOVER-<lane>.md and replace the session" >&2
     return 1
   fi
 
-  bramble send-input --session-id "$sid" "$text" >/dev/null 2>&1 || return 1
-  bramble send-key --session-id "$sid" Enter >/dev/null 2>&1 || true
+  bramble send-input --session-id "$sid" --text "$text" >/dev/null 2>&1 || return 1
+  bramble send-key --session-id "$sid" --key Enter >/dev/null 2>&1 || true
 
   # A busy pane renders an ELAPSED TIMER. Key on that, never on the verb: backends
   # animate Working/Brewed/Improvising/... and verb-matching reports busy lanes as idle.

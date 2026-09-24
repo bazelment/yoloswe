@@ -193,6 +193,24 @@ func TestSpawnRequestArgsCarryParentAndRepo(t *testing.T) {
 	}
 }
 
+func TestSpawnRequestArgsCarryEffort(t *testing.T) {
+	t.Parallel()
+	args := SpawnRequest{
+		Repo: "kernel", Worktree: "/wt/lane", Prompt: "brief", Effort: "xhigh",
+	}.Args()
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--effort xhigh") {
+		t.Errorf("args missing effort: %v", args)
+	}
+
+	without := strings.Join(SpawnRequest{
+		Repo: "kernel", Worktree: "/wt/lane", Prompt: "brief",
+	}.Args(), " ")
+	if strings.Contains(without, "--effort") {
+		t.Errorf("empty effort must be omitted: %s", without)
+	}
+}
+
 // A lane forking from a branch with local commits must use an explicit worktree,
 // because --from resolves against the REMOTE.
 func TestSpawnRequestArgsCreateWorktreeForm(t *testing.T) {

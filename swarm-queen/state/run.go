@@ -9,8 +9,9 @@ import (
 
 // Phase is one step in a lane's lifecycle, with the model that runs it.
 type Phase struct {
-	Name  string `json:"name"`
-	Model string `json:"model"`
+	Name   string `json:"name"`
+	Model  string `json:"model"`
+	Effort string `json:"effort,omitempty"`
 }
 
 // Config is the run-level contract. Shared with ledger.py's "config" object.

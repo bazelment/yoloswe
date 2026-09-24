@@ -313,7 +313,7 @@ func TestCodexTurnOptions_NoEffortYieldsNoOptions(t *testing.T) {
 func TestCodexTurnOptions_WiresAllValidLevels(t *testing.T) {
 	t.Parallel()
 
-	for _, level := range []EffortLevel{EffortLow, EffortMedium, EffortHigh, EffortMax, EffortAuto} {
+	for _, level := range []EffortLevel{EffortLow, EffortMedium, EffortHigh, EffortMax, EffortXHigh, EffortAuto} {
 		level := level
 		t.Run(string(level), func(t *testing.T) {
 			t.Parallel()

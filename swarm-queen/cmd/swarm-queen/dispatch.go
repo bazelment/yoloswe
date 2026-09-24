@@ -104,11 +104,14 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 
 	model := dispatchModel
-	if model == "" {
-		for _, p := range st.Config.Phases {
-			if p.Name == phase {
+	var phaseEffort string
+	for _, p := range st.Config.Phases {
+		if p.Name == phase {
+			if model == "" {
 				model = p.Model
 			}
+			phaseEffort = p.Effort
+			break
 		}
 	}
 
@@ -135,7 +138,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	req := bramble.SpawnRequest{
 		Repo: dispatchRepo, Parent: dispatchParent, Goal: lane.Title,
-		Model: model, Backend: dispatchBackend,
+		Model: model, Backend: dispatchBackend, Effort: phaseEffort,
 	}
 	if lane.Worktree != "" {
 		req.Worktree = lane.Worktree

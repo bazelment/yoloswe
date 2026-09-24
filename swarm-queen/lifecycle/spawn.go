@@ -34,6 +34,7 @@ type SpawnBrief struct {
 	Lane    string
 	Phase   string
 	Model   string
+	Effort  string
 	Type    string
 	Backend string
 	// Text is the brief handed to the agent. It must carry LITERAL report paths:
@@ -71,6 +72,9 @@ func Spawn(
 	}
 	if req.Backend == "" {
 		req.Backend = brief.Backend
+	}
+	if req.Effort == "" {
+		req.Effort = brief.Effort
 	}
 
 	// A brief without its literal report paths produces a lane that cannot

@@ -26,6 +26,7 @@ func TestParseEffort_AcceptsAllValidLevels(t *testing.T) {
 		{"medium", EffortMedium},
 		{"high", EffortHigh},
 		{"max", EffortMax},
+		{"xhigh", EffortXHigh},
 	} {
 		t.Run(tc.in, func(t *testing.T) {
 			t.Parallel()
@@ -71,6 +72,7 @@ func TestClaudeEffortLevel_MapsAllLevels(t *testing.T) {
 		{EffortMedium, claude.EffortMed},
 		{EffortHigh, claude.EffortHigh},
 		{EffortMax, claude.EffortMax},
+		{EffortXHigh, claude.EffortMax},
 	} {
 		t.Run(string(tc.in), func(t *testing.T) {
 			t.Parallel()
@@ -83,15 +85,16 @@ func TestClaudeEffortLevel_MapsAllLevels(t *testing.T) {
 // When a provider is added, this table forces a deliberate choice
 // rather than another silent ignore.
 //
-// Claude, Codex, and Agy accept all five levels; Cursor rejects any explicit
-// non-auto effort with ErrEffortUnsupported. EffortAuto and empty effort both
+// Claude, Codex, and Agy accept every explicit level, including Codex's
+// xhigh (Claude clamps it to max, Agy clamps it to high). Cursor rejects any
+// explicit non-auto effort with ErrEffortUnsupported. EffortAuto and empty effort both
 // mean "use the provider default" and are never rejected.
 // (Invalid string parsing is covered by TestParseEffort_RejectsInvalidLevels
 // — providers receive a validated EffortLevel and trust the boundary.)
 func TestProviderEffortMatrix(t *testing.T) {
 	t.Parallel()
 
-	validLevels := []EffortLevel{EffortLow, EffortMedium, EffortHigh, EffortMax, EffortAuto}
+	validLevels := []EffortLevel{EffortLow, EffortMedium, EffortHigh, EffortMax, EffortXHigh, EffortAuto}
 
 	// Field order: function pointer (8 bytes) before string (16 bytes) to
 	// satisfy fieldalignment.
@@ -284,8 +287,10 @@ func TestModelSupportsEffort(t *testing.T) {
 		{model: "gemini-3.1-pro-high", level: EffortMedium, want: false},
 		{model: "gemini-3.1-pro-low", level: EffortMedium, want: false},
 
-		// EffortMax clamps to high, which both pro variants can serve.
+		// EffortMax and EffortXHigh clamp to high, which both pro variants can serve.
 		{model: "gemini-3.1-pro-low", level: EffortMax, want: true},
+		{model: "gemini-3.1-pro-low", level: EffortXHigh, want: true},
+		{model: "gpt-5.5", level: EffortXHigh, want: true},
 
 		// Auto never needs a variant, and an unpinned agy ID is unconstrained.
 		{model: "gemini-3.1-pro-high", level: EffortAuto, want: true},

@@ -279,6 +279,21 @@ case "$DOC" in
   *) ok "doctor sees a session recorded only at round 3" ;;
 esac
 
+echo "== phase spec name:model:effort =="
+RUNE="$TMP/effort"
+L init "$RUNE" --goal g --phases "swe:grok-4.7-high,clean:gpt-5.6-terra:xhigh,review:opus" --base main --target main >/dev/null
+EFF=$(/usr/bin/env python3 -c "
+import json
+phases=json.load(open('$RUNE/state.json'))['config']['phases']
+print('|'.join(f\"{p['name']}={p.get('model','')}:{p.get('effort','')}\" for p in phases))
+")
+chk "effort parsed onto the phase that names one" "$EFF" "swe=grok-4.7-high:|clean=gpt-5.6-terra:xhigh|review=opus:"
+SHOW=$(L show "$RUNE")
+if echo "$SHOW" | grep -q 'clean `gpt-5.6-terra xhigh`'; then ok "ledger shows effort"
+else no "ledger omitted effort: $SHOW"; fi
+if echo "$SHOW" | grep -q 'swe `grok-4.7-high`'; then ok "model-only phase stays model-only"
+else no "swe phase render changed: $SHOW"; fi
+
 echo
 echo "passed $PASS, failed $FAIL"
 [ "$FAIL" -eq 0 ]

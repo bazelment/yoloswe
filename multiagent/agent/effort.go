@@ -17,6 +17,9 @@ const (
 	EffortMedium EffortLevel = "medium"
 	EffortHigh   EffortLevel = "high"
 	EffortMax    EffortLevel = "max"
+	// EffortXHigh is Codex's top reasoning level. Providers whose scale stops
+	// at max or high clamp it when they build their own flags.
+	EffortXHigh EffortLevel = "xhigh"
 )
 
 // ErrInvalidEffort is returned when an unknown effort string is parsed.
@@ -35,10 +38,10 @@ var ErrEffortUnsupported = errors.New("provider does not support reasoning effor
 func ParseEffort(s string) (EffortLevel, error) {
 	level := EffortLevel(s)
 	switch level {
-	case EffortAuto, EffortLow, EffortMedium, EffortHigh, EffortMax:
+	case EffortAuto, EffortLow, EffortMedium, EffortHigh, EffortMax, EffortXHigh:
 		return level, nil
 	}
-	return "", fmt.Errorf("%w: %q (valid: low, medium, high, max, auto)", ErrInvalidEffort, s)
+	return "", fmt.Errorf("%w: %q (valid: auto, low, medium, high, max, xhigh)", ErrInvalidEffort, s)
 }
 
 // ProviderSupportsEffort reports whether a provider honors an explicit non-auto
