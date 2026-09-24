@@ -78,6 +78,7 @@ type providerRunner struct { //nolint:govet // fieldalignment: keep related life
 	eventHandler    *sessionEventHandler
 	eventBridgeDone chan struct{}
 	model           string // model ID for provider (e.g. "gpt-5.5")
+	effort          string // reasoning effort; empty means the provider default
 	permissionMode  string // execution permissions (e.g. "bypass", "plan")
 	workDir         string // working directory for provider
 	llmEndpoint     llmendpoint.Endpoint
@@ -238,6 +239,9 @@ func (r *providerRunner) RunTurn(ctx context.Context, message string) (*claude.T
 	}
 	if !r.llmEndpoint.IsZero() {
 		opts = append(opts, agent.WithProviderLLMEndpoint(r.llmEndpoint))
+	}
+	if r.effort != "" {
+		opts = append(opts, agent.WithProviderEffort(agent.EffortLevel(r.effort)))
 	}
 
 	var result *agent.AgentResult
@@ -1010,6 +1014,8 @@ type SpawnOpts struct { //nolint:govet // fieldalignment: keep endpoint next to 
 	// gateways where one model is reachable through more than one CLI/wire API.
 	Backend     string
 	LLMEndpoint llmendpoint.Endpoint
+	// Effort is forwarded to CLIs that accept it; empty uses the provider default.
+	Effort string
 }
 
 // StartSessionWithOpts is StartSession with the optional attributes in SpawnOpts.
@@ -1086,6 +1092,24 @@ func (m *Manager) startSessionWithID(sessionID SessionID, sessionType SessionTyp
 		cancel()
 		return "", err
 	}
+	if opts.Effort != "" {
+		level, err := agent.ParseEffort(opts.Effort)
+		if err != nil {
+			cancel()
+			return "", err
+		}
+		agentModel, err := resolveAgentModel(model, backend, m.config.ModelRegistry)
+		if err != nil {
+			cancel()
+			return "", err
+		}
+		model, level, err = agent.ReconcileCLIModelEffort(agentModel.Provider, model, level)
+		if err != nil {
+			cancel()
+			return "", err
+		}
+		opts.Effort = string(level)
+	}
 
 	session := &Session{
 		ID:              sessionID,
@@ -1097,6 +1121,7 @@ func (m *Manager) startSessionWithID(sessionID SessionID, sessionType SessionTyp
 		Title:           generateTitle(prompt, 20),
 		Model:           model,
 		Backend:         backend,
+		Effort:          opts.Effort,
 		LLMEndpoint:     endpoint.Clone(),
 		RepoName:        m.config.RepoName,
 		ParentSessionID: opts.ParentSessionID,
@@ -1264,6 +1289,7 @@ func storedToSession(stored *StoredSession) *Session {
 		Title:           stored.Title,
 		Model:           stored.Model,
 		Backend:         stored.Backend,
+		Effort:          stored.Effort,
 		RepoName:        stored.RepoName,
 		CLISessionID:    stored.CLISessionID,
 		ParentSessionID: stored.ParentSessionID,
@@ -1768,6 +1794,7 @@ func validateEndpointBackend(endpoint llmendpoint.Endpoint, backend string) erro
 func (m *Manager) plannerConfigFor(session *Session, eventHandler *sessionEventHandler) planner.Config {
 	return planner.Config{
 		Model:           session.Model,
+		Effort:          claude.EffortLevel(session.Effort),
 		LLMEndpoint:     session.LLMEndpoint.Clone(),
 		WorkDir:         session.WorktreePath,
 		Simple:          true,
@@ -1782,6 +1809,7 @@ func (m *Manager) plannerConfigFor(session *Session, eventHandler *sessionEventH
 func (m *Manager) builderConfigFor(session *Session) yoloswe.BuilderConfig {
 	return yoloswe.BuilderConfig{
 		Model:           session.Model,
+		Effort:          claude.EffortLevel(session.Effort),
 		LLMEndpoint:     session.LLMEndpoint.Clone(),
 		WorkDir:         session.WorktreePath,
 		ResumeSessionID: session.CLISessionID,
@@ -1792,6 +1820,7 @@ func (m *Manager) builderConfigFor(session *Session) yoloswe.BuilderConfig {
 func (m *Manager) codeTalkConfigFor(session *Session) yoloswe.CodeTalkConfig {
 	return yoloswe.CodeTalkConfig{
 		Model:           session.Model,
+		Effort:          claude.EffortLevel(session.Effort),
 		LLMEndpoint:     session.LLMEndpoint.Clone(),
 		WorkDir:         session.WorktreePath,
 		ResumeSessionID: session.CLISessionID,
@@ -1824,6 +1853,7 @@ func (m *Manager) newTmuxRunner(session *Session, prompt, tmuxName string, agent
 		workDir:         session.WorktreePath,
 		prompt:          prompt,
 		model:           agentModel.ID,
+		effort:          session.Effort,
 		provider:        agentModel.Provider,
 		permissionMode:  permissionMode,
 		resumeSessionID: session.CLISessionID,
@@ -2044,6 +2074,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					eventHandler: eventHandler,
 					worktreePath: session.WorktreePath,
 					model:        session.Model,
+					effort:       claude.EffortLevel(session.Effort),
 					recordingDir: m.config.RecordingDir,
 				}
 			case SessionTypeCodeTalk:
@@ -2074,6 +2105,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	// their own config structs in the default branch above.
 	if pr, ok := runner.(*providerRunner); ok {
 		pr.llmEndpoint = session.LLMEndpoint.Clone()
+		pr.effort = session.Effort
 	}
 
 	if err := runner.Start(session.ctx); err != nil {

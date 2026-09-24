@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/wt"
@@ -538,6 +539,7 @@ func TestManager_TUIWrapperConfigsCarrySessionEndpoint(t *testing.T) {
 		ID:           "wrapper-cfg",
 		Model:        "stealth/ox-alpha",
 		Backend:      ProviderClaude,
+		Effort:       "max",
 		LLMEndpoint:  endpoint,
 		WorktreePath: t.TempDir(),
 		CLISessionID: "cli-resume-id",
@@ -545,11 +547,12 @@ func TestManager_TUIWrapperConfigsCarrySessionEndpoint(t *testing.T) {
 	mgr := NewManagerWithConfig(ManagerConfig{RecordingDir: t.TempDir()})
 	t.Cleanup(mgr.Close)
 
-	// Each row reduces one wrapper's config to the four values that must
+	// Each row reduces one wrapper's config to the values that must
 	// travel with the session, so the assertions do not depend on config
 	// types that differ between the three wrappers.
 	type carried struct {
 		endpoint                               llmendpoint.Endpoint
+		effort                                 claude.EffortLevel
 		model, workDir, resumeID, recordingDir string
 	}
 	plannerCfg := mgr.plannerConfigFor(session, nil)
@@ -559,9 +562,9 @@ func TestManager_TUIWrapperConfigsCarrySessionEndpoint(t *testing.T) {
 		got  carried
 		name string
 	}{
-		{carried{plannerCfg.LLMEndpoint, plannerCfg.Model, plannerCfg.WorkDir, plannerCfg.ResumeSessionID, plannerCfg.RecordingDir}, "planner"},
-		{carried{builderCfg.LLMEndpoint, builderCfg.Model, builderCfg.WorkDir, builderCfg.ResumeSessionID, builderCfg.RecordingDir}, "builder"},
-		{carried{codeTalkCfg.LLMEndpoint, codeTalkCfg.Model, codeTalkCfg.WorkDir, codeTalkCfg.ResumeSessionID, codeTalkCfg.RecordingDir}, "codetalk"},
+		{carried{plannerCfg.LLMEndpoint, plannerCfg.Effort, plannerCfg.Model, plannerCfg.WorkDir, plannerCfg.ResumeSessionID, plannerCfg.RecordingDir}, "planner"},
+		{carried{builderCfg.LLMEndpoint, builderCfg.Effort, builderCfg.Model, builderCfg.WorkDir, builderCfg.ResumeSessionID, builderCfg.RecordingDir}, "builder"},
+		{carried{codeTalkCfg.LLMEndpoint, codeTalkCfg.Effort, codeTalkCfg.Model, codeTalkCfg.WorkDir, codeTalkCfg.ResumeSessionID, codeTalkCfg.RecordingDir}, "codetalk"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, endpoint, tc.got.endpoint,
@@ -572,6 +575,8 @@ func TestManager_TUIWrapperConfigsCarrySessionEndpoint(t *testing.T) {
 			// not exist" against a single-model endpoint.
 			assert.Equal(t, "stealth/ox-alpha", tc.got.model,
 				"the session's model must reach the %s wrapper config", tc.name)
+			assert.Equal(t, claude.EffortMax, tc.got.effort,
+				"the session's effort must reach the %s wrapper config", tc.name)
 			assert.Equal(t, session.WorktreePath, tc.got.workDir)
 			assert.Equal(t, "cli-resume-id", tc.got.resumeID)
 			assert.Equal(t, mgr.config.RecordingDir, tc.got.recordingDir)

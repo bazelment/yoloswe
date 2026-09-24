@@ -63,7 +63,8 @@ func TestAgyEffortLevel_MapsAllLevels(t *testing.T) {
 		{EffortLow, "low"},
 		{EffortMedium, "medium"},
 		{EffortHigh, "high"},
-		{EffortMax, "high"}, // EffortMax clamps to agy's highest level.
+		{EffortMax, "high"},   // EffortMax clamps to agy's highest level.
+		{EffortXHigh, "high"}, // Codex xhigh clamps the same way.
 		{EffortLevel("unexpected"), ""},
 	} {
 		t.Run(string(tc.in), func(t *testing.T) {
@@ -119,6 +120,7 @@ func TestAgySessionOpts_Effort(t *testing.T) {
 		{name: "medium", effort: EffortMedium, want: "medium"},
 		{name: "high", effort: EffortHigh, want: "high"},
 		{name: "max clamps to high", effort: EffortMax, want: "high"},
+		{name: "xhigh clamps to high", effort: EffortXHigh, want: "high"},
 	}
 	for _, tt := range tests {
 		tt := tt
@@ -271,7 +273,7 @@ func TestAgyProvider_AcceptsExplicitEffort(t *testing.T) {
 func TestModelSupportsEffort_AgreesWithReconciliation(t *testing.T) {
 	t.Parallel()
 
-	levels := []EffortLevel{EffortAuto, EffortLow, EffortMedium, EffortHigh, EffortMax}
+	levels := []EffortLevel{EffortAuto, EffortLow, EffortMedium, EffortHigh, EffortMax, EffortXHigh}
 	for _, m := range AllModels {
 		if m.Provider != ProviderAgy {
 			continue

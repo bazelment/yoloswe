@@ -43,6 +43,51 @@ rm -f "$XDG_RUNTIME_DIR"/*.sock
 sw_socket >/dev/null 2>&1
 chk "no socket -> non-zero" "$?" "1"
 
+echo "== an unsuffixed socket matches, not only the pid form =="
+python3 - "$XDG_RUNTIME_DIR" "$U" <<'PY'
+import socket,sys,os
+d,u=sys.argv[1],sys.argv[2]
+s=socket.socket(socket.AF_UNIX); s.bind(os.path.join(d,f"bramble-{u}.sock"))
+PY
+OUT=$(sw_socket 2>&1); RC=$?
+chk "unsuffixed socket resolves" "$RC" "0"
+case "$OUT" in *"/bramble-$U.sock") ok "picked the unsuffixed socket" ;; *) no "picked $OUT" ;; esac
+rm -f "$XDG_RUNTIME_DIR"/bramble-"$U".sock
+
+echo "== a UID-prefix lookalike is not a TUI socket =="
+python3 - "$XDG_RUNTIME_DIR" "$U" <<'PY'
+import socket,sys,os
+d,u=sys.argv[1],sys.argv[2]
+s=socket.socket(socket.AF_UNIX); s.bind(os.path.join(d,f"bramble-{u}stale.sock"))
+PY
+sw_socket >/dev/null 2>&1
+chk "UID-prefix lookalike -> non-zero" "$?" "1"
+rm -f "$XDG_RUNTIME_DIR"/bramble-"$U"stale.sock
+
+echo "== sw_spawn inherits a phase's effort only for the phase's own model =="
+# A fake bramble records its argv and fails, so sw_spawn stops before recording.
+(
+  RUN="$TMP/effort-run"; mkdir -p "$RUN"
+  cat > "$RUN/state.json" <<'JSON'
+{"config":{"phases":[{"name":"clean","model":"gpt-5.6-terra","effort":"xhigh"}]}}
+JSON
+  echo brief > "$TMP/brief.txt"
+  bramble() { printf '%s\n' "$@" > "$TMP/spawn-argv"; return 1; }
+  sw_spawn lane-a clean gpt-5.6-terra "$TMP/brief.txt" "" /wt/lane >/dev/null 2>&1
+  if grep -qx -- '--effort' "$TMP/spawn-argv" && grep -qx xhigh "$TMP/spawn-argv"; then
+    ok "phase model inherits the phase effort"
+  else no "phase effort not passed: $(tr '\n' ' ' < "$TMP/spawn-argv")"; fi
+  sw_spawn lane-a clean composer-2.5 "$TMP/brief.txt" "" /wt/lane >/dev/null 2>&1
+  if grep -qx -- '--effort' "$TMP/spawn-argv"; then
+    no "overridden model inherited the phase effort: $(tr '\n' ' ' < "$TMP/spawn-argv")"
+  else ok "overridden model drops the phase effort"; fi
+  sw_spawn lane-a clean composer-2.5 "$TMP/brief.txt" "" /wt/lane high >/dev/null 2>&1
+  if grep -qx high "$TMP/spawn-argv"; then ok "explicit effort still wins"
+  else no "explicit effort dropped: $(tr '\n' ' ' < "$TMP/spawn-argv")"; fi
+) > "$TMP/spawn-out"
+cat "$TMP/spawn-out"
+PASS=$((PASS + $(grep -c '^  ok' "$TMP/spawn-out"))); FAIL=$((FAIL + $(grep -c '^  FAIL' "$TMP/spawn-out")))
+
 echo "== sw_session_field parses the dict wrapper, not a bare list =="
 cat > "$TMP/sessions.json" <<'JSON'
 {"sessions":[

@@ -174,3 +174,30 @@ func TestRunDispatchRefusesAnUnknownLane(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+func TestPhaseModelEffortDropsEffortWhenModelOverridden(t *testing.T) {
+	t.Parallel()
+	phases := []state.Phase{
+		{Name: "swe", Model: "opus"},
+		{Name: "clean", Model: "gpt-5.6-terra", Effort: "xhigh"},
+	}
+	for _, tc := range []struct {
+		name, phase, override string
+		wantModel, wantEffort string
+	}{
+		{name: "phase model keeps effort", phase: "clean", wantModel: "gpt-5.6-terra", wantEffort: "xhigh"},
+		{name: "same-model override keeps effort", phase: "clean", override: "gpt-5.6-terra", wantModel: "gpt-5.6-terra", wantEffort: "xhigh"},
+		{name: "different-model override drops effort", phase: "clean", override: "composer-2.5", wantModel: "composer-2.5"},
+		{name: "phase without effort", phase: "swe", wantModel: "opus"},
+		{name: "unknown phase uses override", phase: "nope", override: "sonnet", wantModel: "sonnet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			model, effort := phaseModelEffort(phases, tc.phase, tc.override)
+			if model != tc.wantModel || effort != tc.wantEffort {
+				t.Errorf("phaseModelEffort(%q, %q) = (%q, %q), want (%q, %q)",
+					tc.phase, tc.override, model, effort, tc.wantModel, tc.wantEffort)
+			}
+		})
+	}
+}

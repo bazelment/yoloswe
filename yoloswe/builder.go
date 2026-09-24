@@ -13,6 +13,7 @@ import (
 // BuilderConfig holds configuration for the builder session.
 type BuilderConfig struct {
 	Model           string
+	Effort          claude.EffortLevel // empty uses the CLI default
 	LLMEndpoint     llmendpoint.Endpoint
 	WorkDir         string
 	RecordingDir    string
@@ -99,6 +100,9 @@ func (b *BuilderSession) Start(ctx context.Context) error {
 
 	if !b.config.LLMEndpoint.IsZero() {
 		opts = append(opts, claude.WithLLMEndpoint(b.config.LLMEndpoint))
+	}
+	if b.config.Effort != "" {
+		opts = append(opts, claude.WithEffort(b.config.Effort))
 	}
 
 	// Use interactive tool handler for AskUserQuestion (auto-answers)

@@ -247,7 +247,9 @@ type SpawnRequest struct {
 	Goal   string
 	Prompt string
 	// Backend selects the CLI independently of the model.
-	Backend        string
+	Backend string
+	// Effort is forwarded as --effort; empty omits the flag.
+	Effort         string
 	CreateWorktree bool
 }
 
@@ -290,6 +292,7 @@ func (r SpawnRequest) Args() []string {
 	add("-t", r.Type)
 	add("-m", r.Model)
 	add("--backend", r.Backend)
+	add("--effort", r.Effort)
 	add("-g", r.Goal)
 	add("-p", r.Prompt)
 	return args

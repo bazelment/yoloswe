@@ -180,6 +180,7 @@ func (a *Applier) applySpawn(ctx context.Context, d decide.Decision) Outcome {
 	for _, p := range st.Config.Phases {
 		if p.Name == d.Phase {
 			brief.Model = p.Model
+			brief.Effort = p.Effort
 		}
 	}
 

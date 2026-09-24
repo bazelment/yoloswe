@@ -1059,6 +1059,7 @@ func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoNam
 			ParentSessionID: session.SessionID(params.ParentSessionID),
 			Backend:         params.Backend,
 			LLMEndpoint:     params.LLMEndpoint,
+			Effort:          params.Effort,
 		})
 	if err != nil {
 		return nil, fmt.Errorf("failed to start session: %w", err)
@@ -1084,6 +1085,7 @@ func handleListSessions(registry *session.SessionRegistry) *ipc.ListSessionsResu
 			Prompt:          s.Prompt,
 			Model:           s.Model,
 			Backend:         s.Backend,
+			Effort:          s.Effort,
 			ParentSessionID: string(s.ParentSessionID),
 			TmuxTarget:      s.TmuxWindowID,
 		}
@@ -1188,6 +1190,7 @@ auto-compaction. Codex does not need this suffix.`,
 		prompt, _ := cmd.Flags().GetString("prompt")
 		model, _ := cmd.Flags().GetString("model")
 		backend, _ := cmd.Flags().GetString("backend")
+		effort, _ := cmd.Flags().GetString("effort")
 		goal, _ := cmd.Flags().GetString("goal")
 		createWT, _ := cmd.Flags().GetBool("create-worktree")
 		repo, _ := cmd.Flags().GetString("repo")
@@ -1223,6 +1226,7 @@ auto-compaction. Codex does not need this suffix.`,
 				Prompt:          prompt,
 				Model:           model,
 				Backend:         backend,
+				Effort:          effort,
 				LLMEndpoint:     endpoint,
 				Goal:            goal,
 				RepoName:        repo,
@@ -1740,6 +1744,7 @@ func init() {
 	newSessionCmd.Flags().StringP("worktree", "w", "", "Existing worktree path (relative paths resolve against the current directory)")
 	newSessionCmd.Flags().StringP("prompt", "p", "", "Prompt for the session")
 	newSessionCmd.Flags().StringP("model", "m", "", "Model ID (e.g. opus, sonnet)")
+	newSessionCmd.Flags().String("effort", "", "Reasoning effort level (e.g. low, medium, high, xhigh, max)")
 	// Derived from the same list validateBackend accepts, so the help text cannot
 	// drift from reality again: it read "claude or codex" long after cursor and agy
 	// were supported, and two separate swarm runs wrongly ruled agy out because of it.

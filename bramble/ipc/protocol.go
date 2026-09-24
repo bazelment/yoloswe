@@ -52,8 +52,9 @@ type NewSessionParams struct {
 	Branch       string               `json:"branch,omitempty"`        // create new worktree with this branch name
 	BaseBranch   string               `json:"base_branch,omitempty"`   // base branch for new worktree (default: main)
 	Prompt       string               `json:"prompt"`
-	Model        string               `json:"model,omitempty"`     // model ID (default: provider default)
-	Backend      string               `json:"backend,omitempty"`   // CLI backend, independent of model
+	Model        string               `json:"model,omitempty"`   // model ID (default: provider default)
+	Backend      string               `json:"backend,omitempty"` // CLI backend, independent of model
+	Effort       string               `json:"effort,omitempty"`
 	Goal         string               `json:"goal,omitempty"`      // worktree goal (used when creating)
 	RepoName     string               `json:"repo_name,omitempty"` // target repo; auto-detected from cwd if empty
 	LLMEndpoint  llmendpoint.Endpoint `json:"llm_endpoint,omitempty"`
@@ -98,6 +99,7 @@ type SessionSummary struct {
 	Prompt       string `json:"prompt"`
 	Model        string `json:"model"`
 	Backend      string `json:"backend,omitempty"`
+	Effort       string `json:"effort,omitempty"`
 	// ParentSessionID is the session that spawned this one, so a caller can
 	// pick its own subagents out of the list. Empty for a top-level session.
 	ParentSessionID string `json:"parent_session_id,omitempty"`

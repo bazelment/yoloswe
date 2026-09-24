@@ -106,3 +106,19 @@ func TestManagerNewTmuxRunnerCarriesSessionLLMEndpoint(t *testing.T) {
 
 	assert.Equal(t, endpoint, runner.llmEndpoint)
 }
+
+// Effort reaches the tmux command line only if newTmuxRunner copies it off the
+// session; buildCommand's own tests start from a runner that already has it.
+func TestManagerNewTmuxRunnerCarriesSessionEffort(t *testing.T) {
+	t.Parallel()
+
+	m := NewManagerWithConfig(ManagerConfig{})
+	runner := m.newTmuxRunner(
+		&Session{ID: "builder-effort", Model: "gpt-5.5", Effort: "xhigh"},
+		"prompt",
+		"window",
+		agent.AgentModel{ID: "gpt-5.5", Provider: ProviderCodex},
+	)
+
+	assert.Equal(t, "xhigh", runner.effort)
+}

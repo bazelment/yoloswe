@@ -32,6 +32,7 @@ type StoredSession struct {
 	Title          string                `json:"title,omitempty"`
 	Model          string                `json:"model,omitempty"`
 	Backend        string                `json:"backend,omitempty"`
+	Effort         string                `json:"effort,omitempty"`
 	LLMEndpoint    *llmendpoint.Endpoint `json:"llm_endpoint,omitempty"`
 	CreatedAt      time.Time             `json:"created_at"`
 	StartedAt      *time.Time            `json:"started_at,omitempty"`
@@ -509,6 +510,7 @@ func SessionToStored(session *Session, repoName string, output []OutputLine) *St
 		Title:           session.Title,
 		Model:           session.Model,
 		Backend:         session.Backend,
+		Effort:          session.Effort,
 		CLISessionID:    session.CLISessionID,
 		TmuxWindowName:  session.TmuxWindowName,
 		TmuxWindowID:    session.TmuxWindowID,
@@ -557,6 +559,7 @@ func StoredToSessionInfo(stored *StoredSession) SessionInfo {
 		Title:           stored.Title,
 		Model:           stored.Model,
 		Backend:         stored.Backend,
+		Effort:          stored.Effort,
 		CLISessionID:    stored.CLISessionID,
 		TmuxWindowName:  stored.TmuxWindowName,
 		TmuxWindowID:    stored.TmuxWindowID,

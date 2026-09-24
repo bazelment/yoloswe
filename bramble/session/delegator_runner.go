@@ -120,6 +120,7 @@ type delegatorRunner struct {
 	eventHandler  *sessionEventHandler
 	worktreePath  string
 	model         string
+	effort        claude.EffortLevel // empty uses the CLI default
 	recordingDir  string
 }
 
@@ -130,6 +131,9 @@ func (r *delegatorRunner) Start(ctx context.Context) error {
 		delegatorSystemPromptWithModels(r.toolHandler.AvailableModelsDescription(), r.toolHandler.DefaultModel()),
 	)
 	opts = append(opts, claude.WithWorkDir(r.worktreePath))
+	if r.effort != "" {
+		opts = append(opts, claude.WithEffort(r.effort))
+	}
 	if r.recordingDir != "" {
 		opts = append(opts, claude.WithRecording(r.recordingDir))
 	}

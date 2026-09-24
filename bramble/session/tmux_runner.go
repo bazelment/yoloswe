@@ -39,6 +39,7 @@ type tmuxRunner struct { //nolint:govet // fieldalignment: keep launch configura
 	workDir         string // working directory for the window
 	prompt          string // initial prompt
 	model           string // model ID (e.g. "opus", "gpt-5.5")
+	effort          string // reasoning effort; empty means the CLI default
 	provider        string // binary name: "claude" or "codex"
 	permissionMode  string // permission mode: "" (default) or "plan" (claude only)
 	resumeSessionID string // CLI session ID to resume (empty for new sessions)
@@ -282,7 +283,11 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 
 	switch provider {
 	case ProviderCodex:
-		// Codex-specific flags
+		// Codex-specific flags. model_reasoning_effort is a config key, so it
+		// rides the same -c channel as the notify hook.
+		if r.effort != "" {
+			args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", r.effort))
+		}
 		if r.yoloMode {
 			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 		}
@@ -298,6 +303,7 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 			args = append(args, "-c", codexNotifyConfig(r.brambleBin, r.sessionID))
 		}
 	case ProviderCursor:
+		// Cursor encodes effort in the model name and has no --effort flag.
 		// Cursor-specific flags. Note: do NOT use -p/--print in tmux mode.
 		// --print is for scripted one-shot calls; a tmux window is an
 		// interactive session a human attaches to.
@@ -317,6 +323,11 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 			args = append(args, "--resume", r.resumeSessionID)
 		}
 	case ProviderAgy:
+		// --effort must precede --prompt-interactive: that flag consumes the
+		// next argument as the prompt.
+		if r.effort != "" {
+			args = append(args, "--effort", r.effort)
+		}
 		if r.yoloMode {
 			args = append(args, "--dangerously-skip-permissions")
 		}
@@ -332,7 +343,10 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		}
 		args = append(args, "--prompt-interactive")
 	default:
-		// Claude-specific flags
+		// Claude-specific flags.
+		if r.effort != "" {
+			args = append(args, "--effort", r.effort)
+		}
 		if r.yoloMode {
 			args = append(args, "--allow-dangerously-skip-permissions", "--dangerously-skip-permissions")
 		}

@@ -138,6 +138,7 @@ type Session struct {
 	Title            string
 	Model            string
 	Backend          string // explicitly selected CLI backend; empty means infer from Model
+	Effort           string // reasoning effort forwarded to CLIs that accept it; empty means provider default
 	LLMEndpoint      llmendpoint.Endpoint
 	PlanFilePath     string // Path to plan file (planner sessions only)
 	TmuxWindowName   string // tmux window name (empty for TUI mode)
@@ -242,6 +243,7 @@ type SessionInfo struct {
 	Title            string
 	Model            string
 	Backend          string
+	Effort           string
 	PlanFilePath     string
 	TmuxWindowName   string    // tmux window name (empty for TUI mode)
 	TmuxWindowID     string    // tmux window ID like @1, @2 (empty for TUI mode)
@@ -272,6 +274,7 @@ func (s *Session) ToInfo() SessionInfo {
 		Title:            s.Title,
 		Model:            s.Model,
 		Backend:          s.Backend,
+		Effort:           s.Effort,
 		PlanFilePath:     s.PlanFilePath,
 		TmuxWindowName:   s.TmuxWindowName,
 		TmuxWindowID:     s.TmuxWindowID,

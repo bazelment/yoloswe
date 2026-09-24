@@ -17,6 +17,8 @@ const (
 	EffortMedium EffortLevel = "medium"
 	EffortHigh   EffortLevel = "high"
 	EffortMax    EffortLevel = "max"
+	// EffortXHigh is Codex's top reasoning level; narrower providers clamp it.
+	EffortXHigh EffortLevel = "xhigh"
 )
 
 // ErrInvalidEffort is returned when an unknown effort string is parsed.
@@ -35,10 +37,50 @@ var ErrEffortUnsupported = errors.New("provider does not support reasoning effor
 func ParseEffort(s string) (EffortLevel, error) {
 	level := EffortLevel(s)
 	switch level {
-	case EffortAuto, EffortLow, EffortMedium, EffortHigh, EffortMax:
+	case EffortAuto, EffortLow, EffortMedium, EffortHigh, EffortMax, EffortXHigh:
 		return level, nil
 	}
-	return "", fmt.Errorf("%w: %q (valid: low, medium, high, max, auto)", ErrInvalidEffort, s)
+	return "", fmt.Errorf("%w: %q (valid: auto, low, medium, high, max, xhigh)", ErrInvalidEffort, s)
+}
+
+// ReconcileCLIModelEffort turns a provider-neutral effort request into the
+// model and effort arguments a CLI can honor. An empty returned effort means
+// the model already encodes the requested level or the provider default applies.
+func ReconcileCLIModelEffort(provider, model string, level EffortLevel) (string, EffortLevel, error) {
+	if level == "" || level == EffortAuto {
+		return model, "", nil
+	}
+
+	switch provider {
+	case ProviderClaude:
+		if level == EffortXHigh {
+			return model, EffortMax, nil
+		}
+	case ProviderCodex:
+		return model, level, nil
+	case ProviderAgy:
+		if level == EffortMax || level == EffortXHigh {
+			level = EffortHigh
+		}
+		base, pinned := splitModelEffort(model)
+		if pinned == "" {
+			return model, level, nil
+		}
+		if pinned == string(level) {
+			return model, "", nil
+		}
+		retarget, ok := agyRetarget(model, string(level))
+		if !ok {
+			return model, "", fmt.Errorf("%w: agy has no %q variant of %q (requested effort %s on a model pinned to %s)",
+				ErrEffortUnsupported, level, base, level, pinned)
+		}
+		return retarget, "", nil
+	case ProviderCursor:
+		return model, "", EffortUnsupportedError(provider, level)
+	default:
+		return model, "", EffortUnsupportedError(provider, level)
+	}
+	return model, level, nil
 }
 
 // ProviderSupportsEffort reports whether a provider honors an explicit non-auto

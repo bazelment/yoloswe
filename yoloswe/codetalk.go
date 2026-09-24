@@ -33,6 +33,7 @@ When the user asks follow-up questions, explore further if your current understa
 type CodeTalkConfig struct {
 	LLMEndpoint     llmendpoint.Endpoint
 	Model           string
+	Effort          claude.EffortLevel // empty uses the CLI default
 	WorkDir         string
 	RecordingDir    string
 	SystemPrompt    string
@@ -118,6 +119,9 @@ func (ct *CodeTalkSession) Start(ctx context.Context) error {
 	}
 	if !ct.config.LLMEndpoint.IsZero() {
 		opts = append(opts, claude.WithLLMEndpoint(ct.config.LLMEndpoint))
+	}
+	if ct.config.Effort != "" {
+		opts = append(opts, claude.WithEffort(ct.config.Effort))
 	}
 
 	ct.session = claude.NewSession(opts...)

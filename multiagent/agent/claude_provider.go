@@ -614,6 +614,9 @@ func claudeEffortLevel(level EffortLevel) claude.EffortLevel {
 		return claude.EffortHigh
 	case EffortMax:
 		return claude.EffortMax
+	case EffortXHigh:
+		// Claude's scale stops at max. Codex's xhigh clamps there.
+		return claude.EffortMax
 	}
 	panic(fmt.Sprintf("BUG: unhandled EffortLevel %q in claudeEffortLevel", level))
 }

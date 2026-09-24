@@ -179,14 +179,18 @@ def phase_names(state):
 
 
 def parse_phases(spec):
-    """"implement:opus,cleanup:gpt-5.6-luna" -> [{name, model}, ...]"""
+    """"implement:opus,cleanup:gpt-5.6-luna" or "swe:grok-4.7-high,clean:gpt-5.6-terra:xhigh" -> [{name, model, effort?}, ...]"""
     phases = []
     for item in spec.split(","):
         item = item.strip()
         if not item:
             continue
-        name, _, model = item.partition(":")
-        name = name.strip()
+        parts = [p.strip() for p in item.split(":")]
+        if len(parts) > 3:
+            sys.exit(f"phase spec `{item}` has too many `:`-separated fields")
+        name = parts[0]
+        model = parts[1] if len(parts) > 1 else ""
+        effort = parts[2] if len(parts) > 2 else ""
         if not name:
             sys.exit(f"phase spec `{item}` has no name")
         if name in [p["name"] for p in phases]:
@@ -200,7 +204,12 @@ def parse_phases(spec):
             sys.exit(f"phase name `{name}` ends in a digit; round keys are "
                      f"`<phase><round>` with no delimiter, so it cannot be told "
                      f"apart from a rounded key -- rename the phase")
-        phases.append({"name": name, "model": model.strip()})
+        if effort and effort not in {"auto", "low", "medium", "high", "max", "xhigh"}:
+            sys.exit(f"phase spec `{item}` has invalid effort `{effort}`")
+        phase_dict = {"name": name, "model": model}
+        if effort:
+            phase_dict["effort"] = effort
+        phases.append(phase_dict)
     if not phases:
         sys.exit("--phases must name at least one phase")
     return phases
@@ -213,11 +222,21 @@ def render(state, run):
     counts = {s: sum(1 for t in tasks if t["status"] == s) for s in STATUSES}
     tally = " · ".join(f"{s} {counts[s]}" for s in STATUSES if counts[s])
 
+    def format_phase(p):
+        desc = p["name"]
+        parts = []
+        if p.get("model"):
+            parts.append(p["model"])
+        if p.get("effort"):
+            parts.append(p["effort"])
+        if parts:
+            desc += f" `{' '.join(parts)}`"
+        return desc
+
     out = [f"# subagent-swarm — {cfg['goal']}", ""]
     out.append(f"- **run**: `{run}`")
     out.append(f"- **merging into**: `{cfg['target']}`  (base `{cfg['base']}`)")
-    out.append("- **phases**: " + " → ".join(
-        f"{p['name']} `{p['model']}`" if p["model"] else p["name"] for p in cfg["phases"]))
+    out.append("- **phases**: " + " → ".join(format_phase(p) for p in cfg["phases"]))
     out.append(f"- **status**: {tally or 'no lanes yet'}")
     out.append("")
     out.append("| | priority | lane | status | phase | branch | "

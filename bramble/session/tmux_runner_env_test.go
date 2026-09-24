@@ -229,6 +229,87 @@ func TestTmuxRunnerCodexGetsNotifyHook(t *testing.T) {
 	}
 }
 
+// Codex takes a config override; Claude and Agy take --effort; Cursor uses its model name.
+func TestTmuxRunnerBuildCommandEffort(t *testing.T) {
+	cases := []struct {
+		name     string
+		provider string
+		effort   string
+		want     []string
+		absent   []string
+	}{
+		{
+			name:     "codex",
+			provider: ProviderCodex,
+			effort:   "xhigh",
+			want:     []string{"-c", `model_reasoning_effort="xhigh"`},
+		},
+		{
+			name:     "claude",
+			provider: ProviderClaude,
+			effort:   "high",
+			want:     []string{"--effort", "high"},
+		},
+		{
+			name:     "agy",
+			provider: ProviderAgy,
+			effort:   "medium",
+			want:     []string{"--effort", "medium"},
+		},
+		{
+			name:     "cursor",
+			provider: ProviderCursor,
+			effort:   "high",
+			absent:   []string{"--effort", `model_reasoning_effort="high"`},
+		},
+		{
+			name:     "empty omitted",
+			provider: ProviderClaude,
+			absent:   []string{"--effort"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &tmuxRunner{
+				provider: tc.provider,
+				model:    "some-model",
+				effort:   tc.effort,
+				prompt:   "do the work",
+			}
+			_, args := r.buildCommand()
+			for i := 0; i+1 < len(tc.want); i += 2 {
+				if !hasArgPair(args, tc.want[i], tc.want[i+1]) {
+					t.Errorf("missing %s %s\ngot: %v", tc.want[i], tc.want[i+1], args)
+				}
+			}
+			for _, bad := range tc.absent {
+				if slices.Contains(args, bad) {
+					t.Errorf("unexpected %q in %v", bad, args)
+				}
+			}
+			if args[len(args)-1] != r.prompt {
+				t.Errorf("prompt is not the final argument: %v", args)
+			}
+			if tc.provider == ProviderAgy && tc.effort != "" {
+				effortAt := slices.Index(args, "--effort")
+				promptAt := slices.Index(args, "--prompt-interactive")
+				if effortAt < 0 || promptAt < 0 || effortAt >= promptAt {
+					t.Errorf("--effort must precede --prompt-interactive: %v", args)
+				}
+			}
+		})
+	}
+}
+
+func hasArgPair(args []string, flag, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
 // The notify program is only useful if bramble can be found and has an address
 // to report. Without either, emit no override rather than a broken one that
 // makes codex fail to start.

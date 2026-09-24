@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
@@ -224,25 +223,11 @@ func splitModelEffort(model string) (base, pinned string) {
 // judges the result, which is strictly better than shipping a command line
 // already known to conflict.
 func reconcileAgyEffort(c *agy.SessionConfig) error {
-	if c.Effort == "" || c.Model == "" {
-		return nil
+	model, effort, err := ReconcileCLIModelEffort(ProviderAgy, c.Model, EffortLevel(c.Effort))
+	if err != nil {
+		return err
 	}
-	base, pinned := splitModelEffort(c.Model)
-	if pinned == "" {
-		// Nothing pinned by the model: --effort alone carries the level.
-		return nil
-	}
-	if pinned == c.Effort {
-		c.Effort = "" // Same level twice; keep one representation.
-		return nil
-	}
-	retarget, ok := agyRetarget(c.Model, c.Effort)
-	if !ok {
-		return fmt.Errorf("%w: agy has no %q variant of %q (requested effort %s on a model pinned to %s)",
-			ErrEffortUnsupported, c.Effort, base, c.Effort, pinned)
-	}
-	c.Model = retarget
-	c.Effort = ""
+	c.Model, c.Effort = model, string(effort)
 	return nil
 }
 
@@ -283,7 +268,8 @@ func agyEffortLevel(level EffortLevel) string {
 		return "low"
 	case EffortMedium:
 		return "medium"
-	case EffortHigh, EffortMax:
+	case EffortHigh, EffortMax, EffortXHigh:
+		// Agy's scale stops at high. max and Codex's xhigh both clamp there.
 		return "high"
 	}
 	return ""

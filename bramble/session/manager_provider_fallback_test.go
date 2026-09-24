@@ -311,3 +311,42 @@ func TestProviderRunner_RunTurnFallsBackToResultTextForSilentLongRunningProvider
 	assert.Equal(t, OutputTypeText, lines[0].Type)
 	assert.Equal(t, "long-running response: follow-up", lines[0].Content)
 }
+
+// optionRecordingProvider keeps the ExecuteConfig of its last turn so a test can
+// see what providerRunner actually hands the provider.
+type optionRecordingProvider struct {
+	silentEphemeralProvider
+	cfg agent.ExecuteConfig
+}
+
+func (p *optionRecordingProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.WorktreeContext, opts ...agent.ExecuteOption) (*agent.AgentResult, error) {
+	for _, opt := range opts {
+		opt(&p.cfg)
+	}
+	return p.silentEphemeralProvider.Execute(ctx, prompt, wtCtx, opts...)
+}
+
+// Session metadata can carry effort while the turn silently drops it; only the
+// options reaching Execute prove the provider was asked for it.
+func TestProviderRunner_RunTurnForwardsEffort(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name, effort string
+		want         agent.EffortLevel
+	}{
+		{name: "set", effort: "xhigh", want: agent.EffortXHigh},
+		{name: "empty omitted", effort: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, handler := setupProviderRunnerHarness(t)
+			provider := &optionRecordingProvider{}
+			runner := &providerRunner{provider: provider, eventHandler: handler, effort: tc.effort}
+
+			_, err := runner.RunTurn(context.Background(), "hello")
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, provider.cfg.Effort)
+		})
+	}
+}
