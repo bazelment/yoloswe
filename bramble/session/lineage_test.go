@@ -100,6 +100,45 @@ func TestStartSessionWithOptsRecordsParent(t *testing.T) {
 	assert.Equal(t, SessionID("wt-planner-parent1"), info.ParentSessionID)
 }
 
+func TestStartSessionWithOptsReconcilesEffort(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		backend    string
+		model      string
+		effort     string
+		wantModel  string
+		wantEffort string
+		wantErr    bool
+	}{
+		{name: "codex keeps xhigh", backend: ProviderCodex, model: "gpt-5.5", effort: "xhigh", wantModel: "gpt-5.5", wantEffort: "xhigh"},
+		{name: "claude clamps xhigh", backend: ProviderClaude, model: "sonnet", effort: "xhigh", wantModel: "sonnet", wantEffort: "max"},
+		{name: "agy retargets pinned model", backend: ProviderAgy, model: "gemini-3.1-pro-low", effort: "xhigh", wantModel: "gemini-3.1-pro-high"},
+		{name: "auto is omitted", backend: ProviderCodex, model: "gpt-5.5", effort: "auto", wantModel: "gpt-5.5"},
+		{name: "cursor rejects effort", backend: ProviderCursor, model: "cursor-fast", effort: "high", wantErr: true},
+		{name: "invalid effort rejected", backend: ProviderCodex, model: "gpt-5.5", effort: "turbo", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := NewManagerWithConfig(ManagerConfig{RepoName: "myrepo", Provider: &silentEphemeralProvider{}, SessionMode: SessionModeTUI})
+			t.Cleanup(m.Close)
+
+			id, err := m.StartSessionWithOpts(SessionTypeBuilder, t.TempDir(), "prompt", tc.model,
+				SpawnOpts{Backend: tc.backend, Effort: tc.effort})
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			info, ok := m.GetSessionInfo(id)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantModel, info.Model)
+			assert.Equal(t, tc.wantEffort, info.Effort)
+		})
+	}
+}
+
 // TestStartSessionLeavesParentEmpty pins that the plain entry point stays a
 // top-level spawn — every existing caller goes through it.
 func TestStartSessionLeavesParentEmpty(t *testing.T) {

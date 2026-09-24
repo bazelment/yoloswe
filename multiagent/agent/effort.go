@@ -17,8 +17,7 @@ const (
 	EffortMedium EffortLevel = "medium"
 	EffortHigh   EffortLevel = "high"
 	EffortMax    EffortLevel = "max"
-	// EffortXHigh is Codex's top reasoning level. Providers whose scale stops
-	// at max or high clamp it when they build their own flags.
+	// EffortXHigh is Codex's top reasoning level; narrower providers clamp it.
 	EffortXHigh EffortLevel = "xhigh"
 )
 
@@ -42,6 +41,46 @@ func ParseEffort(s string) (EffortLevel, error) {
 		return level, nil
 	}
 	return "", fmt.Errorf("%w: %q (valid: auto, low, medium, high, max, xhigh)", ErrInvalidEffort, s)
+}
+
+// ReconcileCLIModelEffort turns a provider-neutral effort request into the
+// model and effort arguments a CLI can honor. An empty returned effort means
+// the model already encodes the requested level or the provider default applies.
+func ReconcileCLIModelEffort(provider, model string, level EffortLevel) (string, EffortLevel, error) {
+	if level == "" || level == EffortAuto {
+		return model, "", nil
+	}
+
+	switch provider {
+	case ProviderClaude:
+		if level == EffortXHigh {
+			return model, EffortMax, nil
+		}
+	case ProviderCodex:
+		return model, level, nil
+	case ProviderAgy:
+		if level == EffortMax || level == EffortXHigh {
+			level = EffortHigh
+		}
+		base, pinned := splitModelEffort(model)
+		if pinned == "" {
+			return model, level, nil
+		}
+		if pinned == string(level) {
+			return model, "", nil
+		}
+		retarget, ok := agyRetarget(model, string(level))
+		if !ok {
+			return model, "", fmt.Errorf("%w: agy has no %q variant of %q (requested effort %s on a model pinned to %s)",
+				ErrEffortUnsupported, level, base, level, pinned)
+		}
+		return retarget, "", nil
+	case ProviderCursor:
+		return model, "", EffortUnsupportedError(provider, level)
+	default:
+		return model, "", EffortUnsupportedError(provider, level)
+	}
+	return model, level, nil
 }
 
 // ProviderSupportsEffort reports whether a provider honors an explicit non-auto

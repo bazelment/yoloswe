@@ -54,6 +54,16 @@ chk "unsuffixed socket resolves" "$RC" "0"
 case "$OUT" in *"/bramble-$U.sock") ok "picked the unsuffixed socket" ;; *) no "picked $OUT" ;; esac
 rm -f "$XDG_RUNTIME_DIR"/bramble-"$U".sock
 
+echo "== a UID-prefix lookalike is not a TUI socket =="
+python3 - "$XDG_RUNTIME_DIR" "$U" <<'PY'
+import socket,sys,os
+d,u=sys.argv[1],sys.argv[2]
+s=socket.socket(socket.AF_UNIX); s.bind(os.path.join(d,f"bramble-{u}stale.sock"))
+PY
+sw_socket >/dev/null 2>&1
+chk "UID-prefix lookalike -> non-zero" "$?" "1"
+rm -f "$XDG_RUNTIME_DIR"/bramble-"$U"stale.sock
+
 echo "== sw_session_field parses the dict wrapper, not a bare list =="
 cat > "$TMP/sessions.json" <<'JSON'
 {"sessions":[

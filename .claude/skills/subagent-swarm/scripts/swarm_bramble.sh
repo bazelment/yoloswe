@@ -29,7 +29,7 @@ sw_socket() {
   local -a m=()
   local f
   # Match both bramble-<uid>.sock and bramble-<uid>-<pid>.sock.
-  for f in "$d"/bramble-"$uid"*.sock; do
+  for f in "$d"/bramble-"$uid".sock "$d"/bramble-"$uid"-*.sock; do
     [ -S "$f" ] || continue
     case "$f" in *bramble-control-*) continue ;; esac
     m+=("$f")

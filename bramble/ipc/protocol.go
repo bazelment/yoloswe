@@ -52,9 +52,9 @@ type NewSessionParams struct {
 	Branch       string               `json:"branch,omitempty"`        // create new worktree with this branch name
 	BaseBranch   string               `json:"base_branch,omitempty"`   // base branch for new worktree (default: main)
 	Prompt       string               `json:"prompt"`
-	Model        string               `json:"model,omitempty"`     // model ID (default: provider default)
-	Backend      string               `json:"backend,omitempty"`   // CLI backend, independent of model
-	Effort       string               `json:"effort,omitempty"`    // reasoning effort (low, medium, high, xhigh, max)
+	Model        string               `json:"model,omitempty"`   // model ID (default: provider default)
+	Backend      string               `json:"backend,omitempty"` // CLI backend, independent of model
+	Effort       string               `json:"effort,omitempty"`
 	Goal         string               `json:"goal,omitempty"`      // worktree goal (used when creating)
 	RepoName     string               `json:"repo_name,omitempty"` // target repo; auto-detected from cwd if empty
 	LLMEndpoint  llmendpoint.Endpoint `json:"llm_endpoint,omitempty"`

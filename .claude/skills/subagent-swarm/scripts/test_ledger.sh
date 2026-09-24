@@ -293,6 +293,16 @@ if echo "$SHOW" | grep -q 'clean `gpt-5.6-terra xhigh`'; then ok "ledger shows e
 else no "ledger omitted effort: $SHOW"; fi
 if echo "$SHOW" | grep -q 'swe `grok-4.7-high`'; then ok "model-only phase stays model-only"
 else no "swe phase render changed: $SHOW"; fi
+if L init "$TMP/extra-phase-fields" --goal g --phases "clean:terra:xhigh:typo" --base main --target main >/dev/null 2>&1; then
+  no "extra phase fields accepted"
+else
+  ok "extra phase fields rejected"
+fi
+if L init "$TMP/invalid-effort" --goal g --phases "clean:terra:turbo" --base main --target main >/dev/null 2>&1; then
+  no "invalid effort accepted"
+else
+  ok "invalid effort rejected"
+fi
 
 echo
 echo "passed $PASS, failed $FAIL"

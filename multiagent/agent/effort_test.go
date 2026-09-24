@@ -60,6 +60,38 @@ func TestEffortUnsupportedError_WrapsAndIncludesContext(t *testing.T) {
 	assert.Contains(t, err.Error(), "high")
 }
 
+func TestReconcileCLIModelEffort(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		wantErr    error
+		name       string
+		provider   string
+		model      string
+		effort     EffortLevel
+		wantModel  string
+		wantEffort EffortLevel
+	}{
+		{name: "auto omitted", provider: ProviderCodex, model: "gpt-5.5", effort: EffortAuto, wantModel: "gpt-5.5"},
+		{name: "codex keeps xhigh", provider: ProviderCodex, model: "gpt-5.5", effort: EffortXHigh, wantModel: "gpt-5.5", wantEffort: EffortXHigh},
+		{name: "claude clamps xhigh", provider: ProviderClaude, model: "opus", effort: EffortXHigh, wantModel: "opus", wantEffort: EffortMax},
+		{name: "agy retargets pinned model", provider: ProviderAgy, model: "gemini-3.1-pro-low", effort: EffortXHigh, wantModel: "gemini-3.1-pro-high"},
+		{name: "cursor rejects effort", provider: ProviderCursor, model: "cursor-fast", effort: EffortHigh, wantModel: "cursor-fast", wantErr: ErrEffortUnsupported},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			model, effort, err := ReconcileCLIModelEffort(tc.provider, tc.model, tc.effort)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantModel, model)
+			assert.Equal(t, tc.wantEffort, effort)
+		})
+	}
+}
+
 func TestClaudeEffortLevel_MapsAllLevels(t *testing.T) {
 	t.Parallel()
 
@@ -192,6 +224,9 @@ func TestProviderEffortMatrix(t *testing.T) {
 
 			noKnobProvider := prov.name == "cursor"
 			for _, level := range validLevels {
+				if noKnobProvider && level == EffortAuto {
+					continue
+				}
 				err := prov.run(t, level)
 				// EffortAuto means "use provider default" — a no-knob
 				// provider satisfies that trivially, so it must not be

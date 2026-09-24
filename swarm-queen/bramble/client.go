@@ -248,8 +248,7 @@ type SpawnRequest struct {
 	Prompt string
 	// Backend selects the CLI independently of the model.
 	Backend string
-	// Effort is forwarded as --effort. Empty omits the flag. Cursor encodes
-	// effort in the model name, so leave this empty for that backend.
+	// Effort is forwarded as --effort; empty omits the flag.
 	Effort         string
 	CreateWorktree bool
 }

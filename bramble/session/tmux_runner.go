@@ -303,9 +303,7 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 			args = append(args, "-c", codexNotifyConfig(r.brambleBin, r.sessionID))
 		}
 	case ProviderCursor:
-		// Cursor encodes effort in the model name (for example grok-4.7-high)
-		// and has no --effort flag. Passing one would be a startup error.
-		//
+		// Cursor encodes effort in the model name and has no --effort flag.
 		// Cursor-specific flags. Note: do NOT use -p/--print in tmux mode.
 		// --print is for scripted one-shot calls; a tmux window is an
 		// interactive session a human attaches to.
@@ -345,7 +343,7 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		}
 		args = append(args, "--prompt-interactive")
 	default:
-		// Claude-specific flags. Empty provider is rewritten to Claude above.
+		// Claude-specific flags.
 		if r.effort != "" {
 			args = append(args, "--effort", r.effort)
 		}

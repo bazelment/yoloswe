@@ -229,9 +229,7 @@ func TestTmuxRunnerCodexGetsNotifyHook(t *testing.T) {
 	}
 }
 
-// Effort is a separate flag from the model. Codex takes a config override,
-// Claude and Agy take --effort, and Cursor has no such flag because the level
-// is already in the model name.
+// Codex takes a config override; Claude and Agy take --effort; Cursor uses its model name.
 func TestTmuxRunnerBuildCommandEffort(t *testing.T) {
 	cases := []struct {
 		name     string

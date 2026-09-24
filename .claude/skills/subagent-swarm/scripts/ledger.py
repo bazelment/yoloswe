@@ -186,6 +186,8 @@ def parse_phases(spec):
         if not item:
             continue
         parts = [p.strip() for p in item.split(":")]
+        if len(parts) > 3:
+            sys.exit(f"phase spec `{item}` has too many `:`-separated fields")
         name = parts[0]
         model = parts[1] if len(parts) > 1 else ""
         effort = parts[2] if len(parts) > 2 else ""
@@ -202,6 +204,8 @@ def parse_phases(spec):
             sys.exit(f"phase name `{name}` ends in a digit; round keys are "
                      f"`<phase><round>` with no delimiter, so it cannot be told "
                      f"apart from a rounded key -- rename the phase")
+        if effort and effort not in {"auto", "low", "medium", "high", "max", "xhigh"}:
+            sys.exit(f"phase spec `{item}` has invalid effort `{effort}`")
         phase_dict = {"name": name, "model": model}
         if effort:
             phase_dict["effort"] = effort

@@ -1014,9 +1014,7 @@ type SpawnOpts struct { //nolint:govet // fieldalignment: keep endpoint next to 
 	// gateways where one model is reachable through more than one CLI/wire API.
 	Backend     string
 	LLMEndpoint llmendpoint.Endpoint
-	// Effort is the reasoning-effort level forwarded to CLIs that accept it.
-	// Empty leaves the provider default. Cursor encodes effort in the model
-	// name, so the tmux launcher does not pass this as a flag for that backend.
+	// Effort is forwarded to CLIs that accept it; empty uses the provider default.
 	Effort string
 }
 
@@ -1093,6 +1091,24 @@ func (m *Manager) startSessionWithID(sessionID SessionID, sessionType SessionTyp
 	if err := validateBackendModel(backend, model); err != nil {
 		cancel()
 		return "", err
+	}
+	if opts.Effort != "" {
+		level, err := agent.ParseEffort(opts.Effort)
+		if err != nil {
+			cancel()
+			return "", err
+		}
+		agentModel, err := resolveAgentModel(model, backend, m.config.ModelRegistry)
+		if err != nil {
+			cancel()
+			return "", err
+		}
+		model, level, err = agent.ReconcileCLIModelEffort(agentModel.Provider, model, level)
+		if err != nil {
+			cancel()
+			return "", err
+		}
+		opts.Effort = string(level)
 	}
 
 	session := &Session{
