@@ -64,7 +64,7 @@ const (
 
 	// DefaultCodexModel is the model used when BackendCodex is selected and
 	// no --model flag is provided.
-	DefaultCodexModel = "gpt-5.4-mini"
+	DefaultCodexModel = "gpt-6-luna"
 
 	// DefaultCursorModel is the model used when BackendCursor is selected and
 	// no --model flag is provided.

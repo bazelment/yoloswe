@@ -33,7 +33,7 @@
 //
 //	config := yoloswe.Config{
 //	    BuilderModel:   "sonnet",
-//	    ReviewerModel:  "gpt-5.4-mini",
+//	    ReviewerModel:  "gpt-6-luna",
 //	    BuilderWorkDir: "/path/to/project",
 //	    MaxBudgetUSD:   5.0,
 //	    MaxTimeSeconds: 600,

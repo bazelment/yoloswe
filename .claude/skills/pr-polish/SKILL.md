@@ -261,7 +261,7 @@ REVIEW_START_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
 ( BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:codex:r{ROUND} \
   python3 $SKILL_DIR/scripts/review_push.py \
     --backend codex --envelope "$LOG_DIR/codex-envelope.json" -- \
-  timeout 2400 $BRAMBLE_BIN code-review --backend codex --model gpt-5.6-luna --effort medium \
+  timeout 2400 $BRAMBLE_BIN code-review --backend codex --model gpt-6-luna --effort medium \
     --skip-test-execution --verbose --idle-timeout 8m \
     --goal "$GOAL" --scope-hints-file "$SCOPE_HINTS" $DIFF_BASE_ARG \
     ${CODEX_RESUME:+--resume-session-id "$CODEX_RESUME"} \

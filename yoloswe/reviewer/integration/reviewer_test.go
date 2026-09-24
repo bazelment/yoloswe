@@ -21,7 +21,7 @@ var (
 func TestReviewWithResult_Codex(t *testing.T) {
 	config := reviewer.Config{
 		BackendType: reviewer.BackendCodex,
-		Model:       "gpt-5.4-mini",
+		Model:       reviewer.DefaultCodexModel,
 		WorkDir:     t.TempDir(),
 		Verbose:     true,
 	}

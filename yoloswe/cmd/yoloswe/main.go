@@ -22,6 +22,7 @@ import (
 	"github.com/bazelment/yoloswe/wt"
 	"github.com/bazelment/yoloswe/yoloswe"
 	"github.com/bazelment/yoloswe/yoloswe/planner"
+	"github.com/bazelment/yoloswe/yoloswe/reviewer"
 )
 
 var rootOpts = cliapp.Options{ToolName: "yoloswe"}
@@ -180,7 +181,7 @@ The loop continues until the reviewer accepts or limits are reached.`,
 	}
 
 	cmd.Flags().StringVar(&flags.builderModel, "builder-model", "sonnet", "Builder model: haiku, sonnet, opus, fable, or full Claude model ID")
-	cmd.Flags().StringVar(&flags.reviewerModel, "reviewer-model", "", "Reviewer model (default: gpt-5.4-mini)")
+	cmd.Flags().StringVar(&flags.reviewerModel, "reviewer-model", "", "Reviewer model (default: "+reviewer.DefaultCodexModel+")")
 	cmd.Flags().StringVar(&flags.dir, "dir", "", "Working directory (default: current)")
 	cmd.Flags().Float64Var(&flags.budget, "budget", 100.0, "Max USD for builder session")
 	cmd.Flags().IntVar(&flags.timeout, "timeout", 3600, "Max seconds")
