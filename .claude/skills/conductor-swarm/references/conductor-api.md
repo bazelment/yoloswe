@@ -8,7 +8,7 @@ Use `scripts/api.py` from the skill directory. It builds API payloads, follows l
 
 ```bash
 python3 scripts/api.py projects
-python3 scripts/api.py workspaces --project-id PROJECT_ID
+python3 scripts/api.py find-workspaces --name lane-name --repo-url REPOSITORY_URL
 python3 scripts/api.py create-workspace --project-id PROJECT_ID --branch main \
   --name lane-name --agent codex --model MODEL_ID --brief-file /path/to/brief.txt
 python3 scripts/api.py sessions --workspace-id WORKSPACE_ID
@@ -22,7 +22,7 @@ Resolve a project from the complete `projects` result using its repository ident
 
 `create-session` makes a fresh agent chat in the existing workspace and sends its phase brief in the same request. `send` handles follow-up messages: it prints a UUID before sending, so reuse `--message-id` with that UUID if the request outcome is uncertain. Record the returned message ID. `observe-session` combines session status (`idle`, `working`, or `error`) with all new transcript entries and `lastMessageId`, following pagination internally. Advance the ledger cursor only after processing the returned messages. Preserve each session's cursor separately.
 
-If workspace or session creation returns an uncertain result, do not immediately repeat the POST: `workspaces --project-id` and `sessions --workspace-id` let you reconcile by the recorded lane name and time first. These list commands also follow pagination. If a creation response has no `initialMessage`, inspect the session transcript before sending the brief separately.
+If workspace or session creation returns an uncertain result, do not immediately repeat the POST. Use `find-workspaces --name ... --repo-url ...` for a server-filtered exact workspace match, then `sessions --workspace-id` to reconcile the chat. Both follow pagination. Listing every workspace in a large project can be slow. If a creation response has no `initialMessage`, inspect the session transcript before sending the brief separately.
 
 Use `workspace-status` for machine lifecycle (`initializing`, `ready`, `sleeping`, `archived`, and errors) and `workspace` for its deep link and current identity. A machine that is initializing or sleeping is not an agent failure. A session can remain `idle` while its first message is queued, so seek a reply or observe a `working -> idle` transition before judging completion. Treat an empty or failed API response as unknown, not proof of absence.
 

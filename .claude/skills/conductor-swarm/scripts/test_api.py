@@ -94,6 +94,21 @@ class ConductorClientTests(unittest.TestCase):
         self.assertEqual(observed["transcript"]["lastMessageId"], "m2")
         self.assertEqual(len(opener.calls), 4)
 
+    def test_find_workspaces_uses_server_filters_and_exact_match(self):
+        opener = FakeOpener({
+            "data": [
+                {"id": "w1", "name": "lane-a", "repoUrl": "https://example.com/repo"},
+                {"id": "w2", "name": "lane-a-old", "repoUrl": "https://example.com/repo"},
+            ],
+            "offset": 0, "hasMore": False,
+        })
+        client = api.ConductorClient("secret", opener=opener)
+        matches = client.find_workspaces("lane-a", "https://example.com/repo.git")
+        self.assertEqual([item["id"] for item in matches], ["w1"])
+        query = parse_qs(urlsplit(opener.calls[0].full_url).query)
+        self.assertEqual(query["name"], ["lane-a"])
+        self.assertEqual(query["repo"], ["https://example.com/repo.git"])
+
     def test_empty_pagination_and_response_are_unknown(self):
         client = api.ConductorClient("secret", opener=FakeOpener(
             {"data": [], "offset": 0, "hasMore": True}))

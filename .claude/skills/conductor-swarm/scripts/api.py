@@ -79,11 +79,14 @@ class ConductorClient:
             raise ConductorError("Conductor returned an empty page with hasMore=true")
         return data
 
-    def _paginated(self, path):
+    def _paginated(self, path, filters=None):
         items = []
         offset = 0
         while True:
-            page = self._request("GET", path, params={"limit": 100, "offset": offset})
+            params = {"limit": 100, "offset": offset}
+            if filters:
+                params.update(filters)
+            page = self._request("GET", path, params=params)
             data = self._page(page)
             if page.get("offset") != offset:
                 raise ConductorError("Conductor returned an unexpected list offset")
@@ -97,6 +100,12 @@ class ConductorClient:
 
     def workspaces(self, project_id):
         return self._paginated(f"/projects/{self._id(project_id)}/workspaces")
+
+    def find_workspaces(self, name, repo_url):
+        matches = self._paginated("/workspaces", {"name": name, "repo": repo_url})
+        canonical_repo = repo_url.rstrip("/").removesuffix(".git")
+        return [item for item in matches if item.get("name") == name and
+                (item.get("repoUrl") or "").rstrip("/").removesuffix(".git") == canonical_repo]
 
     def sessions(self, workspace_id):
         return self._paginated(f"/workspaces/{self._id(workspace_id)}/sessions")
@@ -211,6 +220,9 @@ def main():
     commands.add_parser("projects")
     workspaces = commands.add_parser("workspaces")
     workspaces.add_argument("--project-id", required=True)
+    find = commands.add_parser("find-workspaces")
+    find.add_argument("--name", required=True)
+    find.add_argument("--repo-url", required=True)
     sessions = commands.add_parser("sessions")
     sessions.add_argument("--workspace-id", required=True)
 
@@ -254,6 +266,8 @@ def main():
             result = {"data": client.projects()}
         elif args.command == "workspaces":
             result = {"data": client.workspaces(args.project_id)}
+        elif args.command == "find-workspaces":
+            result = {"data": client.find_workspaces(args.name, args.repo_url)}
         elif args.command == "sessions":
             result = {"data": client.sessions(args.workspace_id)}
         elif args.command == "create-workspace":

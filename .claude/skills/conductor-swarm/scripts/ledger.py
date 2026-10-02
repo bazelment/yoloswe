@@ -81,7 +81,7 @@ def run(args):
                 "status": "planned", "workspace_id": "", "deep_link": "",
                 "sessions": {}, "cursors": {}, "observed_working": {},
                 "artifact_url": "", "verified_sha": "", "reviewed_sha": "",
-                "verification": "", "initial_message_id": "", "notes": [],
+                "verification": "", "initial_message_ids": {}, "notes": [],
             }
             save(args.run, state)
             return
@@ -99,8 +99,7 @@ def run(args):
                                   ("artifact_url", "artifact_url"),
                                   ("verified_sha", "verified_sha"),
                                   ("reviewed_sha", "reviewed_sha"),
-                                  ("verification", "verification"),
-                                  ("initial_message_id", "initial_message_id")):
+                                  ("verification", "verification")):
                 value = getattr(args, option)
                 if value is not None:
                     item[field] = value
@@ -111,12 +110,15 @@ def run(args):
                     sessions.append(args.session_id)
             sessions = item["sessions"].get(current, [])
             active_session = sessions[-1] if sessions else ""
-            if (args.cursor is not None or args.observed_working) and not active_session:
-                raise ValueError("record a session before updating its cursor or working state")
+            if (args.cursor is not None or args.observed_working or
+                    args.initial_message_id is not None) and not active_session:
+                raise ValueError("record a session before updating its message state")
             if args.cursor is not None:
                 item["cursors"][active_session] = args.cursor
             if args.observed_working:
                 item["observed_working"][active_session] = True
+            if args.initial_message_id is not None:
+                item.setdefault("initial_message_ids", {})[active_session] = args.initial_message_id
             if args.note:
                 item["notes"].append(args.note)
             save(args.run, state)
