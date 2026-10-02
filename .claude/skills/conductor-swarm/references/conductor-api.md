@@ -2,7 +2,7 @@
 
 Use the [Conductor API documentation](https://www.conductor.build/docs/api) and its [OpenAPI schema](https://api.conductor.build/v0/openapi.json) as the current contract. The API is beta; refresh the schema when a request shape or model ID is uncertain. This reference was checked against the schema on 2026-10-02.
 
-The API base is `https://api.conductor.build/v0`. Require `CONDUCTOR_API_KEY` and authenticate with `Authorization: Bearer $CONDUCTOR_API_KEY`. If it is absent, ask the user to create a key at [Conductor API keys](https://app.conductor.build/home/api-keys) and make it available through their environment or secret store. Never put the key in prompts, output, a run ledger, or a checked-in file.
+The API base is `https://api.conductor.build/v0`. Require `CONDUCTOR_API_TOKEN` and authenticate with `Authorization: Bearer $CONDUCTOR_API_TOKEN`. If it is absent, ask the user to create a key at [Conductor API keys](https://app.conductor.build/home/api-keys) and make it available through their environment or secret store. Never put the key in prompts, output, a run ledger, or a checked-in file.
 
 Use `scripts/api.py` from the skill directory. It builds API payloads, follows list pagination, and prints JSON results or an error without printing the credential:
 

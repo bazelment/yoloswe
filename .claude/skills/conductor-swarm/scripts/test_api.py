@@ -122,9 +122,9 @@ class ConductorClientTests(unittest.TestCase):
         with self.assertRaisesRegex(api.ConductorError, "offset"):
             client.projects()
 
-    def test_api_key_requirement_and_error_redaction(self):
-        with patch.dict(os.environ, {"CONDUCTOR_API_TOKEN": "wrong-token"}, clear=True):
-            with self.assertRaisesRegex(api.ConductorError, "CONDUCTOR_API_KEY"):
+    def test_api_token_requirement_and_error_redaction(self):
+        with patch.dict(os.environ, {"CONDUCTOR_API_KEY": "wrong-token"}, clear=True):
+            with self.assertRaisesRegex(api.ConductorError, "CONDUCTOR_API_TOKEN"):
                 api.ConductorClient()
         error = HTTPError("https://example", 400, "bad request", {},
                           io.BytesIO(b'{"userMessage":"invalid model"}'))
