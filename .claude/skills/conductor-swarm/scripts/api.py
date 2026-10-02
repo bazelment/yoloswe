@@ -110,22 +110,24 @@ class ConductorClient:
     def sessions(self, workspace_id):
         return self._paginated(f"/workspaces/{self._id(workspace_id)}/sessions")
 
+    @staticmethod
+    def _agent_body(name, agent, model, brief, effort, kind):
+        if not brief.strip():
+            raise ValueError(f"{kind} brief is empty")
+        body = {"name": name, "agent": agent, "model": model, "message": brief}
+        if effort:
+            body["effort"] = effort
+        return body
+
     def create_workspace(self, *, project_id=None, repository_url=None, branch, name,
                          agent, model, brief, effort=None):
         if bool(project_id) == bool(repository_url):
             raise ValueError("provide exactly one of project_id or repository_url")
-        if not brief.strip():
-            raise ValueError("workspace brief is empty")
         body = {
             "projectId" if project_id else "repositoryUrl": project_id or repository_url,
             "branch": branch,
-            "name": name,
-            "agent": agent,
-            "model": model,
-            "message": brief,
+            **self._agent_body(name, agent, model, brief, effort, "workspace"),
         }
-        if effort:
-            body["effort"] = effort
         result = self._request("POST", "/workspaces", body=body)
         for field in ("workspaceId", "sessionId", "deepLink"):
             if not result.get(field):
@@ -133,17 +135,10 @@ class ConductorClient:
         return result
 
     def create_session(self, *, workspace_id, name, agent, model, brief, effort=None):
-        if not brief.strip():
-            raise ValueError("session brief is empty")
         body = {
             "workspaceId": workspace_id,
-            "name": name,
-            "agent": agent,
-            "model": model,
-            "message": brief,
+            **self._agent_body(name, agent, model, brief, effort, "session"),
         }
-        if effort:
-            body["effort"] = effort
         result = self._request("POST", "/sessions", body=body)
         if not result.get("id"):
             raise ConductorError("session creation response lacks id; reconcile before retrying")

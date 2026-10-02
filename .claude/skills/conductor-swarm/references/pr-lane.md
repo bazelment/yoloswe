@@ -1,23 +1,23 @@
 # Default PR lane
 
-Use only when the invocation supplies no lifecycle. Its models, tools, skips, approvals, and authority boundaries take precedence.
+Use this lifecycle when the invocation supplies none. Use its model for each phase without an explicit model override. The invocation's tools, skips, approvals, and authority boundaries take precedence. Resolve the current Conductor API model IDs before dispatch.
 
-| Phase | Remote session | Exit evidence |
-|---|---|---|
-| `swe` | Initial session in a new workspace | Scoped committed change and requested proof; reachable branch or PR if authorized. |
-| `clean` | Fresh session in the same workspace | Simplified lane diff, committed, with new SHA and status. |
-| `review` | Fresh session in the same workspace | Review against the lane's fork commit and current HEAD, with findings or a clear verdict. |
-| `integrate` | Orchestrator, unless assigned otherwise | Authorized PR, merge, or handoff gate satisfied and verified. |
+| Phase | Session default |
+|---|---|
+| `swe` | Claude Code, Sonnet 5.5; initial session in a new workspace |
+| `clean` | Claude Code, Sonnet 5.5; fresh session in the same workspace; run `/simplify` on the current commit |
+| `review` | Claude Code, Opus 5.5; fresh session in the same workspace; run `/review` |
+| `integrate` | Orchestrator, unless assigned otherwise |
 
 The same workspace preserves branch and working files across phase sessions. A fresh session has no guaranteed conversational context, but it can inspect its checkout. Brief from the current artifact, not a narrative of earlier sessions. For example:
 
 | Phase | Concise brief shape |
 |---|---|
-| `swe` | "Change the root README Nx alias to use the installed workspace binary. Commit the README-only diff and report SHA and checks." |
-| `clean` | "Inspect `FORK_SHA..HEAD` for unnecessary changes. Commit only if you simplify it; report HEAD and status." |
-| `review` | "Review `FORK_SHA..HEAD` for correctness and scope. Report findings or clear, with reviewed HEAD." |
+| `swe` | "Change the root README Nx alias to `pnpm exec nx`." |
+| `clean` | "`/simplify`" |
+| `review` | "`/review`" |
 
-Add a pinned SHA, cross-lane interface, or authority boundary only when it changes the decision. Do not repeat the agent's identity, tell it to read repository instructions, or prescribe routine validation commands.
+Start the actual clean and review briefs with `/simplify` and `/review` so Claude Code invokes those commands. Add a pinned SHA, cross-lane interface, or authority boundary only when it changes the decision. Do not repeat the agent's identity, tell it to read repository instructions, or prescribe routine validation commands.
 
 A major finding goes back to `swe` with the finding recorded. If the task changes scope or ownership, create a new lane. Recheck the current remote head after review; a verdict on an older SHA is stale. After integrating parallel lanes, test affected modules together to prove their contracts compose.
 
