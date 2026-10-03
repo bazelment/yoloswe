@@ -21,10 +21,10 @@ class ConductorError(Exception):
 
 class ConductorClient:
     def __init__(self, api_key=None, *, base_url=API_BASE, opener=urlopen):
-        self.api_key = api_key or os.environ.get("CONDUCTOR_API_KEY")
+        self.api_key = api_key or os.environ.get("CONDUCTOR_API_TOKEN")
         if not self.api_key:
             raise ConductorError(
-                f"set CONDUCTOR_API_KEY; create one at {API_KEYS_URL} if needed"
+                f"set CONDUCTOR_API_TOKEN; create one at {API_KEYS_URL} if needed"
             )
         self.base_url = base_url.rstrip("/")
         self.opener = opener
