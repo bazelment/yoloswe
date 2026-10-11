@@ -58,6 +58,19 @@ sw_preflight() {
   # The orchestrator's own session id, read from the parent CLI's argv.
   SELF="${SELF:-$(ps -o args= -p "$(ps -o ppid= -p $$)" 2>/dev/null |
         sed -n "s/.*session-id '\([^']*\)'.*/\1/p")}"
+  if [ -z "${SELF:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
+    local w; w=$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}' 2>/dev/null || true)
+    if [ -n "$w" ]; then
+      SELF=$(sw_sessions | /usr/bin/env python3 -c '
+import json,sys
+w=sys.argv[1]
+try: d=json.load(sys.stdin)
+except: sys.exit(0)
+for r in (d.get("sessions",d) if isinstance(d,dict) else d) or []:
+  if r.get("tmux_target")==w: print(r.get("id","")); break
+' "$w" 2>/dev/null || true)
+    fi
+  fi
   export SELF
 
   TARGET="${TARGET:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null)}"
@@ -139,7 +152,7 @@ sw_spawn() {
   local branch="${5:-}" worktree="${6:-}" effort="${7:-}"
   : "${RUN:?run sw_preflight first}"
   [ -r "$brief" ] || { echo "sw_spawn: brief not readable: $brief" >&2; return 1; }
-  local repo; repo="$(basename "$(git rev-parse --show-toplevel 2>/dev/null)")"
+  local repo; repo="${SW_REPO:-$(basename "$(realpath "$(git rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null)")}"
   [ -n "$repo" ] || { echo "sw_spawn: not in a git repo" >&2; return 1; }
 
   # A phase spec of name:model:effort lands in state.json. Callers that only
@@ -194,7 +207,11 @@ for p in state.get("config", {}).get("phases", []):
   [ -n "$sid" ] || { echo "sw_spawn: could not parse a session id from:" >&2
                      printf '%s\n' "$out" >&2; return 1; }
 
-  [ -z "$worktree" ] && worktree="$(sw_session_field "$sid" worktree_name)"
+  if [ -z "$worktree" ]; then
+    local wt_name; wt_name="$(sw_session_field "$sid" worktree_name)"
+    worktree="$(git worktree list --porcelain | awk -v n="$wt_name" '$1=="worktree" && $2 ~ ("/" n "$") {print $2; exit}')"
+    [ -z "$worktree" ] && worktree="$(realpath "$wt_name" 2>/dev/null || echo "$wt_name")"
+  fi
   local wt_abs; wt_abs="$(realpath "$worktree" 2>/dev/null || echo "$worktree")"
 
   # Record in the SAME call as the spawn -- ledger row, spawn.json, and the brief.

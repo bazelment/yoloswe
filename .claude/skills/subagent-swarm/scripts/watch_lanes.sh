@@ -43,6 +43,8 @@ before=$(ls "$RUN"/*.done "$RUN"/*.needs-swe 2>/dev/null | sort)
 declare -A LASTC LASTD STALL
 
 while IFS=$'\t' read -r id _phase _branch wt wid; do
+  case "$_phase" in verify|merge) continue ;; esac
+  [ "$id" = "replay" ] && continue
   LASTC[$id]=$(git -C "$wt" rev-parse HEAD 2>/dev/null)
   LASTD[$id]=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l)
   STALL[$id]=0
@@ -73,6 +75,8 @@ for _ in $(seq 1 "$rounds"); do
   fi
 
   while IFS=$'\t' read -r id _phase _branch wt wid; do
+    case "$_phase" in verify|merge) continue ;; esac
+    [ "$id" = "replay" ] && continue
     # A dead window is a decision now, not in STALL_MIN minutes. Nothing pushes
     # this: a lane that dies before writing .done has no other way to say so,
     # and its worktree can look perfectly static while it is gone.

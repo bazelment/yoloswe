@@ -106,6 +106,26 @@ def identify_pr(pr_number: int | None = None) -> dict[str, Any]:
         except json.JSONDecodeError:
             pr_data = None
 
+    if not pr_data or not pr_data.get("pr_number"):
+        # Fallback to REST API if gh pr view (GraphQL) failed (e.g. secondary rate limit)
+        try:
+            if pr_number is not None:
+                rest_res = run([
+                    "gh", "api", f"repos/{owner_repo}/pulls/{pr_number}",
+                    "--jq", "{pr_number: .number, title: .title, url: .html_url, body: .body, base: .base.ref, head: .head.ref, head_sha: .head.sha}"
+                ], check=False)
+                if rest_res.returncode == 0 and rest_res.stdout.strip():
+                    pr_data = json.loads(rest_res.stdout)
+            elif branch:
+                rest_res = run([
+                    "gh", "api", f"repos/{owner_repo}/pulls?head={owner}:{branch}",
+                    "--jq", ".[0] | {pr_number: .number, title: .title, url: .html_url, body: .body, base: .base.ref, head: .head.ref, head_sha: .head.sha}"
+                ], check=False)
+                if rest_res.returncode == 0 and rest_res.stdout.strip() and rest_res.stdout.strip() != "null":
+                    pr_data = json.loads(rest_res.stdout)
+        except Exception:
+            pass
+
     if pr_data and pr_data.get("pr_number"):
         state_dir, state_file = state_paths(pr_data["pr_number"])
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -143,14 +163,28 @@ def identify_pr(pr_number: int | None = None) -> dict[str, Any]:
 
 
 def _owner_repo() -> tuple[str, str, str]:
-    """Return ``(owner, repo, 'owner/repo')`` via ``gh repo view``."""
+    """Return ``(owner, repo, 'owner/repo')`` via ``gh repo view`` with git remote fallback."""
     res = run(
         ["gh", "repo", "view", "--json", "owner,name", "--jq", '"\\(.owner.login)/\\(.name)"'],
-        check=True,
+        check=False,
     )
-    owner_repo = res.stdout.strip().strip('"')
-    owner, repo = owner_repo.split("/", 1)
-    return owner, repo, owner_repo
+    if res.returncode == 0 and res.stdout.strip():
+        owner_repo = res.stdout.strip().strip('"')
+        if "/" in owner_repo:
+            owner, repo = owner_repo.split("/", 1)
+            return owner, repo, owner_repo
+
+    # Fallback to git remote url when gh repo view (GraphQL) fails
+    try:
+        remote = run(["git", "remote", "get-url", "origin"], check=True).stdout.strip()
+        m = re.search(r"[:/]([^/]+)/([^/]+?)(?:\.git)?$", remote)
+        if m:
+            owner, repo = m.group(1), m.group(2)
+            return owner, repo, f"{owner}/{repo}"
+    except Exception:
+        pass
+
+    raise RuntimeError(f"failed to determine owner/repo: {res.stderr}")
 
 
 # ---------------------------------------------------------------------------
