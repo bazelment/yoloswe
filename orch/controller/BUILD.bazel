@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "controller",
+    srcs = ["controller.go"],
+    importpath = "github.com/bazelment/yoloswe/orch/controller",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//orch/clock",
+        "//orch/lane",
+        "//orch/recipe",
+        "//orch/store",
+    ],
+)
+
+go_test(
+    name = "controller_test",
+    srcs = ["controller_test.go"],
+    deps = [
+        ":controller",
+        "//orch/clock",
+        "//orch/lane",
+        "//orch/recipe",
+        "//orch/store",
+    ],
+)
