@@ -1,0 +1,235 @@
+{
+  "exchanges": [
+    {
+      "request": {
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 4096,
+        "messages": []
+      },
+      "response": {
+        "id": "msg_full_1",
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Inspecting lane reports, PR metadata, and CI status before taking action."
+            },
+            {
+              "type": "tool_use",
+              "id": "call_read_rep",
+              "name": "read.lane_report",
+              "input": {
+                "lane_id": "lane-stalled",
+                "max_bytes": 256,
+                "reason": "check latest report before retry"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "call_read_pr",
+              "name": "read.pr",
+              "input": {
+                "lane_id": "lane-active",
+                "max_bytes": 256,
+                "reason": "inspect PR approval state"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "call_read_ci",
+              "name": "read.ci",
+              "input": {
+                "lane_id": "lane-active",
+                "max_bytes": 256,
+                "reason": "inspect CI check failure details"
+              }
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 2400,
+          "output_tokens": 140
+        }
+      }
+    },
+    {
+      "request": {
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 4096,
+        "messages": []
+      },
+      "response": {
+        "id": "msg_full_2",
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Updating backlog and managing lanes."
+            },
+            {
+              "type": "tool_use",
+              "id": "call_b_add",
+              "name": "backlog.add",
+              "input": {
+                "id": "item-new",
+                "title": "Add replay evaluation harness",
+                "description": "Offline replay runner for Gate 2",
+                "acceptance": "bazel test passes",
+                "priority": "p1",
+                "depends_on": ["item-done"],
+                "tags": ["eval"],
+                "reason": "needed for gate 2 validation"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "call_b_upd",
+              "name": "backlog.update",
+              "input": {
+                "id": "item-open",
+                "priority": "p0",
+                "acceptance": "lint and unit tests pass",
+                "reason": "owner prioritized dispatcher work"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "call_b_reord",
+              "name": "backlog.reorder",
+              "input": {
+                "item_ids": ["item-open", "item-new", "item-drop"],
+                "reason": "put item-open ahead of item-new"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "call_b_close",
+              "name": "backlog.close",
+              "input": {
+                "id": "item-drop",
+                "status": "dropped",
+                "reason": "superseded by item-new"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "call_l_spawn",
+              "name": "lane.spawn",
+              "input": {
+                "item_id": "item-open",
+                "lane_id": "lane-open",
+                "brief": "Implement item-open with full unit test coverage.",
+                "recipe_override": "no code review, skip clean",
+                "branch": "swarm/lane-open",
+                "base_branch": "main",
+                "reason": "slot available for p0 item"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "call_l_steer",
+              "name": "lane.steer",
+              "input": {
+                "lane_id": "lane-active",
+                "note": "Fix the failing lint check in controller.go.",
+                "reason": "CI reported lint failure"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "call_l_retry",
+              "name": "lane.retry",
+              "input": {
+                "lane_id": "lane-stalled",
+                "phase": "swe",
+                "round": 2,
+                "note": "Retry swe on round 2.",
+                "reason": "stalled in round 1"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "call_l_stop",
+              "name": "lane.stop",
+              "input": {
+                "lane_id": "lane-doomed",
+                "reason": "obsolete work stream"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "call_owner_ask",
+              "name": "owner.ask",
+              "input": {
+                "id": "ask-schema",
+                "lane_id": "lane-active",
+                "question": "Should we drop legacy v0 table support?",
+                "options": ["keep-v0", "drop-v0"],
+                "default": "keep-v0",
+                "deadline": "30m",
+                "steer_note": "Keep v0 support for backwards compatibility.",
+                "reason": "breaking schema decision requires owner input"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "call_dir_note",
+              "name": "directive.note",
+              "input": {
+                "id": "note-flaky-ci",
+                "fact": "Bazel remote cache was warmed at 10:00 UTC.",
+                "expiry": "2h",
+                "scope": "lane-active",
+                "reason": "record operational fact for future ticks"
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "call_plan_req",
+              "name": "planner.request",
+              "input": {
+                "reason": "Milestone 1 items spawned; reconcile phase 2 plan",
+                "plan_ref": "post:5aaec193"
+              }
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 3100,
+          "output_tokens": 420
+        }
+      }
+    },
+    {
+      "request": {
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 4096,
+        "messages": []
+      },
+      "response": {
+        "id": "msg_full_3",
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "end_turn",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Completed all backlog, lane, owner ask, directive, and planner actions."
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 3800,
+          "output_tokens": 35
+        }
+      }
+    }
+  ]
+}
