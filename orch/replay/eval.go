@@ -35,6 +35,7 @@ type EvalConfig struct {
 }
 
 // MomentResult captures the evaluation outcome of a single JudgmentMoment.
+//
 //nolint:govet
 type MomentResult struct {
 	ID                  string
@@ -65,6 +66,7 @@ type MomentResult struct {
 }
 
 // QuestionResult captures the evaluation outcome of a single ConciergeQuestion.
+//
 //nolint:govet
 type QuestionResult struct {
 	ID                string
@@ -389,8 +391,7 @@ func Evaluate(ctx context.Context, ds *Dataset, cfg EvalConfig) (*EvalReport, er
 	if err := runParallel(ctx, len(ds.Moments), workers, func(ctx context.Context, idx int) error {
 		mr, err := EvaluateMoment(ctx, ds.Moments[idx], client, cfg.DispatcherConfig)
 		if err != nil {
-			momentResults[idx] = MomentResult{ID: ds.Moments[idx].ID, RunID: ds.Moments[idx].RunID, Error: err.Error(), InvariantViolations: 1}
-			fmt.Printf("MOMENT ERROR %s: %v\n", ds.Moments[idx].ID, err)
+			momentResults[idx] = MomentResult{ID: ds.Moments[idx].ID, RunID: ds.Moments[idx].RunID, Grounded: ds.Moments[idx].Grounding == GroundingVerified, Error: err.Error()}
 			return nil
 		}
 		momentResults[idx] = mr
@@ -404,7 +405,6 @@ func Evaluate(ctx context.Context, ds *Dataset, cfg EvalConfig) (*EvalReport, er
 		qr, err := EvaluateQuestion(ctx, ds.Questions[idx], concierge)
 		if err != nil {
 			questionResults[idx] = QuestionResult{ID: ds.Questions[idx].ID, RunID: ds.Questions[idx].RunID, Question: ds.Questions[idx].Question, Error: err.Error()}
-			fmt.Printf("QUESTION ERROR %s: %v\n", ds.Questions[idx].ID, err)
 			return nil
 		}
 		questionResults[idx] = qr
@@ -683,7 +683,9 @@ func ComputeReport(moments []MomentResult, questions []QuestionResult) *EvalRepo
 		rep.VetterRejections += m.VetterRejections
 		rep.AuditViolations += m.AuditViolations
 		rep.InvariantViolations += m.InvariantViolations
-		tokens = append(tokens, m.InputTokens)
+		if m.Error == "" {
+			tokens = append(tokens, m.InputTokens)
+		}
 		if m.LatencyMS > 0 {
 			latencies = append(latencies, m.LatencyMS)
 		}

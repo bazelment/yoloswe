@@ -18,6 +18,7 @@ import (
 )
 
 // OpenAIClient implements ModelClient using the OpenAI Responses API.
+//
 //nolint:govet
 type OpenAIClient struct {
 	clock             clock.Clock
@@ -254,6 +255,7 @@ func readResponsesStream(r io.ReadCloser, idle time.Duration) ([]byte, error) {
 	results := make(chan result, 1)
 	go func() {
 		s := bufio.NewScanner(r)
+		s.Buffer(make([]byte, 64*1024), 16*1024*1024)
 		for s.Scan() {
 			line := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s.Text()), "data:"))
 			if line == "" || line == "[DONE]" {
@@ -337,7 +339,13 @@ func decodeResponses(data []byte, requestedModel string) (*Response, error) {
 	}
 	var raw struct {
 		ID, Model, Status string
-		Output            []struct {
+		Error             *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		IncompleteDetails *struct {
+			Reason string `json:"reason"`
+		} `json:"incomplete_details"`
+		Output []struct {
 			Type      string `json:"type"`
 			ID        string `json:"id"`
 			CallID    string `json:"call_id"`
@@ -356,6 +364,19 @@ func decodeResponses(data []byte, requestedModel string) (*Response, error) {
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("orch/model: decode OpenAI response: %w", err)
+	}
+	if raw.Status == "failed" {
+		if raw.Error != nil && raw.Error.Message != "" {
+			return nil, fmt.Errorf("orch/model: OpenAI response failed: %s", raw.Error.Message)
+		}
+		return nil, fmt.Errorf("orch/model: OpenAI response failed")
+	}
+	if raw.Status == "incomplete" {
+		reason := "incomplete"
+		if raw.IncompleteDetails != nil && raw.IncompleteDetails.Reason != "" {
+			reason = raw.IncompleteDetails.Reason
+		}
+		return nil, fmt.Errorf("orch/model: OpenAI response incomplete: %s", reason)
 	}
 	var blocks []ContentBlock
 	stop := StopReasonEndTurn
