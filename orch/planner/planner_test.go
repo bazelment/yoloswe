@@ -59,7 +59,6 @@ func seedPlannerStore(t *testing.T) (*clock.FakeClock, *store.MemoryStore, *lane
 		t.Fatalf("Add directive: %v", err)
 	}
 
-	// Existing backlog items.
 	for _, it := range []store.BacklogItem{
 		{
 			ID:          "item-alpha",
@@ -95,7 +94,6 @@ func seedPlannerStore(t *testing.T) (*clock.FakeClock, *store.MemoryStore, *lane
 		}
 	}
 
-	// Active lanes.
 	for _, ln := range []lane.Lane{
 		{
 			ID:            "lane-alpha",
@@ -166,7 +164,6 @@ func TestRecorded_PlanImportFromFile(t *testing.T) {
 		t.Fatalf("TurnCount = %d, want 2", res.TurnCount)
 	}
 
-	// 1. Fresh planner thread was created and completed.
 	th, err := st.Threads().GetThread(ctx, res.ThreadID)
 	if err != nil {
 		t.Fatalf("GetThread: %v", err)
@@ -182,7 +179,6 @@ func TestRecorded_PlanImportFromFile(t *testing.T) {
 		t.Fatalf("unexpected turns: %+v", turns)
 	}
 
-	// 2. Run objective and plan reference were updated in the Store.
 	run, err := st.Runs().Get(ctx, "run-1")
 	if err != nil {
 		t.Fatalf("Get run: %v", err)
@@ -198,7 +194,6 @@ func TestRecorded_PlanImportFromFile(t *testing.T) {
 		t.Fatalf("expected ObjectiveUpdated=true")
 	}
 
-	// 3. Backlog diff was applied immediately without waiting for approval.
 	if !slices.Equal(res.Applied.AddedItems, []string{"item-concierge", "item-planner"}) {
 		t.Fatalf("AddedItems = %v, want [item-concierge item-planner]", res.Applied.AddedItems)
 	}
@@ -244,7 +239,6 @@ func TestRecorded_PlanImportFromFile(t *testing.T) {
 		t.Fatalf("item-legacy-poller status = %q, want %q", droppedItem.Status, store.BacklogDropped)
 	}
 
-	// 4. Lanes to stop and re-brief were executed against the Driver and Store.
 	if !slices.Equal(res.Applied.StoppedLanes, []string{"lane-legacy"}) {
 		t.Fatalf("StoppedLanes = %v, want [lane-legacy]", res.Applied.StoppedLanes)
 	}
@@ -270,7 +264,6 @@ func TestRecorded_PlanImportFromFile(t *testing.T) {
 		t.Fatalf("drv.Steers[0].Message = %q", drv.Steers[0].Message)
 	}
 
-	// 5. Unmappable and conflicting points triggered owner.ask with default and deadline.
 	if len(res.Applied.OwnerAsks) != 2 {
 		t.Fatalf("len(OwnerAsks) = %d, want 2: %+v", len(res.Applied.OwnerAsks), res.Applied.OwnerAsks)
 	}
@@ -293,7 +286,6 @@ func TestRecorded_PlanImportFromFile(t *testing.T) {
 		t.Fatalf("unexpected unmappable ask: %+v", res.Applied.OwnerAsks[1])
 	}
 
-	// 6. One-message summary describes the reconciliation.
 	for _, substr := range []string{
 		"added 2 backlog item(s) [item-concierge, item-planner]",
 		"updated 1 backlog item(s) [item-beta]",
@@ -307,7 +299,6 @@ func TestRecorded_PlanImportFromFile(t *testing.T) {
 		}
 	}
 
-	// 7. Decisions were logged with planner actor.
 	if len(res.Decisions) == 0 {
 		t.Fatalf("expected planner decisions to be logged")
 	}
@@ -405,7 +396,6 @@ func TestRecorded_RecipeEdit(t *testing.T) {
 		t.Fatalf("unexpected EchoTable:\n%s", res.RecipeResult.EchoTable)
 	}
 
-	// Fresh planner thread created and turn completed.
 	th, err := st.Threads().GetThread(ctx, res.ThreadID)
 	if err != nil {
 		t.Fatalf("GetThread: %v", err)
@@ -414,7 +404,6 @@ func TestRecorded_RecipeEdit(t *testing.T) {
 		t.Fatalf("th.Role = %q, want planner", th.Role)
 	}
 
-	// New recipe v2 saved in RecipeStore while v1 remains intact for in-flight lanes.
 	storedV2, err := st.Recipes().Get(ctx, "run-1", "default", 2)
 	if err != nil {
 		t.Fatalf("Get default@v2: %v", err)
@@ -443,7 +432,6 @@ func TestRecorded_RecipeEdit(t *testing.T) {
 		t.Fatalf("alphaLane.RecipeVersion = %d, want 1", alphaLane.RecipeVersion)
 	}
 
-	// Decision recorded for recipe.compile.
 	if len(res.Decisions) != 1 || res.Decisions[0].Tool != planner.ToolRecipeCompile {
 		t.Fatalf("Decisions = %+v, want 1 recipe.compile decision", res.Decisions)
 	}
@@ -631,6 +619,5 @@ func TestHandleSignal_ReplanOnControllerSignal(t *testing.T) {
 		t.Fatalf("verifyItem = %+v", verifyItem)
 	}
 
-	// Ensure controller.OwnerAsk compatibility is exercised.
 	var _ []controller.OwnerAsk = res.Applied.OwnerAsks
 }

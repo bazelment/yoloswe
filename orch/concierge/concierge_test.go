@@ -148,14 +148,12 @@ func TestInnerLoop_StatusQuestionAnsweredFromSeededMemoryStore(t *testing.T) {
 		t.Fatalf("expected 0 decision writes on read-only status question, got %+v", res.Decisions)
 	}
 
-	// Verify Store facts are cited in the answer.
 	for _, wantFact := range []string{"run-1", "lane-alpha", "item-alpha", "item-beta", "#42", "abc12345"} {
 		if !slices.Contains(res.CitedFacts, wantFact) {
 			t.Fatalf("CitedFacts = %v, missing %q", res.CitedFacts, wantFact)
 		}
 	}
 
-	// Verify tool output passed to turn 2 contained Store facts.
 	if len(replayClient.Requests) != 2 {
 		t.Fatalf("len(Requests) = %d, want 2", len(replayClient.Requests))
 	}
@@ -170,7 +168,6 @@ func TestInnerLoop_StatusQuestionAnsweredFromSeededMemoryStore(t *testing.T) {
 		t.Fatalf("lane.show tool output missing phase report summary:\n%s", toolResMsg.Content[1].Content)
 	}
 
-	// Verify a fresh concierge thread was persisted in ThreadStore.
 	th, err := st.Threads().GetThread(ctx, res.ThreadID)
 	if err != nil {
 		t.Fatalf("GetThread: %v", err)
@@ -179,7 +176,6 @@ func TestInnerLoop_StatusQuestionAnsweredFromSeededMemoryStore(t *testing.T) {
 		t.Fatalf("thread = %+v", th)
 	}
 
-	// Asking a second question via Ask starts a second fresh thread.
 	replayClient.Enqueue(model.Response{
 		ID:         "msg_second_conv",
 		Model:      concierge.DefaultModel,

@@ -438,8 +438,7 @@ func (p *Planner) startFreshThread(ctx context.Context, runID, goal string) (sto
 	return th, turnRec, nil
 }
 
-// DirectiveHandler returns a callback suitable for concierge.Config.OnDirective
-// that triggers the Planner when a plan_import or recipe_edit directive is submitted.
+// DirectiveHandler returns a concierge.DirectiveHandler that triggers the Planner on plan_import and recipe_edit directives.
 func (p *Planner) DirectiveHandler() func(ctx context.Context, runID string, dir store.Directive) (string, error) {
 	return func(ctx context.Context, runID string, dir store.Directive) (string, error) {
 		switch dir.Kind {
@@ -477,8 +476,7 @@ func (p *Planner) CompileOverride(ctx context.Context, base recipe.Recipe, overr
 	return res.Recipe, nil
 }
 
-// HandleDirective triggers a fresh Planner thread for dir (plan_import,
-// recipe_edit, or replan instruction) and marks the directive handled on success.
+// HandleDirective runs a fresh Planner thread for dir and marks it handled on success.
 func (p *Planner) HandleDirective(ctx context.Context, runID string, dir store.Directive) (*Result, error) {
 	if p.store == nil {
 		return nil, errors.New("orch/planner: store is required")
@@ -584,9 +582,7 @@ func (p *Planner) HandleSignal(ctx context.Context, sig Signal) (*Result, error)
 	}
 }
 
-// ImportPlan runs a fresh Planner thread in plan-import mode, reading planRef
-// (file path or Nebula post ID), reconciling it against current Store state,
-// and applying the reconciliation without approval with a one-message summary.
+// ImportPlan reconciles planRef (file path or Nebula post ID) against the Store without approval.
 func (p *Planner) ImportPlan(ctx context.Context, runID, planRef string) (*Result, error) {
 	if strings.TrimSpace(planRef) == "" {
 		return nil, fmt.Errorf("%w: plan_ref is required", store.ErrInvalidArgument)
@@ -594,8 +590,7 @@ func (p *Planner) ImportPlan(ctx context.Context, runID, planRef string) (*Resul
 	return p.reconcile(ctx, runID, ModePlanImport, planRef, "")
 }
 
-// Replan runs a fresh Planner thread to reconcile the run backlog and lanes
-// given reason (and optional current plan reference on the Run).
+// Replan reconciles the run backlog and lanes for the given trigger reason.
 func (p *Planner) Replan(ctx context.Context, runID, reason string) (*Result, error) {
 	return p.reconcile(ctx, runID, ModeReplan, "", reason)
 }
@@ -773,7 +768,6 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 	if reconciled != nil {
 		summary = FormatReconciliationSummary(runID, effectiveRef, *reconciled, applied)
 		if modelText != "" && !strings.Contains(summary, modelText) {
-			// Ensure single-message summary includes both model narrative and structured diff facts.
 			summary = singleLineSummary(modelText + " — " + summary)
 		}
 	}
@@ -977,7 +971,6 @@ func (p *Planner) applyReconciliation(
 		return nil
 	}
 
-	// 1. Update Run objective and plan reference.
 	newObj := strings.TrimSpace(rec.Objective)
 	newPlanRef := cmp.Or(strings.TrimSpace(planRef), run.PlanRef)
 	if (newObj != "" && newObj != run.Objective) || (newPlanRef != "" && newPlanRef != run.PlanRef) {
@@ -995,7 +988,6 @@ func (p *Planner) applyReconciliation(
 		}
 	}
 
-	// 2. Apply backlog additions.
 	for i := range rec.BacklogDiff.Add {
 		add := &rec.BacklogDiff.Add[i]
 		itemID := strings.TrimSpace(add.ID)
@@ -1040,7 +1032,6 @@ func (p *Planner) applyReconciliation(
 		}
 	}
 
-	// 3. Apply backlog updates/reprioritizations.
 	for i := range rec.BacklogDiff.Update {
 		upd := &rec.BacklogDiff.Update[i]
 		itemID := strings.TrimSpace(upd.ID)
@@ -1087,7 +1078,6 @@ func (p *Planner) applyReconciliation(
 		}
 	}
 
-	// 4. Apply backlog drops.
 	droppedSet := make(map[string]bool, len(rec.BacklogDiff.Drop))
 	for _, drop := range rec.BacklogDiff.Drop {
 		itemID := strings.TrimSpace(drop.ID)
@@ -1106,7 +1096,6 @@ func (p *Planner) applyReconciliation(
 		}
 	}
 
-	// 5. Apply backlog reorder if specified.
 	if len(rec.BacklogDiff.Reorder) > 0 {
 		if err := p.store.Backlog().Reorder(ctx, run.ID, rec.BacklogDiff.Reorder, ActorPlanner); err != nil {
 			return applied, decisions, err
@@ -1118,7 +1107,6 @@ func (p *Planner) applyReconciliation(
 		}
 	}
 
-	// 6. Stop lanes superseded by the plan.
 	for _, stopSpec := range rec.LanesToStop {
 		laneID := strings.TrimSpace(stopSpec.LaneID)
 		if laneID == "" {
@@ -1158,7 +1146,6 @@ func (p *Planner) applyReconciliation(
 		}
 	}
 
-	// 7. Re-brief active or blocked lanes.
 	for _, rebriefSpec := range rec.LanesToRebrief {
 		laneID := strings.TrimSpace(rebriefSpec.LaneID)
 		if laneID == "" {

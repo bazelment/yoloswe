@@ -48,13 +48,11 @@ const (
 	KindOrder      = "order"
 )
 
-// ErrUncitedAnswer is returned when RequireCitations is enabled and the model's
-// final answer fails to cite any Store fact or fabricates a non-existent Store ID.
+// ErrUncitedAnswer is returned when the model's final answer fails to cite any
+// Store fact or fabricates a non-existent Store ID.
 var ErrUncitedAnswer = errors.New("orch/concierge: answer does not cite store facts")
 
-// DirectiveHandler is an optional callback invoked synchronously when
-// directive.submit writes a directive (for example, to trigger Planner on
-// plan_import or recipe_edit directives).
+// DirectiveHandler is an optional callback invoked synchronously when directive.submit writes a directive.
 type DirectiveHandler func(ctx context.Context, runID string, dir store.Directive) (string, error)
 
 // Config configures a Concierge instance.
@@ -156,8 +154,7 @@ func isKnownTool(name string) bool {
 	}
 }
 
-// ParseDirectiveKind maps a directive.submit kind string ("rule", "plan_import",
-// "recipe_edit", "order", plus "standing"/"instruction" aliases) to store.DirectiveKind.
+// ParseDirectiveKind maps a directive.submit kind string to store.DirectiveKind.
 func ParseDirectiveKind(raw string) (store.DirectiveKind, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case KindRule, string(store.DirectiveStanding):
@@ -1174,7 +1171,6 @@ func VerifyAnswerCitations(
 		}
 	}
 
-	// Check for fabricated lane-<slug> or item-<slug> tokens when lanes/items exist.
 	for _, tok := range extractPrefixedTokens(trimmed, "lane-") {
 		if !knownLanes[tok] {
 			return cited, fmt.Errorf("%w: answer cites unknown lane %q", ErrUncitedAnswer, tok)

@@ -1,6 +1,5 @@
-// Package planner implements the replanning, plan-import reconciliation, and
-// natural-language recipe editing role for the swarm orchestrator. Each Planner
-// invocation runs in a fresh thread on the Store.
+// Package planner implements replanning, plan-import reconciliation, and
+// natural-language recipe editing in fresh Store threads.
 package planner
 
 // SystemPromptVersion identifies the fixed system prompt revision compiled into the binary.

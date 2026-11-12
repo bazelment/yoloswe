@@ -1,8 +1,5 @@
-// Package concierge implements the owner-facing chat thread role for the swarm
-// orchestrator. Each owner conversation runs on a fresh concierge thread using a
-// cheap model, read-only tools over the Store, and a single write tool
-// (directive.submit) to record typed directives for the Controller, Dispatcher,
-// and Planner.
+// Package concierge implements the owner-facing chat thread role over the Store
+// and the directive.submit write path.
 package concierge
 
 // SystemPromptVersion identifies the fixed system prompt revision compiled into the binary.
