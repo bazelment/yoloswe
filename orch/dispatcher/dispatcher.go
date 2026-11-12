@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +31,10 @@ const (
 	plannerRefPrefix      = "planner_request:"
 )
 
-var _ controller.Judge = (*Dispatcher)(nil)
+var (
+	_ controller.Judge = (*Dispatcher)(nil)
+	_ Advisor          = (*Dispatcher)(nil)
+)
 
 // RecipeCompiler compiles a natural-language recipe override against a base recipe.
 type RecipeCompiler interface {
@@ -62,6 +66,7 @@ type Config struct {
 
 func (c Config) withDefaults() Config {
 	c.Model = cmp.Or(strings.TrimSpace(c.Model), DefaultModel)
+	c.HardBatchModel = cmp.Or(strings.TrimSpace(c.HardBatchModel), DefaultHardBatchModel)
 	c.SystemPrompt = cmp.Or(c.SystemPrompt, SystemPrompt)
 	if len(c.Invariants) == 0 {
 		c.Invariants = DefaultInvariants()
@@ -136,6 +141,38 @@ func (d *Dispatcher) Judge(ctx context.Context, runID string, events []store.Eve
 	return err
 }
 
+// Propose implements Advisor by running one model turn over snapshot and decoding
+// the proposed tool calls into a Proposal without mutating Store state.
+func (d *Dispatcher) Propose(ctx context.Context, snapshot string) (Proposal, error) {
+	if d.client == nil {
+		return Proposal{}, errors.New("orch/dispatcher: model client is required")
+	}
+	resp, err := d.client.CreateMessage(ctx, model.Request{
+		Model:     d.cfg.Model,
+		System:    d.cfg.SystemPrompt,
+		Messages:  []model.Message{model.NewUserMessage(snapshot)},
+		Tools:     d.ToolDefinitions(),
+		MaxTokens: d.cfg.MaxTokens,
+	})
+	if err != nil {
+		return Proposal{}, err
+	}
+	calls := resp.ToolCalls()
+	out := Proposal{
+		Unresolved: strings.TrimSpace(resp.Text()),
+		Actions:    make([]ProposedAction, 0, len(calls)),
+	}
+	for i, tc := range calls {
+		callID := cmp.Or(tc.ID, fmt.Sprintf("act-%d", i+1))
+		act, pErr := ParseAction(callID, tc.Name, tc.Input)
+		if pErr != nil {
+			return out, pErr
+		}
+		out.Actions = append(out.Actions, act)
+	}
+	return out, nil
+}
+
 // LastResult returns the most recent BatchResult produced by Dispatch or Judge.
 func (d *Dispatcher) LastResult() *BatchResult {
 	d.mu.Lock()
@@ -171,7 +208,42 @@ func (d *Dispatcher) nextID(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, d.seq)
 }
 
+func (d *Dispatcher) syncSeq(ctx context.Context, runID, threadID string) {
+	var maxObserved int64
+	if turns, err := d.store.Threads().ListTurns(ctx, threadID); err == nil {
+		maxObserved = max(maxObserved, int64(len(turns)))
+		for i := range turns {
+			maxObserved = max(maxObserved, int64(turns[i].Seq), trailingSeqNumber(turns[i].ID))
+		}
+	}
+	if dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID}); err == nil {
+		maxObserved = max(maxObserved, int64(len(dirs)))
+		for i := range dirs {
+			maxObserved = max(maxObserved, trailingSeqNumber(dirs[i].ID), trailingSeqNumber(dirs[i].Ref))
+		}
+	}
+	d.mu.Lock()
+	if maxObserved > d.seq {
+		d.seq = maxObserved
+	}
+	d.mu.Unlock()
+}
+
+func trailingSeqNumber(id string) int64 {
+	idx := strings.LastIndexByte(id, '-')
+	if idx < 0 || idx+1 >= len(id) {
+		return 0
+	}
+	n, err := strconv.ParseInt(id[idx+1:], 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
 type turnExecState struct {
+	view          *StateView
+	pinnedRecipes map[string]recipe.Recipe
 	turnUsage     map[int]model.Usage
 	turnUsed      map[int]bool
 	threadID      string
@@ -196,6 +268,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	if err != nil {
 		return nil, err
 	}
+	d.syncSeq(ctx, runID, threadID)
 
 	turnID := d.nextID(threadID + "-turn")
 	turnRec, err := d.store.Threads().StartTurn(ctx, store.Turn{
@@ -208,6 +281,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 		return nil, err
 	}
 
+	cleanupCtx := context.WithoutCancel(ctx)
 	snapCfg := d.cfg.Snapshot
 	if len(turnRec.Steers) > 0 {
 		snapCfg.Steers = append(slices.Clone(snapCfg.Steers), turnRec.Steers...)
@@ -215,22 +289,32 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 
 	snap, err := BuildSnapshot(ctx, d.store, d.clock, runID, events, snapCfg)
 	if err != nil {
-		_ = d.store.Threads().CompleteTurn(ctx, threadID, turnID, store.TurnStatusFailed, model.Usage{}, err.Error())
+		_ = d.store.Threads().CompleteTurn(cleanupCtx, threadID, turnID, store.TurnStatusFailed, model.Usage{}, err.Error())
+		for _, steerMsg := range turnRec.Steers {
+			_ = d.store.Threads().SteerTurn(cleanupCtx, threadID, "", steerMsg)
+		}
 		return nil, err
 	}
 
-	_, _ = d.store.Threads().AppendItem(ctx, store.Item{
+	if _, err := d.store.Threads().AppendItem(ctx, store.Item{
 		ThreadID: threadID,
 		TurnID:   turnID,
 		Kind:     store.ItemKindSnapshot,
 		Content:  snap.Text,
-	})
+	}); err != nil {
+		_ = d.store.Threads().CompleteTurn(cleanupCtx, threadID, turnID, store.TurnStatusFailed, model.Usage{}, err.Error())
+		for _, steerMsg := range turnRec.Steers {
+			_ = d.store.Threads().SteerTurn(cleanupCtx, threadID, "", steerMsg)
+		}
+		return nil, err
+	}
 
 	state := &turnExecState{
-		threadID:  threadID,
-		turnID:    turnID,
-		turnUsage: make(map[int]model.Usage),
-		turnUsed:  make(map[int]bool),
+		threadID:      threadID,
+		turnID:        turnID,
+		pinnedRecipes: make(map[string]recipe.Recipe),
+		turnUsage:     make(map[int]model.Usage),
+		turnUsed:      make(map[int]bool),
 	}
 
 	reg := d.buildToolRegistry(runID, state)
@@ -254,7 +338,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 			state.currentTurn = turn
 			state.turnUsage[turn] = resp.Usage
 			if txt := strings.TrimSpace(resp.Text()); txt != "" {
-				_, _ = d.store.Threads().AppendItem(ctx, store.Item{
+				_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
 					ThreadID: threadID,
 					TurnID:   turnID,
 					Kind:     store.ItemKindAssistantMessage,
@@ -271,7 +355,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 			}
 		}),
 		model.WithOnToolCall(func(_ int, call model.ToolCall, resBlock model.ContentBlock) {
-			_, _ = d.store.Threads().AppendItem(ctx, store.Item{
+			_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
 				ThreadID: threadID,
 				TurnID:   turnID,
 				Kind:     store.ItemKindToolCall,
@@ -279,7 +363,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 				CallID:   call.ID,
 				Payload:  call.Input,
 			})
-			_, _ = d.store.Threads().AppendItem(ctx, store.Item{
+			_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
 				ThreadID: threadID,
 				TurnID:   turnID,
 				Kind:     store.ItemKindToolResult,
@@ -308,7 +392,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 		turnStatus = store.TurnStatusFailed
 		errMsg = loopErr.Error()
 	}
-	_ = d.store.Threads().CompleteTurn(ctx, threadID, turnID, turnStatus, usage, errMsg)
+	if compErr := d.store.Threads().CompleteTurn(cleanupCtx, threadID, turnID, turnStatus, usage, errMsg); compErr != nil && loopErr == nil {
+		loopErr = compErr
+	}
 
 	res := &BatchResult{
 		ThreadID:  threadID,
@@ -408,6 +494,14 @@ func (d *Dispatcher) buildToolRegistry(runID string, state *turnExecState) *mode
 	return reg
 }
 
+type invariantViolationError struct {
+	msg string
+}
+
+func (e *invariantViolationError) Error() string {
+	return e.msg
+}
+
 func (d *Dispatcher) handleRawToolCall(
 	ctx context.Context,
 	runID string,
@@ -428,39 +522,68 @@ func (d *Dispatcher) handleRawToolCall(
 		if state != nil {
 			state.rejected = append(state.rejected, rejMsg)
 		}
-		d.recordDecision(ctx, runID, state, act, false, "rejected: "+rejMsg, d.clock.Now().Sub(start))
+		_ = d.recordDecision(ctx, runID, state, act, false, "rejected: "+rejMsg, d.clock.Now().Sub(start))
 		return "", errors.New(rejMsg)
 	}
 
-	view, err := LoadStateView(ctx, d.store, d.clock, runID, d.cfg.MaxBriefBytes)
-	if err != nil {
-		return "", err
+	var view *StateView
+	if state != nil && state.view != nil {
+		view = state.view
+	} else {
+		var pinned map[string]recipe.Recipe
+		if state != nil {
+			pinned = state.pinnedRecipes
+		}
+		var err error
+		view, err = loadStateViewWithCache(ctx, d.store, d.clock, runID, d.cfg.MaxBriefBytes, pinned)
+		if err != nil {
+			return "", err
+		}
+		if state != nil {
+			state.view = view
+		}
 	}
 
-	accepted, rejected := Vet(view, Proposal{Actions: []ProposedAction{act}}, d.cfg.Invariants)
-	if len(rejected) > 0 || len(accepted) == 0 {
-		rejMsg := "vetting failed"
-		if len(rejected) > 0 {
-			rejMsg = rejected[0]
-		}
+	if vetErr := VetAction(view, act, d.cfg.Invariants); vetErr != nil {
+		rejMsg := vetErr.Error()
 		if state != nil {
 			state.rejected = append(state.rejected, rejMsg)
 		}
-		d.recordDecision(ctx, runID, state, act, false, "rejected: "+rejMsg, d.clock.Now().Sub(start))
+		_ = d.recordDecision(ctx, runID, state, act, false, "rejected: "+rejMsg, d.clock.Now().Sub(start))
 		return "", fmt.Errorf("invariant violation: %s", rejMsg)
 	}
 
 	result, execErr := d.applyVettedAction(ctx, runID, view, act)
 	if execErr != nil {
-		d.recordDecision(ctx, runID, state, act, true, "error: "+execErr.Error(), d.clock.Now().Sub(start))
+		if state != nil && !isReadOnlyTool(act.Tool) {
+			state.view = nil
+		}
+		var invErr *invariantViolationError
+		if errors.As(execErr, &invErr) {
+			if state != nil {
+				state.rejected = append(state.rejected, invErr.msg)
+			}
+			_ = d.recordDecision(ctx, runID, state, act, false, "rejected: "+invErr.msg, d.clock.Now().Sub(start))
+			return "", fmt.Errorf("invariant violation: %s", invErr.msg)
+		}
+		_ = d.recordDecision(ctx, runID, state, act, true, "error: "+execErr.Error(), d.clock.Now().Sub(start))
 		return "", execErr
 	}
 
 	if state != nil {
+		if !isReadOnlyTool(act.Tool) {
+			state.view = nil
+		}
 		state.accepted = append(state.accepted, act)
 	}
-	d.recordDecision(ctx, runID, state, act, true, result, d.clock.Now().Sub(start))
+	if err := d.recordDecision(ctx, runID, state, act, true, result, d.clock.Now().Sub(start)); err != nil {
+		return "", err
+	}
 	return result, nil
+}
+
+func isReadOnlyTool(tool string) bool {
+	return tool == ToolReadLaneReport || tool == ToolReadPR || tool == ToolReadCI
 }
 
 func (d *Dispatcher) recordDecision(
@@ -471,7 +594,7 @@ func (d *Dispatcher) recordDecision(
 	vetted bool,
 	result string,
 	elapsed time.Duration,
-) {
+) error {
 	var (
 		threadID string
 		turnID   string
@@ -486,7 +609,7 @@ func (d *Dispatcher) recordDecision(
 		}
 	}
 
-	dec, err := d.store.Decisions().Append(ctx, store.Decision{
+	dec, err := d.store.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
 		RunID:        runID,
 		Category:     store.DecisionJudgment,
 		Actor:        ActorDispatcher,
@@ -503,9 +626,13 @@ func (d *Dispatcher) recordDecision(
 		CostUSD:      usage.CostUSD,
 		LatencyMs:    max(elapsed.Milliseconds(), 0),
 	})
-	if err == nil && state != nil {
+	if err != nil {
+		return err
+	}
+	if state != nil {
 		state.decisions = append(state.decisions, dec)
 	}
+	return nil
 }
 
 func (d *Dispatcher) applyVettedAction(
@@ -630,27 +757,39 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	}
 	laneID := cmp.Or(strings.TrimSpace(p.LaneID), item.ID)
 
-	baseRecipeName := cmp.Or(strings.TrimSpace(p.RecipeName), item.RecipeName)
-	r, _ := view.RecipeByName(baseRecipeName)
+	base, resolved, _ := view.ResolveSpawnRecipe(p)
+	r := base
 
 	override := strings.TrimSpace(p.RecipeOverride)
 	if override != "" {
-		if existingOverride, exists := view.RecipeByName(override); exists && override != recipe.DefaultName {
-			r = existingOverride
+		if resolved.Version > 0 {
+			r = resolved
 		} else {
 			var compiled recipe.Recipe
 			if d.cfg.RecipeCompiler != nil {
 				var err error
-				compiled, err = d.cfg.RecipeCompiler.CompileOverride(ctx, r, override)
+				compiled, err = d.cfg.RecipeCompiler.CompileOverride(ctx, base, override)
 				if err != nil {
 					return "", err
 				}
 			} else {
-				compiled = CompileRecipeOverride(r, override)
+				compiled = resolved
 			}
 			compiled.RunID = runID
 			compiled.Name = fmt.Sprintf("override-%s", laneID)
 			compiled.Version = 0
+			if maxBytes := view.EffectiveMaxBriefBytes(compiled); maxBytes > 0 && len(p.Brief) > maxBytes {
+				return "", &invariantViolationError{
+					msg: fmt.Sprintf("%s [%s]: brief size within cap — brief size %d bytes exceeds cap of %d bytes",
+						ToolLaneSpawn, laneID, len(p.Brief), maxBytes),
+				}
+			}
+			if compiled.MergePolicy.Mode != recipe.MergeModeSelf && containsDirectMergeInstruction(p.Brief) {
+				return "", &invariantViolationError{
+					msg: fmt.Sprintf("%s [%s]: no merge outside recipe — brief instructs lane to merge directly, which is forbidden under recipe %q (merge_mode=%s)",
+						ToolLaneSpawn, laneID, compiled.Name, compiled.MergePolicy.Mode),
+				}
+			}
 			saved, err := d.store.Recipes().Save(ctx, compiled)
 			if err != nil {
 				return "", err
@@ -937,7 +1076,7 @@ func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, view *Stat
 		ExpiresAt: &dl,
 		Status:    store.DirectiveActive,
 	}
-	if err := d.store.Directives().Add(ctx, dir); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+	if err := d.store.Directives().Add(ctx, dir); err != nil {
 		return "", err
 	}
 
@@ -986,13 +1125,17 @@ func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, _ *St
 func (d *Dispatcher) applyPlannerRequest(ctx context.Context, runID string, p PlannerRequestParams) (string, error) {
 	reqID := d.nextID("planreq")
 
+	text := strings.TrimSpace(p.Reason)
+	if p.Urgent {
+		text = "[urgent] " + text
+	}
 	dir := store.Directive{
 		ID:     reqID,
 		RunID:  runID,
 		Kind:   store.DirectiveInstruction,
 		Source: store.DirectiveSourceDispatcher,
 		Ref:    plannerRefPrefix + cmp.Or(strings.TrimSpace(p.PlanRef), reqID),
-		Text:   strings.TrimSpace(p.Reason),
+		Text:   text,
 		Status: store.DirectiveActive,
 	}
 	if err := d.store.Directives().Add(ctx, dir); err != nil {
@@ -1149,6 +1292,7 @@ func CompileRecipeOverride(base recipe.Recipe, override string) recipe.Recipe {
 	if trimmed == "" {
 		return out
 	}
+	out.Version = 0
 	if out.Source != "" {
 		out.Source = out.Source + " | Override: " + trimmed
 	} else {
@@ -1157,12 +1301,12 @@ func CompileRecipeOverride(base recipe.Recipe, override string) recipe.Recipe {
 
 	lower := strings.ToLower(trimmed)
 
-	if strings.Contains(lower, "no clean") || strings.Contains(lower, "skip clean") || strings.Contains(lower, "without clean") {
+	if containsOverridePhrase(lower, "no clean") || containsOverridePhrase(lower, "skip clean") || containsOverridePhrase(lower, "without clean") {
 		out = removePhaseFromRecipe(out, recipe.PhaseClean)
 	}
 
-	if strings.Contains(lower, "no code review") || strings.Contains(lower, "no review") ||
-		strings.Contains(lower, "skip review") || strings.Contains(lower, "without review") {
+	if containsOverridePhrase(lower, "no code review") || containsOverridePhrase(lower, "no review") ||
+		containsOverridePhrase(lower, "skip review") || containsOverridePhrase(lower, "without review") {
 		out = removePhaseFromRecipe(out, recipe.PhaseReview)
 		out.MergePolicy.RequireReviewPass = false
 		for i := range out.Phases {
@@ -1173,13 +1317,14 @@ func CompileRecipeOverride(base recipe.Recipe, override string) recipe.Recipe {
 	}
 
 	switch {
-	case strings.Contains(lower, "merge themselves") || strings.Contains(lower, "self merge") ||
-		strings.Contains(lower, "self-merge") || strings.Contains(lower, "merge_mode=self"):
+	case containsOverridePhrase(lower, "merge themselves") || containsOverridePhrase(lower, "self merge") ||
+		containsOverridePhrase(lower, "self-merge") || containsOverridePhrase(lower, "merge_mode=self"):
 		out.MergePolicy.Mode = recipe.MergeModeSelf
-	case strings.Contains(lower, "manual merge") || strings.Contains(lower, "merge_mode=manual"):
+	case containsOverridePhrase(lower, "manual merge") || containsOverridePhrase(lower, "merge_mode=manual"):
 		out.MergePolicy.Mode = recipe.MergeModeManual
-	case strings.Contains(lower, "analysis only") || strings.Contains(lower, "no merge") ||
-		strings.Contains(lower, "merge_mode=none"):
+	case containsOverridePhrase(lower, "analysis only") || containsOverridePhrase(lower, "no merge") ||
+		containsOverridePhrase(lower, "skip merge") || containsOverridePhrase(lower, "without merge") ||
+		containsOverridePhrase(lower, "merge_mode=none"):
 		out = removePhaseFromRecipe(out, recipe.PhaseIntegrate)
 		out.MergePolicy.Mode = recipe.MergeModeNone
 		out.MergePolicy.RequireReviewPass = false
@@ -1187,6 +1332,56 @@ func CompileRecipeOverride(base recipe.Recipe, override string) recipe.Recipe {
 	}
 
 	return out
+}
+
+func containsOverridePhrase(s, phrase string) bool {
+	offset := 0
+	for offset <= len(s)-len(phrase) {
+		idx := strings.Index(s[offset:], phrase)
+		if idx < 0 {
+			return false
+		}
+		start := offset + idx
+		end := start + len(phrase)
+		leftOK := start == 0 || !isOverrideWordChar(s[start-1])
+		if leftOK && isOverrideClauseEnd(s[end:]) {
+			return true
+		}
+		offset = start + 1
+	}
+	return false
+}
+
+func isOverrideWordChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
+}
+
+func isOverrideClauseEnd(rest string) bool {
+	if rest == "" {
+		return true
+	}
+	if isOverrideWordChar(rest[0]) {
+		return false
+	}
+	trimmed := strings.TrimLeft(rest, " \t")
+	for _, suffix := range []string{"phase", "step"} {
+		if strings.HasPrefix(trimmed, suffix) {
+			after := trimmed[len(suffix):]
+			if after == "" || !isOverrideWordChar(after[0]) {
+				trimmed = strings.TrimLeft(after, " \t")
+				break
+			}
+		}
+	}
+	if trimmed == "" {
+		return true
+	}
+	switch trimmed[0] {
+	case ',', ';', '.', '|', '\n', '\r', ')', ':':
+		return true
+	default:
+		return false
+	}
 }
 
 func removePhaseFromRecipe(r recipe.Recipe, phaseToRemove string) recipe.Recipe {

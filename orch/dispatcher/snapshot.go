@@ -131,12 +131,6 @@ func BuildSnapshot(
 	}
 
 	maxTotalBytes := cfg.MaxSnapshotTokens * bytesPerTokenEstimate
-	// Allocate per-section byte budgets so no single large table starves the
-	// event batch at the bottom of the snapshot.
-	dirBudget := maxTotalBytes / 6
-	backlogBudget := maxTotalBytes / 4
-	laneBudget := maxTotalBytes / 4
-	eventBudget := maxTotalBytes / 3
 
 	var b strings.Builder
 	truncated := false
@@ -151,16 +145,36 @@ func BuildSnapshot(
 	if strings.TrimSpace(run.Objective) == "" {
 		b.WriteString("(none)\n")
 	} else {
-		b.WriteString(truncateText(strings.TrimSpace(run.Objective), cfg.MaxObjectiveBytes, &truncated))
+		objBudget := min(cfg.MaxObjectiveBytes, max(maxTotalBytes/8, 256))
+		b.WriteString(truncateText(strings.TrimSpace(run.Objective), objBudget, &truncated))
 		b.WriteString("\n")
 	}
 
 	if len(cfg.Steers) > 0 {
 		b.WriteString("\n## Queued Steers\n")
+		steerBudget := max(maxTotalBytes/10, 256)
+		secStart := b.Len()
 		for i, stMsg := range cfg.Steers {
-			fmt.Fprintf(&b, "%d. %s\n", i+1, truncateText(strings.TrimSpace(stMsg), cfg.MaxDirectiveBytes, &truncated))
+			entry := fmt.Sprintf("%d. %s\n", i+1, truncateText(strings.TrimSpace(stMsg), cfg.MaxDirectiveBytes, &truncated))
+			omitted := fmt.Sprintf("... (%d more steers omitted for token budget)\n", len(cfg.Steers)-i)
+			if i > 0 && b.Len()-secStart+len(entry)+len(omitted) > steerBudget {
+				truncated = true
+				b.WriteString(omitted)
+				break
+			}
+			b.WriteString(entry)
 		}
 	}
+
+	// Reserve fixed overhead (header, objective, steers, and section titles) before
+	// splitting the remaining byte budget across the four sections so the event
+	// batch at the bottom is never starved or cut mid-line.
+	const sectionHeaderOverhead = 384
+	remaining := max(maxTotalBytes-b.Len()-sectionHeaderOverhead, 0)
+	dirBudget := remaining * 15 / 100
+	backlogBudget := remaining * 25 / 100
+	laneBudget := remaining * 25 / 100
+	eventBudget := remaining - dirBudget - backlogBudget - laneBudget
 
 	fmt.Fprintf(&b, "\n## Active Directives (%d)\n", len(directives))
 	if len(directives) == 0 {
@@ -168,11 +182,6 @@ func BuildSnapshot(
 	} else {
 		secStart := b.Len()
 		for i := range directives {
-			if b.Len()-secStart >= dirBudget {
-				truncated = true
-				fmt.Fprintf(&b, "... (%d more directives omitted for token budget)\n", len(directives)-i)
-				break
-			}
 			d := directives[i]
 			exp := "never"
 			if d.ExpiresAt != nil {
@@ -180,13 +189,21 @@ func BuildSnapshot(
 			}
 			scope := cmp.Or(d.Scope, "run")
 			text := singleLine(truncateText(d.Text, cfg.MaxDirectiveBytes, &truncated))
+			var entry string
 			if d.Ref != "" {
-				fmt.Fprintf(&b, "- [%s] kind=%s source=%s scope=%s expires=%s ref=%s: %s\n",
+				entry = fmt.Sprintf("- [%s] kind=%s source=%s scope=%s expires=%s ref=%s: %s\n",
 					d.ID, d.Kind, d.Source, scope, exp, d.Ref, text)
 			} else {
-				fmt.Fprintf(&b, "- [%s] kind=%s source=%s scope=%s expires=%s: %s\n",
+				entry = fmt.Sprintf("- [%s] kind=%s source=%s scope=%s expires=%s: %s\n",
 					d.ID, d.Kind, d.Source, scope, exp, text)
 			}
+			omitted := fmt.Sprintf("... (%d more directives omitted for token budget)\n", len(directives)-i)
+			if b.Len()-secStart+len(entry)+len(omitted) > dirBudget {
+				truncated = true
+				b.WriteString(omitted)
+				break
+			}
+			b.WriteString(entry)
 		}
 	}
 
@@ -223,31 +240,35 @@ func BuildSnapshot(
 	} else {
 		secStart := b.Len()
 		for i := range topItems {
-			if b.Len()-secStart >= backlogBudget {
-				truncated = true
-				fmt.Fprintf(&b, "... (%d more backlog items omitted for token budget)\n", len(topItems)-i)
-				break
-			}
 			it := topItems[i]
-			shownBacklog++
-			fmt.Fprintf(&b, "- **%s** [%s #%d %s]", it.ID, it.Priority, it.Order, it.Status)
+			var row strings.Builder
+			fmt.Fprintf(&row, "- **%s** [%s #%d %s]", it.ID, it.Priority, it.Order, it.Status)
 			if it.LaneID != "" {
-				fmt.Fprintf(&b, " lane=%s", it.LaneID)
+				fmt.Fprintf(&row, " lane=%s", it.LaneID)
 			}
 			if it.RecipeName != "" {
-				fmt.Fprintf(&b, " recipe=%s", it.RecipeName)
+				fmt.Fprintf(&row, " recipe=%s", it.RecipeName)
 			}
 			if len(it.DependsOn) > 0 {
-				fmt.Fprintf(&b, " deps=[%s]", strings.Join(it.DependsOn, ","))
+				fmt.Fprintf(&row, " deps=[%s]", strings.Join(it.DependsOn, ","))
 			}
-			fmt.Fprintf(&b, ": %s", singleLine(truncateText(it.Title, 200, &truncated)))
+			fmt.Fprintf(&row, ": %s", singleLine(truncateText(it.Title, 200, &truncated)))
 			if it.Acceptance != "" {
-				fmt.Fprintf(&b, " | acceptance: %s", singleLine(truncateText(it.Acceptance, cfg.MaxItemExcerptBytes/2, &truncated)))
+				fmt.Fprintf(&row, " | acceptance: %s", singleLine(truncateText(it.Acceptance, cfg.MaxItemExcerptBytes/2, &truncated)))
 			}
 			if it.Description != "" {
-				fmt.Fprintf(&b, " | desc: %s", singleLine(truncateText(it.Description, cfg.MaxItemExcerptBytes/2, &truncated)))
+				fmt.Fprintf(&row, " | desc: %s", singleLine(truncateText(it.Description, cfg.MaxItemExcerptBytes/2, &truncated)))
 			}
-			b.WriteString("\n")
+			row.WriteString("\n")
+			entry := row.String()
+			omitted := fmt.Sprintf("... (%d more backlog items omitted for token budget)\n", len(topItems)-i)
+			if b.Len()-secStart+len(entry)+len(omitted) > backlogBudget {
+				truncated = true
+				b.WriteString(omitted)
+				break
+			}
+			shownBacklog++
+			b.WriteString(entry)
 		}
 	}
 
@@ -259,11 +280,6 @@ func BuildSnapshot(
 		b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 		secStart := b.Len()
 		for i := range lanes {
-			if b.Len()-secStart >= laneBudget {
-				truncated = true
-				fmt.Fprintf(&b, "| ... | (%d more lanes omitted) | | | | | | | | | | | |\n", len(lanes)-i)
-				break
-			}
 			ln := lanes[i]
 			recLabel := cmp.Or(ln.RecipeName, recipe.DefaultName)
 			if ln.RecipeVersion > 0 {
@@ -290,7 +306,7 @@ func BuildSnapshot(
 					approvalStr = "OK(" + shortSHA(ln.ApprovalSHA) + ")"
 				}
 			}
-			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %d | %d | %d | %s | %s | %s | %s | %s |\n",
+			entry := fmt.Sprintf("| %s | %s | %s | %s | %s | %d | %d | %d | %s | %s | %s | %s | %s |\n",
 				ln.ID,
 				cmp.Or(ln.ItemID, "-"),
 				ln.Status,
@@ -305,6 +321,13 @@ func BuildSnapshot(
 				approvalStr,
 				cmp.Or(ln.LastEventID, "-"),
 			)
+			omitted := fmt.Sprintf("| ... | (%d more lanes omitted) | | | | | | | | | | | |\n", len(lanes)-i)
+			if b.Len()-secStart+len(entry)+len(omitted) > laneBudget {
+				truncated = true
+				b.WriteString(omitted)
+				break
+			}
+			b.WriteString(entry)
 		}
 	}
 
@@ -312,19 +335,17 @@ func BuildSnapshot(
 	if len(events) == 0 {
 		b.WriteString("(none)\n")
 	} else {
+		// Any unused bytes from earlier sections roll forward into the event batch budget.
+		eventBudget = max(eventBudget, maxTotalBytes-b.Len()-64)
 		secStart := b.Len()
 		for i := range events {
-			if b.Len()-secStart >= eventBudget {
-				truncated = true
-				fmt.Fprintf(&b, "... (%d more events omitted for token budget)\n", len(events)-i)
-				break
-			}
 			ev := events[i]
 			urgentTag := ""
 			if ev.Urgent {
 				urgentTag = " [URGENT]"
 			}
-			fmt.Fprintf(&b, "- **%s** (seq=%d kind=%s lane=%s source=%s)%s",
+			var row strings.Builder
+			fmt.Fprintf(&row, "- **%s** (seq=%d kind=%s lane=%s source=%s)%s",
 				cmp.Or(ev.ID, fmt.Sprintf("seq-%d", ev.Seq)),
 				ev.Seq,
 				ev.Kind,
@@ -333,13 +354,21 @@ func BuildSnapshot(
 				urgentTag,
 			)
 			if ev.Summary != "" {
-				fmt.Fprintf(&b, ": %s", singleLine(truncateText(ev.Summary, DefaultMaxSummaryBytes, &truncated)))
+				fmt.Fprintf(&row, ": %s", singleLine(truncateText(ev.Summary, DefaultMaxSummaryBytes, &truncated)))
 			}
-			b.WriteString("\n")
+			row.WriteString("\n")
 			if len(ev.Payload) > 0 {
 				excerpt := truncateText(strings.TrimSpace(string(ev.Payload)), cfg.MaxEventExcerptBytes, &truncated)
-				fmt.Fprintf(&b, "  payload: `%s`\n", singleLine(excerpt))
+				fmt.Fprintf(&row, "  payload: `%s`\n", singleLine(excerpt))
 			}
+			entry := row.String()
+			omitted := fmt.Sprintf("... (%d more events omitted for token budget)\n", len(events)-i)
+			if b.Len()-secStart+len(entry)+len(omitted) > eventBudget {
+				truncated = true
+				b.WriteString(omitted)
+				break
+			}
+			b.WriteString(entry)
 		}
 	}
 

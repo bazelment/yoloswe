@@ -455,6 +455,17 @@ func LoadStateView(
 	runID string,
 	maxBriefBytes int,
 ) (*StateView, error) {
+	return loadStateViewWithCache(ctx, st, clk, runID, maxBriefBytes, nil)
+}
+
+func loadStateViewWithCache(
+	ctx context.Context,
+	st store.Store,
+	clk clock.Clock,
+	runID string,
+	maxBriefBytes int,
+	pinnedCache map[string]recipe.Recipe,
+) (*StateView, error) {
 	if clk == nil {
 		clk = clock.NewRealClock()
 	}
@@ -499,8 +510,13 @@ func LoadStateView(
 		if ln.RecipeName != "" && ln.RecipeVersion > 0 {
 			key := recipeVersionKey(ln.RecipeName, ln.RecipeVersion)
 			if _, ok := view.VersionRecipes[key]; !ok {
-				if pinned, gErr := st.Recipes().Get(ctx, runID, ln.RecipeName, ln.RecipeVersion); gErr == nil && pinned != nil {
+				if cached, cOk := pinnedCache[key]; cOk {
+					view.VersionRecipes[key] = cached
+				} else if pinned, gErr := st.Recipes().Get(ctx, runID, ln.RecipeName, ln.RecipeVersion); gErr == nil && pinned != nil {
 					view.VersionRecipes[key] = *pinned
+					if pinnedCache != nil {
+						pinnedCache[key] = *pinned
+					}
 				}
 			}
 		}
@@ -569,6 +585,28 @@ func (s *StateView) RecipeForLane(ln lane.Lane) (recipe.Recipe, bool) {
 		}
 	}
 	return s.RecipeByName(name)
+}
+
+// ResolveSpawnRecipe resolves the base recipe and effective recipe (including
+// named-recipe or deterministic overrides) for a lane.spawn action so vet and
+// execution evaluate the same recipe.
+func (s *StateView) ResolveSpawnRecipe(p LaneSpawnParams) (base recipe.Recipe, effective recipe.Recipe, hasBase bool) {
+	item, _ := s.BacklogItem(strings.TrimSpace(p.ItemID))
+	baseName := cmp.Or(strings.TrimSpace(p.RecipeName), item.RecipeName)
+	base, hasBase = s.RecipeByName(baseName)
+	if !hasBase {
+		base = recipe.Default()
+	}
+	effective = base
+	override := strings.TrimSpace(p.RecipeOverride)
+	if override != "" {
+		if existingOverride, exists := s.RecipeByName(override); exists && override != recipe.DefaultName {
+			effective = existingOverride
+		} else {
+			effective = CompileRecipeOverride(base, override)
+		}
+	}
+	return base, effective, hasBase
 }
 
 func (s *StateView) currentTime() time.Time {
@@ -718,10 +756,7 @@ func checkNoMergeOutsideRecipe(st *StateView, act ProposedAction) error {
 		if act.LaneSpawn == nil {
 			return nil
 		}
-		r, _ := st.RecipeByName(act.LaneSpawn.RecipeName)
-		if act.LaneSpawn.RecipeOverride != "" {
-			r = CompileRecipeOverride(r, act.LaneSpawn.RecipeOverride)
-		}
+		_, r, _ := st.ResolveSpawnRecipe(*act.LaneSpawn)
 		if r.MergePolicy.Mode != recipe.MergeModeSelf && containsDirectMergeInstruction(act.LaneSpawn.Brief) {
 			return fmt.Errorf("brief instructs lane to merge directly, but recipe %q has merge mode %q (not %q)",
 				r.Name, r.MergePolicy.Mode, recipe.MergeModeSelf)
@@ -848,7 +883,7 @@ func checkBriefSizeCap(st *StateView, act ProposedAction) error {
 		if strings.TrimSpace(act.LaneSpawn.Brief) == "" {
 			return errors.New("brief is required")
 		}
-		r, _ := st.RecipeByName(act.LaneSpawn.RecipeName)
+		_, r, _ := st.ResolveSpawnRecipe(*act.LaneSpawn)
 		maxBytes := st.EffectiveMaxBriefBytes(r)
 		if len(act.LaneSpawn.Brief) > maxBytes {
 			return fmt.Errorf("brief size %d bytes exceeds recipe cap of %d bytes", len(act.LaneSpawn.Brief), maxBytes)
@@ -967,10 +1002,8 @@ func checkSpawnInvariants(st *StateView, act ProposedAction) error {
 	if item.Status.Terminal() {
 		return fmt.Errorf("backlog item %q is already %s", itemID, item.Status)
 	}
-	if item.Status == store.BacklogInProgress && item.LaneID != "" {
-		if existingLane, hasLane := st.Lane(item.LaneID); hasLane && existingLane.Status == lane.StatusRunning {
-			return fmt.Errorf("backlog item %q is already in progress on running lane %q", itemID, existingLane.ID)
-		}
+	if item.Status == store.BacklogInProgress {
+		return fmt.Errorf("backlog item %q is already in progress on lane %q", itemID, cmp.Or(item.LaneID, itemID))
 	}
 
 	for _, depID := range item.DependsOn {
@@ -988,16 +1021,16 @@ func checkSpawnInvariants(st *StateView, act ProposedAction) error {
 		return fmt.Errorf("lane_id %q must not contain '.'", laneID)
 	}
 	if existing, hasLane := st.Lane(laneID); hasLane {
-		if existing.Status == lane.StatusRunning {
-			return fmt.Errorf("lane %q is already running; spawning onto an occupied lane would collide", laneID)
-		}
 		if existing.Status == lane.StatusDone {
 			return fmt.Errorf("lane %q is already done", laneID)
 		}
+		if existing.Status != lane.StatusPlanned || existing.SessionID != "" || existing.TerminalID != "" ||
+			len(existing.Sessions) > 0 || len(existing.Terminals) > 0 {
+			return fmt.Errorf("lane %q is already %s; spawning onto an occupied lane would collide", laneID, existing.Status)
+		}
 	}
 
-	recipeName := cmp.Or(strings.TrimSpace(p.RecipeName), item.RecipeName)
-	r, hasRecipe := st.RecipeByName(recipeName)
+	_, r, hasRecipe := st.ResolveSpawnRecipe(*p)
 	if !hasRecipe && strings.TrimSpace(p.RecipeName) != "" {
 		return fmt.Errorf("unknown recipe %q", p.RecipeName)
 	}

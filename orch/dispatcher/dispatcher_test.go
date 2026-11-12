@@ -607,7 +607,42 @@ func TestDispatcher_InvariantRejections(t *testing.T) {
 		lnStaleReview.RecordAttempt(recipe.PhaseSWE, 1, "sess-stale-1", "term-stale-swe-1")
 		lnStaleReview.RecordAttempt(recipe.PhaseReview, 1, "sess-stale-1", "term-stale-rev-1")
 
-		for _, ln := range []lane.Lane{lnRunning, lnStaleReview} {
+		lnDone := lane.Lane{
+			ID:     "lane-done",
+			RunID:  "run-1",
+			Status: lane.StatusDone,
+			Phase:  recipe.PhaseIntegrate,
+			Round:  1,
+		}
+		lnNoSession := lane.Lane{
+			ID:     "lane-nosess",
+			RunID:  "run-1",
+			Status: lane.StatusRunning,
+			Phase:  recipe.PhaseSWE,
+			Round:  1,
+		}
+
+		customSelfMerge := recipe.Default()
+		customSelfMerge.RunID = "run-1"
+		customSelfMerge.Name = "custom-automerge"
+		customSelfMerge.MergePolicy.Mode = recipe.MergeModeSelf
+		customSelfMerge.Limits.MaxBriefBytes = 64
+		if _, err := st.Recipes().Save(ctx, customSelfMerge); err != nil {
+			t.Fatalf("Save customSelfMerge: %v", err)
+		}
+
+		if err := st.Backlog().Add(ctx, store.BacklogItem{
+			ID:         "item-custom-recipe",
+			RunID:      "run-1",
+			Title:      "Item using custom-automerge recipe",
+			Priority:   store.PriorityP1,
+			Status:     store.BacklogOpen,
+			RecipeName: "custom-automerge",
+		}); err != nil {
+			t.Fatalf("Add backlog item-custom-recipe: %v", err)
+		}
+
+		for _, ln := range []lane.Lane{lnRunning, lnStaleReview, lnDone, lnNoSession} {
 			if err := st.Lanes().Upsert(ctx, ln); err != nil {
 				t.Fatalf("Upsert lane %s: %v", ln.ID, err)
 			}
@@ -626,11 +661,37 @@ func TestDispatcher_InvariantRejections(t *testing.T) {
 			return act
 		}
 
-		cases := []struct {
-			name        string
-			wantErrSub  string
-			action      dispatcher.ProposedAction
-			wantAllowed bool
+		invs := dispatcher.DefaultInvariants()
+
+		allowedCases := []struct {
+			name   string
+			action dispatcher.ProposedAction
+		}{
+			{
+				name:   "SpawnBriefInstructingDirectMergeAllowedWhenRecipeSelfMerge",
+				action: mustParse(dispatcher.ToolLaneSpawn, `{"item_id":"item-ready","brief":"Implement and run gh pr merge","recipe_override":"lanes merge themselves"}`),
+			},
+			{
+				name:   "SpawnBriefInstructingDirectMergeAllowedViaItemRecipe",
+				action: mustParse(dispatcher.ToolLaneSpawn, `{"item_id":"item-custom-recipe","brief":"Run gh pr merge"}`),
+			},
+			{
+				name:   "SpawnBriefInstructingDirectMergeAllowedViaNamedRecipeOverride",
+				action: mustParse(dispatcher.ToolLaneSpawn, `{"item_id":"item-ready","brief":"Run gh pr merge","recipe_override":"custom-automerge"}`),
+			},
+		}
+		for _, tc := range allowedCases {
+			t.Run(tc.name, func(t *testing.T) {
+				if vErr := dispatcher.VetAction(view, tc.action, invs); vErr != nil {
+					t.Fatalf("expected allowed, got error: %v", vErr)
+				}
+			})
+		}
+
+		rejectedCases := []struct {
+			name       string
+			wantErrSub string
+			action     dispatcher.ProposedAction
 		}{
 			{
 				name:       "ForbiddenDirectMergeTool",
@@ -638,14 +699,19 @@ func TestDispatcher_InvariantRejections(t *testing.T) {
 				wantErrSub: "no merge outside recipe",
 			},
 			{
+				name:       "UnknownToolNotInToolkit",
+				action:     mustParse("shell.exec", `{"cmd":"rm -rf /"}`),
+				wantErrSub: "tool must be in dispatcher toolkit",
+			},
+			{
 				name:       "SpawnBriefInstructingDirectMergeUnderControllerMode",
 				action:     mustParse(dispatcher.ToolLaneSpawn, `{"item_id":"item-ready","brief":"Implement and run gh pr merge --squash"}`),
 				wantErrSub: "no merge outside recipe",
 			},
 			{
-				name:        "SpawnBriefInstructingDirectMergeAllowedWhenRecipeSelfMerge",
-				action:      mustParse(dispatcher.ToolLaneSpawn, `{"item_id":"item-ready","brief":"Implement and run gh pr merge","recipe_override":"lanes merge themselves"}`),
-				wantAllowed: true,
+				name:       "SteerNoteInstructingDirectMergeUnderControllerMode",
+				action:     mustParse(dispatcher.ToolLaneSteer, `{"lane_id":"lane-running","note":"Please run gh pr merge now"}`),
+				wantErrSub: "no merge outside recipe",
 			},
 			{
 				name:       "RetryIntoIntegrateWithStaleApproval",
@@ -688,6 +754,11 @@ func TestDispatcher_InvariantRejections(t *testing.T) {
 				wantErrSub: "brief size within cap",
 			},
 			{
+				name:       "SpawnBriefExceedsItemRecipeSizeCap",
+				action:     mustParse(dispatcher.ToolLaneSpawn, fmt.Sprintf(`{"item_id":"item-custom-recipe","brief":%q}`, strings.Repeat("x", 100))),
+				wantErrSub: "brief size within cap",
+			},
+			{
 				name:       "RetryReusingRecordedRound",
 				action:     mustParse(dispatcher.ToolLaneRetry, `{"lane_id":"lane-stale","phase":"swe","round":1}`),
 				wantErrSub: "must not reuse a recorded round",
@@ -713,28 +784,92 @@ func TestDispatcher_InvariantRejections(t *testing.T) {
 				wantErrSub: "occupied lane",
 			},
 			{
+				name:       "SpawnOntoOccupiedBlockedLane",
+				action:     mustParse(dispatcher.ToolLaneSpawn, `{"item_id":"item-ready","lane_id":"lane-stale","brief":"work"}`),
+				wantErrSub: "occupied lane",
+			},
+			{
+				name:       "SpawnForAlreadyInProgressBacklogItem",
+				action:     mustParse(dispatcher.ToolLaneSpawn, `{"item_id":"item-in-flight","lane_id":"lane-fresh","brief":"work"}`),
+				wantErrSub: "already in progress",
+			},
+			{
 				name:       "SpawnItemWithUnfinishedDependency",
 				action:     mustParse(dispatcher.ToolLaneSpawn, `{"item_id":"item-blocked-by-dep","brief":"work"}`),
 				wantErrSub: "depends on",
 			},
+			{
+				name:       "SteerLaneWithoutStartedSession",
+				action:     mustParse(dispatcher.ToolLaneSteer, `{"lane_id":"lane-nosess","note":"hello"}`),
+				wantErrSub: "lane state must allow steer, retry, or stop",
+			},
+			{
+				name:       "SteerTerminalLane",
+				action:     mustParse(dispatcher.ToolLaneSteer, `{"lane_id":"lane-done","note":"hello"}`),
+				wantErrSub: "lane state must allow steer, retry, or stop",
+			},
+			{
+				name:       "StopLaneWithoutReason",
+				action:     mustParse(dispatcher.ToolLaneStop, `{"lane_id":"lane-running","reason":"   "}`),
+				wantErrSub: "lane state must allow steer, retry, or stop",
+			},
+			{
+				name:       "StopTerminalLane",
+				action:     mustParse(dispatcher.ToolLaneStop, `{"lane_id":"lane-done","reason":"done already"}`),
+				wantErrSub: "lane state must allow steer, retry, or stop",
+			},
+			{
+				name:       "RetryRunningLane",
+				action:     mustParse(dispatcher.ToolLaneRetry, `{"lane_id":"lane-running","phase":"swe","round":2}`),
+				wantErrSub: "lane state must allow steer, retry, or stop",
+			},
+			{
+				name:       "BacklogAddDuplicateID",
+				action:     mustParse(dispatcher.ToolBacklogAdd, `{"id":"item-ready","title":"Dup"}`),
+				wantErrSub: "backlog mutation invariants",
+			},
+			{
+				name:       "BacklogAddSelfDependency",
+				action:     mustParse(dispatcher.ToolBacklogAdd, `{"id":"item-self","title":"Self","depends_on":["item-self"]}`),
+				wantErrSub: "backlog mutation invariants",
+			},
+			{
+				name:       "BacklogUpdateTerminalStatusForbidden",
+				action:     mustParse(dispatcher.ToolBacklogUpdate, `{"id":"item-ready","status":"done","reason":"use close instead"}`),
+				wantErrSub: "backlog mutation invariants",
+			},
+			{
+				name:       "BacklogReorderDuplicateIDs",
+				action:     mustParse(dispatcher.ToolBacklogReorder, `{"item_ids":["item-ready","item-ready"]}`),
+				wantErrSub: "backlog mutation invariants",
+			},
+			{
+				name:       "DirectiveNoteEmptyFact",
+				action:     mustParse(dispatcher.ToolDirectiveNote, `{"fact":"  "}`),
+				wantErrSub: "directive.note and planner.request invariants",
+			},
+			{
+				name:       "DirectiveNotePastExpiry",
+				action:     mustParse(dispatcher.ToolDirectiveNote, `{"fact":"stale note","expiry":"-5m"}`),
+				wantErrSub: "directive.note and planner.request invariants",
+			},
+			{
+				name:       "PlannerRequestEmptyReason",
+				action:     mustParse(dispatcher.ToolPlannerRequest, `{"reason":""}`),
+				wantErrSub: "directive.note and planner.request invariants",
+			},
 		}
 
-		invs := dispatcher.DefaultInvariants()
-		for _, tc := range cases {
-			accepted, rejected := dispatcher.Vet(view, dispatcher.Proposal{Actions: []dispatcher.ProposedAction{tc.action}}, invs)
-			if tc.wantAllowed {
-				if len(accepted) != 1 || len(rejected) != 0 {
-					t.Errorf("%s: expected allowed, got rejected=%v", tc.name, rejected)
+		for _, tc := range rejectedCases {
+			t.Run(tc.name, func(t *testing.T) {
+				accepted, rejected := dispatcher.Vet(view, dispatcher.Proposal{Actions: []dispatcher.ProposedAction{tc.action}}, invs)
+				if len(accepted) != 0 || len(rejected) != 1 {
+					t.Fatalf("expected 1 rejection, got accepted=%d rejected=%v", len(accepted), rejected)
 				}
-				continue
-			}
-			if len(accepted) != 0 || len(rejected) != 1 {
-				t.Errorf("%s: expected 1 rejection, got accepted=%d rejected=%v", tc.name, len(accepted), rejected)
-				continue
-			}
-			if !strings.Contains(rejected[0], tc.wantErrSub) {
-				t.Errorf("%s: rejection %q does not contain %q", tc.name, rejected[0], tc.wantErrSub)
-			}
+				if !strings.Contains(rejected[0], tc.wantErrSub) {
+					t.Fatalf("rejection %q does not contain %q", rejected[0], tc.wantErrSub)
+				}
+			})
 		}
 	})
 
@@ -944,6 +1079,11 @@ func TestDispatcher_SnapshotSizeAndStructure(t *testing.T) {
 		}
 	}
 
+	var steers []string
+	for i := 0; i < 30; i++ {
+		steers = append(steers, fmt.Sprintf("Owner steer %d: %s", i, strings.Repeat("prioritize critical path ", 20)))
+	}
+
 	var batch []store.Event
 	for i := 0; i < 40; i++ {
 		ev, err := st.Events().Append(ctx, store.Event{
@@ -960,7 +1100,11 @@ func TestDispatcher_SnapshotSizeAndStructure(t *testing.T) {
 		batch = append(batch, ev)
 	}
 
-	snap, err := dispatcher.BuildSnapshot(ctx, st, clk, "run-1", batch, dispatcher.SnapshotConfig{})
+	snap, err := dispatcher.BuildSnapshot(ctx, st, clk, "run-1", batch, dispatcher.SnapshotConfig{
+		BacklogTopN:       120,
+		MaxSnapshotTokens: 4000,
+		Steers:            steers,
+	})
 	if err != nil {
 		t.Fatalf("BuildSnapshot: %v", err)
 	}
@@ -982,6 +1126,12 @@ func TestDispatcher_SnapshotSizeAndStructure(t *testing.T) {
 		if !strings.Contains(snap.Text, section) {
 			t.Fatalf("snapshot missing section %q", section)
 		}
+	}
+	if strings.Contains(snap.Text, "...[snapshot truncated to fit <30k token budget]") {
+		t.Fatalf("expected per-section budgets to bound snapshot without tail-chopping the event batch")
+	}
+	if !strings.Contains(snap.Text, "more events omitted for token budget") {
+		t.Fatalf("expected event batch section to truncate cleanly at item boundary")
 	}
 }
 
@@ -1044,8 +1194,7 @@ func TestDispatcher_SQLiteAndHardBatchEscalation(t *testing.T) {
 	)
 
 	disp := dispatcher.New(dispatcher.Config{
-		Model:          "claude-sonnet-4-6",
-		HardBatchModel: "claude-opus-4-6",
+		Model: "claude-sonnet-4-6",
 	}, st, drv, clk, fakeClient)
 
 	ev, err := st.Events().Append(ctx, store.Event{
@@ -1064,8 +1213,8 @@ func TestDispatcher_SQLiteAndHardBatchEscalation(t *testing.T) {
 	}
 
 	reqs := fakeClient.Requests
-	if len(reqs) != 2 || reqs[0].Model != "claude-opus-4-6" {
-		t.Fatalf("model used = %q, want claude-opus-4-6", reqs[0].Model)
+	if len(reqs) != 2 || reqs[0].Model != dispatcher.DefaultHardBatchModel {
+		t.Fatalf("model used = %q, want %s", reqs[0].Model, dispatcher.DefaultHardBatchModel)
 	}
 
 	ln, err := st.Lanes().Get(ctx, "run-sql", "lane-alias")
@@ -1075,4 +1224,217 @@ func TestDispatcher_SQLiteAndHardBatchEscalation(t *testing.T) {
 	if ln.Status != lane.StatusRunning || ln.ItemID != "item-alias" {
 		t.Fatalf("lane-alias = %+v, want running on item-alias", ln)
 	}
+}
+
+func TestDispatcher_RestartOnPersistedStoreDoesNotCollideIDs(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 12, 15, 0, 0, 0, time.UTC))
+
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "restart.db"), clk)
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:        "run-restart",
+		Objective: "Survive process restart without ID collisions.",
+	}); err != nil {
+		t.Fatalf("Create run: %v", err)
+	}
+
+	drv := lane.NewFakeDriver()
+	makeClient := func() *model.FakeClient {
+		return model.NewFakeClient(
+			model.Response{
+				ID:         "msg-turn-1",
+				Model:      dispatcher.DefaultModel,
+				StopReason: model.StopReasonToolUse,
+				Message: model.NewAssistantMessage(
+					model.NewToolUseBlock("c-note", dispatcher.ToolDirectiveNote, json.RawMessage(`{"fact":"fact from dispatcher instance","reason":"record fact"}`)),
+					model.NewToolUseBlock("c-ask", dispatcher.ToolOwnerAsk, json.RawMessage(`{"question":"Proceed?","options":["yes","no"],"default":"yes","deadline":"30m","reason":"confirm"}`)),
+					model.NewToolUseBlock("c-plan", dispatcher.ToolPlannerRequest, json.RawMessage(`{"reason":"reconcile backlog","urgent":true}`)),
+				),
+				Usage: model.Usage{InputTokens: 100, OutputTokens: 40},
+			},
+			model.Response{
+				ID:         "msg-turn-2",
+				Model:      dispatcher.DefaultModel,
+				StopReason: model.StopReasonEndTurn,
+				Message:    model.NewAssistantMessage(model.NewTextBlock("Done.")),
+				Usage:      model.Usage{InputTokens: 120, OutputTokens: 10},
+			},
+		)
+	}
+
+	ev := store.Event{ID: "ev-1", RunID: "run-restart", Kind: store.EventOwnerMessage, Summary: "tick"}
+
+	disp1 := dispatcher.New(dispatcher.Config{}, st, drv, clk, makeClient())
+	res1, err := disp1.Dispatch(ctx, "run-restart", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("disp1.Dispatch: %v", err)
+	}
+
+	disp2 := dispatcher.New(dispatcher.Config{}, st, drv, clk, makeClient())
+	res2, err := disp2.Dispatch(ctx, "run-restart", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("disp2.Dispatch after restart: %v", err)
+	}
+	if res1.TurnID == res2.TurnID {
+		t.Fatalf("expected distinct TurnID across restart, both got %q", res1.TurnID)
+	}
+
+	turns, err := st.Threads().ListTurns(ctx, res1.ThreadID)
+	if err != nil {
+		t.Fatalf("ListTurns: %v", err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("len(turns) = %d, want 2", len(turns))
+	}
+
+	dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: "run-restart"})
+	if err != nil {
+		t.Fatalf("List directives: %v", err)
+	}
+	if len(dirs) != 6 {
+		t.Fatalf("len(directives) = %d, want 6", len(dirs))
+	}
+}
+
+func TestCompileRecipeOverride_WordBoundaries(t *testing.T) {
+	t.Parallel()
+
+	rec := dispatcher.CompileRecipeOverride(recipe.Default(), "expect no merge conflicts, no reviewers needed, no cleanup required")
+	wantPhases := []string{recipe.PhaseSWE, recipe.PhaseClean, recipe.PhaseReview, recipe.PhaseIntegrate}
+	if got := rec.PhaseNames(); fmt.Sprint(got) != fmt.Sprint(wantPhases) {
+		t.Fatalf("PhaseNames() = %v, want %v (false-positive substring match stripped phases)", got, wantPhases)
+	}
+	if rec.MergePolicy.Mode != recipe.MergeModeController {
+		t.Fatalf("MergePolicy.Mode = %q, want %q", rec.MergePolicy.Mode, recipe.MergeModeController)
+	}
+	if !rec.MergePolicy.RequireReviewPass || !rec.MergePolicy.RequireCIGreen {
+		t.Fatalf("MergePolicy gates unexpectedly cleared: %+v", rec.MergePolicy)
+	}
+}
+
+func TestDispatcher_EdgeCasesAndFallbacks(t *testing.T) {
+	t.Parallel()
+
+	t.Run("RecipeCompilerOutputVettedAndReadReportEventFallbackAndDuplicateAsk", func(t *testing.T) {
+		t.Parallel()
+		clk, st, drv := setupTestEnv(t)
+		ctx := t.Context()
+
+		if err := st.Backlog().Add(ctx, store.BacklogItem{
+			ID:       "item-comp",
+			RunID:    "run-1",
+			Title:    "Compiler item",
+			Priority: store.PriorityP1,
+			Status:   store.BacklogOpen,
+		}); err != nil {
+			t.Fatalf("Add backlog: %v", err)
+		}
+
+		ln := lane.Lane{
+			ID:     "lane-ev-rep",
+			RunID:  "run-1",
+			Status: lane.StatusBlocked,
+			Phase:  recipe.PhaseSWE,
+			Round:  1,
+		}
+		if err := st.Lanes().Upsert(ctx, ln); err != nil {
+			t.Fatalf("Upsert lane: %v", err)
+		}
+		if _, err := st.Events().Append(ctx, store.Event{
+			RunID:   "run-1",
+			LaneID:  "lane-ev-rep",
+			Kind:    store.EventLaneReport,
+			Summary: "fallback report summary",
+			Payload: json.RawMessage(`{"outcome":"blocked"}`),
+		}); err != nil {
+			t.Fatalf("Append report event: %v", err)
+		}
+
+		fakeClient := model.NewFakeClient(
+			model.Response{
+				ID:         "msg-edge-1",
+				Model:      dispatcher.DefaultModel,
+				StopReason: model.StopReasonToolUse,
+				Message: model.NewAssistantMessage(
+					model.NewToolUseBlock("c-bad-json", dispatcher.ToolBacklogAdd, json.RawMessage(`{"id":123}`)),
+					model.NewToolUseBlock("c-read-fallback", dispatcher.ToolReadLaneReport, json.RawMessage(`{"lane_id":"lane-ev-rep"}`)),
+					model.NewToolUseBlock("c-ask-1", dispatcher.ToolOwnerAsk, json.RawMessage(`{"id":"dup-id","question":"Q1?","options":["a","b"],"default":"a","deadline":"10m"}`)),
+					model.NewToolUseBlock("c-ask-2", dispatcher.ToolOwnerAsk, json.RawMessage(`{"id":"dup-id","question":"Q2?","options":["a","b"],"default":"b","deadline":"20m"}`)),
+					model.NewToolUseBlock("c-spawn-comp", dispatcher.ToolLaneSpawn, json.RawMessage(`{"item_id":"item-comp","brief":"Run gh pr merge now","recipe_override":"self-merge"}`)),
+				),
+				Usage: model.Usage{InputTokens: 200, OutputTokens: 50},
+			},
+			model.Response{
+				ID:         "msg-edge-2",
+				Model:      dispatcher.DefaultModel,
+				StopReason: model.StopReasonEndTurn,
+				Message:    model.NewAssistantMessage(model.NewTextBlock("Completed edge checks.")),
+				Usage:      model.Usage{InputTokens: 250, OutputTokens: 20},
+			},
+		)
+
+		disp := dispatcher.New(dispatcher.Config{
+			RecipeCompiler: dispatcher.RecipeCompilerFunc(func(_ context.Context, base recipe.Recipe, _ string) (recipe.Recipe, error) {
+				out := base.Clone()
+				out.MergePolicy.Mode = recipe.MergeModeController
+				return out, nil
+			}),
+		}, st, drv, clk, fakeClient)
+
+		res, err := disp.Dispatch(ctx, "run-1", nil)
+		if err != nil {
+			t.Fatalf("Dispatch: %v", err)
+		}
+		if len(res.Accepted) != 2 {
+			t.Fatalf("len(Accepted) = %d, want 2 (read.lane_report and first owner.ask): %+v", len(res.Accepted), res.Accepted)
+		}
+		if len(res.Rejected) < 2 {
+			t.Fatalf("expected invalid JSON and unvetted compiler recipe to be rejected, got Rejected=%v", res.Rejected)
+		}
+	})
+
+	t.Run("CanceledContextStillCompletesTurnOnSQLite", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewFakeClock(time.Date(2026, 11, 12, 16, 0, 0, 0, time.UTC))
+		st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "cancel.db"), clk)
+		if err != nil {
+			t.Fatalf("OpenSQLite: %v", err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+
+		if err := st.Runs().Create(t.Context(), store.Run{ID: "run-cancel", Objective: "Cancel test"}); err != nil {
+			t.Fatalf("Create run: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancelClient := clientFunc(func(_ context.Context, _ model.Request) (*model.Response, error) {
+			cancel()
+			return nil, context.Canceled
+		})
+
+		disp := dispatcher.New(dispatcher.Config{}, st, lane.NewFakeDriver(), clk, cancelClient)
+		res, err := disp.Dispatch(ctx, "run-cancel", nil)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Dispatch err = %v, want context.Canceled", err)
+		}
+		turn, gErr := st.Threads().GetTurn(t.Context(), res.ThreadID, res.TurnID)
+		if gErr != nil {
+			t.Fatalf("GetTurn: %v", gErr)
+		}
+		if turn.Status != store.TurnStatusFailed {
+			t.Fatalf("turn.Status = %q, want failed even after ctx cancel", turn.Status)
+		}
+	})
+}
+
+type clientFunc func(context.Context, model.Request) (*model.Response, error)
+
+func (f clientFunc) CreateMessage(ctx context.Context, req model.Request) (*model.Response, error) {
+	return f(ctx, req)
 }
