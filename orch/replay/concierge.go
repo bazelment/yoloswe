@@ -15,11 +15,8 @@ import (
 	"github.com/bazelment/yoloswe/orch/store"
 )
 
-// ConciergeSystemPromptVersion identifies the Concierge prompt version used in evaluation.
 const ConciergeSystemPromptVersion = "concierge-v1"
 
-// ConciergeSystemPrompt instructs the Concierge to answer owner status questions strictly
-// from the Store state without hallucinating lanes, PRs, phases, or blockers.
 const ConciergeSystemPrompt = `# Nebula Orchestrator Concierge (` + ConciergeSystemPromptVersion + `)
 
 You are the **Concierge** for a Nebula swarm run — a fast, read-mostly conversational agent sitting in front of the Store so the owner gets immediate, factually accurate answers without blocking the Dispatcher.
@@ -58,10 +55,8 @@ type StoreConcierge struct {
 	MaxTokens    int
 }
 
-// DefaultEvalModel is the default Anthropic model used for live Dispatcher and Concierge evaluation.
 const DefaultEvalModel = "claude-haiku-4-5-20251001"
 
-// NewStoreConcierge constructs a StoreConcierge over client.
 func NewStoreConcierge(client model.ModelClient) *StoreConcierge {
 	return &StoreConcierge{
 		Client:       NewWireToolClient(client),

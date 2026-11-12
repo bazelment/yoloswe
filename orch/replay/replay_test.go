@@ -11,8 +11,6 @@ import (
 	"github.com/bazelment/yoloswe/orch/replay"
 )
 
-// scriptedEvalClient is a deterministic ModelClient for unit-testing the replay harness
-// without network or live LLM calls.
 type scriptedEvalClient struct {
 	momentTools     map[string]model.ToolCall
 	questionAnswers map[string]string

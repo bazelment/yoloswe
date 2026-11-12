@@ -20,11 +20,10 @@ import (
 //go:embed testdata/*.json
 var embeddedTestdata embed.FS
 
-// DefaultDatasetPath is the embedded testdata path for the full Gate 2 dataset.
-const DefaultDatasetPath = "testdata/gate2_dataset.json"
-
-// InnerLoopDatasetPath is the embedded testdata path for the 5 hand-checked inner-loop moments.
-const InnerLoopDatasetPath = "testdata/inner_loop_5.json"
+const (
+	DefaultDatasetPath   = "testdata/gate2_dataset.json"
+	InnerLoopDatasetPath = "testdata/inner_loop_5.json"
+)
 
 // Verdict indicates whether the owner endorsed or corrected the legacy orchestrator's decision.
 type Verdict string
@@ -52,9 +51,7 @@ type BaselineDecision struct {
 	AskedOwner bool   `json:"asked_owner,omitempty"`
 }
 
-// OwnerFollowUp records the owner's subsequent reaction and ground-truth expectation.
-// When Verdict is VerdictCorrected, the owner correction marks the baseline wrong
-// and states the expected decision.
+// OwnerFollowUp records the owner's reaction and ground-truth expectation.
 type OwnerFollowUp struct {
 	Verdict         Verdict  `json:"verdict"`
 	OwnerNote       string   `json:"owner_note,omitempty"`
@@ -77,9 +74,7 @@ type JudgmentMoment struct {
 	OwnerFollowUp OwnerFollowUp    `json:"owner_follow_up"`
 }
 
-// FactGroup represents a verifiable ground-truth fact from Store state that must
-// appear in a Concierge status answer. At least one token in AnyOf must match
-// case-insensitively.
+// FactGroup requires at least one token in AnyOf to match a Concierge answer case-insensitively.
 type FactGroup struct {
 	Label string   `json:"label"`
 	AnyOf []string `json:"any_of"`
@@ -104,17 +99,14 @@ type Dataset struct {
 	Questions []ConciergeQuestion `json:"questions"`
 }
 
-// LoadDefaultDataset loads the embedded full Gate 2 dataset.
 func LoadDefaultDataset() (*Dataset, error) {
 	return LoadEmbeddedDataset(DefaultDatasetPath)
 }
 
-// LoadInnerLoopDataset loads the embedded 5-moment inner-loop dataset.
 func LoadInnerLoopDataset() (*Dataset, error) {
 	return LoadEmbeddedDataset(InnerLoopDatasetPath)
 }
 
-// LoadEmbeddedDataset loads a dataset from the embedded testdata filesystem.
 func LoadEmbeddedDataset(name string) (*Dataset, error) {
 	f, err := embeddedTestdata.Open(name)
 	if err != nil {
@@ -124,7 +116,6 @@ func LoadEmbeddedDataset(name string) (*Dataset, error) {
 	return LoadDatasetFromReader(f)
 }
 
-// LoadDatasetFromFile loads a Dataset from a JSON file on disk.
 func LoadDatasetFromFile(path string) (*Dataset, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -134,7 +125,6 @@ func LoadDatasetFromFile(path string) (*Dataset, error) {
 	return LoadDatasetFromReader(f)
 }
 
-// LoadDatasetFromReader decodes and validates a Dataset from r.
 func LoadDatasetFromReader(r io.Reader) (*Dataset, error) {
 	raw, err := io.ReadAll(r)
 	if err != nil {
@@ -217,8 +207,7 @@ var (
 	reToken   = regexp.MustCompile(`(?i)(?:ghp_[A-Za-z0-9]{16,}|ghs_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-ant-[A-Za-z0-9\-_]{12,}|neb_[A-Za-z0-9\-_]{12,}|xox[baprs]-[A-Za-z0-9\-]{10,}|AKIA[0-9A-Z]{16}|Bearer\s+[A-Za-z0-9._\-]{20,})`)
 )
 
-// ValidateScrubbedBytes verifies that raw dataset JSON contains no unscrubbed emails,
-// credential tokens, or raw 36-char session/account/terminal UUIDs.
+// ValidateScrubbedBytes rejects raw dataset JSON containing unscrubbed tokens, emails, or UUIDs.
 func ValidateScrubbedBytes(raw []byte) error {
 	if match := reToken.Find(raw); match != nil {
 		return fmt.Errorf("orch/replay: dataset contains unscrubbed token pattern %q", string(match))
@@ -232,8 +221,7 @@ func ValidateScrubbedBytes(raw []byte) error {
 	return nil
 }
 
-// ScrubText replaces any tokens, email addresses, or raw UUIDs in s with deterministic
-// scrubbed placeholders.
+// ScrubText replaces tokens, emails, and raw UUIDs in s with placeholders.
 func ScrubText(s string) string {
 	s = reToken.ReplaceAllString(s, "<scrubbed-token>")
 	s = reEmail.ReplaceAllString(s, "<scrubbed-email>")

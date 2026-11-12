@@ -259,10 +259,8 @@ func newSeededEnv(
 	return st, drv, clk, nil
 }
 
-// NewWireToolClient wraps a ModelClient so tool names containing '.' (such as
-// "lane.retry" or "lane.show") are encoded with '_' on the Anthropic Messages API
-// wire (which requires ^[a-zA-Z0-9_-]{1,128}$) and restored to their canonical
-// dotted names in the returned Response.
+// NewWireToolClient encodes dotted tool names with '_' on the Messages API wire
+// (^[a-zA-Z0-9_-]{1,128}$) and restores canonical names in responses.
 func NewWireToolClient(inner model.ModelClient) model.ModelClient {
 	if inner == nil {
 		return nil

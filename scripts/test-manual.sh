@@ -9,7 +9,6 @@ cd "${WORKSPACE_ROOT}"
 
 echo "=== Discovering manual tests ==="
 
-# Explicitly registered manual evaluation / integration targets
 REGISTERED_MANUAL_TESTS=(
     "//orch/replay/integration:eval_test"
 )
