@@ -34,6 +34,10 @@ func TestCompiler_LiveMessagesAPI(t *testing.T) {
 	var client model.ModelClient = model.NewHTTPClient()
 	if os.Getenv("UPDATE_FIXTURES") == "1" {
 		recordPath := filepath.Join(t.TempDir(), "live_recipe_compile.json")
+		if ws := strings.TrimSpace(os.Getenv("BUILD_WORKSPACE_DIRECTORY")); ws != "" {
+			recordPath = filepath.Join(ws, "orch/recipe/testdata/live_recipe_compile.json")
+		}
+		t.Logf("recording live recipe exchanges to %s", recordPath)
 		client = model.NewRecordingFakeClient(recordPath, client)
 	}
 

@@ -1314,3 +1314,45 @@ func TestCompilerRejectsInvalidCompiledRecipes(t *testing.T) {
 		})
 	}
 }
+
+func TestCompilerOptionsAndBaseNameFallback(t *testing.T) {
+	t.Parallel()
+
+	c := recipe.NewCompiler(model.NewFakeClient(), recipe.WithModel("claude-sonnet-4-6"), recipe.WithMaxTokens(1024))
+	req := c.BuildCompileModelRequest(recipe.CompileRequest{
+		Name:   recipe.DefaultName,
+		Source: recipe.DefaultSource,
+	})
+	if req.Model != "claude-sonnet-4-6" {
+		t.Fatalf("Model = %q, want claude-sonnet-4-6", req.Model)
+	}
+	if req.MaxTokens != 1024 {
+		t.Fatalf("MaxTokens = %d, want 1024", req.MaxTokens)
+	}
+
+	base := recipe.Default()
+	submitted := recipe.Default()
+	submitted.Name = ""
+	toolInput, err := recipe.RecipeToToolInput(submitted)
+	if err != nil {
+		t.Fatalf("RecipeToToolInput: %v", err)
+	}
+	fake := model.NewFakeClient(model.Response{
+		ID:         "msg_base_fallback",
+		Model:      recipe.DefaultCompilerModel,
+		StopReason: model.StopReasonToolUse,
+		Message: model.NewAssistantMessage(
+			model.NewToolUseBlock("call_base", recipe.SubmitRecipeToolName, toolInput),
+		),
+	})
+	res, err := recipe.NewCompiler(fake).Compile(t.Context(), recipe.CompileRequest{
+		Base:   &base,
+		Source: "keep default phases",
+	})
+	if err != nil {
+		t.Fatalf("Compile with Base.Name fallback error: %v", err)
+	}
+	if res.Recipe.Name != recipe.DefaultName || res.Recipe.Version != 2 {
+		t.Fatalf("got Name=%q Version=%d, want default v2", res.Recipe.Name, res.Recipe.Version)
+	}
+}

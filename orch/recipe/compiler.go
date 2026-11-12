@@ -199,7 +199,11 @@ func (in compiledRecipeInput) toRecipe(req CompileRequest) Recipe {
 		}
 	}
 
-	name := cmp.Or(strings.TrimSpace(req.Name), strings.TrimSpace(in.Name))
+	var baseName string
+	if req.Base != nil {
+		baseName = strings.TrimSpace(req.Base.Name)
+	}
+	name := cmp.Or(strings.TrimSpace(req.Name), strings.TrimSpace(in.Name), baseName)
 
 	version := req.Version
 	if version == 0 {
@@ -263,7 +267,8 @@ func RecipeToToolInput(r Recipe) (json.RawMessage, error) {
 // CompileRequest describes a natural-language recipe compilation or per-lane override request.
 type CompileRequest struct {
 	Base *Recipe `json:"base,omitempty"`
-	// Name defaults to Base.Name if Base is set, else DefaultName.
+	// Name overrides the compiled recipe name; when empty, the prompt targets
+	// Base.Name (or DefaultName) and toRecipe falls back to the model's name or Base.Name.
 	Name   string `json:"name,omitempty"`
 	RunID  string `json:"run_id,omitempty"`
 	Source string `json:"source"`
@@ -364,7 +369,7 @@ func (c *Compiler) BuildCompileModelRequest(req CompileRequest) model.Request {
 		System:    CompilerSystemPrompt,
 		Messages:  []model.Message{model.NewUserMessage(BuildCompileUserPrompt(req))},
 		Tools:     []model.ToolDefinition{SubmitRecipeToolDefinition()},
-		MaxTokens: max(c.maxTokens, DefaultCompilerMaxTokens),
+		MaxTokens: cmp.Or(c.maxTokens, DefaultCompilerMaxTokens),
 	}
 }
 
