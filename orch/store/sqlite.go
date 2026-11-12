@@ -37,14 +37,12 @@ type SQLiteStore struct {
 	mu    sync.RWMutex
 }
 
-// NewSQLiteStore opens (or creates) a SQLite-backed Store at path and applies
-// embedded schema migrations. If clk is nil, clock.RealClock{} is used.
+// NewSQLiteStore opens a SQLite-backed Store at path and applies migrations.
 func NewSQLiteStore(path string, clk clock.Clock) (*SQLiteStore, error) {
 	return OpenSQLite(path, clk)
 }
 
-// OpenSQLite opens (or creates) a SQLite-backed Store at path and applies
-// embedded schema migrations. If clk is nil, clock.RealClock{} is used.
+// OpenSQLite opens a SQLite-backed Store at path and applies migrations.
 func OpenSQLite(path string, clk clock.Clock) (*SQLiteStore, error) {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
@@ -98,8 +96,7 @@ func RunDBPath(baseDir, runID string) (string, error) {
 	return filepath.Join(baseDir, cleanRunID, DefaultSQLiteFilename), nil
 }
 
-// OpenRunSQLite opens (or creates) the per-run SQLite database file under
-// baseDir/<runID>/store.db (defaulting baseDir to ~/.swarm when empty).
+// OpenRunSQLite opens the per-run SQLite database under baseDir/<runID>/store.db.
 func OpenRunSQLite(baseDir, runID string, clk clock.Clock) (*SQLiteStore, error) {
 	dbPath, err := RunDBPath(baseDir, runID)
 	if err != nil {
