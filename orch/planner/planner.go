@@ -256,6 +256,21 @@ type AppliedChanges struct {
 	ObjectiveUpdated bool                  `json:"objective_updated"`
 }
 
+func (a AppliedChanges) Clone() AppliedChanges {
+	out := a
+	out.AddedItems = slices.Clone(a.AddedItems)
+	out.UpdatedItems = slices.Clone(a.UpdatedItems)
+	out.DroppedItems = slices.Clone(a.DroppedItems)
+	out.ReorderedItems = slices.Clone(a.ReorderedItems)
+	out.StoppedLanes = slices.Clone(a.StoppedLanes)
+	out.RebriefedLanes = slices.Clone(a.RebriefedLanes)
+	out.OwnerAsks = slices.Clone(a.OwnerAsks)
+	for i := range out.OwnerAsks {
+		out.OwnerAsks[i].Options = slices.Clone(out.OwnerAsks[i].Options)
+	}
+	return out
+}
+
 // Result captures the outcome of a single Planner thread execution.
 type Result struct {
 	Plan           *PlanDocument         `json:"plan,omitempty"`
@@ -349,6 +364,7 @@ func (p *Planner) LastResult() *Result {
 		recCopy := p.lastResult.Reconciliation.Clone()
 		cp.Reconciliation = &recCopy
 	}
+	cp.Applied = p.lastResult.Applied.Clone()
 	cp.Decisions = slices.Clone(p.lastResult.Decisions)
 	return &cp
 }
@@ -641,8 +657,7 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 		reconciled *Reconciliation
 		applied    AppliedChanges
 		decisions  []store.Decision
-		turnUsage  = make(map[int]model.Usage)
-		curTurn    int
+		turnUsage  model.Usage
 	)
 
 	applyOnce := func(callCtx context.Context, rec Reconciliation, usage model.Usage) (string, error) {
@@ -665,7 +680,7 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 		if err := json.Unmarshal(raw, &rec); err != nil {
 			return "", fmt.Errorf("decode %s: %w", ToolSubmitReconciliation, err)
 		}
-		return applyOnce(callCtx, rec, turnUsage[curTurn])
+		return applyOnce(callCtx, rec, turnUsage)
 	})
 	reg.Register(readPlanToolDef, func(callCtx context.Context, raw json.RawMessage) (string, error) {
 		var rp ReadPlanParams
@@ -695,9 +710,8 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 		req,
 		reg,
 		model.WithMaxTurns(p.cfg.MaxTurns),
-		model.WithOnTurn(func(turn int, resp model.Response) {
-			curTurn = turn
-			turnUsage[turn] = resp.Usage
+		model.WithOnTurn(func(_ int, resp model.Response) {
+			turnUsage = resp.Usage
 			if txt := strings.TrimSpace(resp.Text()); txt != "" {
 				_, _ = p.store.Threads().AppendItem(cleanupCtx, store.Item{
 					ThreadID: th.ID,
@@ -1181,20 +1195,23 @@ func (p *Planner) applyReconciliation(
 		}
 	}
 
-	// 8. Escalate unmappable and conflicting points via owner.ask with default & deadline.
+	escalateAsk := func(cf ConflictPoint, reason string) error {
+		ask, err := p.registerReconcileAsk(ctx, run.ID, now, cf)
+		if err != nil {
+			return err
+		}
+		applied.OwnerAsks = append(applied.OwnerAsks, ask)
+		return appendDec(ToolOwnerAsk, ask.LaneID, reason,
+			fmt.Sprintf("registered owner ask %s (default=%q)", ask.ID, ask.Default), ask)
+	}
+
 	for i := range rec.Conflicts {
 		cf := &rec.Conflicts[i]
 		desc := strings.TrimSpace(cf.Description)
 		if desc == "" {
 			continue
 		}
-		ask, err := p.registerReconcileAsk(ctx, run.ID, now, *cf)
-		if err != nil {
-			return applied, decisions, err
-		}
-		applied.OwnerAsks = append(applied.OwnerAsks, ask)
-		if err := appendDec(ToolOwnerAsk, ask.LaneID, "plan conflict with active directive: "+desc,
-			fmt.Sprintf("registered owner ask %s (default=%q)", ask.ID, ask.Default), ask); err != nil {
+		if err := escalateAsk(*cf, "plan conflict with active directive: "+desc); err != nil {
 			return applied, decisions, err
 		}
 	}
@@ -1204,18 +1221,12 @@ func (p *Planner) applyReconciliation(
 		if u == "" {
 			continue
 		}
-		ask, err := p.registerReconcileAsk(ctx, run.ID, now, ConflictPoint{
+		if err := escalateAsk(ConflictPoint{
 			Description: u,
 			Question:    fmt.Sprintf("How should unmappable plan item %q be handled?", u),
 			Options:     []string{"skip_unmappable", "add_manual_backlog_item"},
 			Default:     "skip_unmappable",
-		})
-		if err != nil {
-			return applied, decisions, err
-		}
-		applied.OwnerAsks = append(applied.OwnerAsks, ask)
-		if err := appendDec(ToolOwnerAsk, "", "unmappable plan point: "+u,
-			fmt.Sprintf("registered owner ask %s (default=%q)", ask.ID, ask.Default), ask); err != nil {
+		}, "unmappable plan point: "+u); err != nil {
 			return applied, decisions, err
 		}
 	}
@@ -1361,8 +1372,6 @@ func FormatReconciliationSummary(runID, planRef string, rec Reconciliation, appl
 }
 
 func singleLineSummary(s string) string {
-	s = strings.ReplaceAll(s, "\r\n", " ")
-	s = strings.ReplaceAll(s, "\n", " ")
 	return strings.Join(strings.Fields(s), " ")
 }
 

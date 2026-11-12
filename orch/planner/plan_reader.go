@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/bazelment/yoloswe/orch/store"
@@ -61,12 +62,13 @@ func NewPlanReader(posts map[string]string) *DefaultPlanReader {
 // or a file path (PlanSourceFile) and returns the normalized target identifier.
 func ParsePlanRef(ref string) (sourceKind, target string) {
 	trimmed := strings.TrimSpace(ref)
+	lower := strings.ToLower(trimmed)
 	for _, prefix := range []string{"post:", "nebula://post/", "nebula:"} {
-		if strings.HasPrefix(strings.ToLower(trimmed), prefix) {
+		if strings.HasPrefix(lower, prefix) {
 			return PlanSourceNebulaPost, strings.TrimSpace(trimmed[len(prefix):])
 		}
 	}
-	if strings.HasPrefix(strings.ToLower(trimmed), "file://") {
+	if strings.HasPrefix(lower, "file://") {
 		return PlanSourceFile, strings.TrimSpace(trimmed[len("file://"):])
 	}
 	if looksLikeUUID(trimmed) {
@@ -118,24 +120,20 @@ func (r *DefaultPlanReader) ReadPlan(ctx context.Context, ref string) (PlanDocum
 	}
 
 	if sourceKind == PlanSourceFile {
-		path := target
-		if r != nil && r.BaseDir != "" && !strings.HasPrefix(path, "/") {
-			if _, err := os.Stat(path); err != nil {
-				path = r.BaseDir + "/" + path
+		data, err := os.ReadFile(target)
+		if err != nil && r != nil && r.BaseDir != "" && !filepath.IsAbs(target) {
+			if altData, altErr := os.ReadFile(filepath.Join(r.BaseDir, target)); altErr == nil {
+				data, err = altData, nil
 			}
 		}
-		data, err := os.ReadFile(path)
 		if err != nil {
 			return PlanDocument{}, fmt.Errorf("orch/planner: read plan file %q: %w", target, err)
 		}
 		return buildPlanDocument(trimmed, PlanSourceFile, target, string(data)), nil
 	}
 
-	// If a UUID-like reference happens to be an existing local file, prefer the file.
-	if info, err := os.Stat(target); err == nil && !info.IsDir() {
-		if data, readErr := os.ReadFile(target); readErr == nil {
-			return buildPlanDocument(trimmed, PlanSourceFile, target, string(data)), nil
-		}
+	if data, err := os.ReadFile(target); err == nil {
+		return buildPlanDocument(trimmed, PlanSourceFile, target, string(data)), nil
 	}
 
 	if r != nil && r.FetchPost != nil {
@@ -174,7 +172,7 @@ func buildPlanDocument(ref, sourceKind, target, content string) PlanDocument {
 }
 
 func extractMarkdownTitle(content string) string {
-	for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
+	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "#") {
 			title := strings.TrimSpace(strings.TrimLeft(line, "#"))

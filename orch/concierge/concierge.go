@@ -135,23 +135,16 @@ var conciergeToolDefs = []model.ToolDefinition{
 // NormalizeToolName maps underscore aliases (e.g. "lane_show") to canonical dotted tool names.
 func NormalizeToolName(name string) string {
 	trimmed := strings.TrimSpace(name)
-	switch trimmed {
-	case ToolStatus, ToolLaneShow, ToolDecisionsSince, ToolBacklog, ToolDirectiveSubmit:
-		return trimmed
-	case "lane_show":
-		return ToolLaneShow
-	case "decisions_since":
-		return ToolDecisionsSince
-	case "backlog.list", "backlog_list":
-		return ToolBacklog
-	case "directive_submit":
-		return ToolDirectiveSubmit
-	default:
-		if candidate := strings.Replace(trimmed, "_", ".", 1); isKnownTool(candidate) {
-			return candidate
-		}
+	if isKnownTool(trimmed) {
 		return trimmed
 	}
+	if trimmed == "backlog.list" || trimmed == "backlog_list" {
+		return ToolBacklog
+	}
+	if candidate := strings.Replace(trimmed, "_", ".", 1); isKnownTool(candidate) {
+		return candidate
+	}
+	return trimmed
 }
 
 func isKnownTool(name string) bool {
@@ -333,14 +326,13 @@ func (c *Concierge) Ask(ctx context.Context, runID, question string) (*TurnResul
 }
 
 type conciergeTurnState struct {
-	turnUsage           map[int]model.Usage
-	turnUsed            map[int]bool
 	threadID            string
 	turnID              string
 	toolCalls           []string
 	submittedDirectives []store.Directive
 	decisions           []store.Decision
-	currentTurn         int
+	turnUsage           model.Usage
+	turnUsageRecorded   bool
 }
 
 // AskInThread executes a single conversational turn on an existing Concierge thread.
@@ -390,10 +382,8 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 	}
 
 	state := &conciergeTurnState{
-		threadID:  threadID,
-		turnID:    turnID,
-		turnUsage: make(map[int]model.Usage),
-		turnUsed:  make(map[int]bool),
+		threadID: threadID,
+		turnID:   turnID,
 	}
 
 	reg := c.buildToolRegistry(runID, state)
@@ -414,9 +404,9 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 		req,
 		reg,
 		model.WithMaxTurns(c.cfg.MaxTurns),
-		model.WithOnTurn(func(turn int, resp model.Response) {
-			state.currentTurn = turn
-			state.turnUsage[turn] = resp.Usage
+		model.WithOnTurn(func(_ int, resp model.Response) {
+			state.turnUsage = resp.Usage
+			state.turnUsageRecorded = false
 			if txt := strings.TrimSpace(resp.Text()); txt != "" {
 				_, _ = c.store.Threads().AppendItem(cleanupCtx, store.Item{
 					ThreadID: threadID,
@@ -541,6 +531,14 @@ func (c *Concierge) buildToolRegistry(runID string, state *conciergeTurnState) *
 	return reg
 }
 
+func decodeToolParams[T any](tool string, raw []byte) (T, error) {
+	var p T
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return p, fmt.Errorf("decode %s: %w", tool, err)
+	}
+	return p, nil
+}
+
 func (c *Concierge) handleRawToolCall(
 	ctx context.Context,
 	runID string,
@@ -559,37 +557,37 @@ func (c *Concierge) handleRawToolCall(
 
 	switch canonical {
 	case ToolStatus:
-		var p StatusParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return "", fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeToolParams[StatusParams](canonical, trimmed)
+		if err != nil {
+			return "", err
 		}
 		return c.execStatus(ctx, runID, p)
 
 	case ToolLaneShow:
-		var p LaneShowParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return "", fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeToolParams[LaneShowParams](canonical, trimmed)
+		if err != nil {
+			return "", err
 		}
 		return c.execLaneShow(ctx, runID, p)
 
 	case ToolDecisionsSince:
-		var p DecisionsSinceParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return "", fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeToolParams[DecisionsSinceParams](canonical, trimmed)
+		if err != nil {
+			return "", err
 		}
 		return c.execDecisionsSince(ctx, runID, p)
 
 	case ToolBacklog:
-		var p BacklogParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return "", fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeToolParams[BacklogParams](canonical, trimmed)
+		if err != nil {
+			return "", err
 		}
 		return c.execBacklog(ctx, runID, p)
 
 	case ToolDirectiveSubmit:
-		var p DirectiveSubmitParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return "", fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeToolParams[DirectiveSubmitParams](canonical, trimmed)
+		if err != nil {
+			return "", err
 		}
 		return c.execDirectiveSubmit(ctx, runID, state, trimmed, p)
 
@@ -682,10 +680,6 @@ func (c *Concierge) execStatus(ctx context.Context, runID string, p StatusParams
 	)
 	for i := range lanes {
 		ln := lanes[i]
-		rec := cmp.Or(ln.RecipeName, recipe.DefaultName)
-		if ln.RecipeVersion > 0 {
-			rec = fmt.Sprintf("%s@v%d", rec, ln.RecipeVersion)
-		}
 		fmt.Fprintf(&b, "- %s: item=%s status=%s phase=%s round=%d attempt=%d recipe=%s pr=#%d head=%s checks=%s approval_stale=%t age=%s\n",
 			ln.ID,
 			cmp.Or(ln.ItemID, "-"),
@@ -693,7 +687,7 @@ func (c *Concierge) execStatus(ctx context.Context, runID string, p StatusParams
 			cmp.Or(ln.Phase, "-"),
 			ln.Round,
 			ln.Attempt,
-			rec,
+			formatRecipeRef(ln.RecipeName, ln.RecipeVersion),
 			ln.PR,
 			cmp.Or(ln.PRHead, "-"),
 			cmp.Or(ln.Checks, "-"),
@@ -734,17 +728,13 @@ func (c *Concierge) execLaneShow(ctx context.Context, runID string, p LaneShowPa
 	}
 
 	var b strings.Builder
-	rec := cmp.Or(ln.RecipeName, recipe.DefaultName)
-	if ln.RecipeVersion > 0 {
-		rec = fmt.Sprintf("%s@v%d", rec, ln.RecipeVersion)
-	}
 	fmt.Fprintf(&b, "Lane: %s\n", ln.ID)
 	fmt.Fprintf(&b, "Run: %s\n", ln.RunID)
 	fmt.Fprintf(&b, "ItemID: %s\n", cmp.Or(ln.ItemID, "-"))
 	fmt.Fprintf(&b, "Title: %s\n", cmp.Or(ln.Title, "-"))
 	fmt.Fprintf(&b, "Status: %s\n", ln.Status)
 	fmt.Fprintf(&b, "Phase: %s (round=%d attempt=%d)\n", cmp.Or(ln.Phase, "-"), ln.Round, ln.Attempt)
-	fmt.Fprintf(&b, "Recipe: %s\n", rec)
+	fmt.Fprintf(&b, "Recipe: %s\n", formatRecipeRef(ln.RecipeName, ln.RecipeVersion))
 	fmt.Fprintf(&b, "Branch: %s (base=%s)\n", cmp.Or(ln.Branch, "-"), cmp.Or(ln.BaseBranch, "-"))
 	fmt.Fprintf(&b, "SessionID: %s | TerminalID: %s\n", cmp.Or(ln.SessionID, "-"), cmp.Or(ln.TerminalID, "-"))
 	fmt.Fprintf(&b, "PR: #%d | Head: %s | ApprovalSHA: %s | ApprovalStale: %t | MergeSHA: %s | Checks: %s\n",
@@ -1037,9 +1027,9 @@ func (c *Concierge) execDirectiveSubmit(
 	if state != nil {
 		threadID = state.threadID
 		turnID = state.turnID
-		if !state.turnUsed[state.currentTurn] {
-			usage = state.turnUsage[state.currentTurn]
-			state.turnUsed[state.currentTurn] = true
+		if !state.turnUsageRecorded {
+			usage = state.turnUsage
+			state.turnUsageRecorded = true
 		}
 		state.submittedDirectives = append(state.submittedDirectives, dir)
 	}
@@ -1086,13 +1076,14 @@ func VerifyAnswerCitations(
 	}
 
 	var candidates []string
+	seenCandidates := make(map[string]bool)
 	knownLanes := make(map[string]bool)
 	knownItems := make(map[string]bool)
-	knownDirectives := make(map[string]bool)
 
 	addCandidate := func(s string) {
 		s = strings.TrimSpace(s)
-		if s != "" && !slices.Contains(candidates, s) {
+		if s != "" && !seenCandidates[s] {
+			seenCandidates[s] = true
 			candidates = append(candidates, s)
 		}
 	}
@@ -1143,7 +1134,6 @@ func VerifyAnswerCitations(
 	if dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: runID}); err == nil {
 		for i := range dirs {
 			d := dirs[i]
-			knownDirectives[d.ID] = true
 			addCandidate(d.ID)
 			addCandidate(d.Ref)
 			addCandidate(d.Text)
@@ -1151,7 +1141,6 @@ func VerifyAnswerCitations(
 	}
 	for i := range submitted {
 		d := submitted[i]
-		knownDirectives[d.ID] = true
 		addCandidate(d.ID)
 		addCandidate(d.Ref)
 		addCandidate(d.Text)
@@ -1216,6 +1205,14 @@ func extractPrefixedTokens(text, prefix string) []string {
 		}
 	}
 	return out
+}
+
+func formatRecipeRef(name string, version int) string {
+	rec := cmp.Or(name, recipe.DefaultName)
+	if version > 0 {
+		return fmt.Sprintf("%s@v%d", rec, version)
+	}
+	return rec
 }
 
 func formatAge(now time.Time, candidates ...time.Time) string {
