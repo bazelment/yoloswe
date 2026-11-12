@@ -21,7 +21,6 @@ import (
 	"github.com/bazelment/yoloswe/orch/store"
 )
 
-// Planner role constants.
 const (
 	ActorPlanner               = "planner"
 	ToolRecipeCompile          = "recipe.compile"

@@ -261,7 +261,7 @@ func ComputeMetrics(ctx context.Context, st store.Store, clk clock.Clock, runID 
 		}
 	}
 
-	// Compute lane idle time with an actionable event (either waiting to be handled or latency until handled).
+	// Accumulate lane idle time spent with an unhandled actionable event.
 	laneIdleByID := make(map[string]*LaneIdleMetric, len(lanes))
 	lanesByID := make(map[string]lane.Lane, len(lanes))
 	for i := range lanes {
@@ -289,7 +289,6 @@ func ComputeMetrics(ctx context.Context, st store.Store, clk clock.Clock, runID 
 			}
 			continue
 		}
-		// If the lane is still non-terminal and the event is unhandled, accumulate time waiting since ev.CreatedAt.
 		if ln, exists := lanesByID[ev.LaneID]; !exists || !ln.Status.Terminal() {
 			if !ev.CreatedAt.IsZero() && !now.Before(ev.CreatedAt) {
 				durMs := now.Sub(ev.CreatedAt).Milliseconds()

@@ -269,8 +269,7 @@ func (d *ScriptedFakeDriver) popMatchingBehaviorLocked(laneID, phase string, rou
 	return FakePhaseBehavior{}, false
 }
 
-// Runner coordinates the Controller, Dispatcher, and Planner in a single process
-// with run lease ownership, structured logging, metrics persistence, and graceful shutdown.
+// Runner coordinates the Controller, Dispatcher, and Planner for a single Run.
 type Runner struct {
 	store             store.Store
 	driver            lane.LaneDriver
@@ -286,7 +285,6 @@ type Runner struct {
 	mu                sync.Mutex
 }
 
-// NewRunner wires a Runner from cfg, st, drv, clk, client, and logger.
 func NewRunner(
 	cfg Config,
 	st store.Store,
@@ -338,17 +336,14 @@ func NewRunner(
 	return r
 }
 
-// Controller returns the underlying deterministic Controller.
 func (r *Runner) Controller() *controller.Controller {
 	return r.controller
 }
 
-// Dispatcher returns the underlying Dispatcher.
 func (r *Runner) Dispatcher() *dispatcher.Dispatcher {
 	return r.dispatcher
 }
 
-// Planner returns the underlying Planner.
 func (r *Runner) Planner() *Planner {
 	return r.planner
 }
@@ -419,7 +414,6 @@ func (r *Runner) Bootstrap(ctx context.Context) error {
 		)
 	}
 
-	// Ensure default recipe is persisted with configured concurrency cap.
 	if existingRec, err := r.store.Recipes().Get(ctx, runID, recipe.DefaultName, 0); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			def := recipe.Default()
@@ -445,8 +439,7 @@ func (r *Runner) Bootstrap(ctx context.Context) error {
 	return nil
 }
 
-// Step executes one orchestration pass (Planner directives, open-backlog wakeup,
-// Controller step, structured decision logging, and metrics recording when settled).
+// Step executes one orchestration pass across Planner, Controller, and decision logging.
 func (r *Runner) Step(ctx context.Context) error {
 	if err := r.planner.ReconcileDirectives(ctx, r.cfg.RunID, r.cfg.ConcurrencyCap); err != nil {
 		return err
@@ -680,9 +673,7 @@ func (r *Runner) hasImmediateWork(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-// Run executes the long-running orchestration loop until ctx is cancelled,
-// `--once` completion is reached, or `--max-steps` is reached, then writes
-// the final metrics snapshot to DecisionStore and releases the run lease.
+// Run executes the orchestration loop until ctx is cancelled or completion criteria are met.
 func (r *Runner) Run(ctx context.Context) error {
 	if err := r.Bootstrap(ctx); err != nil {
 		return err
@@ -715,7 +706,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		steps++
 
 		if r.cfg.Once {
-			// Drain any immediately actionable work (events, planned lanes, open backlog items) before waiting on ticker.
 			for range 64 {
 				if done, err := r.IsSettledAndComplete(ctx); err == nil && done {
 					return nil

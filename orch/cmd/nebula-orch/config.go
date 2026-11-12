@@ -22,7 +22,6 @@ import (
 	"github.com/bazelment/yoloswe/orch/store"
 )
 
-// Default role model identifiers and configuration values.
 const (
 	DefaultDispatcherModel     = dispatcher.DefaultModel
 	DefaultDispatcherHardModel = dispatcher.DefaultHardBatchModel
@@ -33,7 +32,6 @@ const (
 	DefaultDriverKind          = "nebula"
 )
 
-// Sentinel configuration errors.
 var (
 	ErrRunIDRequired          = errors.New("nebula-orch: --run <id> is required")
 	ErrNebulaStoreUnsupported = errors.New("nebula-orch: --store nebula backend is not yet available in MVP; use --store sqlite:<path>")

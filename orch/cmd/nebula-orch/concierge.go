@@ -18,7 +18,6 @@ import (
 	"github.com/bazelment/yoloswe/orch/store"
 )
 
-// Concierge role constants and tool names.
 const (
 	ActorConcierge          = "concierge"
 	ToolConciergeStatus     = "status"
@@ -34,17 +33,14 @@ const ConciergeSystemPrompt = `You are the Nebula Swarm Concierge.
 Answer the owner's questions accurately and concisely using read-only Store tools (status, lane.show, decisions.since, pr.ci).
 Never invent facts not present in the Store. When the owner issues a rule, instruction, recipe edit, or plan import, call directive.submit.`
 
-// ConciergeStatusParams is the input schema for the `status` tool.
 type ConciergeStatusParams struct {
 	IncludeMetrics bool `json:"include_metrics,omitempty" jsonschema:"description=Include decision, token, cost, and idle metrics"`
 }
 
-// ConciergeLaneShowParams is the input schema for the `lane.show` tool.
 type ConciergeLaneShowParams struct {
 	LaneID string `json:"lane_id" jsonschema:"required,description=Lane ID to inspect"`
 }
 
-// ConciergeDecisionsParams is the input schema for the `decisions.since` tool.
 type ConciergeDecisionsParams struct {
 	Category string `json:"category,omitempty" jsonschema:"description=Optional category filter (auto or judgment)"`
 	LaneID   string `json:"lane_id,omitempty" jsonschema:"description=Optional lane ID filter"`
@@ -52,12 +48,10 @@ type ConciergeDecisionsParams struct {
 	Limit    int    `json:"limit,omitempty" jsonschema:"description=Max decisions to return (default 25)"`
 }
 
-// ConciergePRCIParams is the input schema for the `pr.ci` tool.
 type ConciergePRCIParams struct {
 	LaneID string `json:"lane_id" jsonschema:"required,description=Lane ID to inspect PR and CI checks"`
 }
 
-// DirectiveSubmitParams is the input schema for the `directive.submit` write tool.
 type DirectiveSubmitParams struct {
 	Kind   string `json:"kind,omitempty" jsonschema:"enum=standing,enum=instruction,enum=recipe_edit,enum=plan_import,description=Directive kind (standing, instruction, recipe_edit, plan_import)"`
 	Text   string `json:"text" jsonschema:"required,description=Directive rule, instruction, recipe delta, or plan summary"`
@@ -79,7 +73,6 @@ type Concierge struct {
 	mu        sync.Mutex
 }
 
-// NewConcierge creates a new Concierge instance for runID.
 func NewConcierge(
 	runID string,
 	st store.Store,

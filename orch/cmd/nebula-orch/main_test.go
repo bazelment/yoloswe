@@ -111,7 +111,6 @@ func TestSmoke_ThreeLaneScenarioAndConciergeChat(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "three_lane.db")
 
-	// Write a custom JSON recipe file and a fake driver scenario file where lane-2 stalls in integrate round 1.
 	customRecipe := recipe.Default()
 	customRecipe.Name = "default"
 	recipeBytes, err := json.MarshalIndent(customRecipe, "", "  ")
@@ -143,7 +142,6 @@ func TestSmoke_ThreeLaneScenarioAndConciergeChat(t *testing.T) {
 		t.Fatalf("WriteFile scenario: %v", err)
 	}
 
-	// Seed SQLite store with the 3-item backlog scenario.
 	st, err := store.OpenSQLite(dbPath, clock.NewRealClock())
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)
@@ -193,7 +191,6 @@ func TestSmoke_ThreeLaneScenarioAndConciergeChat(t *testing.T) {
 		t.Fatalf("Close seed store: %v", err)
 	}
 
-	// Step 1: Execute `nebula-orch run --run run-3lane --store sqlite:<path> --driver fake ...`
 	var runOut, runErr bytes.Buffer
 	if err := Execute(ctx, []string{
 		"run",
@@ -215,7 +212,6 @@ func TestSmoke_ThreeLaneScenarioAndConciergeChat(t *testing.T) {
 	}
 	defer func() { _ = verifySt.Close() }()
 
-	// Verify all 3 backlog items and all 3 lanes reached done.
 	for _, itemID := range []string{"item-1", "item-2", "item-3"} {
 		it, err := verifySt.Backlog().Get(ctx, "run-3lane", itemID)
 		if err != nil {
@@ -238,7 +234,6 @@ func TestSmoke_ThreeLaneScenarioAndConciergeChat(t *testing.T) {
 		}
 	}
 
-	// Verify lane-2 recorded integrate round 2 after stalling on round 1.
 	lane2, err := verifySt.Lanes().Get(ctx, "run-3lane", "lane-2")
 	if err != nil {
 		t.Fatalf("Get lane-2: %v", err)
@@ -247,7 +242,6 @@ func TestSmoke_ThreeLaneScenarioAndConciergeChat(t *testing.T) {
 		t.Fatalf("lane-2 MaxRound(integrate) = %d, want 2", lane2.MaxRound(recipe.PhaseIntegrate))
 	}
 
-	// Verify metrics were written to the Decision log.
 	decs, err := verifySt.Decisions().List(ctx, store.DecisionFilter{RunID: "run-3lane"})
 	if err != nil {
 		t.Fatalf("List decisions: %v", err)
@@ -273,7 +267,6 @@ func TestSmoke_ThreeLaneScenarioAndConciergeChat(t *testing.T) {
 		t.Fatalf("expected populated per-decision and per-day token/cost metrics, got %+v", recordedMetrics)
 	}
 
-	// Step 2: Execute `nebula-orch chat --run run-3lane --store sqlite:<path> --replay ...`
 	var chatOut, chatErr bytes.Buffer
 	if err := Execute(ctx, []string{
 		"chat",
@@ -291,7 +284,6 @@ func TestSmoke_ThreeLaneScenarioAndConciergeChat(t *testing.T) {
 		}
 	}
 
-	// Verify Concierge thread and turn were persisted and archived in Store.
 	threads, err := verifySt.Threads().ListThreads(ctx, store.ThreadFilter{
 		RunID: "run-3lane",
 		Role:  store.ThreadRoleConcierge,
@@ -371,7 +363,6 @@ func TestConfig_RoleModelsAndRecipeFiles(t *testing.T) {
 		t.Fatalf("MergePolicy.Mode = %q, want self", gotRec.MergePolicy.Mode)
 	}
 
-	// Verify --store nebula returns ErrNebulaStoreUnsupported.
 	_, _, storeErr := openStore(Config{RunID: "run-cfg", StoreSpec: "nebula"}, clk)
 	if !errors.Is(storeErr, ErrNebulaStoreUnsupported) {
 		t.Fatalf("openStore(nebula) error = %v, want %v", storeErr, ErrNebulaStoreUnsupported)
@@ -392,7 +383,6 @@ func TestPlannerDirectivesAndConciergeSubmit(t *testing.T) {
 		t.Fatalf("Create run: %v", err)
 	}
 
-	// Script Concierge to submit both a recipe_edit and a plan_import directive, then end turn.
 	conciergeClient := model.NewFakeClient(
 		model.Response{
 			ID:         "msg-c-1",
@@ -435,7 +425,6 @@ func TestPlannerDirectivesAndConciergeSubmit(t *testing.T) {
 		t.Fatalf("ReconcileDirectives: %v", err)
 	}
 
-	// Verify recipe was updated to v2 without clean phase.
 	latestDefault, err := st.Recipes().Get(ctx, "run-plan", recipe.DefaultName, 0)
 	if err != nil {
 		t.Fatalf("Get latest default recipe: %v", err)
@@ -444,7 +433,6 @@ func TestPlannerDirectivesAndConciergeSubmit(t *testing.T) {
 		t.Fatalf("expected clean phase to be removed in compiled recipe edit, got phases %v", latestDefault.PhaseNames())
 	}
 
-	// Verify plan import updated run objective, added item-plan-1, and created owner ask for conflict.
 	gotRun, err := st.Runs().Get(ctx, "run-plan")
 	if err != nil {
 		t.Fatalf("Get run: %v", err)
@@ -502,7 +490,6 @@ func TestGracefulShutdown_ReleasesLeaseAndWritesMetrics(t *testing.T) {
 		t.Fatalf("expected active lease held by holder-graceful, got %+v", runWhileActive.Lease)
 	}
 
-	// Cancel context to trigger graceful shutdown.
 	cancel()
 	if runErr := <-errCh; runErr != nil {
 		t.Fatalf("runner.Run returned error on cancel: %v", runErr)
