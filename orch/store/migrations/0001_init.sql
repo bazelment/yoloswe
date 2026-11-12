@@ -106,9 +106,6 @@ CREATE TABLE IF NOT EXISTS decisions (
     PRIMARY KEY (run_id, seq)
 );
 
-CREATE INDEX IF NOT EXISTS idx_decisions_run_seq
-    ON decisions (run_id, seq);
-
 CREATE TABLE IF NOT EXISTS events (
     run_id TEXT NOT NULL,
     seq INTEGER NOT NULL,
@@ -123,9 +120,6 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT NOT NULL,
     PRIMARY KEY (run_id, seq)
 );
-
-CREATE INDEX IF NOT EXISTS idx_events_run_seq
-    ON events (run_id, seq);
 
 CREATE TABLE IF NOT EXISTS event_cursors (
     run_id TEXT NOT NULL,
@@ -171,9 +165,6 @@ CREATE TABLE IF NOT EXISTS turns (
     PRIMARY KEY (thread_id, id),
     UNIQUE (thread_id, seq)
 );
-
-CREATE INDEX IF NOT EXISTS idx_turns_thread_seq
-    ON turns (thread_id, seq);
 
 CREATE TABLE IF NOT EXISTS thread_items (
     thread_id TEXT NOT NULL,

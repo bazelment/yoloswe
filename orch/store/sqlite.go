@@ -286,6 +286,13 @@ func marshalJSONOrDefault(v any, def string) (string, error) {
 	return s, nil
 }
 
+func unmarshalJSON(raw string, dest any) error {
+	if raw == "" || raw == "[]" || raw == "{}" || raw == "null" {
+		return nil
+	}
+	return json.Unmarshal([]byte(raw), dest)
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1
@@ -297,9 +304,63 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+type queryRower interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+type execContext interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func execRequireRow(ctx context.Context, exec execContext, notFoundErr error, query string, args ...any) error {
+	res, err := exec.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return notFoundErr
+	}
+	return nil
+}
+
+func execInsertNew(ctx context.Context, exec execContext, alreadyExistsErr error, query string, args ...any) error {
+	res, err := exec.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return alreadyExistsErr
+	}
+	return nil
+}
+
 type sqliteRunStore SQLiteStore
 
 func (r *sqliteRunStore) s() *SQLiteStore { return (*SQLiteStore)(r) }
+
+const selectRunColumns = `
+SELECT id, objective, plan_ref, default_recipe, created_at, updated_at,
+       lease_holder_id, lease_acquired_at, lease_heartbeat_at, lease_expires_at
+FROM runs`
+
+func getRun(ctx context.Context, q queryRower, runID string) (*Run, error) {
+	run, err := scanRun(q.QueryRowContext(ctx, selectRunColumns+` WHERE id = ?`, runID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: run %q", ErrNotFound, runID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return run, nil
+}
 
 func (r *sqliteRunStore) Create(ctx context.Context, run Run) error {
 	if strings.TrimSpace(run.ID) == "" {
@@ -308,15 +369,6 @@ func (r *sqliteRunStore) Create(ctx context.Context, run Run) error {
 	s := r.s()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	var existingID string
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM runs WHERE id = ?`, run.ID).Scan(&existingID)
-	if err == nil {
-		return fmt.Errorf("%w: run %q", ErrAlreadyExists, run.ID)
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
 
 	now := s.now()
 	cp := run.Clone()
@@ -338,16 +390,16 @@ func (r *sqliteRunStore) Create(ctx context.Context, run Run) error {
 		expiresAt = formatTime(cp.Lease.ExpiresAt)
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	return execInsertNew(ctx, s.db, fmt.Errorf("%w: run %q", ErrAlreadyExists, run.ID), `
 INSERT INTO runs (
     id, objective, plan_ref, default_recipe, created_at, updated_at,
     lease_holder_id, lease_acquired_at, lease_heartbeat_at, lease_expires_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (id) DO NOTHING`,
 		cp.ID, cp.Objective, cp.PlanRef, cp.DefaultRecipe,
 		formatTime(cp.CreatedAt), formatTime(cp.UpdatedAt),
 		holderID, acquiredAt, heartbeatAt, expiresAt,
 	)
-	return err
 }
 
 func scanRun(scanner rowScanner) (*Run, error) {
@@ -398,39 +450,17 @@ func (r *sqliteRunStore) Get(ctx context.Context, runID string) (*Run, error) {
 	s := r.s()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	row := s.db.QueryRowContext(ctx, `
-SELECT id, objective, plan_ref, default_recipe, created_at, updated_at,
-       lease_holder_id, lease_acquired_at, lease_heartbeat_at, lease_expires_at
-FROM runs WHERE id = ?`, runID)
-	run, err := scanRun(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w: run %q", ErrNotFound, runID)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return run, nil
+	return getRun(ctx, s.db, runID)
 }
 
 func (r *sqliteRunStore) UpdateObjective(ctx context.Context, runID, objective, planRef string) error {
 	s := r.s()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx,
+	return execRequireRow(ctx, s.db, fmt.Errorf("%w: run %q", ErrNotFound, runID),
 		`UPDATE runs SET objective = ?, plan_ref = ?, updated_at = ? WHERE id = ?`,
 		objective, planRef, formatTime(s.now()), runID,
 	)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return fmt.Errorf("%w: run %q", ErrNotFound, runID)
-	}
-	return nil
 }
 
 func (r *sqliteRunStore) AcquireLease(ctx context.Context, runID, holderID string, ttl time.Duration) (*Lease, error) {
@@ -447,14 +477,7 @@ func (r *sqliteRunStore) AcquireLease(ctx context.Context, runID, holderID strin
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	row := tx.QueryRowContext(ctx, `
-SELECT id, objective, plan_ref, default_recipe, created_at, updated_at,
-       lease_holder_id, lease_acquired_at, lease_heartbeat_at, lease_expires_at
-FROM runs WHERE id = ?`, runID)
-	run, err := scanRun(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w: run %q", ErrNotFound, runID)
-	}
+	run, err := getRun(ctx, tx, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -503,14 +526,7 @@ func (r *sqliteRunStore) HeartbeatLease(ctx context.Context, runID, holderID str
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	row := tx.QueryRowContext(ctx, `
-SELECT id, objective, plan_ref, default_recipe, created_at, updated_at,
-       lease_holder_id, lease_acquired_at, lease_heartbeat_at, lease_expires_at
-FROM runs WHERE id = ?`, runID)
-	run, err := scanRun(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w: run %q", ErrNotFound, runID)
-	}
+	run, err := getRun(ctx, tx, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -534,8 +550,7 @@ WHERE id = ?`,
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	cp := run.Lease.Clone()
-	return &cp, nil
+	return run.Lease, nil
 }
 
 func (r *sqliteRunStore) ReleaseLease(ctx context.Context, runID, holderID string) error {
@@ -549,14 +564,7 @@ func (r *sqliteRunStore) ReleaseLease(ctx context.Context, runID, holderID strin
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	row := tx.QueryRowContext(ctx, `
-SELECT id, objective, plan_ref, default_recipe, created_at, updated_at,
-       lease_holder_id, lease_acquired_at, lease_heartbeat_at, lease_expires_at
-FROM runs WHERE id = ?`, runID)
-	run, err := scanRun(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: run %q", ErrNotFound, runID)
-	}
+	run, err := getRun(ctx, tx, runID)
 	if err != nil {
 		return err
 	}
@@ -605,15 +613,6 @@ func (b *sqliteBacklogStore) Add(ctx context.Context, item BacklogItem) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var existingID string
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM backlog_items WHERE run_id = ? AND id = ?`, cp.RunID, cp.ID).Scan(&existingID)
-	if err == nil {
-		return fmt.Errorf("%w: backlog item %q in run %q", ErrAlreadyExists, cp.ID, cp.RunID)
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-
 	now := s.now()
 	if cp.CreatedAt.IsZero() {
 		cp.CreatedAt = now
@@ -640,18 +639,18 @@ func (b *sqliteBacklogStore) Add(ctx context.Context, item BacklogItem) error {
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	return execInsertNew(ctx, s.db, fmt.Errorf("%w: backlog item %q in run %q", ErrAlreadyExists, cp.ID, cp.RunID), `
 INSERT INTO backlog_items (
     run_id, id, title, description, acceptance, priority, priority_rank, sort_order,
     status, lane_id, recipe_name, depends_on_json, tags_json, history_json, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (run_id, id) DO NOTHING`,
 		cp.RunID, cp.ID, cp.Title, cp.Description, cp.Acceptance,
 		string(cp.Priority), cp.Priority.Rank(), cp.Order,
 		string(cp.Status), cp.LaneID, cp.RecipeName,
 		dependsJSON, tagsJSON, historyJSON,
 		formatTime(cp.CreatedAt), formatTime(cp.UpdatedAt),
 	)
-	return err
 }
 
 func scanBacklogItem(scanner rowScanner) (*BacklogItem, error) {
@@ -680,23 +679,17 @@ func scanBacklogItem(scanner rowScanner) (*BacklogItem, error) {
 	if item.UpdatedAt, err = parseTime(updatedStr); err != nil {
 		return nil, err
 	}
-	if dependsJSON != "" && dependsJSON != "[]" {
-		if err := json.Unmarshal([]byte(dependsJSON), &item.DependsOn); err != nil {
-			return nil, err
-		}
+	if err := unmarshalJSON(dependsJSON, &item.DependsOn); err != nil {
+		return nil, err
 	}
-	if tagsJSON != "" && tagsJSON != "[]" {
-		if err := json.Unmarshal([]byte(tagsJSON), &item.Tags); err != nil {
-			return nil, err
-		}
+	if err := unmarshalJSON(tagsJSON, &item.Tags); err != nil {
+		return nil, err
 	}
-	if histJSON != "" && histJSON != "[]" {
-		if err := json.Unmarshal([]byte(histJSON), &item.History); err != nil {
-			return nil, err
-		}
-		for i := range item.History {
-			item.History[i].At = item.History[i].At.UTC()
-		}
+	if err := unmarshalJSON(histJSON, &item.History); err != nil {
+		return nil, err
+	}
+	for i := range item.History {
+		item.History[i].At = item.History[i].At.UTC()
 	}
 	return &item, nil
 }
@@ -706,12 +699,8 @@ SELECT run_id, id, title, description, acceptance, priority, priority_rank, sort
        status, lane_id, recipe_name, depends_on_json, tags_json, history_json, created_at, updated_at
 FROM backlog_items`
 
-func (b *sqliteBacklogStore) Get(ctx context.Context, runID, itemID string) (*BacklogItem, error) {
-	s := b.s()
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	row := s.db.QueryRowContext(ctx, selectBacklogColumns+` WHERE run_id = ? AND id = ?`, runID, itemID)
-	item, err := scanBacklogItem(row)
+func getBacklogItem(ctx context.Context, q queryRower, runID, itemID string) (*BacklogItem, error) {
+	item, err := scanBacklogItem(q.QueryRowContext(ctx, selectBacklogColumns+` WHERE run_id = ? AND id = ?`, runID, itemID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: backlog item %q in run %q", ErrNotFound, itemID, runID)
 	}
@@ -719,6 +708,13 @@ func (b *sqliteBacklogStore) Get(ctx context.Context, runID, itemID string) (*Ba
 		return nil, err
 	}
 	return item, nil
+}
+
+func (b *sqliteBacklogStore) Get(ctx context.Context, runID, itemID string) (*BacklogItem, error) {
+	s := b.s()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return getBacklogItem(ctx, s.db, runID, itemID)
 }
 
 func (b *sqliteBacklogStore) Update(ctx context.Context, item BacklogItem, actor, reason string) error {
@@ -735,11 +731,7 @@ func (b *sqliteBacklogStore) Update(ctx context.Context, item BacklogItem, actor
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	row := tx.QueryRowContext(ctx, selectBacklogColumns+` WHERE run_id = ? AND id = ?`, item.RunID, item.ID)
-	existing, err := scanBacklogItem(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: backlog item %q in run %q", ErrNotFound, item.ID, item.RunID)
-	}
+	existing, err := getBacklogItem(ctx, tx, item.RunID, item.ID)
 	if err != nil {
 		return err
 	}
@@ -795,11 +787,7 @@ func (b *sqliteBacklogStore) Reorder(ctx context.Context, runID string, itemIDs 
 
 	existingItems := make([]*BacklogItem, len(itemIDs))
 	for i, id := range itemIDs {
-		row := tx.QueryRowContext(ctx, selectBacklogColumns+` WHERE run_id = ? AND id = ?`, runID, id)
-		item, err := scanBacklogItem(row)
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w: backlog item %q in run %q", ErrNotFound, id, runID)
-		}
+		item, err := getBacklogItem(ctx, tx, runID, id)
 		if err != nil {
 			return err
 		}
@@ -843,11 +831,7 @@ func (b *sqliteBacklogStore) Close(ctx context.Context, runID, itemID string, st
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	row := tx.QueryRowContext(ctx, selectBacklogColumns+` WHERE run_id = ? AND id = ?`, runID, itemID)
-	item, err := scanBacklogItem(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: backlog item %q in run %q", ErrNotFound, itemID, runID)
-	}
+	item, err := getBacklogItem(ctx, tx, runID, itemID)
 	if err != nil {
 		return err
 	}
@@ -954,15 +938,11 @@ func scanLane(scanner rowScanner) (*Lane, error) {
 	if ln.UpdatedAt, err = parseTime(updatedStr); err != nil {
 		return nil, err
 	}
-	if sessionsJSON != "" && sessionsJSON != "{}" {
-		if err := json.Unmarshal([]byte(sessionsJSON), &ln.Sessions); err != nil {
-			return nil, err
-		}
+	if err := unmarshalJSON(sessionsJSON, &ln.Sessions); err != nil {
+		return nil, err
 	}
-	if terminalsJSON != "" && terminalsJSON != "{}" {
-		if err := json.Unmarshal([]byte(terminalsJSON), &ln.Terminals); err != nil {
-			return nil, err
-		}
+	if err := unmarshalJSON(terminalsJSON, &ln.Terminals); err != nil {
+		return nil, err
 	}
 	return &ln, nil
 }
@@ -1098,18 +1078,9 @@ func (l *sqliteLaneStore) Delete(ctx context.Context, runID, laneID string) erro
 	s := l.s()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, `DELETE FROM lanes WHERE run_id = ? AND id = ?`, runID, laneID)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return fmt.Errorf("%w: lane %q in run %q", ErrNotFound, laneID, runID)
-	}
-	return nil
+	return execRequireRow(ctx, s.db, fmt.Errorf("%w: lane %q in run %q", ErrNotFound, laneID, runID),
+		`DELETE FROM lanes WHERE run_id = ? AND id = ?`, runID, laneID,
+	)
 }
 
 type sqliteDirectiveStore SQLiteStore
@@ -1156,15 +1127,6 @@ func (d *sqliteDirectiveStore) Add(ctx context.Context, dir Directive) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var existingID string
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM directives WHERE run_id = ? AND id = ?`, dir.RunID, dir.ID).Scan(&existingID)
-	if err == nil {
-		return fmt.Errorf("%w: directive %q in run %q", ErrAlreadyExists, dir.ID, dir.RunID)
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-
 	cp := dir.Clone()
 	if cp.CreatedAt.IsZero() {
 		cp.CreatedAt = s.now()
@@ -1179,13 +1141,13 @@ func (d *sqliteDirectiveStore) Add(ctx context.Context, dir Directive) error {
 		cp.Source = DirectiveSourceOwner
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	return execInsertNew(ctx, s.db, fmt.Errorf("%w: directive %q in run %q", ErrAlreadyExists, dir.ID, dir.RunID), `
 INSERT INTO directives (run_id, id, kind, source, scope, text, ref, status, expires_at, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (run_id, id) DO NOTHING`,
 		cp.RunID, cp.ID, string(cp.Kind), string(cp.Source), cp.Scope,
 		cp.Text, cp.Ref, string(cp.Status), formatTimePtr(cp.ExpiresAt), formatTime(cp.CreatedAt),
 	)
-	return err
 }
 
 func (d *sqliteDirectiveStore) Get(ctx context.Context, runID, directiveID string) (*Directive, error) {
@@ -1207,18 +1169,9 @@ func (d *sqliteDirectiveStore) UpdateStatus(ctx context.Context, runID, directiv
 	s := d.s()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, `UPDATE directives SET status = ? WHERE run_id = ? AND id = ?`, string(status), runID, directiveID)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return fmt.Errorf("%w: directive %q in run %q", ErrNotFound, directiveID, runID)
-	}
-	return nil
+	return execRequireRow(ctx, s.db, fmt.Errorf("%w: directive %q in run %q", ErrNotFound, directiveID, runID),
+		`UPDATE directives SET status = ? WHERE run_id = ? AND id = ?`, string(status), runID, directiveID,
+	)
 }
 
 func (d *sqliteDirectiveStore) List(ctx context.Context, filter DirectiveFilter) ([]Directive, error) {
@@ -1309,7 +1262,7 @@ INSERT INTO decisions (
 	if err := tx.Commit(); err != nil {
 		return Decision{}, err
 	}
-	return cp.Clone(), nil
+	return cp, nil
 }
 
 func (d *sqliteDecisionStore) List(ctx context.Context, filter DecisionFilter) ([]Decision, error) {
@@ -1415,7 +1368,7 @@ INSERT INTO events (
 	if err := tx.Commit(); err != nil {
 		return Event{}, err
 	}
-	return cp.Clone(), nil
+	return cp, nil
 }
 
 func (e *sqliteEventStore) List(ctx context.Context, filter EventFilter) ([]Event, error) {
@@ -1553,12 +1506,31 @@ func scanThread(scanner rowScanner) (*Thread, error) {
 	if th.UpdatedAt, err = parseTime(updatedStr); err != nil {
 		return nil, err
 	}
-	if queuedJSON != "" && queuedJSON != "[]" {
-		if err := json.Unmarshal([]byte(queuedJSON), &th.QueuedSteers); err != nil {
-			return nil, err
-		}
+	if err := unmarshalJSON(queuedJSON, &th.QueuedSteers); err != nil {
+		return nil, err
 	}
 	return &th, nil
+}
+
+func getThread(ctx context.Context, q queryRower, threadID string) (*Thread, error) {
+	th, err := scanThread(q.QueryRowContext(ctx, selectThreadColumns+` WHERE id = ?`, threadID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return th, nil
+}
+
+func requireThreadExists(ctx context.Context, q queryRower, threadID string) error {
+	var exists string
+	if err := q.QueryRowContext(ctx, `SELECT id FROM threads WHERE id = ?`, threadID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
+	} else if err != nil {
+		return err
+	}
+	return nil
 }
 
 const selectTurnColumns = `
@@ -1586,12 +1558,37 @@ func scanTurn(scanner rowScanner) (*Turn, error) {
 	if tr.CompletedAt, err = parseTimePtr(completedStr); err != nil {
 		return nil, err
 	}
-	if steersJSON != "" && steersJSON != "[]" {
-		if err := json.Unmarshal([]byte(steersJSON), &tr.Steers); err != nil {
-			return nil, err
-		}
+	if err := unmarshalJSON(steersJSON, &tr.Steers); err != nil {
+		return nil, err
 	}
 	return &tr, nil
+}
+
+func getTurn(ctx context.Context, q queryRower, threadID, turnID string) (*Turn, error) {
+	tr, err := scanTurn(q.QueryRowContext(ctx, selectTurnColumns+` WHERE thread_id = ? AND id = ?`, threadID, turnID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: turn %q in thread %q", ErrNotFound, turnID, threadID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return tr, nil
+}
+
+func insertTurn(ctx context.Context, exec execContext, tr Turn) error {
+	steersJSON, err := marshalJSONOrDefault(tr.Steers, "[]")
+	if err != nil {
+		return err
+	}
+	_, err = exec.ExecContext(ctx, `
+INSERT INTO turns (
+    thread_id, id, run_id, seq, status, input, error, steers_json,
+    input_tokens, output_tokens, cost_usd, started_at, completed_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		tr.ThreadID, tr.ID, tr.RunID, tr.Seq, string(tr.Status), tr.Input, tr.Error, steersJSON,
+		tr.InputTokens, tr.OutputTokens, tr.CostUSD, formatTime(tr.StartedAt), formatTimePtr(tr.CompletedAt),
+	)
+	return err
 }
 
 const selectItemColumns = `
@@ -1622,6 +1619,17 @@ func scanItem(scanner rowScanner) (*Item, error) {
 	return &it, nil
 }
 
+func insertItem(ctx context.Context, exec execContext, it Item) error {
+	_, err := exec.ExecContext(ctx, `
+INSERT INTO thread_items (
+    thread_id, seq, id, turn_id, kind, name, call_id, content, payload_json, is_error, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		it.ThreadID, it.Seq, it.ID, it.TurnID, string(it.Kind),
+		it.Name, it.CallID, it.Content, string(it.Payload), boolToInt(it.IsError), formatTime(it.CreatedAt),
+	)
+	return err
+}
+
 func (t *sqliteThreadStore) StartThread(ctx context.Context, th Thread) (Thread, error) {
 	if strings.TrimSpace(th.ID) == "" || strings.TrimSpace(th.RunID) == "" || strings.TrimSpace(string(th.Role)) == "" {
 		return Thread{}, fmt.Errorf("%w: thread requires id, run_id, and role", ErrInvalidArgument)
@@ -1629,15 +1637,6 @@ func (t *sqliteThreadStore) StartThread(ctx context.Context, th Thread) (Thread,
 	s := t.s()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	var existingID string
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM threads WHERE id = ?`, th.ID).Scan(&existingID)
-	if err == nil {
-		return Thread{}, fmt.Errorf("%w: thread %q", ErrAlreadyExists, th.ID)
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return Thread{}, err
-	}
 
 	now := s.now()
 	cp := th.Clone()
@@ -1655,11 +1654,12 @@ func (t *sqliteThreadStore) StartThread(ctx context.Context, th Thread) (Thread,
 		return Thread{}, err
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	err = execInsertNew(ctx, s.db, fmt.Errorf("%w: thread %q", ErrAlreadyExists, th.ID), `
 INSERT INTO threads (
     id, run_id, role, goal, parent_thread_id, forked_at_turn_id, status,
     queued_steers_json, input_tokens, output_tokens, cost_usd, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (id) DO NOTHING`,
 		cp.ID, cp.RunID, string(cp.Role), cp.Goal, cp.ParentThreadID, cp.ForkedAtTurnID,
 		string(cp.Status), queuedJSON, cp.InputTokens, cp.OutputTokens, cp.CostUSD,
 		formatTime(cp.CreatedAt), formatTime(cp.UpdatedAt),
@@ -1667,22 +1667,14 @@ INSERT INTO threads (
 	if err != nil {
 		return Thread{}, err
 	}
-	return cp.Clone(), nil
+	return cp, nil
 }
 
 func (t *sqliteThreadStore) GetThread(ctx context.Context, threadID string) (*Thread, error) {
 	s := t.s()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	row := s.db.QueryRowContext(ctx, selectThreadColumns+` WHERE id = ?`, threadID)
-	th, err := scanThread(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return th, nil
+	return getThread(ctx, s.db, threadID)
 }
 
 func (t *sqliteThreadStore) ListThreads(ctx context.Context, filter ThreadFilter) ([]Thread, error) {
@@ -1690,7 +1682,10 @@ func (t *sqliteThreadStore) ListThreads(ctx context.Context, filter ThreadFilter
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, selectThreadColumns)
+	rows, err := s.db.QueryContext(ctx,
+		selectThreadColumns+` WHERE (? = '' OR run_id = ?) AND (? = '' OR role = ?)`,
+		filter.RunID, filter.RunID, string(filter.Role), string(filter.Role),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1701,12 +1696,6 @@ func (t *sqliteThreadStore) ListThreads(ctx context.Context, filter ThreadFilter
 		th, err := scanThread(rows)
 		if err != nil {
 			return nil, err
-		}
-		if filter.RunID != "" && th.RunID != filter.RunID {
-			continue
-		}
-		if filter.Role != "" && th.Role != filter.Role {
-			continue
 		}
 		if len(filter.Statuses) > 0 && !slices.Contains(filter.Statuses, th.Status) {
 			continue
@@ -1726,36 +1715,18 @@ func (t *sqliteThreadStore) UpdateThreadStatus(ctx context.Context, threadID str
 	s := t.s()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, `UPDATE threads SET status = ?, updated_at = ? WHERE id = ?`, string(status), formatTime(s.now()), threadID)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
-	}
-	return nil
+	return execRequireRow(ctx, s.db, fmt.Errorf("%w: thread %q", ErrNotFound, threadID),
+		`UPDATE threads SET status = ?, updated_at = ? WHERE id = ?`, string(status), formatTime(s.now()), threadID,
+	)
 }
 
 func (t *sqliteThreadStore) SetThreadGoal(ctx context.Context, threadID, goal string) error {
 	s := t.s()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, `UPDATE threads SET goal = ?, updated_at = ? WHERE id = ?`, goal, formatTime(s.now()), threadID)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
-	}
-	return nil
+	return execRequireRow(ctx, s.db, fmt.Errorf("%w: thread %q", ErrNotFound, threadID),
+		`UPDATE threads SET goal = ?, updated_at = ? WHERE id = ?`, goal, formatTime(s.now()), threadID,
+	)
 }
 
 func (t *sqliteThreadStore) ForkThread(ctx context.Context, parentThreadID, newThreadID, upToTurnID string) (Thread, error) {
@@ -1772,20 +1743,8 @@ func (t *sqliteThreadStore) ForkThread(ctx context.Context, parentThreadID, newT
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	parent, err := scanThread(tx.QueryRowContext(ctx, selectThreadColumns+` WHERE id = ?`, parentThreadID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return Thread{}, fmt.Errorf("%w: parent thread %q", ErrNotFound, parentThreadID)
-	}
+	parent, err := getThread(ctx, tx, parentThreadID)
 	if err != nil {
-		return Thread{}, err
-	}
-
-	var existingID string
-	err = tx.QueryRowContext(ctx, `SELECT id FROM threads WHERE id = ?`, newThreadID).Scan(&existingID)
-	if err == nil {
-		return Thread{}, fmt.Errorf("%w: thread %q", ErrAlreadyExists, newThreadID)
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
 		return Thread{}, err
 	}
 
@@ -1793,14 +1752,22 @@ func (t *sqliteThreadStore) ForkThread(ctx context.Context, parentThreadID, newT
 	if err != nil {
 		return Thread{}, err
 	}
-	var parentTurns []Turn
+	includedTurns := make(map[string]bool)
+	var copiedTurns []Turn
+	foundUpTo := upToTurnID == ""
 	for turnRows.Next() {
 		tr, err := scanTurn(turnRows)
 		if err != nil {
 			_ = turnRows.Close()
 			return Thread{}, err
 		}
-		parentTurns = append(parentTurns, *tr)
+		tr.ThreadID = newThreadID
+		copiedTurns = append(copiedTurns, *tr)
+		includedTurns[tr.ID] = true
+		if upToTurnID != "" && tr.ID == upToTurnID {
+			foundUpTo = true
+			break
+		}
 	}
 	if err := turnRows.Err(); err != nil {
 		_ = turnRows.Close()
@@ -1808,19 +1775,6 @@ func (t *sqliteThreadStore) ForkThread(ctx context.Context, parentThreadID, newT
 	}
 	_ = turnRows.Close()
 
-	includedTurns := make(map[string]bool)
-	var copiedTurns []Turn
-	foundUpTo := upToTurnID == ""
-	for i := range parentTurns {
-		tr := parentTurns[i].Clone()
-		tr.ThreadID = newThreadID
-		copiedTurns = append(copiedTurns, tr)
-		includedTurns[tr.ID] = true
-		if upToTurnID != "" && tr.ID == upToTurnID {
-			foundUpTo = true
-			break
-		}
-	}
 	if !foundUpTo {
 		return Thread{}, fmt.Errorf("%w: turn %q in parent thread %q", ErrNotFound, upToTurnID, parentThreadID)
 	}
@@ -1839,9 +1793,8 @@ func (t *sqliteThreadStore) ForkThread(ctx context.Context, parentThreadID, newT
 		if !includedTurns[it.TurnID] {
 			continue
 		}
-		cpItem := it.Clone()
-		cpItem.ThreadID = newThreadID
-		copiedItems = append(copiedItems, cpItem)
+		it.ThreadID = newThreadID
+		copiedItems = append(copiedItems, *it)
 	}
 	if err := itemRows.Err(); err != nil {
 		_ = itemRows.Close()
@@ -1862,11 +1815,12 @@ func (t *sqliteThreadStore) ForkThread(ctx context.Context, parentThreadID, newT
 		UpdatedAt:      now,
 	}
 
-	_, err = tx.ExecContext(ctx, `
+	err = execInsertNew(ctx, tx, fmt.Errorf("%w: thread %q", ErrAlreadyExists, newThreadID), `
 INSERT INTO threads (
     id, run_id, role, goal, parent_thread_id, forked_at_turn_id, status,
     queued_steers_json, input_tokens, output_tokens, cost_usd, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', 0, 0, 0, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', 0, 0, 0, ?, ?)
+ON CONFLICT (id) DO NOTHING`,
 		forked.ID, forked.RunID, string(forked.Role), forked.Goal,
 		forked.ParentThreadID, forked.ForkedAtTurnID, string(forked.Status),
 		formatTime(forked.CreatedAt), formatTime(forked.UpdatedAt),
@@ -1876,34 +1830,13 @@ INSERT INTO threads (
 	}
 
 	for i := range copiedTurns {
-		tr := &copiedTurns[i]
-		steersJSON, err := marshalJSONOrDefault(tr.Steers, "[]")
-		if err != nil {
-			return Thread{}, err
-		}
-		_, err = tx.ExecContext(ctx, `
-INSERT INTO turns (
-    thread_id, id, run_id, seq, status, input, error, steers_json,
-    input_tokens, output_tokens, cost_usd, started_at, completed_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			tr.ThreadID, tr.ID, tr.RunID, tr.Seq, string(tr.Status), tr.Input, tr.Error, steersJSON,
-			tr.InputTokens, tr.OutputTokens, tr.CostUSD, formatTime(tr.StartedAt), formatTimePtr(tr.CompletedAt),
-		)
-		if err != nil {
+		if err := insertTurn(ctx, tx, copiedTurns[i]); err != nil {
 			return Thread{}, err
 		}
 	}
 
 	for i := range copiedItems {
-		it := &copiedItems[i]
-		_, err = tx.ExecContext(ctx, `
-INSERT INTO thread_items (
-    thread_id, seq, id, turn_id, kind, name, call_id, content, payload_json, is_error, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			it.ThreadID, it.Seq, it.ID, it.TurnID, string(it.Kind),
-			it.Name, it.CallID, it.Content, string(it.Payload), boolToInt(it.IsError), formatTime(it.CreatedAt),
-		)
-		if err != nil {
+		if err := insertItem(ctx, tx, copiedItems[i]); err != nil {
 			return Thread{}, err
 		}
 	}
@@ -1911,7 +1844,7 @@ INSERT INTO thread_items (
 	if err := tx.Commit(); err != nil {
 		return Thread{}, err
 	}
-	return forked.Clone(), nil
+	return forked, nil
 }
 
 func (t *sqliteThreadStore) StartTurn(ctx context.Context, turn Turn) (Turn, error) {
@@ -1928,10 +1861,7 @@ func (t *sqliteThreadStore) StartTurn(ctx context.Context, turn Turn) (Turn, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	th, err := scanThread(tx.QueryRowContext(ctx, selectThreadColumns+` WHERE id = ?`, turn.ThreadID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return Turn{}, fmt.Errorf("%w: thread %q", ErrNotFound, turn.ThreadID)
-	}
+	th, err := getThread(ctx, tx, turn.ThreadID)
 	if err != nil {
 		return Turn{}, err
 	}
@@ -1962,20 +1892,7 @@ func (t *sqliteThreadStore) StartTurn(ctx context.Context, turn Turn) (Turn, err
 		cp.Steers = append(slices.Clone(th.QueuedSteers), cp.Steers...)
 	}
 
-	steersJSON, err := marshalJSONOrDefault(cp.Steers, "[]")
-	if err != nil {
-		return Turn{}, err
-	}
-
-	_, err = tx.ExecContext(ctx, `
-INSERT INTO turns (
-    thread_id, id, run_id, seq, status, input, error, steers_json,
-    input_tokens, output_tokens, cost_usd, started_at, completed_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		cp.ThreadID, cp.ID, cp.RunID, cp.Seq, string(cp.Status), cp.Input, cp.Error, steersJSON,
-		cp.InputTokens, cp.OutputTokens, cp.CostUSD, formatTime(cp.StartedAt), formatTimePtr(cp.CompletedAt),
-	)
-	if err != nil {
+	if err := insertTurn(ctx, tx, cp); err != nil {
 		return Turn{}, err
 	}
 
@@ -1989,7 +1906,7 @@ INSERT INTO turns (
 	if err := tx.Commit(); err != nil {
 		return Turn{}, err
 	}
-	return cp.Clone(), nil
+	return cp, nil
 }
 
 func (t *sqliteThreadStore) SteerTurn(ctx context.Context, threadID, turnID, message string) error {
@@ -2006,10 +1923,7 @@ func (t *sqliteThreadStore) SteerTurn(ctx context.Context, threadID, turnID, mes
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	th, err := scanThread(tx.QueryRowContext(ctx, selectThreadColumns+` WHERE id = ?`, threadID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
-	}
+	th, err := getThread(ctx, tx, threadID)
 	if err != nil {
 		return err
 	}
@@ -2035,12 +1949,15 @@ func (t *sqliteThreadStore) SteerTurn(ctx context.Context, threadID, turnID, mes
 			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) + 1 FROM thread_items WHERE thread_id = ?`, threadID).Scan(&nextItemSeq); err != nil {
 				return err
 			}
-			_, err = tx.ExecContext(ctx, `
-INSERT INTO thread_items (
-    thread_id, seq, id, turn_id, kind, name, call_id, content, payload_json, is_error, created_at
-) VALUES (?, ?, ?, ?, ?, '', '', ?, '', 0, ?)`,
-				threadID, nextItemSeq, fmt.Sprintf("item-%d", nextItemSeq), turnID, string(ItemKindSteer), message, nowStr,
-			)
+			err = insertItem(ctx, tx, Item{
+				ID:        fmt.Sprintf("item-%d", nextItemSeq),
+				ThreadID:  threadID,
+				TurnID:    turnID,
+				Seq:       nextItemSeq,
+				Kind:      ItemKindSteer,
+				Content:   message,
+				CreatedAt: now,
+			})
 			if err != nil {
 				return err
 			}
@@ -2076,18 +1993,12 @@ func (t *sqliteThreadStore) CompleteTurn(ctx context.Context, threadID, turnID s
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	th, err := scanThread(tx.QueryRowContext(ctx, selectThreadColumns+` WHERE id = ?`, threadID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
-	}
+	th, err := getThread(ctx, tx, threadID)
 	if err != nil {
 		return err
 	}
 
-	tr, err := scanTurn(tx.QueryRowContext(ctx, selectTurnColumns+` WHERE thread_id = ? AND id = ?`, threadID, turnID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: turn %q in thread %q", ErrNotFound, turnID, threadID)
-	}
+	tr, err := getTurn(ctx, tx, threadID, turnID)
 	if err != nil {
 		return err
 	}
@@ -2125,21 +2036,10 @@ func (t *sqliteThreadStore) GetTurn(ctx context.Context, threadID, turnID string
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var exists string
-	if err := s.db.QueryRowContext(ctx, `SELECT id FROM threads WHERE id = ?`, threadID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
-	} else if err != nil {
+	if err := requireThreadExists(ctx, s.db, threadID); err != nil {
 		return nil, err
 	}
-
-	tr, err := scanTurn(s.db.QueryRowContext(ctx, selectTurnColumns+` WHERE thread_id = ? AND id = ?`, threadID, turnID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w: turn %q in thread %q", ErrNotFound, turnID, threadID)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return tr, nil
+	return getTurn(ctx, s.db, threadID, turnID)
 }
 
 func (t *sqliteThreadStore) ListTurns(ctx context.Context, threadID string) ([]Turn, error) {
@@ -2147,10 +2047,7 @@ func (t *sqliteThreadStore) ListTurns(ctx context.Context, threadID string) ([]T
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var exists string
-	if err := s.db.QueryRowContext(ctx, `SELECT id FROM threads WHERE id = ?`, threadID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
-	} else if err != nil {
+	if err := requireThreadExists(ctx, s.db, threadID); err != nil {
 		return nil, err
 	}
 
@@ -2185,12 +2082,10 @@ func (t *sqliteThreadStore) AppendItem(ctx context.Context, item Item) (Item, er
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var exists string
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM threads WHERE id = ?`, item.ThreadID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
-		return Item{}, fmt.Errorf("%w: thread %q", ErrNotFound, item.ThreadID)
-	} else if err != nil {
+	if err := requireThreadExists(ctx, tx, item.ThreadID); err != nil {
 		return Item{}, err
 	}
+	var exists string
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM turns WHERE thread_id = ? AND id = ?`, item.ThreadID, item.TurnID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 		return Item{}, fmt.Errorf("%w: turn %q in thread %q", ErrNotFound, item.TurnID, item.ThreadID)
 	} else if err != nil {
@@ -2211,20 +2106,13 @@ func (t *sqliteThreadStore) AppendItem(ctx context.Context, item Item) (Item, er
 		cp.CreatedAt = s.now()
 	}
 
-	_, err = tx.ExecContext(ctx, `
-INSERT INTO thread_items (
-    thread_id, seq, id, turn_id, kind, name, call_id, content, payload_json, is_error, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		cp.ThreadID, cp.Seq, cp.ID, cp.TurnID, string(cp.Kind),
-		cp.Name, cp.CallID, cp.Content, string(cp.Payload), boolToInt(cp.IsError), formatTime(cp.CreatedAt),
-	)
-	if err != nil {
+	if err := insertItem(ctx, tx, cp); err != nil {
 		return Item{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return Item{}, err
 	}
-	return cp.Clone(), nil
+	return cp, nil
 }
 
 func (t *sqliteThreadStore) ListItems(ctx context.Context, threadID, turnID string, limit, offset int) ([]Item, error) {
@@ -2232,48 +2120,39 @@ func (t *sqliteThreadStore) ListItems(ctx context.Context, threadID, turnID stri
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var exists string
-	if err := s.db.QueryRowContext(ctx, `SELECT id FROM threads WHERE id = ?`, threadID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
-	} else if err != nil {
+	if err := requireThreadExists(ctx, s.db, threadID); err != nil {
 		return nil, err
 	}
+
+	limitArg := -1
+	if limit > 0 {
+		limitArg = limit
+	}
+	offsetArg := max(offset, 0)
 
 	var (
 		rows *sql.Rows
 		err  error
 	)
 	if turnID != "" {
-		rows, err = s.db.QueryContext(ctx, selectItemColumns+` WHERE thread_id = ? AND turn_id = ? ORDER BY seq ASC`, threadID, turnID)
+		rows, err = s.db.QueryContext(ctx, selectItemColumns+` WHERE thread_id = ? AND turn_id = ? ORDER BY seq ASC LIMIT ? OFFSET ?`, threadID, turnID, limitArg, offsetArg)
 	} else {
-		rows, err = s.db.QueryContext(ctx, selectItemColumns+` WHERE thread_id = ? ORDER BY seq ASC`, threadID)
+		rows, err = s.db.QueryContext(ctx, selectItemColumns+` WHERE thread_id = ? ORDER BY seq ASC LIMIT ? OFFSET ?`, threadID, limitArg, offsetArg)
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var filtered []Item
+	var out []Item
 	for rows.Next() {
 		it, err := scanItem(rows)
 		if err != nil {
 			return nil, err
 		}
-		filtered = append(filtered, *it)
+		out = append(out, *it)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if offset > 0 {
-		if offset >= len(filtered) {
-			return nil, nil
-		}
-		filtered = filtered[offset:]
-	}
-	if limit > 0 && len(filtered) > limit {
-		filtered = filtered[:limit]
-	}
-	return filtered, nil
+	return out, rows.Err()
 }
 
 type sqliteRecipeStore SQLiteStore
@@ -2301,30 +2180,20 @@ func scanRecipe(scanner rowScanner) (*Recipe, error) {
 	if rec.CreatedAt, err = parseTime(createdStr); err != nil {
 		return nil, err
 	}
-	if phasesJSON != "" && phasesJSON != "[]" {
-		if err := json.Unmarshal([]byte(phasesJSON), &rec.Phases); err != nil {
-			return nil, err
-		}
+	if err := unmarshalJSON(phasesJSON, &rec.Phases); err != nil {
+		return nil, err
 	}
-	if transJSON != "" && transJSON != "[]" {
-		if err := json.Unmarshal([]byte(transJSON), &rec.Transitions); err != nil {
-			return nil, err
-		}
+	if err := unmarshalJSON(transJSON, &rec.Transitions); err != nil {
+		return nil, err
 	}
-	if unmapJSON != "" && unmapJSON != "[]" {
-		if err := json.Unmarshal([]byte(unmapJSON), &rec.Unmapped); err != nil {
-			return nil, err
-		}
+	if err := unmarshalJSON(unmapJSON, &rec.Unmapped); err != nil {
+		return nil, err
 	}
-	if mergeJSON != "" && mergeJSON != "{}" {
-		if err := json.Unmarshal([]byte(mergeJSON), &rec.MergePolicy); err != nil {
-			return nil, err
-		}
+	if err := unmarshalJSON(mergeJSON, &rec.MergePolicy); err != nil {
+		return nil, err
 	}
-	if limJ != "" && limJ != "{}" {
-		if err := json.Unmarshal([]byte(limJ), &rec.Limits); err != nil {
-			return nil, err
-		}
+	if err := unmarshalJSON(limJ, &rec.Limits); err != nil {
+		return nil, err
 	}
 	return &rec, nil
 }
@@ -2353,15 +2222,6 @@ func (r *sqliteRecipeStore) Save(ctx context.Context, rec Recipe) (Recipe, error
 			return Recipe{}, err
 		}
 		cp.Version = nextVer
-	} else {
-		var existingVer int
-		err := tx.QueryRowContext(ctx, `SELECT version FROM recipes WHERE run_id = ? AND name = ? AND version = ?`, cp.RunID, cp.Name, cp.Version).Scan(&existingVer)
-		if err == nil {
-			return Recipe{}, fmt.Errorf("%w: recipe %q v%d in run %q", ErrAlreadyExists, cp.Name, cp.Version, cp.RunID)
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return Recipe{}, err
-		}
 	}
 	if cp.CreatedAt.IsZero() {
 		cp.CreatedAt = s.now()
@@ -2388,11 +2248,12 @@ func (r *sqliteRecipeStore) Save(ctx context.Context, rec Recipe) (Recipe, error
 		return Recipe{}, err
 	}
 
-	_, err = tx.ExecContext(ctx, `
+	err = execInsertNew(ctx, tx, fmt.Errorf("%w: recipe %q v%d in run %q", ErrAlreadyExists, cp.Name, cp.Version, cp.RunID), `
 INSERT INTO recipes (
     run_id, name, version, source, base_recipe, base_version,
     phases_json, transitions_json, unmapped_json, merge_policy_json, limits_json, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (run_id, name, version) DO NOTHING`,
 		cp.RunID, cp.Name, cp.Version, cp.Source, cp.BaseRecipe, cp.BaseVersion,
 		phasesJSON, transJSON, unmapJSON, mergeJSON, limitsJSON, formatTime(cp.CreatedAt),
 	)
@@ -2402,7 +2263,7 @@ INSERT INTO recipes (
 	if err := tx.Commit(); err != nil {
 		return Recipe{}, err
 	}
-	return cp.Clone(), nil
+	return cp, nil
 }
 
 func (r *sqliteRecipeStore) Get(ctx context.Context, runID, name string, version int) (*Recipe, error) {
