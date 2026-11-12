@@ -982,9 +982,9 @@
      "s:3e62639b"
     ],
     "relation": "correction",
-    "evidence": "owner_quote",
-    "owner_quote": "raise the lane limit to 12 after fast merge is done",
-    "label_basis": "Host decision under an owner-approved pilot: do not wait on the owner for the Stage A/B split; decide and record."
+    "evidence": "owner_attributed",
+    "owner_quote": "",
+    "label_basis": "Host decision under the owner-approved pilot: the host approves the Stage A/B split, tells the orchestrator not to wait on the owner for it, and cites the owner's 11-04 'full authorization' for flips; decide and record, not ask."
    }
   },
   {
@@ -1077,7 +1077,8 @@
     "summary": "The orchestrator put this question to the owner: Metering 1/8: Approve the proposed $50/$200 allowances and a launch subsidy/enrollment envelope?",
     "asked_owner": true,
     "source_ids": [
-     "s:949b0491"
+     "s:949b0491",
+     "s:081d9bed"
     ]
    },
    "owner_follow_up": {
