@@ -6,6 +6,7 @@ go_library(
         "dispatcher.go",
         "prompt.go",
         "snapshot.go",
+        "truncation.go",
         "vet.go",
     ],
     importpath = "github.com/bazelment/yoloswe/orch/dispatcher",
@@ -22,7 +23,10 @@ go_library(
 
 go_test(
     name = "dispatcher_test",
-    srcs = ["dispatcher_test.go"],
+    srcs = [
+        "dispatcher_test.go",
+        "judgment_contract_test.go",
+    ],
     data = glob(["testdata/**"]),
     deps = [
         ":dispatcher",

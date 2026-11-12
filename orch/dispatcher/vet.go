@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,7 +61,7 @@ type BacklogUpdateParams struct {
 	Description string   `json:"description,omitempty" jsonschema:"description=Updated description"`
 	Acceptance  string   `json:"acceptance,omitempty" jsonschema:"description=Updated acceptance criteria"`
 	Priority    string   `json:"priority,omitempty" jsonschema:"enum=p0,enum=p1,enum=p2,enum=p3,description=Updated priority"`
-	Status      string   `json:"status,omitempty" jsonschema:"enum=open,enum=in_progress,enum=blocked,description=Updated non-terminal status"`
+	Status      string   `json:"status,omitempty" jsonschema:"enum=open,enum=blocked,description=Updated status. Never in_progress: lane.spawn sets that itself. Use backlog.close for done/dropped"`
 	RecipeName  string   `json:"recipe_name,omitempty" jsonschema:"description=Updated recipe name"`
 	Reason      string   `json:"reason" jsonschema:"required,description=Reason for updating this item"`
 	DependsOn   []string `json:"depends_on,omitempty" jsonschema:"description=Replacement dependency IDs"`
@@ -82,7 +83,7 @@ type BacklogCloseParams struct {
 
 // LaneSpawnParams holds parameters for the lane.spawn tool.
 type LaneSpawnParams struct {
-	ItemID         string `json:"item_id" jsonschema:"required,description=Backlog item ID to assign to the lane"`
+	ItemID         string `json:"item_id" jsonschema:"required" jsonschema_description:"ID of an open backlog item marked ready in the snapshot. Spawning marks it in_progress itself, so do not call backlog.update first"`
 	LaneID         string `json:"lane_id,omitempty" jsonschema:"description=Optional lane ID (defaults to item_id)"`
 	Brief          string `json:"brief" jsonschema:"required,description=Task brief for the lane"`
 	RecipeName     string `json:"recipe_name,omitempty" jsonschema:"description=Optional recipe name"`
@@ -119,18 +120,18 @@ type OwnerAskParams struct {
 	ID        string   `json:"id,omitempty" jsonschema:"description=Optional unique ask ID"`
 	LaneID    string   `json:"lane_id,omitempty" jsonschema:"description=Optional lane ID blocked on this question"`
 	Question  string   `json:"question" jsonschema:"required,description=One-sentence decision question for the owner"`
-	Default   string   `json:"default" jsonschema:"required,description=Default option auto-applied at deadline (must be one of options)"`
-	Deadline  string   `json:"deadline" jsonschema:"required,description=Deadline as RFC3339 timestamp or positive duration (e.g. 30m, 2h)"`
+	Default   string   `json:"default" jsonschema:"required" jsonschema_description:"Option auto-applied at deadline. If it is not already one of options it is added as an option, so a card's own stated default can be passed as is"`
+	Deadline  string   `json:"deadline" jsonschema:"required" jsonschema_description:"Deadline as RFC3339 timestamp, positive duration (30m, 2h, 7d) or UTC clock time (05:30Z = next occurrence)"`
 	SteerNote string   `json:"steer_note,omitempty" jsonschema:"description=Optional steering note to send when the default is applied"`
 	Reason    string   `json:"reason,omitempty" jsonschema:"description=Why owner input is required"`
-	Options   []string `json:"options" jsonschema:"required,description=Concrete options the owner can choose from"`
+	Options   []string `json:"options" jsonschema:"required" jsonschema_description:"Concrete options the owner can choose from: short labels, a few words each (put the detail in the question)"`
 }
 
 // DirectiveNoteParams holds parameters for the directive.note tool.
 type DirectiveNoteParams struct {
 	ID     string `json:"id,omitempty" jsonschema:"description=Optional directive ID"`
 	Fact   string `json:"fact" jsonschema:"required,description=Fact or operational note to persist in the store"`
-	Expiry string `json:"expiry,omitempty" jsonschema:"description=Optional expiry as RFC3339 timestamp or duration (e.g. 24h)"`
+	Expiry string `json:"expiry,omitempty" jsonschema_description:"Optional expiry as RFC3339 timestamp, duration (24h, 7d) or UTC clock time (05:30Z = next occurrence)"`
 	Scope  string `json:"scope,omitempty" jsonschema:"description=Optional lane ID or scope"`
 	Reason string `json:"reason,omitempty" jsonschema:"description=Reason for recording this note"`
 }
@@ -152,14 +153,14 @@ type ReadLaneReportParams struct {
 
 // ReadPRParams holds parameters for the read.pr tool.
 type ReadPRParams struct {
-	LaneID   string `json:"lane_id" jsonschema:"required,description=Lane ID whose PR status to read"`
+	LaneID   string `json:"lane_id" jsonschema:"required,description=ID of a lane listed in the snapshot Lanes table (never a placeholder such as '-')"`
 	Reason   string `json:"reason,omitempty" jsonschema:"description=Optional reason for reading PR info"`
 	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"description=Maximum bytes to return"`
 }
 
 // ReadCIParams holds parameters for the read.ci tool.
 type ReadCIParams struct {
-	LaneID   string `json:"lane_id" jsonschema:"required,description=Lane ID whose CI status to read"`
+	LaneID   string `json:"lane_id" jsonschema:"required,description=ID of a lane listed in the snapshot Lanes table (never a placeholder such as '-')"`
 	Reason   string `json:"reason,omitempty" jsonschema:"description=Optional reason for reading CI info"`
 	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"description=Maximum bytes to return"`
 }
@@ -370,6 +371,7 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 		if p.LaneID == "" {
 			p.LaneID = decodeAliases(trimmed).Lane
 		}
+		p.Options, p.Default = canonicalizeAskDefault(p.Options, p.Default)
 		act.OwnerAsk = p
 		act.LaneID = p.LaneID
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Question))
@@ -835,6 +837,24 @@ func containsDirectMergeInstruction(text string) bool {
 	return false
 }
 
+// canonicalizeAskDefault makes a default that is not (exactly or up to case and
+// surrounding space) one of the options an option of its own. Decision cards
+// routinely state "default if unanswered" separately from their choices, and
+// the owner has to be able to see what will be applied if they do not answer.
+// An empty default or an empty option list is left for checkOwnerAsk to reject.
+func canonicalizeAskDefault(options []string, def string) ([]string, string) {
+	def = strings.TrimSpace(def)
+	if def == "" || len(options) == 0 {
+		return options, def
+	}
+	for _, opt := range options {
+		if strings.EqualFold(strings.TrimSpace(opt), def) {
+			return options, opt
+		}
+	}
+	return append(slices.Clone(options), def), def
+}
+
 func checkOwnerAsk(st *StateView, act ProposedAction) error {
 	if act.Tool != ToolOwnerAsk {
 		return nil
@@ -1135,6 +1155,9 @@ func checkBacklogInvariants(st *StateView, act ProposedAction) error {
 			if status.Terminal() {
 				return fmt.Errorf("use %s to set terminal status %q", ToolBacklogClose, p.Status)
 			}
+			if status == store.BacklogInProgress {
+				return fmt.Errorf("status %q is owned by %s, which marks the item in_progress when it spawns the lane; do not set it by hand", p.Status, ToolLaneSpawn)
+			}
 		}
 
 	case ToolBacklogReorder:
@@ -1216,7 +1239,21 @@ func parseFutureTime(now time.Time, raw string) (time.Time, error) {
 	if d, err := time.ParseDuration(s); err == nil {
 		return now.Add(d).UTC(), nil
 	}
-	return time.Time{}, fmt.Errorf("expected RFC3339 timestamp or duration (e.g. 30m, 2h)")
+	// Owner cards state deadlines as "7d" or as a UTC clock time ("05:30Z").
+	if days, ok := strings.CutSuffix(s, "d"); ok {
+		if n, err := strconv.Atoi(days); err == nil && n > 0 {
+			return now.AddDate(0, 0, n).UTC(), nil
+		}
+	}
+	if clock, err := time.Parse("15:04Z", s); err == nil {
+		now = now.UTC()
+		t := time.Date(now.Year(), now.Month(), now.Day(), clock.Hour(), clock.Minute(), 0, 0, time.UTC)
+		if !t.After(now) {
+			t = t.AddDate(0, 0, 1)
+		}
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("expected RFC3339 timestamp, duration (e.g. 30m, 2h, 7d) or UTC clock time (e.g. 05:30Z, next occurrence)")
 }
 
 func isCIGreen(checks string) bool {

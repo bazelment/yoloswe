@@ -734,8 +734,15 @@ func TestDispatcher_InvariantRejections(t *testing.T) {
 				wantErrSub: "owner.ask requires options, default, and deadline",
 			},
 			{
-				name:       "OwnerAskDefaultNotInOptions",
-				action:     mustParse(dispatcher.ToolOwnerAsk, `{"question":"Which DB?","options":["pg","sqlite"],"default":"mysql","deadline":"30m"}`),
+				name: "OwnerAskDefaultNotInOptions",
+				// Built by hand: ParseAction itself turns a stated default into an
+				// option, so only a non-parsed action can reach the vetter mismatched.
+				action: dispatcher.ProposedAction{
+					Tool: dispatcher.ToolOwnerAsk,
+					OwnerAsk: &dispatcher.OwnerAskParams{
+						Question: "Which DB?", Options: []string{"pg", "sqlite"}, Default: "mysql", Deadline: "30m",
+					},
+				},
 				wantErrSub: "must be one of options",
 			},
 			{

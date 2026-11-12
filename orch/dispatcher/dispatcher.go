@@ -52,16 +52,19 @@ func (f RecipeCompilerFunc) CompileOverride(ctx context.Context, base recipe.Rec
 type Config struct {
 	RecipeCompiler   RecipeCompiler
 	OnPlannerRequest func(ctx context.Context, runID, reason, planRef string) error
-	Model            string
-	HardBatchModel   string
-	SystemPrompt     string
-	ThreadID         string
-	Invariants       []Invariant
-	Snapshot         SnapshotConfig
-	MaxTurns         int
-	MaxTokens        int
-	MaxBriefBytes    int
-	MaxReadBytes     int
+	// Temperature is the sampling temperature for judgment turns. Nil means 0:
+	// the same batch and snapshot should lead to the same decision.
+	Temperature    *float64
+	Model          string
+	HardBatchModel string
+	SystemPrompt   string
+	ThreadID       string
+	Invariants     []Invariant
+	Snapshot       SnapshotConfig
+	MaxTurns       int
+	MaxTokens      int
+	MaxBriefBytes  int
+	MaxReadBytes   int
 }
 
 func (c Config) withDefaults() Config {
@@ -82,6 +85,10 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxReadBytes <= 0 {
 		c.MaxReadBytes = DefaultMaxReadBytes
+	}
+	if c.Temperature == nil {
+		zero := 0.0
+		c.Temperature = &zero
 	}
 	c.Snapshot = c.Snapshot.withDefaults()
 	return c
@@ -321,16 +328,17 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	modelName := d.selectModel(events)
 
 	req := model.Request{
-		Model:     modelName,
-		System:    d.cfg.SystemPrompt,
-		Messages:  []model.Message{model.NewUserMessage(snap.Text)},
-		Tools:     reg.Definitions(),
-		MaxTokens: d.cfg.MaxTokens,
+		Model:       modelName,
+		System:      d.cfg.SystemPrompt,
+		Messages:    []model.Message{model.NewUserMessage(snap.Text)},
+		Tools:       toolsForBatch(reg.Definitions(), events),
+		MaxTokens:   d.cfg.MaxTokens,
+		Temperature: d.cfg.Temperature,
 	}
 
 	loopRes, loopErr := model.RunToolLoop(
 		ctx,
-		d.client,
+		retryOnTruncationClient{inner: d.client},
 		req,
 		reg,
 		model.WithMaxTurns(d.cfg.MaxTurns),
@@ -454,6 +462,17 @@ func (d *Dispatcher) selectModel(events []store.Event) string {
 	return d.cfg.Model
 }
 
+// toolsForBatch drops the read.* tools from a batch that names no lane. They
+// only expand a lane's truncated excerpt, so a run-level batch (owner message,
+// relayed mail) leaves them nothing to read, and a model that is offered them
+// anyway "checks on" the lanes with a made-up lane ID.
+func toolsForBatch(defs []model.ToolDefinition, events []store.Event) []model.ToolDefinition {
+	if slices.ContainsFunc(events, func(ev store.Event) bool { return strings.TrimSpace(ev.LaneID) != "" }) {
+		return defs
+	}
+	return slices.DeleteFunc(slices.Clone(defs), func(def model.ToolDefinition) bool { return isReadOnlyTool(def.Name) })
+}
+
 func isHardBatch(events []store.Event) bool {
 	if len(events) >= 4 {
 		return true
@@ -468,16 +487,16 @@ func isHardBatch(events []store.Event) bool {
 
 var dispatcherToolDefs = []model.ToolDefinition{
 	{Name: ToolBacklogAdd, Description: "Add a new prioritized item to the run backlog", InputSchema: model.SchemaFor[BacklogAddParams]()},
-	{Name: ToolBacklogUpdate, Description: "Update an existing non-terminal backlog item", InputSchema: model.SchemaFor[BacklogUpdateParams]()},
+	{Name: ToolBacklogUpdate, Description: "Edit an existing open or blocked backlog item (title, acceptance, priority, dependencies, open/blocked). Never sets in_progress: lane.spawn does that", InputSchema: model.SchemaFor[BacklogUpdateParams]()},
 	{Name: ToolBacklogReorder, Description: "Reorder backlog items within their priority tier", InputSchema: model.SchemaFor[BacklogReorderParams]()},
 	{Name: ToolBacklogClose, Description: "Close a backlog item as done or dropped", InputSchema: model.SchemaFor[BacklogCloseParams]()},
-	{Name: ToolLaneSpawn, Description: "Spawn a worker lane for an open backlog item with a brief and optional recipe override", InputSchema: model.SchemaFor[LaneSpawnParams]()},
+	{Name: ToolLaneSpawn, Description: "Spawn a worker lane for an open, ready backlog item. This also marks the item in_progress, so it is the only call needed to start work on it", InputSchema: model.SchemaFor[LaneSpawnParams]()},
 	{Name: ToolLaneSteer, Description: "Send a steering note to an active or blocked lane", InputSchema: model.SchemaFor[LaneSteerParams]()},
 	{Name: ToolLaneRetry, Description: "Retry a stalled, blocked, or failed lane on a fresh round", InputSchema: model.SchemaFor[LaneRetryParams]()},
 	{Name: ToolLaneStop, Description: "Stop a non-terminal lane and mark it failed", InputSchema: model.SchemaFor[LaneStopParams]()},
-	{Name: ToolOwnerAsk, Description: "Pose a decision question to the owner with options, a mandatory default, and a deadline", InputSchema: model.SchemaFor[OwnerAskParams]()},
-	{Name: ToolDirectiveNote, Description: "Record an operational fact or note directive with optional expiry", InputSchema: model.SchemaFor[DirectiveNoteParams]()},
-	{Name: ToolPlannerRequest, Description: "Request a Planner turn to replan or import a plan", InputSchema: model.SchemaFor[PlannerRequestParams]()},
+	{Name: ToolOwnerAsk, Description: "Pose a decision to the owner that only the owner can make (product scope, spend, credentials, one-way/destructive policy) and that the batch presents as still open, with options, a mandatory default, and a deadline. Never use it for engineering, ordering or retry choices, or for work the owner already ordered", InputSchema: model.SchemaFor[OwnerAskParams]()},
+	{Name: ToolDirectiveNote, Description: "Persist a standing rule, preference or decision that later batches need and that no backlog item, lane or other call in this batch carries. At most one per batch, holding every point in its fact. Not a log of your own actions or questions", InputSchema: model.SchemaFor[DirectiveNoteParams]()},
+	{Name: ToolPlannerRequest, Description: "Request a Planner turn to replan or import a plan. The reason is delivered to the Planner and also stored as an active directive, so it carries any standing rule given with the request", InputSchema: model.SchemaFor[PlannerRequestParams]()},
 	{Name: ToolReadLaneReport, Description: "Read a bounded phase report for a lane", InputSchema: model.SchemaFor[ReadLaneReportParams]()},
 	{Name: ToolReadPR, Description: "Read bounded PR metadata and approval status for a lane", InputSchema: model.SchemaFor[ReadPRParams]()},
 	{Name: ToolReadCI, Description: "Read bounded CI check status and recent CI events for a lane", InputSchema: model.SchemaFor[ReadCIParams]()},

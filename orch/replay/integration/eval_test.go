@@ -45,6 +45,25 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 		t.Fatalf("load dataset: %v", err)
 	}
 
+	// ORCH_REPLAY_SPLIT=tune|holdout runs one deterministic half of the moments
+	// (by moment-id hash, see replay.SplitMomentIDs); ORCH_REPLAY_MOMENTS picks
+	// explicit ids. Either one measures the Dispatcher only: the Concierge
+	// questions belong to the full-set run, so a subset reports its bars but
+	// does not assert the overall verdict.
+	subset := false
+	if split := strings.TrimSpace(os.Getenv("ORCH_REPLAY_SPLIT")); split != "" {
+		if ds, err = ds.Subset(replay.Split(split)); err != nil {
+			t.Fatalf("split dataset: %v", err)
+		}
+		subset = true
+	}
+	if raw := strings.TrimSpace(os.Getenv("ORCH_REPLAY_MOMENTS")); raw != "" {
+		if ds, err = ds.SelectMoments(strings.Split(raw, ",")); err != nil {
+			t.Fatalf("select moments: %v", err)
+		}
+		subset = true
+	}
+
 	concurrency := 6
 	if raw := strings.TrimSpace(os.Getenv("ORCH_REPLAY_CONCURRENCY")); raw != "" {
 		if n, pErr := strconv.Atoi(raw); pErr == nil && n > 0 {
@@ -78,9 +97,9 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 	for i := range rep.MomentResults {
 		mr := &rep.MomentResults[i]
 		if !mr.Agreed || mr.InvariantViolations > 0 || (mr.ForbidOwnerAsk && mr.AskedOwner) {
-			t.Logf("MOMENT MISS %s (run=%s verified=%t): got tools=%v targets=%v asked=%t inv=%d rejected=%q | want tools=%v targets=%v",
+			fmt.Printf("MOMENT MISS %s (run=%s verified=%t): got tools=%v targets=%v asked=%t inv=%d rejected=%q | want tools=%v targets=%v | summary=%q\n",
 				mr.ID, mr.RunID, mr.Grounded, mr.AcceptedTools, mr.AcceptedTargets, mr.AskedOwner, mr.InvariantViolations,
-				mr.RejectedReasons, mr.ExpectedTools, mr.ExpectedTargets)
+				mr.RejectedReasons, mr.ExpectedTools, mr.ExpectedTargets, mr.Summary)
 		}
 	}
 	for i := range rep.QuestionResults {
@@ -89,6 +108,11 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 			t.Logf("QUESTION MISS %s (run=%s): missing=%v forbidden=%v answer=%q",
 				qr.ID, qr.RunID, qr.MissingFacts, qr.ViolatedForbidden, qr.Answer)
 		}
+	}
+
+	if subset {
+		t.Logf("subset run (%d moments): verdict not asserted; compare the per-bar rows above", len(rep.MomentResults))
+		return
 	}
 
 	// INCONCLUSIVE (every bar passed but no owner correction is evidenced) is
