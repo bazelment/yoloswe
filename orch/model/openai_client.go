@@ -19,7 +19,7 @@ import (
 
 // OpenAIClient implements ModelClient using the OpenAI Responses API.
 //
-//nolint:govet // wire client state is grouped for clarity; alignment is not material.
+//nolint:govet
 type OpenAIClient struct {
 	clock             clock.Clock
 	httpClient        *http.Client
@@ -114,7 +114,7 @@ func (c *OpenAIClient) RunToolLoop(ctx context.Context, req Request, reg *ToolRe
 	return RunToolLoop(ctx, c, req, reg, opts...)
 }
 
-//nolint:govet // request shape mirrors the Responses API wire contract.
+//nolint:govet
 type responsesRequest struct {
 	Store           *bool           `json:"store"`
 	Stream          *bool           `json:"stream"`
@@ -132,7 +132,7 @@ type responsesTool struct {
 	Parameters  json.RawMessage `json:"parameters"`
 }
 
-//nolint:govet // item fields mirror the public Responses API shape.
+//nolint:govet
 type responsesItem struct {
 	Type      string  `json:"type"`
 	Role      string  `json:"role,omitempty"`
@@ -229,6 +229,7 @@ func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Respons
 				return nil, err
 			}
 			c.mu.Lock()
+			resp.Usage.CostUSD = CalculateCost(resp.Model, resp.Usage, c.pricing)
 			c.totalUsage = c.totalUsage.Add(resp.Usage)
 			c.mu.Unlock()
 			return resp, nil
@@ -246,7 +247,7 @@ func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Respons
 }
 
 func readResponsesStream(r io.ReadCloser, idle time.Duration) ([]byte, error) {
-	//nolint:govet // compact channel result for the stream watcher.
+	//nolint:govet
 	type result struct {
 		data []byte
 		err  error
@@ -362,6 +363,9 @@ func decodeResponses(data []byte, requestedModel string) (*Response, error) {
 	for _, item := range raw.Output {
 		switch item.Type {
 		case "message":
+			if item.Text != "" {
+				blocks = append(blocks, NewTextBlock(item.Text))
+			}
 			for _, c := range item.Content {
 				blocks = append(blocks, NewTextBlock(c.Text))
 			}

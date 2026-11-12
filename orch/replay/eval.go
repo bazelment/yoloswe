@@ -36,7 +36,7 @@ type EvalConfig struct {
 
 // MomentResult captures the evaluation outcome of a single JudgmentMoment.
 //
-//nolint:govet // fields mirror the stable scorecard output.
+//nolint:govet
 type MomentResult struct {
 	ID                  string
 	RunID               string
@@ -67,7 +67,7 @@ type MomentResult struct {
 
 // QuestionResult captures the evaluation outcome of a single ConciergeQuestion.
 //
-//nolint:govet // result fields mirror the public report shape.
+//nolint:govet
 type QuestionResult struct {
 	ID                string
 	RunID             string

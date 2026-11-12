@@ -3,6 +3,7 @@ package model_test
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,7 +25,7 @@ func TestOpenAIResponsesToolLoop(t *testing.T) {
 			_, _ = w.Write([]byte(`{"id":"r1","model":"gpt-6.1-sol","output":[{"type":"function_call","call_id":"call-1","name":"lookup","arguments":"{\"key\":\"x\"}"}],"usage":{"input_tokens":7,"output_tokens":3}}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"id":"r2","model":"gpt-6.1-sol","output":[{"type":"message","content":[{"text":"done"}]}],"usage":{"input_tokens":9,"output_tokens":2}}`))
+		_, _ = w.Write([]byte(`{"id":"r2","model":"gpt-6.1-sol","output":[{"type":"message","text":"done"}],"usage":{"input_tokens":9,"output_tokens":2}}`))
 	}))
 	defer server.Close()
 	reg := model.NewToolRegistry()
@@ -33,13 +34,19 @@ func TestOpenAIResponsesToolLoop(t *testing.T) {
 	}) (string, error) {
 		return "value:" + in.Key, nil
 	})
-	client := model.NewOpenAIClient(model.WithOpenAIBaseURL(server.URL), model.WithOpenAIAPIKey("test"), model.WithOpenAIMaxRetries(0))
+	client := model.NewOpenAIClient(
+		model.WithOpenAIBaseURL(server.URL), model.WithOpenAIAPIKey("test"), model.WithOpenAIMaxRetries(0),
+		model.WithOpenAIPricing(map[string]model.ModelPricing{"gpt-6.1-sol": {InputPerMTok: 1, OutputPerMTok: 2}}),
+	)
 	res, err := client.RunToolLoop(context.Background(), model.Request{Model: "gpt-6.1-sol", Messages: []model.Message{model.NewUserMessage("find")}, MaxTurns: 3}, reg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.Response.Text() != "done" || res.Usage.InputTokens != 16 || res.Usage.OutputTokens != 5 {
 		t.Fatalf("response=%q usage=%+v", res.Response.Text(), res.Usage)
+	}
+	if got, want := res.Usage.CostUSD, 0.000026; math.Abs(got-want) > 1e-12 {
+		t.Fatalf("cost=%v, want %v", got, want)
 	}
 	if got := len(requests); got != 2 {
 		t.Fatalf("requests=%d, want 2", got)
