@@ -3,7 +3,9 @@ package replay_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bazelment/yoloswe/orch/dispatcher"
@@ -347,5 +349,435 @@ func TestFullGate2DatasetStructureAndDeterministicEval(t *testing.T) {
 	}
 	if !rep.AllPass() {
 		t.Fatalf("AllPass() = false on deterministic full-set run:\n%s", rep.FormatReport())
+	}
+}
+
+type multiTurnWireClient struct {
+	turns int
+}
+
+func (m *multiTurnWireClient) CreateMessage(_ context.Context, req model.Request) (*model.Response, error) {
+	m.turns++
+	for _, t := range req.Tools {
+		if strings.ContainsRune(t.Name, '.') {
+			return nil, errors.New("tool definition name on wire still contains '.': " + t.Name)
+		}
+	}
+	switch m.turns {
+	case 1:
+		return &model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(model.NewToolUseBlock(
+				"call-read-1",
+				"read_lane_report",
+				json.RawMessage(`{"lane_id":"cd-deploy-dev"}`),
+			)),
+			Usage: model.Usage{
+				InputTokens:              1000,
+				CacheCreationInputTokens: 500,
+				CacheReadInputTokens:     200,
+				OutputTokens:             40,
+			},
+		}, nil
+	case 2:
+		return &model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(model.NewToolUseBlock(
+				"call-retry-2",
+				"lane_retry",
+				json.RawMessage(`{"lane_id":"cd-deploy-dev","phase":"swe","round":2,"note":"Retry swe on round 2.","reason":"Cooldown finished."}`),
+			)),
+			Usage: model.Usage{
+				InputTokens:          1100,
+				CacheReadInputTokens: 300,
+				OutputTokens:         50,
+			},
+		}, nil
+	default:
+		return &model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Retried lane cd-deploy-dev after reading report.")),
+			Usage: model.Usage{
+				InputTokens:  900,
+				OutputTokens: 30,
+			},
+		}, nil
+	}
+}
+
+func TestWireToolClientReadLaneReportThenMutateAndCacheTokens(t *testing.T) {
+	t.Parallel()
+
+	ds, err := replay.LoadInnerLoopDataset()
+	if err != nil {
+		t.Fatalf("LoadInnerLoopDataset: %v", err)
+	}
+	rawClient := &multiTurnWireClient{}
+	wireClient := replay.NewWireToolClient(rawClient)
+
+	mr, err := replay.EvaluateMoment(t.Context(), ds.Moments[0], wireClient, dispatcher.Config{MaxTurns: 4})
+	if err != nil {
+		t.Fatalf("EvaluateMoment: %v", err)
+	}
+	if rawClient.turns != 3 {
+		t.Fatalf("rawClient.turns = %d, want 3 (read.lane_report -> lane.retry -> final summary)", rawClient.turns)
+	}
+	if !mr.Agreed {
+		t.Fatalf("mr.Agreed = false, want true (acceptedTools=%v acceptedTargets=%v)", mr.AcceptedTools, mr.AcceptedTargets)
+	}
+	wantTokens := int64((1000 + 500 + 200) + (1100 + 300) + 900)
+	if mr.InputTokens != wantTokens {
+		t.Fatalf("mr.InputTokens = %d, want %d (including cache creation and cache read tokens)", mr.InputTokens, wantTokens)
+	}
+}
+
+type staticActionClient struct {
+	calls []model.ToolCall
+	usage model.Usage
+}
+
+func (s *staticActionClient) CreateMessage(_ context.Context, req model.Request) (*model.Response, error) {
+	if len(req.Messages) > 0 {
+		last := req.Messages[len(req.Messages)-1]
+		for _, b := range last.Content {
+			if b.Type == model.BlockTypeToolResult {
+				return &model.Response{
+					StopReason: model.StopReasonEndTurn,
+					Message:    model.NewAssistantMessage(model.NewTextBlock("Done.")),
+				}, nil
+			}
+		}
+	}
+	var blocks []model.ContentBlock
+	for _, tc := range s.calls {
+		blocks = append(blocks, model.NewToolUseBlock(tc.ID, tc.Name, tc.Input))
+	}
+	return &model.Response{
+		StopReason: model.StopReasonToolUse,
+		Message:    model.NewAssistantMessage(blocks...),
+		Usage:      s.usage,
+	}, nil
+}
+
+func TestNegativeAgreementAndComputeReportBars(t *testing.T) {
+	t.Parallel()
+
+	ds, err := replay.LoadInnerLoopDataset()
+	if err != nil {
+		t.Fatalf("LoadInnerLoopDataset: %v", err)
+	}
+
+	t.Run("substring target mismatch rejected", func(t *testing.T) {
+		t.Parallel()
+		var m replay.JudgmentMoment
+		raw := `{
+			"id": "sub-1",
+			"run_id": "run-sub",
+			"description": "Ensure lane-1 does not match lane-10",
+			"state": {
+				"run": {"id": "run-sub", "objective": "test"},
+				"lanes": [
+					{"id": "lane-1", "run_id": "run-sub", "status": "blocked", "phase": "swe", "round": 1},
+					{"id": "lane-10", "run_id": "run-sub", "status": "blocked", "phase": "swe", "round": 1}
+				]
+			},
+			"events": [{"id": "ev-sub", "run_id": "run-sub", "kind": "stall", "class": "judgment", "lane_id": "lane-10", "summary": "stall"}],
+			"baseline": {"tool": "lane.retry", "target": "lane-10", "summary": "retry"},
+			"owner_follow_up": {
+				"verdict": "endorsed",
+				"expected_tools": ["lane.retry"],
+				"expected_targets": ["lane-10"]
+			}
+		}`
+		if uErr := json.Unmarshal([]byte(raw), &m); uErr != nil {
+			t.Fatalf("json.Unmarshal: %v", uErr)
+		}
+		client := &staticActionClient{
+			calls: []model.ToolCall{{
+				ID:    "c1",
+				Name:  dispatcher.ToolLaneRetry,
+				Input: mustJSON(t, dispatcher.LaneRetryParams{LaneID: "lane-1", Phase: "swe", Round: 2, Reason: "wrong lane"}),
+			}},
+		}
+		mr, evalErr := replay.EvaluateMoment(t.Context(), m, client, dispatcher.Config{})
+		if evalErr != nil {
+			t.Fatalf("EvaluateMoment: %v", evalErr)
+		}
+		if mr.Agreed {
+			t.Fatalf("mr.Agreed = true for target lane-1 against expected lane-10, want false")
+		}
+	})
+
+	t.Run("unexpected extra mutating action rejected", func(t *testing.T) {
+		t.Parallel()
+		m := ds.Moments[0]
+		client := &staticActionClient{
+			calls: []model.ToolCall{
+				{
+					ID:    "c1",
+					Name:  dispatcher.ToolLaneRetry,
+					Input: mustJSON(t, dispatcher.LaneRetryParams{LaneID: "cd-deploy-dev", Phase: "swe", Round: 2, Reason: "expected retry"}),
+				},
+				{
+					ID:    "c2",
+					Name:  dispatcher.ToolBacklogAdd,
+					Input: mustJSON(t, dispatcher.BacklogAddParams{ID: "unexpected-item", Title: "Unrelated", Priority: "p2", Reason: "spurious"}),
+				},
+			},
+		}
+		mr, evalErr := replay.EvaluateMoment(t.Context(), m, client, dispatcher.Config{})
+		if evalErr != nil {
+			t.Fatalf("EvaluateMoment: %v", evalErr)
+		}
+		if mr.Agreed {
+			t.Fatalf("mr.Agreed = true when an unexpected second mutating action was accepted, want false")
+		}
+	})
+
+	t.Run("owner.ask on decide_dont_ask fails agreement and ask rate bar", func(t *testing.T) {
+		t.Parallel()
+		m := ds.Moments[1] // decide_dont_ask_steer
+		client := &staticActionClient{
+			calls: []model.ToolCall{{
+				ID:   "c-ask",
+				Name: dispatcher.ToolOwnerAsk,
+				Input: mustJSON(t, dispatcher.OwnerAskParams{
+					LaneID:   "cd-deploy-dev",
+					Question: "Which schema should we use?",
+					Options:  []string{"cd-publish", "legacy"},
+					Default:  "cd-publish",
+					Deadline: "1h",
+					Reason:   "Unnecessary ask",
+				}),
+			}},
+			usage: model.Usage{InputTokens: 35000},
+		}
+		mr, evalErr := replay.EvaluateMoment(t.Context(), m, client, dispatcher.Config{})
+		if evalErr != nil {
+			t.Fatalf("EvaluateMoment: %v", evalErr)
+		}
+		if mr.Agreed {
+			t.Fatal("mr.Agreed = true on forbidden owner.ask, want false")
+		}
+		if !mr.AskedOwner {
+			t.Fatal("mr.AskedOwner = false, want true")
+		}
+
+		rep := replay.ComputeReport([]replay.MomentResult{mr}, []replay.QuestionResult{{
+			ID:                "q-bad",
+			MissingFacts:      []string{"missing-fact"},
+			ViolatedForbidden: []string{"hallucinated-pr"},
+			Accurate:          false,
+		}})
+		if rep.AllPass() {
+			t.Fatal("rep.AllPass() = true when bars failed, want false")
+		}
+		if rep.AskRatePass {
+			t.Fatal("rep.AskRatePass = true when unnecessary ask rate is 100%, want false")
+		}
+		if rep.ConciergePass {
+			t.Fatal("rep.ConciergePass = true when accuracy is 0%, want false")
+		}
+		if rep.TokensPass {
+			t.Fatal("rep.TokensPass = true when median tokens is 35000 >= 30000, want false")
+		}
+	})
+}
+
+func TestAuditAcceptedActionsViolations(t *testing.T) {
+	t.Parallel()
+
+	var state replay.MomentState
+	rawState := `{
+		"run": {"id": "run-audit", "objective": "audit test", "default_recipe": "default"},
+		"backlog": [
+			{"id": "item-new", "run_id": "run-audit", "title": "New item", "priority": "p1", "status": "open"}
+		],
+		"lanes": [
+			{"id": "ln-1", "run_id": "run-audit", "status": "running", "phase": "swe", "round": 1},
+			{"id": "ln-2", "run_id": "run-audit", "status": "running", "phase": "swe", "round": 1},
+			{"id": "ln-3", "run_id": "run-audit", "status": "running", "phase": "swe", "round": 1},
+			{"id": "ln-4", "run_id": "run-audit", "status": "running", "phase": "swe", "round": 1},
+			{"id": "ln-5", "run_id": "run-audit", "status": "running", "phase": "swe", "round": 1},
+			{"id": "ln-6", "run_id": "run-audit", "status": "running", "phase": "swe", "round": 1},
+			{"id": "ln-7", "run_id": "run-audit", "status": "running", "phase": "swe", "round": 1},
+			{"id": "ln-8", "run_id": "run-audit", "status": "running", "phase": "swe", "round": 1},
+			{"id": "ln-stale", "run_id": "run-audit", "status": "blocked", "phase": "review", "round": 1, "pr": 101, "pr_head": "sha-new", "approval_sha": "sha-old", "checks": "pending"}
+		]
+	}`
+	if err := json.Unmarshal([]byte(rawState), &state); err != nil {
+		t.Fatalf("json.Unmarshal state: %v", err)
+	}
+
+	violations := replay.AuditAcceptedActions(state, []dispatcher.ProposedAction{
+		{
+			Tool: dispatcher.ToolLaneSpawn,
+			LaneSpawn: &dispatcher.LaneSpawnParams{
+				ItemID: "item-new",
+				LaneID: "ln-new",
+				Brief:  "Use token ghp_1234567890abcdef1234567890abcdef to push.",
+			},
+		},
+		{
+			Tool: dispatcher.ToolLaneRetry,
+			LaneRetry: &dispatcher.LaneRetryParams{
+				LaneID: "ln-stale",
+				Phase:  "integrate",
+				Round:  2,
+				Note:   "Retry integrate.",
+			},
+		},
+	})
+	if len(violations) < 3 {
+		t.Fatalf("len(violations) = %d (%v), want >= 3 (concurrency cap, secret token leak, stale approval integrate)", len(violations), violations)
+	}
+}
+
+func TestDatasetValidateRejections(t *testing.T) {
+	t.Parallel()
+
+	var nilDS *replay.Dataset
+	if err := nilDS.Validate(); err == nil {
+		t.Fatal("nil Dataset.Validate() = nil, want error")
+	}
+
+	emptyDS := &replay.Dataset{}
+	if err := emptyDS.Validate(); err == nil {
+		t.Fatal("empty Dataset.Validate() = nil, want error")
+	}
+
+	ds, err := replay.LoadInnerLoopDataset()
+	if err != nil {
+		t.Fatalf("LoadInnerLoopDataset: %v", err)
+	}
+
+	dupMoments := *ds
+	dupMoments.Moments = append([]replay.JudgmentMoment{ds.Moments[0]}, ds.Moments...)
+	if err := dupMoments.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate moment id") {
+		t.Fatalf("duplicate moment Validate() = %v, want duplicate moment id error", err)
+	}
+
+	badRunID := *ds
+	badRunID.Moments = append([]replay.JudgmentMoment(nil), ds.Moments...)
+	badRunID.Moments[0].RunID = "mismatch-run"
+	if err := badRunID.Validate(); err == nil || !strings.Contains(err.Error(), "mismatched run_id") {
+		t.Fatalf("mismatched run_id Validate() = %v, want mismatched run_id error", err)
+	}
+
+	badQuestion := *ds
+	badQuestion.Questions = append([]replay.ConciergeQuestion(nil), ds.Questions...)
+	badQuestion.Questions[0].RequiredFacts = nil
+	if err := badQuestion.Validate(); err == nil || !strings.Contains(err.Error(), "no required_facts") {
+		t.Fatalf("empty required_facts Validate() = %v, want no required_facts error", err)
+	}
+}
+
+type cancellingClient struct {
+	cancel context.CancelFunc
+	calls  atomic.Int32
+}
+
+func (c *cancellingClient) CreateMessage(ctx context.Context, _ model.Request) (*model.Response, error) {
+	if c.calls.Add(1) == 1 {
+		c.cancel()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &model.Response{
+		StopReason: model.StopReasonEndTurn,
+		Message:    model.NewAssistantMessage(model.NewTextBlock("ok")),
+	}, nil
+}
+
+func TestEvaluateContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	ds, err := replay.LoadInnerLoopDataset()
+	if err != nil {
+		t.Fatalf("LoadInnerLoopDataset: %v", err)
+	}
+
+	for _, workers := range []int{1, 4} {
+		ctx, cancel := context.WithCancel(t.Context())
+		client := &cancellingClient{cancel: cancel}
+		_, evalErr := replay.Evaluate(ctx, ds, replay.EvalConfig{
+			Client:      client,
+			Concurrency: workers,
+		})
+		if evalErr == nil {
+			t.Fatalf("Evaluate(workers=%d) with cancelled context returned nil error, want non-nil", workers)
+		}
+	}
+}
+
+type conciergeToolExerciserClient struct {
+	turn int
+}
+
+func (c *conciergeToolExerciserClient) CreateMessage(_ context.Context, req model.Request) (*model.Response, error) {
+	c.turn++
+	switch c.turn {
+	case 1:
+		return &model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("t1", "status", json.RawMessage(`{}`)),
+				model.NewToolUseBlock("t2", "lane_show", json.RawMessage(`{"lane_id":"cd-deploy-dev"}`)),
+				model.NewToolUseBlock("t3", "pr_status", json.RawMessage(`{"lane_id":"cd-deploy-dev"}`)),
+				model.NewToolUseBlock("t4", "ci_status", json.RawMessage(`{"lane_id":"cd-deploy-dev"}`)),
+				model.NewToolUseBlock("t5", "decisions_since", json.RawMessage(`{"since":"0","limit":5}`)),
+				model.NewToolUseBlock("t6", "directive_submit", json.RawMessage(`{"kind":"instruction","text":"Hold merges on cd-deploy-dev"}`)),
+				model.NewToolUseBlock("t7", "directive_submit", json.RawMessage(`{"kind":"note","text":"Second directive under same FakeClock timestamp"}`)),
+			),
+			Usage: model.Usage{InputTokens: 800, CacheReadInputTokens: 200, OutputTokens: 100},
+		}, nil
+	default:
+		var directiveIDs []string
+		for _, m := range req.Messages {
+			for _, b := range m.Content {
+				if b.Type == model.BlockTypeToolResult {
+					if b.IsError {
+						return nil, errors.New("unexpected tool error in concierge: " + b.Content)
+					}
+					if strings.HasPrefix(b.Content, "submitted directive ") {
+						directiveIDs = append(directiveIDs, strings.TrimPrefix(b.Content, "submitted directive "))
+					}
+				}
+			}
+		}
+		if len(directiveIDs) != 2 || directiveIDs[0] == directiveIDs[1] {
+			return nil, errors.New("expected 2 distinct directive IDs under FakeClock")
+		}
+		return &model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Lane cd-deploy-dev (#5127) is blocked in swe round 1 with checks pending; merge-red-check-guard and image-retention are running; cd-publish (#5124) is done.")),
+			Usage:      model.Usage{InputTokens: 900, OutputTokens: 60},
+		}, nil
+	}
+}
+
+func TestStoreConciergeToolsAndDirectiveSubmit(t *testing.T) {
+	t.Parallel()
+
+	ds, err := replay.LoadInnerLoopDataset()
+	if err != nil {
+		t.Fatalf("LoadInnerLoopDataset: %v", err)
+	}
+	client := &conciergeToolExerciserClient{}
+	concierge := replay.NewStoreConcierge(client)
+
+	qr, err := replay.EvaluateQuestion(t.Context(), ds.Questions[0], concierge)
+	if err != nil {
+		t.Fatalf("EvaluateQuestion: %v", err)
+	}
+	if !qr.Accurate {
+		t.Fatalf("qr.Accurate = false (missing=%v violated=%v answer=%q)", qr.MissingFacts, qr.ViolatedForbidden, qr.Answer)
+	}
+	if len(qr.ToolCalls) != 7 {
+		t.Fatalf("len(qr.ToolCalls) = %d (%v), want 7", len(qr.ToolCalls), qr.ToolCalls)
+	}
+	if qr.InputTokens != 1900 {
+		t.Fatalf("qr.InputTokens = %d, want 1900", qr.InputTokens)
 	}
 }

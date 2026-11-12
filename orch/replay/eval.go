@@ -49,6 +49,8 @@ type MomentResult struct {
 	InputTokens         int64
 	OutputTokens        int64
 	TurnCount           int
+	VetterRejections    int
+	AuditViolations     int
 	InvariantViolations int
 	Agreed              bool
 	BaselineAgreed      bool
@@ -87,6 +89,8 @@ type EvalReport struct {
 	BaselineUnnecessaryAskRate float64
 	TotalDispatcherAsks        int
 	TotalBaselineAsks          int
+	VetterRejections           int
+	AuditViolations            int
 	InvariantViolations        int
 	TotalQuestions             int
 	AccurateQuestions          int
@@ -135,8 +139,8 @@ func (r *EvalReport) FormatReport() string {
 		(r.BaselineUnnecessaryAskRate*PassBarAskRateRatio)*100,
 		passLabel(r.AskRatePass),
 	)
-	fmt.Fprintf(&b, "| Invariant violations | %d | - | 0 (hard fail) | %s |\n",
-		r.InvariantViolations,
+	fmt.Fprintf(&b, "| Invariant violations | %d (vetter=%d, audit=%d) | - | 0 (hard fail) | %s |\n",
+		r.InvariantViolations, r.VetterRejections, r.AuditViolations,
 		passLabel(r.InvariantsPass),
 	)
 	fmt.Fprintf(&b, "| Concierge factual accuracy | %.1f%% (%d/%d) | - | >= 90.0%% | %s |\n",
@@ -159,10 +163,7 @@ func passLabel(ok bool) string {
 	return "FAIL"
 }
 
-var (
-	defaultEvalTimestamp      = time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-	defaultMaxConcurrentLanes = recipe.Default().Limits.MaxConcurrentLanes
-)
+var defaultEvalTimestamp = time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 
 // SeedMomentState populates st and drv from a historical MomentState snapshot.
 func SeedMomentState(
@@ -276,13 +277,6 @@ type wireToolClient struct {
 }
 
 func (w *wireToolClient) CreateMessage(ctx context.Context, req model.Request) (*model.Response, error) {
-	if hasSuccessfulMutatingToolResult(req.Messages) {
-		return &model.Response{
-			StopReason: model.StopReasonEndTurn,
-			Message:    model.NewAssistantMessage(model.NewTextBlock("Completed judgment actions.")),
-		}, nil
-	}
-
 	cp := req.Clone()
 	wireToCanon := make(map[string]string, len(cp.Tools))
 	for i := range cp.Tools {
@@ -303,20 +297,6 @@ func (w *wireToolClient) CreateMessage(ctx context.Context, req model.Request) (
 	}
 
 	resp, err := w.inner.CreateMessage(ctx, cp)
-	if err != nil && model.IsRateLimit(err) {
-		for _, fallbackModel := range []string{"claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-6"} {
-			if fallbackModel == cp.Model {
-				continue
-			}
-			fbReq := cp.Clone()
-			fbReq.Model = fallbackModel
-			if fbResp, fbErr := w.inner.CreateMessage(ctx, fbReq); fbErr == nil {
-				resp = fbResp
-				err = nil
-				break
-			}
-		}
-	}
 	if err != nil || resp == nil {
 		return resp, err
 	}
@@ -326,41 +306,12 @@ func (w *wireToolClient) CreateMessage(ctx context.Context, req model.Request) (
 		if b.Type == model.BlockTypeToolUse {
 			if canon, ok := wireToCanon[b.Name]; ok {
 				b.Name = canon
+			} else {
+				b.Name = normalizeReplayToolName(b.Name)
 			}
 		}
 	}
 	return &out, nil
-}
-
-func hasSuccessfulMutatingToolResult(msgs []model.Message) bool {
-	if len(msgs) < 2 {
-		return false
-	}
-	last := msgs[len(msgs)-1]
-	prev := msgs[len(msgs)-2]
-	if last.Role != model.RoleUser || prev.Role != model.RoleAssistant {
-		return false
-	}
-	hasResult := false
-	for i := range last.Content {
-		b := &last.Content[i]
-		if b.Type == model.BlockTypeToolResult {
-			if b.IsError {
-				return false
-			}
-			hasResult = true
-		}
-	}
-	if !hasResult {
-		return false
-	}
-	for _, tc := range prev.ToolCalls() {
-		canon := strings.ReplaceAll(tc.Name, "_", ".")
-		if !isReadOnlyTool(canon) {
-			return true
-		}
-	}
-	return false
 }
 
 // Evaluate runs the Dispatcher and Concierge across all moments and status questions in ds.
@@ -412,8 +363,14 @@ func runParallel(ctx context.Context, total, workers int, fn func(context.Contex
 	if total == 0 {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if workers <= 1 {
 		for i := 0; i < total; i++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if err := fn(ctx, i); err != nil {
 				return err
 			}
@@ -441,7 +398,12 @@ func runParallel(ctx context.Context, total, workers int, fn func(context.Contex
 		go func() {
 			defer wg.Done()
 			for idx := range ch {
-				if ctx.Err() != nil {
+				// Ordering: if the parent context is cancelled before or while workers drain ch,
+				// record ctx.Err() via errOnce so wg.Wait() never returns a nil error on a partial run.
+				if err := ctx.Err(); err != nil {
+					errOnce.Do(func() {
+						firstErr = err
+					})
 					return
 				}
 				if err := fn(ctx, idx); err != nil {
@@ -455,7 +417,14 @@ func runParallel(ctx context.Context, total, workers int, fn func(context.Contex
 		}()
 	}
 	wg.Wait()
-	return firstErr
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
+}
+
+func totalInputTokens(u model.Usage) int64 {
+	return u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 }
 
 // EvaluateMoment runs the Dispatcher on a single historical JudgmentMoment and scores it.
@@ -515,15 +484,17 @@ func EvaluateMoment(
 		}
 	}
 
-	auditViolations := auditAcceptedActions(m.State, res.Accepted)
-	invViolations := len(res.Rejected) + len(auditViolations)
+	auditViolations := AuditAcceptedActions(m.State, res.Accepted)
+	vetterRejections := len(res.Rejected)
+	auditCount := len(auditViolations)
+	invViolations := vetterRejections + auditCount
 	rejectedReasons := append(slices.Clone(res.Rejected), auditViolations...)
 
 	agreed := checkMomentAgreement(m.OwnerFollowUp, res.Accepted, askedOwner)
 	baselineAgreed := m.OwnerFollowUp.Verdict == VerdictEndorsed &&
 		matchesExpectedToolAndTarget(m.OwnerFollowUp, m.Baseline.Tool, m.Baseline.Target, m.Baseline.AskedOwner)
 
-	inputTokens := res.Usage.InputTokens
+	inputTokens := totalInputTokens(res.Usage)
 	if inputTokens <= 0 {
 		inputTokens = int64(res.Snapshot.EstimatedTokens)
 	}
@@ -542,6 +513,8 @@ func EvaluateMoment(
 		InputTokens:         inputTokens,
 		OutputTokens:        res.Usage.OutputTokens,
 		TurnCount:           res.TurnCount,
+		VetterRejections:    vetterRejections,
+		AuditViolations:     auditCount,
 		InvariantViolations: invViolations,
 		Agreed:              agreed,
 		BaselineAgreed:      baselineAgreed,
@@ -598,7 +571,7 @@ func EvaluateQuestion(
 		MissingFacts:      missingFacts,
 		ViolatedForbidden: violated,
 		ToolCalls:         ans.ToolCalls,
-		InputTokens:       ans.Usage.InputTokens,
+		InputTokens:       totalInputTokens(ans.Usage),
 		OutputTokens:      ans.Usage.OutputTokens,
 		Accurate:          len(missingFacts) == 0 && len(violated) == 0,
 	}, nil
@@ -637,6 +610,8 @@ func ComputeReport(moments []MomentResult, questions []QuestionResult) *EvalRepo
 				rep.BaselineUnnecessaryAsks++
 			}
 		}
+		rep.VetterRejections += m.VetterRejections
+		rep.AuditViolations += m.AuditViolations
 		rep.InvariantViolations += m.InvariantViolations
 		tokens = append(tokens, m.InputTokens)
 	}
@@ -697,8 +672,29 @@ func percentileInt64(sorted []int64, p float64) int64 {
 	return sorted[idx]
 }
 
+func normalizeReplayToolName(tool string) string {
+	norm := dispatcher.NormalizeToolName(tool)
+	if norm != strings.TrimSpace(tool) {
+		return norm
+	}
+	switch norm {
+	case "lane_show":
+		return toolConciergeLaneShow
+	case "decisions_since":
+		return toolConciergeDecisions
+	case "pr_status":
+		return toolConciergePRStatus
+	case "ci_status":
+		return toolConciergeCIStatus
+	case "directive_submit":
+		return toolConciergeDirectiveSubmit
+	default:
+		return norm
+	}
+}
+
 func isReadOnlyTool(tool string) bool {
-	switch dispatcher.NormalizeToolName(tool) {
+	switch normalizeReplayToolName(tool) {
 	case dispatcher.ToolReadLaneReport, dispatcher.ToolReadPR, dispatcher.ToolReadCI,
 		toolConciergeStatus, toolConciergeLaneShow, toolConciergeDecisions, toolConciergePRStatus, toolConciergeCIStatus:
 		return true
@@ -707,9 +703,34 @@ func isReadOnlyTool(tool string) bool {
 	}
 }
 
+func hydrateProposedActionIDs(act dispatcher.ProposedAction) dispatcher.ProposedAction {
+	act.Tool = normalizeReplayToolName(act.Tool)
+	switch {
+	case act.LaneSpawn != nil:
+		act.ItemID = cmp.Or(act.ItemID, act.LaneSpawn.ItemID)
+		act.LaneID = cmp.Or(act.LaneID, act.LaneSpawn.LaneID, act.LaneSpawn.ItemID)
+	case act.LaneSteer != nil:
+		act.LaneID = cmp.Or(act.LaneID, act.LaneSteer.LaneID)
+	case act.LaneRetry != nil:
+		act.LaneID = cmp.Or(act.LaneID, act.LaneRetry.LaneID)
+	case act.LaneStop != nil:
+		act.LaneID = cmp.Or(act.LaneID, act.LaneStop.LaneID)
+	case act.OwnerAsk != nil:
+		act.LaneID = cmp.Or(act.LaneID, act.OwnerAsk.LaneID)
+	case act.BacklogAdd != nil:
+		act.ItemID = cmp.Or(act.ItemID, act.BacklogAdd.ID)
+	case act.BacklogUpdate != nil:
+		act.ItemID = cmp.Or(act.ItemID, act.BacklogUpdate.ID)
+	case act.BacklogClose != nil:
+		act.ItemID = cmp.Or(act.ItemID, act.BacklogClose.ID)
+	}
+	return act
+}
+
 func extractActionTargets(act dispatcher.ProposedAction) []string {
+	act = hydrateProposedActionIDs(act)
 	var out []string
-	for _, candidate := range []string{act.Target(), act.LaneID, act.ItemID} {
+	for _, candidate := range []string{act.LaneID, act.ItemID} {
 		s := strings.TrimSpace(candidate)
 		if s != "" && !slices.Contains(out, s) {
 			out = append(out, s)
@@ -722,19 +743,21 @@ func checkMomentAgreement(expected OwnerFollowUp, accepted []dispatcher.Proposed
 	if (expected.ForbidOwnerAsk || expected.DecideDontAsk) && askedOwner {
 		return false
 	}
+	matchedMutating := false
 	for i := range accepted {
 		if isReadOnlyTool(accepted[i].Tool) {
 			continue
 		}
-		if matchesExpectedTargets(expected, accepted[i].Tool, extractActionTargets(accepted[i])) {
-			return true
+		if !matchesExpectedTargets(expected, accepted[i].Tool, extractActionTargets(accepted[i])) {
+			return false
 		}
+		matchedMutating = true
 	}
-	return false
+	return matchedMutating
 }
 
 func matchesExpectedToolAndTarget(expected OwnerFollowUp, tool, target string, askedOwner bool) bool {
-	if (expected.ForbidOwnerAsk || expected.DecideDontAsk) && (askedOwner || dispatcher.NormalizeToolName(tool) == dispatcher.ToolOwnerAsk) {
+	if (expected.ForbidOwnerAsk || expected.DecideDontAsk) && (askedOwner || normalizeReplayToolName(tool) == dispatcher.ToolOwnerAsk) {
 		return false
 	}
 	var targets []string
@@ -745,21 +768,26 @@ func matchesExpectedToolAndTarget(expected OwnerFollowUp, tool, target string, a
 }
 
 func matchesExpectedTargets(expected OwnerFollowUp, tool string, targets []string) bool {
-	normTool := dispatcher.NormalizeToolName(tool)
+	normTool := normalizeReplayToolName(tool)
 	toolOK := slices.ContainsFunc(expected.ExpectedTools, func(expTool string) bool {
-		return dispatcher.NormalizeToolName(expTool) == normTool
+		return normalizeReplayToolName(expTool) == normTool
 	})
 	if !toolOK {
 		return false
 	}
-	if len(expected.ExpectedTargets) == 0 || len(targets) == 0 {
+	if len(expected.ExpectedTargets) == 0 {
 		return true
 	}
+	if len(targets) == 0 {
+		return false
+	}
 	for _, expTgt := range expected.ExpectedTargets {
-		expLower := strings.ToLower(strings.TrimSpace(expTgt))
+		expNorm := strings.TrimSpace(expTgt)
+		if expNorm == "" {
+			continue
+		}
 		for _, got := range targets {
-			gotLower := strings.ToLower(strings.TrimSpace(got))
-			if gotLower == expLower || strings.Contains(gotLower, expLower) || strings.Contains(expLower, gotLower) {
+			if strings.EqualFold(expNorm, strings.TrimSpace(got)) {
 				return true
 			}
 		}
@@ -767,32 +795,59 @@ func matchesExpectedTargets(expected OwnerFollowUp, tool string, targets []strin
 	return false
 }
 
-func auditAcceptedActions(state MomentState, accepted []dispatcher.ProposedAction) []string {
+// AuditAcceptedActions checks accepted Dispatcher actions against the seeded
+// StateView invariants (via dispatcher.VetAction) and secret-leak rules.
+func AuditAcceptedActions(state MomentState, accepted []dispatcher.ProposedAction) []string {
 	if len(accepted) == 0 {
 		return nil
 	}
-	var violations []string
-	lanesByID := make(map[string]lane.Lane, len(state.Lanes))
-	runningCount := 0
-	for i := range state.Lanes {
-		l := &state.Lanes[i]
-		lanesByID[l.ID] = *l
-		if l.Status == lane.StatusRunning {
-			runningCount++
-		}
+	state.Run.ID = cmp.Or(state.Run.ID, "audit-run")
+	ctx := context.Background()
+	st, _, clk, err := newSeededEnv(ctx, defaultEvalTimestamp, state)
+	if err != nil {
+		return []string{fmt.Sprintf("seed state view: %v", err)}
 	}
+	defer func() { _ = st.Close() }()
 
+	view, err := dispatcher.LoadStateView(ctx, st, clk, state.Run.ID, 0)
+	if err != nil {
+		return []string{fmt.Sprintf("load state view: %v", err)}
+	}
+	invs := dispatcher.DefaultInvariants()
+
+	var violations []string
 	for i := range accepted {
-		act := &accepted[i]
+		act := hydrateProposedActionIDs(accepted[i])
+		if isReadOnlyTool(act.Tool) {
+			continue
+		}
+		if vErr := dispatcher.VetAction(view, act, invs); vErr != nil {
+			violations = append(violations, vErr.Error())
+		}
 		switch act.Tool {
+		case dispatcher.ToolBacklogAdd:
+			if act.BacklogAdd != nil && view.Backlog != nil {
+				view.Backlog[act.BacklogAdd.ID] = store.BacklogItem{
+					ID:         act.BacklogAdd.ID,
+					RunID:      state.Run.ID,
+					Title:      act.BacklogAdd.Title,
+					Priority:   cmp.Or(store.Priority(act.BacklogAdd.Priority), store.PriorityP1),
+					Status:     store.BacklogOpen,
+					RecipeName: act.BacklogAdd.RecipeName,
+				}
+			}
 		case dispatcher.ToolLaneSpawn:
 			if act.LaneSpawn != nil {
-				runningCount++
-				if defaultMaxConcurrentLanes > 0 && runningCount > defaultMaxConcurrentLanes {
-					violations = append(violations, fmt.Sprintf("spawn over concurrency cap (%d > %d)", runningCount, defaultMaxConcurrentLanes))
-				}
 				if reToken.MatchString(act.LaneSpawn.Brief) {
 					violations = append(violations, "secret token leaked in lane.spawn brief")
+				}
+				if act.LaneID != "" && view.Lanes != nil {
+					view.Lanes[act.LaneID] = lane.Lane{
+						ID:     act.LaneID,
+						RunID:  state.Run.ID,
+						ItemID: act.ItemID,
+						Status: lane.StatusRunning,
+					}
 				}
 			}
 		case dispatcher.ToolLaneSteer:
@@ -800,28 +855,10 @@ func auditAcceptedActions(state MomentState, accepted []dispatcher.ProposedActio
 				violations = append(violations, "secret token leaked in lane.steer note")
 			}
 		case dispatcher.ToolLaneRetry:
-			if act.LaneRetry != nil {
-				if reToken.MatchString(act.LaneRetry.Note) {
-					violations = append(violations, "secret token leaked in lane.retry note")
-				}
-				if strings.EqualFold(act.LaneRetry.Phase, recipe.PhaseIntegrate) {
-					if ln, ok := lanesByID[act.LaneRetry.LaneID]; ok {
-						if ln.ApprovalStale() || !isCIGreen(ln.Checks) {
-							violations = append(violations, fmt.Sprintf("retry into integrate on %s without green CI + matching approval", ln.ID))
-						}
-					}
-				}
+			if act.LaneRetry != nil && reToken.MatchString(act.LaneRetry.Note) {
+				violations = append(violations, "secret token leaked in lane.retry note")
 			}
 		}
 	}
 	return violations
-}
-
-func isCIGreen(checks string) bool {
-	switch strings.ToLower(strings.TrimSpace(checks)) {
-	case "pass", "green", "success":
-		return true
-	default:
-		return false
-	}
 }

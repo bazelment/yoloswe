@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bazelment/yoloswe/orch/clock"
@@ -53,6 +55,7 @@ type StoreConcierge struct {
 	SystemPrompt string
 	MaxTurns     int
 	MaxTokens    int
+	dirSeq       atomic.Int64
 }
 
 const DefaultEvalModel = "claude-haiku-4-5-20251001"
@@ -128,7 +131,7 @@ func (c *StoreConcierge) Answer(
 	for _, def := range conciergeToolDefs {
 		reg.Register(def, func(callCtx context.Context, raw json.RawMessage) (string, error) {
 			toolCalls = append(toolCalls, def.Name)
-			return executeConciergeTool(callCtx, st, drv, clk, runID, def.Name, raw)
+			return c.executeTool(callCtx, st, drv, clk, runID, def.Name, raw)
 		})
 	}
 
@@ -274,7 +277,17 @@ func readLaneReportSummary(ctx context.Context, drv lane.LaneDriver, runID strin
 		rep.Outcome, rep.Breaks, rep.Reason, rep.Summary)
 }
 
-func executeConciergeTool(
+func lookupConciergeLane(ctx context.Context, st store.Store, runID string, raw json.RawMessage) (*lane.Lane, error) {
+	var p laneShowParams
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+	}
+	return st.Lanes().Get(ctx, runID, strings.TrimSpace(p.LaneID))
+}
+
+func (c *StoreConcierge) executeTool(
 	ctx context.Context,
 	st store.Store,
 	drv lane.LaneDriver,
@@ -285,12 +298,8 @@ func executeConciergeTool(
 	switch toolName {
 	case toolConciergeStatus:
 		return buildConciergeStatusView(ctx, st, drv, clk, runID)
-	case toolConciergeLaneShow, toolConciergePRStatus, toolConciergeCIStatus:
-		var p laneShowParams
-		if len(raw) > 0 {
-			_ = json.Unmarshal(raw, &p)
-		}
-		ln, err := st.Lanes().Get(ctx, runID, strings.TrimSpace(p.LaneID))
+	case toolConciergeLaneShow:
+		ln, err := lookupConciergeLane(ctx, st, runID, raw)
 		if err != nil {
 			return "", err
 		}
@@ -300,16 +309,55 @@ func executeConciergeTool(
 			out += "\n" + repLine
 		}
 		return out, nil
+	case toolConciergePRStatus:
+		ln, err := lookupConciergeLane(ctx, st, runID, raw)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("lane=%s pr=#%d pr_head=%s approval_sha=%s approval_stale=%t merge_sha=%s status=%s title=%q",
+			ln.ID, ln.PR, cmp.Or(ln.PRHead, "-"), cmp.Or(ln.ApprovalSHA, "-"), ln.ApprovalStale(), cmp.Or(ln.MergeSHA, "-"), ln.Status, ln.Title), nil
+	case toolConciergeCIStatus:
+		ln, err := lookupConciergeLane(ctx, st, runID, raw)
+		if err != nil {
+			return "", err
+		}
+		out := fmt.Sprintf("lane=%s pr=#%d pr_head=%s checks=%s",
+			ln.ID, ln.PR, cmp.Or(ln.PRHead, "-"), cmp.Or(ln.Checks, "-"))
+		evs, err := st.Events().List(ctx, store.EventFilter{RunID: runID, LaneID: ln.ID, Limit: 10})
+		if err != nil {
+			return "", err
+		}
+		for i := range evs {
+			ev := &evs[i]
+			lowerKind := strings.ToLower(string(ev.Kind))
+			lowerSum := strings.ToLower(ev.Summary)
+			if strings.Contains(lowerKind, "ci") || strings.Contains(lowerSum, "ci") || strings.Contains(lowerSum, "check") {
+				out += fmt.Sprintf("\nci_event seq=%d kind=%s summary=%q", ev.Seq, ev.Kind, ev.Summary)
+			}
+		}
+		return out, nil
 	case toolConciergeDecisions:
 		var p decisionsSinceParams
 		if len(raw) > 0 {
-			_ = json.Unmarshal(raw, &p)
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return "", err
+			}
 		}
-		decs, err := st.Decisions().List(ctx, store.DecisionFilter{
+		filter := store.DecisionFilter{
 			RunID:  runID,
 			LaneID: strings.TrimSpace(p.LaneID),
 			Limit:  cmp.Or(p.Limit, 20),
-		})
+		}
+		if s := strings.TrimSpace(p.Since); s != "" {
+			if seq, err := strconv.ParseInt(s, 10, 64); err == nil {
+				filter.SinceSeq = seq
+			} else if ts, err := time.Parse(time.RFC3339, s); err == nil {
+				filter.SinceTime = &ts
+			} else {
+				return "", fmt.Errorf("invalid since %q: want sequence integer or RFC3339 timestamp", p.Since)
+			}
+		}
+		decs, err := st.Decisions().List(ctx, filter)
 		if err != nil {
 			return "", err
 		}
@@ -324,10 +372,17 @@ func executeConciergeTool(
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return "", err
 		}
+		kind := store.DirectiveKind(cmp.Or(strings.TrimSpace(p.Kind), string(store.DirectiveInstruction)))
+		switch kind {
+		case store.DirectiveStanding, store.DirectiveInstruction, store.DirectiveNote:
+		default:
+			return "", fmt.Errorf("invalid directive kind %q: want standing, instruction, or note", p.Kind)
+		}
+		seq := c.dirSeq.Add(1)
 		dir := store.Directive{
-			ID:     fmt.Sprintf("dir-concierge-%d", clk.Now().UnixNano()),
+			ID:     fmt.Sprintf("dir-concierge-%d-%d", clk.Now().UnixNano(), seq),
 			RunID:  runID,
-			Kind:   store.DirectiveKind(cmp.Or(p.Kind, string(store.DirectiveInstruction))),
+			Kind:   kind,
 			Source: store.DirectiveSourceOwner,
 			Scope:  p.Scope,
 			Text:   p.Text,
