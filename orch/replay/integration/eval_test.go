@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -94,6 +95,10 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 	fmt.Println(reportText)
 	t.Log("\n" + reportText)
 
+	if !subset {
+		printSplitReports(rep)
+	}
+
 	for i := range rep.MomentResults {
 		mr := &rep.MomentResults[i]
 		if !mr.Agreed || mr.InvariantViolations > 0 || (mr.ForbidOwnerAsk && mr.AskedOwner) {
@@ -119,5 +124,29 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 	// not a pass: the gate must not read green on evidence it does not have.
 	if !rep.AllPass() {
 		t.Fatalf("Validation Gate 2 verdict %s:\n%s", rep.Verdict(), rep.FormatReport())
+	}
+}
+
+// printSplitReports scores the moments of a full run once per deterministic
+// half (see replay.SplitMomentIDs), so the tune and holdout numbers come from
+// the same single pass over the dataset.
+func printSplitReports(rep *replay.EvalReport) {
+	ids := make([]string, len(rep.MomentResults))
+	for i := range rep.MomentResults {
+		ids[i] = rep.MomentResults[i].ID
+	}
+	tune, holdout := replay.SplitMomentIDs(ids)
+	for _, half := range []struct {
+		name string
+		ids  []string
+	}{{string(replay.SplitTune), tune}, {string(replay.SplitHoldout), holdout}} {
+		var moments []replay.MomentResult
+		for i := range rep.MomentResults {
+			if slices.Contains(half.ids, rep.MomentResults[i].ID) {
+				moments = append(moments, rep.MomentResults[i])
+			}
+		}
+		sub := replay.ComputeReport(moments, nil)
+		fmt.Printf("\n--- %s split (%d moments; Concierge questions are scored on the full set only) ---\n%s", half.name, len(moments), sub.FormatReport())
 	}
 }
