@@ -78,9 +78,9 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 	for i := range rep.MomentResults {
 		mr := &rep.MomentResults[i]
 		if !mr.Agreed || mr.InvariantViolations > 0 || (mr.ForbidOwnerAsk && mr.AskedOwner) {
-			t.Logf("MOMENT MISS %s (run=%s verified=%t): got tools=%v targets=%v asked=%t inv=%d | want tools=%v targets=%v",
+			t.Logf("MOMENT MISS %s (run=%s verified=%t): got tools=%v targets=%v asked=%t inv=%d rejected=%q | want tools=%v targets=%v",
 				mr.ID, mr.RunID, mr.Grounded, mr.AcceptedTools, mr.AcceptedTargets, mr.AskedOwner, mr.InvariantViolations,
-				mr.ExpectedTools, mr.ExpectedTargets)
+				mr.RejectedReasons, mr.ExpectedTools, mr.ExpectedTargets)
 		}
 	}
 	for i := range rep.QuestionResults {

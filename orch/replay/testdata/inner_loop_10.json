@@ -1,0 +1,1280 @@
+{
+ "version": "gate2-v2-inner-loop-10",
+ "runs": [
+  "20261103-cicd-300",
+  "20261026-feedback",
+  "20261023-s1-main"
+ ],
+ "provenance_rubric": "A moment is 'verified' only if all hold: (1) source.ids cite export records (testdata/source_excerpt.json) that carry the owner's order, correction, answer or approval; (2) any source.owner_quote is a verbatim substring of a cited record; (3) the baseline is what the old orchestrator did per a cited record (its reply, its own question, or the lane start in the run record), never inferred from the label; (4) a target lane exists in the run record and, for fund moments, started within 4h after the mail, for steer moments before it; (5) state shows only facts the records establish (lane liveness comes from lane mail on both sides of the moment; a running lane's session_id is a placeholder because the records show a session was live, not its id). Moments failing any check are dropped, not synthesized.",
+ "moments": [
+  {
+   "id": "cicd-300-g01",
+   "run_id": "20261103-cicd-300",
+   "timestamp": "2026-11-10T19:58:37Z",
+   "category": "owner_order_fund_lane",
+   "description": "Owner message received while the run is in flight; run backlog and active lanes as at that time.",
+   "state": {
+    "run": {
+     "id": "20261103-cicd-300",
+     "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min three days running; deploys self-run every <= 20 min with metric rollback; main deterministic (no session gate fails on a known main flake)",
+     "default_recipe": "default"
+    },
+    "backlog": [
+     {
+      "id": "item-south-only-deploys",
+      "run_id": "20261103-cicd-300",
+      "title": "ARC runners and deploy workflows target us-south1 only (lands at T)",
+      "acceptance": "DRAFT PR: every deploy workflow and ARC runner targets us-south1, prepush passes, undrafted at T",
+      "priority": "p0",
+      "status": "open"
+     },
+     {
+      "id": "item-south-lost-inputs-post-oom",
+      "run_id": "20261103-cicd-300",
+      "title": "South session Bazel lost inputs after the OOM fix",
+      "acceptance": "Cause named with evidence + DRAFT fix or dated host plan",
+      "priority": "p0",
+      "status": "in_progress",
+      "lane_id": "south-lost-inputs-post-oom"
+     },
+     {
+      "id": "item-datagarden-app-token-ingest",
+      "run_id": "20261103-cicd-300",
+      "title": "datagarden: ingest on the App installation token",
+      "acceptance": "Token proven on kernel-ci-runners + nebula PRs, ingest cut over, one full green cycle with the old path as fallback.",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "datagarden-app-token-ingest"
+     },
+     {
+      "id": "item-webhook-rollback-schema-proof",
+      "run_id": "20261103-cicd-300",
+      "title": "Execute 7354b7c8 webhook db tests on post-#4512 schema",
+      "acceptance": "Pass/fail counts of 7354b7c8 webhook db tests on a DB migrated through 20261110171311 with an account row, by 20:15Z.",
+      "priority": "p0",
+      "status": "in_progress",
+      "lane_id": "webhook-rollback-schema-proof"
+     }
+    ],
+    "lanes": [
+     {
+      "id": "south-lost-inputs-post-oom",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-south-lost-inputs-post-oom",
+      "title": "South session Bazel lost inputs after the OOM fix",
+      "status": "running",
+      "session_id": "session-south-lost-inputs-post-oom",
+      "created_at": "2026-11-10T16:44:37Z",
+      "updated_at": "2026-11-10T16:44:37Z"
+     },
+     {
+      "id": "datagarden-app-token-ingest",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-datagarden-app-token-ingest",
+      "title": "datagarden: ingest on the App installation token",
+      "status": "running",
+      "session_id": "session-datagarden-app-token-ingest",
+      "created_at": "2026-11-10T17:43:20Z",
+      "updated_at": "2026-11-10T17:43:20Z"
+     },
+     {
+      "id": "webhook-rollback-schema-proof",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-webhook-rollback-schema-proof",
+      "title": "Execute 7354b7c8 webhook db tests on post-#4512 schema",
+      "status": "running",
+      "session_id": "session-webhook-rollback-schema-proof",
+      "created_at": "2026-11-10T17:51:03Z",
+      "updated_at": "2026-11-10T17:51:03Z"
+     }
+    ]
+   },
+   "events": [
+    {
+     "id": "ev-cicd-300-g01",
+     "run_id": "20261103-cicd-300",
+     "kind": "owner_msg",
+     "class": "judgment",
+     "source": "mail:s:c77591db",
+     "summary": "OWNER DECISION (Ming, 20:0xZ, confirmed in the host session): FINISH nebula-dev us-west1 -> us-south1 ASAP. Owner: \"fastest path... for the remaining users, we can ask them to stop their current work and start new work in south1... this has taken too long\", and \"primary database in south to reduce latency\". This supersedes the cohort, sleeper-move and soak pacing, and the scratch DB rehearsal. No remote-cell mode for west.\nOrder: (1) DB switchover to nebula-dev-usso1 TODAY, after tonight's deploy (2651eb55) is LIVE and its checks read clean. (2) The 6 west-homed accounts (5 humans + role-nebula-builder) go into cell.placement.users now, launches flag on, HOME seed syncs now. (3) Announcement to the 5 humans (host sends, owner-approved text). T = announcement + 4 h. (4) At T, one window: final HOME sync; back up every awake west session (refs/nebula/backup/<sid>/worktree, a logged ref for each) and sleep it; refuse west wakes with a pointer to the backup; bring up south home (apiserver, real llm-gateway with per-region values + reach check per owner rule 2155e24f, build-service, aggregator, omnigent); flip DNS nebula/gerrit/bazel-cache; ARC and deploys to south only. (5) West teardown ~7 days later, separate owner OK.\nHard constraints: the 37 held guest_not_restored west sessions are never released or deleted. Release or delete NOTHING; sessions only sleep. Proof is on the member's real path, labelled LIVE. Every PR runs prepush.sh. Rollback in the first hour: DNS back to west, west home scaled up; the DB stays in south.\nOwners: host = switchover, DNS, launches flag, announcement (via host-ops2 with the owner token). south1-ramp child = placement PR, syncs, backups, close-wake, staging south home. S1 = gateway values. cicd-300 = ARC, deploy workflows, Buildbarn. The new- …[truncated]"
+    }
+   ],
+   "baseline": {
+    "tool": "lane.spawn",
+    "target": "item-south-only-deploys",
+    "summary": "Orchestrator reply: cicd-300 ack, first in my slots. Lane south-only-deploys was spawned 20:00Z (16g). It writes one DRAFT PR against deploy.yaml as it is on main: ARC runners and every deploy workflow target us-south1 o …[truncated]",
+    "source_ids": [
+     "s:250f971c"
+    ]
+   },
+   "owner_follow_up": {
+    "verdict": "endorsed",
+    "expected_tools": [
+     "lane.spawn"
+    ],
+    "expected_targets": [
+     "item-south-only-deploys"
+    ]
+   },
+   "grounding": "verified",
+   "grounding_evidence": "owner record(s) s:c77591db cited in source_excerpt; baseline from s:250f971c; lane south-only-deploys startedAt in run record",
+   "source": {
+    "ids": [
+     "s:c77591db"
+    ],
+    "relation": "order",
+    "evidence": "owner_quote",
+    "owner_quote": "fastest path... for the remaining users, we can ask them to stop their current work and start new work in south1... this has taken too long",
+    "label_basis": "Owner order/decision asks for new work to be funded as a lane; the run record shows that lane started within 4h of the mail."
+   }
+  },
+  {
+   "id": "cicd-300-g05",
+   "run_id": "20261103-cicd-300",
+   "timestamp": "2026-11-12T04:02:37Z",
+   "category": "owner_order_fund_lane",
+   "description": "Owner message received while the run is in flight; run backlog and active lanes as at that time.",
+   "state": {
+    "run": {
+     "id": "20261103-cicd-300",
+     "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min three days running; deploys self-run every <= 20 min with metric rollback; main deterministic (no session gate fails on a known main flake)",
+     "default_recipe": "default"
+    },
+    "backlog": [
+     {
+      "id": "item-lane-friction-72h",
+      "run_id": "20261103-cicd-300",
+      "title": "Why swarm lanes take long: 72 h friction and useless-work analysis",
+      "acceptance": "Numbers per stage, rework and useless work for 72 h of lanes; top 5 causes by lost hours with one fix each; filed by 11-12 07:30Z",
+      "priority": "p0",
+      "status": "open"
+     },
+     {
+      "id": "item-pool-health-dm",
+      "run_id": "20261103-cicd-300",
+      "title": "Owner DM when free Claude pool slots drop below 20%",
+      "acceptance": "Owner Slack DM when free Claude slots < 20%, naming the re-seed count, without repeating while low (owner P1 95ce9f27)",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "pool-health-dm"
+     },
+     {
+      "id": "item-image-retention",
+      "run_id": "20261103-cicd-300",
+      "title": "Artifact Registry image cleanup policies (dry-run first)",
+      "acceptance": "Dry-run counts/GB per repo with zero live or manifest digests deleted, then a DRAFT PR turning the cleanup policies on",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "image-retention"
+     }
+    ],
+    "lanes": [
+     {
+      "id": "pool-health-dm",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-pool-health-dm",
+      "title": "Owner DM when free Claude pool slots drop below 20%",
+      "status": "running",
+      "session_id": "session-pool-health-dm",
+      "created_at": "2026-11-12T02:18:32Z",
+      "updated_at": "2026-11-12T02:18:32Z"
+     },
+     {
+      "id": "image-retention",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-image-retention",
+      "title": "Artifact Registry image cleanup policies (dry-run first)",
+      "status": "running",
+      "session_id": "session-image-retention",
+      "created_at": "2026-11-11T19:01:08Z",
+      "updated_at": "2026-11-11T19:01:08Z"
+     }
+    ]
+   },
+   "events": [
+    {
+     "id": "ev-cicd-300-g05",
+     "run_id": "20261103-cicd-300",
+     "kind": "owner_msg",
+     "class": "judgment",
+     "source": "mail:s:d1a70882",
+     "summary": "Host, OWNER QUESTION, P0 analysis (fund one analysis lane now, report by 11-12 08:00Z): \"we have too many swarm lanes taking a long time to finish, are they hitting too many frictions, are they doing too much useless work\".\nMeasure, for every lane that ran in the last 72 h across all nebula runs (south1-ramp, cicd-300, feedback, product-ux, plg-launch, s1-main, deploy-ops, infra, identity):\n1. Wall time from spawn to merge, split into stages: swe coding, local gate (prepush / bazel), waiting for CI, review, rework rounds, waiting on the orchestrator (phase closed, mail unseen), model capacity/pool stalls, rebases/conflicts, main-red blocks.\n2. Rework: rounds per lane, and for each needs-changes review whether the finding was a real defect or scope added by the reviewer (goldens, extra proofs, wording).\n3. Useless work: lanes abandoned/superseded/duplicated, PRs closed unmerged, tests or proofs added that a later change deleted, gate time spent on unaffected targets.\n4. Top 5 causes by lost hours, each with ONE concrete fix and expected hours saved per week.\nUse lane_metrics.py / wait_metrics.py plus EVENTS and reports. Tonight's examples to check: #5188 (4 rounds), portalform #4053 (4), egressaws #4054 (3), #5080 (5), image-retention (5), a 29-min local gate, a lane spawn that failed silently for 1 h, mail to a closed phase lost 30 min, Claude pool exhaustion.\nReport numbers, not anecdotes; I'll relay to the owner."
+    }
+   ],
+   "baseline": {
+    "tool": "lane.spawn",
+    "target": "item-lane-friction-72h",
+    "summary": "Orchestrator reply: Funded: analysis lane lane-friction-72h in cicd-300, spawned 04:1xZ, P0. Report to you by 11-12 08:00Z (the lane files by 07:30Z, and I check and relay it).  It covers every lane since 11-09 04:00Z in …[truncated]",
+    "source_ids": [
+     "s:2283a97b"
+    ]
+   },
+   "owner_follow_up": {
+    "verdict": "endorsed",
+    "expected_tools": [
+     "lane.spawn"
+    ],
+    "expected_targets": [
+     "item-lane-friction-72h"
+    ]
+   },
+   "grounding": "verified",
+   "grounding_evidence": "owner record(s) s:d1a70882 cited in source_excerpt; baseline from s:2283a97b; lane lane-friction-72h startedAt in run record",
+   "source": {
+    "ids": [
+     "s:d1a70882"
+    ],
+    "relation": "order",
+    "evidence": "owner_quote",
+    "owner_quote": "we have too many swarm lanes taking a long time to finish, are they hitting too many frictions, are they doing too much useless work",
+    "label_basis": "Owner order/decision asks for new work to be funded as a lane; the run record shows that lane started within 4h of the mail."
+   }
+  },
+  {
+   "id": "cicd-300-g10",
+   "run_id": "20261103-cicd-300",
+   "timestamp": "2026-11-08T04:02:00Z",
+   "category": "owner_order_fund_lane",
+   "description": "Owner message received while the run is in flight; run backlog and active lanes as at that time.",
+   "state": {
+    "run": {
+     "id": "20261103-cicd-300",
+     "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min three days running; deploys self-run every <= 20 min with metric rollback; main deterministic (no session gate fails on a known main flake)",
+     "default_recipe": "default"
+    },
+    "backlog": [
+     {
+      "id": "item-deploy-redesign-plan",
+      "run_id": "20261103-cicd-300",
+      "title": "Deploy process redesign plan (Claude planning mode, per-service schedules)",
+      "acceptance": "Strategy plan published as a Nebula post covering (a)-(e) by 2026-11-08T10:00Z",
+      "priority": "p1",
+      "status": "open"
+     },
+     {
+      "id": "item-fb639-lost-inputs",
+      "run_id": "20261103-cicd-300",
+      "title": "FB-639: session Bazel lost inputs on a first invocation",
+      "acceptance": "mechanism named from evidence; fix PR only if it is a chart/config defect",
+      "priority": "p2",
+      "status": "in_progress",
+      "lane_id": "fb639-lost-inputs"
+     },
+     {
+      "id": "item-fb639-proxy-cancel",
+      "run_id": "20261103-cicd-300",
+      "title": "FB-639: who cancels Bazel input reads through the session cache proxy",
+      "acceptance": "Initiator named with trace evidence; fix or mitigation PR with failing-first test, or evidence-backed finding, by 2026-11-09T18:00Z",
+      "priority": "p2",
+      "status": "in_progress",
+      "lane_id": "fb639-proxy-cancel"
+     },
+     {
+      "id": "item-bb-ac-index",
+      "run_id": "20261103-cicd-300",
+      "title": "Buildbarn AC key-location map probe-limit misses (us-south1)",
+      "acceptance": "Cause found from evidence; sized chart fix PR with dispatch/proof/rollback, or no-change with evidence",
+      "priority": "p2",
+      "status": "in_progress",
+      "lane_id": "bb-ac-index"
+     }
+    ],
+    "lanes": [
+     {
+      "id": "fb639-lost-inputs",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-fb639-lost-inputs",
+      "title": "FB-639: session Bazel lost inputs on a first invocation",
+      "status": "running",
+      "session_id": "session-fb639-lost-inputs",
+      "created_at": "2026-11-08T02:56:16Z",
+      "updated_at": "2026-11-08T02:56:16Z"
+     },
+     {
+      "id": "fb639-proxy-cancel",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-fb639-proxy-cancel",
+      "title": "FB-639: who cancels Bazel input reads through the session cache proxy",
+      "status": "running",
+      "session_id": "session-fb639-proxy-cancel",
+      "created_at": "2026-11-08T03:23:40Z",
+      "updated_at": "2026-11-08T03:23:40Z"
+     },
+     {
+      "id": "bb-ac-index",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-bb-ac-index",
+      "title": "Buildbarn AC key-location map probe-limit misses (us-south1)",
+      "status": "running",
+      "session_id": "session-bb-ac-index",
+      "created_at": "2026-11-08T03:21:56Z",
+      "updated_at": "2026-11-08T03:21:56Z"
+     }
+    ]
+   },
+   "events": [
+    {
+     "id": "ev-cicd-300-g10",
+     "run_id": "20261103-cicd-300",
+     "kind": "owner_msg",
+     "class": "judgment",
+     "source": "mail:s:4b555346",
+     "summary": "Host -> cicd-300, from the OWNER (Ming), ~04:05Z 11-08. Two things.\n1. Ming APPROVED the swarm reorg plan: https://nebula.sycloud.ai/posts/s:12d4023e (all of D1-D7 as recommended). For you:\n- D1: cicd-300 becomes Delivery, the single owner of merge->live end to end: class, GO, dispatch, holds, rollback, the generic post-deploy checks and canary trips, plus one promotion path to code and Dell. There is a train captain on every shift, so no build waits more than 2 h without a named owner. The host stops dispatching.\n- Timing per section 4: the train moves to you at T1, after batch-2 closes and the Phase-2 draft is accepted (~11-09). Until then the south1-ramp child and S1 keep today's train and batch-2 roles. Don't take over a live train mid-batch.\n- D7: Cells & Ops (nebula-infra) owns the us-south1 pool split, members first. You request runner capacity from them; the placement design you owe still goes to them and the host.\n2. Ming's ask, in his words: \"ask the new owner of deploy to fund a redesign using claude planning mode to streamline the deployment process, also consider allowing different microservice to have their own deploy schedule.\"\nPlease fund ONE planning lane now, from your own budget (Ming asked you to fund it):\n- Method: Claude planning mode. Use the repo's plan-swarm skill (.claude/skills/plan-swarm: plan mode one level up, milestones, workstreams, risks, forks), read-only.\n- Output: a strategy PLAN as a Nebula post. Plan only: no deploy-path PR, workflow change or dispatch comes from this lane. Implementation lanes come after Ming reads the post.\n- It must cover:\n  (a) Where merge->live time goes today, from measured data: p50 4.4 h, longest gap 12 h, 8 of 29 deploy runs rolled a build (reorg plan section 4). Name the top losses.\n  (b) A streamlined pat …[truncated]"
+    }
+   ],
+   "baseline": {
+    "tool": "lane.spawn",
+    "target": "item-deploy-redesign-plan",
+    "summary": "Orchestrator reply: cicd-300 -> host: received, and thanks.  1. Reorg: understood. cicd-300 becomes Delivery and takes the train at T1 (after batch-2 closes and the Phase-2 draft is accepted, ~11-09). Until then the sout …[truncated]",
+    "source_ids": [
+     "s:18d171f2"
+    ]
+   },
+   "owner_follow_up": {
+    "verdict": "endorsed",
+    "expected_tools": [
+     "lane.spawn"
+    ],
+    "expected_targets": [
+     "item-deploy-redesign-plan"
+    ]
+   },
+   "grounding": "verified",
+   "grounding_evidence": "owner record(s) s:4b555346 cited in source_excerpt; baseline from s:18d171f2; lane deploy-redesign-plan startedAt in run record",
+   "source": {
+    "ids": [
+     "s:4b555346"
+    ],
+    "relation": "order",
+    "evidence": "owner_quote",
+    "owner_quote": "ask the new owner of deploy to fund a redesign using claude planning mode to streamline the deployment process",
+    "label_basis": "Owner order/decision asks for new work to be funded as a lane; the run record shows that lane started within 4h of the mail."
+   }
+  },
+  {
+   "id": "cicd-300-g12",
+   "run_id": "20261103-cicd-300",
+   "timestamp": "2026-11-03T05:00:41Z",
+   "category": "owner_standing_rule",
+   "description": "Owner message received; run state as at that time.",
+   "state": {
+    "run": {
+     "id": "20261103-cicd-300",
+     "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min three days running; deploys self-run every <= 20 min with metric rollback; main deterministic (no session gate fails on a known main flake)",
+     "default_recipe": "default"
+    },
+    "backlog": [],
+    "lanes": []
+   },
+   "events": [
+    {
+     "id": "ev-cicd-300-g12",
+     "run_id": "20261103-cicd-300",
+     "kind": "owner_msg",
+     "class": "judgment",
+     "source": "mail:s:0200b53e",
+     "summary": "Ack routing change: deny-path merges -> HOST-ASK; deploy.yaml/nebula/deploy merges wait for '28i LIVE' + south1 child class \n\nRelayed by the host Claude session that started this run, not typed by the owner. It comes from the host-supervisor session and matches the owner's 11-03 ruling: \"merge decisions are the HOST's\" (owner to host, 04:13Z: \"don't wait on me for merge decision you can make that decision\"). Put it in OBJECTIVE.md.\n\n1. **Deny-path merge decisions go to the HOST, not the owner.** Deny paths are `.github/workflows/**`, `nebula/deploy/**`, `docker/base-images/arc-runner/**` and `go.mod`/`go.sum`.\n   - Your credential cannot mail the host session directly. When such a PR is merge-ready, send\n     `nebula mail send --to owner --question --ask \"HOST-ASK merge #<n>: <title>\" --choice merge --choice hold --run 20261103-cicd-300 --pr <url>`.\n   - The details must give: head SHA, review verdict on that head, required CI state, and one deploy-impact line (what merging changes live, e.g. \"next deploy slot runs this deploy.yaml\" or \"deploy-arc-runners applies values.yaml on push\").\n   - The host supervisor sweeps the owner inbox and answers. Ask once per head; do not re-ask in a loop.\n2. **Slot coupling.** Every `deploy.yaml` or `nebula/deploy/**` change is classed by the south1 ramp run's child orchestrator (run 20261025-south1-ramp) before it merges, because the next slot dispatch runs whatever `deploy.yaml` is at main HEAD.\n   - Deploy slot 28i is in flight now. Do not ask to merge `deploy.yaml` or `nebula/deploy/**` PRs until the host says \"28i LIVE\". After that the host routes them through the child's class.\n   - Keep building and reviewing those lanes meanwhile. Only the merge waits.\n3. **Unchanged:** repo variables (including `NEBULA_DEPLOY_HOLD`), rulesets,  …[truncated]"
+    }
+   ],
+   "baseline": {
+    "tool": "directive.note",
+    "target": "",
+    "summary": "Orchestrator reply: ack. Recorded in OBJECTIVE.md of run 20261103-cicd-300: deny-path merge-ready PRs -> one HOST-ASK per head (--choice merge/hold, head, verdict, CI, deploy-impact line); deploy.yaml and nebula/deploy/* …[truncated]",
+    "source_ids": [
+     "s:166399a5"
+    ]
+   },
+   "owner_follow_up": {
+    "verdict": "endorsed",
+    "expected_tools": [
+     "directive.note"
+    ],
+    "forbid_owner_ask": true
+   },
+   "grounding": "verified",
+   "grounding_evidence": "owner record(s) s:0200b53e cited in source_excerpt; baseline from s:166399a5",
+   "source": {
+    "ids": [
+     "s:0200b53e"
+    ],
+    "relation": "order",
+    "evidence": "owner_quote",
+    "owner_quote": "don't wait on me for merge decision you can make that decision",
+    "label_basis": "Owner states a standing rule or decision that must persist for later decisions; the persistent store for such a rule is a directive note."
+   }
+  },
+  {
+   "id": "cicd-300-g13",
+   "run_id": "20261103-cicd-300",
+   "timestamp": "2026-11-10T18:08:54Z",
+   "category": "owner_feedback_replan",
+   "description": "Owner reaction to the orchestrator's replan posts; run state as at that time.",
+   "state": {
+    "run": {
+     "id": "20261103-cicd-300",
+     "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min three days running; deploys self-run every <= 20 min with metric rollback; main deterministic (no session gate fails on a known main flake)",
+     "default_recipe": "default"
+    },
+    "backlog": [
+     {
+      "id": "item-south-lost-inputs-post-oom",
+      "run_id": "20261103-cicd-300",
+      "title": "South session Bazel lost inputs after the OOM fix",
+      "acceptance": "Cause named with evidence + DRAFT fix or dated host plan",
+      "priority": "p0",
+      "status": "in_progress",
+      "lane_id": "south-lost-inputs-post-oom"
+     },
+     {
+      "id": "item-south-session-cache-refused",
+      "run_id": "20261103-cicd-300",
+      "title": "South sessions get Connection refused on :8986 while Buildbarn is healthy",
+      "acceptance": "refusal located from inside a south session + fix PR or exact ask",
+      "priority": "p0",
+      "status": "in_progress",
+      "lane_id": "south-session-cache-refused"
+     },
+     {
+      "id": "item-datagarden-app-token-ingest",
+      "run_id": "20261103-cicd-300",
+      "title": "datagarden: ingest on the App installation token",
+      "acceptance": "Token proven on kernel-ci-runners + nebula PRs, ingest cut over, one full green cycle with the old path as fallback.",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "datagarden-app-token-ingest"
+     }
+    ],
+    "lanes": [
+     {
+      "id": "south-lost-inputs-post-oom",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-south-lost-inputs-post-oom",
+      "title": "South session Bazel lost inputs after the OOM fix",
+      "status": "running",
+      "session_id": "session-south-lost-inputs-post-oom",
+      "created_at": "2026-11-10T16:44:37Z",
+      "updated_at": "2026-11-10T16:44:37Z"
+     },
+     {
+      "id": "south-session-cache-refused",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-south-session-cache-refused",
+      "title": "South sessions get Connection refused on :8986 while Buildbarn is healthy",
+      "status": "running",
+      "session_id": "session-south-session-cache-refused",
+      "created_at": "2026-11-10T15:54:05Z",
+      "updated_at": "2026-11-10T15:54:05Z"
+     },
+     {
+      "id": "datagarden-app-token-ingest",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-datagarden-app-token-ingest",
+      "title": "datagarden: ingest on the App installation token",
+      "status": "running",
+      "session_id": "session-datagarden-app-token-ingest",
+      "created_at": "2026-11-10T17:43:20Z",
+      "updated_at": "2026-11-10T17:43:20Z"
+     }
+    ]
+   },
+   "events": [
+    {
+     "id": "ev-cicd-300-g13",
+     "run_id": "20261103-cicd-300",
+     "kind": "owner_msg",
+     "class": "judgment",
+     "source": "mail:s:4528329d",
+     "summary": "Owner feedback on the replan posts (18:1xZ): \"I couldn't read the planning post, it's just too abstract, without clear context and trade-offs.\" Rewrite yours as v2 (same tag replan, title \"<run-id> replan v2\"). Plain language: no internal ids, codes or jargon (no \"O-1\", \"KEEP rows\", \"S3\", lane names) unless explained in the same sentence. Use exactly this shape, at most ~1 page:\n\n1. What this run is for, in one sentence a newcomer would understand, and why it matters to the owner's priorities (south1 migration / nebula-dev reliability / shipping friction / code.sycloud.ai launch).\n2. Where it stands today: 3-5 bullets of concrete facts (what's done, what's live, what's broken, with numbers and dates).\n3. What I propose to change, and why: each change is one bullet saying what we do differently and what problem that solves.\n4. Trade-offs: for each real choice, a small table or bullets: Option A vs B (vs C), with cost (time, money, risk to members), benefit, and what we give up. Then my recommendation and the one reason.\n5. What I need from the owner: numbered decisions, each answerable in one word, with the default if he doesn't answer and when it takes effect. If there are none, say \"nothing\".\n6. What happens next and when: 3 dated milestones.\n\nMail the v2 link to the host by 20:00Z. If your plan is \"the run is done, close it\", sections 3-4 can be one line each. Same rule as before: not adopted until the owner approves; tonight's work continues."
+    }
+   ],
+   "baseline": {
+    "tool": "planner.request",
+    "target": "",
+    "summary": "Orchestrator reply: cicd-300 replan v2 (plain language, 6 sections, private, tag replan): https://nebula.sycloud.ai/posts/s:12e18849 . In short: retarget from merges per day (met: 330 on 11-10) to every commit builds and …[truncated]",
+    "source_ids": [
+     "s:65068a34"
+    ]
+   },
+   "owner_follow_up": {
+    "verdict": "endorsed",
+    "expected_tools": [
+     "planner.request"
+    ]
+   },
+   "grounding": "verified",
+   "grounding_evidence": "owner record(s) s:4528329d cited in source_excerpt; baseline from s:65068a34",
+   "source": {
+    "ids": [
+     "s:4528329d"
+    ],
+    "relation": "feedback",
+    "evidence": "owner_quote",
+    "owner_quote": "I couldn't read the planning post, it's just too abstract, without clear context and trade-offs.",
+    "label_basis": "Owner rejects the replan post and asks for a rewrite; a rewrite of the plan is a planner turn."
+   }
+  },
+  {
+   "id": "cicd-300-g15",
+   "run_id": "20261103-cicd-300",
+   "timestamp": "2026-11-10T05:52:47Z",
+   "category": "owner_order_steer_lane",
+   "description": "Owner message received; run state as at that time.",
+   "state": {
+    "run": {
+     "id": "20261103-cicd-300",
+     "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min three days running; deploys self-run every <= 20 min with metric rollback; main deterministic (no session gate fails on a known main flake)",
+     "default_recipe": "default"
+    },
+    "backlog": [
+     {
+      "id": "item-session-upload-off-switch",
+      "run_id": "20261103-cicd-300",
+      "title": "DRAFT off switch for session cache uploads (#3315)",
+      "acceptance": "DRAFT PR ready for the owner to merge or not",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "session-upload-off-switch"
+     },
+     {
+      "id": "item-datagarden-nebula-freshness",
+      "run_id": "20261103-cicd-300",
+      "title": "datagarden: nebula CI ingestion freshness + reliability",
+      "acceptance": "nebula freshness/coverage reported; ingest reliably green",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "datagarden-nebula-freshness"
+     },
+     {
+      "id": "item-buildbarn-storage-sizing",
+      "run_id": "20261103-cicd-300",
+      "title": "buildbarn: us-south1 storage sized for more workers (options + cost)",
+      "acceptance": "sizing proposal with cost + DRAFT PRs, south only",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "buildbarn-storage-sizing"
+     },
+     {
+      "id": "item-main-push-ci-completes",
+      "run_id": "20261103-cicd-300",
+      "title": "main push CI completes under high merge rate",
+      "acceptance": "a complete main push run at least every ~30-45 min, proven on real runs",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "main-push-ci-completes"
+     }
+    ],
+    "lanes": [
+     {
+      "id": "session-upload-off-switch",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-session-upload-off-switch",
+      "title": "DRAFT off switch for session cache uploads (#3315)",
+      "status": "running",
+      "session_id": "session-session-upload-off-switch",
+      "created_at": "2026-11-10T05:42:49Z",
+      "updated_at": "2026-11-10T05:42:49Z"
+     },
+     {
+      "id": "datagarden-nebula-freshness",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-datagarden-nebula-freshness",
+      "title": "datagarden: nebula CI ingestion freshness + reliability",
+      "status": "running",
+      "session_id": "session-datagarden-nebula-freshness",
+      "created_at": "2026-11-10T02:53:18Z",
+      "updated_at": "2026-11-10T02:53:18Z"
+     },
+     {
+      "id": "buildbarn-storage-sizing",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-buildbarn-storage-sizing",
+      "title": "buildbarn: us-south1 storage sized for more workers (options + cost)",
+      "status": "running",
+      "session_id": "session-buildbarn-storage-sizing",
+      "created_at": "2026-11-10T03:36:32Z",
+      "updated_at": "2026-11-10T03:36:32Z"
+     },
+     {
+      "id": "main-push-ci-completes",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-main-push-ci-completes",
+      "title": "main push CI completes under high merge rate",
+      "status": "running",
+      "session_id": "session-main-push-ci-completes",
+      "created_at": "2026-11-10T03:52:09Z",
+      "updated_at": "2026-11-10T03:52:09Z"
+     }
+    ]
+   },
+   "events": [
+    {
+     "id": "ev-cicd-300-g15",
+     "run_id": "20261103-cicd-300",
+     "kind": "owner_msg",
+     "class": "judgment",
+     "source": "mail:s:36c37540",
+     "summary": "OWNER DECISION: '3315 off'. Merge the session-upload off switch as soon as its lane's PR passes review (no owner wait). Run your proof plan: frontend CAS Put ops, AC completeness-NotFound minus raw NotFound, and session gate times, 24 h before vs after. Revert if session gates slow by more than 10%. Mail me the PR and merge time.",
+     "lane_id": "session-upload-off-switch"
+    }
+   ],
+   "baseline": {
+    "tool": "lane.steer",
+    "target": "session-upload-off-switch",
+    "summary": "Orchestrator reply: cicd-300 -> owner: '3315 off' received. Lane session-upload-off-switch was told to open its PR READY; it merges pinned on review PASS, no owner wait. PR number and merge time follow.  Proof baseline.  …[truncated]",
+    "source_ids": [
+     "s:aa846d34"
+    ]
+   },
+   "owner_follow_up": {
+    "verdict": "endorsed",
+    "expected_tools": [
+     "lane.steer"
+    ],
+    "expected_targets": [
+     "session-upload-off-switch"
+    ]
+   },
+   "grounding": "verified",
+   "grounding_evidence": "owner record(s) s:36c37540 cited in source_excerpt; baseline from s:aa846d34; lane session-upload-off-switch startedAt in run record",
+   "source": {
+    "ids": [
+     "s:36c37540"
+    ],
+    "relation": "order",
+    "evidence": "owner_quote",
+    "owner_quote": "3315 off",
+    "label_basis": "Owner decides the lane's PR merges as soon as review passes with no owner wait; that is a note to the running lane."
+   }
+  },
+  {
+   "id": "cicd-300-g16",
+   "run_id": "20261103-cicd-300",
+   "timestamp": "2026-11-11T01:41:35Z",
+   "category": "owner_feedback_revise_lane",
+   "description": "Owner message received; run state as at that time.",
+   "state": {
+    "run": {
+     "id": "20261103-cicd-300",
+     "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min three days running; deploys self-run every <= 20 min with metric rollback; main deterministic (no session gate fails on a known main flake)",
+     "default_recipe": "default"
+    },
+    "backlog": [
+     {
+      "id": "item-red-main-architecture",
+      "run_id": "20261103-cicd-300",
+      "title": "Architecture design: make post-merge red-main classes structurally impossible",
+      "acceptance": "Owner-format Nebula post with options, recommendation, decisions, dated steps; due 11-11 12:00Z",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "red-main-architecture"
+     },
+     {
+      "id": "item-runner-base-pin",
+      "run_id": "20261103-cicd-300",
+      "title": "Pin session runner base image inputs",
+      "acceptance": "see runner-base-pin.swe.brief done-when",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "runner-base-pin"
+     },
+     {
+      "id": "item-heal-red-check",
+      "run_id": "20261103-cicd-300",
+      "title": "heal-ci v2 group 1: red_check.sh precondition + reds.py --early",
+      "acceptance": "red_check.sh + reds.py --early merged with tests and one real run pasted",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "heal-red-check"
+     }
+    ],
+    "lanes": [
+     {
+      "id": "red-main-architecture",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-red-main-architecture",
+      "title": "Architecture design: make post-merge red-main classes structurally impossible",
+      "status": "running",
+      "session_id": "session-red-main-architecture",
+      "created_at": "2026-11-11T00:42:10Z",
+      "updated_at": "2026-11-11T00:42:10Z"
+     },
+     {
+      "id": "runner-base-pin",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-runner-base-pin",
+      "title": "Pin session runner base image inputs",
+      "status": "running",
+      "session_id": "session-runner-base-pin",
+      "created_at": "2026-11-10T18:39:59Z",
+      "updated_at": "2026-11-10T18:39:59Z"
+     },
+     {
+      "id": "heal-red-check",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-heal-red-check",
+      "title": "heal-ci v2 group 1: red_check.sh precondition + reds.py --early",
+      "status": "running",
+      "session_id": "session-heal-red-check",
+      "created_at": "2026-11-10T21:27:34Z",
+      "updated_at": "2026-11-10T21:27:34Z"
+     }
+    ]
+   },
+   "events": [
+    {
+     "id": "ev-cicd-300-g16",
+     "run_id": "20261103-cicd-300",
+     "kind": "owner_msg",
+     "class": "judgment",
+     "source": "mail:s:1f0ec9c2",
+     "summary": "OWNER FEEDBACK on the main-failure design (post db27db0e), for the red-main-architecture lane to revise:\n1. NO merge queue. He accepts some red; the goal is to SHRINK THE BAD WINDOW (time from a red landing to green), not to prevent every red.\n2. Nearly every PR is written and merged by nebula-swarm lanes. So the lever is the lanes: give them a stronger, explicit expectation to balance risk and speed themselves. Examples the design should weigh: a lane judges its PR's blast radius (shared test infra, routes or invariants, migrations, swarm scripts, cross-package APIs) and does the matching extra check before it merges (rebase on fresh main plus the affected tests, or the main-only tests a PR never runs); it owns its merge until main's next push is green, and reverts or fixes within N minutes if its PR turned main red; red attribution by heal-ci is fast and automatic.\nDeliver v2 as the same post (edit it), owner format, plain language: where it stands with numbers, options with trade-offs, recommendation, numbered one-word decisions with defaults, dated steps. Concrete changes to the nebula-swarm skill (exit contract, merge rules) and to heal-ci. Revert/fix timer targets with numbers from the last 2 days (what window would each rule have cut). Due 11-11 10:00Z. Keep #4828, images-every-commit and prepush-web-once on hold until v2.",
+     "lane_id": "red-main-architecture"
+    }
+   ],
+   "baseline": {
+    "tool": "lane.retry",
+    "target": "red-main-architecture",
+    "summary": "Orchestrator reply: Received. red-main-architecture round 2 is starting now (fresh Opus terminal, same session ae0304ad), with your feedback verbatim plus the v1 inputs. It edits post db27db0e into v2: no merge queue, th …[truncated]",
+    "source_ids": [
+     "s:41e6de12"
+    ]
+   },
+   "owner_follow_up": {
+    "verdict": "endorsed",
+    "expected_tools": [
+     "lane.steer",
+     "lane.retry"
+    ],
+    "expected_targets": [
+     "red-main-architecture"
+    ]
+   },
+   "grounding": "verified",
+   "grounding_evidence": "owner record(s) s:1f0ec9c2 cited in source_excerpt; baseline from s:41e6de12; lane red-main-architecture startedAt in run record",
+   "source": {
+    "ids": [
+     "s:1f0ec9c2"
+    ],
+    "relation": "order",
+    "evidence": "owner_attributed",
+    "owner_quote": "",
+    "label_basis": "Owner feedback is addressed to the red-main-architecture lane for revision; either a steering note or a fresh round satisfies it."
+   }
+  },
+  {
+   "id": "cicd-300-g17",
+   "run_id": "20261103-cicd-300",
+   "timestamp": "2026-11-08T04:47:45Z",
+   "category": "decide_dont_ask",
+   "description": "Orchestrator has an open question while the run is in flight; run state as at that time.",
+   "state": {
+    "run": {
+     "id": "20261103-cicd-300",
+     "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min three days running; deploys self-run every <= 20 min with metric rollback; main deterministic (no session gate fails on a known main flake)",
+     "default_recipe": "default"
+    },
+    "backlog": [
+     {
+      "id": "item-fb639-lost-inputs",
+      "run_id": "20261103-cicd-300",
+      "title": "FB-639: session Bazel lost inputs on a first invocation",
+      "acceptance": "mechanism named from evidence; fix PR only if it is a chart/config defect",
+      "priority": "p2",
+      "status": "in_progress",
+      "lane_id": "fb639-lost-inputs"
+     },
+     {
+      "id": "item-fb639-proxy-cancel",
+      "run_id": "20261103-cicd-300",
+      "title": "FB-639: who cancels Bazel input reads through the session cache proxy",
+      "acceptance": "Initiator named with trace evidence; fix or mitigation PR with failing-first test, or evidence-backed finding, by 2026-11-09T18:00Z",
+      "priority": "p2",
+      "status": "in_progress",
+      "lane_id": "fb639-proxy-cancel"
+     },
+     {
+      "id": "item-bb-ac-index",
+      "run_id": "20261103-cicd-300",
+      "title": "Buildbarn AC key-location map probe-limit misses (us-south1)",
+      "acceptance": "Cause found from evidence; sized chart fix PR with dispatch/proof/rollback, or no-change with evidence",
+      "priority": "p2",
+      "status": "in_progress",
+      "lane_id": "bb-ac-index"
+     }
+    ],
+    "lanes": [
+     {
+      "id": "fb639-lost-inputs",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-fb639-lost-inputs",
+      "title": "FB-639: session Bazel lost inputs on a first invocation",
+      "status": "running",
+      "session_id": "session-fb639-lost-inputs",
+      "created_at": "2026-11-08T02:56:16Z",
+      "updated_at": "2026-11-08T02:56:16Z"
+     },
+     {
+      "id": "fb639-proxy-cancel",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-fb639-proxy-cancel",
+      "title": "FB-639: who cancels Bazel input reads through the session cache proxy",
+      "status": "running",
+      "session_id": "session-fb639-proxy-cancel",
+      "created_at": "2026-11-08T03:23:40Z",
+      "updated_at": "2026-11-08T03:23:40Z"
+     },
+     {
+      "id": "bb-ac-index",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-bb-ac-index",
+      "title": "Buildbarn AC key-location map probe-limit misses (us-south1)",
+      "status": "running",
+      "session_id": "session-bb-ac-index",
+      "created_at": "2026-11-08T03:21:56Z",
+      "updated_at": "2026-11-08T03:21:56Z"
+     }
+    ]
+   },
+   "events": [
+    {
+     "id": "ev-cicd-300-g17",
+     "run_id": "20261103-cicd-300",
+     "kind": "mail",
+     "class": "judgment",
+     "source": "mail:s:75db40b1",
+     "summary": "HOST-ASK dispatch deploy-buildbarn.yaml @065d6e23 (#3923 us-west1 AC map 512 MiB). Choices: dispatch | hold. \nHOST-ASK dispatch deploy-buildbarn.yaml @065d6e23 (#3923 us-west1 AC map 512 MiB). Choices: dispatch | hold.\n\nHOST-ASK dispatch deploy-buildbarn.yaml for #3923 (us-west1 AC key-location map 128 MiB -> 512 MiB).\n- Change: #3923 merged at 065d6e23. Since the last Buildbarn deploy (a6fd1aaa, run 42433254161), the only changes are the new values-west-dev.yaml overlay and the us-west1 matrix line. us-south1 renders identically, so no south pods should roll.\n- Why: your 02:00-03:00Z read. West's AC map is full: ~6% of gets capped at 16 probes and ~43% of new AC records discarded. South is healthy and is left alone.\n- Dispatch: deploy-buildbarn.yaml on main at 065d6e23. No inputs. Per the FB-545 runbook, dispatch while west sessions are quiet: west storage-0/1 roll, and the map change cold-starts west's AC index (one-time AC misses). CAS contents are unchanged.\n- Proof, about 1 h after the roll, us-west1 only:\n  - rate(...get_too_many_attempts_total{storage_type=\"ac\"}) near 0, against ~1.05/s per shard before;\n  - put_iterations TooManyAttempts near 0, against ~43% of inserts before;\n  - storage pods Ready, and the cache-probe green.\n  - For south, confirm no storage pod restarted.\n- Rollback: revert #3923 and re-dispatch. That cold-starts west's AC once more; CAS is untouched.\n- Unmeasured: live AC cardinality and record size. 4x is a bounded first step, and your post-roll counters decide any next size.\nRecommendation: dispatch at the next quiet west window. Default if unanswered: hold (nothing is broken, it's a hit-rate loss)."
+    }
+   ],
+   "baseline": {
+    "tool": "owner.ask",
+    "target": "",
+    "summary": "The orchestrator brought the question to the host/owner instead of deciding: HOST-ASK dispatch deploy-buildbarn.yaml @065d6e23 (#3923 us-west1 AC map 512 MiB). Choices: dispatch | hold. (more in details) HOST-ASK dispatch deploy-buildbar …[truncated]",
+    "asked_owner": true,
+    "source_ids": [
+     "s:75db40b1"
+    ]
+   },
+   "owner_follow_up": {
+    "verdict": "corrected",
+    "expected_tools": [
+     "directive.note"
+    ],
+    "decide_dont_ask": true
+   },
+   "grounding": "verified",
+   "grounding_evidence": "owner record(s) s:eecfd3a6, s:75db40b1 cited in source_excerpt; baseline from s:75db40b1",
+   "source": {
+    "ids": [
+     "s:eecfd3a6",
+     "s:75db40b1"
+    ],
+    "relation": "correction",
+    "evidence": "owner_attributed",
+    "owner_quote": "",
+    "label_basis": "Host relays the owner saying the host is still doing too much and hands the timing decision to the orchestrator; the orchestrator should decide and record, not ask."
+   }
+  },
+  {
+   "id": "cicd-300-g18",
+   "run_id": "20261103-cicd-300",
+   "timestamp": "2026-11-05T00:26:02Z",
+   "category": "decide_dont_ask",
+   "description": "Orchestrator has an open question while the run is in flight; run state as at that time.",
+   "state": {
+    "run": {
+     "id": "20261103-cicd-300",
+     "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min three days running; deploys self-run every <= 20 min with metric rollback; main deterministic (no session gate fails on a known main flake)",
+     "default_recipe": "default"
+    },
+    "backlog": [
+     {
+      "id": "item-browser-suites-bazel",
+      "run_id": "20261103-cicd-300",
+      "title": "tests: Web UI Playwright and BYOD+smoke as sharded bazel test targets with a pinned hermetic Chromium",
+      "acceptance": "both suites in //..., cached, shard time <= today; PR(s) merged",
+      "priority": "p0",
+      "status": "in_progress",
+      "lane_id": "browser-suites-bazel"
+     },
+     {
+      "id": "item-flake-repeat-surfaced",
+      "run_id": "20261103-cicd-300",
+      "title": "Fix main flakes surfaced by the PR repeat step",
+      "acceptance": "Each unowned surfaced case fixed deterministically, 50x green",
+      "priority": "p2",
+      "status": "in_progress",
+      "lane_id": "flake-repeat-surfaced"
+     },
+     {
+      "id": "item-app-token-impl",
+      "run_id": "20261103-cicd-300",
+      "title": "2a impl: App installation tokens for the swarm (mode off) + one queue query per tick",
+      "acceptance": "minting/delivery/seam/queue-batching per the design, App mode off; PR(s) merged",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "app-token-impl"
+     }
+    ],
+    "lanes": [
+     {
+      "id": "browser-suites-bazel",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-browser-suites-bazel",
+      "title": "tests: Web UI Playwright and BYOD+smoke as sharded bazel test targets with a pinned hermetic Chromium",
+      "status": "running",
+      "session_id": "session-browser-suites-bazel",
+      "created_at": "2026-11-05T00:24:25Z",
+      "updated_at": "2026-11-05T00:24:25Z"
+     },
+     {
+      "id": "flake-repeat-surfaced",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-flake-repeat-surfaced",
+      "title": "Fix main flakes surfaced by the PR repeat step",
+      "status": "running",
+      "session_id": "session-flake-repeat-surfaced",
+      "created_at": "2026-11-04T15:10:26Z",
+      "updated_at": "2026-11-04T15:10:26Z"
+     },
+     {
+      "id": "app-token-impl",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-app-token-impl",
+      "title": "2a impl: App installation tokens for the swarm (mode off) + one queue query per tick",
+      "status": "running",
+      "session_id": "session-app-token-impl",
+      "created_at": "2026-11-03T06:01:22Z",
+      "updated_at": "2026-11-03T06:01:22Z"
+     }
+    ]
+   },
+   "events": [
+    {
+     "id": "ev-cicd-300-g18",
+     "run_id": "20261103-cicd-300",
+     "kind": "mail",
+     "class": "judgment",
+     "source": "mail:s:3e62639b",
+     "summary": "cicd-300 -> host, re 1d2aa298. Agreed: \"fast merge\" = the post a3eef2d5 pilot's MERGE half. I put a split to the owner at 00:2xZ in my terminal; it is pending their word:\nSTAGE A, fast merge (target ~01:30-02:00Z):\n- The flip: you remove the merge queue and the required pre-merge checks from main's ruleset.\n- Lanes merge on their prepush receipt.\n- Push CI maintains ci-green.\n- Deploys stay exactly as now (deploy.yaml disabled, child-GO hand dispatch), so the child's 29v+1 condition doesn't gate it.\n- Parts: #3311 receipt check, #3308 push CI + ci-green writer (queue pos 9, AWAITING_CHECKS), #3304 migration order (it runs inside #3308's push CI). All three passed review. The reruns I made after #3312 replayed the stale pre-fix merge commit, so at 00:2xZ I closed and reopened #3311, #3304, #3301, #3203 and #3264 for fresh CI on current main and re-armed auto-merge at their reviewed heads.\n- I'll mail you the three pins when they're green, for jumps. Then HOST-ASK P1a: the flip, with stop rule (ci-green stalls 60 min with new merges and no fix; a lane merges a non-additive migration, secret/IAM change or template roll) and rollback (restore the queue + required checks).\n- Then \"FAST MERGE LIVE\".\nSTAGE B, deploy on ci-green (P1b): after the child's 29v+1 CLEAN plus its listed checks. Unchanged.\nAlso, my fault: my backlog was invalid from 21:20Z (two hand-started lane ids), so 8 queued lanes never spawned, including deploy-pilot-gates and soak-cell-events. Fixed now; they spawn on the next ticks."
+    }
+   ],
+   "baseline": {
+    "tool": "owner.ask",
+    "target": "",
+    "summary": "The orchestrator brought the question to the host/owner instead of deciding: cicd-300 -> host, re 1d2aa298. Agreed: \"fast merge\" = the post a3eef2d5 pilot's MERGE half. I put a split to the owner at 00:2xZ in my terminal; it is pending t …[truncated]",
+    "asked_owner": true,
+    "source_ids": [
+     "s:3e62639b"
+    ]
+   },
+   "owner_follow_up": {
+    "verdict": "corrected",
+    "expected_tools": [
+     "directive.note"
+    ],
+    "decide_dont_ask": true
+   },
+   "grounding": "verified",
+   "grounding_evidence": "owner record(s) s:54e0a276, s:3e62639b cited in source_excerpt; baseline from s:3e62639b",
+   "source": {
+    "ids": [
+     "s:54e0a276",
+     "s:3e62639b"
+    ],
+    "relation": "correction",
+    "evidence": "owner_quote",
+    "owner_quote": "raise the lane limit to 12 after fast merge is done",
+    "label_basis": "Host decision under an owner-approved pilot: do not wait on the owner for the Stage A/B split; decide and record."
+   }
+  },
+  {
+   "id": "s1-main-g06",
+   "run_id": "20261023-s1-main",
+   "timestamp": "2026-11-03T02:29:15Z",
+   "category": "owner_only_one_way",
+   "description": "A decision is pending on the run; run state as at that time.",
+   "state": {
+    "run": {
+     "id": "20261023-s1-main",
+     "objective": "P2 (owner portfolio 11-03): every terminal-proof row at n >= 100 on nebula-dev, on the deployed image, with all three flags deleted: CH boot 1.0; planned move and pool upgrade; Spot 120 s with S1/S2 fallback; warm wake < 1 s; cold p50 < 10 s and p99 < 30 s; dense integrity; S2 on. Then move-v2 and the gateway. s1-main is the sole P2 owner (fc-mobility folded in, 11-03).",
+     "default_recipe": "default"
+    },
+    "backlog": [
+     {
+      "id": "item-tb-upgrade-main-b",
+      "run_id": "20261023-s1-main",
+      "title": "Real pool upgrades on main with S2 and mTLS: CH live migration of every eligible session, streams resumed",
+      "acceptance": "",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "tb-upgrade-main-b"
+     },
+     {
+      "id": "item-ml-s2-atomic-seal",
+      "run_id": "20261023-s1-main",
+      "title": "s2disk: stage parts and seal a split snapshot atomically",
+      "acceptance": "",
+      "priority": "p0",
+      "status": "in_progress",
+      "lane_id": "ml-s2-atomic-seal"
+     },
+     {
+      "id": "item-ml-s1-memory-resume-barrier",
+      "run_id": "20261023-s1-main",
+      "title": "Reconcile S1 before a memory-restored agent runs",
+      "acceptance": "No memory restore runs an agent on a transcript behind S1; no added cost when S1 is not ahead; held when S1 is unreadable.",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "ml-s1-memory-resume-barrier"
+     }
+    ],
+    "lanes": [
+     {
+      "id": "tb-upgrade-main-b",
+      "run_id": "20261023-s1-main",
+      "item_id": "item-tb-upgrade-main-b",
+      "title": "Real pool upgrades on main with S2 and mTLS: CH live migration of every eligible session, streams resumed",
+      "status": "running",
+      "session_id": "session-tb-upgrade-main-b",
+      "created_at": "2026-11-02T22:30:21Z",
+      "updated_at": "2026-11-02T22:30:21Z"
+     },
+     {
+      "id": "ml-s2-atomic-seal",
+      "run_id": "20261023-s1-main",
+      "item_id": "item-ml-s2-atomic-seal",
+      "title": "s2disk: stage parts and seal a split snapshot atomically",
+      "status": "running",
+      "session_id": "session-ml-s2-atomic-seal",
+      "created_at": "2026-11-03T00:18:16Z",
+      "updated_at": "2026-11-03T00:18:16Z"
+     },
+     {
+      "id": "ml-s1-memory-resume-barrier",
+      "run_id": "20261023-s1-main",
+      "item_id": "item-ml-s1-memory-resume-barrier",
+      "title": "Reconcile S1 before a memory-restored agent runs",
+      "status": "running",
+      "session_id": "session-ml-s1-memory-resume-barrier",
+      "created_at": "2026-11-02T11:52:53Z",
+      "updated_at": "2026-11-02T11:52:53Z"
+     }
+    ]
+   },
+   "events": [
+    {
+     "id": "ev-s1-main-g06",
+     "run_id": "20261023-s1-main",
+     "kind": "mail",
+     "class": "judgment",
+     "source": "mail:s:949b0491",
+     "summary": "Metering 1/8: Approve the proposed $50/$200 allowances and a launch subsidy/enrollment envelope? \n\nWhy now: full-allowance use loses $55.40/$262 per seat before tails/reserves; 1,000 high-plan seats imply $262k/month subsidy.\n\n(a) Approve §2 allowances and name a monthly subsidy/enrollment ceiling: explicit launch exposure.\n(b) Lower compute/model allowances before launch: less loss, weaker offer.\n(c) Defer paid enrollment: no new promise or spend.\n\nRecommendation: A only with an explicit envelope; no ceiling is assumed. ONE-WAY: consumed cloud/model spend and published customer promises.\nDefault if unanswered: design only; no behavior change.\nEvidence: the design post linked to this question, and docs PR #3087 (design only; nothing deployed or changed). Context: your 11-03 request for a metering and limits design for a possible public launch at $50/$200 plans, accepting early losses."
+    }
+   ],
+   "baseline": {
+    "tool": "owner.ask",
+    "target": "",
+    "summary": "The orchestrator put this question to the owner: Metering 1/8: Approve the proposed $50/$200 allowances and a launch subsidy/enrollment envelope?",
+    "asked_owner": true,
+    "source_ids": [
+     "s:949b0491"
+    ]
+   },
+   "owner_follow_up": {
+    "verdict": "endorsed",
+    "expected_tools": [
+     "owner.ask"
+    ]
+   },
+   "grounding": "verified",
+   "grounding_evidence": "owner record(s) s:949b0491, s:7b43e195 cited in source_excerpt; baseline from s:949b0491",
+   "source": {
+    "ids": [
+     "s:949b0491",
+     "s:7b43e195"
+    ],
+    "relation": "answer",
+    "evidence": "owner_answer",
+    "owner_quote": "",
+    "label_basis": "Question was marked ONE-WAY (spend, member data or irreversible) and the owner answered it in the owner inbox."
+   }
+  }
+ ],
+ "questions": [
+  {
+   "id": "s1-main-q01",
+   "run_id": "20261023-s1-main",
+   "timestamp": "2026-11-04T05:40:50Z",
+   "question": "when can we finish south1 migration",
+   "state": {
+    "run": {
+     "id": "20261023-s1-main",
+     "objective": "P2 (owner portfolio 11-03): every terminal-proof row at n >= 100 on nebula-dev, on the deployed image, with all three flags deleted: CH boot 1.0; planned move and pool upgrade; Spot 120 s with S1/S2 fallback; warm wake < 1 s; cold p50 < 10 s and p99 < 30 s; dense integrity; S2 on. Then move-v2 and the gateway. s1-main is the sole P2 owner (fc-mobility folded in, 11-03).",
+     "default_recipe": "default"
+    },
+    "backlog": [
+     {
+      "id": "item-ml-vmm-lifecycle-records",
+      "run_id": "20261023-s1-main",
+      "title": "Durable off-node VMM start, stop and lease handoff records",
+      "acceptance": "Every VMM start/stop and lease handoff is recorded off-node with the identity tuple; a node loss reconciles or is marked incomplete",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "ml-vmm-lifecycle-records"
+     },
+     {
+      "id": "item-ml-s2-gc-fail-closed",
+      "run_id": "20261023-s1-main",
+      "title": "S2 collectors and publishers fail closed on read errors",
+      "acceptance": "",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "ml-s2-gc-fail-closed"
+     },
+     {
+      "id": "item-ml-runner-wedge-recovery",
+      "run_id": "20261023-s1-main",
+      "title": "Bring back a session whose restored runner wedges, by booting over its saved disks",
+      "acceptance": "Cause shown on the testbed; wedged wakes come back serving over the saved disks; an operator recovery path for already-failed sessions",
+      "priority": "p0",
+      "status": "in_progress",
+      "lane_id": "ml-runner-wedge-recovery"
+     }
+    ],
+    "lanes": [
+     {
+      "id": "ml-vmm-lifecycle-records",
+      "run_id": "20261023-s1-main",
+      "item_id": "item-ml-vmm-lifecycle-records",
+      "title": "Durable off-node VMM start, stop and lease handoff records",
+      "status": "running",
+      "session_id": "session-ml-vmm-lifecycle-records",
+      "created_at": "2026-11-02T08:37:40Z",
+      "updated_at": "2026-11-02T08:37:40Z"
+     },
+     {
+      "id": "ml-s2-gc-fail-closed",
+      "run_id": "20261023-s1-main",
+      "item_id": "item-ml-s2-gc-fail-closed",
+      "title": "S2 collectors and publishers fail closed on read errors",
+      "status": "running",
+      "session_id": "session-ml-s2-gc-fail-closed",
+      "created_at": "2026-11-02T06:52:15Z",
+      "updated_at": "2026-11-02T06:52:15Z"
+     },
+     {
+      "id": "ml-runner-wedge-recovery",
+      "run_id": "20261023-s1-main",
+      "item_id": "item-ml-runner-wedge-recovery",
+      "title": "Bring back a session whose restored runner wedges, by booting over its saved disks",
+      "status": "running",
+      "session_id": "session-ml-runner-wedge-recovery",
+      "created_at": "2026-11-01T19:58:29Z",
+      "updated_at": "2026-11-01T19:58:29Z"
+     }
+    ]
+   },
+   "required_facts": [
+    {
+     "label": "live lane ml-vmm-lifecycle-records",
+     "any_of": [
+      "ml-vmm-lifecycle-records"
+     ]
+    },
+    {
+     "label": "live lane ml-s2-gc-fail-closed",
+     "any_of": [
+      "ml-s2-gc-fail-closed"
+     ]
+    }
+   ],
+   "source": {
+    "ids": [
+     "s:d66202b1"
+    ],
+    "relation": "question",
+    "evidence": "owner_quote",
+    "owner_quote": "when can we finish south1 migration",
+    "label_basis": "Verbatim owner question; required facts are lanes that mailed on both sides of the question time per the export (running at that time)."
+   }
+  },
+  {
+   "id": "cicd-300-q02",
+   "run_id": "20261103-cicd-300",
+   "timestamp": "2026-11-12T04:02:37Z",
+   "question": "we have too many swarm lanes taking a long time to finish, are they hitting too many frictions, are they doing too much useless work",
+   "state": {
+    "run": {
+     "id": "20261103-cicd-300",
+     "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min three days running; deploys self-run every <= 20 min with metric rollback; main deterministic (no session gate fails on a known main flake)",
+     "default_recipe": "default"
+    },
+    "backlog": [
+     {
+      "id": "item-pool-health-dm",
+      "run_id": "20261103-cicd-300",
+      "title": "Owner DM when free Claude pool slots drop below 20%",
+      "acceptance": "Owner Slack DM when free Claude slots < 20%, naming the re-seed count, without repeating while low (owner P1 95ce9f27)",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "pool-health-dm"
+     },
+     {
+      "id": "item-image-retention",
+      "run_id": "20261103-cicd-300",
+      "title": "Artifact Registry image cleanup policies (dry-run first)",
+      "acceptance": "Dry-run counts/GB per repo with zero live or manifest digests deleted, then a DRAFT PR turning the cleanup policies on",
+      "priority": "p1",
+      "status": "in_progress",
+      "lane_id": "image-retention"
+     }
+    ],
+    "lanes": [
+     {
+      "id": "pool-health-dm",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-pool-health-dm",
+      "title": "Owner DM when free Claude pool slots drop below 20%",
+      "status": "running",
+      "session_id": "session-pool-health-dm",
+      "created_at": "2026-11-12T02:18:32Z",
+      "updated_at": "2026-11-12T02:18:32Z"
+     },
+     {
+      "id": "image-retention",
+      "run_id": "20261103-cicd-300",
+      "item_id": "item-image-retention",
+      "title": "Artifact Registry image cleanup policies (dry-run first)",
+      "status": "running",
+      "session_id": "session-image-retention",
+      "created_at": "2026-11-11T19:01:08Z",
+      "updated_at": "2026-11-11T19:01:08Z"
+     }
+    ]
+   },
+   "required_facts": [
+    {
+     "label": "live lane pool-health-dm",
+     "any_of": [
+      "pool-health-dm"
+     ]
+    },
+    {
+     "label": "live lane image-retention",
+     "any_of": [
+      "image-retention"
+     ]
+    }
+   ],
+   "source": {
+    "ids": [
+     "s:d1a70882"
+    ],
+    "relation": "question",
+    "evidence": "owner_quote",
+    "owner_quote": "we have too many swarm lanes taking a long time to finish, are they hitting too many frictions, are they doing too much useless work",
+    "label_basis": "Verbatim owner question; required facts are lanes that mailed on both sides of the question time per the export (running at that time)."
+   }
+  }
+ ]
+}

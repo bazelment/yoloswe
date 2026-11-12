@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -68,14 +69,19 @@ func (s *scriptedEvalClient) CreateMessage(_ context.Context, req model.Request)
 		}, nil
 	}
 
-	for evID, tc := range s.momentTools {
-		if strings.Contains(userText, evID) {
-			return &model.Response{
-				StopReason: model.StopReasonToolUse,
-				Message:    model.NewAssistantMessage(model.NewToolUseBlock(tc.ID, tc.Name, tc.Input)),
-				Usage:      model.Usage{InputTokens: 3200, OutputTokens: 110},
-			}, nil
+	// Event ids are prefixes of one another (ev-x-g1, ev-x-g10): the longest match wins.
+	best := ""
+	for evID := range s.momentTools {
+		if strings.Contains(userText, evID) && len(evID) > len(best) {
+			best = evID
 		}
+	}
+	if tc, ok := s.momentTools[best]; ok {
+		return &model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message:    model.NewAssistantMessage(model.NewToolUseBlock(tc.ID, tc.Name, tc.Input)),
+			Usage:      model.Usage{InputTokens: 3200, OutputTokens: 110},
+		}, nil
 	}
 
 	return &model.Response{
@@ -145,136 +151,33 @@ func TestScrubbingValidation(t *testing.T) {
 	}
 }
 
-func TestInnerLoop5MomentsEndToEnd(t *testing.T) {
-	t.Parallel()
-
-	ds, err := replay.LoadInnerLoopDataset()
-	if err != nil {
-		t.Fatalf("LoadInnerLoopDataset: %v", err)
+func momentByID(t *testing.T, ds *replay.Dataset, id string) replay.JudgmentMoment {
+	t.Helper()
+	for i := range ds.Moments {
+		if ds.Moments[i].ID == id {
+			return ds.Moments[i]
+		}
 	}
-	if len(ds.Moments) != 5 {
-		t.Fatalf("len(ds.Moments) = %d, want 5", len(ds.Moments))
-	}
-	if len(ds.Questions) != 5 {
-		t.Fatalf("len(ds.Questions) = %d, want 5", len(ds.Questions))
-	}
-
-	client := &scriptedEvalClient{
-		momentTools: map[string]model.ToolCall{
-			"ev-cicd-m001": {
-				ID:   "call-1",
-				Name: dispatcher.ToolLaneRetry,
-				Input: mustJSON(t, dispatcher.LaneRetryParams{
-					LaneID: "cd-deploy-dev",
-					Phase:  "swe",
-					Round:  2,
-					Note:   "Retry swe on round 2 after wake cooldown exit 75.",
-					Reason: "Wake cooldown ended; retry on fresh round 2.",
-				}),
-			},
-			"ev-cicd-m002": {
-				ID:   "call-2",
-				Name: dispatcher.ToolLaneSteer,
-				Input: mustJSON(t, dispatcher.LaneSteerParams{
-					LaneID: "cd-deploy-dev",
-					Note:   "Adopt cd-publish (#5124) shared manifest validator schema.",
-					Reason: "Per standing rule, align with merged shared schema without asking owner.",
-				}),
-			},
-			"ev-feedback-m001": {
-				ID:   "call-3",
-				Name: dispatcher.ToolLaneSpawn,
-				Input: mustJSON(t, dispatcher.LaneSpawnParams{
-					ItemID: "fb880-release-backup",
-					LaneID: "fb880-release-backup",
-					Brief:  "Fix code release --backup so release aborts when backup fails.",
-					Reason: "P0 data-safety item ready with available lane capacity.",
-				}),
-			},
-			"ev-feedback-m002": {
-				ID:   "call-4",
-				Name: dispatcher.ToolPlannerRequest,
-				Input: mustJSON(t, dispatcher.PlannerRequestParams{
-					PlanRef: "post:feedback-reliability-v2",
-					Reason:  "Owner requested goal reassessment and backlog replan.",
-				}),
-			},
-			"ev-s1-m001": {
-				ID:   "call-5",
-				Name: dispatcher.ToolBacklogAdd,
-				Input: mustJSON(t, dispatcher.BacklogAddParams{
-					ID:         "fsck-refusal-branches",
-					Title:      "Clean up fsck refusal branches on sleep copy rejection",
-					Priority:   "p1",
-					Acceptance: "Refusal branches cleaned up and covered by unit test",
-					Reason:     "Split separate defect discovered by sleep-copy-fsck-gate into its own item.",
-				}),
-			},
-		},
-	}
-
-	rep, err := replay.Evaluate(t.Context(), ds, replay.EvalConfig{
-		Client:      client,
-		Concurrency: 2,
-	})
-	if err != nil {
-		t.Fatalf("Evaluate: %v", err)
-	}
-
-	// The 5 hand-picked moments are not verified against run records, so they
-	// exercise the plumbing but must not produce a PASS verdict on their own.
-	if rep.GroundedMoments != 0 || rep.SyntheticMoments != 5 {
-		t.Fatalf("grounded/synthetic = %d/%d, want 0/5", rep.GroundedMoments, rep.SyntheticMoments)
-	}
-	if rep.SyntheticAgreed != 5 {
-		t.Fatalf("SyntheticAgreed = %d, want 5:\n%s", rep.SyntheticAgreed, rep.FormatReport())
-	}
-	if rep.AllPass() || rep.AgreementPass {
-		t.Fatalf("a run with no verified moments passed:\n%s", rep.FormatReport())
-	}
-	if rep.InvariantViolations != 0 {
-		t.Fatalf("InvariantViolations = %d, want 0", rep.InvariantViolations)
-	}
-	if rep.ConciergeAccuracy != 1.0 {
-		t.Fatalf("ConciergeAccuracy = %.2f, want 1.0", rep.ConciergeAccuracy)
-	}
-	if rep.MedianInputTokens <= 0 || rep.MedianInputTokens >= replay.PassBarMaxMedianInputTokens {
-		t.Fatalf("MedianInputTokens = %d, want in (0, %d)", rep.MedianInputTokens, replay.PassBarMaxMedianInputTokens)
-	}
+	t.Fatalf("moment %q not in dataset", id)
+	return replay.JudgmentMoment{}
 }
 
-func TestFullGate2DatasetStructureAndDeterministicEval(t *testing.T) {
-	t.Parallel()
-
-	ds, err := replay.LoadDefaultDataset()
-	if err != nil {
-		t.Fatalf("LoadDefaultDataset: %v", err)
-	}
-	if len(ds.Moments) != 150 {
-		t.Fatalf("len(ds.Moments) = %d, want 150", len(ds.Moments))
-	}
-	if len(ds.Questions) != 40 {
-		t.Fatalf("len(ds.Questions) = %d, want 40", len(ds.Questions))
-	}
-
-	runCounts := make(map[string]int)
-	correctedCount := 0
-	for i := range ds.Moments {
-		m := &ds.Moments[i]
-		runCounts[m.RunID]++
-		if m.OwnerFollowUp.Verdict == replay.VerdictCorrected {
-			correctedCount++
+// failedMoments lists the moments a report did not agree on, with the reasons.
+func failedMoments(rep *replay.EvalReport) string {
+	var b strings.Builder
+	for _, mr := range rep.MomentResults {
+		if !mr.Agreed || mr.InvariantViolations > 0 {
+			fmt.Fprintf(&b, "  %s want %v%v got %v%v rejected=%v summary=%q\n", mr.ID, mr.ExpectedTools, mr.ExpectedTargets, mr.AcceptedTools, mr.AcceptedTargets, mr.RejectedReasons, mr.Summary)
 		}
 	}
-	for _, wantRun := range []string{"20261103-cicd-300", "20261026-feedback", "20261023-s1-main"} {
-		if runCounts[wantRun] == 0 {
-			t.Fatalf("no moments extracted for run %q", wantRun)
-		}
-	}
-	if correctedCount == 0 {
-		t.Fatal("expected owner-corrected moments in dataset, got 0")
-	}
+	return b.String()
+}
 
+// oracleClient answers every moment with its own label: the first expected
+// tool on the first expected target. It exercises the plumbing and the grader;
+// it says nothing about a real model.
+func oracleClient(t *testing.T, ds *replay.Dataset) *scriptedEvalClient {
+	t.Helper()
 	momentTools := make(map[string]model.ToolCall, len(ds.Moments))
 	for i := range ds.Moments {
 		m := &ds.Moments[i]
@@ -352,32 +255,101 @@ func TestFullGate2DatasetStructureAndDeterministicEval(t *testing.T) {
 		}
 	}
 
-	client := &scriptedEvalClient{momentTools: momentTools}
-	rep, err := replay.Evaluate(t.Context(), ds, replay.EvalConfig{
-		Client:      client,
-		Concurrency: 8,
-	})
+	return &scriptedEvalClient{momentTools: momentTools}
+}
+
+// TestInnerLoop10MomentsEndToEnd is the smallest end-to-end case: 10 grounded
+// moments and 2 owner status questions through the strict grader.
+func TestInnerLoop10MomentsEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	ds, err := replay.LoadInnerLoopDataset()
+	if err != nil {
+		t.Fatalf("LoadInnerLoopDataset: %v", err)
+	}
+	if len(ds.Moments) != 10 || len(ds.Questions) != 2 {
+		t.Fatalf("inner loop has %d moments / %d questions, want 10 / 2", len(ds.Moments), len(ds.Questions))
+	}
+	client := oracleClient(t, ds)
+
+	rep, err := replay.Evaluate(t.Context(), ds, replay.EvalConfig{Client: client, Concurrency: 2})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if rep.GroundedMoments != 10 || rep.SyntheticMoments != 0 {
+		t.Fatalf("grounded/synthetic = %d/%d, want 10/0", rep.GroundedMoments, rep.SyntheticMoments)
+	}
+	if rep.DispatcherAgreed != 10 {
+		t.Fatalf("label oracle agreed on %d/10:\n%s%s", rep.DispatcherAgreed, failedMoments(rep), rep.FormatReport())
+	}
+	if rep.EvidencedCorrections != 2 || rep.DecideDontAskMoments != 3 {
+		t.Fatalf("corrections=%d decide-dont-ask=%d, want 2 and 3", rep.EvidencedCorrections, rep.DecideDontAskMoments)
+	}
+	if rep.InvariantViolations != 0 {
+		t.Fatalf("InvariantViolations = %d, want 0", rep.InvariantViolations)
+	}
+	if rep.ConciergeAccuracy != 1.0 {
+		t.Fatalf("ConciergeAccuracy = %.2f, want 1.0", rep.ConciergeAccuracy)
+	}
+	if rep.MedianInputTokens <= 0 || rep.MedianInputTokens >= replay.PassBarMaxMedianInputTokens {
+		t.Fatalf("MedianInputTokens = %d, want in (0, %d)", rep.MedianInputTokens, replay.PassBarMaxMedianInputTokens)
+	}
+}
+
+// Moment and question counts of the committed Gate 2 dataset. They are what
+// the owner export supports and not a target: the export holds too few owner
+// status questions to reach 30 (see the provenance rubric).
+const (
+	wantFullMoments   = 44
+	wantFullQuestions = 4
+)
+
+func TestFullGate2DatasetStructureAndDeterministicEval(t *testing.T) {
+	t.Parallel()
+
+	ds, err := replay.LoadDefaultDataset()
+	if err != nil {
+		t.Fatalf("LoadDefaultDataset: %v", err)
+	}
+	if len(ds.Moments) != wantFullMoments || len(ds.Questions) != wantFullQuestions {
+		t.Fatalf("moments/questions = %d/%d, want %d/%d (recount with the rubric before changing)", len(ds.Moments), len(ds.Questions), wantFullMoments, wantFullQuestions)
+	}
+
+	runCounts := make(map[string]int)
+	for i := range ds.Moments {
+		m := &ds.Moments[i]
+		runCounts[m.RunID]++
+		if m.Grounding != replay.GroundingVerified {
+			t.Fatalf("moment %s is %q; the dataset may only hold verified moments", m.ID, m.Grounding)
+		}
+	}
+	for _, wantRun := range []string{"20261103-cicd-300", "20261026-feedback", "20261023-s1-main"} {
+		if runCounts[wantRun] == 0 {
+			t.Fatalf("no moments extracted for run %q", wantRun)
+		}
+	}
+
+	rep, err := replay.Evaluate(t.Context(), ds, replay.EvalConfig{Client: oracleClient(t, ds), Concurrency: 8})
 	if err != nil {
 		t.Fatalf("Evaluate full dataset: %v", err)
 	}
-	// An oracle that replays each label must satisfy every measured bar, yet the
-	// verdict stays INCONCLUSIVE: no owner correction is evidenced in the source runs.
+	// An oracle that replays each label satisfies every measured bar, and the
+	// verdict is PASS only because the owner corrections and decide-don't-ask
+	// moments are evidenced in the export.
 	if !rep.BarsPass() {
-		t.Fatalf("BarsPass() = false for the label oracle:\n%s", rep.FormatReport())
+		t.Fatalf("BarsPass() = false for the label oracle:\n%s%s", failedMoments(rep), rep.FormatReport())
 	}
-	if rep.AgreementRate != 1.0 || rep.SyntheticAgreed != rep.SyntheticMoments {
-		t.Fatalf("oracle agreement verified=%.2f synthetic=%d/%d, want all", rep.AgreementRate, rep.SyntheticAgreed, rep.SyntheticMoments)
+	if rep.AgreementRate != 1.0 || rep.GroundedMoments != wantFullMoments || rep.SyntheticMoments != 0 {
+		t.Fatalf("oracle agreement=%.2f grounded/synthetic=%d/%d, want 1.0 and %d/0:\n%s", rep.AgreementRate, rep.GroundedMoments, rep.SyntheticMoments, wantFullMoments, rep.FormatReport())
 	}
-	if rep.GroundedMoments != 24 || rep.SyntheticMoments != 126 {
-		t.Fatalf("grounded/synthetic = %d/%d, want 24/126 (recount with the rubric before changing)", rep.GroundedMoments, rep.SyntheticMoments)
-	}
-	if rep.EvidencedCorrections != 0 || rep.Verdict() != replay.VerdictInconclusive || rep.AllPass() {
-		t.Fatalf("verdict %s, evidenced corrections %d: want INCONCLUSIVE/0 until real owner corrections are evidenced", rep.Verdict(), rep.EvidencedCorrections)
+	if rep.EvidencedCorrections != 2 || rep.DecideDontAskMoments != 3 || rep.Verdict() != replay.VerdictPass {
+		t.Fatalf("verdict %s, corrections %d, decide-dont-ask %d: want PASS/2/3", rep.Verdict(), rep.EvidencedCorrections, rep.DecideDontAskMoments)
 	}
 }
 
 type multiTurnWireClient struct {
-	turns int
+	laneID string
+	turns  int
 }
 
 func (m *multiTurnWireClient) CreateMessage(_ context.Context, req model.Request) (*model.Response, error) {
@@ -394,7 +366,7 @@ func (m *multiTurnWireClient) CreateMessage(_ context.Context, req model.Request
 			Message: model.NewAssistantMessage(model.NewToolUseBlock(
 				"call-read-1",
 				"read_lane_report",
-				json.RawMessage(`{"lane_id":"cd-deploy-dev"}`),
+				json.RawMessage(`{"lane_id":"`+m.laneID+`"}`),
 			)),
 			Usage: model.Usage{
 				InputTokens:              1000,
@@ -408,8 +380,8 @@ func (m *multiTurnWireClient) CreateMessage(_ context.Context, req model.Request
 			StopReason: model.StopReasonToolUse,
 			Message: model.NewAssistantMessage(model.NewToolUseBlock(
 				"call-retry-2",
-				"lane_retry",
-				json.RawMessage(`{"lane_id":"cd-deploy-dev","phase":"swe","round":2,"note":"Retry swe on round 2.","reason":"Cooldown finished."}`),
+				"lane_steer",
+				json.RawMessage(`{"lane_id":"`+m.laneID+`","note":"Hold the upload path off until the switch lands.","reason":"Owner order relayed by the host."}`),
 			)),
 			Usage: model.Usage{
 				InputTokens:          1100,
@@ -420,7 +392,7 @@ func (m *multiTurnWireClient) CreateMessage(_ context.Context, req model.Request
 	default:
 		return &model.Response{
 			StopReason: model.StopReasonEndTurn,
-			Message:    model.NewAssistantMessage(model.NewTextBlock("Retried lane cd-deploy-dev after reading report.")),
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Steered lane " + m.laneID + " after reading its report.")),
 			Usage: model.Usage{
 				InputTokens:  900,
 				OutputTokens: 30,
@@ -436,15 +408,16 @@ func TestWireToolClientReadLaneReportThenMutateAndCacheTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadInnerLoopDataset: %v", err)
 	}
-	rawClient := &multiTurnWireClient{}
+	steer := momentByID(t, ds, "cicd-300-g15")
+	rawClient := &multiTurnWireClient{laneID: steer.OwnerFollowUp.ExpectedTargets[0]}
 	wireClient := replay.NewWireToolClient(rawClient)
 
-	mr, err := replay.EvaluateMoment(t.Context(), ds.Moments[0], wireClient, dispatcher.Config{MaxTurns: 4})
+	mr, err := replay.EvaluateMoment(t.Context(), steer, wireClient, dispatcher.Config{MaxTurns: 4})
 	if err != nil {
 		t.Fatalf("EvaluateMoment: %v", err)
 	}
 	if rawClient.turns != 3 {
-		t.Fatalf("rawClient.turns = %d, want 3 (read.lane_report -> lane.retry -> final summary)", rawClient.turns)
+		t.Fatalf("rawClient.turns = %d, want 3 (read.lane_report -> lane.steer -> final summary)", rawClient.turns)
 	}
 	if !mr.Agreed {
 		t.Fatalf("mr.Agreed = false, want true (acceptedTools=%v acceptedTargets=%v)", mr.AcceptedTools, mr.AcceptedTargets)
@@ -534,13 +507,13 @@ func TestNegativeAgreementAndComputeReportBars(t *testing.T) {
 
 	t.Run("unexpected extra mutating action rejected", func(t *testing.T) {
 		t.Parallel()
-		m := ds.Moments[0]
+		m := momentByID(t, ds, "cicd-300-g15")
 		client := &staticActionClient{
 			calls: []model.ToolCall{
 				{
 					ID:    "c1",
-					Name:  dispatcher.ToolLaneRetry,
-					Input: mustJSON(t, dispatcher.LaneRetryParams{LaneID: "cd-deploy-dev", Phase: "swe", Round: 2, Reason: "expected retry"}),
+					Name:  dispatcher.ToolLaneSteer,
+					Input: mustJSON(t, dispatcher.LaneSteerParams{LaneID: m.OwnerFollowUp.ExpectedTargets[0], Note: "Hold the upload path off.", Reason: "expected steer"}),
 				},
 				{
 					ID:    "c2",
@@ -560,16 +533,16 @@ func TestNegativeAgreementAndComputeReportBars(t *testing.T) {
 
 	t.Run("owner.ask on decide_dont_ask fails agreement and ask rate bar", func(t *testing.T) {
 		t.Parallel()
-		m := ds.Moments[1] // decide_dont_ask_steer
+		m := momentByID(t, ds, "cicd-300-g18") // decide, don't ask
 		client := &staticActionClient{
 			calls: []model.ToolCall{{
 				ID:   "c-ask",
 				Name: dispatcher.ToolOwnerAsk,
 				Input: mustJSON(t, dispatcher.OwnerAskParams{
-					LaneID:   "cd-deploy-dev",
-					Question: "Which schema should we use?",
-					Options:  []string{"cd-publish", "legacy"},
-					Default:  "cd-publish",
+					LaneID:   m.State.Lanes[0].ID,
+					Question: "Should the split go ahead as proposed?",
+					Options:  []string{"go", "hold"},
+					Default:  "go",
 					Deadline: "1h",
 					Reason:   "Unnecessary ask",
 				}),
@@ -742,7 +715,8 @@ func TestEvaluateContextCancellation(t *testing.T) {
 }
 
 type conciergeToolExerciserClient struct {
-	turn int
+	laneIDs []string
+	turn    int
 }
 
 func (c *conciergeToolExerciserClient) CreateMessage(_ context.Context, req model.Request) (*model.Response, error) {
@@ -753,11 +727,11 @@ func (c *conciergeToolExerciserClient) CreateMessage(_ context.Context, req mode
 			StopReason: model.StopReasonToolUse,
 			Message: model.NewAssistantMessage(
 				model.NewToolUseBlock("t1", "status", json.RawMessage(`{}`)),
-				model.NewToolUseBlock("t2", "lane_show", json.RawMessage(`{"lane_id":"cd-deploy-dev"}`)),
-				model.NewToolUseBlock("t3", "pr_status", json.RawMessage(`{"lane_id":"cd-deploy-dev"}`)),
-				model.NewToolUseBlock("t4", "ci_status", json.RawMessage(`{"lane_id":"cd-deploy-dev"}`)),
+				model.NewToolUseBlock("t2", "lane_show", json.RawMessage(`{"lane_id":"`+c.laneIDs[0]+`"}`)),
+				model.NewToolUseBlock("t3", "pr_status", json.RawMessage(`{"lane_id":"`+c.laneIDs[0]+`"}`)),
+				model.NewToolUseBlock("t4", "ci_status", json.RawMessage(`{"lane_id":"`+c.laneIDs[0]+`"}`)),
 				model.NewToolUseBlock("t5", "decisions_since", json.RawMessage(`{"since":"0","limit":5}`)),
-				model.NewToolUseBlock("t6", "directive_submit", json.RawMessage(`{"kind":"instruction","text":"Hold merges on cd-deploy-dev"}`)),
+				model.NewToolUseBlock("t6", "directive_submit", json.RawMessage(`{"kind":"instruction","text":"Hold merges on `+c.laneIDs[0]+`"}`)),
 				model.NewToolUseBlock("t7", "directive_submit", json.RawMessage(`{"kind":"note","text":"Second directive under same FakeClock timestamp"}`)),
 			),
 			Usage: model.Usage{InputTokens: 800, CacheReadInputTokens: 200, OutputTokens: 100},
@@ -781,7 +755,7 @@ func (c *conciergeToolExerciserClient) CreateMessage(_ context.Context, req mode
 		}
 		return &model.Response{
 			StopReason: model.StopReasonEndTurn,
-			Message:    model.NewAssistantMessage(model.NewTextBlock("Lane cd-deploy-dev (#5127) is blocked in swe round 1 with checks pending; merge-red-check-guard and image-retention are running; cd-publish (#5124) is done.")),
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Running now: " + strings.Join(c.laneIDs, ", ") + ".")),
 			Usage:      model.Usage{InputTokens: 900, OutputTokens: 60},
 		}, nil
 	}
@@ -794,10 +768,15 @@ func TestStoreConciergeToolsAndDirectiveSubmit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadInnerLoopDataset: %v", err)
 	}
-	client := &conciergeToolExerciserClient{}
+	q := ds.Questions[0]
+	var laneIDs []string
+	for _, fg := range q.RequiredFacts {
+		laneIDs = append(laneIDs, fg.AnyOf...)
+	}
+	client := &conciergeToolExerciserClient{laneIDs: laneIDs}
 	concierge := replay.NewStoreConcierge(client)
 
-	qr, err := replay.EvaluateQuestion(t.Context(), ds.Questions[0], concierge)
+	qr, err := replay.EvaluateQuestion(t.Context(), q, concierge)
 	if err != nil {
 		t.Fatalf("EvaluateQuestion: %v", err)
 	}
