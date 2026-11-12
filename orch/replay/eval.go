@@ -159,6 +159,11 @@ func passLabel(ok bool) string {
 	return "FAIL"
 }
 
+var (
+	defaultEvalTimestamp      = time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	defaultMaxConcurrentLanes = recipe.Default().Limits.MaxConcurrentLanes
+)
+
 // SeedMomentState populates st and drv from a historical MomentState snapshot.
 func SeedMomentState(
 	ctx context.Context,
@@ -169,21 +174,15 @@ func SeedMomentState(
 ) error {
 	now := clk.Now()
 	run := state.Run
-	if run.DefaultRecipe == "" {
-		run.DefaultRecipe = recipe.DefaultName
-	}
+	run.DefaultRecipe = cmp.Or(run.DefaultRecipe, recipe.DefaultName)
 	if err := st.Runs().Create(ctx, run); err != nil {
 		return fmt.Errorf("create run %s: %w", run.ID, err)
 	}
 
 	for i := range state.Directives {
 		dir := state.Directives[i]
-		if dir.RunID == "" {
-			dir.RunID = run.ID
-		}
-		if dir.Status == "" {
-			dir.Status = store.DirectiveActive
-		}
+		dir.RunID = cmp.Or(dir.RunID, run.ID)
+		dir.Status = cmp.Or(dir.Status, store.DirectiveActive)
 		if err := st.Directives().Add(ctx, dir); err != nil {
 			return fmt.Errorf("add directive %s: %w", dir.ID, err)
 		}
@@ -191,15 +190,9 @@ func SeedMomentState(
 
 	for i := range state.Backlog {
 		item := state.Backlog[i]
-		if item.RunID == "" {
-			item.RunID = run.ID
-		}
-		if item.Priority == "" {
-			item.Priority = store.PriorityP1
-		}
-		if item.Status == "" {
-			item.Status = store.BacklogOpen
-		}
+		item.RunID = cmp.Or(item.RunID, run.ID)
+		item.Priority = cmp.Or(item.Priority, store.PriorityP1)
+		item.Status = cmp.Or(item.Status, store.BacklogOpen)
 		if err := st.Backlog().Add(ctx, item); err != nil {
 			return fmt.Errorf("add backlog item %s: %w", item.ID, err)
 		}
@@ -207,12 +200,8 @@ func SeedMomentState(
 
 	for i := range state.Lanes {
 		ln := state.Lanes[i]
-		if ln.RunID == "" {
-			ln.RunID = run.ID
-		}
-		if ln.RecipeName == "" {
-			ln.RecipeName = run.DefaultRecipe
-		}
+		ln.RunID = cmp.Or(ln.RunID, run.ID)
+		ln.RecipeName = cmp.Or(ln.RecipeName, run.DefaultRecipe)
 		if ln.LastEventAt.IsZero() {
 			ln.LastEventAt = now.Add(-10 * time.Minute)
 		}
@@ -238,9 +227,7 @@ func SeedMomentState(
 
 	for i := range state.Decisions {
 		dec := state.Decisions[i]
-		if dec.RunID == "" {
-			dec.RunID = run.ID
-		}
+		dec.RunID = cmp.Or(dec.RunID, run.ID)
 		if _, err := st.Decisions().Append(ctx, dec); err != nil {
 			return fmt.Errorf("append decision: %w", err)
 		}
@@ -252,6 +239,24 @@ func SeedMomentState(
 		}
 	}
 	return nil
+}
+
+func newSeededEnv(
+	ctx context.Context,
+	ts time.Time,
+	state MomentState,
+) (store.Store, *lane.FakeDriver, clock.Clock, error) {
+	if ts.IsZero() {
+		ts = defaultEvalTimestamp
+	}
+	clk := clock.NewFakeClock(ts)
+	st := store.NewMemoryStore(clk)
+	drv := lane.NewFakeDriver()
+	if err := SeedMomentState(ctx, st, drv, clk, state); err != nil {
+		_ = st.Close()
+		return nil, nil, nil, err
+	}
+	return st, drv, clk, nil
 }
 
 // NewWireToolClient wraps a ModelClient so tool names containing '.' (such as
@@ -353,7 +358,7 @@ func hasSuccessfulMutatingToolResult(msgs []model.Message) bool {
 	}
 	for _, tc := range prev.ToolCalls() {
 		canon := strings.ReplaceAll(tc.Name, "_", ".")
-		if !isReadTool(canon) && canon != "status" && canon != "lane.show" && canon != "decisions.since" && canon != "pr.status" && canon != "ci.status" {
+		if !isReadOnlyTool(canon) {
 			return true
 		}
 	}
@@ -462,28 +467,17 @@ func EvaluateMoment(
 	client model.ModelClient,
 	dispCfg dispatcher.Config,
 ) (MomentResult, error) {
-	ts := m.Timestamp
-	if ts.IsZero() {
-		ts = time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-	}
-	clk := clock.NewFakeClock(ts)
-	st := store.NewMemoryStore(clk)
-	defer func() { _ = st.Close() }()
-	drv := lane.NewFakeDriver()
-
-	if err := SeedMomentState(ctx, st, drv, clk, m.State); err != nil {
+	st, drv, clk, err := newSeededEnv(ctx, m.Timestamp, m.State)
+	if err != nil {
 		return MomentResult{}, err
 	}
+	defer func() { _ = st.Close() }()
 
 	appended := make([]store.Event, 0, len(m.Events))
 	for i := range m.Events {
 		ev := m.Events[i]
-		if ev.RunID == "" {
-			ev.RunID = m.RunID
-		}
-		if ev.Class == "" {
-			ev.Class = store.EventClassJudgment
-		}
+		ev.RunID = cmp.Or(ev.RunID, m.RunID)
+		ev.Class = cmp.Or(ev.Class, store.EventClassJudgment)
 		saved, err := st.Events().Append(ctx, ev)
 		if err != nil {
 			return MomentResult{}, fmt.Errorf("append event: %w", err)
@@ -491,12 +485,8 @@ func EvaluateMoment(
 		appended = append(appended, saved)
 	}
 
-	if dispCfg.Model == "" {
-		dispCfg.Model = DefaultEvalModel
-	}
-	if dispCfg.HardBatchModel == "" {
-		dispCfg.HardBatchModel = DefaultEvalModel
-	}
+	dispCfg.Model = cmp.Or(dispCfg.Model, DefaultEvalModel)
+	dispCfg.HardBatchModel = cmp.Or(dispCfg.HardBatchModel, DefaultEvalModel)
 	if dispCfg.MaxTurns <= 0 {
 		dispCfg.MaxTurns = 3
 	}
@@ -513,7 +503,7 @@ func EvaluateMoment(
 	)
 	for i := range res.Accepted {
 		act := &res.Accepted[i]
-		if isReadTool(act.Tool) {
+		if isReadOnlyTool(act.Tool) {
 			continue
 		}
 		acceptedTools = append(acceptedTools, act.Tool)
@@ -569,18 +559,11 @@ func EvaluateQuestion(
 	q ConciergeQuestion,
 	concierge ConciergeRunner,
 ) (QuestionResult, error) {
-	ts := q.Timestamp
-	if ts.IsZero() {
-		ts = time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-	}
-	clk := clock.NewFakeClock(ts)
-	st := store.NewMemoryStore(clk)
-	defer func() { _ = st.Close() }()
-	drv := lane.NewFakeDriver()
-
-	if err := SeedMomentState(ctx, st, drv, clk, q.State); err != nil {
+	st, drv, clk, err := newSeededEnv(ctx, q.Timestamp, q.State)
+	if err != nil {
 		return QuestionResult{}, err
 	}
+	defer func() { _ = st.Close() }()
 
 	ans, err := concierge.Answer(ctx, st, drv, clk, q.RunID, q.Question)
 	if err != nil {
@@ -716,9 +699,10 @@ func percentileInt64(sorted []int64, p float64) int64 {
 	return sorted[idx]
 }
 
-func isReadTool(tool string) bool {
+func isReadOnlyTool(tool string) bool {
 	switch dispatcher.NormalizeToolName(tool) {
-	case dispatcher.ToolReadLaneReport, dispatcher.ToolReadPR, dispatcher.ToolReadCI:
+	case dispatcher.ToolReadLaneReport, dispatcher.ToolReadPR, dispatcher.ToolReadCI,
+		toolConciergeStatus, toolConciergeLaneShow, toolConciergeDecisions, toolConciergePRStatus, toolConciergeCIStatus:
 		return true
 	default:
 		return false
@@ -727,40 +711,11 @@ func isReadTool(tool string) bool {
 
 func extractActionTargets(act dispatcher.ProposedAction) []string {
 	var out []string
-	add := func(s string) {
-		s = strings.TrimSpace(s)
+	for _, candidate := range []string{act.Target(), act.LaneID, act.ItemID} {
+		s := strings.TrimSpace(candidate)
 		if s != "" && !slices.Contains(out, s) {
 			out = append(out, s)
 		}
-	}
-	add(act.Target())
-	if act.LaneSpawn != nil {
-		add(act.LaneSpawn.ItemID)
-		add(act.LaneSpawn.LaneID)
-	}
-	if act.LaneSteer != nil {
-		add(act.LaneSteer.LaneID)
-	}
-	if act.LaneRetry != nil {
-		add(act.LaneRetry.LaneID)
-	}
-	if act.LaneStop != nil {
-		add(act.LaneStop.LaneID)
-	}
-	if act.BacklogAdd != nil {
-		add(act.BacklogAdd.ID)
-	}
-	if act.BacklogUpdate != nil {
-		add(act.BacklogUpdate.ID)
-	}
-	if act.BacklogClose != nil {
-		add(act.BacklogClose.ID)
-	}
-	if act.OwnerAsk != nil {
-		add(act.OwnerAsk.LaneID)
-	}
-	if act.DirectiveNote != nil {
-		add(act.DirectiveNote.Scope)
 	}
 	return out
 }
@@ -770,39 +725,11 @@ func checkMomentAgreement(expected OwnerFollowUp, accepted []dispatcher.Proposed
 		return false
 	}
 	for i := range accepted {
-		if isReadTool(accepted[i].Tool) {
+		if isReadOnlyTool(accepted[i].Tool) {
 			continue
 		}
-		if actionMatchesExpected(expected, accepted[i]) {
+		if matchesExpectedTargets(expected, accepted[i].Tool, extractActionTargets(accepted[i])) {
 			return true
-		}
-	}
-	return false
-}
-
-func actionMatchesExpected(expected OwnerFollowUp, act dispatcher.ProposedAction) bool {
-	normTool := dispatcher.NormalizeToolName(act.Tool)
-	toolOK := false
-	for _, expTool := range expected.ExpectedTools {
-		if dispatcher.NormalizeToolName(expTool) == normTool {
-			toolOK = true
-			break
-		}
-	}
-	if !toolOK {
-		return false
-	}
-	if len(expected.ExpectedTargets) == 0 {
-		return true
-	}
-	targets := extractActionTargets(act)
-	for _, expTgt := range expected.ExpectedTargets {
-		expLower := strings.ToLower(strings.TrimSpace(expTgt))
-		for _, got := range targets {
-			gotLower := strings.ToLower(got)
-			if gotLower == expLower || strings.Contains(gotLower, expLower) || strings.Contains(expLower, gotLower) {
-				return true
-			}
 		}
 	}
 	return false
@@ -812,31 +739,40 @@ func matchesExpectedToolAndTarget(expected OwnerFollowUp, tool, target string, a
 	if (expected.ForbidOwnerAsk || expected.DecideDontAsk) && (askedOwner || dispatcher.NormalizeToolName(tool) == dispatcher.ToolOwnerAsk) {
 		return false
 	}
-	normTool := dispatcher.NormalizeToolName(tool)
-	toolOK := false
-	for _, expTool := range expected.ExpectedTools {
-		if dispatcher.NormalizeToolName(expTool) == normTool {
-			toolOK = true
-			break
-		}
+	var targets []string
+	if strings.TrimSpace(target) != "" {
+		targets = []string{target}
 	}
+	return matchesExpectedTargets(expected, tool, targets)
+}
+
+func matchesExpectedTargets(expected OwnerFollowUp, tool string, targets []string) bool {
+	normTool := dispatcher.NormalizeToolName(tool)
+	toolOK := slices.ContainsFunc(expected.ExpectedTools, func(expTool string) bool {
+		return dispatcher.NormalizeToolName(expTool) == normTool
+	})
 	if !toolOK {
 		return false
 	}
-	if len(expected.ExpectedTargets) == 0 || target == "" {
+	if len(expected.ExpectedTargets) == 0 || len(targets) == 0 {
 		return true
 	}
-	tLower := strings.ToLower(strings.TrimSpace(target))
-	for _, exp := range expected.ExpectedTargets {
-		eLower := strings.ToLower(strings.TrimSpace(exp))
-		if tLower == eLower || strings.Contains(tLower, eLower) || strings.Contains(eLower, tLower) {
-			return true
+	for _, expTgt := range expected.ExpectedTargets {
+		expLower := strings.ToLower(strings.TrimSpace(expTgt))
+		for _, got := range targets {
+			gotLower := strings.ToLower(strings.TrimSpace(got))
+			if gotLower == expLower || strings.Contains(gotLower, expLower) || strings.Contains(expLower, gotLower) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
 func auditAcceptedActions(state MomentState, accepted []dispatcher.ProposedAction) []string {
+	if len(accepted) == 0 {
+		return nil
+	}
 	var violations []string
 	lanesByID := make(map[string]lane.Lane, len(state.Lanes))
 	runningCount := 0
@@ -847,8 +783,6 @@ func auditAcceptedActions(state MomentState, accepted []dispatcher.ProposedActio
 			runningCount++
 		}
 	}
-	defRec := recipe.Default()
-	maxConcurrent := defRec.Limits.MaxConcurrentLanes
 
 	for i := range accepted {
 		act := &accepted[i]
@@ -856,8 +790,8 @@ func auditAcceptedActions(state MomentState, accepted []dispatcher.ProposedActio
 		case dispatcher.ToolLaneSpawn:
 			if act.LaneSpawn != nil {
 				runningCount++
-				if maxConcurrent > 0 && runningCount > maxConcurrent {
-					violations = append(violations, fmt.Sprintf("spawn over concurrency cap (%d > %d)", runningCount, maxConcurrent))
+				if defaultMaxConcurrentLanes > 0 && runningCount > defaultMaxConcurrentLanes {
+					violations = append(violations, fmt.Sprintf("spawn over concurrency cap (%d > %d)", runningCount, defaultMaxConcurrentLanes))
 				}
 				if reToken.MatchString(act.LaneSpawn.Brief) {
 					violations = append(violations, "secret token leaked in lane.spawn brief")
@@ -872,9 +806,9 @@ func auditAcceptedActions(state MomentState, accepted []dispatcher.ProposedActio
 				if reToken.MatchString(act.LaneRetry.Note) {
 					violations = append(violations, "secret token leaked in lane.retry note")
 				}
-				if strings.EqualFold(act.LaneRetry.Phase, "integrate") {
+				if strings.EqualFold(act.LaneRetry.Phase, recipe.PhaseIntegrate) {
 					if ln, ok := lanesByID[act.LaneRetry.LaneID]; ok {
-						if ln.ApprovalStale() || !strings.EqualFold(ln.Checks, "pass") && !strings.EqualFold(ln.Checks, "green") && !strings.EqualFold(ln.Checks, "success") {
+						if ln.ApprovalStale() || !isCIGreen(ln.Checks) {
 							violations = append(violations, fmt.Sprintf("retry into integrate on %s without green CI + matching approval", ln.ID))
 						}
 					}
@@ -883,4 +817,13 @@ func auditAcceptedActions(state MomentState, accepted []dispatcher.ProposedActio
 		}
 	}
 	return violations
+}
+
+func isCIGreen(checks string) bool {
+	switch strings.ToLower(strings.TrimSpace(checks)) {
+	case "pass", "green", "success":
+		return true
+	default:
+		return false
+	}
 }

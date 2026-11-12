@@ -90,13 +90,22 @@ type directiveSubmitParams struct {
 	Scope string `json:"scope,omitempty"`
 }
 
+const (
+	toolConciergeStatus          = "status"
+	toolConciergeLaneShow        = "lane.show"
+	toolConciergeDecisions       = "decisions.since"
+	toolConciergePRStatus        = "pr.status"
+	toolConciergeCIStatus        = "ci.status"
+	toolConciergeDirectiveSubmit = "directive.submit"
+)
+
 var conciergeToolDefs = []model.ToolDefinition{
-	{Name: "status", Description: "Query run status: lanes by phase, backlog items, directives, and pending asks", InputSchema: model.SchemaFor[statusToolParams]()},
-	{Name: "lane.show", Description: "Show detailed state, PR/CI status, and last phase report for a lane", InputSchema: model.SchemaFor[laneShowParams]()},
-	{Name: "decisions.since", Description: "Query recent Dispatcher and Controller decisions and reasons", InputSchema: model.SchemaFor[decisionsSinceParams]()},
-	{Name: "pr.status", Description: "Show PR number, head SHA, approval SHA, and merge status for a lane", InputSchema: model.SchemaFor[laneShowParams]()},
-	{Name: "ci.status", Description: "Show CI check state and recent CI events for a lane", InputSchema: model.SchemaFor[laneShowParams]()},
-	{Name: "directive.submit", Description: "Submit an owner directive (standing, instruction, note) to the Store", InputSchema: model.SchemaFor[directiveSubmitParams]()},
+	{Name: toolConciergeStatus, Description: "Query run status: lanes by phase, backlog items, directives, and pending asks", InputSchema: model.SchemaFor[statusToolParams]()},
+	{Name: toolConciergeLaneShow, Description: "Show detailed state, PR/CI status, and last phase report for a lane", InputSchema: model.SchemaFor[laneShowParams]()},
+	{Name: toolConciergeDecisions, Description: "Query recent Dispatcher and Controller decisions and reasons", InputSchema: model.SchemaFor[decisionsSinceParams]()},
+	{Name: toolConciergePRStatus, Description: "Show PR number, head SHA, approval SHA, and merge status for a lane", InputSchema: model.SchemaFor[laneShowParams]()},
+	{Name: toolConciergeCIStatus, Description: "Show CI check state and recent CI events for a lane", InputSchema: model.SchemaFor[laneShowParams]()},
+	{Name: toolConciergeDirectiveSubmit, Description: "Submit an owner directive (standing, instruction, note) to the Store", InputSchema: model.SchemaFor[directiveSubmitParams]()},
 }
 
 // Answer runs the Concierge over the seeded Store to answer question for runID.
@@ -122,10 +131,9 @@ func (c *StoreConcierge) Answer(
 	var toolCalls []string
 	reg := model.NewToolRegistry()
 	for _, def := range conciergeToolDefs {
-		d := def
-		reg.Register(d, func(callCtx context.Context, raw json.RawMessage) (string, error) {
-			toolCalls = append(toolCalls, d.Name)
-			return executeConciergeTool(callCtx, st, drv, clk, runID, d.Name, raw)
+		reg.Register(def, func(callCtx context.Context, raw json.RawMessage) (string, error) {
+			toolCalls = append(toolCalls, def.Name)
+			return executeConciergeTool(callCtx, st, drv, clk, runID, def.Name, raw)
 		})
 	}
 
@@ -225,11 +233,8 @@ func buildConciergeStatusView(
 				age,
 				ln.Title,
 			)
-			if drv != nil && ln.TerminalID != "" {
-				if rep, rErr := drv.ReadReport(ctx, runID, ln.ID, ln.TerminalID); rErr == nil && rep != nil {
-					fmt.Fprintf(&b, "  report(outcome=%s, breaks=%q, reason=%q, summary=%q)\n",
-						rep.Outcome, rep.Breaks, rep.Reason, rep.Summary)
-				}
+			if repLine := readLaneReportSummary(ctx, drv, runID, *ln); repLine != "" {
+				fmt.Fprintf(&b, "  %s\n", repLine)
 			}
 		}
 	}
@@ -262,6 +267,18 @@ func buildConciergeStatusView(
 	return b.String(), nil
 }
 
+func readLaneReportSummary(ctx context.Context, drv lane.LaneDriver, runID string, ln lane.Lane) string {
+	if drv == nil || ln.TerminalID == "" {
+		return ""
+	}
+	rep, err := drv.ReadReport(ctx, runID, ln.ID, ln.TerminalID)
+	if err != nil || rep == nil {
+		return ""
+	}
+	return fmt.Sprintf("report(outcome=%s, breaks=%q, reason=%q, summary=%q)",
+		rep.Outcome, rep.Breaks, rep.Reason, rep.Summary)
+}
+
 func executeConciergeTool(
 	ctx context.Context,
 	st store.Store,
@@ -271,9 +288,9 @@ func executeConciergeTool(
 	raw json.RawMessage,
 ) (string, error) {
 	switch toolName {
-	case "status":
+	case toolConciergeStatus:
 		return buildConciergeStatusView(ctx, st, drv, clk, runID)
-	case "lane.show", "pr.status", "ci.status":
+	case toolConciergeLaneShow, toolConciergePRStatus, toolConciergeCIStatus:
 		var p laneShowParams
 		if len(raw) > 0 {
 			_ = json.Unmarshal(raw, &p)
@@ -284,13 +301,11 @@ func executeConciergeTool(
 		}
 		out := fmt.Sprintf("lane=%s status=%s phase=%s round=%d item=%s pr=#%d pr_head=%s approval_sha=%s checks=%s merge_sha=%s title=%q",
 			ln.ID, ln.Status, ln.Phase, ln.Round, ln.ItemID, ln.PR, ln.PRHead, ln.ApprovalSHA, ln.Checks, ln.MergeSHA, ln.Title)
-		if drv != nil && ln.TerminalID != "" {
-			if rep, rErr := drv.ReadReport(ctx, runID, ln.ID, ln.TerminalID); rErr == nil && rep != nil {
-				out += fmt.Sprintf("\nreport: outcome=%s breaks=%q reason=%q summary=%q", rep.Outcome, rep.Breaks, rep.Reason, rep.Summary)
-			}
+		if repLine := readLaneReportSummary(ctx, drv, runID, *ln); repLine != "" {
+			out += "\n" + repLine
 		}
 		return out, nil
-	case "decisions.since":
+	case toolConciergeDecisions:
 		var p decisionsSinceParams
 		if len(raw) > 0 {
 			_ = json.Unmarshal(raw, &p)
@@ -309,7 +324,7 @@ func executeConciergeTool(
 			lines = append(lines, fmt.Sprintf("seq=%d tool=%s lane=%s reason=%q result=%q", d.Seq, d.Tool, d.LaneID, d.Reason, d.Result))
 		}
 		return strings.Join(lines, "\n"), nil
-	case "directive.submit":
+	case toolConciergeDirectiveSubmit:
 		var p directiveSubmitParams
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return "", err
