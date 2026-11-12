@@ -317,12 +317,20 @@ func TestDispatch_OnePrimaryActionPerBatch(t *testing.T) {
 			wantAccepted: []string{dispatcher.ToolBacklogAdd, dispatcher.ToolLaneSpawn},
 		},
 		{
-			name: "AddThenSpawnOfOtherItemIsRejected",
+			name: "AddThenSpawnOfOtherItemIsAllowed",
 			calls: []model.ToolCall{
 				{ID: "t1", Name: dispatcher.ToolBacklogAdd, Input: json.RawMessage(`{"id":"item-new","title":"new","reason":"r"}`)},
 				{ID: "t2", Name: dispatcher.ToolLaneSpawn, Input: json.RawMessage(`{"item_id":"item-other","brief":"do it","reason":"r"}`)},
 			},
-			wantAccepted: []string{dispatcher.ToolBacklogAdd},
+			wantAccepted: []string{dispatcher.ToolBacklogAdd, dispatcher.ToolLaneSpawn},
+		},
+		{
+			name: "SpawnThenRetryIsRejected",
+			calls: []model.ToolCall{
+				{ID: "t1", Name: dispatcher.ToolLaneSpawn, Input: json.RawMessage(`{"item_id":"item-other","brief":"do it","reason":"r"}`)},
+				{ID: "t2", Name: dispatcher.ToolLaneStop, Input: json.RawMessage(`{"lane_id":"lane-a","reason":"r"}`)},
+			},
+			wantAccepted: []string{dispatcher.ToolLaneSpawn},
 			wantRejected: 1,
 		},
 	}
