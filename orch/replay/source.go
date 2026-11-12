@@ -59,8 +59,8 @@ func LoadSourceExcerpt() (*SourceExcerpt, error) {
 // ValidateSources checks that every label in ds is backed by the excerpt:
 //   - every cited source id (moment, question, baseline) is a record in the excerpt;
 //   - an owner_quote is a verbatim substring of a cited record;
-//   - the first cited record of an owner_quote or owner_answer source is
-//     owner-authored (from_kind user), or it is the cited record that holds the quote;
+//   - an owner_answer moment cites at least one owner-authored record (from_kind user);
+//   - a question cites only owner-authored records;
 //   - every target a label expects (lane ids or item-<lane> ids) names a lane
 //     in the excerpt's run records for that run.
 func ValidateSources(ds *Dataset, ex *SourceExcerpt) error {
@@ -79,21 +79,20 @@ func ValidateSources(ds *Dataset, ex *SourceExcerpt) error {
 	for _, l := range ex.Lanes {
 		lanes[l.Run+"/"+l.ID] = struct{}{}
 	}
-	checkSource := func(what, run string, src Source) error {
-		for _, id := range src.IDs {
+	checkIDs := func(what string, ids []string) error {
+		for _, id := range ids {
 			if _, ok := records[id]; !ok {
 				return fmt.Errorf("orch/replay: %s cites %q which is not in the source excerpt", what, id)
 			}
 		}
+		return nil
+	}
+	checkSource := func(what, run string, src Source) error {
+		if err := checkIDs(what, src.IDs); err != nil {
+			return err
+		}
 		if src.Evidence == EvidenceOwnerQuote {
-			found := false
-			for _, id := range src.IDs {
-				if strings.Contains(records[id].Body, src.OwnerQuote) {
-					found = true
-					break
-				}
-			}
-			if !found {
+			if !slices.ContainsFunc(src.IDs, func(id string) bool { return strings.Contains(records[id].Body, src.OwnerQuote) }) {
 				return fmt.Errorf("orch/replay: %s owner_quote %q is not verbatim in any cited record", what, src.OwnerQuote)
 			}
 		}
@@ -115,10 +114,8 @@ func ValidateSources(ds *Dataset, ex *SourceExcerpt) error {
 		if err := checkSource(what, m.RunID, m.Source); err != nil {
 			return err
 		}
-		for _, id := range m.Baseline.SourceIDs {
-			if _, ok := records[id]; !ok {
-				return fmt.Errorf("orch/replay: %s baseline cites %q which is not in the source excerpt", what, id)
-			}
+		if err := checkIDs(what+" baseline", m.Baseline.SourceIDs); err != nil {
+			return err
 		}
 		if m.Source.Evidence == EvidenceOwnerAnswer && !slices.ContainsFunc(m.Source.IDs, func(id string) bool { return records[id].FromKind == "user" }) {
 			return fmt.Errorf("orch/replay: %s claims an owner answer but cites no owner-authored record", m.ID)

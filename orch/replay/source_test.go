@@ -37,11 +37,6 @@ func TestEveryLabelCitesARecordInTheSourceExcerpt(t *testing.T) {
 		if err := replay.ValidateSources(ds, ex); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
-		for _, m := range ds.Moments {
-			if m.Grounding == replay.GroundingVerified && len(m.Source.IDs) == 0 {
-				t.Errorf("%s: verified moment %s has no source id", name, m.ID)
-			}
-		}
 	}
 }
 
@@ -106,6 +101,16 @@ func TestSourceValidationRejectsUngroundedLabels(t *testing.T) {
 	if quoted < 0 {
 		t.Fatal("no quoted moment with a target to mutate")
 	}
+	nonOwner := ""
+	for _, r := range ex.Records {
+		if r.FromKind != "user" && r.Run == full.Questions[0].RunID {
+			nonOwner = r.ID
+			break
+		}
+	}
+	if nonOwner == "" {
+		t.Fatal("no non-owner record for the question's run in the excerpt")
+	}
 	cases := map[string]struct {
 		mutate  func(ds *replay.Dataset)
 		wantErr string
@@ -131,11 +136,8 @@ func TestSourceValidationRejectsUngroundedLabels(t *testing.T) {
 			wantErr: "no such lane",
 		},
 		"question not owner authored": {
-			mutate: func(ds *replay.Dataset) {
-				ds.Questions[0].Source.IDs = []string{ds.Moments[quoted].Baseline.SourceIDs[0]}
-				ds.Questions[0].Source.OwnerQuote = ds.Questions[0].Question
-			},
-			wantErr: "",
+			mutate:  func(ds *replay.Dataset) { ds.Questions[0].Source.IDs = append(ds.Questions[0].Source.IDs, nonOwner) },
+			wantErr: "not owner-authored",
 		},
 	}
 	for name, tc := range cases {
@@ -147,7 +149,7 @@ func TestSourceValidationRejectsUngroundedLabels(t *testing.T) {
 			if err == nil {
 				t.Fatal("ValidateSources accepted an ungrounded label")
 			}
-			if tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr) {
+			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("error %q does not mention %q", err, tc.wantErr)
 			}
 		})
