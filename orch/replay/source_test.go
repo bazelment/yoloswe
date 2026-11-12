@@ -2,6 +2,7 @@ package replay_test
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -111,10 +112,18 @@ func TestSourceValidationRejectsUngroundedLabels(t *testing.T) {
 	if nonOwner == "" {
 		t.Fatal("no non-owner record for the question's run in the excerpt")
 	}
+	oneWay := oneWayMoment(t, full)
 	cases := map[string]struct {
 		mutate  func(ds *replay.Dataset)
 		wantErr string
 	}{
+		"owner answer with no attribution to the owner": {
+			// Only the card: its from_kind is user, but nothing says the owner decided.
+			mutate: func(ds *replay.Dataset) {
+				ds.Moments[oneWay].Source.IDs = ds.Moments[oneWay].Source.IDs[:1]
+			},
+			wantErr: "attributes the answer to the owner",
+		},
 		"source id missing from the excerpt": {
 			mutate:  func(ds *replay.Dataset) { ds.Moments[quoted].Source.IDs = []string{"s:00000000"} },
 			wantErr: "not in the source excerpt",
@@ -151,6 +160,53 @@ func TestSourceValidationRejectsUngroundedLabels(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("error %q does not mention %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// oneWayMoment returns the index of the first owner_only_one_way moment.
+func oneWayMoment(t *testing.T, ds *replay.Dataset) int {
+	t.Helper()
+	i := slices.IndexFunc(ds.Moments, func(m replay.JudgmentMoment) bool { return m.Category == replay.CategoryOwnerOnlyOneWay })
+	if i < 0 {
+		t.Fatal("no owner_only_one_way moment")
+	}
+	return i
+}
+
+// TestOneWayLabelNeedsAOneWayCard: the card cited by an owner_only_one_way
+// moment must be marked ONE-WAY. Two cards the first rebuild labelled this way
+// said "Not one-way" and "(two-way)" in their own text.
+func TestOneWayLabelNeedsAOneWayCard(t *testing.T) {
+	t.Parallel()
+	ex, err := replay.LoadSourceExcerpt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := replay.LoadDefaultDataset()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := &full.Moments[oneWayMoment(t, full)]
+	for name, card := range map[string]string{
+		"not one-way":  "Ask 19 (by 23:00Z): S2 crash guarantee? Not one-way.",
+		"two-way":      "Ask D1 (two-way). Why now: ONE-WAY for cost only if (c).",
+		"never marked": "Q4: may S2 re-enable rely on keep-parked? (a) and (b) are reversible.",
+		"one-way: no":  "Recommendation: (b). ONE-WAY: no.",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			mutated := *ex
+			mutated.Records = slices.Clone(ex.Records)
+			for i := range mutated.Records {
+				if mutated.Records[i].ID == target.Source.IDs[0] {
+					mutated.Records[i].Body = card
+				}
+			}
+			err := replay.ValidateSources(full, &mutated)
+			if err == nil || !strings.Contains(err.Error(), "not marked ONE-WAY") {
+				t.Fatalf("ValidateSources = %v, want a 'not marked ONE-WAY' error", err)
 			}
 		})
 	}
