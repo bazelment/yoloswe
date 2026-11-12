@@ -847,12 +847,18 @@ func canonicalizeAskDefault(options []string, def string) ([]string, string) {
 	if def == "" || len(options) == 0 {
 		return options, def
 	}
-	for _, opt := range options {
-		if strings.EqualFold(strings.TrimSpace(opt), def) {
-			return options, opt
+	// Options are trimmed so the default, which applyOwnerAsk also trims, still
+	// compares equal to its option under controller.OwnerAsk.Validate.
+	trimmed := make([]string, len(options))
+	for i, opt := range options {
+		trimmed[i] = strings.TrimSpace(opt)
+	}
+	for _, opt := range trimmed {
+		if strings.EqualFold(opt, def) {
+			return trimmed, opt
 		}
 	}
-	return append(slices.Clone(options), def), def
+	return append(trimmed, def), def
 }
 
 func checkOwnerAsk(st *StateView, act ProposedAction) error {

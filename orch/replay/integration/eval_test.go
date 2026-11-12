@@ -57,7 +57,7 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 		subset = true
 	}
 	if raw := strings.TrimSpace(os.Getenv("ORCH_REPLAY_MOMENTS")); raw != "" {
-		if ds, err = ds.SelectMoments(strings.Split(raw, ",")); err != nil {
+		if ds, err = ds.SelectMoments(splitIDs(raw)); err != nil {
 			t.Fatalf("select moments: %v", err)
 		}
 		subset = true
@@ -146,4 +146,15 @@ func printSplitReports(rep *replay.EvalReport) {
 		sub := replay.ComputeReport(moments, nil)
 		fmt.Printf("\n--- %s split (%d moments; Concierge questions are scored on the full set only) ---\n%s", half.name, len(moments), sub.FormatReport())
 	}
+}
+
+// splitIDs splits a comma-separated id list, trimming space and dropping empties.
+func splitIDs(raw string) []string {
+	var ids []string
+	for _, id := range strings.Split(raw, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }

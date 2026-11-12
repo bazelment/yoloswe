@@ -2,6 +2,7 @@ package dispatcher_test
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -205,6 +206,7 @@ func TestParseAction_OwnerAskCardShapes(t *testing.T) {
 	}{
 		{name: "DefaultOutsideOptionsBecomesOption", args: `{"question":"q","options":["a","b"],"default":"Design only","deadline":"30m"}`, wantDefault: "Design only", wantOptions: 3},
 		{name: "DefaultMatchedCaseInsensitively", args: `{"question":"q","options":["Alpha","Beta"],"default":" alpha ","deadline":"30m"}`, wantDefault: "Alpha", wantOptions: 2},
+		{name: "PaddedOptionIsTrimmedSoApplyAcceptsIt", args: `{"question":"q","options":[" Alpha ","Beta"],"default":"alpha","deadline":"30m"}`, wantDefault: "Alpha", wantOptions: 2},
 		{name: "ClockTimeDeadline", args: `{"question":"q","options":["a","b"],"default":"a","deadline":"05:30Z"}`, wantDefault: "a", wantOptions: 2},
 		{name: "DayDeadline", args: `{"question":"q","options":["a","b"],"default":"a","deadline":"2d"}`, wantDefault: "a", wantOptions: 2},
 		{name: "NoOptionsStillRejected", args: `{"question":"q","default":"a","deadline":"30m"}`, wantErr: "options are required"},
@@ -227,6 +229,11 @@ func TestParseAction_OwnerAskCardShapes(t *testing.T) {
 			}
 			if vErr != nil {
 				t.Fatalf("VetAction: %v", vErr)
+			}
+			// applyOwnerAsk trims Default and controller.OwnerAsk.Validate then needs
+			// an exact match among the options.
+			if !slices.Contains(act.OwnerAsk.Options, strings.TrimSpace(act.OwnerAsk.Default)) {
+				t.Fatalf("default %q is not exactly one of options %q", act.OwnerAsk.Default, act.OwnerAsk.Options)
 			}
 			if act.OwnerAsk.Default != tc.wantDefault || len(act.OwnerAsk.Options) != tc.wantOptions {
 				t.Fatalf("default=%q options=%v, want default %q and %d options", act.OwnerAsk.Default, act.OwnerAsk.Options, tc.wantDefault, tc.wantOptions)
@@ -300,7 +307,7 @@ func TestDispatch_OnePrimaryActionPerBatch(t *testing.T) {
 			wantRejected: 1,
 		},
 		{
-			name: "NoteFirstThenSpawnKeepsTheNote",
+			name: "NoteFirstThenPlannerRequestIsRejected",
 			calls: []model.ToolCall{
 				{ID: "t1", Name: dispatcher.ToolDirectiveNote, Input: json.RawMessage(`{"fact":"a rule","reason":"r"}`)},
 				{ID: "t2", Name: dispatcher.ToolPlannerRequest, Input: json.RawMessage(`{"reason":"replan"}`)},
@@ -325,7 +332,7 @@ func TestDispatch_OnePrimaryActionPerBatch(t *testing.T) {
 			wantAccepted: []string{dispatcher.ToolBacklogAdd, dispatcher.ToolLaneSpawn},
 		},
 		{
-			name: "SpawnThenRetryIsRejected",
+			name: "SpawnThenStopIsRejected",
 			calls: []model.ToolCall{
 				{ID: "t1", Name: dispatcher.ToolLaneSpawn, Input: json.RawMessage(`{"item_id":"item-other","brief":"do it","reason":"r"}`)},
 				{ID: "t2", Name: dispatcher.ToolLaneStop, Input: json.RawMessage(`{"lane_id":"lane-a","reason":"r"}`)},
