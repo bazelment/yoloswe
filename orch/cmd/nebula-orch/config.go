@@ -79,6 +79,7 @@ func (m RoleModels) withDefaults() RoleModels {
 
 // Config holds the runtime configuration for nebula-orch `run` and `chat`.
 type Config struct {
+	ModelProvider     string        `json:"model_provider,omitempty"`
 	Models            RoleModels    `json:"models"`
 	RunID             string        `json:"run_id,omitempty"`
 	Objective         string        `json:"objective,omitempty"`
@@ -111,6 +112,7 @@ type Config struct {
 }
 
 func (c Config) withDefaults() Config {
+	c.ModelProvider = cmp.Or(strings.TrimSpace(c.ModelProvider), strings.TrimSpace(os.Getenv("ORCH_MODEL_PROVIDER")))
 	c.Models = c.Models.withDefaults()
 	c.StoreSpec = cmp.Or(strings.TrimSpace(c.StoreSpec), DefaultStoreSpec)
 	c.DriverKind = cmp.Or(strings.ToLower(strings.TrimSpace(c.DriverKind)), DefaultDriverKind)
@@ -387,6 +389,20 @@ func openStore(cfg Config, clk clock.Clock) (store.Store, string, error) {
 func openModelClient(cfg Config, clk clock.Clock) (model.ModelClient, error) {
 	if strings.TrimSpace(cfg.ReplayPath) != "" {
 		return model.LoadFakeClient(cfg.ReplayPath)
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.ModelProvider), "openai") {
+		var opts []model.OpenAIClientOption
+		if clk != nil {
+			opts = append(opts, model.WithOpenAIClock(clk))
+		}
+		if strings.TrimSpace(cfg.LLMGatewayURL) != "" {
+			opts = append(opts, model.WithOpenAIBaseURL(cfg.LLMGatewayURL))
+		}
+		client := model.NewOpenAIClient(opts...)
+		if strings.TrimSpace(cfg.RecordPath) != "" {
+			return model.NewRecordingFakeClient(cfg.RecordPath, client), nil
+		}
+		return client, nil
 	}
 	var opts []model.ClientOption
 	if clk != nil {

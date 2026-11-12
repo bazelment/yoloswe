@@ -17,8 +17,14 @@ import (
 	"github.com/bazelment/yoloswe/orch/replay"
 )
 
-func liveClientFromEnv(t *testing.T) *model.HTTPClient {
+func liveClientFromEnv(t *testing.T) model.ModelClient {
 	t.Helper()
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("ORCH_MODEL_PROVIDER")), "openai") {
+		if strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) == "" && strings.TrimSpace(os.Getenv("NEBULA_LLM_KEY")) == "" {
+			t.Skip("skipping live OpenAI eval: no key")
+		}
+		return model.NewOpenAIClient(model.WithOpenAIMaxRetries(4), model.WithOpenAIRetryBackoff(500*time.Millisecond, 5*time.Second))
+	}
 	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) == "" &&
 		strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")) == "" &&
 		strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")) == "" {
@@ -70,7 +76,10 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 		}
 	}
 
-	modelName := cmp.Or(strings.TrimSpace(os.Getenv("ANTHROPIC_MODEL")), replay.DefaultEvalModel)
+	modelName := cmp.Or(strings.TrimSpace(os.Getenv("ORCH_MODEL")), strings.TrimSpace(os.Getenv("ANTHROPIC_MODEL")), replay.DefaultEvalModel)
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("ORCH_MODEL_PROVIDER")), "openai") && strings.TrimSpace(os.Getenv("ORCH_MODEL")) == "" {
+		modelName = "gpt-6.1-sol"
+	}
 	concierge := replay.NewStoreConcierge(client)
 	concierge.Model = modelName
 
