@@ -9,6 +9,7 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -129,12 +130,8 @@ type Config struct {
 }
 
 func (c Config) withDefaults() Config {
-	if c.HolderID == "" {
-		c.HolderID = DefaultHolderID
-	}
-	if c.Consumer == "" {
-		c.Consumer = DefaultConsumer
-	}
+	c.HolderID = cmp.Or(c.HolderID, DefaultHolderID)
+	c.Consumer = cmp.Or(c.Consumer, DefaultConsumer)
 	if c.LeaseTTL <= 0 {
 		c.LeaseTTL = DefaultLeaseTTL
 	}
@@ -345,17 +342,11 @@ func (c *Controller) Run(ctx context.Context) error {
 		case <-runCtx.Done():
 			return nil
 		case <-hbTicker.C():
-			if err := c.Step(runCtx); err != nil && !errors.Is(err, store.ErrLeaseHeld) && !errors.Is(err, ErrControllerStopped) {
-				return err
-			}
 		case <-pollTicker.C():
-			if err := c.Step(runCtx); err != nil && !errors.Is(err, store.ErrLeaseHeld) && !errors.Is(err, ErrControllerStopped) {
-				return err
-			}
 		case <-c.wakeCh:
-			if err := c.Step(runCtx); err != nil && !errors.Is(err, store.ErrLeaseHeld) && !errors.Is(err, ErrControllerStopped) {
-				return err
-			}
+		}
+		if err := c.Step(runCtx); err != nil && !errors.Is(err, store.ErrLeaseHeld) && !errors.Is(err, ErrControllerStopped) {
+			return err
 		}
 	}
 }
@@ -433,7 +424,7 @@ func (c *Controller) StartLane(ctx context.Context, laneID string) error {
 	if err != nil {
 		return err
 	}
-	firstName := r.FirstPhase()
+	firstName := cmp.Or(ln.Phase, r.FirstPhase())
 	firstPhase, ok := r.Phase(firstName)
 	if !ok {
 		return fmt.Errorf("orch/controller: recipe %q has no first phase", r.Name)
@@ -452,9 +443,7 @@ func (c *Controller) AskOwner(ctx context.Context, ask OwnerAsk) error {
 	if c.killed {
 		return ErrControllerStopped
 	}
-	if ask.RunID == "" {
-		ask.RunID = c.cfg.RunID
-	}
+	ask.RunID = cmp.Or(ask.RunID, c.cfg.RunID)
 	if err := ask.Validate(); err != nil {
 		return err
 	}
@@ -518,9 +507,12 @@ func (c *Controller) AnswerOwnerAsk(ctx context.Context, askID, chosenOption str
 	if err := c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dir.ID, store.DirectiveHandled); err != nil {
 		return err
 	}
+	return c.applyOwnerAskResolution(ctx, ask, "ask-answer-"+ask.ID, chosenOption, chosenOption, "")
+}
 
-	ansDir := store.Directive{
-		ID:     "ask-answer-" + ask.ID,
+func (c *Controller) applyOwnerAskResolution(ctx context.Context, ask OwnerAsk, directiveID, chosenOption, steerMsg, eventID string) error {
+	resDir := store.Directive{
+		ID:     directiveID,
 		RunID:  c.cfg.RunID,
 		Kind:   store.DirectiveInstruction,
 		Source: store.DirectiveSourceOwner,
@@ -529,30 +521,35 @@ func (c *Controller) AnswerOwnerAsk(ctx context.Context, askID, chosenOption str
 		Text:   chosenOption,
 		Status: store.DirectiveActive,
 	}
-	if err := c.store.Directives().Add(ctx, ansDir); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+	if err := c.store.Directives().Add(ctx, resDir); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		return err
 	}
-
-	if ask.LaneID != "" {
-		if ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ask.LaneID); err == nil {
-			if ln.SessionID != "" || ln.TerminalID != "" {
-				if err := c.driver.Steer(ctx, lane.SteerRequest{
-					RunID:      c.cfg.RunID,
-					LaneID:     ln.ID,
-					SessionID:  ln.SessionID,
-					TerminalID: ln.TerminalID,
-					Message:    chosenOption,
-				}); err != nil {
-					return err
-				}
-			}
-			if ln.Status == lane.StatusBlocked {
-				ln.Status = lane.StatusRunning
-				ln.LastEventAt = c.clock.Now().UTC()
-				if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
-					return err
-				}
-			}
+	if ask.LaneID == "" {
+		return nil
+	}
+	ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ask.LaneID)
+	if err != nil {
+		return nil
+	}
+	if ln.SessionID != "" || ln.TerminalID != "" {
+		if err := c.driver.Steer(ctx, lane.SteerRequest{
+			RunID:      c.cfg.RunID,
+			LaneID:     ln.ID,
+			SessionID:  ln.SessionID,
+			TerminalID: ln.TerminalID,
+			Message:    steerMsg,
+		}); err != nil {
+			return err
+		}
+	}
+	if ln.Status == lane.StatusBlocked {
+		ln.Status = lane.StatusRunning
+		if eventID != "" {
+			ln.LastEventID = eventID
+		}
+		ln.LastEventAt = c.clock.Now().UTC()
+		if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -776,10 +773,7 @@ func (c *Controller) reconcilePlannedLanes(ctx context.Context) error {
 		if r.Limits.MaxConcurrentLanes > 0 && activeCount >= r.Limits.MaxConcurrentLanes {
 			break
 		}
-		firstName := ln.Phase
-		if firstName == "" {
-			firstName = r.FirstPhase()
-		}
+		firstName := cmp.Or(ln.Phase, r.FirstPhase())
 		firstPhase, ok := r.Phase(firstName)
 		if !ok {
 			continue
@@ -853,6 +847,7 @@ func (c *Controller) detectStalls(ctx context.Context) error {
 func (c *Controller) checkOwnerAsks(ctx context.Context) error {
 	dirs, err := c.store.Directives().List(ctx, store.DirectiveFilter{
 		RunID:      c.cfg.RunID,
+		Kinds:      []store.DirectiveKind{store.DirectiveInstruction},
 		ActiveOnly: false,
 	})
 	if err != nil {
@@ -1002,11 +997,7 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 	if rep.Checks != "" {
 		ln.Checks = rep.Checks
 	} else if rep.CIGreen != nil {
-		if *rep.CIGreen {
-			ln.Checks = "green"
-		} else {
-			ln.Checks = "red"
-		}
+		ln.Checks = boolToChecks(*rep.CIGreen)
 	}
 
 	r, err := c.resolveRecipe(ctx, ln)
@@ -1017,23 +1008,37 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 	curPhase, hasPhase := r.Phase(ln.Phase)
 	if hasPhase && len(curPhase.ExitContract.AllowedOutcomes) > 0 {
 		if !slices.Contains(curPhase.ExitContract.AllowedOutcomes, string(rep.Outcome)) {
-			ln.Status = lane.StatusBlocked
-			if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
-				return store.EventClassUnclassified, err
-			}
-			return store.EventClassJudgment, nil
+			return c.blockLaneForJudgment(ctx, ln)
 		}
 	}
 
 	if rep.Outcome == lane.OutcomeDone && isReviewPhase(curPhase) {
-		if rep.HeadSHA != "" {
-			ln.ApprovalSHA = rep.HeadSHA
-		} else if ln.PRHead != "" {
-			ln.ApprovalSHA = ln.PRHead
-		}
+		ln.ApprovalSHA = cmp.Or(rep.HeadSHA, ln.PRHead, ln.ApprovalSHA)
 	}
 
 	return c.advanceByRecipe(ctx, ln, r, string(rep.Outcome), rep.Reason, rep.Breaks, ev)
+}
+
+func (c *Controller) blockLaneForJudgment(ctx context.Context, ln *lane.Lane) (store.EventClass, error) {
+	ln.Status = lane.StatusBlocked
+	if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+		return store.EventClassUnclassified, err
+	}
+	return store.EventClassJudgment, nil
+}
+
+func (c *Controller) escalateLane(ctx context.Context, ln *lane.Lane, reason, result string, args DecisionArgs) (store.EventClass, error) {
+	_, already, err := c.recordDecision(ctx, ToolLaneEscalate, ln.ID, reason, result, args)
+	if err != nil {
+		return store.EventClassUnclassified, err
+	}
+	if !already {
+		ln.Status = lane.StatusBlocked
+		if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+			return store.EventClassUnclassified, err
+		}
+	}
+	return store.EventClassJudgment, nil
 }
 
 func (c *Controller) advanceByRecipe(
@@ -1074,11 +1079,7 @@ func (c *Controller) advanceByRecipe(
 
 		// Outcomes like blocked or needs-input without a mechanical transition
 		// block the lane and escalate to the Judge.
-		ln.Status = lane.StatusBlocked
-		if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
-			return store.EventClassUnclassified, err
-		}
-		return store.EventClassJudgment, nil
+		return c.blockLaneForJudgment(ctx, ln)
 	}
 
 	delete(c.pendingVerdicts, ln.ID)
@@ -1087,19 +1088,11 @@ func (c *Controller) advanceByRecipe(
 	case recipe.TargetComplete:
 		if r.MergePolicy.RequireReviewPass && recipeHasReviewPhase(r) {
 			if (ln.PRHead != "" || ln.ApprovalSHA != "") && ln.ApprovalStale() {
-				ln.Status = lane.StatusBlocked
-				if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
-					return store.EventClassUnclassified, err
-				}
-				return store.EventClassJudgment, nil
+				return c.blockLaneForJudgment(ctx, ln)
 			}
 		}
 		if r.MergePolicy.RequireCIGreen && !ciGreen {
-			ln.Status = lane.StatusBlocked
-			if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
-				return store.EventClassUnclassified, err
-			}
-			return store.EventClassJudgment, nil
+			return c.blockLaneForJudgment(ctx, ln)
 		}
 
 		actionKey := completeActionKey(ln.ID, ln.Phase, round)
@@ -1120,9 +1113,7 @@ func (c *Controller) advanceByRecipe(
 		}
 		if !already {
 			ln.Status = lane.StatusDone
-			if ln.MergeSHA == "" {
-				ln.MergeSHA = ln.PRHead
-			}
+			ln.MergeSHA = cmp.Or(ln.MergeSHA, ln.PRHead)
 			if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
 				return store.EventClassUnclassified, err
 			}
@@ -1137,12 +1128,11 @@ func (c *Controller) advanceByRecipe(
 		return store.EventClassAuto, nil
 
 	case recipe.TargetEscalate:
-		actionKey := escalateActionKey(ln.ID, ln.Phase, round, ev.ID)
-		_, already, err := c.recordDecision(ctx, ToolLaneEscalate, ln.ID,
+		return c.escalateLane(ctx, ln,
 			fmt.Sprintf("escalated from %s on verdict %s at round %d", ln.Phase, verdict, round),
 			"escalated to judgment",
 			DecisionArgs{
-				ActionKey: actionKey,
+				ActionKey: escalateActionKey(ln.ID, ln.Phase, round, ev.ID),
 				EventID:   ev.ID,
 				FromPhase: ln.Phase,
 				ToPhase:   recipe.TargetEscalate,
@@ -1150,16 +1140,6 @@ func (c *Controller) advanceByRecipe(
 				Round:     round,
 			},
 		)
-		if err != nil {
-			return store.EventClassUnclassified, err
-		}
-		if !already {
-			ln.Status = lane.StatusBlocked
-			if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
-				return store.EventClassUnclassified, err
-			}
-		}
-		return store.EventClassJudgment, nil
 
 	default:
 		targetPhase, ok := r.Phase(mech.To)
@@ -1168,11 +1148,7 @@ func (c *Controller) advanceByRecipe(
 		}
 		if hasGate(targetPhase, "review_approved") && r.MergePolicy.RequireReviewPass && recipeHasReviewPhase(r) {
 			if (ln.PRHead != "" || ln.ApprovalSHA != "") && ln.ApprovalStale() {
-				ln.Status = lane.StatusBlocked
-				if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
-					return store.EventClassUnclassified, err
-				}
-				return store.EventClassJudgment, nil
+				return c.blockLaneForJudgment(ctx, ln)
 			}
 		}
 
@@ -1186,12 +1162,11 @@ func (c *Controller) advanceByRecipe(
 		}
 
 		if r.Limits.MaxRounds > 0 && nextRound > r.Limits.MaxRounds {
-			actionKey := escalateActionKey(ln.ID, ln.Phase, round, ev.ID)
-			_, already, err := c.recordDecision(ctx, ToolLaneEscalate, ln.ID,
+			return c.escalateLane(ctx, ln,
 				fmt.Sprintf("rework to %s round %d exceeds max_rounds %d", targetPhase.Name, nextRound, r.Limits.MaxRounds),
 				"round limit exceeded",
 				DecisionArgs{
-					ActionKey: actionKey,
+					ActionKey: escalateActionKey(ln.ID, ln.Phase, round, ev.ID),
 					EventID:   ev.ID,
 					FromPhase: ln.Phase,
 					ToPhase:   recipe.TargetEscalate,
@@ -1199,16 +1174,6 @@ func (c *Controller) advanceByRecipe(
 					Round:     round,
 				},
 			)
-			if err != nil {
-				return store.EventClassUnclassified, err
-			}
-			if !already {
-				ln.Status = lane.StatusBlocked
-				if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
-					return store.EventClassUnclassified, err
-				}
-			}
-			return store.EventClassJudgment, nil
 		}
 
 		note := reason
@@ -1252,10 +1217,7 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 	}
 
 	// If the terminal filed a valid phase report before exiting, process it as a report.
-	termID := payload.TerminalID
-	if termID == "" {
-		termID = ln.TerminalID
-	}
+	termID := cmp.Or(payload.TerminalID, ln.TerminalID)
 	if termID != "" && payload.ExitCode == 0 && payload.Error == "" {
 		if rep, err := c.driver.ReadReport(ctx, c.cfg.RunID, ln.ID, termID); err == nil && rep != nil && rep.Outcome.Valid() {
 			return c.handleLaneReport(ctx, ev)
@@ -1288,28 +1250,17 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		return store.EventClassAuto, nil
 	}
 
-	actionKey := escalateActionKey(ln.ID, ln.Phase, max(ln.Round, 1), ev.ID)
-	_, already, err := c.recordDecision(ctx, ToolLaneEscalate, ln.ID,
+	return c.escalateLane(ctx, ln,
 		fmt.Sprintf("phase %s exhausted %d attempts", curPhase.Name, maxAttempts),
 		"attempts exhausted",
 		DecisionArgs{
-			ActionKey: actionKey,
+			ActionKey: escalateActionKey(ln.ID, ln.Phase, max(ln.Round, 1), ev.ID),
 			EventID:   ev.ID,
 			Phase:     curPhase.Name,
 			Round:     max(ln.Round, 1),
 			Attempt:   curAttempt,
 		},
 	)
-	if err != nil {
-		return store.EventClassUnclassified, err
-	}
-	if !already {
-		ln.Status = lane.StatusBlocked
-		if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
-			return store.EventClassUnclassified, err
-		}
-	}
-	return store.EventClassJudgment, nil
 }
 
 func (c *Controller) handleCI(ctx context.Context, ev *store.Event) (store.EventClass, error) {
@@ -1342,11 +1293,7 @@ func (c *Controller) handleCI(ctx context.Context, ev *store.Event) (store.Event
 	case payload.Status != "":
 		ln.Checks = payload.Status
 	case payload.Green != nil:
-		if *payload.Green {
-			ln.Checks = "green"
-		} else {
-			ln.Checks = "red"
-		}
+		ln.Checks = boolToChecks(*payload.Green)
 	case strings.Contains(strings.ToLower(ev.Summary), "green") || strings.Contains(strings.ToLower(ev.Summary), "pass"):
 		ln.Checks = "green"
 	case strings.Contains(strings.ToLower(ev.Summary), "red") || strings.Contains(strings.ToLower(ev.Summary), "fail"):
@@ -1455,9 +1402,7 @@ func (c *Controller) handleOwnerAskExpired(ctx context.Context, ev *store.Event)
 	if ask.ID == "" {
 		return store.EventClassJudgment, nil
 	}
-	if ask.LaneID == "" {
-		ask.LaneID = ev.LaneID
-	}
+	ask.LaneID = cmp.Or(ask.LaneID, ev.LaneID)
 
 	// If the ask directive was already handled (e.g., answered by the owner), do not overwrite it.
 	dirID := ownerAskDirectiveID(ask.ID)
@@ -1489,46 +1434,8 @@ func (c *Controller) handleOwnerAskExpired(ctx context.Context, ev *store.Event)
 
 	_ = c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dirID, store.DirectiveHandled)
 
-	appliedDir := store.Directive{
-		ID:     "ask-default-" + ask.ID,
-		RunID:  c.cfg.RunID,
-		Kind:   store.DirectiveInstruction,
-		Source: store.DirectiveSourceOwner,
-		Scope:  ask.LaneID,
-		Ref:    ask.ID,
-		Text:   ask.Default,
-		Status: store.DirectiveActive,
-	}
-	if err := c.store.Directives().Add(ctx, appliedDir); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+	if err := c.applyOwnerAskResolution(ctx, ask, "ask-default-"+ask.ID, ask.Default, cmp.Or(ask.SteerNote, ask.Default), ev.ID); err != nil {
 		return store.EventClassUnclassified, err
-	}
-
-	if ask.LaneID != "" {
-		if ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ask.LaneID); err == nil {
-			steerMsg := ask.SteerNote
-			if steerMsg == "" {
-				steerMsg = ask.Default
-			}
-			if ln.SessionID != "" || ln.TerminalID != "" {
-				if err := c.driver.Steer(ctx, lane.SteerRequest{
-					RunID:      c.cfg.RunID,
-					LaneID:     ln.ID,
-					SessionID:  ln.SessionID,
-					TerminalID: ln.TerminalID,
-					Message:    steerMsg,
-				}); err != nil {
-					return store.EventClassUnclassified, err
-				}
-			}
-			if ln.Status == lane.StatusBlocked {
-				ln.Status = lane.StatusRunning
-				ln.LastEventID = ev.ID
-				ln.LastEventAt = c.clock.Now().UTC()
-				if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
-					return store.EventClassUnclassified, err
-				}
-			}
-		}
 	}
 	return store.EventClassAuto, nil
 }
@@ -1619,9 +1526,7 @@ func (c *Controller) startLanePhase(
 
 	now := c.clock.Now().UTC()
 	ln.Status = lane.StatusRunning
-	if ln.RecipeName == "" {
-		ln.RecipeName = r.Name
-	}
+	ln.RecipeName = cmp.Or(ln.RecipeName, r.Name)
 	if ln.RecipeVersion == 0 {
 		ln.RecipeVersion = max(r.Version, 1)
 	}
@@ -1708,46 +1613,21 @@ func (c *Controller) extractReport(ctx context.Context, ln *lane.Lane, ev store.
 			}
 		}
 	}
-	if payload.HeadSHA == "" && payload.Head != "" {
-		payload.HeadSHA = payload.Head
-	}
+	payload.HeadSHA = cmp.Or(payload.HeadSHA, payload.Head)
 
-	termID := payload.TerminalID
-	if termID == "" {
-		termID = ln.TerminalID
-	}
+	termID := cmp.Or(payload.TerminalID, ln.TerminalID)
 	if termID != "" && c.driver != nil {
 		if drvRep, err := c.driver.ReadReport(ctx, c.cfg.RunID, ln.ID, termID); err == nil && drvRep != nil {
-			if payload.Outcome == "" {
-				payload.Outcome = drvRep.Outcome
-			}
-			if payload.HeadSHA == "" {
-				payload.HeadSHA = drvRep.HeadSHA
-			}
-			if payload.PR == 0 {
-				payload.PR = drvRep.PR
-			}
-			if payload.Phase == "" {
-				payload.Phase = drvRep.Phase
-			}
-			if payload.Round == 0 {
-				payload.Round = drvRep.Round
-			}
-			if payload.Reason == "" {
-				payload.Reason = drvRep.Reason
-			}
-			if payload.For == "" {
-				payload.For = drvRep.For
-			}
-			if payload.Ask == "" {
-				payload.Ask = drvRep.Ask
-			}
-			if payload.Breaks == "" {
-				payload.Breaks = drvRep.Breaks
-			}
-			if payload.Summary == "" {
-				payload.Summary = drvRep.Summary
-			}
+			payload.Outcome = cmp.Or(payload.Outcome, drvRep.Outcome)
+			payload.HeadSHA = cmp.Or(payload.HeadSHA, drvRep.HeadSHA)
+			payload.PR = cmp.Or(payload.PR, drvRep.PR)
+			payload.Phase = cmp.Or(payload.Phase, drvRep.Phase)
+			payload.Round = cmp.Or(payload.Round, drvRep.Round)
+			payload.Reason = cmp.Or(payload.Reason, drvRep.Reason)
+			payload.For = cmp.Or(payload.For, drvRep.For)
+			payload.Ask = cmp.Or(payload.Ask, drvRep.Ask)
+			payload.Breaks = cmp.Or(payload.Breaks, drvRep.Breaks)
+			payload.Summary = cmp.Or(payload.Summary, drvRep.Summary)
 		}
 	}
 
@@ -1767,10 +1647,8 @@ func (c *Controller) enqueueJudgmentEvent(ev store.Event) {
 	if _, ok := c.dispatchedEvents[ev.ID]; ok {
 		return
 	}
-	for i := range c.pendingJudgment {
-		if c.pendingJudgment[i].ID == ev.ID {
-			return
-		}
+	if slices.ContainsFunc(c.pendingJudgment, func(e store.Event) bool { return e.ID == ev.ID }) {
+		return
 	}
 	now := c.clock.Now().UTC()
 	if len(c.pendingJudgment) == 0 {
@@ -1788,10 +1666,8 @@ func (c *Controller) flushJudgmentIfDue(ctx context.Context) error {
 		return nil
 	}
 	now := c.clock.Now().UTC()
-	for i := range c.pendingJudgment {
-		if c.pendingJudgment[i].Urgent {
-			return c.flushJudgment(ctx, "urgent bypass")
-		}
+	if slices.ContainsFunc(c.pendingJudgment, func(e store.Event) bool { return e.Urgent }) {
+		return c.flushJudgment(ctx, "urgent bypass")
 	}
 	if !now.Before(c.batchFirstAt.Add(c.cfg.JudgmentDebounce)) {
 		return c.flushJudgment(ctx, "debounce elapsed")
@@ -1841,6 +1717,13 @@ func (c *Controller) flushJudgment(ctx context.Context, reason string) error {
 	return nil
 }
 
+func boolToChecks(green bool) string {
+	if green {
+		return "green"
+	}
+	return "red"
+}
+
 func isCIGreen(checks string) bool {
 	switch strings.ToLower(strings.TrimSpace(checks)) {
 	case "green", "pass", "passed", "success", "ok", "true":
@@ -1867,21 +1750,13 @@ func isReviewPhase(p recipe.Phase) bool {
 }
 
 func recipeHasReviewPhase(r *recipe.Recipe) bool {
-	for _, p := range r.Phases {
-		if isReviewPhase(p) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(r.Phases, isReviewPhase)
 }
 
 func hasGate(p recipe.Phase, gateName string) bool {
-	for _, g := range p.Gates {
-		if g.Name == gateName {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(p.Gates, func(g recipe.Gate) bool {
+		return g.Name == gateName
+	})
 }
 
 func ownerAskDirectiveID(askID string) string {
