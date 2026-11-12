@@ -1,0 +1,35 @@
+# gazelle:ignore
+load("@rules_go//go:def.bzl", "go_test")
+
+# Manual Validation Gate 2 offline evaluation target that runs Dispatcher and
+# Concierge over the extracted historical dataset against a live Anthropic API
+# or llm-gateway endpoint and prints the Gate 2 scorecard.
+#
+# Run with:
+#   bazel test //orch/replay/integration:eval_test \
+#       --test_tag_filters=integration --test_output=streamed
+go_test(
+    name = "eval_test",
+    size = "large",
+    srcs = ["eval_test.go"],
+    env_inherit = [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "ANTHROPIC_MODEL",
+        "ORCH_REPLAY_CONCURRENCY",
+        "ORCH_REPLAY_INNER_LOOP_ONLY",
+    ],
+    gotags = ["integration"],
+    tags = [
+        "integration",
+        "local",
+        "manual",
+    ],
+    deps = [
+        "//orch/dispatcher",
+        "//orch/model",
+        "//orch/replay",
+    ],
+)

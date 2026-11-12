@@ -1,0 +1,603 @@
+{
+  "version": "gate2-v1",
+  "runs": [
+    "20261103-cicd-300",
+    "20261026-feedback",
+    "20261023-s1-main"
+  ],
+  "moments": [
+    {
+      "id": "cicd-300-m001",
+      "run_id": "20261103-cicd-300",
+      "timestamp": "2026-11-11T22:28:10Z",
+      "category": "stall_retry",
+      "description": "Lane cd-deploy-dev stalled in swe round 1 after wake cooldown exit 75; retry on round 2.",
+      "state": {
+        "run": {
+          "id": "20261103-cicd-300",
+          "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
+          "default_recipe": "default"
+        },
+        "backlog": [
+          {
+            "id": "item-cd-deploy-dev",
+            "run_id": "20261103-cicd-300",
+            "title": "Move cd-deploy-dev #5127 onto shared manifest validator",
+            "acceptance": "scripts/lint.sh and bazel test green on #5127",
+            "priority": "p0",
+            "status": "in_progress",
+            "lane_id": "cd-deploy-dev"
+          }
+        ],
+        "lanes": [
+          {
+            "id": "cd-deploy-dev",
+            "run_id": "20261103-cicd-300",
+            "item_id": "item-cd-deploy-dev",
+            "title": "Move cd-deploy-dev #5127 onto shared manifest validator",
+            "status": "blocked",
+            "phase": "swe",
+            "round": 1,
+            "attempt": 1,
+            "pr": 5127,
+            "pr_head": "a1b2c3d4",
+            "checks": "pending",
+            "last_event_at": "2026-11-11T21:35:00Z"
+          }
+        ]
+      },
+      "events": [
+        {
+          "id": "ev-cicd-m001",
+          "run_id": "20261103-cicd-300",
+          "kind": "stall",
+          "class": "judgment",
+          "lane_id": "cd-deploy-dev",
+          "source": "controller",
+          "summary": "lane cd-deploy-dev stalled in phase swe (round 1, attempt 1) after 53m10s (sw_phase wake cooldown exit 75); retry lane cd-deploy-dev in phase swe on round 2."
+        }
+      ],
+      "baseline": {
+        "tool": "lane.retry",
+        "target": "cd-deploy-dev",
+        "summary": "Retried cd-deploy-dev in swe round 2 after wake cooldown stall.",
+        "asked_owner": false
+      },
+      "owner_follow_up": {
+        "verdict": "endorsed",
+        "decide_dont_ask": false,
+        "forbid_owner_ask": true,
+        "expected_tools": ["lane.retry"],
+        "expected_targets": ["cd-deploy-dev"]
+      }
+    },
+    {
+      "id": "cicd-300-m002",
+      "run_id": "20261103-cicd-300",
+      "timestamp": "2026-11-11T20:55:00Z",
+      "category": "decide_dont_ask_steer",
+      "description": "Manifest schema clash between cd-deploy-dev (#5127) and merged cd-publish (#5124); steer cd-deploy-dev to use cd-publish schema without asking owner.",
+      "state": {
+        "run": {
+          "id": "20261103-cicd-300",
+          "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
+          "default_recipe": "default"
+        },
+        "directives": [
+          {
+            "id": "dir-decide-schema",
+            "run_id": "20261103-cicd-300",
+            "kind": "standing",
+            "source": "owner",
+            "text": "Decide, don't ask on internal schema or package clashes between lanes: align active lanes onto the already-merged contract.",
+            "status": "active"
+          }
+        ],
+        "backlog": [
+          {
+            "id": "item-cd-deploy-dev",
+            "run_id": "20261103-cicd-300",
+            "title": "Implement cd-deploy-dev workflow manifest validation",
+            "acceptance": "Uses shared manifest validator and passes CI",
+            "priority": "p0",
+            "status": "in_progress",
+            "lane_id": "cd-deploy-dev"
+          }
+        ],
+        "lanes": [
+          {
+            "id": "cd-publish",
+            "run_id": "20261103-cicd-300",
+            "title": "Publish shared release manifest validator schema",
+            "status": "done",
+            "phase": "review",
+            "round": 1,
+            "pr": 5124,
+            "pr_head": "9f8e7d6c",
+            "approval_sha": "9f8e7d6c",
+            "merge_sha": "9f8e7d6c",
+            "checks": "pass",
+            "last_event_at": "2026-11-11T20:40:00Z"
+          },
+          {
+            "id": "cd-deploy-dev",
+            "run_id": "20261103-cicd-300",
+            "item_id": "item-cd-deploy-dev",
+            "title": "Implement cd-deploy-dev workflow manifest validation",
+            "status": "running",
+            "phase": "swe",
+            "round": 1,
+            "attempt": 1,
+            "pr": 5127,
+            "pr_head": "b4c5d6e7",
+            "checks": "pending",
+            "last_event_at": "2026-11-11T20:54:00Z"
+          }
+        ]
+      },
+      "events": [
+        {
+          "id": "ev-cicd-m002",
+          "run_id": "20261103-cicd-300",
+          "kind": "mail",
+          "class": "judgment",
+          "lane_id": "cd-deploy-dev",
+          "source": "cd-deploy-dev",
+          "summary": "Lane cd-deploy-dev asks whether to keep its local manifest schema or adopt cd-publish's merged shared schema (#5124). Per standing directive, steer cd-deploy-dev to adopt cd-publish's shared schema."
+        }
+      ],
+      "baseline": {
+        "tool": "owner.ask",
+        "target": "cd-deploy-dev",
+        "summary": "Asked owner whether cd-deploy-dev should adopt cd-publish schema.",
+        "asked_owner": true
+      },
+      "owner_follow_up": {
+        "verdict": "corrected",
+        "owner_note": "Decide, don't ask: cd-publish already landed the shared schema; steer cd-deploy-dev to use it.",
+        "decide_dont_ask": true,
+        "forbid_owner_ask": true,
+        "expected_tools": ["lane.steer", "lane.retry"],
+        "expected_targets": ["cd-deploy-dev"]
+      }
+    },
+    {
+      "id": "feedback-m001",
+      "run_id": "20261026-feedback",
+      "timestamp": "2026-11-11T13:18:00Z",
+      "category": "spawn_ready",
+      "description": "Open P0 backlog item fb880-release-backup is ready and concurrency is well under cap; spawn lane.",
+      "state": {
+        "run": {
+          "id": "20261026-feedback",
+          "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions.",
+          "default_recipe": "default"
+        },
+        "backlog": [
+          {
+            "id": "fb880-release-backup",
+            "run_id": "20261026-feedback",
+            "title": "FB-880: code release --backup must refuse release when backup fails",
+            "description": "Data safety P0: ensure nebula code release --backup aborts release if backup creation fails or is skipped.",
+            "acceptance": "Unit and scoped integration tests proving release is refused when backup fails.",
+            "priority": "p0",
+            "status": "open"
+          }
+        ],
+        "lanes": [
+          {
+            "id": "fb858-idle-alert",
+            "run_id": "20261026-feedback",
+            "title": "FB-858: fix idle alert on sleeping session",
+            "status": "running",
+            "phase": "review",
+            "round": 3,
+            "attempt": 1,
+            "pr": 5031,
+            "pr_head": "77a88b99",
+            "checks": "pass",
+            "last_event_at": "2026-11-11T13:10:00Z"
+          }
+        ]
+      },
+      "events": [
+        {
+          "id": "ev-feedback-m001",
+          "run_id": "20261026-feedback",
+          "kind": "owner_msg",
+          "class": "judgment",
+          "source": "owner",
+          "summary": "P0 backlog item fb880-release-backup (code release --backup data safety) is open and ready with free lane capacity; spawn a worker lane for fb880-release-backup now."
+        }
+      ],
+      "baseline": {
+        "tool": "lane.spawn",
+        "target": "fb880-release-backup",
+        "summary": "Spawned lane fb880-release-backup for P0 data-safety fix.",
+        "asked_owner": false
+      },
+      "owner_follow_up": {
+        "verdict": "endorsed",
+        "decide_dont_ask": false,
+        "forbid_owner_ask": true,
+        "expected_tools": ["lane.spawn"],
+        "expected_targets": ["fb880-release-backup"]
+      }
+    },
+    {
+      "id": "feedback-m002",
+      "run_id": "20261026-feedback",
+      "timestamp": "2026-11-10T17:59:15Z",
+      "category": "replan_request",
+      "description": "Owner mail directs orchestrator to reassess goal and replan the backlog via planner.request.",
+      "state": {
+        "run": {
+          "id": "20261026-feedback",
+          "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions.",
+          "plan_ref": "post:feedback-reliability-v2",
+          "default_recipe": "default"
+        },
+        "backlog": [
+          {
+            "id": "fb748-health-repo-slug",
+            "run_id": "20261026-feedback",
+            "title": "FB-748: include repo slug in health check output",
+            "acceptance": "CLI test passes",
+            "priority": "p2",
+            "status": "in_progress",
+            "lane_id": "fb748-health-repo-slug"
+          }
+        ],
+        "lanes": [
+          {
+            "id": "fb748-health-repo-slug",
+            "run_id": "20261026-feedback",
+            "item_id": "fb748-health-repo-slug",
+            "title": "FB-748: include repo slug in health check output",
+            "status": "running",
+            "phase": "swe",
+            "round": 1,
+            "attempt": 1,
+            "pr": 4712,
+            "pr_head": "1234abcd",
+            "checks": "pass",
+            "last_event_at": "2026-11-10T17:50:00Z"
+          }
+        ]
+      },
+      "events": [
+        {
+          "id": "ev-feedback-m002",
+          "run_id": "20261026-feedback",
+          "kind": "owner_msg",
+          "class": "judgment",
+          "source": "owner",
+          "urgent": true,
+          "summary": "Owner directive: reassess the run goal and request a Planner turn (planner.request) to replan the backlog against plan_ref post:feedback-reliability-v2."
+        }
+      ],
+      "baseline": {
+        "tool": "planner.request",
+        "target": "post:feedback-reliability-v2",
+        "summary": "Requested planner turn to replan feedback backlog.",
+        "asked_owner": false
+      },
+      "owner_follow_up": {
+        "verdict": "endorsed",
+        "decide_dont_ask": false,
+        "forbid_owner_ask": true,
+        "expected_tools": ["planner.request"]
+      }
+    },
+    {
+      "id": "s1-main-m001",
+      "run_id": "20261023-s1-main",
+      "timestamp": "2026-11-09T05:42:25Z",
+      "category": "decide_dont_ask_split",
+      "description": "Lane sleep-copy-fsck-gate found unrelated defect fsck-refusal-branches; add separate backlog item instead of asking owner or bundling.",
+      "state": {
+        "run": {
+          "id": "20261023-s1-main",
+          "objective": "S1/S2 storage and lease reliability on main; one narrow PR per lane.",
+          "default_recipe": "default"
+        },
+        "directives": [
+          {
+            "id": "dir-one-pr-per-lane",
+            "run_id": "20261023-s1-main",
+            "kind": "standing",
+            "source": "owner",
+            "text": "Standing rule: keep each lane to one narrow PR; when a lane discovers a separate defect, split it into a new backlog item (backlog.add) without calling owner.ask.",
+            "status": "active"
+          }
+        ],
+        "backlog": [
+          {
+            "id": "item-sleep-copy-fsck-gate",
+            "run_id": "20261023-s1-main",
+            "title": "Gate sleep copy publication on e2fsck pass",
+            "acceptance": "Sleep copy refuses publication on fsck failure",
+            "priority": "p0",
+            "status": "in_progress",
+            "lane_id": "sleep-copy-fsck-gate"
+          }
+        ],
+        "lanes": [
+          {
+            "id": "sleep-copy-fsck-gate",
+            "run_id": "20261023-s1-main",
+            "item_id": "item-sleep-copy-fsck-gate",
+            "title": "Gate sleep copy publication on e2fsck pass",
+            "status": "running",
+            "phase": "swe",
+            "round": 1,
+            "attempt": 1,
+            "pr": 4228,
+            "pr_head": "c0ffee12",
+            "checks": "pass",
+            "last_event_at": "2026-11-09T05:40:00Z"
+          }
+        ]
+      },
+      "events": [
+        {
+          "id": "ev-s1-m001",
+          "run_id": "20261023-s1-main",
+          "kind": "lane_report",
+          "class": "judgment",
+          "lane_id": "sleep-copy-fsck-gate",
+          "source": "sleep-copy-fsck-gate",
+          "summary": "Lane sleep-copy-fsck-gate notes a separate defect in fsck refusal branch cleanup (id: fsck-refusal-branches) outside PR #4228. Per standing rule, add fsck-refusal-branches to the backlog with backlog.add."
+        }
+      ],
+      "baseline": {
+        "tool": "owner.ask",
+        "target": "sleep-copy-fsck-gate",
+        "summary": "Asked owner whether to bundle fsck-refusal-branches into #4228 or split into a new backlog item.",
+        "asked_owner": true
+      },
+      "owner_follow_up": {
+        "verdict": "corrected",
+        "owner_note": "Decide, don't ask: wrong lane, split fsck-refusal-branches into its own backlog item.",
+        "decide_dont_ask": true,
+        "forbid_owner_ask": true,
+        "expected_tools": ["backlog.add"],
+        "expected_targets": ["fsck-refusal-branches"]
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "cicd-300-q001",
+      "run_id": "20261103-cicd-300",
+      "timestamp": "2026-11-11T21:15:00Z",
+      "question": "Where are we on cicd-300 right now? Which lanes are running and what is blocked?",
+      "state": {
+        "run": {
+          "id": "20261103-cicd-300",
+          "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min."
+        },
+        "lanes": [
+          {
+            "id": "merge-red-check-guard",
+            "run_id": "20261103-cicd-300",
+            "title": "Enforce exact-head green checks before merge",
+            "status": "running",
+            "phase": "review",
+            "round": 4,
+            "pr": 5039,
+            "pr_head": "8811aa22",
+            "checks": "pass"
+          },
+          {
+            "id": "image-retention",
+            "run_id": "20261103-cicd-300",
+            "title": "Prune old container image tags in registry",
+            "status": "running",
+            "phase": "review",
+            "round": 1,
+            "pr": 5118,
+            "pr_head": "4455cc66",
+            "checks": "pass"
+          },
+          {
+            "id": "cd-deploy-dev",
+            "run_id": "20261103-cicd-300",
+            "title": "Move cd-deploy-dev onto shared manifest validator",
+            "status": "blocked",
+            "phase": "swe",
+            "round": 2,
+            "pr": 5127,
+            "pr_head": "a1b2c3d4",
+            "checks": "pending"
+          }
+        ]
+      },
+      "required_facts": [
+        {"label": "running lane merge-red-check-guard", "any_of": ["merge-red-check-guard", "#5039", "5039"]},
+        {"label": "running lane image-retention", "any_of": ["image-retention", "#5118", "5118"]},
+        {"label": "blocked lane cd-deploy-dev", "any_of": ["cd-deploy-dev", "#5127", "5127"]},
+        {"label": "cd-deploy-dev blocked status", "any_of": ["blocked", "swe"]}
+      ],
+      "forbidden_claims": [
+        "cd-deploy-dev is merged",
+        "#5127 merged"
+      ]
+    },
+    {
+      "id": "cicd-300-q002",
+      "run_id": "20261103-cicd-300",
+      "timestamp": "2026-11-11T21:20:00Z",
+      "question": "How is cd-deploy-dev doing and what PR is it working on?",
+      "state": {
+        "run": {
+          "id": "20261103-cicd-300",
+          "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day."
+        },
+        "lanes": [
+          {
+            "id": "cd-deploy-dev",
+            "run_id": "20261103-cicd-300",
+            "title": "Move cd-deploy-dev onto shared manifest validator",
+            "status": "running",
+            "phase": "swe",
+            "round": 2,
+            "pr": 5127,
+            "pr_head": "a1b2c3d4",
+            "checks": "pending"
+          }
+        ]
+      },
+      "required_facts": [
+        {"label": "lane name", "any_of": ["cd-deploy-dev"]},
+        {"label": "phase and round", "any_of": ["swe", "round 2", "r2"]},
+        {"label": "PR number", "any_of": ["5127", "#5127"]}
+      ],
+      "forbidden_claims": [
+        "status is done",
+        "already merged"
+      ]
+    },
+    {
+      "id": "feedback-q001",
+      "run_id": "20261026-feedback",
+      "timestamp": "2026-11-10T15:25:00Z",
+      "question": "Why is sl503-west-session-logs in rework and what is its PR status?",
+      "state": {
+        "run": {
+          "id": "20261026-feedback",
+          "objective": "Agent and swarm-tooling reliability."
+        },
+        "lanes": [
+          {
+            "id": "sl503-west-session-logs",
+            "run_id": "20261026-feedback",
+            "title": "Fix west session log router archive lifecycle safety",
+            "status": "running",
+            "phase": "swe",
+            "round": 2,
+            "pr": 4688,
+            "pr_head": "f1a279a9",
+            "checks": "pending"
+          }
+        ],
+        "decisions": [
+          {
+            "id": "dec-sl503-rework",
+            "run_id": "20261026-feedback",
+            "category": "judgment",
+            "actor": "dispatcher",
+            "lane_id": "sl503-west-session-logs",
+            "tool": "lane.retry",
+            "vetted": true,
+            "reason": "Review round 1 requested a real-router archive lifecycle-safety test",
+            "result": "Retried sl503-west-session-logs in swe round 2"
+          }
+        ]
+      },
+      "required_facts": [
+        {"label": "lane sl503-west-session-logs", "any_of": ["sl503-west-session-logs"]},
+        {"label": "PR 4688", "any_of": ["4688", "#4688"]},
+        {"label": "rework reason", "any_of": ["real-router", "archive lifecycle", "lifecycle-safety", "review"]}
+      ],
+      "forbidden_claims": [
+        "#4688 is merged"
+      ]
+    },
+    {
+      "id": "s1-main-q001",
+      "run_id": "20261023-s1-main",
+      "timestamp": "2026-10-23T22:05:00Z",
+      "question": "Where are we on the S1 lease series? Did ml-s1-lease merge and what is ml-s1-log doing?",
+      "state": {
+        "run": {
+          "id": "20261023-s1-main",
+          "objective": "Reaper fix + S1/lease series on main."
+        },
+        "lanes": [
+          {
+            "id": "ml-s1-lease",
+            "run_id": "20261023-s1-main",
+            "title": "main PR-2: session epoch/lease schema and store",
+            "status": "done",
+            "phase": "integrate",
+            "round": 1,
+            "pr": 1648,
+            "pr_head": "d2b8d9ce",
+            "approval_sha": "d2b8d9ce",
+            "merge_sha": "b9aef18a",
+            "checks": "pass"
+          },
+          {
+            "id": "ml-s1-log",
+            "run_id": "20261023-s1-main",
+            "title": "main PR-3: S1 sequenced epoch-fenced transcript log",
+            "status": "running",
+            "phase": "review",
+            "round": 1,
+            "pr": 1655,
+            "pr_head": "efbb345f",
+            "checks": "pass"
+          }
+        ]
+      },
+      "required_facts": [
+        {"label": "ml-s1-lease merged PR #1648", "any_of": ["1648", "#1648", "b9aef18a"]},
+        {"label": "ml-s1-lease done/merged", "any_of": ["merged", "done"]},
+        {"label": "ml-s1-log PR #1655", "any_of": ["1655", "#1655"]},
+        {"label": "ml-s1-log in review", "any_of": ["review"]}
+      ],
+      "forbidden_claims": [
+        "ml-s1-lease is blocked",
+        "ml-s1-log has already merged"
+      ]
+    },
+    {
+      "id": "s1-main-q002",
+      "run_id": "20261023-s1-main",
+      "timestamp": "2026-11-03T00:20:00Z",
+      "question": "Why is ml-s2-fsync-contract blocked?",
+      "state": {
+        "run": {
+          "id": "20261023-s1-main",
+          "objective": "S1/S2 storage and lease reliability on main."
+        },
+        "lanes": [
+          {
+            "id": "ml-s2-fsync-contract",
+            "run_id": "20261023-s1-main",
+            "title": "Enforce S2 fsync durability contract before publish",
+            "status": "blocked",
+            "phase": "review",
+            "round": 1,
+            "pr": 3061,
+            "pr_head": "7f6e5d4c",
+            "checks": "failed"
+          }
+        ],
+        "decisions": [
+          {
+            "id": "dec-fsync-ci-fail",
+            "run_id": "20261023-s1-main",
+            "category": "auto",
+            "actor": "controller",
+            "lane_id": "ml-s2-fsync-contract",
+            "tool": "ci.poll",
+            "vetted": true,
+            "reason": "CI check failed on PR #3061 (head 7f6e5d4c)",
+            "result": "wait-failed: ci:3061 state=failed"
+          }
+        ]
+      },
+      "required_facts": [
+        {"label": "lane ml-s2-fsync-contract", "any_of": ["ml-s2-fsync-contract"]},
+        {"label": "PR #3061", "any_of": ["3061", "#3061"]},
+        {"label": "CI failed", "any_of": ["ci", "check", "failed"]}
+      ],
+      "forbidden_claims": [
+        "checks are green",
+        "checks passed"
+      ]
+    }
+  ]
+}

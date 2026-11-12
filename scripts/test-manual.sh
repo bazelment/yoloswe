@@ -9,8 +9,14 @@ cd "${WORKSPACE_ROOT}"
 
 echo "=== Discovering manual tests ==="
 
+# Explicitly registered manual evaluation / integration targets
+REGISTERED_MANUAL_TESTS=(
+    "//orch/replay/integration:eval_test"
+)
+
 # Find all test targets with the "manual" tag
-MANUAL_TESTS=$(bazel query 'attr(tags, "manual", tests(//...))' 2>/dev/null)
+QUERY_MANUAL_TESTS=$(bazel query 'attr(tags, "manual", tests(//...))' 2>/dev/null || true)
+MANUAL_TESTS=$(printf "%s\n%s\n" "${QUERY_MANUAL_TESTS}" "${REGISTERED_MANUAL_TESTS[@]}" | sed '/^$/d' | sort -u)
 
 if [[ -z "${MANUAL_TESTS}" ]]; then
     echo "No manual tests found."
