@@ -162,28 +162,39 @@ func TestDatasetValidateRequiresSourceOnVerifiedMoments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cases := map[string]func(m *replay.JudgmentMoment){
-		"no source ids":    func(m *replay.JudgmentMoment) { m.Source.IDs = nil },
-		"unknown relation": func(m *replay.JudgmentMoment) { m.Source.Relation = "inferred" },
-		"unknown evidence": func(m *replay.JudgmentMoment) { m.Source.Evidence = "orchestrator_did_it" },
-		"quote evidence, no quote": func(m *replay.JudgmentMoment) {
+	cases := []struct {
+		mutate  func(m *replay.JudgmentMoment)
+		name    string
+		wantErr string
+	}{
+		{name: "no source ids", wantErr: "no source ids", mutate: func(m *replay.JudgmentMoment) { m.Source.IDs = nil }},
+		{name: "unknown relation", wantErr: "source relation", mutate: func(m *replay.JudgmentMoment) { m.Source.Relation = "inferred" }},
+		{name: "unknown evidence", wantErr: "unknown source evidence", mutate: func(m *replay.JudgmentMoment) { m.Source.Evidence = "orchestrator_did_it" }},
+		{name: "quote evidence, no quote", wantErr: "without a quote", mutate: func(m *replay.JudgmentMoment) {
 			m.Source.Evidence = replay.EvidenceOwnerQuote
 			m.Source.OwnerQuote = ""
-		},
-		"no label basis":     func(m *replay.JudgmentMoment) { m.Source.LabelBasis = "" },
-		"no baseline source": func(m *replay.JudgmentMoment) { m.Baseline.SourceIDs = nil },
-		"owner correction shown to the model": func(m *replay.JudgmentMoment) {
+		}},
+		{name: "no label basis", wantErr: "no label_basis", mutate: func(m *replay.JudgmentMoment) { m.Source.LabelBasis = "" }},
+		{name: "no baseline source", wantErr: "baseline cites no source", mutate: func(m *replay.JudgmentMoment) { m.Baseline.SourceIDs = nil }},
+		{name: "owner correction shown to the model", wantErr: "shows the owner", mutate: func(m *replay.JudgmentMoment) {
 			m.Source.Relation = replay.RelationCorrection
 			m.Source.Evidence = replay.EvidenceOwnerQuote
 			m.Source.OwnerQuote = "the owner decided already"
 			m.Events[0].Summary += " the owner decided already"
-		},
+		}},
 	}
-	for name, fn := range cases {
-		ds := cloneDataset(t, inner)
-		fn(&ds.Moments[0])
-		if err := ds.Validate(); err == nil {
-			t.Errorf("%s: Validate accepted the moment", name)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ds := cloneDataset(t, inner)
+			tc.mutate(&ds.Moments[0])
+			err := ds.Validate()
+			if err == nil {
+				t.Fatal("Validate accepted the moment")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not contain %q", err, tc.wantErr)
+			}
+		})
 	}
 }
