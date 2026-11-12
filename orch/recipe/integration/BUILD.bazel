@@ -1,12 +1,6 @@
 # gazelle:ignore
 load("@rules_go//go:def.bzl", "go_test")
 
-# Manual live integration test that exercises orch/recipe.Compiler against a
-# real Anthropic Messages API or llm-gateway endpoint.
-#
-# Run with:
-#   bazel test //orch/recipe/integration:integration_test \
-#       --test_tag_filters=integration --test_output=streamed
 go_test(
     name = "integration_test",
     size = "medium",

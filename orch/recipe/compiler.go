@@ -14,18 +14,16 @@ import (
 	"github.com/bazelment/yoloswe/orch/model"
 )
 
-// Default configuration for the natural-language recipe compiler.
 const (
 	DefaultCompilerModel     = "claude-opus-4-6"
 	DefaultCompilerMaxTokens = 4096
 	SubmitRecipeToolName     = "submit_recipe"
 )
 
-// ErrEmptyRecipeSource is returned when Compile is called with an empty natural-language source.
+// ErrEmptyRecipeSource is returned when Compile is called with an empty source.
 var ErrEmptyRecipeSource = errors.New("orch/recipe: recipe source is required")
 
-// CompilerSystemPrompt is the planner system prompt used when compiling
-// plain-language workflow specifications and per-lane deltas into typed Recipes.
+// CompilerSystemPrompt is the planner system prompt for recipe compilation.
 const CompilerSystemPrompt = `You are the Nebula Swarm Recipe Compiler (Planner role).
 Turn the owner's plain-language lane/phase workflow description (or a per-lane delta against a base recipe) into a typed Recipe by calling the submit_recipe tool.
 
@@ -264,20 +262,16 @@ func RecipeToToolInput(r Recipe) (json.RawMessage, error) {
 
 // CompileRequest describes a natural-language recipe compilation or per-lane override request.
 type CompileRequest struct {
-	// Base is an optional base recipe for per-lane overrides or incremental edits.
 	Base *Recipe `json:"base,omitempty"`
-	// Name is the target recipe name (defaults to Base.Name if Base is set, else DefaultName).
-	Name string `json:"name,omitempty"`
-	// RunID optionally tags the compiled recipe with a run identifier.
-	RunID string `json:"run_id,omitempty"`
-	// Source is the plain-language recipe description or override delta.
+	// Name defaults to Base.Name if Base is set, else DefaultName.
+	Name   string `json:"name,omitempty"`
+	RunID  string `json:"run_id,omitempty"`
 	Source string `json:"source"`
-	// Version is the target version number (defaults to 1, or Base.Version+1 when overriding the same name).
+	// Version defaults to 1, or Base.Version+1 when overriding the same recipe name.
 	Version int `json:"version,omitempty"`
 }
 
-// CompileResult holds the compiled Recipe, its readable echo table, any unmapped
-// phrases from the owner's input, and the model token/cost usage.
+// CompileResult holds the compiled Recipe, echo table, unmapped phrases, and model usage.
 type CompileResult struct {
 	EchoTable string      `json:"echo_table"`
 	Unmapped  []string    `json:"unmapped,omitempty"`

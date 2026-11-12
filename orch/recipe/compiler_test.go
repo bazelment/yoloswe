@@ -41,7 +41,6 @@ func overrideFrom(base recipe.Recipe, name, source string) recipe.Recipe {
 func goldenCases() []goldenCase {
 	def := recipe.Default()
 
-	// 01: Shipped default recipe round-trip from DefaultSource.
 	case01 := goldenCase{
 		ID: "01_default_roundtrip",
 		Request: recipe.CompileRequest{
@@ -59,7 +58,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 02: Per-lane override: "this lane: no code review"
 	noReview := overrideFrom(def, "no-review", "this lane: no code review")
 	integrateNoReview := def.Phases[3].Clone()
 	integrateNoReview.BriefTemplate = "Verify green CI checks on HEAD, then integrate the PR into the target branch."
@@ -99,7 +97,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 03: Per-lane override: skip clean unconditionally
 	skipClean := overrideFrom(def, "skip-clean", "this lane: skip clean, go straight from swe to review")
 	skipClean.Phases = []recipe.Phase{
 		def.Phases[0].Clone(),
@@ -129,7 +126,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 04: Override with JudgmentRule: "skip clean for docs"
 	skipCleanDocs := overrideFrom(def, recipe.DefaultName, "skip clean for docs")
 	skipCleanDocs.Transitions = slices.Insert(skipCleanDocs.Transitions, 0, recipe.Transition{
 		From: recipe.PhaseSWE,
@@ -161,7 +157,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 05: Override with JudgmentRule: "skip clean under 200 lines"
 	skipClean200 := overrideFrom(def, recipe.DefaultName, "skip clean under 200 lines")
 	skipClean200.Transitions = slices.Insert(skipClean200.Transitions, 0, recipe.Transition{
 		From: recipe.PhaseSWE,
@@ -187,7 +182,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 06: Override adding phase + JudgmentRule: "security review for auth changes"
 	secAuth := overrideFrom(def, "security-auth", "security review for auth changes")
 	secPhase := recipe.Phase{
 		Name:          "security-review",
@@ -251,7 +245,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 07: Override: "lanes merge their own PR once CI is green"
 	selfMerge := overrideFrom(def, "self-merge", "lanes merge their own PR once CI is green")
 	selfMerge.Phases[3].BriefTemplate = "Merge the lane's own PR using own_merge.sh once review passes and CI is green on HEAD."
 	selfMerge.MergePolicy = recipe.MergePolicy{
@@ -276,7 +269,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 08: Standalone: analysis-only lane
 	analysisOnly := recipe.Recipe{
 		Name:    "analysis",
 		Version: 1,
@@ -327,7 +319,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 09: Standalone: debate workflow
 	debate := recipe.Recipe{
 		Name:    "debate",
 		Version: 1,
@@ -405,7 +396,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 10: Standalone: proof / rehearsal lane
 	rehearsal := recipe.Recipe{
 		Name:    "rehearsal",
 		Version: 1,
@@ -476,7 +466,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 11: Composite owner specification from design post
 	integrateSelf := def.Phases[3].Clone()
 	integrateSelf.BriefTemplate = "Merge the lane's own PR once review passes and CI is green on HEAD."
 	compositeOwner := recipe.Recipe{
@@ -544,7 +533,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 12: Standalone: incident hotfix
 	hotfix := recipe.Recipe{
 		Name:    "hotfix",
 		Version: 1,
@@ -585,7 +573,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 13: Standalone: test-doctor flake fix
 	testDoctorSWE := def.Phases[0].Clone()
 	testDoctorSWE.BriefTemplate = "Reproduce and fix the flaky test, verify with lint, scoped_tests, and flake_repeat gates, and open a PR."
 	testDoctorSWE.Gates = []recipe.Gate{
@@ -629,7 +616,6 @@ func goldenCases() []goldenCase {
 		Expected: testDoctor,
 	}
 
-	// 14: Standalone: ui-sweep visual fix
 	uiSWE := def.Phases[0].Clone()
 	uiSWE.BriefTemplate = "Implement the UI fix, capture before/after screenshots, pass lint and scoped_tests, and open a PR."
 	uiSWE.Gates = []recipe.Gate{
@@ -672,7 +658,6 @@ func goldenCases() []goldenCase {
 		Expected: uiSweep,
 	}
 
-	// 15: Per-lane override: Codex primary agent for SWE + 3 phase attempts
 	codexSWE := overrideFrom(def, "codex-swe", "this lane: use codex gpt-5.4 high effort as primary agent for swe with claude opus high effort as fallback, and allow up to 3 phase attempts")
 	codexSWE.Phases[0].Agents = []recipe.AgentSpec{
 		{Harness: "codex", Model: "gpt-5.4", Effort: "high"},
@@ -697,7 +682,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 16: Per-lane override: manual merge targeting release/v2
 	releaseManual := overrideFrom(def, "release-manual", "target the release/v2 branch and leave the PR open for manual human merge after review and CI pass; remove the integrate phase")
 	releaseManual.Phases = []recipe.Phase{
 		def.Phases[0].Clone(),
@@ -732,7 +716,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 17: Per-lane override: judgment escalation on risky/public-API changes
 	riskGated := overrideFrom(def, "risk-gated", "if review passes and CI is green but the change looks risky or modifies public APIs, escalate to the dispatcher instead of auto-integrating")
 	riskGated.Transitions = slices.Insert(riskGated.Transitions, 2, recipe.Transition{
 		From: recipe.PhaseReview,
@@ -762,7 +745,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 18: Standalone: benchmark optimization lane with judgment escalation
 	benchSWE := def.Phases[0].Clone()
 	benchSWE.BriefTemplate = "Implement the optimization, run before/after benchmarks, pass lint, scoped_tests, and bench_compare gates, and open a PR."
 	benchSWE.Gates = []recipe.Gate{
@@ -809,7 +791,6 @@ func goldenCases() []goldenCase {
 		Expected: benchmark,
 	}
 
-	// 19: Standalone with unmapped phrases (never silently dropped)
 	unmappedSlack := def.Clone()
 	unmappedSlack.Name = "default-with-extras"
 	unmappedSlack.Version = 1
@@ -841,7 +822,6 @@ func goldenCases() []goldenCase {
 		},
 	}
 
-	// 20: Per-lane override with unmapped phrase
 	unmappedEspresso := overrideFrom(skipClean, "fast-espresso", "this lane: skip clean, set phase timeout to 30m, and brew a fresh pot of espresso when CI turns green")
 	unmappedEspresso.BaseRecipe = recipe.DefaultName
 	unmappedEspresso.Limits.PhaseTimeout = 30 * time.Minute
@@ -1277,7 +1257,6 @@ func TestCompilerRejectsInvalidCompiledRecipes(t *testing.T) {
 			name:    "UnreachablePhase",
 			reqName: "bad",
 			mutate: func(r *recipe.Recipe) {
-				// Bypass clean so clean is never reached from swe, while clean still has an outgoing transition.
 				r.Transitions[0].To = recipe.PhaseReview
 			},
 			wantErr: `phase "clean": unreachable from first phase "swe"`,
