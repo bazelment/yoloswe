@@ -2,13 +2,24 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "recipe",
-    srcs = ["recipe.go"],
+    srcs = [
+        "compiler.go",
+        "recipe.go",
+    ],
     importpath = "github.com/bazelment/yoloswe/orch/recipe",
     visibility = ["//visibility:public"],
+    deps = ["//orch/model"],
 )
 
 go_test(
     name = "recipe_test",
-    srcs = ["recipe_test.go"],
-    deps = [":recipe"],
+    srcs = [
+        "compiler_test.go",
+        "recipe_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    deps = [
+        ":recipe",
+        "//orch/model",
+    ],
 )

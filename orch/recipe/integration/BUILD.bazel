@@ -1,0 +1,26 @@
+# gazelle:ignore
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "integration_test",
+    size = "medium",
+    srcs = ["live_test.go"],
+    env_inherit = [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "ANTHROPIC_MODEL",
+        "UPDATE_FIXTURES",
+    ],
+    gotags = ["integration"],
+    tags = [
+        "integration",
+        "local",
+        "manual",
+    ],
+    deps = [
+        "//orch/model",
+        "//orch/recipe",
+    ],
+)
