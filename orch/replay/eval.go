@@ -136,7 +136,8 @@ func (r *EvalReport) Verdict() string {
 	switch {
 	case !r.BarsPass():
 		return VerdictFail
-	case r.EvidencedCorrections == 0:
+	case r.EvidencedCorrections == 0 || r.DecideDontAskMoments == 0:
+		// The ask bar is vacuous without a verified moment that forbids asking.
 		return VerdictInconclusive
 	default:
 		return VerdictPass

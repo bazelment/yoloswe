@@ -152,6 +152,7 @@ func countExpectedTool(ds *replay.Dataset, tool string) int {
 	for i := range ds.Moments {
 		for _, et := range ds.Moments[i].OwnerFollowUp.ExpectedTools {
 			if dispatcher.NormalizeToolName(et) == tool {
+				n++
 				break
 			}
 		}
@@ -223,26 +224,37 @@ func TestAdversarialWrongDispatchersFailTheBars(t *testing.T) {
 // must not agree, for every moment that names targets.
 func TestAdversarialRightToolWrongTarget(t *testing.T) {
 	t.Parallel()
-	ds, err := replay.LoadInnerLoopDataset()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, m := range ds.Moments {
-		if len(m.OwnerFollowUp.ExpectedTargets) == 0 || m.OwnerFollowUp.ExpectedTools[0] != dispatcher.ToolLaneRetry {
-			continue
-		}
-		client := &staticActionClient{calls: []model.ToolCall{{
-			ID:    "c1",
-			Name:  dispatcher.ToolLaneRetry,
-			Input: marshal(t, dispatcher.LaneRetryParams{LaneID: "some-other-lane", Reason: "wrong lane"}),
-		}}}
-		mr, err := replay.EvaluateMoment(t.Context(), m, client, dispatcher.Config{})
+	for _, set := range datasetSets {
+		ds, err := set.load()
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("%s: load: %v", set.name, err)
 		}
-		if mr.Agreed {
-			t.Errorf("%s: lane.retry on some-other-lane agreed with label %v", m.ID, m.OwnerFollowUp.ExpectedTargets)
-		}
+		t.Run(set.name, func(t *testing.T) {
+			t.Parallel()
+			exercised := 0
+			for _, m := range ds.Moments {
+				if len(m.OwnerFollowUp.ExpectedTargets) == 0 || len(m.OwnerFollowUp.ExpectedTools) == 0 ||
+					dispatcher.NormalizeToolName(m.OwnerFollowUp.ExpectedTools[0]) != dispatcher.ToolLaneRetry {
+					continue
+				}
+				exercised++
+				client := &staticActionClient{calls: []model.ToolCall{{
+					ID:    "c1",
+					Name:  dispatcher.ToolLaneRetry,
+					Input: marshal(t, dispatcher.LaneRetryParams{LaneID: "some-other-lane", Reason: "wrong lane"}),
+				}}}
+				mr, err := replay.EvaluateMoment(t.Context(), m, client, dispatcher.Config{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mr.Agreed {
+					t.Errorf("%s: lane.retry on some-other-lane agreed with label %v", m.ID, m.OwnerFollowUp.ExpectedTargets)
+				}
+			}
+			if exercised == 0 {
+				t.Skipf("%s has no lane.retry moment with targets", set.name)
+			}
+		})
 	}
 }
 
@@ -479,6 +491,14 @@ func TestSyntheticMomentsNeverCountTowardBars(t *testing.T) {
 	rep = replay.ComputeReport(corrected, acc)
 	if rep.Verdict() != replay.VerdictPass || !rep.AllPass() {
 		t.Errorf("verified moments with an evidenced correction: verdict=%s\n%s", rep.Verdict(), rep.FormatReport())
+	}
+
+	// A correction that does not forbid asking leaves the ask bar vacuous.
+	noForbid := []replay.MomentResult{
+		{ID: "g1", Grounded: true, Verdict: replay.VerdictCorrected, Agreed: true, BaselineAgreed: false, InputTokens: 1000},
+	}
+	if rep = replay.ComputeReport(noForbid, acc); rep.Verdict() != replay.VerdictInconclusive {
+		t.Errorf("corrected moment without forbid-ask: verdict=%s, want INCONCLUSIVE", rep.Verdict())
 	}
 
 	// A verified moment where the dispatcher asked anyway fails the ask bar.
