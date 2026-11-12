@@ -578,7 +578,7 @@ func EvaluateMoment(
 		Agreed:              agreed,
 		BaselineAgreed:      baselineAgreed,
 		DecideDontAsk:       m.OwnerFollowUp.DecideDontAsk,
-		ForbidOwnerAsk:      m.OwnerFollowUp.ForbidOwnerAsk || m.OwnerFollowUp.DecideDontAsk,
+		ForbidOwnerAsk:      m.OwnerFollowUp.ForbidsAsk(),
 		Grounded:            m.Grounding == GroundingVerified,
 		AskedOwner:          askedOwner,
 		BaselineAskedOwner:  m.Baseline.AskedOwner || dispatcher.NormalizeToolName(m.Baseline.Tool) == dispatcher.ToolOwnerAsk,
@@ -875,7 +875,7 @@ func checkActionSemantics(act dispatcher.ProposedAction) bool {
 }
 
 func checkMomentAgreement(expected OwnerFollowUp, accepted []dispatcher.ProposedAction, askedOwner bool) bool {
-	if (expected.ForbidOwnerAsk || expected.DecideDontAsk) && askedOwner {
+	if expected.ForbidsAsk() && askedOwner {
 		return false
 	}
 	// Aliases in ExpectedTargets are alternatives for one target, so only the
@@ -907,7 +907,7 @@ func checkMomentAgreement(expected OwnerFollowUp, accepted []dispatcher.Proposed
 }
 
 func matchesExpectedToolAndTarget(expected OwnerFollowUp, tool, target string, askedOwner bool) bool {
-	if (expected.ForbidOwnerAsk || expected.DecideDontAsk) && (askedOwner || normalizeReplayToolName(tool) == dispatcher.ToolOwnerAsk) {
+	if expected.ForbidsAsk() && (askedOwner || normalizeReplayToolName(tool) == dispatcher.ToolOwnerAsk) {
 		return false
 	}
 	var targets []string

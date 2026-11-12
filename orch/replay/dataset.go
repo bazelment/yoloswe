@@ -75,6 +75,9 @@ type OwnerFollowUp struct {
 	ForbidOwnerAsk  bool     `json:"forbid_owner_ask,omitempty"`
 }
 
+// ForbidsAsk reports whether the label makes an owner.ask a wrong answer.
+func (f OwnerFollowUp) ForbidsAsk() bool { return f.ForbidOwnerAsk || f.DecideDontAsk }
+
 // JudgmentMoment is a single historical judgment batch extracted from a past Nebula swarm run.
 type JudgmentMoment struct {
 	Timestamp   time.Time   `json:"timestamp"`

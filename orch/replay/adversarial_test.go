@@ -134,6 +134,14 @@ func logScore(t *testing.T, name string, rep *replay.EvalReport) {
 		rep.TotalDispatcherAsks, rep.AgreementPass, rep.AskRatePass, rep.AllPass())
 }
 
+var datasetSets = []struct {
+	load func() (*replay.Dataset, error)
+	name string
+}{
+	{replay.LoadInnerLoopDataset, "inner-loop-5"},
+	{replay.LoadDefaultDataset, "gate2-full"},
+}
+
 type adversary struct {
 	mk func(*testing.T) func(replay.JudgmentMoment) model.ModelClient
 	// maxAgreed is the most moments the adversary may legitimately agree on:
@@ -147,7 +155,6 @@ func countExpectedTool(ds *replay.Dataset, tool string) int {
 	for i := range ds.Moments {
 		for _, et := range ds.Moments[i].OwnerFollowUp.ExpectedTools {
 			if dispatcher.NormalizeToolName(et) == tool {
-				n++
 				break
 			}
 		}
@@ -185,13 +192,7 @@ func adversaries() []adversary {
 // 5-moment set with always-lane.stop / always-owner.ask / never-acts.
 func TestAdversarialWrongDispatchersFailTheBars(t *testing.T) {
 	t.Parallel()
-	for _, set := range []struct {
-		load func() (*replay.Dataset, error)
-		name string
-	}{
-		{replay.LoadInnerLoopDataset, "inner-loop-5"},
-		{replay.LoadDefaultDataset, "gate2-full"},
-	} {
+	for _, set := range datasetSets {
 		ds, err := set.load()
 		if err != nil {
 			t.Fatalf("%s: load: %v", set.name, err)
@@ -267,13 +268,7 @@ func TestAdversarialNoZeroOverZeroOrEmptyPass(t *testing.T) {
 // owner's follow-up text and the baseline's own summary.
 func TestAdversarialPromptDoesNotContainTheAnswer(t *testing.T) {
 	t.Parallel()
-	for _, set := range []struct {
-		load func() (*replay.Dataset, error)
-		name string
-	}{
-		{replay.LoadInnerLoopDataset, "inner-loop-5"},
-		{replay.LoadDefaultDataset, "gate2-full"},
-	} {
+	for _, set := range datasetSets {
 		ds, err := set.load()
 		if err != nil {
 			t.Fatalf("%s: %v", set.name, err)
@@ -383,13 +378,7 @@ func scrapingDispatcher(t *testing.T) clientFunc {
 // the dispatcher which tool to call and with which id.
 func TestAdversarialScraperCannotPassTheBar(t *testing.T) {
 	t.Parallel()
-	for _, set := range []struct {
-		load func() (*replay.Dataset, error)
-		name string
-	}{
-		{replay.LoadInnerLoopDataset, "inner-loop-5"},
-		{replay.LoadDefaultDataset, "gate2-full"},
-	} {
+	for _, set := range datasetSets {
 		ds, err := set.load()
 		if err != nil {
 			t.Fatalf("%s: %v", set.name, err)
@@ -421,7 +410,7 @@ func TestAdversarialConciergeNeedsTheStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := t.Context()
-	var echoAccurate, prompted int
+	var echoAccurate int
 	for _, q := range ds.Questions {
 		qr, err := replay.EvaluateQuestion(ctx, q, echoQuestionConcierge{})
 		if err != nil {
@@ -430,17 +419,16 @@ func TestAdversarialConciergeNeedsTheStore(t *testing.T) {
 		if qr.Accurate {
 			echoAccurate++
 		}
-		prompted++
 	}
-	t.Logf("ADVERSARIAL concierge echoes question, never calls a tool: accurate %d/%d (bar 90%%)", echoAccurate, prompted)
-	if float64(echoAccurate)/float64(prompted) >= replay.PassBarMinConciergeAccuracy {
+	t.Logf("ADVERSARIAL concierge echoes question, never calls a tool: accurate %d/%d (bar 90%%)", echoAccurate, len(ds.Questions))
+	if float64(echoAccurate)/float64(len(ds.Questions)) >= replay.PassBarMinConciergeAccuracy {
 		t.Errorf("question-echo concierge scored %d/%d accurate (>= %.0f%% bar): required facts are answerable without the Store",
-			echoAccurate, prompted, replay.PassBarMinConciergeAccuracy*100)
+			echoAccurate, len(ds.Questions), replay.PassBarMinConciergeAccuracy*100)
 	}
 
 	// Same through the real StoreConcierge with a model that answers from the
 	// prompt only (no tool use): it must not be accurate.
-	var promptOnly, n int
+	var promptOnly int
 	sc := replay.NewStoreConcierge(clientFunc(func(_ context.Context, req model.Request) (*model.Response, error) {
 		return endTurn(req.Messages[0].Text()), nil
 	}))
@@ -452,11 +440,10 @@ func TestAdversarialConciergeNeedsTheStore(t *testing.T) {
 		if qr.Accurate {
 			promptOnly++
 		}
-		n++
 	}
-	t.Logf("ADVERSARIAL concierge parrots its prompt, no Store tool call: accurate %d/%d", promptOnly, n)
+	t.Logf("ADVERSARIAL concierge parrots its prompt, no Store tool call: accurate %d/%d", promptOnly, len(ds.Questions))
 	if promptOnly != 0 {
-		t.Errorf("a prompt-parroting concierge that never queried the Store was accurate on %d/%d questions", promptOnly, n)
+		t.Errorf("a prompt-parroting concierge that never queried the Store was accurate on %d/%d questions", promptOnly, len(ds.Questions))
 	}
 }
 
