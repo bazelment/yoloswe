@@ -4,7 +4,6 @@ package recipe
 
 import (
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -256,7 +255,9 @@ func (r *Recipe) MatchTransitions(fromPhase, verdict string, ciGreen bool, round
 	return mechanical, judgment
 }
 
-var trailingDigitRe = regexp.MustCompile(`\d$`)
+func hasTrailingDigit(s string) bool {
+	return s != "" && s[len(s)-1] >= '0' && s[len(s)-1] <= '9'
+}
 
 // Validate checks that r is structurally sound.
 func (r *Recipe) Validate() error {
@@ -280,7 +281,7 @@ func (r *Recipe) Validate() error {
 		if p.Name == TargetComplete || p.Name == TargetEscalate {
 			return fmt.Errorf("recipe %q: phase name %q is reserved for transition targets", r.Name, p.Name)
 		}
-		if trailingDigitRe.MatchString(p.Name) {
+		if hasTrailingDigit(p.Name) {
 			return fmt.Errorf("recipe %q: phase name %q must not end in a digit (ambiguous with <phase><round> attempt keys)", r.Name, p.Name)
 		}
 		if len(p.Agents) == 0 {

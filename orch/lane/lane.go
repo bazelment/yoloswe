@@ -240,47 +240,8 @@ func ParsePhaseReport(raw string) (*PhaseReport, error) {
 	var body []string
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if k, v, ok := splitHeader(trimmed); ok {
-			switch strings.ToLower(k) {
-			case "outcome":
-				rep.Outcome = ReportOutcome(strings.TrimSpace(v))
-				continue
-			case "head":
-				rep.HeadSHA = strings.TrimSpace(v)
-				continue
-			case "pr":
-				if n, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(v), "#")); err == nil {
-					rep.PR = n
-				}
-				continue
-			case "reason":
-				rep.Reason = strings.TrimSpace(v)
-				continue
-			case "for":
-				rep.For = strings.TrimSpace(v)
-				continue
-			case "ask":
-				rep.Ask = strings.TrimSpace(v)
-				continue
-			case "breaks":
-				rep.Breaks = strings.TrimSpace(v)
-				continue
-			case "riskiest step":
-				rep.RiskiestStep = strings.TrimSpace(v)
-				continue
-			case "observed":
-				rep.Observed = strings.TrimSpace(v)
-				continue
-			case "verdict":
-				rep.Verdict = strings.TrimSpace(v)
-				continue
-			case "reach":
-				rep.Reach = strings.TrimSpace(v)
-				continue
-			case "reach observed":
-				rep.ReachObserved = strings.TrimSpace(v)
-				continue
-			}
+		if k, v, ok := splitHeader(trimmed); ok && applyReportHeader(rep, k, v) {
+			continue
 		}
 		if trimmed != "" {
 			body = append(body, trimmed)
@@ -293,12 +254,50 @@ func ParsePhaseReport(raw string) (*PhaseReport, error) {
 	return rep, nil
 }
 
+func applyReportHeader(rep *PhaseReport, key, val string) bool {
+	switch strings.ToLower(key) {
+	case "outcome":
+		rep.Outcome = ReportOutcome(val)
+	case "head":
+		rep.HeadSHA = val
+	case "pr":
+		if n, err := strconv.Atoi(strings.TrimPrefix(val, "#")); err == nil {
+			rep.PR = n
+		}
+	case "reason":
+		rep.Reason = val
+	case "for":
+		rep.For = val
+	case "ask":
+		rep.Ask = val
+	case "breaks":
+		rep.Breaks = val
+	case "riskiest step":
+		rep.RiskiestStep = val
+	case "observed":
+		rep.Observed = val
+	case "verdict":
+		rep.Verdict = val
+	case "reach":
+		rep.Reach = val
+	case "reach observed":
+		rep.ReachObserved = val
+	default:
+		return false
+	}
+	return true
+}
+
 func splitHeader(line string) (string, string, bool) {
-	idx := strings.IndexByte(line, ':')
-	if idx <= 0 {
+	k, v, ok := strings.Cut(line, ":")
+	if !ok {
 		return "", "", false
 	}
-	return strings.TrimSpace(line[:idx]), strings.TrimSpace(line[idx+1:]), true
+	k = strings.TrimSpace(k)
+	if k == "" {
+		return "", "", false
+	}
+	return k, strings.TrimSpace(v), true
 }
 
 // SpawnRequest holds the parameters to spawn a new worker session for a lane.

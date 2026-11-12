@@ -150,14 +150,13 @@ func NewToolResultMessage(results ...ContentBlock) Message {
 
 // Text concatenates all text blocks in m.
 func (m Message) Text() string {
-	var parts []string
+	var b strings.Builder
 	for i := range m.Content {
-		b := &m.Content[i]
-		if b.Type == BlockTypeText && b.Text != "" {
-			parts = append(parts, b.Text)
+		if m.Content[i].Type == BlockTypeText {
+			b.WriteString(m.Content[i].Text)
 		}
 	}
-	return strings.Join(parts, "")
+	return b.String()
 }
 
 // ToolCalls extracts all tool_use blocks from m.
@@ -365,11 +364,7 @@ func (r *ToolRegistry) Dispatch(ctx context.Context, call ToolCall) ContentBlock
 // jsonschema struct tags.
 func SchemaFor[T any]() json.RawMessage {
 	var zero T
-	t := reflect.TypeOf(zero)
-	for t != nil && t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	schema := reflectSchema(t)
+	schema := reflectSchema(reflect.TypeOf(zero))
 	b, err := json.Marshal(schema)
 	if err != nil {
 		panic(fmt.Sprintf("orch/model: failed to marshal schema for %T: %v", zero, err))
@@ -378,11 +373,11 @@ func SchemaFor[T any]() json.RawMessage {
 }
 
 func reflectSchema(t reflect.Type) map[string]any {
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
 	if t == nil {
 		return map[string]any{"type": "object"}
-	}
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
 	}
 	switch t.Kind() {
 	case reflect.String:
@@ -455,32 +450,32 @@ func reflectSchema(t reflect.Type) map[string]any {
 	}
 }
 
+type scriptedCall struct {
+	err  error
+	resp Response
+}
+
 // FakeClient is a deterministic record/replay ModelClient for tests.
 type FakeClient struct {
-	Requests  []Request
-	responses []Response
-	errors    []error
-	mu        sync.Mutex
+	Requests []Request
+	queue    []scriptedCall
+	mu       sync.Mutex
 }
 
 // NewFakeClient creates a FakeClient queued with the given responses.
 func NewFakeClient(responses ...Response) *FakeClient {
-	cloned := make([]Response, len(responses))
+	queue := make([]scriptedCall, len(responses))
 	for i := range responses {
-		cloned[i] = responses[i].Clone()
+		queue[i] = scriptedCall{resp: responses[i].Clone()}
 	}
-	return &FakeClient{
-		responses: cloned,
-		errors:    make([]error, len(responses)),
-	}
+	return &FakeClient{queue: queue}
 }
 
 // Enqueue appends a scripted response (or error) to the fake client's queue.
 func (f *FakeClient) Enqueue(resp Response, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.responses = append(f.responses, resp.Clone())
-	f.errors = append(f.errors, err)
+	f.queue = append(f.queue, scriptedCall{resp: resp.Clone(), err: err})
 }
 
 // CreateMessage records req and returns the next queued response.
@@ -488,16 +483,14 @@ func (f *FakeClient) CreateMessage(_ context.Context, req Request) (*Response, e
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Requests = append(f.Requests, req.Clone())
-	if len(f.responses) == 0 {
+	if len(f.queue) == 0 {
 		return nil, fmt.Errorf("orch/model: FakeClient has no more scripted responses (call #%d)", len(f.Requests))
 	}
-	resp := f.responses[0]
-	err := f.errors[0]
-	f.responses = f.responses[1:]
-	f.errors = f.errors[1:]
-	if err != nil {
-		return nil, err
+	next := f.queue[0]
+	f.queue = f.queue[1:]
+	if next.err != nil {
+		return nil, next.err
 	}
-	cp := resp.Clone()
+	cp := next.resp.Clone()
 	return &cp, nil
 }

@@ -2,7 +2,8 @@
 package clock
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"sync"
 	"time"
 )
@@ -172,23 +173,18 @@ func (fc *FakeClock) earliestEventLocked(limit time.Time) (time.Time, bool) {
 }
 
 func (fc *FakeClock) fireDueLocked(at time.Time) []func() {
-	type dueTimer struct {
-		timer *fakeTimer
-		id    uint64
-	}
-	var due []dueTimer
+	var due []*fakeTimer
 	for _, t := range fc.timers {
 		if t.active && !t.when.After(at) {
-			due = append(due, dueTimer{timer: t, id: t.id})
+			due = append(due, t)
 		}
 	}
-	sort.Slice(due, func(i, j int) bool {
-		return due[i].id < due[j].id
+	slices.SortFunc(due, func(a, b *fakeTimer) int {
+		return cmp.Compare(a.id, b.id)
 	})
 
 	var callbacks []func()
-	for _, d := range due {
-		t := d.timer
+	for _, t := range due {
 		if !t.active {
 			continue
 		}
@@ -239,32 +235,20 @@ func (fc *FakeClock) NewTimer(d time.Duration) Timer {
 // AfterFunc schedules f to run after d on the fake clock.
 func (fc *FakeClock) AfterFunc(d time.Duration, f func()) Timer {
 	fc.mu.Lock()
-	if d <= 0 {
-		fc.nextID++
-		t := &fakeTimer{
-			clock:   fc,
-			ch:      make(chan time.Time, 1),
-			afterFn: f,
-			when:    fc.now,
-			id:      fc.nextID,
-			active:  false,
-		}
-		fc.timers = append(fc.timers, t)
-		fc.mu.Unlock()
-		f()
-		return t
-	}
 	fc.nextID++
 	t := &fakeTimer{
 		clock:   fc,
 		ch:      make(chan time.Time, 1),
 		afterFn: f,
-		when:    fc.now.Add(d),
+		when:    fc.now.Add(max(d, 0)),
 		id:      fc.nextID,
-		active:  true,
+		active:  d > 0,
 	}
 	fc.timers = append(fc.timers, t)
 	fc.mu.Unlock()
+	if d <= 0 {
+		f()
+	}
 	return t
 }
 

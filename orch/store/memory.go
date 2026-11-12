@@ -1,16 +1,17 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/bazelment/yoloswe/orch/clock"
 	"github.com/bazelment/yoloswe/orch/model"
+	"github.com/bazelment/yoloswe/orch/recipe"
 )
 
 // MemoryStore is a thread-safe, in-memory implementation of Store.
@@ -114,7 +115,7 @@ func (r *memRunStore) Create(_ context.Context, run Run) error {
 		cp.UpdatedAt = cp.CreatedAt
 	}
 	if cp.DefaultRecipe == "" {
-		cp.DefaultRecipe = "default"
+		cp.DefaultRecipe = recipe.DefaultName
 	}
 	s.runs[cp.ID] = &cp
 	return nil
@@ -297,13 +298,11 @@ func (b *memBacklogStore) Update(_ context.Context, item BacklogItem, actor, rea
 	cp := item.Clone()
 	cp.CreatedAt = existing.CreatedAt
 	cp.UpdatedAt = now
-	history := slices.Clone(existing.History)
-	history = append(history, BacklogHistoryEntry{
+	cp.History = append(slices.Clone(existing.History), BacklogHistoryEntry{
 		At:     now,
 		Actor:  actor,
 		Change: reason,
 	})
-	cp.History = history
 	byRun[cp.ID] = &cp
 	return nil
 }
@@ -323,7 +322,7 @@ func (b *memBacklogStore) Reorder(_ context.Context, runID string, itemIDs []str
 		item := byRun[id]
 		item.Order = idx + 1
 		item.UpdatedAt = now
-		item.History = append(slices.Clone(item.History), BacklogHistoryEntry{
+		item.History = append(item.History, BacklogHistoryEntry{
 			At:     now,
 			Actor:  actor,
 			Change: fmt.Sprintf("reordered to position %d", idx+1),
@@ -347,7 +346,7 @@ func (b *memBacklogStore) Close(_ context.Context, runID, itemID string, status 
 	now := s.now()
 	item.Status = status
 	item.UpdatedAt = now
-	item.History = append(slices.Clone(item.History), BacklogHistoryEntry{
+	item.History = append(item.History, BacklogHistoryEntry{
 		At:     now,
 		Actor:  actor,
 		Change: fmt.Sprintf("closed (%s): %s", status, reason),
@@ -369,17 +368,13 @@ func (b *memBacklogStore) List(_ context.Context, filter BacklogFilter) ([]Backl
 		}
 		out = append(out, item.Clone())
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if ri, rj := out[i].Priority.Rank(), out[j].Priority.Rank(); ri != rj {
-			return ri < rj
-		}
-		if out[i].Order != out[j].Order {
-			return out[i].Order < out[j].Order
-		}
-		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].CreatedAt.Before(out[j].CreatedAt)
-		}
-		return out[i].ID < out[j].ID
+	slices.SortFunc(out, func(a, b BacklogItem) int {
+		return cmp.Or(
+			cmp.Compare(a.Priority.Rank(), b.Priority.Rank()),
+			cmp.Compare(a.Order, b.Order),
+			a.CreatedAt.Compare(b.CreatedAt),
+			cmp.Compare(a.ID, b.ID),
+		)
 	})
 	if filter.Limit > 0 && len(out) > filter.Limit {
 		out = out[:filter.Limit]
@@ -442,8 +437,8 @@ func (l *memLaneStore) List(_ context.Context, filter LaneFilter) ([]Lane, error
 		}
 		out = append(out, ln.Clone())
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].ID < out[j].ID
+	slices.SortFunc(out, func(a, b Lane) int {
+		return cmp.Compare(a.ID, b.ID)
 	})
 	return out, nil
 }
@@ -544,11 +539,8 @@ func (d *memDirectiveStore) List(_ context.Context, filter DirectiveFilter) ([]D
 		}
 		out = append(out, dir.Clone())
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].CreatedAt.Before(out[j].CreatedAt)
-		}
-		return out[i].ID < out[j].ID
+	slices.SortFunc(out, func(a, b Directive) int {
+		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), cmp.Compare(a.ID, b.ID))
 	})
 	return out, nil
 }
@@ -764,11 +756,8 @@ func (t *memThreadStore) ListThreads(_ context.Context, filter ThreadFilter) ([]
 		}
 		out = append(out, th.Clone())
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].CreatedAt.Before(out[j].CreatedAt)
-		}
-		return out[i].ID < out[j].ID
+	slices.SortFunc(out, func(a, b Thread) int {
+		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), cmp.Compare(a.ID, b.ID))
 	})
 	return out, nil
 }
@@ -863,6 +852,16 @@ func (t *memThreadStore) ForkThread(_ context.Context, parentThreadID, newThread
 	return forked.Clone(), nil
 }
 
+func (s *MemoryStore) findTurnLocked(threadID, turnID string) *Turn {
+	turns := s.turns[threadID]
+	for i := range turns {
+		if turns[i].ID == turnID {
+			return &turns[i]
+		}
+	}
+	return nil
+}
+
 func (t *memThreadStore) StartTurn(_ context.Context, turn Turn) (Turn, error) {
 	if strings.TrimSpace(turn.ID) == "" || strings.TrimSpace(turn.ThreadID) == "" {
 		return Turn{}, fmt.Errorf("%w: turn requires id and thread_id", ErrInvalidArgument)
@@ -874,12 +873,10 @@ func (t *memThreadStore) StartTurn(_ context.Context, turn Turn) (Turn, error) {
 	if !ok {
 		return Turn{}, fmt.Errorf("%w: thread %q", ErrNotFound, turn.ThreadID)
 	}
-	existingTurns := s.turns[turn.ThreadID]
-	for i := range existingTurns {
-		if existingTurns[i].ID == turn.ID {
-			return Turn{}, fmt.Errorf("%w: turn %q in thread %q", ErrAlreadyExists, turn.ID, turn.ThreadID)
-		}
+	if s.findTurnLocked(turn.ThreadID, turn.ID) != nil {
+		return Turn{}, fmt.Errorf("%w: turn %q in thread %q", ErrAlreadyExists, turn.ID, turn.ThreadID)
 	}
+	existingTurns := s.turns[turn.ThreadID]
 	now := s.now()
 	cp := turn.Clone()
 	cp.RunID = th.RunID
@@ -910,28 +907,21 @@ func (t *memThreadStore) SteerTurn(_ context.Context, threadID, turnID, message 
 		return fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
 	}
 	now := s.now()
-	turns := s.turns[threadID]
 	if turnID != "" {
-		for i := range turns {
-			if turns[i].ID == turnID {
-				if turns[i].Status == TurnStatusRunning {
-					turns[i].Steers = append(turns[i].Steers, message)
-					s.turns[threadID] = turns
-					seq := len(s.items[threadID]) + 1
-					s.items[threadID] = append(s.items[threadID], Item{
-						ID:        fmt.Sprintf("item-%d", seq),
-						ThreadID:  threadID,
-						TurnID:    turnID,
-						Seq:       seq,
-						Kind:      ItemKindSteer,
-						Content:   message,
-						CreatedAt: now,
-					})
-					th.UpdatedAt = now
-					return nil
-				}
-				break
-			}
+		if tr := s.findTurnLocked(threadID, turnID); tr != nil && tr.Status == TurnStatusRunning {
+			tr.Steers = append(tr.Steers, message)
+			seq := len(s.items[threadID]) + 1
+			s.items[threadID] = append(s.items[threadID], Item{
+				ID:        fmt.Sprintf("item-%d", seq),
+				ThreadID:  threadID,
+				TurnID:    turnID,
+				Seq:       seq,
+				Kind:      ItemKindSteer,
+				Content:   message,
+				CreatedAt: now,
+			})
+			th.UpdatedAt = now
+			return nil
 		}
 	}
 	th.QueuedSteers = append(th.QueuedSteers, message)
@@ -950,25 +940,17 @@ func (t *memThreadStore) CompleteTurn(_ context.Context, threadID, turnID string
 	if !ok {
 		return fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
 	}
-	turns := s.turns[threadID]
-	idx := -1
-	for i := range turns {
-		if turns[i].ID == turnID {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
+	tr := s.findTurnLocked(threadID, turnID)
+	if tr == nil {
 		return fmt.Errorf("%w: turn %q in thread %q", ErrNotFound, turnID, threadID)
 	}
 	now := s.now()
-	turns[idx].Status = status
-	turns[idx].CompletedAt = &now
-	turns[idx].Error = errMsg
-	turns[idx].InputTokens += usage.InputTokens
-	turns[idx].OutputTokens += usage.OutputTokens
-	turns[idx].CostUSD += usage.CostUSD
-	s.turns[threadID] = turns
+	tr.Status = status
+	tr.CompletedAt = &now
+	tr.Error = errMsg
+	tr.InputTokens += usage.InputTokens
+	tr.OutputTokens += usage.OutputTokens
+	tr.CostUSD += usage.CostUSD
 
 	th.InputTokens += usage.InputTokens
 	th.OutputTokens += usage.OutputTokens
@@ -985,14 +967,12 @@ func (t *memThreadStore) GetTurn(_ context.Context, threadID, turnID string) (*T
 	if _, ok := s.threads[threadID]; !ok {
 		return nil, fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
 	}
-	turns := s.turns[threadID]
-	for i := range turns {
-		if turns[i].ID == turnID {
-			cp := turns[i].Clone()
-			return &cp, nil
-		}
+	tr := s.findTurnLocked(threadID, turnID)
+	if tr == nil {
+		return nil, fmt.Errorf("%w: turn %q in thread %q", ErrNotFound, turnID, threadID)
 	}
-	return nil, fmt.Errorf("%w: turn %q in thread %q", ErrNotFound, turnID, threadID)
+	cp := tr.Clone()
+	return &cp, nil
 }
 
 func (t *memThreadStore) ListTurns(_ context.Context, threadID string) ([]Turn, error) {
@@ -1020,15 +1000,7 @@ func (t *memThreadStore) AppendItem(_ context.Context, item Item) (Item, error) 
 	if _, ok := s.threads[item.ThreadID]; !ok {
 		return Item{}, fmt.Errorf("%w: thread %q", ErrNotFound, item.ThreadID)
 	}
-	turnFound := false
-	turns := s.turns[item.ThreadID]
-	for i := range turns {
-		if turns[i].ID == item.TurnID {
-			turnFound = true
-			break
-		}
-	}
-	if !turnFound {
+	if s.findTurnLocked(item.ThreadID, item.TurnID) == nil {
 		return Item{}, fmt.Errorf("%w: turn %q in thread %q", ErrNotFound, item.TurnID, item.ThreadID)
 	}
 	seq := len(s.items[item.ThreadID]) + 1
@@ -1114,8 +1086,8 @@ func (r *memRecipeStore) Save(_ context.Context, rec Recipe) (Recipe, error) {
 		cp.CreatedAt = s.now()
 	}
 	versions = append(versions, cp)
-	sort.Slice(versions, func(i, j int) bool {
-		return versions[i].Version < versions[j].Version
+	slices.SortFunc(versions, func(a, b Recipe) int {
+		return cmp.Compare(a.Version, b.Version)
 	})
 	byRun[cp.Name] = versions
 	return cp.Clone(), nil
@@ -1165,8 +1137,8 @@ func (r *memRecipeStore) ListLatest(_ context.Context, runID string) ([]Recipe, 
 			out = append(out, versions[len(versions)-1].Clone())
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].Name < out[j].Name
+	slices.SortFunc(out, func(a, b Recipe) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 	return out, nil
 }
