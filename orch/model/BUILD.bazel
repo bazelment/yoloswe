@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "http_client.go",
         "model.go",
+        "openai_client.go",
     ],
     importpath = "github.com/bazelment/yoloswe/orch/model",
     visibility = ["//visibility:public"],
@@ -13,7 +14,10 @@ go_library(
 
 go_test(
     name = "model_test",
-    srcs = ["model_test.go"],
+    srcs = [
+        "model_test.go",
+        "openai_client_test.go",
+    ],
     data = glob(["testdata/**"]),
     deps = [":model"],
 )

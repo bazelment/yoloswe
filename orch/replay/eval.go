@@ -35,6 +35,8 @@ type EvalConfig struct {
 }
 
 // MomentResult captures the evaluation outcome of a single JudgmentMoment.
+//
+//nolint:govet
 type MomentResult struct {
 	ID                  string
 	RunID               string
@@ -59,9 +61,13 @@ type MomentResult struct {
 	Grounded            bool
 	AskedOwner          bool
 	BaselineAskedOwner  bool
+	Error               string
+	LatencyMS           int64
 }
 
 // QuestionResult captures the evaluation outcome of a single ConciergeQuestion.
+//
+//nolint:govet
 type QuestionResult struct {
 	ID                string
 	RunID             string
@@ -73,6 +79,7 @@ type QuestionResult struct {
 	InputTokens       int64
 	OutputTokens      int64
 	Accurate          bool
+	Error             string
 }
 
 // EvalReport summarizes a complete Validation Gate 2 run against the plan's bars.
@@ -102,6 +109,7 @@ type EvalReport struct {
 	InvariantViolations        int
 	TotalQuestions             int
 	AccurateQuestions          int
+	ErrorCount                 int
 	ConciergeAccuracy          float64
 	MedianInputTokens          int64
 	P90InputTokens             int64
@@ -111,6 +119,8 @@ type EvalReport struct {
 	InvariantsPass             bool
 	ConciergePass              bool
 	TokensPass                 bool
+	MedianLatencyMS            int64
+	P90LatencyMS               int64
 }
 
 // Verdicts: FAIL if any bar failed; INCONCLUSIVE if all bars passed but no owner
@@ -124,6 +134,7 @@ const (
 // BarsPass reports whether all five Validation Gate 2 bars passed on the evidence at hand.
 func (r *EvalReport) BarsPass() bool {
 	return r != nil &&
+		r.ErrorCount == 0 &&
 		r.AgreementPass &&
 		r.AskRatePass &&
 		r.InvariantsPass &&
@@ -155,6 +166,14 @@ func (r *EvalReport) FormatReport() string {
 	var b strings.Builder
 	b.WriteString("=== Validation Gate 2: Historical Decision Replay Scorecard ===\n")
 	fmt.Fprintf(&b, "Moments evaluated:   %d (%d verified against run records, %d synthetic - not counted toward agreement/ask bars)\n", r.TotalMoments, r.GroundedMoments, r.SyntheticMoments)
+	errorsCount := 0
+	for i := range r.MomentResults {
+		if r.MomentResults[i].Error != "" {
+			errorsCount++
+		}
+	}
+	fmt.Fprintf(&b, "Moment errors:        %d\n", errorsCount)
+	fmt.Fprintf(&b, "Decision latency:     median=%dms p90=%dms\n", r.MedianLatencyMS, r.P90LatencyMS)
 	fmt.Fprintf(&b, "Owner corrections evidenced in run history: %d\n", r.EvidencedCorrections)
 	fmt.Fprintf(&b, "Questions evaluated: %d\n\n", r.TotalQuestions)
 
@@ -374,7 +393,8 @@ func Evaluate(ctx context.Context, ds *Dataset, cfg EvalConfig) (*EvalReport, er
 	if err := runParallel(ctx, len(ds.Moments), workers, func(ctx context.Context, idx int) error {
 		mr, err := EvaluateMoment(ctx, ds.Moments[idx], client, cfg.DispatcherConfig)
 		if err != nil {
-			return fmt.Errorf("moment %s: %w", ds.Moments[idx].ID, err)
+			momentResults[idx] = MomentResult{ID: ds.Moments[idx].ID, RunID: ds.Moments[idx].RunID, Grounded: ds.Moments[idx].Grounding == GroundingVerified, Error: err.Error()}
+			return nil
 		}
 		momentResults[idx] = mr
 		return nil
@@ -386,7 +406,8 @@ func Evaluate(ctx context.Context, ds *Dataset, cfg EvalConfig) (*EvalReport, er
 	if err := runParallel(ctx, len(ds.Questions), workers, func(ctx context.Context, idx int) error {
 		qr, err := EvaluateQuestion(ctx, ds.Questions[idx], concierge)
 		if err != nil {
-			return fmt.Errorf("question %s: %w", ds.Questions[idx].ID, err)
+			questionResults[idx] = QuestionResult{ID: ds.Questions[idx].ID, RunID: ds.Questions[idx].RunID, Question: ds.Questions[idx].Question, Error: err.Error()}
+			return nil
 		}
 		questionResults[idx] = qr
 		return nil
@@ -472,6 +493,7 @@ func EvaluateMoment(
 	client model.ModelClient,
 	dispCfg dispatcher.Config,
 ) (MomentResult, error) {
+	started := time.Now()
 	st, drv, clk, err := newSeededEnv(ctx, m.Timestamp, m.State)
 	if err != nil {
 		return MomentResult{}, err
@@ -578,6 +600,7 @@ func EvaluateMoment(
 		Grounded:            m.Grounding == GroundingVerified,
 		AskedOwner:          askedOwner,
 		BaselineAskedOwner:  m.Baseline.AskedOwner || dispatcher.NormalizeToolName(m.Baseline.Tool) == dispatcher.ToolOwnerAsk,
+		LatencyMS:           time.Since(started).Milliseconds(),
 	}, nil
 }
 
@@ -650,8 +673,12 @@ func ComputeReport(moments []MomentResult, questions []QuestionResult) *EvalRepo
 	}
 
 	tokens := make([]int64, 0, len(moments))
+	latencies := make([]int64, 0, len(moments))
 	for i := range moments {
 		m := &moments[i]
+		if m.Error != "" {
+			rep.ErrorCount++
+		}
 		if m.AskedOwner {
 			rep.TotalDispatcherAsks++
 		}
@@ -661,7 +688,12 @@ func ComputeReport(moments []MomentResult, questions []QuestionResult) *EvalRepo
 		rep.VetterRejections += m.VetterRejections
 		rep.AuditViolations += m.AuditViolations
 		rep.InvariantViolations += m.InvariantViolations
-		tokens = append(tokens, m.InputTokens)
+		if m.Error == "" {
+			tokens = append(tokens, m.InputTokens)
+		}
+		if m.LatencyMS > 0 {
+			latencies = append(latencies, m.LatencyMS)
+		}
 
 		if !m.Grounded {
 			rep.SyntheticMoments++
@@ -707,6 +739,9 @@ func ComputeReport(moments []MomentResult, questions []QuestionResult) *EvalRepo
 	}
 
 	for i := range questions {
+		if questions[i].Error != "" {
+			rep.ErrorCount++
+		}
 		if questions[i].Accurate {
 			rep.AccurateQuestions++
 		}
@@ -720,6 +755,11 @@ func ComputeReport(moments []MomentResult, questions []QuestionResult) *EvalRepo
 		rep.MedianInputTokens = percentileInt64(tokens, 0.50)
 		rep.P90InputTokens = percentileInt64(tokens, 0.90)
 		rep.MaxInputTokens = tokens[len(tokens)-1]
+	}
+	if len(latencies) > 0 {
+		slices.Sort(latencies)
+		rep.MedianLatencyMS = percentileInt64(latencies, 0.50)
+		rep.P90LatencyMS = percentileInt64(latencies, 0.90)
 	}
 
 	// Nothing measured is never a pass, and 0% against a 0% baseline is not agreement.

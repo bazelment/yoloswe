@@ -47,13 +47,16 @@ func nextUniqueID(prefix string, clk clock.Clock) string {
 }
 
 const (
-	DefaultDispatcherModel     = dispatcher.DefaultModel
-	DefaultDispatcherHardModel = dispatcher.DefaultHardBatchModel
-	DefaultConciergeModel      = "claude-haiku-4-5-20251001"
-	DefaultPlannerModel        = recipe.DefaultCompilerModel
-	DefaultConcurrencyCap      = 4
-	DefaultStoreSpec           = "sqlite"
-	DefaultDriverKind          = "nebula"
+	DefaultDispatcherModel       = dispatcher.DefaultModel
+	DefaultDispatcherHardModel   = dispatcher.DefaultHardBatchModel
+	DefaultConciergeModel        = "claude-haiku-4-5-20251001"
+	DefaultPlannerModel          = recipe.DefaultCompilerModel
+	DefaultOpenAIDispatcherModel = "gpt-6.1-sol"
+	DefaultOpenAIConciergeModel  = "gpt-6.1-sol"
+	DefaultOpenAIPlannerModel    = "gpt-6.1-sol"
+	DefaultConcurrencyCap        = 4
+	DefaultStoreSpec             = "sqlite"
+	DefaultDriverKind            = "nebula"
 )
 
 var (
@@ -69,7 +72,14 @@ type RoleModels struct {
 	Planner        string `json:"planner,omitempty"`
 }
 
-func (m RoleModels) withDefaults() RoleModels {
+func (m RoleModels) withDefaults(provider string) RoleModels {
+	if strings.EqualFold(provider, "openai") {
+		m.Dispatcher = cmp.Or(strings.TrimSpace(m.Dispatcher), DefaultOpenAIDispatcherModel)
+		m.DispatcherHard = cmp.Or(strings.TrimSpace(m.DispatcherHard), DefaultOpenAIDispatcherModel)
+		m.Concierge = cmp.Or(strings.TrimSpace(m.Concierge), DefaultOpenAIConciergeModel)
+		m.Planner = cmp.Or(strings.TrimSpace(m.Planner), DefaultOpenAIPlannerModel)
+		return m
+	}
 	m.Dispatcher = cmp.Or(strings.TrimSpace(m.Dispatcher), DefaultDispatcherModel)
 	m.DispatcherHard = cmp.Or(strings.TrimSpace(m.DispatcherHard), DefaultDispatcherHardModel)
 	m.Concierge = cmp.Or(strings.TrimSpace(m.Concierge), DefaultConciergeModel)
@@ -79,6 +89,7 @@ func (m RoleModels) withDefaults() RoleModels {
 
 // Config holds the runtime configuration for nebula-orch `run` and `chat`.
 type Config struct {
+	ModelProvider     string        `json:"model_provider,omitempty"`
 	Models            RoleModels    `json:"models"`
 	RunID             string        `json:"run_id,omitempty"`
 	Objective         string        `json:"objective,omitempty"`
@@ -111,14 +122,15 @@ type Config struct {
 }
 
 func (c Config) withDefaults() Config {
-	c.Models = c.Models.withDefaults()
+	c.ModelProvider = cmp.Or(strings.TrimSpace(c.ModelProvider), strings.TrimSpace(os.Getenv("ORCH_MODEL_PROVIDER")))
+	c.Models = c.Models.withDefaults(c.ModelProvider)
 	c.StoreSpec = cmp.Or(strings.TrimSpace(c.StoreSpec), DefaultStoreSpec)
 	c.DriverKind = cmp.Or(strings.ToLower(strings.TrimSpace(c.DriverKind)), DefaultDriverKind)
-	c.LLMGatewayURL = cmp.Or(
-		strings.TrimSpace(c.LLMGatewayURL),
-		strings.TrimSpace(os.Getenv("LLM_GATEWAY_URL")),
-		strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")),
-	)
+	if strings.EqualFold(c.ModelProvider, "openai") {
+		c.LLMGatewayURL = cmp.Or(strings.TrimSpace(c.LLMGatewayURL), strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")), strings.TrimSpace(os.Getenv("LLM_GATEWAY_URL")))
+	} else {
+		c.LLMGatewayURL = cmp.Or(strings.TrimSpace(c.LLMGatewayURL), strings.TrimSpace(os.Getenv("LLM_GATEWAY_URL")), strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")))
+	}
 	if c.ConcurrencyCap == 0 {
 		c.ConcurrencyCap = DefaultConcurrencyCap
 	}
@@ -160,6 +172,10 @@ func (c Config) withDefaults() Config {
 
 // Validate checks that c has valid required fields for command execution.
 func (c Config) Validate(requireDriver bool) error {
+	provider := strings.ToLower(strings.TrimSpace(c.ModelProvider))
+	if provider != "" && provider != "anthropic" && provider != "openai" {
+		return fmt.Errorf("nebula-orch: unsupported model provider %q (want anthropic or openai)", c.ModelProvider)
+	}
 	if strings.TrimSpace(c.RunID) == "" {
 		return ErrRunIDRequired
 	}
@@ -204,6 +220,7 @@ func LoadConfigFile(path string, base Config) (Config, error) {
 func mergeConfig(lower, higher Config) Config {
 	out := lower
 	out.RunID = cmp.Or(higher.RunID, lower.RunID)
+	out.ModelProvider = cmp.Or(higher.ModelProvider, lower.ModelProvider)
 	out.Objective = cmp.Or(higher.Objective, lower.Objective)
 	out.PlanRef = cmp.Or(higher.PlanRef, lower.PlanRef)
 	out.StoreSpec = cmp.Or(higher.StoreSpec, lower.StoreSpec)
@@ -294,6 +311,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.StringVar(&cfg.StoreSpec, "store", "", "Store backend: sqlite:<path>, sqlite, memory, or nebula")
 	fs.StringVar(&cfg.StoreBaseDir, "store-dir", "", "Base directory for default per-run SQLite store (~/.swarm)")
 	fs.StringVar(&cfg.DriverKind, "driver", "", "Worker lane driver: nebula or fake (default nebula)")
+	fs.StringVar(&cfg.ModelProvider, "model-provider", "", "Model provider: anthropic or openai")
 	fs.StringVar(&cfg.LLMGatewayURL, "llm-gateway-url", "", "Messages API / llm-gateway base URL")
 	fs.StringVar(&cfg.Models.Dispatcher, "dispatcher-model", "", "Model for Dispatcher turns")
 	fs.StringVar(&cfg.Models.DispatcherHard, "dispatcher-hard-model", "", "Escalation model for hard Dispatcher batches")
@@ -387,6 +405,20 @@ func openStore(cfg Config, clk clock.Clock) (store.Store, string, error) {
 func openModelClient(cfg Config, clk clock.Clock) (model.ModelClient, error) {
 	if strings.TrimSpace(cfg.ReplayPath) != "" {
 		return model.LoadFakeClient(cfg.ReplayPath)
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.ModelProvider), "openai") {
+		var opts []model.OpenAIClientOption
+		if clk != nil {
+			opts = append(opts, model.WithOpenAIClock(clk))
+		}
+		if strings.TrimSpace(cfg.LLMGatewayURL) != "" {
+			opts = append(opts, model.WithOpenAIBaseURL(cfg.LLMGatewayURL))
+		}
+		client := model.NewOpenAIClient(opts...)
+		if strings.TrimSpace(cfg.RecordPath) != "" {
+			return model.NewRecordingFakeClient(cfg.RecordPath, client), nil
+		}
+		return client, nil
 	}
 	var opts []model.ClientOption
 	if clk != nil {
