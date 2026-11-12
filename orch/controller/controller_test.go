@@ -80,7 +80,6 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 		clk, st, drv, judge := setupTestEnv(t)
 		ctx := t.Context()
 
-		// Save a 3-phase swe -> review -> integrate recipe.
 		def := recipe.Default()
 		threePhase := def.Clone()
 		threePhase.RunID = "run-1"
@@ -118,7 +117,6 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 
 		ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
 
-		// Step 1: spawns planned lane into swe.
 		if err := ctrl.Step(ctx); err != nil {
 			t.Fatalf("Step 1 (spawn swe): %v", err)
 		}
@@ -126,7 +124,6 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 			t.Fatalf("Spawns = %+v, want 1 spawn in swe", drv.Spawns)
 		}
 
-		// Step 2: swe finishes -> transitions to review.
 		appendReportEvent(t, st, "lane-fast", lane.PhaseReport{
 			Phase:   recipe.PhaseSWE,
 			Outcome: lane.OutcomeDone,
@@ -140,7 +137,7 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 			t.Fatalf("PhaseStarts = %+v, want [review]", drv.PhaseStarts)
 		}
 
-		// Step 3: review finishes while CI is not green yet -> waits for CI.
+		// Review finishes before CI is green; transition holds until CI passes.
 		appendReportEvent(t, st, "lane-fast", lane.PhaseReport{
 			Phase:   recipe.PhaseReview,
 			Outcome: lane.OutcomeDone,
@@ -153,7 +150,6 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 			t.Fatalf("expected review to wait for CI green before starting integrate, got %d starts", len(drv.PhaseStarts))
 		}
 
-		// Step 4: CI turns green -> transitions to integrate.
 		appendCIEvent(t, st, "lane-fast", "green", "sha-fast-1")
 		if err := ctrl.Step(ctx); err != nil {
 			t.Fatalf("Step 4 (CI green -> integrate): %v", err)
@@ -162,7 +158,6 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 			t.Fatalf("PhaseStarts = %+v, want [review, integrate]", drv.PhaseStarts)
 		}
 
-		// Step 5: integrate finishes -> lane done and backlog item closed.
 		appendReportEvent(t, st, "lane-fast", lane.PhaseReport{
 			Phase:   recipe.PhaseIntegrate,
 			Outcome: lane.OutcomeDone,
@@ -209,7 +204,6 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 
 		ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
 
-		// Spawn swe.
 		if err := ctrl.Step(ctx); err != nil {
 			t.Fatalf("Step (spawn): %v", err)
 		}
@@ -285,14 +279,13 @@ func TestControllerReworkAndRoundLimits(t *testing.T) {
 
 	ctrl := controller.New(controller.Config{
 		RunID:            "run-1",
-		JudgmentDebounce: -1, // immediate dispatch for test assertion
+		JudgmentDebounce: -1,
 	}, st, drv, clk, judge)
 
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("initial Step: %v", err)
 	}
 
-	// Rounds 1 and 2: swe -> clean -> review (needs-swe) -> reworks to swe on round+1.
 	for round := 1; round <= 2; round++ {
 		appendReportEvent(t, st, "lane-rework", lane.PhaseReport{
 			Phase:   recipe.PhaseSWE,
@@ -337,7 +330,7 @@ func TestControllerReworkAndRoundLimits(t *testing.T) {
 		t.Fatalf("expected 0 judgment batches during mechanical reworks r1-r2, got %d", judge.BatchCount())
 	}
 
-	// Round 3: swe -> clean -> review (needs-swe) -> hits round limit (MinRound: 3 -> TargetEscalate).
+	// Round 3 review needs-swe hits MinRound: 3 -> TargetEscalate.
 	for _, phase := range []string{recipe.PhaseSWE, recipe.PhaseClean} {
 		appendReportEvent(t, st, "lane-rework", lane.PhaseReport{
 			Phase:   phase,
@@ -371,7 +364,6 @@ func TestControllerReworkAndRoundLimits(t *testing.T) {
 		t.Fatalf("judge.BatchCount() = %d, want 1 after round 3 escalation", judge.BatchCount())
 	}
 
-	// Verify earlier round sessions were preserved in ln.Sessions.
 	for _, key := range []string{"swe", "swe2", "swe3", "clean", "clean2", "clean3", "review", "review2", "review3"} {
 		if ln.Sessions[key] == "" || ln.Terminals[key] == "" {
 			t.Fatalf("missing recorded attempt key %q in Sessions=%v Terminals=%v", key, ln.Sessions, ln.Terminals)
@@ -413,7 +405,6 @@ func TestControllerJudgmentRuleAndPhaseExitFallback(t *testing.T) {
 		JudgmentDebounce: -1,
 	}, st, drv, clk, judge)
 
-	// Spawn swe (attempt 1 uses claude:opus).
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("Step (spawn): %v", err)
 	}
@@ -421,7 +412,7 @@ func TestControllerJudgmentRuleAndPhaseExitFallback(t *testing.T) {
 		t.Fatalf("initial spawn = %+v, want claude:opus", drv.Spawns)
 	}
 
-	// Simulate swe terminal exiting with non-zero code -> fallback chain retries attempt 2 with codex:gpt-5.4.
+	// Non-zero exit without a report triggers attempt 2 on the fallback agent chain.
 	rawExit, _ := json.Marshal(controller.PhaseExitPayload{
 		ExitCode: 1,
 		Error:    "rate limited",
@@ -444,7 +435,6 @@ func TestControllerJudgmentRuleAndPhaseExitFallback(t *testing.T) {
 		t.Fatalf("expected fallback retry to be auto (0 judgment batches), got %d", judge.BatchCount())
 	}
 
-	// Attempt 2 completes swe -> advances to clean.
 	appendReportEvent(t, st, "lane-sec", lane.PhaseReport{
 		Phase:   recipe.PhaseSWE,
 		Outcome: lane.OutcomeDone,
@@ -454,7 +444,6 @@ func TestControllerJudgmentRuleAndPhaseExitFallback(t *testing.T) {
 		t.Fatalf("Step (swe done): %v", err)
 	}
 
-	// Clean completes -> matches transition with JudgmentRule -> classified as judgment!
 	appendReportEvent(t, st, "lane-sec", lane.PhaseReport{
 		Phase:   recipe.PhaseClean,
 		Outcome: lane.OutcomeDone,
@@ -486,12 +475,10 @@ func TestControllerStallDetection(t *testing.T) {
 		JudgmentDebounce: 2 * time.Minute,
 	}, st, drv, clk, judge)
 
-	// Start lane in swe (default PhaseTimeout is 45m).
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("Step (spawn): %v", err)
 	}
 
-	// Advance 44 minutes: not stalled yet.
 	clk.Advance(44 * time.Minute)
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("Step at 44m: %v", err)
@@ -500,7 +487,6 @@ func TestControllerStallDetection(t *testing.T) {
 		t.Fatalf("expected 0 stops at 44m, got %+v", drv.Stops)
 	}
 
-	// Advance 1 more minute (total 45m): stall detected, terminal stopped, lane marked blocked.
 	clk.Advance(time.Minute)
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("Step at 45m: %v", err)
@@ -517,7 +503,6 @@ func TestControllerStallDetection(t *testing.T) {
 		t.Fatalf("lane.Status = %q, want blocked", ln.Status)
 	}
 
-	// Stall event is debounced until 2m elapses.
 	if judge.BatchCount() != 0 {
 		t.Fatalf("expected stall event to wait for debounce window, got %d batches", judge.BatchCount())
 	}
@@ -555,12 +540,10 @@ func TestControllerJudgmentBatchingAndUrgentBypass(t *testing.T) {
 		JudgmentDebounce: 3 * time.Minute,
 	}, st, drv, clk, judge)
 
-	// Spawn both lanes.
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("Step (spawn): %v", err)
 	}
 
-	// At t=0: lane-blocked reports OutcomeBlocked (judgment event #1).
 	appendReportEvent(t, st, "lane-blocked", lane.PhaseReport{
 		Phase:   recipe.PhaseSWE,
 		Outcome: lane.OutcomeBlocked,
@@ -573,7 +556,6 @@ func TestControllerJudgmentBatchingAndUrgentBypass(t *testing.T) {
 		t.Fatalf("BatchCount at t=0 = %d, want 0 (debouncing)", judge.BatchCount())
 	}
 
-	// At t=1m: mail event arrives (judgment event #2) AND lane-auto completes swe (auto event).
 	clk.Advance(time.Minute)
 	if _, err := st.Events().Append(ctx, store.Event{
 		RunID:   "run-1",
@@ -592,7 +574,6 @@ func TestControllerJudgmentBatchingAndUrgentBypass(t *testing.T) {
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("Step at t=1m: %v", err)
 	}
-	// Auto event must execute immediately without waiting for judgment debounce.
 	if len(drv.PhaseStarts) != 1 || drv.PhaseStarts[0].LaneID != "lane-auto" || drv.PhaseStarts[0].Phase != recipe.PhaseClean {
 		t.Fatalf("expected lane-auto to advance to clean immediately at t=1m, got %+v", drv.PhaseStarts)
 	}
@@ -600,7 +581,6 @@ func TestControllerJudgmentBatchingAndUrgentBypass(t *testing.T) {
 		t.Fatalf("BatchCount at t=1m = %d, want 0", judge.BatchCount())
 	}
 
-	// At t=3m: debounce window (3m from t=0) elapses -> both judgment events flushed in 1 batch!
 	clk.Advance(2 * time.Minute)
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("Step at t=3m: %v", err)
@@ -614,7 +594,6 @@ func TestControllerJudgmentBatchingAndUrgentBypass(t *testing.T) {
 		t.Fatalf("Batches[0] = %+v, want [lane_report, mail]", judge.Batches[0])
 	}
 
-	// Now test urgent bypass: queue a non-urgent mail at t=4m, then an urgent owner_msg at t=4m15s.
 	clk.Advance(time.Minute)
 	if _, err := st.Events().Append(ctx, store.Event{
 		RunID:   "run-1",
@@ -668,7 +647,6 @@ func TestControllerOwnerAskDefaultAtDeadline(t *testing.T) {
 		t.Fatalf("Step (spawn): %v", err)
 	}
 
-	// Validation: missing default or default not in options must fail.
 	badAsk := controller.OwnerAsk{
 		ID:       "ask-bad",
 		Question: "Which DB?",
@@ -680,7 +658,6 @@ func TestControllerOwnerAskDefaultAtDeadline(t *testing.T) {
 		t.Fatalf("AskOwner(invalid default) = %v, want ErrInvalidArgument", err)
 	}
 
-	// Register valid ask1 (will expire and apply default) and ask2 (will be answered before deadline).
 	deadline := clk.Now().Add(10 * time.Minute)
 	ask1 := controller.OwnerAsk{
 		ID:        "ask-1",
@@ -714,7 +691,6 @@ func TestControllerOwnerAskDefaultAtDeadline(t *testing.T) {
 		t.Fatalf("lane.Status after AskOwner = %q, want blocked", ln.Status)
 	}
 
-	// At t=5m: owner answers ask-2 with non-default "include"; ask-1 remains unanswered.
 	clk.Advance(5 * time.Minute)
 	if err := ctrl.AnswerOwnerAsk(ctx, "ask-2", "include"); err != nil {
 		t.Fatalf("AnswerOwnerAsk(ask-2): %v", err)
@@ -726,7 +702,6 @@ func TestControllerOwnerAskDefaultAtDeadline(t *testing.T) {
 		t.Fatalf("expected 0 steers on lane-ask at t=5m, got %+v", drv.Steers)
 	}
 
-	// At t=10m: ask-1 deadline expires -> default "wal" is auto-applied and steers lane-ask!
 	clk.Advance(5 * time.Minute)
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("Step at t=10m (deadline): %v", err)
@@ -744,7 +719,6 @@ func TestControllerOwnerAskDefaultAtDeadline(t *testing.T) {
 		t.Fatalf("lane.Status after ask default = %q, want running", ln.Status)
 	}
 
-	// Verify ask-1 recorded an owner.ask.default decision and ask-2 did not.
 	decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1"})
 	if err != nil {
 		t.Fatalf("List decisions: %v", err)
@@ -830,7 +804,6 @@ func TestControllerKillRestartIdempotenceAndLeaseTakeover(t *testing.T) {
 		t:          t,
 	}
 
-	// Also verify inside Judge callback that ToolJudgmentDispatch is already in DecisionStore.
 	judge.OnJudge = func(ctx context.Context, runID string, events []store.Event) error {
 		decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: runID})
 		if err != nil || len(decs) == 0 || decs[len(decs)-1].Tool != controller.ToolJudgmentDispatch {
@@ -855,7 +828,6 @@ func TestControllerKillRestartIdempotenceAndLeaseTakeover(t *testing.T) {
 		JudgmentDebounce: 2 * time.Minute,
 	}, st, drv, clk, judge)
 
-	// Controller A spawns lane-ha in swe, then advances swe -> clean, queues a judgment event and an owner ask.
 	if err := ctrl1.Step(ctx); err != nil {
 		t.Fatalf("ctrl1 Step 1 (spawn): %v", err)
 	}
@@ -890,13 +862,11 @@ func TestControllerKillRestartIdempotenceAndLeaseTakeover(t *testing.T) {
 		t.Fatalf("after ctrl1 Step 2: Spawns=%d PhaseStarts=%d, want 1, 1", len(drv.Spawns), len(drv.PhaseStarts))
 	}
 
-	// Kill Controller A without releasing the lease.
 	ctrl1.Kill()
 	if err := ctrl1.Step(ctx); !errors.Is(err, controller.ErrControllerStopped) {
 		t.Fatalf("ctrl1.Step after Kill = %v, want ErrControllerStopped", err)
 	}
 
-	// Controller B starts before Controller A's 30s lease TTL expires -> blocked by ErrLeaseHeld.
 	ctrl2 := controller.New(controller.Config{
 		RunID:            "run-1",
 		HolderID:         "controller-b",
@@ -909,17 +879,14 @@ func TestControllerKillRestartIdempotenceAndLeaseTakeover(t *testing.T) {
 		t.Fatalf("ctrl2.Step before lease expiry = %v, want ErrLeaseHeld", err)
 	}
 
-	// Advance past the remaining 20s of Controller A's lease TTL (now at t=30s).
 	clk.Advance(20 * time.Second)
 	if err := ctrl2.Step(ctx); err != nil {
 		t.Fatalf("ctrl2.Step after lease expiry: %v", err)
 	}
-	// Controller B must NOT have repeated SpawnSession or StartPhaseTerminal!
 	if len(drv.Spawns) != 1 || len(drv.PhaseStarts) != 1 {
 		t.Fatalf("after ctrl2 takeover: Spawns=%d PhaseStarts=%d, want 1, 1 (no duplicates)", len(drv.Spawns), len(drv.PhaseStarts))
 	}
 
-	// Advance to t=2m: recovered judgment event (from t=0) and owner ask (deadline t=90s) both fire under Controller B!
 	clk.Advance(90 * time.Second)
 	if err := ctrl2.Step(ctx); err != nil {
 		t.Fatalf("ctrl2.Step at t=2m: %v", err)
@@ -932,7 +899,6 @@ func TestControllerKillRestartIdempotenceAndLeaseTakeover(t *testing.T) {
 		t.Fatalf("recovered ask default directive on ctrl2 = %+v, err=%v", defDir, err)
 	}
 
-	// Drive lane-ha through clean -> review -> integrate -> complete on Controller B.
 	for _, phase := range []string{recipe.PhaseClean, recipe.PhaseReview, recipe.PhaseIntegrate} {
 		appendReportEvent(t, st, "lane-ha", lane.PhaseReport{
 			Phase:   phase,
@@ -957,8 +923,8 @@ func TestControllerKillRestartIdempotenceAndLeaseTakeover(t *testing.T) {
 		t.Fatalf("List decisions before replay: %v", err)
 	}
 
-	// Simulate a crash where the event cursor was lost/reset to 0 after Decisions were committed.
-	// A restarted Controller C must re-scan every event from Seq 1 and skip all of them via DecisionStore!
+	// Reset the event cursor to 0 after decisions are committed; a restarted
+	// controller must skip already-decided events when replaying from Seq 1.
 	ctrl2.Kill()
 	if err := st.Events().SetCursor(ctx, "run-1", controller.DefaultConsumer, 0); err != nil {
 		t.Fatalf("SetCursor(0): %v", err)
@@ -999,7 +965,6 @@ func TestControllerStaleApprovalAndRunLoop(t *testing.T) {
 	clk, st, drv, judge := setupTestEnv(t)
 	ctx := t.Context()
 
-	// Create a lane already in integrate whose PRHead moved after review approval (ApprovalStale == true).
 	if err := st.Lanes().Upsert(ctx, lane.Lane{
 		ID:          "lane-stale",
 		RunID:       "run-1",
@@ -1034,7 +999,6 @@ func TestControllerStaleApprovalAndRunLoop(t *testing.T) {
 		JudgmentDebounce:  -1,
 	}, st, drv, clk, judge)
 
-	// Queue the event before starting Run so the initial Step inside Run processes it deterministically.
 	appendReportEvent(t, st, "lane-stale", lane.PhaseReport{
 		Phase:   recipe.PhaseIntegrate,
 		Outcome: lane.OutcomeDone,

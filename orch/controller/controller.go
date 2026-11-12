@@ -1,11 +1,5 @@
 // Package controller implements the deterministic swarm orchestrator state machine.
-//
-// It consumes events from store.Store, advances lanes through their compiled
-// recipe phases, detects stalls, maintains the run lease with heartbeats,
-// auto-applies owner-ask defaults at their deadlines, and batches judgment
-// events (with urgent bypass) for a Judge (implemented by the Dispatcher).
-// Every action is recorded in store.DecisionStore before execution so that a
-// process crash and restart never repeats an action.
+// Every action is recorded in store.DecisionStore before execution so a crash and restart never repeats it.
 package controller
 
 import (
@@ -351,14 +345,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	}
 }
 
-// Step executes one deterministic controller pass:
-//  1. Acquires or heartbeats the run lease.
-//  2. Synchronizes the write-ahead Decision log for idempotency.
-//  3. Spawns any StatusPlanned lanes up to the recipe concurrency cap.
-//  4. Detects stalled running lanes and emits EventStall.
-//  5. Checks open owner asks for deadline expiry and emits EventOwnerAskExpired.
-//  6. Consumes unread events from EventStore, executing auto transitions and queuing judgment events.
-//  7. Flushes any debounced judgment event batch whose debounce window has elapsed.
+// Step executes one deterministic pass of lease maintenance, stall/expiry detection, event consumption, and judgment flushing.
 func (c *Controller) Step(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -433,9 +420,7 @@ func (c *Controller) StartLane(ctx context.Context, laneID string) error {
 	return c.startLanePhase(ctx, ln, r, firstPhase, round, 1, ToolPhaseStart, "", "spawn initial phase", "")
 }
 
-// AskOwner registers an owner ask with options, a default, and a deadline.
-// When the deadline arrives without an owner answer, the controller
-// automatically applies ask.Default.
+// AskOwner registers an owner ask whose default option is auto-applied at its deadline.
 func (c *Controller) AskOwner(ctx context.Context, ask OwnerAsk) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -483,8 +468,7 @@ func (c *Controller) AskOwner(ctx context.Context, ask OwnerAsk) error {
 	return nil
 }
 
-// AnswerOwnerAsk records the owner's response to an open OwnerAsk before its
-// deadline, marking the ask handled so the default is not applied at expiry.
+// AnswerOwnerAsk records the owner's response to an open OwnerAsk before its deadline.
 func (c *Controller) AnswerOwnerAsk(ctx context.Context, askID, chosenOption string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -670,8 +654,7 @@ func (c *Controller) recordDecision(ctx context.Context, tool, laneID, reason, r
 	return dec, false, nil
 }
 
-// recoverPendingState reconstructs in-memory pending judgment events and
-// pending CI-gated verdicts from the Store when a Controller starts or restarts.
+// recoverPendingState reconstructs pending judgment events and CI-gated verdicts on startup.
 func (c *Controller) recoverPendingState(ctx context.Context) error {
 	cur, err := c.store.Events().GetCursor(ctx, c.cfg.RunID, c.cfg.Consumer)
 	if err != nil {
@@ -1060,8 +1043,7 @@ func (c *Controller) advanceByRecipe(
 	}
 
 	if mech == nil {
-		// Check whether a transition from ln.Phase with this verdict is simply
-		// waiting on CIGreen == true (and CI has not failed).
+		// Hold the verdict if a transition only awaits green CI.
 		if !ciGreen && !isCIRed(ln.Checks) {
 			mechWithCI, judgWithCI := r.MatchTransitions(ln.Phase, verdict, true, round)
 			if mechWithCI != nil || len(judgWithCI) > 0 {
@@ -1076,9 +1058,6 @@ func (c *Controller) advanceByRecipe(
 				return store.EventClassAuto, nil
 			}
 		}
-
-		// Outcomes like blocked or needs-input without a mechanical transition
-		// block the lane and escalate to the Judge.
 		return c.blockLaneForJudgment(ctx, ln)
 	}
 
@@ -1216,7 +1195,6 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		return store.EventClassAuto, nil
 	}
 
-	// If the terminal filed a valid phase report before exiting, process it as a report.
 	termID := cmp.Or(payload.TerminalID, ln.TerminalID)
 	if termID != "" && payload.ExitCode == 0 && payload.Error == "" {
 		if rep, err := c.driver.ReadReport(ctx, c.cfg.RunID, ln.ID, termID); err == nil && rep != nil && rep.Outcome.Valid() {
@@ -1404,7 +1382,6 @@ func (c *Controller) handleOwnerAskExpired(ctx context.Context, ev *store.Event)
 	}
 	ask.LaneID = cmp.Or(ask.LaneID, ev.LaneID)
 
-	// If the ask directive was already handled (e.g., answered by the owner), do not overwrite it.
 	dirID := ownerAskDirectiveID(ask.ID)
 	if dir, err := c.store.Directives().Get(ctx, c.cfg.RunID, dirID); err == nil {
 		if dir.Status != store.DirectiveActive {
