@@ -462,15 +462,19 @@ func (d *Dispatcher) selectModel(events []store.Event) string {
 	return d.cfg.Model
 }
 
-// toolsForBatch drops the read.* tools from a batch that names no lane. They
-// only expand a lane's truncated excerpt, so a run-level batch (owner message,
-// relayed mail) leaves them nothing to read, and a model that is offered them
-// anyway "checks on" the lanes with a made-up lane ID.
+// toolsForBatch drops the read.* tools from a batch that names no lane: they
+// only expand a lane's truncated excerpt, and a model offered them anyway
+// invents a lane ID.
 func toolsForBatch(defs []model.ToolDefinition, events []store.Event) []model.ToolDefinition {
-	if slices.ContainsFunc(events, func(ev store.Event) bool { return strings.TrimSpace(ev.LaneID) != "" }) {
+	if batchNamesLane(events) {
 		return defs
 	}
 	return slices.DeleteFunc(slices.Clone(defs), func(def model.ToolDefinition) bool { return isReadOnlyTool(def.Name) })
+}
+
+// batchNamesLane reports whether any event of the batch is about a lane.
+func batchNamesLane(events []store.Event) bool {
+	return slices.ContainsFunc(events, func(ev store.Event) bool { return strings.TrimSpace(ev.LaneID) != "" })
 }
 
 func isHardBatch(events []store.Event) bool {
@@ -610,28 +614,23 @@ func (d *Dispatcher) handleRawToolCall(
 	return result, nil
 }
 
-// checkOnePrimaryAction enforces the batch contract: a batch is answered with
-// one answer. The only fan-out allowed is the work that is naturally plural
-// and independent per target: backlog.add, lane.spawn and lane.retry (several
-// items added, several ready items spawned, an added item spawned, a stalled
-// lane retried while a freed slot is filled). Anything else (a
-// directive.note restating the decision, a steer plus a retry, ...) is
-// rejected with an error, so the model sees it, the decision log records it,
-// and the grader scores exactly what was applied. The first action wins; read
-// tools are never limited.
+// isFanOutTool reports whether a tool may repeat or combine within a batch:
+// the work that is naturally plural and independent per target.
+func isFanOutTool(tool string) bool {
+	return tool == ToolBacklogAdd || tool == ToolLaneSpawn || tool == ToolLaneRetry
+}
+
+// checkOnePrimaryAction enforces one primary action per batch: the first
+// mutating call wins, and any further one is rejected (visibly, so the model
+// and the decision log see it) unless both are fan-out tools. Read tools are
+// never limited.
 func checkOnePrimaryAction(accepted []ProposedAction, act ProposedAction) error {
 	if isReadOnlyTool(act.Tool) {
 		return nil
 	}
-	fanOut := func(tool string) bool {
-		return tool == ToolBacklogAdd || tool == ToolLaneSpawn || tool == ToolLaneRetry
-	}
 	for i := range accepted {
 		prev := accepted[i]
-		if isReadOnlyTool(prev.Tool) {
-			continue
-		}
-		if fanOut(prev.Tool) && fanOut(act.Tool) {
+		if isReadOnlyTool(prev.Tool) || (isFanOutTool(prev.Tool) && isFanOutTool(act.Tool)) {
 			continue
 		}
 		return fmt.Errorf("this batch already applied %s [%s]; answer a batch with a single primary action (only %s, %s and %s may combine)",

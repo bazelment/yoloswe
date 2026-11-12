@@ -1,6 +1,7 @@
 package dispatcher
 
 import (
+	"cmp"
 	"context"
 	"strings"
 
@@ -14,10 +15,9 @@ const maxTruncationRetries = 2
 // truncationNudge tells the model its previous reply hit the output limit.
 const truncationNudge = "Your previous reply was cut off by the output limit before any tool call completed, so nothing was decided. Call the tool now with no preamble, then end with one short sentence."
 
-// retryOnTruncationClient re-asks a turn that stopped at max_tokens. A reply
-// that spends its whole output budget on analysis (or on a half-written tool
-// call) decides nothing, and the batch is then lost: the tool loop treats any
-// stop other than tool_use as the end of the turn.
+// retryOnTruncationClient re-asks a turn that stopped at max_tokens: the tool
+// loop treats any stop other than tool_use as the end of the turn, so a reply
+// cut off before its tool call would lose the batch.
 type retryOnTruncationClient struct {
 	inner model.ModelClient
 }
@@ -37,18 +37,11 @@ func (c retryOnTruncationClient) CreateMessage(ctx context.Context, req model.Re
 			return &out, nil
 		}
 		cur = req.Clone()
-		if prose := strings.TrimSpace(resp.Text()); prose != "" {
-			cur.Messages = append(cur.Messages, model.Message{
-				Role:    model.RoleAssistant,
-				Content: []model.ContentBlock{{Type: model.BlockTypeText, Text: prose}},
-			})
-		} else {
-			// The user turn must still alternate with an assistant turn.
-			cur.Messages = append(cur.Messages, model.Message{
-				Role:    model.RoleAssistant,
-				Content: []model.ContentBlock{{Type: model.BlockTypeText, Text: "(cut off)"}},
-			})
-		}
+		// The user turn must still alternate with an assistant turn.
+		cur.Messages = append(cur.Messages, model.Message{
+			Role:    model.RoleAssistant,
+			Content: []model.ContentBlock{{Type: model.BlockTypeText, Text: cmp.Or(strings.TrimSpace(resp.Text()), "(cut off)")}},
+		})
 		cur.Messages = append(cur.Messages, model.NewUserMessage(truncationNudge))
 	}
 }

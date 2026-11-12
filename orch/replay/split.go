@@ -38,8 +38,7 @@ func SplitMomentIDs(ids []string) (tune, holdout []string) {
 }
 
 // Subset returns a copy of ds holding only the moments of the given split and
-// no Concierge questions (they are not part of the Dispatcher fix surface and
-// are reported on the full set). SplitAll-style use is just ds itself.
+// no Concierge questions (they are reported on the full set).
 func (ds *Dataset) Subset(split Split) (*Dataset, error) {
 	ids := make([]string, len(ds.Moments))
 	for i := range ds.Moments {

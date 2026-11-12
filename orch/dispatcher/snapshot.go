@@ -25,10 +25,9 @@ const (
 	DefaultMaxItemExcerptBytes  = 512
 	DefaultMaxEventExcerptBytes = 1024
 	DefaultMaxSummaryBytes      = 512
-	// DefaultMaxOwnerSummaryBytes bounds the summary of owner-originated events
-	// (owner messages, relayed mail, expired asks). Those carry the owner's
-	// order or decision card, which often arrives after a long preamble, so
-	// cutting them at DefaultMaxSummaryBytes drops the instruction itself.
+	// DefaultMaxOwnerSummaryBytes bounds owner-originated event summaries: the
+	// order or decision card often follows a long preamble that the default
+	// cut would drop it with.
 	DefaultMaxOwnerSummaryBytes = 4096
 	bytesPerTokenEstimate       = 4
 )
@@ -42,8 +41,7 @@ type SnapshotConfig struct {
 	MaxDirectiveBytes    int
 	MaxItemExcerptBytes  int
 	MaxEventExcerptBytes int
-	// MaxOwnerSummaryBytes bounds owner-originated event summaries; see
-	// DefaultMaxOwnerSummaryBytes.
+	// MaxOwnerSummaryBytes bounds owner-originated event summaries.
 	MaxOwnerSummaryBytes int
 }
 
@@ -257,8 +255,7 @@ func BuildSnapshot(
 		for i := range topItems {
 			it := topItems[i]
 			var row strings.Builder
-			// "ready" marks an open item whose dependencies are all done: the
-			// only state in which lane.spawn will accept it.
+			// "ready": the only state in which lane.spawn accepts an open item.
 			readiness := ""
 			if it.Status == store.BacklogOpen && depsDone(it, statusByID) {
 				readiness = " ready"
@@ -366,8 +363,7 @@ func BuildSnapshot(
 				urgentTag = " [URGENT]"
 			}
 			var row strings.Builder
-			// Run-level events carry no lane field at all: a "lane=-" or
-			// "lane=none" placeholder gets passed to read.* tools as a lane ID.
+			// Omitted, not "lane=-": a placeholder gets passed to read.* tools as a lane ID.
 			laneLabel := ""
 			if ev.LaneID != "" {
 				laneLabel = " lane=" + ev.LaneID
@@ -403,7 +399,7 @@ func BuildSnapshot(
 		}
 	}
 
-	if len(events) > 0 && !slices.ContainsFunc(events, func(ev store.Event) bool { return ev.LaneID != "" }) {
+	if len(events) > 0 && !batchNamesLane(events) {
 		b.WriteString("\nRun-level batch: no lane is named, so read.* tools are not offered. Text cut with `[truncated]` is final; decide with what is shown.\n")
 	}
 
