@@ -405,6 +405,92 @@ func TestAdversarialScraperCannotPassTheBar(t *testing.T) {
 	}
 }
 
+var (
+	cueOneWayRE   = regexp.MustCompile(`(?i)one-way|\bdefault if unanswered\b|\bchoices?:`)
+	cueReplanRE   = regexp.MustCompile(`(?i)replan|rewrite yours|\bplan v\d\b`)
+	cueFundRE     = regexp.MustCompile(`(?i)\bfund (?:one |a |an )?(?:analysis )?lane\b|\bfunded as your\b|\bowner (?:ask|order|request|direction)\b`)
+	cueDecisionRE = regexp.MustCompile(`(?i)owner decision|owner directive|standing|ruling|\bverbatim\b`)
+	cueFeedbackRE = regexp.MustCompile(`(?i)owner feedback`)
+	cueBacklogRE  = regexp.MustCompile(`- \*\*([A-Za-z0-9._:\-]+)\*\* \[p\d #\d+ open\]`)
+	cueLaneRE     = regexp.MustCompile(`(?m)^\| ([A-Za-z0-9._:\-]+) \| [^|]+ \| running \|`)
+)
+
+// cueWordDispatcher has no model but, unlike scrapingDispatcher, reads the
+// owner's cue words ("ONE-WAY", "fund a lane", "OWNER DECISION", "replan") and
+// the state tables, so its score measures how much of each label is guessable
+// from phrasing and state alone.
+func cueWordDispatcher(t *testing.T) clientFunc {
+	return func(_ context.Context, req model.Request) (*model.Response, error) {
+		if hasToolResult(req) || len(req.Messages) == 0 {
+			return endTurn("done"), nil
+		}
+		text := req.Messages[0].Text()
+		events := text
+		if i := strings.Index(text, "## Judgment Event Batch"); i >= 0 {
+			events = text[i:]
+		}
+		var name string
+		var input any
+		switch {
+		case cueReplanRE.MatchString(events):
+			name, input = dispatcher.ToolPlannerRequest, dispatcher.PlannerRequestParams{Reason: "cue"}
+		case cueOneWayRE.MatchString(events):
+			name, input = dispatcher.ToolOwnerAsk, dispatcher.OwnerAskParams{Question: "cue", Options: []string{"yes", "no"}, Default: "no", Deadline: "1h", Reason: "cue"}
+		case cueFundRE.MatchString(events):
+			item := ""
+			if m := cueBacklogRE.FindStringSubmatch(text); m != nil {
+				item = m[1]
+			}
+			name, input = dispatcher.ToolLaneSpawn, dispatcher.LaneSpawnParams{ItemID: item, Brief: "cue", Reason: "cue"}
+		case cueFeedbackRE.MatchString(events):
+			id := ""
+			if m := cueLaneRE.FindStringSubmatch(text); m != nil {
+				id = m[1]
+			}
+			name, input = dispatcher.ToolLaneRetry, dispatcher.LaneRetryParams{LaneID: id, Reason: "cue"}
+		case cueDecisionRE.MatchString(events):
+			name, input = dispatcher.ToolDirectiveNote, dispatcher.DirectiveNoteParams{Fact: "cue"}
+		default:
+			return endTurn("No action needed."), nil
+		}
+		raw, err := json.Marshal(input)
+		if err != nil {
+			return nil, err
+		}
+		return &model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message:    model.NewAssistantMessage(model.NewToolUseBlock("cue-1", name, raw)),
+			Usage:      model.Usage{InputTokens: 2500},
+		}, nil
+	}
+}
+
+// TestAdversarialCueWordBaselineFailsTheBar: a model-free dispatcher that keys
+// on the owner's cue words and reads the backlog and lane tables must not clear
+// the agreement or ask bars. The 0% an event-text scraper scores only shows
+// tool names are scrubbed; this one shows the labels are not guessable from
+// phrasing.
+func TestAdversarialCueWordBaselineFailsTheBar(t *testing.T) {
+	t.Parallel()
+	for _, set := range datasetSets {
+		ds, err := set.load()
+		if err != nil {
+			t.Fatalf("%s: %v", set.name, err)
+		}
+		t.Run(set.name, func(t *testing.T) {
+			t.Parallel()
+			rep := evalMoments(t, ds, func(replay.JudgmentMoment) model.ModelClient { return cueWordDispatcher(t) })
+			logScore(t, set.name+"/cue-word-baseline", rep)
+			if rep.AgreementPass {
+				t.Errorf("cue-word baseline cleared the agreement bar (%.1f%% vs baseline %.1f%%)", rep.AgreementRate*100, rep.BaselineAgreementRate*100)
+			}
+			if rep.AllPass() {
+				t.Error("cue-word baseline AllPass() = true: the Gate 2 bar must fail a model-free dispatcher")
+			}
+		})
+	}
+}
+
 // TestAdversarialConciergeNeedsTheStore: a concierge that never calls a Store
 // tool must not count as accurate.
 func TestAdversarialConciergeNeedsTheStore(t *testing.T) {

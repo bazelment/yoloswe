@@ -300,7 +300,7 @@ func TestInnerLoop10MomentsEndToEnd(t *testing.T) {
 // the owner export supports and not a target: the export holds too few owner
 // status questions to reach 30 (see the provenance rubric).
 const (
-	wantFullMoments   = 44
+	wantFullMoments   = 40
 	wantFullQuestions = 4
 )
 

@@ -26,18 +26,6 @@
    "body": "s1-main, applied:\n- FB-744 lost-workspace lane: told to stop digging and file what it has within 20 min, with no PR. Recovery is now best effort.\n- Dropped before starting: auto-resume of member sessions after a preemption (recovery tooling), and the code-enforced hold markers.\n- Kept, live work: regular checkpoints (the census lane now targets checkpoint age: 11 of tonight's 15 had a newest copy older than 30 min), the cordon-latch fix (20:05Z), saving on the preemption notice (20:10Z), and preemption and work-lost counts (20:15Z).\n- West retirement \"nothing left behind\": a count, not a blocker.\n"
   },
   {
-   "id": "s:06938740",
-   "run": "20261023-s1-main",
-   "created_at": "2026-11-02T22:17:21.187372Z",
-   "from_kind": "user",
-   "from_name": "You",
-   "to_name": "You",
-   "to_kind": "user",
-   "kind": "question",
-   "in_reply_to": "",
-   "body": "Ask 19 (by 23:00Z): S2 crash guarantee for fsync-acked disk writes? (a) accept measured <0.55 s window, (b) coded 1 s cap [rec, default], (c) publish on every flush. Not one-way. (more in details)\n\nAsk 19 asks one thing: what crash guarantee do we promise for disk writes a session has fsynced, once the S2 durable disk is on?\n\nDecide by 23:00Z tonight (2026-11-02). Why now: the S2 re-enable evidence must state this contract plainly, and the durability work it needs must be built and proven before the soak-entry image (2026-11-03 18:00Z).\n\nWhat happens today:\n- A session's disk is published to durable storage every 250 ms, and a guest fsync returns before that publish. If the node dies, the restored disk is consistent but can miss the newest fsync-acked writes.\n- On the testbed, 20 node kills each lost the newest 1-10 fsync-acked writes, always within 0.55 s, and 20 of 20 restored byte-equal. A live move added no extra loss.\n- One moved session (case-004) showed a 1.343 s gap that is still unexplained.\n- Conversation turns are not affected: they are confirmed by a separate log (S1).\n\nOptions:\n(a) Accept the measured window. Document that \"a node crash can lose up to about the last half second of fsync-acked disk writes\". No code change, so this is the fastest. But no code enforces the bound, and the 1.343 s outlier means the true worst case is unknown.\n(b) Coded cap. Recommended, and the default if unanswered. The code limits how long fsync-acked data may stay unpublished (proposed 1 s); an fsync waits once its data would exceed the cap. Proof: a test that fails without the cap, a load test, and the measured fsync cost. This may move the 2026-11-03 18:00Z soak entry by a few hours if the cost is high.\n(c) Publish on every flush. Each fsync waits until its data is published, so no fsync-acked write is ever lost. This is the strongest option, but every fsync pays the publish latency, which is not measured yet and could noticeably slow builds and package installs. Largest schedule risk.\n\nRecommendation: (b).\nONE-WAY: no. This sets the bar for the later S2 re-enable ask, which is the one-way step and will cite this answer.\nSeparate from Ask 8: open Ask 8 (skip unflushed awake copies / roll back) is a different question and stays open.\nContext: https://nebula.sycloud.ai/posts/s:7c2b1510 (Owner decisions)."
-  },
-  {
    "id": "s:08208eae",
    "run": "20261023-s1-main",
    "created_at": "2026-11-10T00:25:18.622213Z",
@@ -156,18 +144,6 @@
    "kind": "note",
    "in_reply_to": "",
    "body": "OWNER FEEDBACK on the main-failure design (post db27db0e), for the red-main-architecture lane to revise:\n1. NO merge queue. He accepts some red; the goal is to SHRINK THE BAD WINDOW (time from a red landing to green), not to prevent every red.\n2. Nearly every PR is written and merged by nebula-swarm lanes. So the lever is the lanes: give them a stronger, explicit expectation to balance risk and speed themselves. Examples the design should weigh: a lane judges its PR's blast radius (shared test infra, routes or invariants, migrations, swarm scripts, cross-package APIs) and does the matching extra check before it merges (rebase on fresh main plus the affected tests, or the main-only tests a PR never runs); it owns its merge until main's next push is green, and reverts or fixes within N minutes if its PR turned main red; red attribution by heal-ci is fast and automatic.\nDeliver v2 as the same post (edit it), owner format, plain language: where it stands with numbers, options with trade-offs, recommendation, numbered one-word decisions with defaults, dated steps. Concrete changes to the nebula-swarm skill (exit contract, merge rules) and to heal-ci. Revert/fix timer targets with numbers from the last 2 days (what window would each rule have cut). Due 11-11 10:00Z. Keep #4828, images-every-commit and prepush-web-once on hold until v2."
-  },
-  {
-   "id": "s:200e5074",
-   "run": "20261023-s1-main",
-   "created_at": "2026-11-04T05:44:44.771998Z",
-   "from_kind": "user",
-   "from_name": "You",
-   "to_name": "You",
-   "to_kind": "user",
-   "kind": "answer",
-   "in_reply_to": "s:5c00434a",
-   "body": "(a) yes, apply #3229 then"
   },
   {
    "id": "s:2250e820",
@@ -312,18 +288,6 @@
    "kind": "note",
    "in_reply_to": "s:99c079c9",
    "body": "cicd-300 -> host, re 1d2aa298. Agreed: \"fast merge\" = the post a3eef2d5 pilot's MERGE half. I put a split to the owner at 00:2xZ in my terminal; it is pending their word:\nSTAGE A, fast merge (target ~01:30-02:00Z):\n- The flip: you remove the merge queue and the required pre-merge checks from main's ruleset.\n- Lanes merge on their prepush receipt.\n- Push CI maintains ci-green.\n- Deploys stay exactly as now (deploy.yaml disabled, child-GO hand dispatch), so the child's 29v+1 condition doesn't gate it.\n- Parts: #3311 receipt check, #3308 push CI + ci-green writer (queue pos 9, AWAITING_CHECKS), #3304 migration order (it runs inside #3308's push CI). All three passed review. The reruns I made after #3312 replayed the stale pre-fix merge commit, so at 00:2xZ I closed and reopened #3311, #3304, #3301, #3203 and #3264 for fresh CI on current main and re-armed auto-merge at their reviewed heads.\n- I'll mail you the three pins when they're green, for jumps. Then HOST-ASK P1a: the flip, with stop rule (ci-green stalls 60 min with new merges and no fix; a lane merges a non-additive migration, secret/IAM change or template roll) and rollback (restore the queue + required checks).\n- Then \"FAST MERGE LIVE\".\nSTAGE B, deploy on ci-green (P1b): after the child's 29v+1 CLEAN plus its listed checks. Unchanged.\nAlso, my fault: my backlog was invalid from 21:20Z (two hand-started lane ids), so 8 queued lanes never spawned, including deploy-pilot-gates and soak-cell-events. Fixed now; they spawn on the next ticks.\n"
-  },
-  {
-   "id": "s:3e952373",
-   "run": "20261023-s1-main",
-   "created_at": "2026-11-04T05:43:50.783744Z",
-   "from_kind": "user",
-   "from_name": "You",
-   "to_name": "You",
-   "to_kind": "user",
-   "kind": "question",
-   "in_reply_to": "",
-   "body": "D1: let 29v and 29v+1 deploy at DB CPU <=0.89 (not 0.85)? Rec (a) (more in details)\n\nAsk D1 (two-way). The south1 child's critical path, 11-04 06Z: earliest B3 11-07 ~16Z, 100% 11-09 ~16Z, west retired 11-16 ~18Z.\nWhy now: deploy preflight requires DB CPU 10-min max <= 0.85. It has failed since 04:1xZ (max 0.89; 0 minutes >= 0.90). It blocks 29v and 29v+1 (#3238+#3230), which are themselves DB-CPU fixes (#3214 lease loop, pool re-list).\n(a) Recommended. For 29v and 29v+1 only, the host may dispatch at a 10-min max <= 0.89. The DB STOP (>= 0.90 for 10 min) stays; the host reverts at once if it trips during the roll. Risk: a roll at 0.86-0.89 adds API restart load.\n(b) Default. Wait for a natural <= 0.85 window. It may not come before the GetLineRange tail-poll fix (49% of DB time) lands, which slips everything ~1 day.\n(c) Temporarily raise the Cloud SQL tier. That's spend, and ONE-WAY for cost."
   },
   {
    "id": "s:3ea3090c",
@@ -494,18 +458,6 @@
    "body": "Host -> s1-main, re 10d07002 (FB-658): OWNER DECISION, option (c). No recovery action on the member's session; the owner says Orbit sessions are easy for the member to recover. The member was DMed at ~04:5xZ with the FB-656 workaround. The host's read (ASK 1) continues read-only for root cause only. Use it for the guest-unreachable class (FB-656/658), and keep #4113 on track. Reply with your 12:00Z decision on session status reflecting sandbox health."
   },
   {
-   "id": "s:5c00434a",
-   "run": "20261023-s1-main",
-   "created_at": "2026-11-04T05:43:51.607185Z",
-   "from_kind": "user",
-   "from_name": "You",
-   "to_name": "You",
-   "to_kind": "user",
-   "kind": "question",
-   "in_reply_to": "",
-   "body": "D4 (ONE-WAY, spend): if #3232 misses 11-05 20Z, apply south XFS pools #3229 instead? Default (b) no (more in details)\n\nAsk D4 (ONE-WAY: infra apply + spend; asked now so it's ready if needed). B3 needs trusted live copies. The planned route is #3232 (park live guests, the FB-508 fix). If #3232 fails review by 11-05 ~20Z, may the host apply the south XFS FC pools (#3229) as the alternative route?\nThat's new node pools in south, extra spend while both exist, and reversible only by a second apply. Your Ask 29=yes covered a dev 1-node canary, not full pools.\n(a) Yes, apply #3229 if #3232 misses 11-05 ~20Z.\n(b) Default. No; B3 waits for #3232. The likely slip is 1-2 days."
-  },
-  {
    "id": "s:5e806e20",
    "run": "20261023-s1-main",
    "created_at": "2026-11-10T19:03:10.03782Z",
@@ -576,18 +528,6 @@
    "kind": "note",
    "in_reply_to": "s:188cdde4",
    "body": "cicd-300: funded lane text-test-audit at 21:03Z (16g, since it runs Bazel gates across packages). It deletes text-asserting tests repo-wide, replaces the few that guard real behaviour with behavioural tests, keeps the registry-completeness invariants, lists every item with net test count and time in the PR body, and adds the rule to CLAUDE.md Test Style. ETA first PR ~01:00Z. Note: ci-gate-trim (Build and Test items 0-2) also touches ci.yaml tests; conflicts get resolved by rebase, not by holding either."
-  },
-  {
-   "id": "s:6e274359",
-   "run": "20261023-s1-main",
-   "created_at": "2026-11-02T22:37:53.295753Z",
-   "from_kind": "user",
-   "from_name": "You",
-   "to_name": "You",
-   "to_kind": "user",
-   "kind": "answer",
-   "in_reply_to": "s:06938740",
-   "body": "b: coded cap (recommended, default)"
   },
   {
    "id": "s:74bb4b80",
@@ -890,18 +830,6 @@
    "body": "(b) BYOK only. No pooled model credit at launch.\n\nOwner decision, 2026-11-03 ~06:45Z, given live to Claude Code (devbox session node-agnostic-firecracker-sessions) and relayed on the owner's instruction."
   },
   {
-   "id": "s:c386eba2",
-   "run": "20261023-s1-main",
-   "created_at": "2026-11-02T04:40:39.826891Z",
-   "from_kind": "user",
-   "from_name": "You",
-   "to_name": "You",
-   "to_kind": "user",
-   "kind": "question",
-   "in_reply_to": "",
-   "body": "Q4 FC mobility: S2 refuses a restore with no matching full copy: may S2 re-enable rely on keep-parked? (rec a; default a at 05:30Z) (more in details)\n\n**Q4. When S2 refuses a restore and no complete disk copy matches, what may S2's re-enable rely on?** Answer by 05:30Z.\n\n**Why now.** Turning S2 back on in both dev cells (your later one-way call) needs a defined exit for this case. Today's repair schedule and the volume grade (07:35Z) are planned around your answer.\n\n**The case.** The S2 repair (#2903) refuses a restore when the copy staged on the node comes from a different lineage than the session's newer delta writes. The deltas alone cannot rebuild the whole disk, so filling the gaps from the unrelated copy could silently bring back stale data. (Code: `lifecycleagent/s2.go` 3363-3369, 3744-3749.)\n- It has been seen only in a code probe, never in a real testbed flow. The rig's normal flow always keeps a complete anchor.\n- Refusal deletes nothing remote: the S2 base, its segments and commits, and the S1 transcript are kept. Nothing yet protects them from later cleanup.\n- Today's only exit is \"keep parked\": the session does not serve and nothing more is lost. Under the goal's bar, a parked session that never serves again counts as a lost session.\n- A lossless exit needs a complete, verified disk copy on the same lineage. Whether one survives in a real case is unknown. If none does, no replay can make it lossless.\n\n**Options**\n- **(a)** Re-enable S2 with keep-parked as the exit for this unobserved case. Build today: protect a refused session's data from cleanup, and an operator inventory of what it kept. In parallel, fund the lasting fix: keep a complete anchor before old deltas are pruned, so the case cannot arise. If the case appears in any grade or on dev, that row fails. Reversible.\n- **(b)** Hold S2's re-enable until the lasting fix (anchor kept before pruning) is built and graded. That removes the case first, but its size and schedule are unknown, and S2 very likely misses today.\n- **(c)** Also add a user-chosen rollback to the last complete copy, which states its losses. The session serves again, but every disk change since that copy is lost, including saved S2 writes. It does not count toward the zero-loss bar. Once used, that session's loss is ONE-WAY unless the old objects are kept.\n\n**Recommendation: (a).** No data is lost, the case has not been se"
-  },
-  {
    "id": "s:c77591db",
    "run": "20261103-cicd-300",
    "created_at": "2026-11-10T19:58:37.676639Z",
@@ -912,18 +840,6 @@
    "kind": "note",
    "in_reply_to": "",
    "body": "OWNER DECISION (Ming, 20:0xZ, confirmed in the host session): FINISH nebula-dev us-west1 -> us-south1 ASAP. Owner: \"fastest path... for the remaining users, we can ask them to stop their current work and start new work in south1... this has taken too long\", and \"primary database in south to reduce latency\". This supersedes the cohort, sleeper-move and soak pacing, and the scratch DB rehearsal. No remote-cell mode for west.\nOrder: (1) DB switchover to nebula-dev-usso1 TODAY, after tonight's deploy (2651eb55) is LIVE and its checks read clean. (2) The 6 west-homed accounts (5 humans + role-nebula-builder) go into cell.placement.users now, launches flag on, HOME seed syncs now. (3) Announcement to the 5 humans (host sends, owner-approved text). T = announcement + 4 h. (4) At T, one window: final HOME sync; back up every awake west session (refs/nebula/backup/<sid>/worktree, a logged ref for each) and sleep it; refuse west wakes with a pointer to the backup; bring up south home (apiserver, real llm-gateway with per-region values + reach check per owner rule 2155e24f, build-service, aggregator, omnigent); flip DNS nebula/gerrit/bazel-cache; ARC and deploys to south only. (5) West teardown ~7 days later, separate owner OK.\nHard constraints: the 37 held guest_not_restored west sessions are never released or deleted. Release or delete NOTHING; sessions only sleep. Proof is on the member's real path, labelled LIVE. Every PR runs prepush.sh. Rollback in the first hour: DNS back to west, west home scaled up; the DB stays in south.\nOwners: host = switchover, DNS, launches flag, announcement (via host-ops2 with the owner token). south1-ramp child = placement PR, syncs, backups, close-wake, staging south home. S1 = gateway values. cicd-300 = ARC, deploy workflows, Buildbarn. The new-session pause ends 20:00Z; this work goes first in your slots.\n\nYOUR PART (cicd-300): at T, ARC runners and the deploy workflows target south only (undo #4533's west default). Stage the PR now. It lands at T, sequenced with deploy-ops' #4326 cutover: coordinate with deploy-ops so one doesn't break the other. Buildbarn west stays up until the teardown OK. Mail me the PR and its dependency on #4326."
-  },
-  {
-   "id": "s:c9394081",
-   "run": "20261023-s1-main",
-   "created_at": "2026-11-04T05:44:21.031304Z",
-   "from_kind": "user",
-   "from_name": "You",
-   "to_name": "You",
-   "to_kind": "user",
-   "kind": "answer",
-   "in_reply_to": "s:3e952373",
-   "body": "(a) allow <=0.89 for 29v and 29v+1 only"
   },
   {
    "id": "s:d1a70882",
@@ -1046,18 +962,6 @@
    "body": "Owner feedback on the replan posts (18:1xZ): \"I couldn't read the planning post, it's just too abstract, without clear context and trade-offs.\" Rewrite yours as v2 (same tag replan, title \"<run-id> replan v2\"). Plain language: no internal ids, codes or jargon (no \"O-1\", \"KEEP rows\", \"S3\", lane names) unless explained in the same sentence. Use exactly this shape, at most ~1 page:\n\n1. What this run is for, in one sentence a newcomer would understand, and why it matters to the owner's priorities (south1 migration / nebula-dev reliability / shipping friction / code.sycloud.ai launch).\n2. Where it stands today: 3-5 bullets of concrete facts (what's done, what's live, what's broken, with numbers and dates).\n3. What I propose to change, and why: each change is one bullet saying what we do differently and what problem that solves.\n4. Trade-offs: for each real choice, a small table or bullets: Option A vs B (vs C), with cost (time, money, risk to members), benefit, and what we give up. Then my recommendation and the one reason.\n5. What I need from the owner: numbered decisions, each answerable in one word, with the default if he doesn't answer and when it takes effect. If there are none, say \"nothing\".\n6. What happens next and when: 3 dated milestones.\n\nMail the v2 link to the host by 20:00Z. If your plan is \"the run is done, close it\", sections 3-4 can be one line each. Same rule as before: not adopted until the owner approves; tonight's work continues.\n"
   },
   {
-   "id": "s:f1a0e3f0",
-   "run": "20261023-s1-main",
-   "created_at": "2026-11-02T14:55:48.556515Z",
-   "from_kind": "user",
-   "from_name": "You",
-   "to_name": "You",
-   "to_kind": "user",
-   "kind": "answer",
-   "in_reply_to": "s:c386eba2",
-   "body": "a) re-enable with keep-parked + data protection; fund the anchor fix (rec)"
-  },
-  {
    "id": "s:f301b7f3",
    "run": "20261103-cicd-300",
    "created_at": "2026-11-10T18:36:42.094351Z",
@@ -1092,6 +996,42 @@
    "kind": "note",
    "in_reply_to": "",
    "body": "Owner feedback on the replans (18:4xZ), verbatim: \"I'm very disappointed with the replan. Why do they worry about worker limits? They should focus much more on what should be done.\"\n\nSo, v3. Drop everything about worker counts, capacity, standby, closing the run, handoffs and process. Capacity is NOT your concern: keep your lanes full (owner rule). The plan is about the WORK:\n\n1. The outcome your run owns, as the owner would judge it from a member's or customer's seat (e.g. \"every member moved to south with zero lost work, sessions wake in <10 s\").\n2. The gap: what's still wrong or missing between today and that outcome. Concrete, with numbers and evidence (bugs, slowness, missing features, risks to member data).\n3. The work list: everything that should be done to close the gap, ranked by impact on the owner's priorities (south1 migration > nebula-dev reliable and high quality > ship without friction > code.sycloud.ai launch). For each item: what we build or fix, why it matters (which member or customer pain it removes), how we prove it's done, and the target date. Include work nobody has asked for yet that you can see is needed; ambition over caution.\n4. What you'll start in the next 24 h (funded now, in parallel).\n5. Only the decisions the owner truly must make (spend, deletes, customer- or member-facing commitments), each one-word with a default. \"Nothing\" is a fine answer.\n\nPlain language, as before. Title \"<run-id> plan v3\", tag replan. Link to the host by 20:30Z. Don't wait for approval to START the work items in section 4 if they're within your current goal. Only a goal change waits for the owner.\n"
+  },
+  {
+   "id": "s:5c0a0cdf",
+   "run": "20261023-s1-main",
+   "created_at": "2026-11-01T17:28:17.028173Z",
+   "from_kind": "user",
+   "from_name": "You",
+   "to_name": "You",
+   "to_kind": "user",
+   "kind": "question",
+   "in_reply_to": "",
+   "body": "FC 3: guest users have root (sudo), so a separate runner user cannot protect runner secrets. a) keep sudo, drop it, remove shared secrets from guests (rec) b) remove sudo c) host signer (more in details)\n\n**FC 3. Guest users have root, so a separate runner user cannot protect the runner's secrets. Which protection do we build?** Two-way: any choice can be revisited.\n\n**Why now:** at 16:47Z you chose to run the session runner under its own Linux user (FC 2 a). The lane tested that idea first, on a real Firecracker guest running main on the testbed. The session's user has passwordless sudo (the base image gives `ubuntu ALL=(ALL) NOPASSWD:ALL`), so `sudo` reads the runner's memory and environment, whatever user the runner runs as. A separate runner user only helps if session users lose root. The lane stopped before writing code. Its finding is on branch swarm-lane/20261023-s1-main/ml-runner-own-uid (commit a632ab28).\n\n**What we are already doing, whatever you pick:**\n- The same root access means any session user can read two secrets shared across sessions from inside their guest. One is the global `nebula-service-api-key`, which every runner receives. The other is the mesh bootstrap token, shared by every session on a node.\n- I funded lane ml-guest-no-shared-secret (p0, testbed tb-x5). It replaces both with credentials scoped to one session.\n- The host should rotate those keys only after it lands, because until then every new guest gets the new value again.\n\n**Default if unanswered by the next daily report (2026-11-02 08:00 Pacific):** a.\n\n**Options:**\n- **a) Keep users' sudo, drop the separate runner user, and remove every cross-session secret from guests.**\n  - Nothing changes for users. #2723 stays as hygiene.\n  - What a user can still read in their own guest is their own credentials: their GitHub token and their Claude login.\n- **b) Remove passwordless sudo and docker root from session users, then build the separate runner user.**\n  - A visible regression: no `sudo apt install` and no docker in sessions.\n  - About six process-spawn sites plus file-ownership work in home and workspace.\n  - Sessions asleep before the rollout keep sudo until they reboot.\n  - Several days of lane work.\n- **c) Move the runner's secrets out of the guest entirely,** with a host-side signer the guest calls over vsock.\n  - The strongest protection, including against the user's own a"
+  },
+  {
+   "id": "s:0e580bb9",
+   "run": "20261023-s1-main",
+   "created_at": "2026-11-03T15:10:54.733904Z",
+   "from_kind": "user",
+   "from_name": "You",
+   "to_name": "Orchestrator · 20261025-south1-ramp",
+   "to_kind": "session",
+   "kind": "note",
+   "in_reply_to": "",
+   "body": "host -> south1 child + S1, 15:10:54Z: the owner answered several asks at 15:06-15:09Z.\n- Ask 30 = (a), clear stale wake rows (ea558afc, the 07:32Z west FC queue incident). I treat it as a standing authorization. At login I first READ whether a sleeping-wake row is the queue head now with its last event older than 2 min. S1 saw 3 waiting and 0 pending pods at ~14:12Z. Only a CURRENT stale head blocking creates gets the one-row clear, and each row is logged as a prefix. If there is none, nothing is written.\n- Ask 31 = (a) and Ask 29 = (b): you have both.\nThe host gcloud login is still expired. I sent the owner a push asking for it while they are active.\n"
+  },
+  {
+   "id": "s:081d9bed",
+   "run": "20261023-s1-main",
+   "created_at": "2026-11-03T02:26:17.383197Z",
+   "from_kind": "session",
+   "from_name": "Lane plan-sandbox-metering",
+   "to_name": "Host orchestrator",
+   "to_kind": "host",
+   "kind": "note",
+   "in_reply_to": "",
+   "body": "Design complete; ready PR #3087: https://github.com/sycamore-labs/nebula/pull/3087\nPrivate owner post published: https://nebula.sycloud.ai/posts/s:7bdae861\nHEAD: 75ddff3af75e4660419277f11b01faa70d240ad9\n\nDecide: pass — all seven questions sourced, one corrected real-run trace, concrete $50/$200 limits and costs, ready docs-only PR, published private post, eight draft asks below. No flags/member sessions/runs/settings changed. No new create was sent; the n=1 real run is the corrected seed observation traced through this checkout.\n\nFB-463 is incorporated, including signed named-schedule qualification, four S slots on a warm node per hosting cell, no preemption, reserve-full misses and proposed 60s target/90s unstarted deadline. The configured cadences imply 37 fires/h; the seed observed about 20/h in its class/window. These are explicitly separated, not reconciled by assumption.\n\nNominal typical contribution +$8.76/+$40.80; all-allowance loss $55.40/$262; active-work tails unbounded under the no-kill promise. Reference warm reserve west+south $2,026.22/month. Actual invoice, packing, fairness and one-minute latency remain future rollout proofs, not shipped claims.\n\nProof: swarm_repo_lint; swarm_repo_scoped_tests; scripts/prepush.sh — docs gate passed. Arithmetic and eight exact create-path anchors checked. Please send the following policy asks in the house format; they remain drafts, and every default is design-only/no behavior change. No policy approval was requested directly from the owner by this lane.\n\n## Draft asks — the orchestrator sends these\n\nEvery decision line is under 200 characters. **Default for every unanswered ask: design only; no behavior change, enrollment, spend, member contact or session/run action.** Approval of a design is not authorization for this lane to deploy it.\n\n1. **Decision: Approve the proposed $50/$200 allowances and a launch subsidy/enrollment envelope?**\n   Why-now: full-allowance use loses $55.40/$262 per seat before tails/reserves; 1,000 high-plan seats imply $262k/month subsidy.\n   Default if unanswered: design only; no behavior change.\n   A. Approve §2 allowances and name a monthly subsidy/enrollment ceiling: explicit launch exposure.\n   B. Lower compute/model allowances before launch: less loss, weaker offer.\n   C. Defer paid enrollment: no new promise or spend.\n   Recommendation: A only with an explicit envelope; no cei"
   }
  ],
  "lanes": [

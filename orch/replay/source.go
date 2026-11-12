@@ -3,8 +3,20 @@ package replay
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
+)
+
+// CategoryOwnerOnlyOneWay labels moments where the old orchestrator put a
+// ONE-WAY card (spend, member data, irreversible) to the owner.
+const CategoryOwnerOnlyOneWay = "owner_only_one_way"
+
+var (
+	// notOneWayRE matches a card that says it is two-way or not one-way.
+	notOneWayRE = regexp.MustCompile(`(?i)\bnot one-way\b|\(two-way\)|\bone-way: no\.`)
+	// ownerAttributionRE matches a record that says the owner made the decision.
+	ownerAttributionRE = regexp.MustCompile(`(?i)\bowner (?:decision|answered|chose|approved)\b|\byou chose\b`)
 )
 
 // SourceRecord is one export record cited by a label. Bodies are cut to a
@@ -61,6 +73,11 @@ func LoadSourceExcerpt() (*SourceExcerpt, error) {
 //   - an owner_quote is a verbatim substring of a cited record;
 //   - an owner_answer moment cites at least one owner-authored record (from_kind user);
 //   - a question cites only owner-authored records;
+//   - an owner_answer moment cites a record that attributes the answer to the
+//     owner: a plain from_kind=user answer may be the host's, as the source's own
+//     "authorship being confirmed" mail on one batch of answers shows;
+//   - an owner_only_one_way moment cites a card that is marked ONE-WAY and does
+//     not call itself two-way or "not one-way";
 //   - every target a label expects (lane ids or item-<lane> ids) names a lane
 //     in the excerpt's run records for that run.
 func ValidateSources(ds *Dataset, ex *SourceExcerpt) error {
@@ -119,6 +136,19 @@ func ValidateSources(ds *Dataset, ex *SourceExcerpt) error {
 		}
 		if m.Source.Evidence == EvidenceOwnerAnswer && !slices.ContainsFunc(m.Source.IDs, func(id string) bool { return records[id].FromKind == "user" }) {
 			return fmt.Errorf("orch/replay: %s claims an owner answer but cites no owner-authored record", m.ID)
+		}
+		if m.Source.Evidence == EvidenceOwnerAnswer && !slices.ContainsFunc(m.Source.IDs, func(id string) bool { return ownerAttributionRE.MatchString(records[id].Body) }) {
+			return fmt.Errorf("orch/replay: %s claims an owner answer but no cited record attributes the answer to the owner", m.ID)
+		}
+		if m.Category == CategoryOwnerOnlyOneWay {
+			card := slices.IndexFunc(m.Source.IDs, func(id string) bool { return records[id].Kind == "question" })
+			if card < 0 {
+				return fmt.Errorf("orch/replay: %s is %s but cites no question card", m.ID, CategoryOwnerOnlyOneWay)
+			}
+			body := records[m.Source.IDs[card]].Body
+			if !strings.Contains(strings.ToLower(body), "one-way") || notOneWayRE.MatchString(body) {
+				return fmt.Errorf("orch/replay: %s is %s but card %q is not marked ONE-WAY (or says it is two-way)", m.ID, CategoryOwnerOnlyOneWay, m.Source.IDs[card])
+			}
 		}
 		for _, tgt := range m.OwnerFollowUp.ExpectedTargets {
 			lane := strings.TrimPrefix(tgt, "item-")
