@@ -277,3 +277,86 @@ func TestBacklogUpdate_InProgressIsOwnedBySpawn(t *testing.T) {
 		t.Fatalf("lane = %+v err=%v, want running", ln, err)
 	}
 }
+
+// The batch contract: a second mutating action is rejected with an error the
+// model sees and the result records; the first action stands. backlog.add
+// followed by a spawn of that item is the one allowed pair.
+func TestDispatch_OnePrimaryActionPerBatch(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name         string
+		calls        []model.ToolCall
+		wantAccepted []string
+		wantRejected int
+	}{
+		{
+			name: "NoteBesideSteerIsRejected",
+			calls: []model.ToolCall{
+				{ID: "t1", Name: dispatcher.ToolLaneSteer, Input: json.RawMessage(`{"lane_id":"lane-a","note":"fix it","reason":"r"}`)},
+				{ID: "t2", Name: dispatcher.ToolDirectiveNote, Input: json.RawMessage(`{"fact":"restates the steer","reason":"r"}`)},
+			},
+			wantAccepted: []string{dispatcher.ToolLaneSteer},
+			wantRejected: 1,
+		},
+		{
+			name: "NoteFirstThenSpawnKeepsTheNote",
+			calls: []model.ToolCall{
+				{ID: "t1", Name: dispatcher.ToolDirectiveNote, Input: json.RawMessage(`{"fact":"a rule","reason":"r"}`)},
+				{ID: "t2", Name: dispatcher.ToolPlannerRequest, Input: json.RawMessage(`{"reason":"replan"}`)},
+			},
+			wantAccepted: []string{dispatcher.ToolDirectiveNote},
+			wantRejected: 1,
+		},
+		{
+			name: "AddThenSpawnOfAddedItemIsAllowed",
+			calls: []model.ToolCall{
+				{ID: "t1", Name: dispatcher.ToolBacklogAdd, Input: json.RawMessage(`{"id":"item-new","title":"new","reason":"r"}`)},
+				{ID: "t2", Name: dispatcher.ToolLaneSpawn, Input: json.RawMessage(`{"item_id":"item-new","brief":"do it","reason":"r"}`)},
+			},
+			wantAccepted: []string{dispatcher.ToolBacklogAdd, dispatcher.ToolLaneSpawn},
+		},
+		{
+			name: "AddThenSpawnOfOtherItemIsRejected",
+			calls: []model.ToolCall{
+				{ID: "t1", Name: dispatcher.ToolBacklogAdd, Input: json.RawMessage(`{"id":"item-new","title":"new","reason":"r"}`)},
+				{ID: "t2", Name: dispatcher.ToolLaneSpawn, Input: json.RawMessage(`{"item_id":"item-other","brief":"do it","reason":"r"}`)},
+			},
+			wantAccepted: []string{dispatcher.ToolBacklogAdd},
+			wantRejected: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clk, st, drv := setupTestEnv(t)
+			ctx := t.Context()
+			if err := st.Backlog().Add(ctx, store.BacklogItem{ID: "item-other", RunID: "run-1", Title: "other", Status: store.BacklogOpen, Priority: store.PriorityP1}); err != nil {
+				t.Fatalf("Add item: %v", err)
+			}
+			if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-a", RunID: "run-1", Status: lane.StatusRunning, SessionID: "s", TerminalID: "t"}); err != nil {
+				t.Fatalf("Upsert lane: %v", err)
+			}
+			fake := model.NewFakeClient(toolUseResponse(tc.calls...), endTurnResponse("done"))
+			d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+			ev, err := st.Events().Append(ctx, store.Event{RunID: "run-1", Kind: store.EventOwnerMessage, Class: store.EventClassJudgment, Summary: "x"})
+			if err != nil {
+				t.Fatalf("Append event: %v", err)
+			}
+			res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+			if err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+			var got []string
+			for _, a := range res.Accepted {
+				got = append(got, a.Tool)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.wantAccepted, ",") || len(res.Rejected) != tc.wantRejected {
+				t.Fatalf("accepted=%v rejected=%q, want %v and %d rejection(s)", got, res.Rejected, tc.wantAccepted, tc.wantRejected)
+			}
+			if tc.wantRejected > 0 && !strings.Contains(res.Rejected[0], "one primary action per batch") {
+				t.Errorf("rejection must name the contract: %q", res.Rejected[0])
+			}
+		})
+	}
+}

@@ -52,19 +52,23 @@ func (f RecipeCompilerFunc) CompileOverride(ctx context.Context, base recipe.Rec
 type Config struct {
 	RecipeCompiler   RecipeCompiler
 	OnPlannerRequest func(ctx context.Context, runID, reason, planRef string) error
-	// Temperature is the sampling temperature for judgment turns. Nil means 0:
-	// the same batch and snapshot should lead to the same decision.
-	Temperature    *float64
-	Model          string
-	HardBatchModel string
-	SystemPrompt   string
-	ThreadID       string
-	Invariants     []Invariant
-	Snapshot       SnapshotConfig
-	MaxTurns       int
-	MaxTokens      int
-	MaxBriefBytes  int
-	MaxReadBytes   int
+	// Temperature is the sampling temperature for judgment turns. Nil omits it
+	// from the request: newer models reject the parameter outright.
+	Temperature *float64
+	// AllowMultiAction lifts the one-primary-action-per-batch contract
+	// (checkOnePrimaryAction). Production leaves it false; tests that script
+	// every tool into a single batch set it.
+	AllowMultiAction bool
+	Model            string
+	HardBatchModel   string
+	SystemPrompt     string
+	ThreadID         string
+	Invariants       []Invariant
+	Snapshot         SnapshotConfig
+	MaxTurns         int
+	MaxTokens        int
+	MaxBriefBytes    int
+	MaxReadBytes     int
 }
 
 func (c Config) withDefaults() Config {
@@ -85,10 +89,6 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxReadBytes <= 0 {
 		c.MaxReadBytes = DefaultMaxReadBytes
-	}
-	if c.Temperature == nil {
-		zero := 0.0
-		c.Temperature = &zero
 	}
 	c.Snapshot = c.Snapshot.withDefaults()
 	return c
@@ -572,6 +572,15 @@ func (d *Dispatcher) handleRawToolCall(
 		return "", fmt.Errorf("invariant violation: %s", rejMsg)
 	}
 
+	if state != nil && !d.cfg.AllowMultiAction {
+		if oneErr := checkOnePrimaryAction(state.accepted, act); oneErr != nil {
+			rejMsg := fmt.Sprintf("%s [%s]: one primary action per batch — %v. The batch is answered: do not retry or substitute another mutating call, end your turn", act.Tool, act.Target(), oneErr)
+			state.rejected = append(state.rejected, rejMsg)
+			_ = d.recordDecision(ctx, runID, state, act, false, "rejected: "+rejMsg, d.clock.Now().Sub(start))
+			return "", fmt.Errorf("invariant violation: %s", rejMsg)
+		}
+	}
+
 	result, execErr := d.applyVettedAction(ctx, runID, view, act)
 	if execErr != nil {
 		if state != nil && !isReadOnlyTool(act.Tool) {
@@ -599,6 +608,45 @@ func (d *Dispatcher) handleRawToolCall(
 		return "", err
 	}
 	return result, nil
+}
+
+// checkOnePrimaryAction enforces the batch contract: a batch is answered with
+// one mutating action. The only second action allowed is the work that cannot
+// stand alone: further backlog.add calls, and a lane.spawn for an item this
+// batch added. Anything else (a directive.note restating the decision, a
+// steer plus a retry, ...) is rejected with an error, so the model sees it,
+// the decision log records it, and the grader scores exactly what was applied.
+// The first action wins; read tools are never limited.
+func checkOnePrimaryAction(accepted []ProposedAction, act ProposedAction) error {
+	if isReadOnlyTool(act.Tool) {
+		return nil
+	}
+	var first *ProposedAction
+	added := map[string]bool{}
+	for i := range accepted {
+		prev := accepted[i]
+		if isReadOnlyTool(prev.Tool) {
+			continue
+		}
+		if first == nil {
+			first = &accepted[i]
+		}
+		if prev.Tool != ToolBacklogAdd {
+			return fmt.Errorf("this batch already applied %s [%s]; answer a batch with a single primary action (a %s is only allowed after %s for the item just added)",
+				prev.Tool, prev.Target(), ToolLaneSpawn, ToolBacklogAdd)
+		}
+		if prev.BacklogAdd != nil {
+			added[prev.BacklogAdd.ID] = true
+		}
+	}
+	if first == nil || act.Tool == ToolBacklogAdd {
+		return nil
+	}
+	if act.Tool == ToolLaneSpawn && act.LaneSpawn != nil && added[act.LaneSpawn.ItemID] {
+		return nil
+	}
+	return fmt.Errorf("this batch already applied %s [%s]; answer a batch with a single primary action (a %s is only allowed after %s for the item just added)",
+		first.Tool, first.Target(), ToolLaneSpawn, ToolBacklogAdd)
 }
 
 func isReadOnlyTool(tool string) bool {

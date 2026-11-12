@@ -75,13 +75,17 @@ func TestPattern_ExtraMutatingActionsAreMissesAndPromptForbidsThem(t *testing.T)
 	t.Parallel()
 
 	// planner.request already stores its reason as an active directive, so the
-	// extra directive.note in the recorded output is a redundant second action.
+	// directive.note after it is a redundant second action. The one-primary-
+	// action contract rejects it with an error, and the grader counts that
+	// rejection as a violation: what is scored is exactly what was applied.
 	extra, _ := replayRecorded(t, "cicd-300-g14",
 		call("t1", "planner.request", `{"reason":"owner wants a v3 replan about work, not capacity","urgent":true}`),
 		call("t2", "directive.note", `{"fact":"capacity is not the dispatcher's concern; keep lanes full","reason":"owner rule"}`),
 	)
-	if extra.Agreed || len(extra.AcceptedTools) != 2 {
-		t.Fatalf("planner.request + directive.note: agreed=%v tools=%v, want a miss with 2 actions", extra.Agreed, extra.AcceptedTools)
+	if extra.Agreed || len(extra.AcceptedTools) != 1 || extra.InvariantViolations != 1 ||
+		!strings.Contains(strings.Join(extra.RejectedReasons, "|"), "one primary action per batch") {
+		t.Fatalf("planner.request + directive.note: agreed=%v tools=%v violations=%d rejected=%q, want one applied action and one contract rejection",
+			extra.Agreed, extra.AcceptedTools, extra.InvariantViolations, extra.RejectedReasons)
 	}
 	single, _ := replayRecorded(t, "cicd-300-g14",
 		call("t1", "planner.request", `{"reason":"owner wants a v3 replan about work, not capacity","urgent":true}`),
