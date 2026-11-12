@@ -6,10 +6,12 @@ go_library(
         "concierge.go",
         "dataset.go",
         "eval.go",
+        "source.go",
     ],
     embedsrcs = [
         "testdata/gate2_dataset.json",
-        "testdata/inner_loop_5.json",
+        "testdata/inner_loop_10.json",
+        "testdata/source_excerpt.json",
     ],
     importpath = "github.com/bazelment/yoloswe/orch/replay",
     visibility = ["//visibility:public"],
@@ -28,6 +30,7 @@ go_test(
     srcs = [
         "adversarial_test.go",
         "replay_test.go",
+        "source_test.go",
     ],
     data = glob(["testdata/**"]),
     deps = [

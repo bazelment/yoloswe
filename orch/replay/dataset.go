@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,7 +24,10 @@ var embeddedTestdata embed.FS
 
 const (
 	DefaultDatasetPath   = "testdata/gate2_dataset.json"
-	InnerLoopDatasetPath = "testdata/inner_loop_5.json"
+	InnerLoopDatasetPath = "testdata/inner_loop_10.json"
+	// SourceExcerptPath holds the export records and run-record lanes every
+	// label in the datasets cites; see ValidateSources.
+	SourceExcerptPath = "testdata/source_excerpt.json"
 )
 
 // Verdict indicates whether the owner endorsed or corrected the legacy orchestrator's decision.
@@ -59,10 +63,48 @@ const (
 
 // BaselineDecision records what the legacy shell/prompt orchestrator did at a moment.
 type BaselineDecision struct {
-	Tool       string `json:"tool"`
-	Target     string `json:"target,omitempty"`
-	Summary    string `json:"summary"`
-	AskedOwner bool   `json:"asked_owner,omitempty"`
+	Tool    string `json:"tool"`
+	Target  string `json:"target,omitempty"`
+	Summary string `json:"summary"`
+	// SourceIDs cite the export records (or run-record facts) that show what
+	// the legacy orchestrator did; required on verified moments.
+	SourceIDs  []string `json:"source_ids,omitempty"`
+	AskedOwner bool     `json:"asked_owner,omitempty"`
+}
+
+// Relation says how the cited owner record bears on the label.
+type Relation string
+
+const (
+	// RelationOrder: the owner (or a host relaying the owner) ordered the work.
+	RelationOrder Relation = "order"
+	// RelationCorrection: the owner corrected how the old orchestrator behaved.
+	RelationCorrection Relation = "correction"
+	// RelationFeedback: the owner rejected or criticised earlier output and asked for it again.
+	RelationFeedback Relation = "feedback"
+	// RelationAnswer: the owner answered a card the orchestrator put to them.
+	RelationAnswer Relation = "answer"
+	// RelationQuestion: the owner asked a status question.
+	RelationQuestion Relation = "question"
+)
+
+// Evidence tiers for a source.
+const (
+	// EvidenceOwnerQuote: OwnerQuote is a verbatim owner statement found in a cited record.
+	EvidenceOwnerQuote = "owner_quote"
+	// EvidenceOwnerAnswer: the cited record is the owner's own answer to a card.
+	EvidenceOwnerAnswer = "owner_answer"
+	// EvidenceOwnerAttributed: a cited record explicitly attributes the decision to the owner.
+	EvidenceOwnerAttributed = "owner_attributed"
+)
+
+// Source ties a label to the export records that justify it.
+type Source struct {
+	Relation   Relation `json:"relation"`
+	Evidence   string   `json:"evidence"`
+	OwnerQuote string   `json:"owner_quote,omitempty"`
+	LabelBasis string   `json:"label_basis"`
+	IDs        []string `json:"ids"`
 }
 
 // OwnerFollowUp records the owner's reaction and ground-truth expectation.
@@ -87,11 +129,13 @@ type JudgmentMoment struct {
 	Category    string      `json:"category,omitempty"`
 	Description string      `json:"description"`
 	// Grounding and GroundingEvidence record how this moment's label was checked.
-	Grounding         Grounding        `json:"grounding"`
-	GroundingEvidence string           `json:"grounding_evidence"`
-	Events            []store.Event    `json:"events"`
-	Baseline          BaselineDecision `json:"baseline"`
-	OwnerFollowUp     OwnerFollowUp    `json:"owner_follow_up"`
+	Grounding         Grounding     `json:"grounding"`
+	GroundingEvidence string        `json:"grounding_evidence"`
+	Events            []store.Event `json:"events"`
+	// Source cites the export records behind the label (see ValidateSources).
+	Source        Source           `json:"source"`
+	Baseline      BaselineDecision `json:"baseline"`
+	OwnerFollowUp OwnerFollowUp    `json:"owner_follow_up"`
 }
 
 // FactGroup requires at least one token in AnyOf to match a Concierge answer case-insensitively.
@@ -109,6 +153,7 @@ type ConciergeQuestion struct {
 	RequiredFacts   []FactGroup `json:"required_facts"`
 	ForbiddenClaims []string    `json:"forbidden_claims,omitempty"`
 	State           MomentState `json:"state"`
+	Source          Source      `json:"source"`
 }
 
 // Dataset holds the extracted historical Validation Gate 2 dataset.
@@ -210,6 +255,11 @@ func (ds *Dataset) Validate() error {
 		if err := validateMomentNoLeakage(m); err != nil {
 			return err
 		}
+		if m.Grounding == GroundingVerified {
+			if err := validateMomentSource(m); err != nil {
+				return err
+			}
+		}
 	}
 
 	seenQuestions := make(map[string]struct{}, len(ds.Questions))
@@ -230,6 +280,62 @@ func (ds *Dataset) Validate() error {
 		}
 		if len(q.RequiredFacts) == 0 {
 			return fmt.Errorf("orch/replay: question %q has no required_facts", q.ID)
+		}
+		if err := validateSourceShape("question "+q.ID, q.Source, RelationQuestion); err != nil {
+			return err
+		}
+		if q.Source.Evidence != EvidenceOwnerQuote || !strings.Contains(q.Source.OwnerQuote, q.Question) {
+			return fmt.Errorf("orch/replay: question %q must be a verbatim owner question (evidence owner_quote containing the question text)", q.ID)
+		}
+	}
+	return nil
+}
+
+func validateSourceShape(what string, src Source, allowed ...Relation) error {
+	if len(src.IDs) == 0 {
+		return fmt.Errorf("orch/replay: %s has no source ids", what)
+	}
+	for _, id := range src.IDs {
+		if strings.TrimSpace(id) == "" {
+			return fmt.Errorf("orch/replay: %s has an empty source id", what)
+		}
+	}
+	if !slices.Contains(allowed, src.Relation) {
+		return fmt.Errorf("orch/replay: %s has source relation %q, want one of %v", what, src.Relation, allowed)
+	}
+	switch src.Evidence {
+	case EvidenceOwnerQuote:
+		if strings.TrimSpace(src.OwnerQuote) == "" {
+			return fmt.Errorf("orch/replay: %s claims owner_quote evidence without a quote", what)
+		}
+	case EvidenceOwnerAnswer, EvidenceOwnerAttributed:
+	default:
+		return fmt.Errorf("orch/replay: %s has unknown source evidence %q", what, src.Evidence)
+	}
+	if strings.TrimSpace(src.LabelBasis) == "" {
+		return fmt.Errorf("orch/replay: %s has no label_basis", what)
+	}
+	return nil
+}
+
+// validateMomentSource requires a verified moment to cite its evidence and
+// refuses to show the model the owner's correction or answer, which is the label.
+func validateMomentSource(m *JudgmentMoment) error {
+	what := "moment " + m.ID
+	if err := validateSourceShape(what, m.Source, RelationOrder, RelationCorrection, RelationFeedback, RelationAnswer); err != nil {
+		return err
+	}
+	if len(m.Baseline.SourceIDs) == 0 {
+		return fmt.Errorf("orch/replay: %s baseline cites no source", what)
+	}
+	if m.Source.Relation == RelationCorrection || m.Source.Relation == RelationAnswer {
+		quote := strings.ToLower(strings.TrimSpace(m.Source.OwnerQuote))
+		if quote != "" {
+			for j := range m.Events {
+				if strings.Contains(strings.ToLower(m.Events[j].Summary), quote) {
+					return fmt.Errorf("orch/replay: %s event %q shows the owner %s that is the label", m.ID, m.Events[j].ID, m.Source.Relation)
+				}
+			}
 		}
 	}
 	return nil

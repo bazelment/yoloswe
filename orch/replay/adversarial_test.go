@@ -135,7 +135,7 @@ var datasetSets = []struct {
 	load func() (*replay.Dataset, error)
 	name string
 }{
-	{replay.LoadInnerLoopDataset, "inner-loop-5"},
+	{replay.LoadInnerLoopDataset, "inner-loop-10"},
 	{replay.LoadDefaultDataset, "gate2-full"},
 }
 
