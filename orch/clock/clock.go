@@ -38,16 +38,12 @@ func NewRealClock() Clock {
 	return RealClock{}
 }
 
-// Now returns the current wall-clock time.
 func (RealClock) Now() time.Time { return time.Now() }
 
-// NewTimer creates a real timer.
 func (RealClock) NewTimer(d time.Duration) Timer { return &realTimer{time.NewTimer(d)} }
 
-// NewTicker creates a real ticker.
 func (RealClock) NewTicker(d time.Duration) Ticker { return &realTicker{time.NewTicker(d)} }
 
-// AfterFunc schedules f to run after d using a real timer.
 func (RealClock) AfterFunc(d time.Duration, f func()) Timer {
 	return &realTimer{time.AfterFunc(d, f)}
 }
@@ -83,7 +79,6 @@ func NewFakeClock(initial time.Time) *FakeClock {
 	}
 }
 
-// Now returns the fake clock's current time.
 func (fc *FakeClock) Now() time.Time {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
@@ -212,7 +207,6 @@ func (fc *FakeClock) fireDueLocked(at time.Time) []func() {
 	return callbacks
 }
 
-// NewTimer creates a timer on the fake clock.
 func (fc *FakeClock) NewTimer(d time.Duration) Timer {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
@@ -232,7 +226,6 @@ func (fc *FakeClock) NewTimer(d time.Duration) Timer {
 	return t
 }
 
-// AfterFunc schedules f to run after d on the fake clock.
 func (fc *FakeClock) AfterFunc(d time.Duration, f func()) Timer {
 	fc.mu.Lock()
 	fc.nextID++

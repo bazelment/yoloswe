@@ -61,36 +61,25 @@ func (s *MemoryStore) now() time.Time {
 	return s.clock.Now().UTC()
 }
 
-// Runs returns the RunStore view.
 func (s *MemoryStore) Runs() RunStore { return (*memRunStore)(s) }
 
-// Backlog returns the BacklogStore view.
 func (s *MemoryStore) Backlog() BacklogStore { return (*memBacklogStore)(s) }
 
-// Lanes returns the LaneStore view.
 func (s *MemoryStore) Lanes() LaneStore { return (*memLaneStore)(s) }
 
-// Directives returns the DirectiveStore view.
 func (s *MemoryStore) Directives() DirectiveStore { return (*memDirectiveStore)(s) }
 
-// Decisions returns the DecisionStore view.
 func (s *MemoryStore) Decisions() DecisionStore { return (*memDecisionStore)(s) }
 
-// Events returns the EventStore view.
 func (s *MemoryStore) Events() EventStore { return (*memEventStore)(s) }
 
-// Threads returns the ThreadStore view.
 func (s *MemoryStore) Threads() ThreadStore { return (*memThreadStore)(s) }
 
-// Recipes returns the RecipeStore view.
 func (s *MemoryStore) Recipes() RecipeStore { return (*memRecipeStore)(s) }
 
-// Close implements Store.
 func (s *MemoryStore) Close() error { return nil }
 
 var _ Store = (*MemoryStore)(nil)
-
-// --- RunStore ---
 
 type memRunStore MemoryStore
 
@@ -216,8 +205,6 @@ func (r *memRunStore) ReleaseLease(_ context.Context, runID, holderID string) er
 	run.UpdatedAt = s.now()
 	return nil
 }
-
-// --- BacklogStore ---
 
 type memBacklogStore MemoryStore
 
@@ -382,8 +369,6 @@ func (b *memBacklogStore) List(_ context.Context, filter BacklogFilter) ([]Backl
 	return out, nil
 }
 
-// --- LaneStore ---
-
 type memLaneStore MemoryStore
 
 func (l *memLaneStore) s() *MemoryStore { return (*MemoryStore)(l) }
@@ -454,8 +439,6 @@ func (l *memLaneStore) Delete(_ context.Context, runID, laneID string) error {
 	delete(byRun, laneID)
 	return nil
 }
-
-// --- DirectiveStore ---
 
 type memDirectiveStore MemoryStore
 
@@ -545,8 +528,6 @@ func (d *memDirectiveStore) List(_ context.Context, filter DirectiveFilter) ([]D
 	return out, nil
 }
 
-// --- DecisionStore ---
-
 type memDecisionStore MemoryStore
 
 func (d *memDecisionStore) s() *MemoryStore { return (*MemoryStore)(d) }
@@ -605,8 +586,6 @@ func (d *memDecisionStore) List(_ context.Context, filter DecisionFilter) ([]Dec
 	}
 	return out, nil
 }
-
-// --- EventStore ---
 
 type memEventStore MemoryStore
 
@@ -695,8 +674,6 @@ func (e *memEventStore) SetCursor(_ context.Context, runID, consumer string, seq
 	}
 	return nil
 }
-
-// --- ThreadStore ---
 
 type memThreadStore MemoryStore
 
@@ -1043,8 +1020,6 @@ func (t *memThreadStore) ListItems(_ context.Context, threadID, turnID string, l
 	}
 	return filtered, nil
 }
-
-// --- RecipeStore ---
 
 type memRecipeStore MemoryStore
 

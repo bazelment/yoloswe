@@ -7,9 +7,7 @@ import (
 	"github.com/bazelment/yoloswe/orch/model"
 )
 
-// Store is the single persistence boundary for the swarm orchestrator harness.
-// All state lives in the Store; the controller and agent roles never touch
-// files or HTTP endpoints directly for bookkeeping.
+// Store is the persistence boundary for the swarm orchestrator harness.
 type Store interface {
 	Runs() RunStore
 	Backlog() BacklogStore

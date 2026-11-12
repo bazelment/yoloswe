@@ -53,7 +53,6 @@ type ContentBlock struct {
 	IsError   bool            `json:"is_error,omitempty"`
 }
 
-// Clone returns a deep copy of b.
 func (b ContentBlock) Clone() ContentBlock {
 	out := b
 	if b.Input != nil {
@@ -62,17 +61,14 @@ func (b ContentBlock) Clone() ContentBlock {
 	return out
 }
 
-// NewTextBlock creates a text ContentBlock.
 func NewTextBlock(text string) ContentBlock {
 	return ContentBlock{Type: BlockTypeText, Text: text}
 }
 
-// NewThinkingBlock creates a thinking ContentBlock.
 func NewThinkingBlock(text string) ContentBlock {
 	return ContentBlock{Type: BlockTypeThinking, Text: text}
 }
 
-// NewToolUseBlock creates a tool_use ContentBlock.
 func NewToolUseBlock(id, name string, input json.RawMessage) ContentBlock {
 	return ContentBlock{
 		Type:  BlockTypeToolUse,
@@ -82,7 +78,6 @@ func NewToolUseBlock(id, name string, input json.RawMessage) ContentBlock {
 	}
 }
 
-// NewToolResultBlock creates a tool_result ContentBlock.
 func NewToolResultBlock(toolUseID, content string, isError bool) ContentBlock {
 	return ContentBlock{
 		Type:      BlockTypeToolResult,
@@ -112,7 +107,6 @@ type Message struct {
 	Content []ContentBlock `json:"content"`
 }
 
-// Clone returns a deep copy of m.
 func (m Message) Clone() Message {
 	out := Message{Role: m.Role}
 	if m.Content != nil {
@@ -124,7 +118,6 @@ func (m Message) Clone() Message {
 	return out
 }
 
-// NewUserMessage creates a user Message with a single text block.
 func NewUserMessage(text string) Message {
 	return Message{
 		Role:    RoleUser,
@@ -132,7 +125,6 @@ func NewUserMessage(text string) Message {
 	}
 }
 
-// NewAssistantMessage creates an assistant Message from content blocks.
 func NewAssistantMessage(blocks ...ContentBlock) Message {
 	return Message{
 		Role:    RoleAssistant,
@@ -140,7 +132,6 @@ func NewAssistantMessage(blocks ...ContentBlock) Message {
 	}
 }
 
-// NewToolResultMessage creates a user Message carrying tool_result blocks.
 func NewToolResultMessage(results ...ContentBlock) Message {
 	return Message{
 		Role:    RoleUser,
@@ -182,7 +173,6 @@ type ToolDefinition struct {
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 
-// Clone returns a deep copy of d.
 func (d ToolDefinition) Clone() ToolDefinition {
 	return ToolDefinition{
 		Name:        d.Name,
@@ -205,7 +195,6 @@ func (u Usage) TotalTokens() int64 {
 	return u.InputTokens + u.OutputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 }
 
-// Add returns the sum of u and other.
 func (u Usage) Add(other Usage) Usage {
 	return Usage{
 		InputTokens:              u.InputTokens + other.InputTokens,
@@ -228,7 +217,6 @@ type Request struct {
 	MaxTokens     int               `json:"max_tokens"`
 }
 
-// Clone returns a deep copy of r.
 func (r Request) Clone() Request {
 	out := r
 	if r.Metadata != nil {
@@ -263,29 +251,25 @@ type Response struct {
 	Usage      Usage      `json:"usage"`
 }
 
-// Clone returns a deep copy of r.
 func (r Response) Clone() Response {
 	out := r
 	out.Message = r.Message.Clone()
 	return out
 }
 
-// Text returns the concatenated text of the response message.
 func (r Response) Text() string {
 	return r.Message.Text()
 }
 
-// ToolCalls returns the tool calls requested in the response message.
 func (r Response) ToolCalls() []ToolCall {
 	return r.Message.ToolCalls()
 }
 
-// ModelClient is the interface for invoking the Messages API (via llm-gateway or fake).
+// ModelClient invokes the Messages API.
 type ModelClient interface {
 	CreateMessage(ctx context.Context, req Request) (*Response, error)
 }
 
-// Client is an alias for ModelClient.
 type Client = ModelClient
 
 // ToolRegistry holds typed tool definitions and handlers for an agent role.
@@ -298,7 +282,6 @@ type toolEntry struct {
 	def     ToolDefinition
 }
 
-// NewToolRegistry creates an empty ToolRegistry.
 func NewToolRegistry() *ToolRegistry {
 	return &ToolRegistry{}
 }

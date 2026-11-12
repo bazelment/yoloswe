@@ -99,7 +99,6 @@ func testRunsAndLeases(t *testing.T, factory Factory) {
 		t.Fatalf("Get after UpdateObjective = %+v", got)
 	}
 
-	// Lease acquisition, contention, heartbeat, expiration, and handover.
 	ttl := 30 * time.Second
 	l1, err := st.Runs().AcquireLease(ctx, "run-1", "holder-a", ttl)
 	if err != nil {
@@ -125,7 +124,6 @@ func testRunsAndLeases(t *testing.T, factory Factory) {
 		t.Fatalf("HeartbeatLease = %+v, want extended ExpiresAt and preserved AcquiredAt", l1Hb)
 	}
 
-	// Advance past TTL: holder-a loses the lease and holder-b can take over.
 	clk.Advance(ttl + time.Second)
 	if _, err := st.Runs().HeartbeatLease(ctx, "run-1", "holder-a", ttl); !errors.Is(err, ErrLeaseNotHeld) {
 		t.Fatalf("HeartbeatLease after expiry = %v, want ErrLeaseNotHeld", err)
@@ -194,7 +192,6 @@ func testBacklog(t *testing.T, factory Factory) {
 		t.Fatalf("duplicate Add error = %v, want ErrAlreadyExists", err)
 	}
 
-	// Verify priority and order sorting.
 	listed, err := st.Backlog().List(ctx, BacklogFilter{RunID: "run-1"})
 	if err != nil {
 		t.Fatalf("List error: %v", err)
@@ -208,7 +205,6 @@ func testBacklog(t *testing.T, factory Factory) {
 		t.Fatalf("List order = %v, want %v", gotOrder, wantOrder)
 	}
 
-	// Reorder p0 items so item-p0-b comes before item-p0-a.
 	if err := st.Backlog().Reorder(ctx, "run-1", []string{"item-p0-b", "item-p0-a"}, "dispatcher"); err != nil {
 		t.Fatalf("Reorder error: %v", err)
 	}
@@ -220,7 +216,6 @@ func testBacklog(t *testing.T, factory Factory) {
 		t.Fatalf("List after Reorder = %+v", listed)
 	}
 
-	// Update and verify history tracking + mutation isolation.
 	got, err := st.Backlog().Get(ctx, "run-1", "item-p2")
 	if err != nil {
 		t.Fatalf("Get(item-p2) error: %v", err)
@@ -309,7 +304,6 @@ func testLanes(t *testing.T, factory Factory) {
 		t.Fatalf("Sessions map was mutated by caller: %v", again.Sessions)
 	}
 
-	// Advance phase via Upsert.
 	again.RecordAttempt(recipe.PhaseReview, 1, "sess-2", "term-2")
 	again.Status = lane.StatusDone
 	if err := st.Lanes().Upsert(ctx, *again); err != nil {
@@ -376,7 +370,6 @@ func testDirectives(t *testing.T, factory Factory) {
 		t.Fatalf("len(active) = %d, want 2", len(active))
 	}
 
-	// Mark d2 handled.
 	if err := st.Directives().UpdateStatus(ctx, "run-1", "dir-2", DirectiveHandled); err != nil {
 		t.Fatalf("UpdateStatus error: %v", err)
 	}
@@ -388,7 +381,6 @@ func testDirectives(t *testing.T, factory Factory) {
 		t.Fatalf("active directives = %+v, want only dir-1", active)
 	}
 
-	// Advance clock past d1's expiry.
 	clk.Advance(11 * time.Minute)
 	active, err = st.Directives().List(ctx, DirectiveFilter{RunID: "run-1", ActiveOnly: true})
 	if err != nil {
@@ -552,7 +544,6 @@ func testThreadsTurnsAndItems(t *testing.T, factory Factory) {
 		t.Fatalf("initial thread Status = %q, want idle", th.Status)
 	}
 
-	// Queue a steer before any turn is running.
 	if err := st.Threads().SteerTurn(ctx, "th-1", "", "Check lane core first"); err != nil {
 		t.Fatalf("SteerTurn(queued) error: %v", err)
 	}
@@ -569,7 +560,6 @@ func testThreadsTurnsAndItems(t *testing.T, factory Factory) {
 		t.Fatalf("turn1 = %+v, expected drained QueuedSteers", turn1)
 	}
 
-	// Inject a live steer into the running turn.
 	if err := st.Threads().SteerTurn(ctx, "th-1", "turn-1", "Also check CI"); err != nil {
 		t.Fatalf("SteerTurn(running) error: %v", err)
 	}
@@ -592,7 +582,6 @@ func testThreadsTurnsAndItems(t *testing.T, factory Factory) {
 		t.Fatalf("CompleteTurn(turn-1) error: %v", err)
 	}
 
-	// Start turn-2 on parent, then fork at turn-1 to verify fork isolation.
 	if _, err := st.Threads().StartTurn(ctx, Turn{
 		ID:       "turn-2",
 		ThreadID: "th-1",
@@ -660,7 +649,6 @@ func testRecipes(t *testing.T, factory Factory) {
 		t.Fatalf("v1.Version = %d, want 1", v1.Version)
 	}
 
-	// Save a second version with no clean phase ("skip clean").
 	v2In := def.Clone()
 	v2In.Source = "Skip clean phase: swe -> review -> integrate"
 	v2In.Phases = []recipe.Phase{def.Phases[0], def.Phases[2], def.Phases[3]}
@@ -677,7 +665,6 @@ func testRecipes(t *testing.T, factory Factory) {
 		t.Fatalf("v2.Version = %d, want 2", v2.Version)
 	}
 
-	// Pinning: Get(version=1) returns the 4-phase recipe; Get(version=0) returns v2.
 	gotV1, err := st.Recipes().Get(ctx, "run-1", recipe.DefaultName, 1)
 	if err != nil {
 		t.Fatalf("Get(v1) error: %v", err)

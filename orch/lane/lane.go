@@ -28,7 +28,6 @@ func (s Status) Terminal() bool {
 	return s == StatusDone || s == StatusFailed
 }
 
-// Valid reports whether s is a known Status value.
 func (s Status) Valid() bool {
 	switch s {
 	case StatusPlanned, StatusRunning, StatusBlocked, StatusFailed, StatusDone:
@@ -68,7 +67,6 @@ type Lane struct {
 	PR            int               `json:"pr,omitempty"`
 }
 
-// Clone returns a deep copy of l.
 func (l Lane) Clone() Lane {
 	out := l
 	if l.Sessions != nil {
@@ -200,7 +198,6 @@ const (
 	OutcomeNeedsInput ReportOutcome = "needs-input"
 )
 
-// Valid reports whether o is a recognized ReportOutcome.
 func (o ReportOutcome) Valid() bool {
 	switch o {
 	case OutcomeDone, OutcomeNeedsSWE, OutcomeBlocked, OutcomeNeedsInput:
@@ -372,7 +369,6 @@ type LaneDriver interface {
 	ReadReport(ctx context.Context, runID, laneID, terminalID string) (*PhaseReport, error)
 }
 
-// Driver is an alias for LaneDriver.
 type Driver = LaneDriver
 
 // FakeDriver is an in-memory LaneDriver implementation for deterministic unit tests.
@@ -386,14 +382,12 @@ type FakeDriver struct {
 	mu          sync.Mutex
 }
 
-// NewFakeDriver creates a ready-to-use FakeDriver.
 func NewFakeDriver() *FakeDriver {
 	return &FakeDriver{
 		reports: make(map[string]*PhaseReport),
 	}
 }
 
-// SpawnSession records the spawn request and returns synthetic session and terminal IDs.
 func (f *FakeDriver) SpawnSession(_ context.Context, req SpawnRequest) (SpawnResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -410,7 +404,6 @@ func (f *FakeDriver) SpawnSession(_ context.Context, req SpawnRequest) (SpawnRes
 	}, nil
 }
 
-// StartPhaseTerminal records the phase start request and returns a synthetic terminal ID.
 func (f *FakeDriver) StartPhaseTerminal(_ context.Context, req StartPhaseRequest) (StartPhaseResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -431,7 +424,6 @@ func (f *FakeDriver) StartPhaseTerminal(_ context.Context, req StartPhaseRequest
 	}, nil
 }
 
-// Steer records a steering message.
 func (f *FakeDriver) Steer(_ context.Context, req SteerRequest) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -439,7 +431,6 @@ func (f *FakeDriver) Steer(_ context.Context, req SteerRequest) error {
 	return nil
 }
 
-// Stop records a stop request.
 func (f *FakeDriver) Stop(_ context.Context, req StopRequest) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -455,7 +446,6 @@ func (f *FakeDriver) SetReport(terminalID string, rep PhaseReport) {
 	f.reports[terminalID] = &cp
 }
 
-// ReadReport returns the scripted report for terminalID, if any.
 func (f *FakeDriver) ReadReport(_ context.Context, _, _, terminalID string) (*PhaseReport, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

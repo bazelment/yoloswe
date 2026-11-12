@@ -22,8 +22,6 @@ var (
 	ErrConflict        = errors.New("orch/store: conflict")
 )
 
-// Re-export Lane and Recipe domain types so callers of package store can
-// reference them directly without extra imports if desired.
 type (
 	Lane       = lane.Lane
 	LaneStatus = lane.Status
@@ -44,7 +42,6 @@ func (l Lease) Expired(now time.Time) bool {
 	return !now.Before(l.ExpiresAt)
 }
 
-// Clone returns a copy of l.
 func (l Lease) Clone() Lease {
 	return l
 }
@@ -60,7 +57,6 @@ type Run struct {
 	DefaultRecipe string    `json:"default_recipe,omitempty"`
 }
 
-// Clone returns a deep copy of r.
 func (r Run) Clone() Run {
 	out := r
 	if r.Lease != nil {
@@ -96,7 +92,6 @@ func (p Priority) Rank() int {
 	}
 }
 
-// Valid reports whether p is a known Priority.
 func (p Priority) Valid() bool {
 	switch p {
 	case PriorityP0, PriorityP1, PriorityP2, PriorityP3:
@@ -122,7 +117,6 @@ func (s BacklogStatus) Terminal() bool {
 	return s == BacklogDone || s == BacklogDropped
 }
 
-// Valid reports whether s is a known BacklogStatus.
 func (s BacklogStatus) Valid() bool {
 	switch s {
 	case BacklogOpen, BacklogInProgress, BacklogBlocked, BacklogDone, BacklogDropped:
@@ -158,7 +152,6 @@ type BacklogItem struct {
 	Order       int                   `json:"order"`
 }
 
-// Clone returns a deep copy of b.
 func (b BacklogItem) Clone() BacklogItem {
 	out := b
 	out.DependsOn = slices.Clone(b.DependsOn)
@@ -237,7 +230,6 @@ func (d Directive) IsActive(now time.Time) bool {
 	return true
 }
 
-// Clone returns a deep copy of d.
 func (d Directive) Clone() Directive {
 	out := d
 	if d.ExpiresAt != nil {
@@ -285,7 +277,6 @@ type Decision struct {
 	Vetted       bool             `json:"vetted"`
 }
 
-// Clone returns a deep copy of d.
 func (d Decision) Clone() Decision {
 	out := d
 	if d.Args != nil {
@@ -343,7 +334,6 @@ type Event struct {
 	Urgent    bool            `json:"urgent,omitempty"`
 }
 
-// Clone returns a deep copy of e.
 func (e Event) Clone() Event {
 	out := e
 	if e.Payload != nil {
@@ -426,7 +416,6 @@ type Thread struct {
 	CostUSD        float64      `json:"cost_usd"`
 }
 
-// Clone returns a deep copy of t.
 func (t Thread) Clone() Thread {
 	out := t
 	out.QueuedSteers = slices.Clone(t.QueuedSteers)
@@ -450,7 +439,6 @@ type Turn struct {
 	CostUSD      float64    `json:"cost_usd"`
 }
 
-// Clone returns a deep copy of t.
 func (t Turn) Clone() Turn {
 	out := t
 	if t.CompletedAt != nil {
@@ -476,7 +464,6 @@ type Item struct {
 	IsError   bool            `json:"is_error,omitempty"`
 }
 
-// Clone returns a deep copy of i.
 func (i Item) Clone() Item {
 	out := i
 	if i.Payload != nil {

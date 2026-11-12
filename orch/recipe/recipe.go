@@ -49,7 +49,6 @@ const (
 	MergeModeNone MergeMode = "none"
 )
 
-// Valid reports whether m is a recognized MergeMode.
 func (m MergeMode) Valid() bool {
 	switch m {
 	case MergeModeController, MergeModeSelf, MergeModeManual, MergeModeNone:
@@ -90,7 +89,6 @@ type Phase struct {
 	Mutating      bool         `json:"mutating"`
 }
 
-// Clone returns a deep copy of p.
 func (p Phase) Clone() Phase {
 	out := p
 	out.Agents = slices.Clone(p.Agents)
@@ -99,11 +97,8 @@ func (p Phase) Clone() Phase {
 	return out
 }
 
-// Condition specifies when a Transition fires.
-//
-// Mechanical conditions (Verdict, CIGreen, MinRound, MaxRound) are evaluated
-// deterministically by the controller. Conditions with a non-empty JudgmentRule
-// require a Dispatcher judgment turn evaluated against that rule text.
+// Condition specifies when a Transition fires. Mechanical fields are evaluated
+// by the controller; a non-empty JudgmentRule requires a Dispatcher turn.
 type Condition struct {
 	Verdict      string `json:"verdict,omitempty"`
 	JudgmentRule string `json:"judgment_rule,omitempty"`
@@ -112,8 +107,7 @@ type Condition struct {
 	CIGreen      bool   `json:"ci_green,omitempty"`
 }
 
-// NeedsJudgment reports whether this condition requires LLM judgment rather
-// than purely mechanical evaluation.
+// NeedsJudgment reports whether c requires LLM judgment.
 func (c Condition) NeedsJudgment() bool {
 	return strings.TrimSpace(c.JudgmentRule) != ""
 }
@@ -179,7 +173,6 @@ type Recipe struct {
 	BaseVersion int          `json:"base_version,omitempty"`
 }
 
-// Clone returns a deep copy of r.
 func (r Recipe) Clone() Recipe {
 	out := r
 	if r.Phases != nil {
@@ -193,7 +186,6 @@ func (r Recipe) Clone() Recipe {
 	return out
 }
 
-// PhaseNames returns the ordered phase names in r.
 func (r *Recipe) PhaseNames() []string {
 	names := make([]string, len(r.Phases))
 	for i, p := range r.Phases {
@@ -202,7 +194,6 @@ func (r *Recipe) PhaseNames() []string {
 	return names
 }
 
-// FirstPhase returns the name of the first phase, or "" if r has no phases.
 func (r *Recipe) FirstPhase() string {
 	if len(r.Phases) == 0 {
 		return ""
@@ -210,7 +201,6 @@ func (r *Recipe) FirstPhase() string {
 	return r.Phases[0].Name
 }
 
-// Phase looks up a phase by name.
 func (r *Recipe) Phase(name string) (Phase, bool) {
 	for _, p := range r.Phases {
 		if p.Name == name {
@@ -220,7 +210,6 @@ func (r *Recipe) Phase(name string) (Phase, bool) {
 	return Phase{}, false
 }
 
-// TransitionsFrom returns all transitions originating from fromPhase in declaration order.
 func (r *Recipe) TransitionsFrom(fromPhase string) []Transition {
 	var out []Transition
 	for _, tr := range r.Transitions {
@@ -231,10 +220,8 @@ func (r *Recipe) TransitionsFrom(fromPhase string) []Transition {
 	return out
 }
 
-// MatchTransitions evaluates transitions out of fromPhase against a phase outcome.
-// It returns the first matching purely mechanical transition (if any), and any
-// candidate transitions whose mechanical preconditions match but require
-// Dispatcher judgment to evaluate JudgmentRule.
+// MatchTransitions returns the first matching purely mechanical transition out
+// of fromPhase and any candidates that require Dispatcher judgment.
 func (r *Recipe) MatchTransitions(fromPhase, verdict string, ciGreen bool, round int) (mechanical *Transition, judgment []Transition) {
 	for _, tr := range r.Transitions {
 		if tr.From != fromPhase {
@@ -313,8 +300,7 @@ func (r *Recipe) Validate() error {
 	return nil
 }
 
-// FormatTable renders a concise Markdown summary of the compiled recipe for
-// owner confirmation or inspection.
+// FormatTable renders a Markdown summary of the compiled recipe.
 func (r *Recipe) FormatTable() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "### Recipe `%s` (v%d)\n\n", r.Name, r.Version)

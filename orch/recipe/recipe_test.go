@@ -35,7 +35,6 @@ func TestDefaultRecipe(t *testing.T) {
 		t.Fatalf("FirstPhase() = %q, want %q", def.FirstPhase(), recipe.PhaseSWE)
 	}
 
-	// Verify swe -> clean -> review -> integrate -> complete transitions.
 	tr1, judg := def.MatchTransitions(recipe.PhaseSWE, recipe.OutcomeDone, false, 1)
 	if tr1 == nil || tr1.To != recipe.PhaseClean || len(judg) != 0 {
 		t.Fatalf("swe done transition = (%+v, %v), want -> clean", tr1, judg)
@@ -90,14 +89,12 @@ func TestRecipeValidationAndJudgmentTransitions(t *testing.T) {
 		t.Fatalf("expected 1 judgment transition, got %+v", judg)
 	}
 
-	// Test Clone isolation.
 	cloned := r.Clone()
 	cloned.Phases[0].Name = "mutated"
 	if r.Phases[0].Name == "mutated" {
 		t.Fatal("Clone() did not deep-copy Phases slice")
 	}
 
-	// Digit suffix in phase name must fail validation.
 	bad := recipe.Default()
 	bad.Phases[0].Name = "swe2"
 	if err := bad.Validate(); err == nil {
