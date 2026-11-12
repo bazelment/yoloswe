@@ -159,8 +159,18 @@ func (d *Dispatcher) BuildSnapshot(ctx context.Context, runID string, events []s
 
 // ToolDefinitions returns the canonical tool definitions exposed to ModelClient.
 func (d *Dispatcher) ToolDefinitions() []model.ToolDefinition {
-	reg := d.buildToolRegistry("", nil)
-	return reg.Definitions()
+	out := make([]model.ToolDefinition, len(dispatcherToolDefs))
+	for i := range dispatcherToolDefs {
+		out[i] = dispatcherToolDefs[i].Clone()
+	}
+	return out
+}
+
+func (d *Dispatcher) nextID(prefix string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.seq++
+	return fmt.Sprintf("%s-%d", prefix, d.seq)
 }
 
 type turnExecState struct {
@@ -184,17 +194,12 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 		return nil, errors.New("orch/dispatcher: model client is required")
 	}
 
-	d.mu.Lock()
-	d.seq++
-	seq := d.seq
-	d.mu.Unlock()
-
 	threadID, err := d.ensureThread(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
 
-	turnID := fmt.Sprintf("%s-turn-%d", threadID, seq)
+	turnID := d.nextID(threadID + "-turn")
 	turnRec, err := d.store.Threads().StartTurn(ctx, store.Turn{
 		ID:       turnID,
 		ThreadID: threadID,
@@ -377,34 +382,31 @@ func isHardBatch(events []store.Event) bool {
 	return false
 }
 
+var dispatcherToolDefs = []model.ToolDefinition{
+	{Name: ToolBacklogAdd, Description: "Add a new prioritized item to the run backlog", InputSchema: model.SchemaFor[BacklogAddParams]()},
+	{Name: ToolBacklogUpdate, Description: "Update an existing non-terminal backlog item", InputSchema: model.SchemaFor[BacklogUpdateParams]()},
+	{Name: ToolBacklogReorder, Description: "Reorder backlog items within their priority tier", InputSchema: model.SchemaFor[BacklogReorderParams]()},
+	{Name: ToolBacklogClose, Description: "Close a backlog item as done or dropped", InputSchema: model.SchemaFor[BacklogCloseParams]()},
+	{Name: ToolLaneSpawn, Description: "Spawn a worker lane for an open backlog item with a brief and optional recipe override", InputSchema: model.SchemaFor[LaneSpawnParams]()},
+	{Name: ToolLaneSteer, Description: "Send a steering note to an active or blocked lane", InputSchema: model.SchemaFor[LaneSteerParams]()},
+	{Name: ToolLaneRetry, Description: "Retry a stalled, blocked, or failed lane on a fresh round", InputSchema: model.SchemaFor[LaneRetryParams]()},
+	{Name: ToolLaneStop, Description: "Stop a non-terminal lane and mark it failed", InputSchema: model.SchemaFor[LaneStopParams]()},
+	{Name: ToolOwnerAsk, Description: "Pose a decision question to the owner with options, a mandatory default, and a deadline", InputSchema: model.SchemaFor[OwnerAskParams]()},
+	{Name: ToolDirectiveNote, Description: "Record an operational fact or note directive with optional expiry", InputSchema: model.SchemaFor[DirectiveNoteParams]()},
+	{Name: ToolPlannerRequest, Description: "Request a Planner turn to replan or import a plan", InputSchema: model.SchemaFor[PlannerRequestParams]()},
+	{Name: ToolReadLaneReport, Description: "Read a bounded phase report for a lane", InputSchema: model.SchemaFor[ReadLaneReportParams]()},
+	{Name: ToolReadPR, Description: "Read bounded PR metadata and approval status for a lane", InputSchema: model.SchemaFor[ReadPRParams]()},
+	{Name: ToolReadCI, Description: "Read bounded CI check status and recent CI events for a lane", InputSchema: model.SchemaFor[ReadCIParams]()},
+}
+
 func (d *Dispatcher) buildToolRegistry(runID string, state *turnExecState) *model.ToolRegistry {
 	reg := model.NewToolRegistry()
-
-	register := func(name, desc string, schema json.RawMessage) {
-		reg.Register(model.ToolDefinition{
-			Name:        name,
-			Description: desc,
-			InputSchema: schema,
-		}, func(ctx context.Context, raw json.RawMessage) (string, error) {
-			return d.handleRawToolCall(ctx, runID, state, name, raw)
+	for i := range dispatcherToolDefs {
+		def := dispatcherToolDefs[i]
+		reg.Register(def, func(ctx context.Context, raw json.RawMessage) (string, error) {
+			return d.handleRawToolCall(ctx, runID, state, def.Name, raw)
 		})
 	}
-
-	register(ToolBacklogAdd, "Add a new prioritized item to the run backlog", model.SchemaFor[BacklogAddParams]())
-	register(ToolBacklogUpdate, "Update an existing non-terminal backlog item", model.SchemaFor[BacklogUpdateParams]())
-	register(ToolBacklogReorder, "Reorder backlog items within their priority tier", model.SchemaFor[BacklogReorderParams]())
-	register(ToolBacklogClose, "Close a backlog item as done or dropped", model.SchemaFor[BacklogCloseParams]())
-	register(ToolLaneSpawn, "Spawn a worker lane for an open backlog item with a brief and optional recipe override", model.SchemaFor[LaneSpawnParams]())
-	register(ToolLaneSteer, "Send a steering note to an active or blocked lane", model.SchemaFor[LaneSteerParams]())
-	register(ToolLaneRetry, "Retry a stalled, blocked, or failed lane on a fresh round", model.SchemaFor[LaneRetryParams]())
-	register(ToolLaneStop, "Stop a non-terminal lane and mark it failed", model.SchemaFor[LaneStopParams]())
-	register(ToolOwnerAsk, "Pose a decision question to the owner with options, a mandatory default, and a deadline", model.SchemaFor[OwnerAskParams]())
-	register(ToolDirectiveNote, "Record an operational fact or note directive with optional expiry", model.SchemaFor[DirectiveNoteParams]())
-	register(ToolPlannerRequest, "Request a Planner turn to replan or import a plan", model.SchemaFor[PlannerRequestParams]())
-	register(ToolReadLaneReport, "Read a bounded phase report for a lane", model.SchemaFor[ReadLaneReportParams]())
-	register(ToolReadPR, "Read bounded PR metadata and approval status for a lane", model.SchemaFor[ReadPRParams]())
-	register(ToolReadCI, "Read bounded CI check status and recent CI events for a lane", model.SchemaFor[ReadCIParams]())
-
 	return reg
 }
 
@@ -698,20 +700,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	}
 
 	if d.driver != nil && len(firstPhase.Agents) > 0 {
-		agent := firstPhase.Agents[0]
-		spawnRes, err := d.driver.SpawnSession(ctx, lane.SpawnRequest{
-			RunID:      runID,
-			LaneID:     ln.ID,
-			Phase:      firstPhase.Name,
-			Round:      ln.Round,
-			Harness:    agent.Harness,
-			Model:      agent.Model,
-			Effort:     agent.Effort,
-			Brief:      p.Brief,
-			Branch:     ln.Branch,
-			BaseBranch: ln.BaseBranch,
-			Worktree:   ln.Worktree,
-		})
+		spawnRes, err := d.spawnLaneSession(ctx, runID, ln, firstPhase.Name, ln.Round, firstPhase.Agents[0], p.Brief)
 		if err != nil {
 			return "", err
 		}
@@ -789,19 +778,7 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 	if d.driver != nil && len(targetPhase.Agents) > 0 {
 		agent := targetPhase.Agents[0]
 		if ln.SessionID == "" {
-			res, err := d.driver.SpawnSession(ctx, lane.SpawnRequest{
-				RunID:      runID,
-				LaneID:     ln.ID,
-				Phase:      targetPhase.Name,
-				Round:      round,
-				Harness:    agent.Harness,
-				Model:      agent.Model,
-				Effort:     agent.Effort,
-				Brief:      brief,
-				Branch:     ln.Branch,
-				BaseBranch: ln.BaseBranch,
-				Worktree:   ln.Worktree,
-			})
+			res, err := d.spawnLaneSession(ctx, runID, ln, targetPhase.Name, round, agent, brief)
 			if err != nil {
 				return "", err
 			}
@@ -840,6 +817,30 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 	return fmt.Sprintf("retried lane %s in phase %s (round %d)", ln.ID, targetPhase.Name, round), nil
 }
 
+func (d *Dispatcher) spawnLaneSession(
+	ctx context.Context,
+	runID string,
+	ln lane.Lane,
+	phase string,
+	round int,
+	agent recipe.AgentSpec,
+	brief string,
+) (lane.SpawnResult, error) {
+	return d.driver.SpawnSession(ctx, lane.SpawnRequest{
+		RunID:      runID,
+		LaneID:     ln.ID,
+		Phase:      phase,
+		Round:      round,
+		Harness:    agent.Harness,
+		Model:      agent.Model,
+		Effort:     agent.Effort,
+		Brief:      brief,
+		Branch:     ln.Branch,
+		BaseBranch: ln.BaseBranch,
+		Worktree:   ln.Worktree,
+	})
+}
+
 func (d *Dispatcher) buildRetryBrief(view *StateView, ln lane.Lane, r recipe.Recipe, phase recipe.Phase, note string) string {
 	var parts []string
 	if ln.Title != "" {
@@ -862,9 +863,8 @@ func (d *Dispatcher) buildRetryBrief(view *StateView, ln lane.Lane, r recipe.Rec
 		parts = append(parts, strings.TrimSpace(note))
 	}
 	brief := strings.Join(parts, "\n\n")
-	maxBytes := view.EffectiveMaxBriefBytes(r)
-	if maxBytes > 0 && len(brief) > maxBytes {
-		brief = brief[:maxBytes]
+	if maxBytes := view.EffectiveMaxBriefBytes(r); maxBytes > 0 && len(brief) > maxBytes {
+		brief = validUTF8Prefix(brief, maxBytes)
 	}
 	return brief
 }
@@ -907,10 +907,7 @@ func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, view *Stat
 	}
 	askID := strings.TrimSpace(p.ID)
 	if askID == "" {
-		d.mu.Lock()
-		d.seq++
-		askID = fmt.Sprintf("ask-%d", d.seq)
-		d.mu.Unlock()
+		askID = d.nextID("ask")
 	}
 
 	ask := controller.OwnerAsk{
@@ -970,10 +967,7 @@ func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, _ *St
 	}
 	dirID := strings.TrimSpace(p.ID)
 	if dirID == "" {
-		d.mu.Lock()
-		d.seq++
-		dirID = fmt.Sprintf("note-%d", d.seq)
-		d.mu.Unlock()
+		dirID = d.nextID("note")
 	}
 	dir := store.Directive{
 		ID:        dirID,
@@ -992,10 +986,7 @@ func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, _ *St
 }
 
 func (d *Dispatcher) applyPlannerRequest(ctx context.Context, runID string, p PlannerRequestParams) (string, error) {
-	d.mu.Lock()
-	d.seq++
-	reqID := fmt.Sprintf("planreq-%d", d.seq)
-	d.mu.Unlock()
+	reqID := d.nextID("planreq")
 
 	dir := store.Directive{
 		ID:     reqID,

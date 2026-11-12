@@ -92,55 +92,11 @@ type LaneSpawnParams struct {
 	Reason         string `json:"reason,omitempty" jsonschema:"description=Reason for spawning this lane"`
 }
 
-func (p *LaneSpawnParams) UnmarshalJSON(data []byte) error {
-	type plain LaneSpawnParams
-	var raw struct {
-		Item   string `json:"item"`
-		Lane   string `json:"lane"`
-		Recipe string `json:"recipe"`
-		plain
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	*p = LaneSpawnParams(raw.plain)
-	if p.ItemID == "" && raw.Item != "" {
-		p.ItemID = raw.Item
-	}
-	if p.LaneID == "" && raw.Lane != "" {
-		p.LaneID = raw.Lane
-	}
-	if p.RecipeOverride == "" && p.RecipeName == "" && raw.Recipe != "" {
-		p.RecipeOverride = raw.Recipe
-	}
-	return nil
-}
-
 // LaneSteerParams holds parameters for the lane.steer tool.
 type LaneSteerParams struct {
 	LaneID string `json:"lane_id" jsonschema:"required,description=Lane ID to steer"`
 	Note   string `json:"note" jsonschema:"required,description=Steering instruction to inject into the lane"`
 	Reason string `json:"reason,omitempty" jsonschema:"description=Reason for steering this lane"`
-}
-
-func (p *LaneSteerParams) UnmarshalJSON(data []byte) error {
-	type plain LaneSteerParams
-	var raw struct {
-		Lane    string `json:"lane"`
-		Message string `json:"message"`
-		plain
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	*p = LaneSteerParams(raw.plain)
-	if p.LaneID == "" && raw.Lane != "" {
-		p.LaneID = raw.Lane
-	}
-	if p.Note == "" && raw.Message != "" {
-		p.Note = raw.Message
-	}
-	return nil
 }
 
 // LaneRetryParams holds parameters for the lane.retry tool.
@@ -152,46 +108,10 @@ type LaneRetryParams struct {
 	Round  int    `json:"round,omitempty" jsonschema:"description=Target round number (must be > max recorded round for the phase; defaults to next unused round)"`
 }
 
-func (p *LaneRetryParams) UnmarshalJSON(data []byte) error {
-	type plain LaneRetryParams
-	var raw struct {
-		Lane  string `json:"lane"`
-		Brief string `json:"brief"`
-		plain
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	*p = LaneRetryParams(raw.plain)
-	if p.LaneID == "" && raw.Lane != "" {
-		p.LaneID = raw.Lane
-	}
-	if p.Note == "" && raw.Brief != "" {
-		p.Note = raw.Brief
-	}
-	return nil
-}
-
 // LaneStopParams holds parameters for the lane.stop tool.
 type LaneStopParams struct {
 	LaneID string `json:"lane_id" jsonschema:"required,description=Lane ID to stop"`
 	Reason string `json:"reason" jsonschema:"required,description=Reason for stopping the lane"`
-}
-
-func (p *LaneStopParams) UnmarshalJSON(data []byte) error {
-	type plain LaneStopParams
-	var raw struct {
-		Lane string `json:"lane"`
-		plain
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	*p = LaneStopParams(raw.plain)
-	if p.LaneID == "" && raw.Lane != "" {
-		p.LaneID = raw.Lane
-	}
-	return nil
 }
 
 // OwnerAskParams holds parameters for the owner.ask tool.
@@ -206,22 +126,6 @@ type OwnerAskParams struct {
 	Options   []string `json:"options" jsonschema:"required,description=Concrete options the owner can choose from"`
 }
 
-func (p *OwnerAskParams) UnmarshalJSON(data []byte) error {
-	type plain OwnerAskParams
-	var raw struct {
-		Lane string `json:"lane"`
-		plain
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	*p = OwnerAskParams(raw.plain)
-	if p.LaneID == "" && raw.Lane != "" {
-		p.LaneID = raw.Lane
-	}
-	return nil
-}
-
 // DirectiveNoteParams holds parameters for the directive.note tool.
 type DirectiveNoteParams struct {
 	ID     string `json:"id,omitempty" jsonschema:"description=Optional directive ID"`
@@ -229,26 +133,6 @@ type DirectiveNoteParams struct {
 	Expiry string `json:"expiry,omitempty" jsonschema:"description=Optional expiry as RFC3339 timestamp or duration (e.g. 24h)"`
 	Scope  string `json:"scope,omitempty" jsonschema:"description=Optional lane ID or scope"`
 	Reason string `json:"reason,omitempty" jsonschema:"description=Reason for recording this note"`
-}
-
-func (p *DirectiveNoteParams) UnmarshalJSON(data []byte) error {
-	type plain DirectiveNoteParams
-	var raw struct {
-		Text      string `json:"text"`
-		ExpiresAt string `json:"expires_at"`
-		plain
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	*p = DirectiveNoteParams(raw.plain)
-	if p.Fact == "" && raw.Text != "" {
-		p.Fact = raw.Text
-	}
-	if p.Expiry == "" && raw.ExpiresAt != "" {
-		p.Expiry = raw.ExpiresAt
-	}
-	return nil
 }
 
 // PlannerRequestParams holds parameters for the planner.request tool.
@@ -266,22 +150,6 @@ type ReadLaneReportParams struct {
 	MaxBytes   int    `json:"max_bytes,omitempty" jsonschema:"description=Maximum bytes to return"`
 }
 
-func (p *ReadLaneReportParams) UnmarshalJSON(data []byte) error {
-	type plain ReadLaneReportParams
-	var raw struct {
-		Lane string `json:"lane"`
-		plain
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	*p = ReadLaneReportParams(raw.plain)
-	if p.LaneID == "" && raw.Lane != "" {
-		p.LaneID = raw.Lane
-	}
-	return nil
-}
-
 // ReadPRParams holds parameters for the read.pr tool.
 type ReadPRParams struct {
 	LaneID   string `json:"lane_id" jsonschema:"required,description=Lane ID whose PR status to read"`
@@ -289,43 +157,11 @@ type ReadPRParams struct {
 	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"description=Maximum bytes to return"`
 }
 
-func (p *ReadPRParams) UnmarshalJSON(data []byte) error {
-	type plain ReadPRParams
-	var raw struct {
-		Lane string `json:"lane"`
-		plain
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	*p = ReadPRParams(raw.plain)
-	if p.LaneID == "" && raw.Lane != "" {
-		p.LaneID = raw.Lane
-	}
-	return nil
-}
-
 // ReadCIParams holds parameters for the read.ci tool.
 type ReadCIParams struct {
 	LaneID   string `json:"lane_id" jsonschema:"required,description=Lane ID whose CI status to read"`
 	Reason   string `json:"reason,omitempty" jsonschema:"description=Optional reason for reading CI info"`
 	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"description=Maximum bytes to return"`
-}
-
-func (p *ReadCIParams) UnmarshalJSON(data []byte) error {
-	type plain ReadCIParams
-	var raw struct {
-		Lane string `json:"lane"`
-		plain
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	*p = ReadCIParams(raw.plain)
-	if p.LaneID == "" && raw.Lane != "" {
-		p.LaneID = raw.Lane
-	}
-	return nil
 }
 
 // ProposedAction is one typed tool call proposed by the Dispatcher model.
@@ -375,38 +211,49 @@ type Advisor interface {
 // canonical dotted tool names ("lane.spawn").
 func NormalizeToolName(name string) string {
 	trimmed := strings.TrimSpace(name)
-	switch trimmed {
-	case "backlog_add":
-		return ToolBacklogAdd
-	case "backlog_update":
-		return ToolBacklogUpdate
-	case "backlog_reorder":
-		return ToolBacklogReorder
-	case "backlog_close":
-		return ToolBacklogClose
-	case "lane_spawn":
-		return ToolLaneSpawn
-	case "lane_steer":
-		return ToolLaneSteer
-	case "lane_retry":
-		return ToolLaneRetry
-	case "lane_stop":
-		return ToolLaneStop
-	case "owner_ask":
-		return ToolOwnerAsk
-	case "directive_note":
-		return ToolDirectiveNote
-	case "planner_request":
-		return ToolPlannerRequest
-	case "read_lane_report":
-		return ToolReadLaneReport
-	case "read_pr":
-		return ToolReadPR
-	case "read_ci":
-		return ToolReadCI
-	default:
+	if isKnownTool(trimmed) {
 		return trimmed
 	}
+	if candidate := strings.Replace(trimmed, "_", ".", 1); isKnownTool(candidate) {
+		return candidate
+	}
+	return trimmed
+}
+
+func isKnownTool(tool string) bool {
+	switch tool {
+	case ToolBacklogAdd, ToolBacklogUpdate, ToolBacklogReorder, ToolBacklogClose,
+		ToolLaneSpawn, ToolLaneSteer, ToolLaneRetry, ToolLaneStop,
+		ToolOwnerAsk, ToolDirectiveNote, ToolPlannerRequest,
+		ToolReadLaneReport, ToolReadPR, ToolReadCI:
+		return true
+	default:
+		return false
+	}
+}
+
+type jsonAliases struct {
+	Item      string `json:"item"`
+	Lane      string `json:"lane"`
+	Recipe    string `json:"recipe"`
+	Message   string `json:"message"`
+	Brief     string `json:"brief"`
+	Text      string `json:"text"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+func decodeAliases(raw []byte) jsonAliases {
+	var a jsonAliases
+	_ = json.Unmarshal(raw, &a)
+	return a
+}
+
+func decodeParams[T any](tool string, raw []byte) (*T, error) {
+	var p T
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", tool, err)
+	}
+	return &p, nil
 }
 
 // ParseAction decodes raw tool call JSON arguments into a typed ProposedAction.
@@ -424,127 +271,165 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 
 	switch canonical {
 	case ToolBacklogAdd:
-		var p BacklogAddParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeParams[BacklogAddParams](canonical, trimmed)
+		if err != nil {
+			return act, err
 		}
-		act.BacklogAdd = &p
+		act.BacklogAdd = p
 		act.ItemID = p.ID
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("add backlog item %s", p.ID))
 
 	case ToolBacklogUpdate:
-		var p BacklogUpdateParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeParams[BacklogUpdateParams](canonical, trimmed)
+		if err != nil {
+			return act, err
 		}
-		act.BacklogUpdate = &p
+		act.BacklogUpdate = p
 		act.ItemID = p.ID
 		act.Reason = strings.TrimSpace(p.Reason)
 
 	case ToolBacklogReorder:
-		var p BacklogReorderParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeParams[BacklogReorderParams](canonical, trimmed)
+		if err != nil {
+			return act, err
 		}
-		act.BacklogReorder = &p
+		act.BacklogReorder = p
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), "reorder backlog items")
 
 	case ToolBacklogClose:
-		var p BacklogCloseParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeParams[BacklogCloseParams](canonical, trimmed)
+		if err != nil {
+			return act, err
 		}
-		act.BacklogClose = &p
+		act.BacklogClose = p
 		act.ItemID = p.ID
 		act.Reason = strings.TrimSpace(p.Reason)
 
 	case ToolLaneSpawn:
-		var p LaneSpawnParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeParams[LaneSpawnParams](canonical, trimmed)
+		if err != nil {
+			return act, err
 		}
-		act.LaneSpawn = &p
+		if p.ItemID == "" || p.LaneID == "" || (p.RecipeOverride == "" && p.RecipeName == "") {
+			a := decodeAliases(trimmed)
+			p.ItemID = cmp.Or(p.ItemID, a.Item)
+			p.LaneID = cmp.Or(p.LaneID, a.Lane)
+			if p.RecipeOverride == "" && p.RecipeName == "" {
+				p.RecipeOverride = a.Recipe
+			}
+		}
+		act.LaneSpawn = p
 		act.ItemID = p.ItemID
 		act.LaneID = cmp.Or(strings.TrimSpace(p.LaneID), strings.TrimSpace(p.ItemID))
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("spawn lane %s for item %s", act.LaneID, p.ItemID))
 
 	case ToolLaneSteer:
-		var p LaneSteerParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeParams[LaneSteerParams](canonical, trimmed)
+		if err != nil {
+			return act, err
 		}
-		act.LaneSteer = &p
+		if p.LaneID == "" || p.Note == "" {
+			a := decodeAliases(trimmed)
+			p.LaneID = cmp.Or(p.LaneID, a.Lane)
+			p.Note = cmp.Or(p.Note, a.Message)
+		}
+		act.LaneSteer = p
 		act.LaneID = p.LaneID
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Note))
 
 	case ToolLaneRetry:
-		var p LaneRetryParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeParams[LaneRetryParams](canonical, trimmed)
+		if err != nil {
+			return act, err
 		}
-		act.LaneRetry = &p
+		if p.LaneID == "" || p.Note == "" {
+			a := decodeAliases(trimmed)
+			p.LaneID = cmp.Or(p.LaneID, a.Lane)
+			p.Note = cmp.Or(p.Note, a.Brief)
+		}
+		act.LaneRetry = p
 		act.LaneID = p.LaneID
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Note), fmt.Sprintf("retry lane %s", p.LaneID))
 
 	case ToolLaneStop:
-		var p LaneStopParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeParams[LaneStopParams](canonical, trimmed)
+		if err != nil {
+			return act, err
 		}
-		act.LaneStop = &p
+		if p.LaneID == "" {
+			p.LaneID = decodeAliases(trimmed).Lane
+		}
+		act.LaneStop = p
 		act.LaneID = p.LaneID
 		act.Reason = strings.TrimSpace(p.Reason)
 
 	case ToolOwnerAsk:
-		var p OwnerAskParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeParams[OwnerAskParams](canonical, trimmed)
+		if err != nil {
+			return act, err
 		}
-		act.OwnerAsk = &p
+		if p.LaneID == "" {
+			p.LaneID = decodeAliases(trimmed).Lane
+		}
+		act.OwnerAsk = p
 		act.LaneID = p.LaneID
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Question))
 
 	case ToolDirectiveNote:
-		var p DirectiveNoteParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeParams[DirectiveNoteParams](canonical, trimmed)
+		if err != nil {
+			return act, err
 		}
-		act.DirectiveNote = &p
+		if p.Fact == "" || p.Expiry == "" {
+			a := decodeAliases(trimmed)
+			p.Fact = cmp.Or(p.Fact, a.Text)
+			p.Expiry = cmp.Or(p.Expiry, a.ExpiresAt)
+		}
+		act.DirectiveNote = p
 		act.LaneID = p.Scope
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Fact))
 
 	case ToolPlannerRequest:
-		var p PlannerRequestParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeParams[PlannerRequestParams](canonical, trimmed)
+		if err != nil {
+			return act, err
 		}
-		act.PlannerRequest = &p
+		act.PlannerRequest = p
 		act.Reason = strings.TrimSpace(p.Reason)
 
 	case ToolReadLaneReport:
-		var p ReadLaneReportParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeParams[ReadLaneReportParams](canonical, trimmed)
+		if err != nil {
+			return act, err
 		}
-		act.ReadLaneReport = &p
+		if p.LaneID == "" {
+			p.LaneID = decodeAliases(trimmed).Lane
+		}
+		act.ReadLaneReport = p
 		act.LaneID = p.LaneID
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("read lane report for %s", p.LaneID))
 
 	case ToolReadPR:
-		var p ReadPRParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeParams[ReadPRParams](canonical, trimmed)
+		if err != nil {
+			return act, err
 		}
-		act.ReadPR = &p
+		if p.LaneID == "" {
+			p.LaneID = decodeAliases(trimmed).Lane
+		}
+		act.ReadPR = p
 		act.LaneID = p.LaneID
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("read PR info for %s", p.LaneID))
 
 	case ToolReadCI:
-		var p ReadCIParams
-		if err := json.Unmarshal(trimmed, &p); err != nil {
-			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		p, err := decodeParams[ReadCIParams](canonical, trimmed)
+		if err != nil {
+			return act, err
 		}
-		act.ReadCI = &p
+		if p.LaneID == "" {
+			p.LaneID = decodeAliases(trimmed).Lane
+		}
+		act.ReadCI = p
 		act.LaneID = p.LaneID
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("read CI status for %s", p.LaneID))
 	}
@@ -559,12 +444,11 @@ type StateView struct {
 	Backlog        map[string]store.BacklogItem
 	Recipes        map[string]recipe.Recipe
 	VersionRecipes map[string]recipe.Recipe
-	Directives     []store.Directive
 	MaxBriefBytes  int
 }
 
-// LoadStateView loads the current Run, Lanes, Backlog, Recipes, and active
-// Directives from st into a StateView for invariant vetting.
+// LoadStateView loads the current Run, Lanes, Backlog, and Recipes from st into
+// a StateView for invariant vetting.
 func LoadStateView(
 	ctx context.Context,
 	st store.Store,
@@ -587,10 +471,6 @@ func LoadStateView(
 	if err != nil {
 		return nil, err
 	}
-	directives, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
-	if err != nil {
-		return nil, err
-	}
 	latestRecipes, err := st.Recipes().ListLatest(ctx, runID)
 	if err != nil {
 		return nil, err
@@ -603,7 +483,6 @@ func LoadStateView(
 		Backlog:        make(map[string]store.BacklogItem, len(backlog)),
 		Recipes:        make(map[string]recipe.Recipe, len(latestRecipes)+1),
 		VersionRecipes: make(map[string]recipe.Recipe, len(latestRecipes)+1),
-		Directives:     directives,
 		MaxBriefBytes:  maxBriefBytes,
 	}
 	defRecipe := recipe.Default()
@@ -656,18 +535,23 @@ func (s *StateView) BacklogItem(id string) (store.BacklogItem, bool) {
 	return it, ok
 }
 
+func (s *StateView) resolveRecipeName(name string) string {
+	if name != "" {
+		return name
+	}
+	if s != nil && s.Run != nil && s.Run.DefaultRecipe != "" {
+		return s.Run.DefaultRecipe
+	}
+	return recipe.DefaultName
+}
+
 // RecipeByName resolves the latest recipe for name (falling back to recipe.Default).
 func (s *StateView) RecipeByName(name string) (recipe.Recipe, bool) {
 	if s == nil {
 		def := recipe.Default()
 		return def, name == "" || name == recipe.DefaultName
 	}
-	if name == "" && s.Run != nil && s.Run.DefaultRecipe != "" {
-		name = s.Run.DefaultRecipe
-	}
-	if name == "" {
-		name = recipe.DefaultName
-	}
+	name = s.resolveRecipeName(name)
 	if r, ok := s.Recipes[name]; ok {
 		return r, true
 	}
@@ -679,19 +563,26 @@ func (s *StateView) RecipeByName(name string) (recipe.Recipe, bool) {
 
 // RecipeForLane resolves the pinned or latest recipe for ln.
 func (s *StateView) RecipeForLane(ln lane.Lane) (recipe.Recipe, bool) {
-	name := ln.RecipeName
-	if name == "" && s != nil && s.Run != nil && s.Run.DefaultRecipe != "" {
-		name = s.Run.DefaultRecipe
-	}
-	if name == "" {
-		name = recipe.DefaultName
-	}
+	name := s.resolveRecipeName(ln.RecipeName)
 	if s != nil && ln.RecipeVersion > 0 {
 		if r, ok := s.VersionRecipes[recipeVersionKey(name, ln.RecipeVersion)]; ok {
 			return r, true
 		}
 	}
 	return s.RecipeByName(name)
+}
+
+func (s *StateView) currentTime() time.Time {
+	if s != nil && !s.Now.IsZero() {
+		return s.Now
+	}
+	return time.Now().UTC()
+}
+
+func (s *StateView) maxBriefBytesForLane(laneID string) int {
+	ln, _ := s.Lane(laneID)
+	r, _ := s.RecipeForLane(ln)
+	return s.EffectiveMaxBriefBytes(r)
 }
 
 // RunningLaneCount returns the number of lanes currently in StatusRunning.
@@ -814,15 +705,10 @@ func VetAction(st *StateView, action ProposedAction, invs []Invariant) error {
 }
 
 func checkKnownTool(_ *StateView, act ProposedAction) error {
-	switch act.Tool {
-	case ToolBacklogAdd, ToolBacklogUpdate, ToolBacklogReorder, ToolBacklogClose,
-		ToolLaneSpawn, ToolLaneSteer, ToolLaneRetry, ToolLaneStop,
-		ToolOwnerAsk, ToolDirectiveNote, ToolPlannerRequest,
-		ToolReadLaneReport, ToolReadPR, ToolReadCI:
-		return nil
-	default:
+	if !isKnownTool(act.Tool) {
 		return fmt.Errorf("tool %q is not permitted for the dispatcher", act.Tool)
 	}
+	return nil
 }
 
 func checkNoMergeOutsideRecipe(st *StateView, act ProposedAction) error {
@@ -875,17 +761,13 @@ func checkNoMergeOutsideRecipe(st *StateView, act ProposedAction) error {
 				r.Name, r.MergePolicy.Mode)
 		}
 		if ph, hasPhase := r.Phase(targetPhase); hasPhase {
-			if (targetPhase == recipe.PhaseIntegrate || hasGate(ph, "review_approved")) && r.MergePolicy.RequireReviewPass {
-				if ln.ApprovalStale() {
-					return fmt.Errorf("cannot enter phase %q with stale or missing review approval (head=%q approval=%q)",
-						targetPhase, ln.PRHead, ln.ApprovalSHA)
-				}
+			if (targetPhase == recipe.PhaseIntegrate || hasGate(ph, "review_approved")) && r.MergePolicy.RequireReviewPass && ln.ApprovalStale() {
+				return fmt.Errorf("cannot enter phase %q with stale or missing review approval (head=%q approval=%q)",
+					targetPhase, ln.PRHead, ln.ApprovalSHA)
 			}
-			if (targetPhase == recipe.PhaseIntegrate || hasGate(ph, "ci_green")) && targetPhase == recipe.PhaseIntegrate && r.MergePolicy.RequireCIGreen {
-				if !isCIGreen(ln.Checks) {
-					return fmt.Errorf("cannot enter integrate phase %q while CI checks are %q",
-						targetPhase, cmp.Or(ln.Checks, "pending"))
-				}
+			if targetPhase == recipe.PhaseIntegrate && r.MergePolicy.RequireCIGreen && !isCIGreen(ln.Checks) {
+				return fmt.Errorf("cannot enter integrate phase %q while CI checks are %q",
+					targetPhase, cmp.Or(ln.Checks, "pending"))
 			}
 		}
 
@@ -950,10 +832,7 @@ func checkOwnerAsk(st *StateView, act ProposedAction) error {
 	if strings.TrimSpace(p.Deadline) == "" {
 		return errors.New("deadline is required")
 	}
-	now := time.Now().UTC()
-	if st != nil && !st.Now.IsZero() {
-		now = st.Now
-	}
+	now := st.currentTime()
 	dl, err := parseFutureTime(now, p.Deadline)
 	if err != nil {
 		return fmt.Errorf("invalid deadline %q: %w", p.Deadline, err)
@@ -986,13 +865,7 @@ func checkBriefSizeCap(st *StateView, act ProposedAction) error {
 		if strings.TrimSpace(act.LaneSteer.Note) == "" {
 			return errors.New("steer note is required")
 		}
-		var r recipe.Recipe
-		if ln, ok := st.Lane(act.LaneSteer.LaneID); ok {
-			r, _ = st.RecipeForLane(ln)
-		} else {
-			r = recipe.Default()
-		}
-		maxBytes := st.EffectiveMaxBriefBytes(r)
+		maxBytes := st.maxBriefBytesForLane(act.LaneSteer.LaneID)
 		if len(act.LaneSteer.Note) > maxBytes {
 			return fmt.Errorf("steer note size %d bytes exceeds cap of %d bytes", len(act.LaneSteer.Note), maxBytes)
 		}
@@ -1001,13 +874,7 @@ func checkBriefSizeCap(st *StateView, act ProposedAction) error {
 		if act.LaneRetry == nil || act.LaneRetry.Note == "" {
 			return nil
 		}
-		var r recipe.Recipe
-		if ln, ok := st.Lane(act.LaneRetry.LaneID); ok {
-			r, _ = st.RecipeForLane(ln)
-		} else {
-			r = recipe.Default()
-		}
-		maxBytes := st.EffectiveMaxBriefBytes(r)
+		maxBytes := st.maxBriefBytesForLane(act.LaneRetry.LaneID)
 		if len(act.LaneRetry.Note) > maxBytes {
 			return fmt.Errorf("retry note size %d bytes exceeds cap of %d bytes", len(act.LaneRetry.Note), maxBytes)
 		}
@@ -1058,45 +925,29 @@ func checkPhaseDeclared(st *StateView, act ProposedAction) error {
 }
 
 func checkNoRoundReuse(st *StateView, act ProposedAction) error {
-	switch act.Tool {
-	case ToolLaneRetry:
-		if act.LaneRetry == nil {
-			return nil
-		}
-		ln, ok := st.Lane(act.LaneRetry.LaneID)
-		if !ok {
-			return nil
-		}
-		r, _ := st.RecipeForLane(ln)
-		phase := cmp.Or(strings.TrimSpace(act.LaneRetry.Phase), ln.Phase, r.FirstPhase())
-		if phase == "" {
-			return nil
-		}
-		recorded := ln.MaxRound(phase)
-		if act.LaneRetry.Round > 0 && recorded > 0 && act.LaneRetry.Round <= recorded {
-			return fmt.Errorf("round %d for phase %q would overwrite an existing attempt (max recorded is %d)",
-				act.LaneRetry.Round, phase, recorded)
-		}
-		targetRound := act.LaneRetry.Round
-		if targetRound <= 0 {
-			targetRound = recorded + 1
-		}
-		if r.Limits.MaxRounds > 0 && targetRound > r.Limits.MaxRounds {
-			return fmt.Errorf("round %d exceeds recipe %q max_rounds %d", targetRound, r.Name, r.Limits.MaxRounds)
-		}
-
-	case ToolLaneSpawn:
-		if act.LaneSpawn == nil {
-			return nil
-		}
-		laneID := cmp.Or(strings.TrimSpace(act.LaneSpawn.LaneID), strings.TrimSpace(act.LaneSpawn.ItemID))
-		ln, ok := st.Lane(laneID)
-		if !ok {
-			return nil
-		}
-		if ln.Status == lane.StatusRunning {
-			return fmt.Errorf("lane %q is already running", laneID)
-		}
+	if act.Tool != ToolLaneRetry || act.LaneRetry == nil {
+		return nil
+	}
+	ln, ok := st.Lane(act.LaneRetry.LaneID)
+	if !ok {
+		return nil
+	}
+	r, _ := st.RecipeForLane(ln)
+	phase := cmp.Or(strings.TrimSpace(act.LaneRetry.Phase), ln.Phase, r.FirstPhase())
+	if phase == "" {
+		return nil
+	}
+	recorded := ln.MaxRound(phase)
+	if act.LaneRetry.Round > 0 && recorded > 0 && act.LaneRetry.Round <= recorded {
+		return fmt.Errorf("round %d for phase %q would overwrite an existing attempt (max recorded is %d)",
+			act.LaneRetry.Round, phase, recorded)
+	}
+	targetRound := act.LaneRetry.Round
+	if targetRound <= 0 {
+		targetRound = recorded + 1
+	}
+	if r.Limits.MaxRounds > 0 && targetRound > r.Limits.MaxRounds {
+		return fmt.Errorf("round %d exceeds recipe %q max_rounds %d", targetRound, r.Name, r.Limits.MaxRounds)
 	}
 	return nil
 }
@@ -1303,10 +1154,7 @@ func checkDirectiveAndPlannerInvariants(st *StateView, act ProposedAction) error
 			return errors.New("fact is required for directive.note")
 		}
 		if strings.TrimSpace(p.Expiry) != "" {
-			now := time.Now().UTC()
-			if st != nil && !st.Now.IsZero() {
-				now = st.Now
-			}
+			now := st.currentTime()
 			exp, err := parseFutureTime(now, p.Expiry)
 			if err != nil {
 				return fmt.Errorf("invalid expiry %q: %w", p.Expiry, err)

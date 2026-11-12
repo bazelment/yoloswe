@@ -348,11 +348,7 @@ func BuildSnapshot(
 		}
 	}
 
-	text := b.String()
-	if len(text) > maxTotalBytes {
-		truncated = true
-		text = truncateSnapshotBytes(text, maxTotalBytes)
-	}
+	text := truncateWithSuffix(b.String(), maxTotalBytes, "\n...[snapshot truncated to fit <30k token budget]\n", &truncated)
 
 	return Snapshot{
 		RunID:           runID,
@@ -397,28 +393,20 @@ func singleLine(s string) string {
 }
 
 func truncateText(s string, maxBytes int, truncated *bool) string {
+	return truncateWithSuffix(s, maxBytes, "...[truncated]", truncated)
+}
+
+func truncateWithSuffix(s string, maxBytes int, suffix string, truncated *bool) string {
 	if maxBytes <= 0 || len(s) <= maxBytes {
 		return s
 	}
 	if truncated != nil {
 		*truncated = true
 	}
-	const suffix = "...[truncated]"
 	if maxBytes <= len(suffix) {
 		return validUTF8Prefix(s, maxBytes)
 	}
 	return validUTF8Prefix(s, maxBytes-len(suffix)) + suffix
-}
-
-func truncateSnapshotBytes(s string, maxBytes int) string {
-	const marker = "\n...[snapshot truncated to fit <30k token budget]\n"
-	if len(s) <= maxBytes {
-		return s
-	}
-	if maxBytes <= len(marker) {
-		return validUTF8Prefix(s, maxBytes)
-	}
-	return validUTF8Prefix(s, maxBytes-len(marker)) + marker
 }
 
 func validUTF8Prefix(s string, maxBytes int) string {
