@@ -1176,7 +1176,8 @@ func isStopTurnOutcome(outcome string) bool {
 	}
 }
 
-// PollSessionUsage polls session terminal usage and appends stall/usage events.
+// PollSessionUsage polls session terminal usage and appends stall/usage events
+// for terminals whose usage/limit snapshot changed since the last poll.
 func (d *Driver) PollSessionUsage(
 	ctx context.Context,
 	events store.EventStore,
@@ -1214,9 +1215,6 @@ func (d *Driver) PollSessionUsage(
 		snapVal := string(rawPayload)
 		d.mu.Lock()
 		unchanged := d.lastUsage[snapKey] == snapVal
-		if !unchanged {
-			d.lastUsage[snapKey] = snapVal
-		}
 		d.mu.Unlock()
 		if unchanged {
 			continue
@@ -1244,12 +1242,16 @@ func (d *Driver) PollSessionUsage(
 		if err != nil {
 			return nil, err
 		}
+		d.mu.Lock()
+		d.lastUsage[snapKey] = snapVal
+		d.mu.Unlock()
 		appended = append(appended, ev)
 	}
 	return appended, nil
 }
 
-// PollCapacity polls cluster capacity and appends a capacity event.
+// PollCapacity polls cluster capacity and appends a capacity event when the
+// snapshot changes (returning a zero store.Event and nil error when unchanged).
 func (d *Driver) PollCapacity(ctx context.Context, events store.EventStore, runID, laneID string) (store.Event, error) {
 	events, err := d.resolveEvents(events)
 	if err != nil {
@@ -1284,15 +1286,12 @@ func (d *Driver) PollCapacity(ctx context.Context, events store.EventStore, runI
 	snapVal := string(rawPayload)
 	d.mu.Lock()
 	unchanged := d.lastCapacity[snapKey] == snapVal
-	if !unchanged {
-		d.lastCapacity[snapKey] = snapVal
-	}
 	d.mu.Unlock()
 	if unchanged {
 		return store.Event{}, nil
 	}
 	summary := fmt.Sprintf("nebula capacity: running=%d waiting=%d", totalRunning, totalWaiting)
-	return events.Append(ctx, store.Event{
+	ev, err := events.Append(ctx, store.Event{
 		CreatedAt: d.clock.Now().UTC(),
 		RunID:     runID,
 		LaneID:    laneID,
@@ -1303,6 +1302,13 @@ func (d *Driver) PollCapacity(ctx context.Context, events store.EventStore, runI
 		Payload:   rawPayload,
 		Urgent:    urgent,
 	})
+	if err != nil {
+		return store.Event{}, err
+	}
+	d.mu.Lock()
+	d.lastCapacity[snapKey] = snapVal
+	d.mu.Unlock()
+	return ev, nil
 }
 
 func (d *Driver) resolveRepositoryID(ctx context.Context) (string, error) {

@@ -805,6 +805,18 @@ func TestStreamEventsCursorScopingResumeStopAndErrorHandling(t *testing.T) {
 		t.Fatalf("StreamEvents(term-a resume StopOnExit): %v", err)
 	}
 
+	srv.mu.Lock()
+	var termALastEventIDs []string
+	for _, c := range srv.calls {
+		if c.Path == "/api/code-terminals/term-a/events/stream" {
+			termALastEventIDs = append(termALastEventIDs, c.Headers.Get("Last-Event-ID"))
+		}
+	}
+	srv.mu.Unlock()
+	if len(termALastEventIDs) != 2 || termALastEventIDs[0] != "" || termALastEventIDs[1] != "3" {
+		t.Fatalf("term-a stream Last-Event-ID headers = %v, want [\"\", \"3\"]", termALastEventIDs)
+	}
+
 	// Second terminal with the SAME Consumer name must start at seq 1 and not skip events.
 	if err := drv.StreamEvents(ctx, nebula.StreamRequest{
 		RunID:      "run-cursor",
@@ -872,6 +884,19 @@ func TestStreamEventsCursorScopingResumeStopAndErrorHandling(t *testing.T) {
 	}
 }
 
+type failOnceEventStore struct {
+	store.EventStore
+	failed bool
+}
+
+func (f *failOnceEventStore) Append(ctx context.Context, ev store.Event) (store.Event, error) {
+	if !f.failed {
+		f.failed = true
+		return store.Event{}, errors.New("transient append error")
+	}
+	return f.EventStore.Append(ctx, ev)
+}
+
 func TestSessionMatchingEnvForwardingSteerAndPollDedupe(t *testing.T) {
 	srv := newFakeNebulaServer(t)
 	drv, _, st := newTestDriver(t, srv, nebula.WithAPIURL(srv.srv.URL))
@@ -891,6 +916,20 @@ func TestSessionMatchingEnvForwardingSteerAndPollDedupe(t *testing.T) {
 	srv.sessions["sess-unrelated"] = &nebula.SessionInfo{
 		ID:     "sess-unrelated",
 		Status: "ready",
+	}
+	srv.sessions["sess-wrong-base"] = &nebula.SessionInfo{
+		ID:         "sess-wrong-base",
+		Status:     "ready",
+		BaseBranch: "develop",
+		WorkBranch: "swarm-lane/run-x/lane-x",
+		Metadata:   map[string]string{"swarmRun": "run-x", "swarmLane": "lane-x"},
+	}
+	srv.sessions["sess-wrong-run"] = &nebula.SessionInfo{
+		ID:         "sess-wrong-run",
+		Status:     "ready",
+		BaseBranch: "main",
+		WorkBranch: "swarm-lane/run-x/lane-x",
+		Metadata:   map[string]string{"swarmRun": "other-run", "swarmLane": "lane-x"},
 	}
 	srv.mu.Unlock()
 
@@ -915,7 +954,7 @@ func TestSessionMatchingEnvForwardingSteerAndPollDedupe(t *testing.T) {
 			t.Fatalf("EnsureSession[%d]: %v", i, err)
 		}
 	}
-	if results[0].ID == "sess-host" || results[0].ID == "sess-unrelated" {
+	if results[0].ID == "sess-host" || results[0].ID == "sess-unrelated" || results[0].ID == "sess-wrong-base" || results[0].ID == "sess-wrong-run" {
 		t.Fatalf("EnsureSession reused wrong session %q", results[0].ID)
 	}
 	if results[0].ID != results[1].ID {
@@ -979,5 +1018,24 @@ func TestSessionMatchingEnvForwardingSteerAndPollDedupe(t *testing.T) {
 	c2, err := drv.PollCapacity(ctx, st.Events(), "run-x", "lane-x")
 	if err != nil || c2.ID != "" {
 		t.Fatalf("second PollCapacity (unchanged) should dedupe, got ev=%+v err=%v", c2, err)
+	}
+
+	// Failed Append must not poison the dedupe map for subsequent retries.
+	flakyUsageEvents := &failOnceEventStore{EventStore: st.Events()}
+	if _, err := drv.PollSessionUsage(ctx, flakyUsageEvents, "run-retry", "lane-x", results[0].ID, started.TerminalID); err == nil {
+		t.Fatal("expected PollSessionUsage error on first flaky Append")
+	}
+	uRetry, err := drv.PollSessionUsage(ctx, flakyUsageEvents, "run-retry", "lane-x", results[0].ID, started.TerminalID)
+	if err != nil || len(uRetry) != 1 {
+		t.Fatalf("retry PollSessionUsage after failed Append: len=%d err=%v", len(uRetry), err)
+	}
+
+	flakyCapEvents := &failOnceEventStore{EventStore: st.Events()}
+	if _, err := drv.PollCapacity(ctx, flakyCapEvents, "run-retry", "lane-x"); err == nil {
+		t.Fatal("expected PollCapacity error on first flaky Append")
+	}
+	cRetry, err := drv.PollCapacity(ctx, flakyCapEvents, "run-retry", "lane-x")
+	if err != nil || cRetry.ID == "" {
+		t.Fatalf("retry PollCapacity after failed Append: ev=%+v err=%v", cRetry, err)
 	}
 }
