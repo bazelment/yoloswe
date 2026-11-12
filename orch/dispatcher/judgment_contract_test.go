@@ -380,23 +380,24 @@ func TestDispatch_RequestShapePerModel(t *testing.T) {
 	}
 	temp := 0.2
 	cases := []struct {
-		name     string
-		cfg      dispatcher.Config
-		urgent   bool
-		wantModl string
+		setTemp  *float64
 		wantTemp *float64
+		name     string
+		model    string
+		wantModl string
+		urgent   bool
 	}{
-		{name: "DefaultModel", cfg: dispatcher.Config{}, wantModl: dispatcher.DefaultModel},
-		{name: "HardBatchModel", cfg: dispatcher.Config{}, urgent: true, wantModl: dispatcher.DefaultHardBatchModel},
-		{name: "CustomModelNoTemperature", cfg: dispatcher.Config{Model: "claude-haiku-4-5"}, wantModl: "claude-haiku-4-5"},
-		{name: "ExplicitTemperatureIsSent", cfg: dispatcher.Config{Model: "claude-sonnet-4-6", Temperature: &temp}, wantModl: "claude-sonnet-4-6", wantTemp: &temp},
+		{name: "DefaultModel", wantModl: dispatcher.DefaultModel},
+		{name: "HardBatchModel", urgent: true, wantModl: dispatcher.DefaultHardBatchModel},
+		{name: "CustomModelNoTemperature", model: "claude-haiku-4-5", wantModl: "claude-haiku-4-5"},
+		{name: "ExplicitTemperatureIsSent", model: "claude-sonnet-4-6", setTemp: &temp, wantModl: "claude-sonnet-4-6", wantTemp: &temp},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			clk, st, drv := setupTestEnv(t)
 			fake := model.NewFakeClient(endTurnResponse("ok"))
-			d := dispatcher.New(tc.cfg, st, drv, clk, fake)
+			d := dispatcher.New(dispatcher.Config{Model: tc.model, Temperature: tc.setTemp}, st, drv, clk, fake)
 			ev, err := st.Events().Append(t.Context(), store.Event{RunID: "run-1", Kind: store.EventMail, Class: store.EventClassJudgment, Urgent: tc.urgent, Summary: "x"})
 			if err != nil {
 				t.Fatalf("Append event: %v", err)
