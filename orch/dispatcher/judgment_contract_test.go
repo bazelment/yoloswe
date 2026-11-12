@@ -368,3 +368,52 @@ func TestDispatch_OnePrimaryActionPerBatch(t *testing.T) {
 		})
 	}
 }
+
+// The request shape per model: the default dispatcher model is
+// claude-sonnet-5-5, the hard-batch model is separate, and no model is sent a
+// temperature unless the caller sets one (sonnet-5-5 rejects the parameter).
+func TestDispatch_RequestShapePerModel(t *testing.T) {
+	t.Parallel()
+
+	if dispatcher.DefaultModel != "claude-sonnet-5-5" {
+		t.Fatalf("DefaultModel = %q, want claude-sonnet-5-5", dispatcher.DefaultModel)
+	}
+	temp := 0.2
+	cases := []struct {
+		name     string
+		cfg      dispatcher.Config
+		urgent   bool
+		wantModl string
+		wantTemp *float64
+	}{
+		{name: "DefaultModel", cfg: dispatcher.Config{}, wantModl: dispatcher.DefaultModel},
+		{name: "HardBatchModel", cfg: dispatcher.Config{}, urgent: true, wantModl: dispatcher.DefaultHardBatchModel},
+		{name: "CustomModelNoTemperature", cfg: dispatcher.Config{Model: "claude-haiku-4-5"}, wantModl: "claude-haiku-4-5"},
+		{name: "ExplicitTemperatureIsSent", cfg: dispatcher.Config{Model: "claude-sonnet-4-6", Temperature: &temp}, wantModl: "claude-sonnet-4-6", wantTemp: &temp},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clk, st, drv := setupTestEnv(t)
+			fake := model.NewFakeClient(endTurnResponse("ok"))
+			d := dispatcher.New(tc.cfg, st, drv, clk, fake)
+			ev, err := st.Events().Append(t.Context(), store.Event{RunID: "run-1", Kind: store.EventMail, Class: store.EventClassJudgment, Urgent: tc.urgent, Summary: "x"})
+			if err != nil {
+				t.Fatalf("Append event: %v", err)
+			}
+			if _, err := d.Dispatch(t.Context(), "run-1", []store.Event{ev}); err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+			req := fake.Requests[0]
+			if req.Model != tc.wantModl {
+				t.Errorf("Model = %q, want %q", req.Model, tc.wantModl)
+			}
+			switch {
+			case tc.wantTemp == nil && req.Temperature != nil:
+				t.Errorf("Temperature = %v, want it omitted", *req.Temperature)
+			case tc.wantTemp != nil && (req.Temperature == nil || *req.Temperature != *tc.wantTemp):
+				t.Errorf("Temperature = %v, want %v", req.Temperature, *tc.wantTemp)
+			}
+		})
+	}
+}

@@ -22,7 +22,7 @@ import (
 
 const (
 	ActorDispatcher       = "dispatcher"
-	DefaultModel          = "claude-sonnet-4-5-20250929"
+	DefaultModel          = "claude-sonnet-5-5"
 	DefaultHardBatchModel = "claude-opus-4-6"
 	DefaultMaxTurns       = model.DefaultMaxTurns
 	DefaultMaxTokens      = model.DefaultMaxTokens

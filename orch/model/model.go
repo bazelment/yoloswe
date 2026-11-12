@@ -407,6 +407,7 @@ var defaultPricing = func() map[string]ModelPricing {
 		"claude-opus-4-1":            opus,
 		"claude-opus-4-20250514":     opus,
 		"sonnet":                     sonnet,
+		"claude-sonnet-5-5":          sonnet,
 		"claude-sonnet-4-6":          sonnet,
 		"claude-sonnet-4-5":          sonnet,
 		"claude-sonnet-4-5-20250929": sonnet,
