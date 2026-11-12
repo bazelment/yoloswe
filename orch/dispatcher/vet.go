@@ -164,9 +164,8 @@ type ReadCIParams struct {
 	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"description=Maximum bytes to return"`
 }
 
-// ProposedAction is one typed tool call proposed by the Dispatcher model.
-// Following the swarm-queen/decide pattern, a model's output is a proposal, not
-// authority: every ProposedAction must pass Vet before being applied.
+// ProposedAction is one typed tool call proposed by the Dispatcher model; it must
+// pass Vet before being applied.
 type ProposedAction struct {
 	BacklogAdd     *BacklogAddParams     `json:"-"`
 	BacklogUpdate  *BacklogUpdateParams  `json:"-"`
@@ -614,15 +613,13 @@ func (s *StateView) EffectiveMaxBriefBytes(r recipe.Recipe) int {
 	return DefaultMaxBriefBytes
 }
 
-// Invariant is a deterministic rule a proposed Dispatcher action must not
-// violate (modeled on swarm-queen/decide.Invariant).
+// Invariant is a deterministic rule a proposed Dispatcher action must not violate.
 type Invariant struct {
 	Check func(st *StateView, action ProposedAction) error
 	Name  string
 }
 
-// DefaultInvariants returns the standard invariant suite every proposed
-// Dispatcher tool call must pass before it is applied.
+// DefaultInvariants returns the standard invariant suite for Dispatcher tool calls.
 func DefaultInvariants() []Invariant {
 	return []Invariant{
 		{
@@ -673,8 +670,7 @@ func DefaultInvariants() []Invariant {
 }
 
 // Vet filters a Proposal to the actions that satisfy every invariant in invs,
-// returning the accepted actions and formatted rejection reasons (matching
-// swarm-queen/decide.Vet).
+// returning the accepted actions and formatted rejection reasons.
 func Vet(st *StateView, p Proposal, invs []Invariant) (accepted []ProposedAction, rejected []string) {
 	for i := range p.Actions {
 		act := p.Actions[i]

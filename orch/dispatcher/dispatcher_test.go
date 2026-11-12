@@ -108,7 +108,6 @@ func TestInnerLoop_StalledLaneProducesLaneRetry(t *testing.T) {
 			t.Fatalf("Snapshot.EstimatedTokens = %d, want in (0, 30000)", res.Snapshot.EstimatedTokens)
 		}
 
-		// Verify system prompt and tools were sent to ModelClient.
 		if len(fakeClient.Requests) != 2 {
 			t.Fatalf("len(Requests) = %d, want 2", len(fakeClient.Requests))
 		}
@@ -116,7 +115,6 @@ func TestInnerLoop_StalledLaneProducesLaneRetry(t *testing.T) {
 			t.Fatalf("request System missing version %q", dispatcher.SystemPromptVersion)
 		}
 
-		// Verify LaneDriver started round 2 on existing session.
 		if len(drv.PhaseStarts) != 1 {
 			t.Fatalf("len(drv.PhaseStarts) = %d, want 1", len(drv.PhaseStarts))
 		}
@@ -125,7 +123,6 @@ func TestInnerLoop_StalledLaneProducesLaneRetry(t *testing.T) {
 			t.Fatalf("PhaseStarts[0] = %+v", started)
 		}
 
-		// Verify Lane state in Store.
 		gotLane, err := st.Lanes().Get(ctx, "run-1", "lane-alpha")
 		if err != nil {
 			t.Fatalf("Get lane: %v", err)
@@ -137,7 +134,6 @@ func TestInnerLoop_StalledLaneProducesLaneRetry(t *testing.T) {
 			t.Fatalf("MaxRound(swe) = %d, want 2", gotLane.MaxRound(recipe.PhaseSWE))
 		}
 
-		// Verify DecisionStore audit entry.
 		decs, err := st.Decisions().List(ctx, store.DecisionFilter{
 			RunID:    "run-1",
 			Category: store.DecisionJudgment,
@@ -186,7 +182,6 @@ func TestInnerLoop_StalledLaneProducesLaneRetry(t *testing.T) {
 			StallTimeout:     45 * time.Minute,
 		}, st, drv, clk, disp)
 
-		// Step 1: Controller spawns planned lane-alpha in swe round 1.
 		if err := ctrl.Step(ctx); err != nil {
 			t.Fatalf("Step 1 (spawn): %v", err)
 		}
@@ -194,7 +189,6 @@ func TestInnerLoop_StalledLaneProducesLaneRetry(t *testing.T) {
 			t.Fatalf("len(Spawns) = %d, want 1", len(drv.Spawns))
 		}
 
-		// Advance clock past phase timeout so Controller detects stall and invokes Dispatcher.Judge.
 		clk.Advance(46 * time.Minute)
 		if err := ctrl.Step(ctx); err != nil {
 			t.Fatalf("Step 2 (stall -> judge -> retry): %v", err)
@@ -405,7 +399,6 @@ func TestDispatcher_FullToolKitReplay(t *testing.T) {
 		}
 	}
 
-	// 1. Verify backlog.add created item-new.
 	itemNew, err := st.Backlog().Get(ctx, "run-1", "item-new")
 	if err != nil {
 		t.Fatalf("Get item-new: %v", err)
@@ -414,7 +407,6 @@ func TestDispatcher_FullToolKitReplay(t *testing.T) {
 		t.Fatalf("item-new = %+v", itemNew)
 	}
 
-	// 2. Verify backlog.update updated item-open to p0 and lane.spawn set it to in_progress.
 	itemOpen, err := st.Backlog().Get(ctx, "run-1", "item-open")
 	if err != nil {
 		t.Fatalf("Get item-open: %v", err)
@@ -423,12 +415,10 @@ func TestDispatcher_FullToolKitReplay(t *testing.T) {
 		t.Fatalf("item-open = %+v", itemOpen)
 	}
 
-	// 3. Verify backlog.reorder updated Order fields.
 	if itemOpen.Order != 1 || itemNew.Order != 2 {
 		t.Fatalf("orders after reorder: item-open=%d item-new=%d, want 1 and 2", itemOpen.Order, itemNew.Order)
 	}
 
-	// 4. Verify backlog.close closed item-drop as dropped.
 	itemDrop, err := st.Backlog().Get(ctx, "run-1", "item-drop")
 	if err != nil {
 		t.Fatalf("Get item-drop: %v", err)
@@ -437,7 +427,6 @@ func TestDispatcher_FullToolKitReplay(t *testing.T) {
 		t.Fatalf("item-drop.Status = %q, want dropped", itemDrop.Status)
 	}
 
-	// 5. Verify lane.spawn created lane-open with compiled recipe override ("no code review, skip clean").
 	gotOpenLane, err := st.Lanes().Get(ctx, "run-1", "lane-open")
 	if err != nil {
 		t.Fatalf("Get lane-open: %v", err)
@@ -457,12 +446,10 @@ func TestDispatcher_FullToolKitReplay(t *testing.T) {
 		t.Fatalf("expected override recipe RequireReviewPass=false")
 	}
 
-	// 6. Verify lane.steer sent steer message via LaneDriver.
 	if len(drv.Steers) != 1 || drv.Steers[0].LaneID != "lane-active" || !strings.Contains(drv.Steers[0].Message, "Fix the failing lint check") {
 		t.Fatalf("drv.Steers = %+v", drv.Steers)
 	}
 
-	// 7. Verify lane.retry started round 2 on lane-stalled.
 	gotStalled, err := st.Lanes().Get(ctx, "run-1", "lane-stalled")
 	if err != nil {
 		t.Fatalf("Get lane-stalled: %v", err)
@@ -471,7 +458,6 @@ func TestDispatcher_FullToolKitReplay(t *testing.T) {
 		t.Fatalf("lane-stalled = %+v, want running on round 2", gotStalled)
 	}
 
-	// 8. Verify lane.stop stopped lane-doomed and marked its backlog item blocked.
 	if len(drv.Stops) != 1 || drv.Stops[0].LaneID != "lane-doomed" {
 		t.Fatalf("drv.Stops = %+v", drv.Stops)
 	}
@@ -490,7 +476,6 @@ func TestDispatcher_FullToolKitReplay(t *testing.T) {
 		t.Fatalf("item-doomed.Status = %q, want blocked", gotDoomedItem.Status)
 	}
 
-	// 9. Verify owner.ask blocked lane-active, created active directive, and auto-applies default on expiry via Controller.
 	gotActive, err := st.Lanes().Get(ctx, "run-1", "lane-active")
 	if err != nil {
 		t.Fatalf("Get lane-active: %v", err)
@@ -506,7 +491,6 @@ func TestDispatcher_FullToolKitReplay(t *testing.T) {
 		t.Fatalf("askDir.Status = %q, want active", askDir.Status)
 	}
 
-	// 10. Verify directive.note persisted note-flaky-ci.
 	noteDir, err := st.Directives().Get(ctx, "run-1", "note-flaky-ci")
 	if err != nil {
 		t.Fatalf("Get directive note: %v", err)
@@ -515,12 +499,10 @@ func TestDispatcher_FullToolKitReplay(t *testing.T) {
 		t.Fatalf("noteDir = %+v", noteDir)
 	}
 
-	// 11. Verify planner.request invoked callback and stored directive.
 	if plannerReason != "Milestone 1 items spawned; reconcile phase 2 plan" || plannerRef != "post:5aaec193" {
 		t.Fatalf("planner callback got reason=%q ref=%q", plannerReason, plannerRef)
 	}
 
-	// 12. Verify all 14 tool calls were logged as vetted judgment Decisions with non-empty reasons.
 	decs, err := st.Decisions().List(ctx, store.DecisionFilter{
 		RunID:    "run-1",
 		Category: store.DecisionJudgment,
@@ -540,7 +522,6 @@ func TestDispatcher_FullToolKitReplay(t *testing.T) {
 		}
 	}
 
-	// 13. Advance clock past the 30m owner ask deadline and verify Controller auto-applies default!
 	clk.Advance(31 * time.Minute)
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("ctrl.Step after owner ask expiry: %v", err)

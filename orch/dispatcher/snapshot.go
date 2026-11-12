@@ -141,7 +141,6 @@ func BuildSnapshot(
 	var b strings.Builder
 	truncated := false
 
-	// 1. Objective & Run header.
 	fmt.Fprintf(&b, "# Run Snapshot: `%s`\n", run.ID)
 	fmt.Fprintf(&b, "Now: %s\n", now.Format(time.RFC3339))
 	fmt.Fprintf(&b, "Default Recipe: %s\n", cmp.Or(run.DefaultRecipe, recipe.DefaultName))
@@ -156,7 +155,6 @@ func BuildSnapshot(
 		b.WriteString("\n")
 	}
 
-	// 2. Queued Steers (if any).
 	if len(cfg.Steers) > 0 {
 		b.WriteString("\n## Queued Steers\n")
 		for i, stMsg := range cfg.Steers {
@@ -164,7 +162,6 @@ func BuildSnapshot(
 		}
 	}
 
-	// 3. Active Directives.
 	fmt.Fprintf(&b, "\n## Active Directives (%d)\n", len(directives))
 	if len(directives) == 0 {
 		b.WriteString("(none)\n")
@@ -193,7 +190,7 @@ func BuildSnapshot(
 		}
 	}
 
-	// 4. Backlog Top-N (prioritize non-terminal items first, then terminal if room).
+	// Prioritize non-terminal backlog items ahead of terminal items within BacklogTopN.
 	counts := make(map[store.BacklogStatus]int)
 	var actionableItems []store.BacklogItem
 	var terminalItems []store.BacklogItem
@@ -254,7 +251,6 @@ func BuildSnapshot(
 		}
 	}
 
-	// 5. Lane Table.
 	fmt.Fprintf(&b, "\n## Lanes (%d)\n", len(lanes))
 	if len(lanes) == 0 {
 		b.WriteString("(none)\n")
@@ -312,7 +308,6 @@ func BuildSnapshot(
 		}
 	}
 
-	// 6. Judgment Event Batch.
 	fmt.Fprintf(&b, "\n## Judgment Event Batch (%d)\n", len(events))
 	if len(events) == 0 {
 		b.WriteString("(none)\n")

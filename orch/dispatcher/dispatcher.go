@@ -19,7 +19,6 @@ import (
 	"github.com/bazelment/yoloswe/orch/store"
 )
 
-// Default Dispatcher configuration values.
 const (
 	ActorDispatcher       = "dispatcher"
 	DefaultModel          = "claude-sonnet-4-5-20250929"
@@ -31,7 +30,6 @@ const (
 	plannerRefPrefix      = "planner_request:"
 )
 
-// Compile-time check that Dispatcher implements controller.Judge.
 var _ controller.Judge = (*Dispatcher)(nil)
 
 // RecipeCompiler compiles a natural-language recipe override against a base recipe.
@@ -1159,12 +1157,10 @@ func CompileRecipeOverride(base recipe.Recipe, override string) recipe.Recipe {
 
 	lower := strings.ToLower(trimmed)
 
-	// Handle "skip clean" / "no clean".
 	if strings.Contains(lower, "no clean") || strings.Contains(lower, "skip clean") || strings.Contains(lower, "without clean") {
 		out = removePhaseFromRecipe(out, recipe.PhaseClean)
 	}
 
-	// Handle "no code review" / "no review" / "skip review".
 	if strings.Contains(lower, "no code review") || strings.Contains(lower, "no review") ||
 		strings.Contains(lower, "skip review") || strings.Contains(lower, "without review") {
 		out = removePhaseFromRecipe(out, recipe.PhaseReview)
@@ -1176,7 +1172,6 @@ func CompileRecipeOverride(base recipe.Recipe, override string) recipe.Recipe {
 		}
 	}
 
-	// Handle merge mode overrides.
 	switch {
 	case strings.Contains(lower, "merge themselves") || strings.Contains(lower, "self merge") ||
 		strings.Contains(lower, "self-merge") || strings.Contains(lower, "merge_mode=self"):

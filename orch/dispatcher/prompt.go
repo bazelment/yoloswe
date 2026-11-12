@@ -1,18 +1,12 @@
 // Package dispatcher implements the LLM judgment loop for the swarm orchestrator.
-// Given a debounced batch of judgment events from the deterministic Controller,
-// Dispatcher builds a compact Store snapshot (<30k tokens), calls ModelClient
-// with a fixed versioned system prompt and ~10 typed tools, vets every tool call
-// against deterministic invariants (the swarm-queen/decide Advisor/Invariant/Vet
-// pattern), logs every decision to store.DecisionStore, and applies vetted
-// mutations within a bounded turn loop.
+// Given a debounced event batch from the Controller, it builds a compact Store
+// snapshot, runs a bounded tool loop, and vets every tool call against invariants.
 package dispatcher
 
 // SystemPromptVersion identifies the fixed system prompt revision compiled into the binary.
 const SystemPromptVersion = "dispatcher-v1"
 
-// SystemPrompt is the fixed, versioned (~3.5 KB) system prompt sent on every
-// Dispatcher turn. No external skill files or conversation history are loaded;
-// all state lives in the Store snapshot provided in the user message.
+// SystemPrompt is the fixed, versioned system prompt sent on every Dispatcher turn.
 const SystemPrompt = `# Nebula Orchestrator Dispatcher (` + SystemPromptVersion + `)
 
 You are the **Dispatcher** for a Nebula swarm run. A deterministic Go Controller owns all waiting, mechanical phase transitions, CI polling, stall timers, and merge gates. You are invoked **only** when a batch of events requires judgment, with a fresh Store snapshot and a narrow typed tool kit. Nothing is remembered across calls: if a fact or decision is not written to the Store through a tool call, it does not exist.
