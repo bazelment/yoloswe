@@ -251,8 +251,8 @@ func TestSplitMomentIDsIsDeterministicAndBalanced(t *testing.T) {
 		ids[i] = ds.Moments[i].ID
 	}
 	tune, holdout := replay.SplitMomentIDs(ids)
-	if len(tune) != 22 || len(holdout) != 22 {
-		t.Fatalf("split = %d/%d, want 22/22", len(tune), len(holdout))
+	if len(tune) != len(ids)/2 || len(holdout) != len(ids)-len(ids)/2 {
+		t.Fatalf("split = %d/%d of %d moments, want a half each", len(tune), len(holdout), len(ids))
 	}
 	for _, id := range tune {
 		if slices.Contains(holdout, id) {
@@ -270,8 +270,8 @@ func TestSplitMomentIDsIsDeterministicAndBalanced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Subset: %v", err)
 	}
-	if len(sub.Moments) != 22 || len(sub.Questions) != 0 {
-		t.Fatalf("tune subset has %d moments / %d questions, want 22 / 0", len(sub.Moments), len(sub.Questions))
+	if len(sub.Moments) != len(tune) || len(sub.Questions) != 0 {
+		t.Fatalf("tune subset has %d moments / %d questions, want %d / 0", len(sub.Moments), len(sub.Questions), len(tune))
 	}
 	if _, err := ds.Subset("nope"); err == nil {
 		t.Fatalf("Subset(unknown split) must fail")
