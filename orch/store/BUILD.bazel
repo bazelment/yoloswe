@@ -5,9 +5,11 @@ go_library(
     srcs = [
         "contract.go",
         "memory.go",
+        "sqlite.go",
         "store.go",
         "types.go",
     ],
+    embedsrcs = ["migrations/0001_init.sql"],
     importpath = "github.com/bazelment/yoloswe/orch/store",
     visibility = ["//visibility:public"],
     deps = [
@@ -15,14 +17,21 @@ go_library(
         "//orch/lane",
         "//orch/model",
         "//orch/recipe",
+        "@org_modernc_sqlite//:sqlite",
     ],
 )
 
 go_test(
     name = "store_test",
-    srcs = ["memory_test.go"],
+    srcs = [
+        "memory_test.go",
+        "sqlite_test.go",
+    ],
     deps = [
         ":store",
         "//orch/clock",
+        "//orch/lane",
+        "//orch/model",
+        "//orch/recipe",
     ],
 )

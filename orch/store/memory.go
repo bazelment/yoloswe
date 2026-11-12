@@ -666,6 +666,9 @@ func (e *memEventStore) SetCursor(_ context.Context, runID, consumer string, seq
 		byRun = make(map[string]EventCursor)
 		s.cursors[runID] = byRun
 	}
+	if existing, ok := byRun[consumer]; ok && seq < existing.Seq {
+		seq = existing.Seq
+	}
 	byRun[consumer] = EventCursor{
 		RunID:     runID,
 		Consumer:  consumer,
