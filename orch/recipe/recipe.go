@@ -60,33 +60,33 @@ func (m MergeMode) Valid() bool {
 
 // AgentSpec describes one entry in a phase's agent/model fallback chain.
 type AgentSpec struct {
-	Harness string `json:"harness"`
-	Model   string `json:"model"`
-	Effort  string `json:"effort,omitempty"`
+	Harness string `json:"harness" jsonschema:"required,description=CLI harness name (claude or codex)"`
+	Model   string `json:"model" jsonschema:"required,description=Model identifier (e.g. opus, sonnet, haiku, gpt-5.4, gpt-5.4-mini)"`
+	Effort  string `json:"effort,omitempty" jsonschema:"description=Reasoning effort level (low, medium, high)"`
 }
 
 // Gate is a verification check required before or at phase exit.
 type Gate struct {
-	Name     string `json:"name"`
-	Command  string `json:"command,omitempty"`
-	Required bool   `json:"required"`
+	Name     string `json:"name" jsonschema:"required,description=Gate identifier"`
+	Command  string `json:"command,omitempty" jsonschema:"description=Optional shell command for the gate"`
+	Required bool   `json:"required" jsonschema:"required,description=Whether passing this gate is mandatory"`
 }
 
 // ExitContract defines what a phase must produce when it finishes.
 type ExitContract struct {
-	AllowedOutcomes []string `json:"allowed_outcomes"`
-	RequiresPR      bool     `json:"requires_pr,omitempty"`
-	RequiresReport  bool     `json:"requires_report"`
+	AllowedOutcomes []string `json:"allowed_outcomes" jsonschema:"required,description=Permitted phase report outcomes (done, needs-swe, blocked, needs-input)"`
+	RequiresPR      bool     `json:"requires_pr,omitempty" jsonschema:"description=Whether the phase requires an open PR"`
+	RequiresReport  bool     `json:"requires_report" jsonschema:"required,description=Whether the phase requires filing a phase report"`
 }
 
 // Phase is one step in a recipe's lifecycle.
 type Phase struct {
-	Name          string       `json:"name"`
-	BriefTemplate string       `json:"brief_template,omitempty"`
-	Agents        []AgentSpec  `json:"agents"`
-	Gates         []Gate       `json:"gates,omitempty"`
-	ExitContract  ExitContract `json:"exit_contract"`
-	Mutating      bool         `json:"mutating"`
+	Name          string       `json:"name" jsonschema:"required,description=Phase name without trailing digits"`
+	BriefTemplate string       `json:"brief_template,omitempty" jsonschema:"description=Instructions given to the worker agent in this phase"`
+	Agents        []AgentSpec  `json:"agents" jsonschema:"required,description=Ordered agent/model fallback chain"`
+	Gates         []Gate       `json:"gates,omitempty" jsonschema:"description=Verification gates required for this phase"`
+	ExitContract  ExitContract `json:"exit_contract" jsonschema:"required,description=Phase exit contract"`
+	Mutating      bool         `json:"mutating" jsonschema:"required,description=Whether the phase modifies repository code or PR state"`
 }
 
 func (p Phase) Clone() Phase {
@@ -100,11 +100,11 @@ func (p Phase) Clone() Phase {
 // Condition specifies when a Transition fires. Mechanical fields are evaluated
 // by the controller; a non-empty JudgmentRule requires a Dispatcher turn.
 type Condition struct {
-	Verdict      string `json:"verdict,omitempty"`
-	JudgmentRule string `json:"judgment_rule,omitempty"`
-	MinRound     int    `json:"min_round,omitempty"`
-	MaxRound     int    `json:"max_round,omitempty"`
-	CIGreen      bool   `json:"ci_green,omitempty"`
+	Verdict      string `json:"verdict,omitempty" jsonschema:"description=Required phase report verdict (done, needs-swe, blocked, needs-input)"`
+	JudgmentRule string `json:"judgment_rule,omitempty" jsonschema:"description=Natural-language condition evaluated by the Dispatcher when judgment is needed"`
+	MinRound     int    `json:"min_round,omitempty" jsonschema:"description=Minimum round number (inclusive)"`
+	MaxRound     int    `json:"max_round,omitempty" jsonschema:"description=Maximum round number (inclusive)"`
+	CIGreen      bool   `json:"ci_green,omitempty" jsonschema:"description=Whether green CI checks on HEAD are required"`
 }
 
 // NeedsJudgment reports whether c requires LLM judgment.
@@ -132,10 +132,10 @@ func (c Condition) MatchesMechanical(verdict string, ciGreen bool, round int) bo
 
 // Transition is a directed edge from one phase to another (or to TargetComplete / TargetEscalate).
 type Transition struct {
-	From         string    `json:"from"`
-	To           string    `json:"to"`
-	On           Condition `json:"on"`
-	AdvanceRound bool      `json:"advance_round,omitempty"`
+	From         string    `json:"from" jsonschema:"required,description=Source phase name"`
+	To           string    `json:"to" jsonschema:"required,description=Target phase name or terminal target (complete or escalate)"`
+	On           Condition `json:"on" jsonschema:"required,description=Transition condition"`
+	AdvanceRound bool      `json:"advance_round,omitempty" jsonschema:"description=True when returning to an earlier phase on the next rework round"`
 }
 
 // Limits bounds rework rounds, retries, timeouts, and brief sizes for a recipe.
@@ -149,11 +149,11 @@ type Limits struct {
 
 // MergePolicy governs how a lane's branch/PR is integrated into the target branch.
 type MergePolicy struct {
-	Mode              MergeMode `json:"mode"`
-	Script            string    `json:"script,omitempty"`
-	TargetBranch      string    `json:"target_branch,omitempty"`
-	RequireReviewPass bool      `json:"require_review_pass"`
-	RequireCIGreen    bool      `json:"require_ci_green"`
+	Mode              MergeMode `json:"mode" jsonschema:"required,enum=controller,enum=self,enum=manual,enum=none,description=Merge mode (controller, self, manual, none)"`
+	Script            string    `json:"script,omitempty" jsonschema:"description=Merge script (e.g. pr_arm.sh or own_merge.sh)"`
+	TargetBranch      string    `json:"target_branch,omitempty" jsonschema:"description=Target git branch (e.g. main)"`
+	RequireReviewPass bool      `json:"require_review_pass" jsonschema:"required,description=Whether a passing review on the pinned HEAD is required"`
+	RequireCIGreen    bool      `json:"require_ci_green" jsonschema:"required,description=Whether green CI on HEAD is required"`
 }
 
 // Recipe is a versioned lane workflow consisting of its natural-language source

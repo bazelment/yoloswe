@@ -25,44 +25,17 @@ type goldenCase struct {
 	Expected recipe.Recipe
 }
 
-func defaultAgentsSWE() []recipe.AgentSpec {
-	return []recipe.AgentSpec{
-		{Harness: "claude", Model: "opus", Effort: "high"},
-		{Harness: "codex", Model: "gpt-5.4", Effort: "high"},
+func overrideFrom(base recipe.Recipe, name, source string) recipe.Recipe {
+	r := base.Clone()
+	r.Name = name
+	r.Version = 1
+	if name == base.Name && base.Version > 0 {
+		r.Version = base.Version + 1
 	}
-}
-
-func defaultAgentsReview() []recipe.AgentSpec {
-	return []recipe.AgentSpec{
-		{Harness: "claude", Model: "sonnet", Effort: "high"},
-		{Harness: "codex", Model: "gpt-5.4", Effort: "high"},
-	}
-}
-
-func defaultAgentsIntegrate() []recipe.AgentSpec {
-	return []recipe.AgentSpec{
-		{Harness: "claude", Model: "sonnet", Effort: "medium"},
-	}
-}
-
-func defaultLimits() recipe.Limits {
-	return recipe.Limits{
-		MaxRounds:          3,
-		MaxPhaseAttempts:   2,
-		PhaseTimeout:       45 * time.Minute,
-		MaxBriefBytes:      16 * 1024,
-		MaxConcurrentLanes: 4,
-	}
-}
-
-func defaultMergePolicy() recipe.MergePolicy {
-	return recipe.MergePolicy{
-		Mode:              recipe.MergeModeController,
-		Script:            "pr_arm.sh",
-		TargetBranch:      "main",
-		RequireReviewPass: true,
-		RequireCIGreen:    true,
-	}
+	r.Source = source
+	r.BaseRecipe = base.Name
+	r.BaseVersion = max(base.Version, 1)
+	return r
 }
 
 func goldenCases() []goldenCase {
@@ -87,12 +60,7 @@ func goldenCases() []goldenCase {
 	}
 
 	// 02: Per-lane override: "this lane: no code review"
-	noReview := def.Clone()
-	noReview.Name = "no-review"
-	noReview.Version = 1
-	noReview.Source = "this lane: no code review"
-	noReview.BaseRecipe = recipe.DefaultName
-	noReview.BaseVersion = 1
+	noReview := overrideFrom(def, "no-review", "this lane: no code review")
 	integrateNoReview := def.Phases[3].Clone()
 	integrateNoReview.BriefTemplate = "Verify green CI checks on HEAD, then integrate the PR into the target branch."
 	integrateNoReview.Gates = []recipe.Gate{
@@ -110,13 +78,12 @@ func goldenCases() []goldenCase {
 		{From: recipe.PhaseIntegrate, On: recipe.Condition{Verdict: recipe.OutcomeNeedsSWE}, To: recipe.PhaseSWE, AdvanceRound: true},
 	}
 	noReview.MergePolicy.RequireReviewPass = false
-	base02 := def.Clone()
 	case02 := goldenCase{
 		ID: "02_override_no_code_review",
 		Request: recipe.CompileRequest{
-			Base:   &base02,
-			Name:   "no-review",
-			Source: "this lane: no code review",
+			Base:   &def,
+			Name:   noReview.Name,
+			Source: noReview.Source,
 		},
 		Expected: noReview,
 		Verify: func(t *testing.T, res *recipe.CompileResult) {
@@ -133,12 +100,7 @@ func goldenCases() []goldenCase {
 	}
 
 	// 03: Per-lane override: skip clean unconditionally
-	skipClean := def.Clone()
-	skipClean.Name = "skip-clean"
-	skipClean.Version = 1
-	skipClean.Source = "this lane: skip clean, go straight from swe to review"
-	skipClean.BaseRecipe = recipe.DefaultName
-	skipClean.BaseVersion = 1
+	skipClean := overrideFrom(def, "skip-clean", "this lane: skip clean, go straight from swe to review")
 	skipClean.Phases = []recipe.Phase{
 		def.Phases[0].Clone(),
 		def.Phases[2].Clone(),
@@ -152,13 +114,12 @@ func goldenCases() []goldenCase {
 		{From: recipe.PhaseIntegrate, On: recipe.Condition{Verdict: recipe.OutcomeDone, CIGreen: true}, To: recipe.TargetComplete},
 		{From: recipe.PhaseIntegrate, On: recipe.Condition{Verdict: recipe.OutcomeNeedsSWE}, To: recipe.PhaseSWE, AdvanceRound: true},
 	}
-	base03 := def.Clone()
 	case03 := goldenCase{
 		ID: "03_override_skip_clean",
 		Request: recipe.CompileRequest{
-			Base:   &base03,
-			Name:   "skip-clean",
-			Source: "this lane: skip clean, go straight from swe to review",
+			Base:   &def,
+			Name:   skipClean.Name,
+			Source: skipClean.Source,
 		},
 		Expected: skipClean,
 		Verify: func(t *testing.T, res *recipe.CompileResult) {
@@ -169,12 +130,7 @@ func goldenCases() []goldenCase {
 	}
 
 	// 04: Override with JudgmentRule: "skip clean for docs"
-	skipCleanDocs := def.Clone()
-	skipCleanDocs.Name = recipe.DefaultName
-	skipCleanDocs.Version = 2
-	skipCleanDocs.Source = "skip clean for docs"
-	skipCleanDocs.BaseRecipe = recipe.DefaultName
-	skipCleanDocs.BaseVersion = 1
+	skipCleanDocs := overrideFrom(def, recipe.DefaultName, "skip clean for docs")
 	skipCleanDocs.Transitions = slices.Insert(skipCleanDocs.Transitions, 0, recipe.Transition{
 		From: recipe.PhaseSWE,
 		On: recipe.Condition{
@@ -183,13 +139,12 @@ func goldenCases() []goldenCase {
 		},
 		To: recipe.PhaseReview,
 	})
-	base04 := def.Clone()
 	case04 := goldenCase{
 		ID: "04_override_skip_clean_for_docs",
 		Request: recipe.CompileRequest{
-			Base:   &base04,
-			Name:   recipe.DefaultName,
-			Source: "skip clean for docs",
+			Base:   &def,
+			Name:   skipCleanDocs.Name,
+			Source: skipCleanDocs.Source,
 		},
 		Expected: skipCleanDocs,
 		Verify: func(t *testing.T, res *recipe.CompileResult) {
@@ -207,12 +162,7 @@ func goldenCases() []goldenCase {
 	}
 
 	// 05: Override with JudgmentRule: "skip clean under 200 lines"
-	skipClean200 := def.Clone()
-	skipClean200.Name = recipe.DefaultName
-	skipClean200.Version = 2
-	skipClean200.Source = "skip clean under 200 lines"
-	skipClean200.BaseRecipe = recipe.DefaultName
-	skipClean200.BaseVersion = 1
+	skipClean200 := overrideFrom(def, recipe.DefaultName, "skip clean under 200 lines")
 	skipClean200.Transitions = slices.Insert(skipClean200.Transitions, 0, recipe.Transition{
 		From: recipe.PhaseSWE,
 		On: recipe.Condition{
@@ -221,13 +171,12 @@ func goldenCases() []goldenCase {
 		},
 		To: recipe.PhaseReview,
 	})
-	base05 := def.Clone()
 	case05 := goldenCase{
 		ID: "05_override_skip_clean_under_200_lines",
 		Request: recipe.CompileRequest{
-			Base:   &base05,
-			Name:   recipe.DefaultName,
-			Source: "skip clean under 200 lines",
+			Base:   &def,
+			Name:   skipClean200.Name,
+			Source: skipClean200.Source,
 		},
 		Expected: skipClean200,
 		Verify: func(t *testing.T, res *recipe.CompileResult) {
@@ -239,18 +188,10 @@ func goldenCases() []goldenCase {
 	}
 
 	// 06: Override adding phase + JudgmentRule: "security review for auth changes"
-	secAuth := def.Clone()
-	secAuth.Name = "security-auth"
-	secAuth.Version = 1
-	secAuth.Source = "security review for auth changes"
-	secAuth.BaseRecipe = recipe.DefaultName
-	secAuth.BaseVersion = 1
+	secAuth := overrideFrom(def, "security-auth", "security review for auth changes")
 	secPhase := recipe.Phase{
-		Name: "security-review",
-		Agents: []recipe.AgentSpec{
-			{Harness: "claude", Model: "opus", Effort: "high"},
-			{Harness: "codex", Model: "gpt-5.4", Effort: "high"},
-		},
+		Name:          "security-review",
+		Agents:        slices.Clone(def.Phases[0].Agents),
 		BriefTemplate: "Perform a security audit of authentication, authorization, and permission changes on the PR.",
 		ExitContract: recipe.ExitContract{
 			AllowedOutcomes: []string{recipe.OutcomeDone, recipe.OutcomeNeedsSWE, recipe.OutcomeBlocked, recipe.OutcomeNeedsInput},
@@ -290,13 +231,12 @@ func goldenCases() []goldenCase {
 		{From: recipe.PhaseIntegrate, On: recipe.Condition{Verdict: recipe.OutcomeDone, CIGreen: true}, To: recipe.TargetComplete},
 		{From: recipe.PhaseIntegrate, On: recipe.Condition{Verdict: recipe.OutcomeNeedsSWE}, To: recipe.PhaseSWE, AdvanceRound: true},
 	}
-	base06 := def.Clone()
 	case06 := goldenCase{
 		ID: "06_override_security_review_for_auth",
 		Request: recipe.CompileRequest{
-			Base:   &base06,
-			Name:   "security-auth",
-			Source: "security review for auth changes",
+			Base:   &def,
+			Name:   secAuth.Name,
+			Source: secAuth.Source,
 		},
 		Expected: secAuth,
 		Verify: func(t *testing.T, res *recipe.CompileResult) {
@@ -312,12 +252,7 @@ func goldenCases() []goldenCase {
 	}
 
 	// 07: Override: "lanes merge their own PR once CI is green"
-	selfMerge := def.Clone()
-	selfMerge.Name = "self-merge"
-	selfMerge.Version = 1
-	selfMerge.Source = "lanes merge their own PR once CI is green"
-	selfMerge.BaseRecipe = recipe.DefaultName
-	selfMerge.BaseVersion = 1
+	selfMerge := overrideFrom(def, "self-merge", "lanes merge their own PR once CI is green")
 	selfMerge.Phases[3].BriefTemplate = "Merge the lane's own PR using own_merge.sh once review passes and CI is green on HEAD."
 	selfMerge.MergePolicy = recipe.MergePolicy{
 		Mode:              recipe.MergeModeSelf,
@@ -326,13 +261,12 @@ func goldenCases() []goldenCase {
 		RequireReviewPass: true,
 		RequireCIGreen:    true,
 	}
-	base07 := def.Clone()
 	case07 := goldenCase{
 		ID: "07_override_lanes_merge_own_pr",
 		Request: recipe.CompileRequest{
-			Base:   &base07,
-			Name:   "self-merge",
-			Source: "lanes merge their own PR once CI is green",
+			Base:   &def,
+			Name:   selfMerge.Name,
+			Source: selfMerge.Source,
 		},
 		Expected: selfMerge,
 		Verify: func(t *testing.T, res *recipe.CompileResult) {
@@ -350,7 +284,7 @@ func goldenCases() []goldenCase {
 		Phases: []recipe.Phase{
 			{
 				Name:          "analyze",
-				Agents:        defaultAgentsSWE(),
+				Agents:        slices.Clone(def.Phases[0].Agents),
 				BriefTemplate: "Investigate the root cause, gather evidence from the codebase, and file a structured findings report without modifying code or opening a PR.",
 				ExitContract: recipe.ExitContract{
 					AllowedOutcomes: []string{recipe.OutcomeDone, recipe.OutcomeBlocked, recipe.OutcomeNeedsInput},
@@ -479,7 +413,7 @@ func goldenCases() []goldenCase {
 		Phases: []recipe.Phase{
 			{
 				Name:          "prove",
-				Agents:        defaultAgentsSWE(),
+				Agents:        slices.Clone(def.Phases[0].Agents),
 				BriefTemplate: "Build the reproduction or proof-of-concept, run scoped_tests and proof_check, and open a PR with the proof.",
 				ExitContract: recipe.ExitContract{
 					AllowedOutcomes: []string{recipe.OutcomeDone, recipe.OutcomeBlocked, recipe.OutcomeNeedsInput},
@@ -495,7 +429,7 @@ func goldenCases() []goldenCase {
 			},
 			{
 				Name:          "verify",
-				Agents:        defaultAgentsReview(),
+				Agents:        slices.Clone(def.Phases[2].Agents),
 				BriefTemplate: "Verify that the reproduction or proof-of-concept holds and satisfies the brief.",
 				ExitContract: recipe.ExitContract{
 					AllowedOutcomes: []string{recipe.OutcomeDone, recipe.OutcomeNeedsSWE, recipe.OutcomeBlocked, recipe.OutcomeNeedsInput},
@@ -543,6 +477,8 @@ func goldenCases() []goldenCase {
 	}
 
 	// 11: Composite owner specification from design post
+	integrateSelf := def.Phases[3].Clone()
+	integrateSelf.BriefTemplate = "Merge the lane's own PR once review passes and CI is green on HEAD."
 	compositeOwner := recipe.Recipe{
 		Name:    "owner-custom",
 		Version: 1,
@@ -551,21 +487,7 @@ func goldenCases() []goldenCase {
 			def.Phases[0].Clone(),
 			secPhase.Clone(),
 			def.Phases[2].Clone(),
-			{
-				Name:          recipe.PhaseIntegrate,
-				Agents:        defaultAgentsIntegrate(),
-				BriefTemplate: "Merge the lane's own PR once review passes and CI is green on HEAD.",
-				ExitContract: recipe.ExitContract{
-					AllowedOutcomes: []string{recipe.OutcomeDone, recipe.OutcomeNeedsSWE, recipe.OutcomeBlocked, recipe.OutcomeNeedsInput},
-					RequiresPR:      true,
-					RequiresReport:  true,
-				},
-				Gates: []recipe.Gate{
-					{Name: "ci_green", Required: true},
-					{Name: "review_approved", Required: true},
-				},
-				Mutating: true,
-			},
+			integrateSelf,
 		},
 		Transitions: []recipe.Transition{
 			{
@@ -647,7 +569,7 @@ func goldenCases() []goldenCase {
 			MaxBriefBytes:      16 * 1024,
 			MaxConcurrentLanes: 4,
 		},
-		MergePolicy: defaultMergePolicy(),
+		MergePolicy: def.MergePolicy,
 	}
 	case12 := goldenCase{
 		ID: "12_incident_hotfix",
@@ -696,7 +618,7 @@ func goldenCases() []goldenCase {
 			MaxBriefBytes:      16 * 1024,
 			MaxConcurrentLanes: 4,
 		},
-		MergePolicy: defaultMergePolicy(),
+		MergePolicy: def.MergePolicy,
 	}
 	case13 := goldenCase{
 		ID: "13_test_doctor_flake_fix",
@@ -738,8 +660,8 @@ func goldenCases() []goldenCase {
 			{From: recipe.PhaseIntegrate, On: recipe.Condition{Verdict: recipe.OutcomeDone, CIGreen: true}, To: recipe.TargetComplete},
 			{From: recipe.PhaseIntegrate, On: recipe.Condition{Verdict: recipe.OutcomeNeedsSWE}, To: recipe.PhaseSWE, AdvanceRound: true},
 		},
-		Limits:      defaultLimits(),
-		MergePolicy: defaultMergePolicy(),
+		Limits:      def.Limits,
+		MergePolicy: def.MergePolicy,
 	}
 	case14 := goldenCase{
 		ID: "14_ui_sweep_visual",
@@ -751,23 +673,17 @@ func goldenCases() []goldenCase {
 	}
 
 	// 15: Per-lane override: Codex primary agent for SWE + 3 phase attempts
-	codexSWE := def.Clone()
-	codexSWE.Name = "codex-swe"
-	codexSWE.Version = 1
-	codexSWE.Source = "this lane: use codex gpt-5.4 high effort as primary agent for swe with claude opus high effort as fallback, and allow up to 3 phase attempts"
-	codexSWE.BaseRecipe = recipe.DefaultName
-	codexSWE.BaseVersion = 1
+	codexSWE := overrideFrom(def, "codex-swe", "this lane: use codex gpt-5.4 high effort as primary agent for swe with claude opus high effort as fallback, and allow up to 3 phase attempts")
 	codexSWE.Phases[0].Agents = []recipe.AgentSpec{
 		{Harness: "codex", Model: "gpt-5.4", Effort: "high"},
 		{Harness: "claude", Model: "opus", Effort: "high"},
 	}
 	codexSWE.Limits.MaxPhaseAttempts = 3
-	base15 := def.Clone()
 	case15 := goldenCase{
 		ID: "15_override_codex_primary_swe",
 		Request: recipe.CompileRequest{
-			Base:   &base15,
-			Name:   "codex-swe",
+			Base:   &def,
+			Name:   codexSWE.Name,
 			Source: codexSWE.Source,
 		},
 		Expected: codexSWE,
@@ -782,12 +698,7 @@ func goldenCases() []goldenCase {
 	}
 
 	// 16: Per-lane override: manual merge targeting release/v2
-	releaseManual := def.Clone()
-	releaseManual.Name = "release-manual"
-	releaseManual.Version = 1
-	releaseManual.Source = "target the release/v2 branch and leave the PR open for manual human merge after review and CI pass; remove the integrate phase"
-	releaseManual.BaseRecipe = recipe.DefaultName
-	releaseManual.BaseVersion = 1
+	releaseManual := overrideFrom(def, "release-manual", "target the release/v2 branch and leave the PR open for manual human merge after review and CI pass; remove the integrate phase")
 	releaseManual.Phases = []recipe.Phase{
 		def.Phases[0].Clone(),
 		def.Phases[1].Clone(),
@@ -806,12 +717,11 @@ func goldenCases() []goldenCase {
 		RequireReviewPass: true,
 		RequireCIGreen:    true,
 	}
-	base16 := def.Clone()
 	case16 := goldenCase{
 		ID: "16_override_manual_merge_release_branch",
 		Request: recipe.CompileRequest{
-			Base:   &base16,
-			Name:   "release-manual",
+			Base:   &def,
+			Name:   releaseManual.Name,
 			Source: releaseManual.Source,
 		},
 		Expected: releaseManual,
@@ -823,12 +733,7 @@ func goldenCases() []goldenCase {
 	}
 
 	// 17: Per-lane override: judgment escalation on risky/public-API changes
-	riskGated := def.Clone()
-	riskGated.Name = "risk-gated"
-	riskGated.Version = 1
-	riskGated.Source = "if review passes and CI is green but the change looks risky or modifies public APIs, escalate to the dispatcher instead of auto-integrating"
-	riskGated.BaseRecipe = recipe.DefaultName
-	riskGated.BaseVersion = 1
+	riskGated := overrideFrom(def, "risk-gated", "if review passes and CI is green but the change looks risky or modifies public APIs, escalate to the dispatcher instead of auto-integrating")
 	riskGated.Transitions = slices.Insert(riskGated.Transitions, 2, recipe.Transition{
 		From: recipe.PhaseReview,
 		On: recipe.Condition{
@@ -838,12 +743,11 @@ func goldenCases() []goldenCase {
 		},
 		To: recipe.TargetEscalate,
 	})
-	base17 := def.Clone()
 	case17 := goldenCase{
 		ID: "17_override_risky_change_judgment_escalation",
 		Request: recipe.CompileRequest{
-			Base:   &base17,
-			Name:   "risk-gated",
+			Base:   &def,
+			Name:   riskGated.Name,
 			Source: riskGated.Source,
 		},
 		Expected: riskGated,
@@ -893,8 +797,8 @@ func goldenCases() []goldenCase {
 			{From: recipe.PhaseIntegrate, On: recipe.Condition{Verdict: recipe.OutcomeDone, CIGreen: true}, To: recipe.TargetComplete},
 			{From: recipe.PhaseIntegrate, On: recipe.Condition{Verdict: recipe.OutcomeNeedsSWE}, To: recipe.PhaseSWE, AdvanceRound: true},
 		},
-		Limits:      defaultLimits(),
-		MergePolicy: defaultMergePolicy(),
+		Limits:      def.Limits,
+		MergePolicy: def.MergePolicy,
 	}
 	case18 := goldenCase{
 		ID: "18_benchmark_optimization",
@@ -938,22 +842,17 @@ func goldenCases() []goldenCase {
 	}
 
 	// 20: Per-lane override with unmapped phrase
-	unmappedEspresso := skipClean.Clone()
-	unmappedEspresso.Name = "fast-espresso"
-	unmappedEspresso.Version = 1
-	unmappedEspresso.Source = "this lane: skip clean, set phase timeout to 30m, and brew a fresh pot of espresso when CI turns green"
+	unmappedEspresso := overrideFrom(skipClean, "fast-espresso", "this lane: skip clean, set phase timeout to 30m, and brew a fresh pot of espresso when CI turns green")
 	unmappedEspresso.BaseRecipe = recipe.DefaultName
-	unmappedEspresso.BaseVersion = 1
 	unmappedEspresso.Limits.PhaseTimeout = 30 * time.Minute
 	unmappedEspresso.Unmapped = []string{
 		"brew a fresh pot of espresso when CI turns green",
 	}
-	base20 := def.Clone()
 	case20 := goldenCase{
 		ID: "20_override_unmapped_espresso_and_timeout",
 		Request: recipe.CompileRequest{
-			Base:   &base20,
-			Name:   "fast-espresso",
+			Base:   &def,
+			Name:   unmappedEspresso.Name,
 			Source: unmappedEspresso.Source,
 		},
 		Expected: unmappedEspresso,

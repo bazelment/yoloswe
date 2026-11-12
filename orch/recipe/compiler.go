@@ -57,56 +57,6 @@ Rules:
 5. Unmapped Phrases (Never Silently Drop):
    - Any phrase, clause, or instruction in the owner's input that cannot be represented in phases, transitions, limits, or merge_policy MUST be included verbatim in "unmapped". Never silently drop unmappable requests.`
 
-type compiledAgentInput struct {
-	Harness string `json:"harness" jsonschema:"required,description=CLI harness name (claude or codex)"`
-	Model   string `json:"model" jsonschema:"required,description=Model identifier (e.g. opus, sonnet, haiku, gpt-5.4, gpt-5.4-mini)"`
-	Effort  string `json:"effort,omitempty" jsonschema:"description=Reasoning effort level (low, medium, high)"`
-}
-
-type compiledGateInput struct {
-	Name     string `json:"name" jsonschema:"required,description=Gate identifier"`
-	Command  string `json:"command,omitempty" jsonschema:"description=Optional shell command for the gate"`
-	Required bool   `json:"required" jsonschema:"required,description=Whether passing this gate is mandatory"`
-}
-
-type compiledExitContractInput struct {
-	AllowedOutcomes []string `json:"allowed_outcomes" jsonschema:"required,description=Permitted phase report outcomes (done, needs-swe, blocked, needs-input)"`
-	RequiresPR      bool     `json:"requires_pr,omitempty" jsonschema:"description=Whether the phase requires an open PR"`
-	RequiresReport  bool     `json:"requires_report" jsonschema:"required,description=Whether the phase requires filing a phase report"`
-}
-
-type compiledPhaseInput struct {
-	Name          string                    `json:"name" jsonschema:"required,description=Phase name without trailing digits"`
-	BriefTemplate string                    `json:"brief_template,omitempty" jsonschema:"description=Instructions given to the worker agent in this phase"`
-	Agents        []compiledAgentInput      `json:"agents" jsonschema:"required,description=Ordered agent/model fallback chain"`
-	Gates         []compiledGateInput       `json:"gates,omitempty" jsonschema:"description=Verification gates required for this phase"`
-	ExitContract  compiledExitContractInput `json:"exit_contract" jsonschema:"required,description=Phase exit contract"`
-	Mutating      bool                      `json:"mutating" jsonschema:"required,description=Whether the phase modifies repository code or PR state"`
-}
-
-type compiledConditionInput struct {
-	Verdict      string `json:"verdict,omitempty" jsonschema:"description=Required phase report verdict (done, needs-swe, blocked, needs-input)"`
-	JudgmentRule string `json:"judgment_rule,omitempty" jsonschema:"description=Natural-language condition evaluated by the Dispatcher when judgment is needed"`
-	MinRound     int    `json:"min_round,omitempty" jsonschema:"description=Minimum round number (inclusive)"`
-	MaxRound     int    `json:"max_round,omitempty" jsonschema:"description=Maximum round number (inclusive)"`
-	CIGreen      bool   `json:"ci_green,omitempty" jsonschema:"description=Whether green CI checks on HEAD are required"`
-}
-
-type compiledTransitionInput struct {
-	From         string                 `json:"from" jsonschema:"required,description=Source phase name"`
-	To           string                 `json:"to" jsonschema:"required,description=Target phase name or terminal target (complete or escalate)"`
-	On           compiledConditionInput `json:"on" jsonschema:"required,description=Transition condition"`
-	AdvanceRound bool                   `json:"advance_round,omitempty" jsonschema:"description=True when returning to an earlier phase on the next rework round"`
-}
-
-type compiledMergePolicyInput struct {
-	Mode              MergeMode `json:"mode" jsonschema:"required,enum=controller,enum=self,enum=manual,enum=none,description=Merge mode (controller, self, manual, none)"`
-	Script            string    `json:"script,omitempty" jsonschema:"description=Merge script (e.g. pr_arm.sh or own_merge.sh)"`
-	TargetBranch      string    `json:"target_branch,omitempty" jsonschema:"description=Target git branch (e.g. main)"`
-	RequireReviewPass bool      `json:"require_review_pass" jsonschema:"required,description=Whether a passing review on the pinned HEAD is required"`
-	RequireCIGreen    bool      `json:"require_ci_green" jsonschema:"required,description=Whether green CI on HEAD is required"`
-}
-
 type compiledLimitsInput struct {
 	PhaseTimeout       string        `json:"phase_timeout,omitempty" jsonschema:"description=Max duration per phase attempt (Go duration string like 45m)"`
 	MaxRounds          int           `json:"max_rounds" jsonschema:"required,description=Max rework rounds before escalating"`
@@ -166,13 +116,15 @@ func (l *compiledLimitsInput) UnmarshalJSON(data []byte) error {
 }
 
 type compiledRecipeInput struct {
-	Name        string                    `json:"name" jsonschema:"required,description=Compiled recipe name"`
-	Phases      []compiledPhaseInput      `json:"phases" jsonschema:"required,description=Ordered phases in the recipe"`
-	Transitions []compiledTransitionInput `json:"transitions" jsonschema:"required,description=Directed transitions between phases and terminal targets"`
-	Unmapped    []string                  `json:"unmapped,omitempty" jsonschema:"description=Phrases from the owner description that could not be mapped"`
-	MergePolicy compiledMergePolicyInput  `json:"merge_policy" jsonschema:"required,description=PR merge policy"`
-	Limits      compiledLimitsInput       `json:"limits" jsonschema:"required,description=Execution and retry limits"`
+	Name        string              `json:"name" jsonschema:"required,description=Compiled recipe name"`
+	Phases      []Phase             `json:"phases" jsonschema:"required,description=Ordered phases in the recipe"`
+	Transitions []Transition        `json:"transitions" jsonschema:"required,description=Directed transitions between phases and terminal targets"`
+	Unmapped    []string            `json:"unmapped,omitempty" jsonschema:"description=Phrases from the owner description that could not be mapped"`
+	MergePolicy MergePolicy         `json:"merge_policy" jsonschema:"required,description=PR merge policy"`
+	Limits      compiledLimitsInput `json:"limits" jsonschema:"required,description=Execution and retry limits"`
 }
+
+var submitRecipeSchema = model.SchemaFor[compiledRecipeInput]()
 
 func formatDurationCompact(d time.Duration) string {
 	if d == 0 {
@@ -189,76 +141,20 @@ func formatDurationCompact(d time.Duration) string {
 }
 
 func recipeToCompiledInput(r Recipe) compiledRecipeInput {
-	phases := make([]compiledPhaseInput, len(r.Phases))
-	for i, p := range r.Phases {
-		agents := make([]compiledAgentInput, len(p.Agents))
-		for j, a := range p.Agents {
-			agents[j] = compiledAgentInput{
-				Harness: a.Harness,
-				Model:   a.Model,
-				Effort:  a.Effort,
-			}
-		}
-		var gates []compiledGateInput
-		if len(p.Gates) > 0 {
-			gates = make([]compiledGateInput, len(p.Gates))
-			for j, g := range p.Gates {
-				gates[j] = compiledGateInput{
-					Name:     g.Name,
-					Command:  g.Command,
-					Required: g.Required,
-				}
-			}
-		}
-		phases[i] = compiledPhaseInput{
-			Name:          p.Name,
-			BriefTemplate: p.BriefTemplate,
-			Agents:        agents,
-			Gates:         gates,
-			ExitContract: compiledExitContractInput{
-				AllowedOutcomes: slices.Clone(p.ExitContract.AllowedOutcomes),
-				RequiresPR:      p.ExitContract.RequiresPR,
-				RequiresReport:  p.ExitContract.RequiresReport,
-			},
-			Mutating: p.Mutating,
-		}
-	}
-
-	transitions := make([]compiledTransitionInput, len(r.Transitions))
-	for i, tr := range r.Transitions {
-		transitions[i] = compiledTransitionInput{
-			From: tr.From,
-			To:   tr.To,
-			On: compiledConditionInput{
-				Verdict:      tr.On.Verdict,
-				JudgmentRule: tr.On.JudgmentRule,
-				MinRound:     tr.On.MinRound,
-				MaxRound:     tr.On.MaxRound,
-				CIGreen:      tr.On.CIGreen,
-			},
-			AdvanceRound: tr.AdvanceRound,
-		}
-	}
-
+	cloned := r.Clone()
 	return compiledRecipeInput{
-		Name:        r.Name,
-		Phases:      phases,
-		Transitions: transitions,
-		Unmapped:    slices.Clone(r.Unmapped),
-		MergePolicy: compiledMergePolicyInput{
-			Mode:              r.MergePolicy.Mode,
-			Script:            r.MergePolicy.Script,
-			TargetBranch:      r.MergePolicy.TargetBranch,
-			RequireReviewPass: r.MergePolicy.RequireReviewPass,
-			RequireCIGreen:    r.MergePolicy.RequireCIGreen,
-		},
+		Name:        cloned.Name,
+		Phases:      cloned.Phases,
+		Transitions: cloned.Transitions,
+		Unmapped:    cloned.Unmapped,
+		MergePolicy: cloned.MergePolicy,
 		Limits: compiledLimitsInput{
-			PhaseTimeout:       formatDurationCompact(r.Limits.PhaseTimeout),
-			MaxRounds:          r.Limits.MaxRounds,
-			MaxPhaseAttempts:   r.Limits.MaxPhaseAttempts,
-			MaxBriefBytes:      r.Limits.MaxBriefBytes,
-			MaxConcurrentLanes: r.Limits.MaxConcurrentLanes,
-			parsedTimeout:      r.Limits.PhaseTimeout,
+			PhaseTimeout:       formatDurationCompact(cloned.Limits.PhaseTimeout),
+			MaxRounds:          cloned.Limits.MaxRounds,
+			MaxPhaseAttempts:   cloned.Limits.MaxPhaseAttempts,
+			MaxBriefBytes:      cloned.Limits.MaxBriefBytes,
+			MaxConcurrentLanes: cloned.Limits.MaxConcurrentLanes,
+			parsedTimeout:      cloned.Limits.PhaseTimeout,
 		},
 	}
 }
@@ -266,57 +162,36 @@ func recipeToCompiledInput(r Recipe) compiledRecipeInput {
 func (in compiledRecipeInput) toRecipe(req CompileRequest) Recipe {
 	phases := make([]Phase, len(in.Phases))
 	for i, p := range in.Phases {
-		agents := make([]AgentSpec, len(p.Agents))
+		p = p.Clone()
+		p.Name = strings.TrimSpace(p.Name)
+		p.BriefTemplate = strings.TrimSpace(p.BriefTemplate)
 		for j, a := range p.Agents {
-			agents[j] = AgentSpec{
+			p.Agents[j] = AgentSpec{
 				Harness: strings.TrimSpace(a.Harness),
 				Model:   strings.TrimSpace(a.Model),
 				Effort:  strings.TrimSpace(a.Effort),
 			}
 		}
-		var gates []Gate
-		if len(p.Gates) > 0 {
-			gates = make([]Gate, len(p.Gates))
-			for j, g := range p.Gates {
-				gates[j] = Gate{
-					Name:     strings.TrimSpace(g.Name),
-					Command:  strings.TrimSpace(g.Command),
-					Required: g.Required,
-				}
+		for j, g := range p.Gates {
+			p.Gates[j] = Gate{
+				Name:     strings.TrimSpace(g.Name),
+				Command:  strings.TrimSpace(g.Command),
+				Required: g.Required,
 			}
 		}
-		outcomes := make([]string, len(p.ExitContract.AllowedOutcomes))
 		for j, o := range p.ExitContract.AllowedOutcomes {
-			outcomes[j] = strings.TrimSpace(o)
+			p.ExitContract.AllowedOutcomes[j] = strings.TrimSpace(o)
 		}
-		phases[i] = Phase{
-			Name:          strings.TrimSpace(p.Name),
-			BriefTemplate: strings.TrimSpace(p.BriefTemplate),
-			Agents:        agents,
-			Gates:         gates,
-			ExitContract: ExitContract{
-				AllowedOutcomes: outcomes,
-				RequiresPR:      p.ExitContract.RequiresPR,
-				RequiresReport:  p.ExitContract.RequiresReport,
-			},
-			Mutating: p.Mutating,
-		}
+		phases[i] = p
 	}
 
 	transitions := make([]Transition, len(in.Transitions))
 	for i, tr := range in.Transitions {
-		transitions[i] = Transition{
-			From: strings.TrimSpace(tr.From),
-			To:   strings.TrimSpace(tr.To),
-			On: Condition{
-				Verdict:      strings.TrimSpace(tr.On.Verdict),
-				JudgmentRule: strings.TrimSpace(tr.On.JudgmentRule),
-				MinRound:     tr.On.MinRound,
-				MaxRound:     tr.On.MaxRound,
-				CIGreen:      tr.On.CIGreen,
-			},
-			AdvanceRound: tr.AdvanceRound,
-		}
+		tr.From = strings.TrimSpace(tr.From)
+		tr.To = strings.TrimSpace(tr.To)
+		tr.On.Verdict = strings.TrimSpace(tr.On.Verdict)
+		tr.On.JudgmentRule = strings.TrimSpace(tr.On.JudgmentRule)
+		transitions[i] = tr
 	}
 
 	var unmapped []string
@@ -326,10 +201,7 @@ func (in compiledRecipeInput) toRecipe(req CompileRequest) Recipe {
 		}
 	}
 
-	name := strings.TrimSpace(in.Name)
-	if reqName := strings.TrimSpace(req.Name); reqName != "" {
-		name = reqName
-	}
+	name := cmp.Or(strings.TrimSpace(req.Name), strings.TrimSpace(in.Name))
 
 	version := req.Version
 	if version == 0 {
@@ -344,9 +216,7 @@ func (in compiledRecipeInput) toRecipe(req CompileRequest) Recipe {
 	var baseRecipe string
 	var baseVersion int
 	if req.Base != nil {
-		if runID == "" {
-			runID = req.Base.RunID
-		}
+		runID = cmp.Or(runID, req.Base.RunID)
 		baseRecipe = req.Base.Name
 		baseVersion = max(req.Base.Version, 1)
 	}
@@ -383,17 +253,13 @@ func SubmitRecipeToolDefinition() model.ToolDefinition {
 	return model.ToolDefinition{
 		Name:        SubmitRecipeToolName,
 		Description: "Submit the compiled typed Recipe for the owner's natural-language specification or per-lane override.",
-		InputSchema: model.SchemaFor[compiledRecipeInput](),
+		InputSchema: slices.Clone(submitRecipeSchema),
 	}
 }
 
 // RecipeToToolInput marshals r into the JSON input shape expected by the submit_recipe tool.
 func RecipeToToolInput(r Recipe) (json.RawMessage, error) {
-	b, err := json.Marshal(recipeToCompiledInput(r))
-	if err != nil {
-		return nil, err
-	}
-	return json.RawMessage(b), nil
+	return json.Marshal(recipeToCompiledInput(r))
 }
 
 // CompileRequest describes a natural-language recipe compilation or per-lane override request.
@@ -463,14 +329,11 @@ func NewCompiler(client model.ModelClient, opts ...CompilerOption) *Compiler {
 
 // BuildCompileUserPrompt formats the user prompt sent to the model for req.
 func BuildCompileUserPrompt(req CompileRequest) string {
-	targetName := strings.TrimSpace(req.Name)
-	if targetName == "" {
-		if req.Base != nil && strings.TrimSpace(req.Base.Name) != "" {
-			targetName = strings.TrimSpace(req.Base.Name)
-		} else {
-			targetName = DefaultName
-		}
+	var baseName string
+	if req.Base != nil {
+		baseName = strings.TrimSpace(req.Base.Name)
 	}
+	targetName := cmp.Or(strings.TrimSpace(req.Name), baseName, DefaultName)
 	source := strings.TrimSpace(req.Source)
 
 	var b strings.Builder
