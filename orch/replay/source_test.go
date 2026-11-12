@@ -112,16 +112,7 @@ func TestSourceValidationRejectsUngroundedLabels(t *testing.T) {
 	if nonOwner == "" {
 		t.Fatal("no non-owner record for the question's run in the excerpt")
 	}
-	oneWay := -1
-	for i, m := range full.Moments {
-		if m.Category == replay.CategoryOwnerOnlyOneWay {
-			oneWay = i
-			break
-		}
-	}
-	if oneWay < 0 {
-		t.Fatal("no owner_only_one_way moment to mutate")
-	}
+	oneWay := oneWayMoment(t, full)
 	cases := map[string]struct {
 		mutate  func(ds *replay.Dataset)
 		wantErr string
@@ -174,6 +165,16 @@ func TestSourceValidationRejectsUngroundedLabels(t *testing.T) {
 	}
 }
 
+// oneWayMoment returns the index of the first owner_only_one_way moment.
+func oneWayMoment(t *testing.T, ds *replay.Dataset) int {
+	t.Helper()
+	i := slices.IndexFunc(ds.Moments, func(m replay.JudgmentMoment) bool { return m.Category == replay.CategoryOwnerOnlyOneWay })
+	if i < 0 {
+		t.Fatal("no owner_only_one_way moment")
+	}
+	return i
+}
+
 // TestOneWayLabelNeedsAOneWayCard: the card cited by an owner_only_one_way
 // moment must be marked ONE-WAY. Two cards the first rebuild labelled this way
 // said "Not one-way" and "(two-way)" in their own text.
@@ -187,16 +188,7 @@ func TestOneWayLabelNeedsAOneWayCard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var target *replay.JudgmentMoment
-	for i := range full.Moments {
-		if full.Moments[i].Category == replay.CategoryOwnerOnlyOneWay {
-			target = &full.Moments[i]
-			break
-		}
-	}
-	if target == nil {
-		t.Fatal("no owner_only_one_way moment")
-	}
+	target := &full.Moments[oneWayMoment(t, full)]
 	for name, card := range map[string]string{
 		"not one-way":  "Ask 19 (by 23:00Z): S2 crash guarantee? Not one-way.",
 		"two-way":      "Ask D1 (two-way). Why now: ONE-WAY for cost only if (c).",

@@ -44,6 +44,19 @@ func endTurn(text string) *model.Response {
 	}
 }
 
+// toolUseResponse is a model turn that calls one tool with input.
+func toolUseResponse(id, name string, input any) (*model.Response, error) {
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return nil, err
+	}
+	return &model.Response{
+		StopReason: model.StopReasonToolUse,
+		Message:    model.NewAssistantMessage(model.NewToolUseBlock(id, name, raw)),
+		Usage:      model.Usage{InputTokens: 2500},
+	}, nil
+}
+
 // clientFunc adapts a function to model.ModelClient.
 type clientFunc func(context.Context, model.Request) (*model.Response, error)
 
@@ -368,15 +381,7 @@ func scrapingDispatcher(t *testing.T) clientFunc {
 		default:
 			return endTurn("No action needed."), nil
 		}
-		raw, err := json.Marshal(input)
-		if err != nil {
-			return nil, err
-		}
-		return &model.Response{
-			StopReason: model.StopReasonToolUse,
-			Message:    model.NewAssistantMessage(model.NewToolUseBlock("scrape-1", strings.ToLower(tool), raw)),
-			Usage:      model.Usage{InputTokens: 2500},
-		}, nil
+		return toolUseResponse("scrape-1", strings.ToLower(tool), input)
 	}
 }
 
@@ -415,10 +420,8 @@ var (
 	cueLaneRE     = regexp.MustCompile(`(?m)^\| ([A-Za-z0-9._:\-]+) \| [^|]+ \| running \|`)
 )
 
-// cueWordDispatcher has no model but, unlike scrapingDispatcher, reads the
-// owner's cue words ("ONE-WAY", "fund a lane", "OWNER DECISION", "replan") and
-// the state tables, so its score measures how much of each label is guessable
-// from phrasing and state alone.
+// cueWordDispatcher is model-free but, unlike scrapingDispatcher, keys on the
+// owner's cue words ("ONE-WAY", "fund a lane", "replan") and the state tables.
 func cueWordDispatcher(t *testing.T) clientFunc {
 	return func(_ context.Context, req model.Request) (*model.Response, error) {
 		if hasToolResult(req) || len(req.Messages) == 0 {
@@ -453,23 +456,12 @@ func cueWordDispatcher(t *testing.T) clientFunc {
 		default:
 			return endTurn("No action needed."), nil
 		}
-		raw, err := json.Marshal(input)
-		if err != nil {
-			return nil, err
-		}
-		return &model.Response{
-			StopReason: model.StopReasonToolUse,
-			Message:    model.NewAssistantMessage(model.NewToolUseBlock("cue-1", name, raw)),
-			Usage:      model.Usage{InputTokens: 2500},
-		}, nil
+		return toolUseResponse("cue-1", name, input)
 	}
 }
 
-// TestAdversarialCueWordBaselineFailsTheBar: a model-free dispatcher that keys
-// on the owner's cue words and reads the backlog and lane tables must not clear
-// the agreement or ask bars. The 0% an event-text scraper scores only shows
-// tool names are scrubbed; this one shows the labels are not guessable from
-// phrasing.
+// TestAdversarialCueWordBaselineFailsTheBar: a cue-word dispatcher must not
+// clear the bar, i.e. labels are not guessable from phrasing and state alone.
 func TestAdversarialCueWordBaselineFailsTheBar(t *testing.T) {
 	t.Parallel()
 	for _, set := range datasetSets {

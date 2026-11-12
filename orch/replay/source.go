@@ -74,10 +74,8 @@ func LoadSourceExcerpt() (*SourceExcerpt, error) {
 //   - an owner_answer moment cites at least one owner-authored record (from_kind user);
 //   - a question cites only owner-authored records;
 //   - an owner_answer moment cites a record that attributes the answer to the
-//     owner: a plain from_kind=user answer may be the host's, as the source's own
-//     "authorship being confirmed" mail on one batch of answers shows;
-//   - an owner_only_one_way moment cites a card that is marked ONE-WAY and does
-//     not call itself two-way or "not one-way";
+//     owner (a bare from_kind=user answer may be the host's);
+//   - an owner_only_one_way moment cites a card marked ONE-WAY, not two-way;
 //   - every target a label expects (lane ids or item-<lane> ids) names a lane
 //     in the excerpt's run records for that run.
 func ValidateSources(ds *Dataset, ex *SourceExcerpt) error {
