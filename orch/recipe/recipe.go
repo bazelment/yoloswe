@@ -254,6 +254,9 @@ func (r *Recipe) Validate() error {
 	if r.Version < 0 {
 		return fmt.Errorf("recipe %q: version must be >= 0, got %d", r.Name, r.Version)
 	}
+	if r.BaseVersion < 0 {
+		return fmt.Errorf("recipe %q: base_version must be >= 0, got %d", r.Name, r.BaseVersion)
+	}
 	if len(r.Phases) == 0 {
 		return fmt.Errorf("recipe %q: at least one phase is required", r.Name)
 	}
@@ -279,9 +282,26 @@ func (r *Recipe) Validate() error {
 				return fmt.Errorf("recipe %q phase %q: agent spec requires non-empty harness and model", r.Name, p.Name)
 			}
 		}
+		for _, g := range p.Gates {
+			if strings.TrimSpace(g.Name) == "" {
+				return fmt.Errorf("recipe %q phase %q: gate name must not be empty", r.Name, p.Name)
+			}
+		}
+		for _, o := range p.ExitContract.AllowedOutcomes {
+			if strings.TrimSpace(o) == "" {
+				return fmt.Errorf("recipe %q phase %q: allowed outcome must not be empty", r.Name, p.Name)
+			}
+		}
 		seenPhases[p.Name] = true
 	}
 
+	if len(r.Transitions) == 0 {
+		return fmt.Errorf("recipe %q: at least one transition is required", r.Name)
+	}
+
+	hasOutgoing := make(map[string]bool, len(r.Phases))
+	adj := make(map[string][]string, len(r.Phases))
+	hasComplete := false
 	for i, tr := range r.Transitions {
 		if !seenPhases[tr.From] {
 			return fmt.Errorf("recipe %q transition %d: unknown source phase %q", r.Name, i, tr.From)
@@ -289,12 +309,54 @@ func (r *Recipe) Validate() error {
 		if tr.To != TargetComplete && tr.To != TargetEscalate && !seenPhases[tr.To] {
 			return fmt.Errorf("recipe %q transition %d: unknown target phase %q", r.Name, i, tr.To)
 		}
+		if tr.On.MinRound < 0 || tr.On.MaxRound < 0 {
+			return fmt.Errorf("recipe %q transition %d: round bounds must not be negative", r.Name, i)
+		}
+		if tr.On.MinRound > 0 && tr.On.MaxRound > 0 && tr.On.MinRound > tr.On.MaxRound {
+			return fmt.Errorf("recipe %q transition %d: min_round (%d) exceeds max_round (%d)", r.Name, i, tr.On.MinRound, tr.On.MaxRound)
+		}
+		hasOutgoing[tr.From] = true
+		if tr.To == TargetComplete {
+			hasComplete = true
+		}
+		if seenPhases[tr.To] {
+			adj[tr.From] = append(adj[tr.From], tr.To)
+		}
+	}
+
+	if !hasComplete {
+		return fmt.Errorf("recipe %q: at least one transition to %q is required", r.Name, TargetComplete)
+	}
+
+	for _, p := range r.Phases {
+		if !hasOutgoing[p.Name] {
+			return fmt.Errorf("recipe %q phase %q: no outgoing transitions", r.Name, p.Name)
+		}
+	}
+
+	reachable := make(map[string]bool, len(r.Phases))
+	queue := []string{r.Phases[0].Name}
+	reachable[r.Phases[0].Name] = true
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, next := range adj[cur] {
+			if !reachable[next] {
+				reachable[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+	for _, p := range r.Phases {
+		if !reachable[p.Name] {
+			return fmt.Errorf("recipe %q phase %q: unreachable from first phase %q", r.Name, p.Name, r.Phases[0].Name)
+		}
 	}
 
 	if !r.MergePolicy.Mode.Valid() {
 		return fmt.Errorf("recipe %q: invalid merge policy mode %q", r.Name, r.MergePolicy.Mode)
 	}
-	if r.Limits.MaxRounds < 0 || r.Limits.MaxPhaseAttempts < 0 || r.Limits.MaxBriefBytes < 0 || r.Limits.PhaseTimeout < 0 {
+	if r.Limits.MaxRounds < 0 || r.Limits.MaxPhaseAttempts < 0 || r.Limits.MaxBriefBytes < 0 || r.Limits.PhaseTimeout < 0 || r.Limits.MaxConcurrentLanes < 0 {
 		return fmt.Errorf("recipe %q: limits must not be negative", r.Name)
 	}
 	return nil
@@ -303,7 +365,12 @@ func (r *Recipe) Validate() error {
 // FormatTable renders a Markdown summary of the compiled recipe.
 func (r *Recipe) FormatTable() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "### Recipe `%s` (v%d)\n\n", r.Name, r.Version)
+	if r.BaseRecipe != "" {
+		baseVer := max(r.BaseVersion, 1)
+		fmt.Fprintf(&b, "### Recipe `%s` (v%d, base `%s` v%d)\n\n", r.Name, r.Version, r.BaseRecipe, baseVer)
+	} else {
+		fmt.Fprintf(&b, "### Recipe `%s` (v%d)\n\n", r.Name, r.Version)
+	}
 	if r.Source != "" {
 		fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(strings.TrimSpace(r.Source), "\n", "\n> "))
 	}
