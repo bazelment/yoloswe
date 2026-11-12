@@ -99,9 +99,6 @@ type HTTPClient struct {
 	retryMaxDelay    time.Duration
 	maxRetries       int
 	mu               sync.Mutex
-	baseURLSet       bool
-	apiKeySet        bool
-	authTokenSet     bool
 }
 
 // ClientOption configures an HTTPClient.
@@ -112,7 +109,6 @@ type ClientOption func(*HTTPClient)
 func WithBaseURL(baseURL string) ClientOption {
 	return func(c *HTTPClient) {
 		c.baseURL = strings.TrimSpace(baseURL)
-		c.baseURLSet = true
 	}
 }
 
@@ -120,7 +116,6 @@ func WithBaseURL(baseURL string) ClientOption {
 func WithAPIKey(apiKey string) ClientOption {
 	return func(c *HTTPClient) {
 		c.apiKey = apiKey
-		c.apiKeySet = true
 	}
 }
 
@@ -128,7 +123,6 @@ func WithAPIKey(apiKey string) ClientOption {
 func WithAuthToken(token string) ClientOption {
 	return func(c *HTTPClient) {
 		c.authToken = token
-		c.authTokenSet = true
 	}
 }
 
@@ -148,9 +142,7 @@ func WithHeaders(headers map[string]string) ClientOption {
 		if c.headers == nil {
 			c.headers = make(map[string]string, len(headers))
 		}
-		for k, v := range headers {
-			c.headers[k] = v
-		}
+		maps.Copy(c.headers, headers)
 	}
 }
 
@@ -231,8 +223,10 @@ func NewHTTPClient(opts ...ClientOption) *HTTPClient {
 		clock:            clock.NewRealClock(),
 		httpClient:       &http.Client{Timeout: DefaultHTTPTimeout},
 		headers:          ParseCustomHeaders(os.Getenv("ANTHROPIC_CUSTOM_HEADERS")),
-		pricing:          DefaultPricing(),
-		baseURL:          DefaultBaseURL,
+		pricing:          defaultPricing,
+		baseURL:          strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")),
+		apiKey:           os.Getenv("ANTHROPIC_API_KEY"),
+		authToken:        os.Getenv("ANTHROPIC_AUTH_TOKEN"),
 		anthropicVersion: DefaultAnthropicVersion,
 		maxRetries:       DefaultMaxRetries,
 		retryBaseDelay:   DefaultRetryBaseDelay,
@@ -241,19 +235,8 @@ func NewHTTPClient(opts ...ClientOption) *HTTPClient {
 	for _, opt := range opts {
 		opt(c)
 	}
-	if !c.baseURLSet {
-		if envURL := strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")); envURL != "" {
-			c.baseURL = envURL
-		}
-	}
 	if c.baseURL == "" {
 		c.baseURL = DefaultBaseURL
-	}
-	if !c.apiKeySet {
-		c.apiKey = os.Getenv("ANTHROPIC_API_KEY")
-	}
-	if !c.authTokenSet {
-		c.authToken = os.Getenv("ANTHROPIC_AUTH_TOKEN")
 	}
 	return c
 }
@@ -298,12 +281,7 @@ type wireRequest struct {
 // req.ToolRegistry is set) and returns the parsed Response with Usage and CostUSD.
 func (c *HTTPClient) CreateMessage(ctx context.Context, req Request) (*Response, error) {
 	if req.ToolRegistry != nil {
-		res, err := RunToolLoop(ctx, c, req, req.ToolRegistry, WithMaxTurns(req.MaxTurns))
-		if res != nil {
-			cp := res.Response.Clone()
-			return &cp, err
-		}
-		return nil, err
+		return runToolLoopResponse(ctx, c, req)
 	}
 
 	maxTokens := req.MaxTokens
@@ -473,35 +451,35 @@ func (c *HTTPClient) sleepRetry(ctx context.Context, attempt int, hdr http.Heade
 }
 
 func (c *HTTPClient) retryDelay(attempt int, hdr http.Header) time.Duration {
-	if hdr != nil {
-		if msStr := strings.TrimSpace(hdr.Get("retry-after-ms")); msStr != "" {
-			if ms, err := strconv.ParseInt(msStr, 10, 64); err == nil && ms >= 0 {
-				d := time.Duration(ms) * time.Millisecond
-				if c.retryMaxDelay > 0 && d > c.retryMaxDelay {
-					return c.retryMaxDelay
-				}
-				return d
+	delay, ok := parseRetryAfter(hdr)
+	if !ok {
+		delay = c.retryBaseDelay
+		for i := 1; i < attempt; i++ {
+			if c.retryMaxDelay > 0 && delay >= c.retryMaxDelay {
+				return c.retryMaxDelay
 			}
-		}
-		if secStr := strings.TrimSpace(hdr.Get("Retry-After")); secStr != "" {
-			if secs, err := strconv.ParseFloat(secStr, 64); err == nil && secs >= 0 {
-				d := time.Duration(secs * float64(time.Second))
-				if c.retryMaxDelay > 0 && d > c.retryMaxDelay {
-					return c.retryMaxDelay
-				}
-				return d
-			}
-		}
-	}
-	delay := c.retryBaseDelay
-	for i := 1; i < attempt; i++ {
-		delay *= 2
-		if c.retryMaxDelay > 0 && delay >= c.retryMaxDelay {
-			return c.retryMaxDelay
+			delay *= 2
 		}
 	}
 	if c.retryMaxDelay > 0 && delay > c.retryMaxDelay {
 		return c.retryMaxDelay
 	}
 	return delay
+}
+
+func parseRetryAfter(hdr http.Header) (time.Duration, bool) {
+	if hdr == nil {
+		return 0, false
+	}
+	if msStr := strings.TrimSpace(hdr.Get("retry-after-ms")); msStr != "" {
+		if ms, err := strconv.ParseInt(msStr, 10, 64); err == nil && ms >= 0 {
+			return time.Duration(ms) * time.Millisecond, true
+		}
+	}
+	if secStr := strings.TrimSpace(hdr.Get("Retry-After")); secStr != "" {
+		if secs, err := strconv.ParseFloat(secStr, 64); err == nil && secs >= 0 {
+			return time.Duration(secs * float64(time.Second)), true
+		}
+	}
+	return 0, false
 }

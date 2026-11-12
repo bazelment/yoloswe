@@ -381,8 +381,7 @@ type ModelPricing struct {
 	CacheCreationPerMTok float64 `json:"cache_creation_per_mtok"`
 }
 
-// DefaultPricing returns built-in USD per 1M token rates for Anthropic models.
-func DefaultPricing() map[string]ModelPricing {
+var defaultPricing = func() map[string]ModelPricing {
 	opus := ModelPricing{
 		InputPerMTok:         15.0,
 		OutputPerMTok:        75.0,
@@ -418,13 +417,18 @@ func DefaultPricing() map[string]ModelPricing {
 		"claude-haiku-4-5-20251001":  haiku,
 		"claude-3-5-haiku-20241022":  haiku,
 	}
+}()
+
+// DefaultPricing returns built-in USD per 1M token rates for Anthropic models.
+func DefaultPricing() map[string]ModelPricing {
+	return maps.Clone(defaultPricing)
 }
 
 // CalculateCost computes the USD cost for usage u on modelName using the
 // provided pricing table (falling back to DefaultPricing if pricing is nil).
 func CalculateCost(modelName string, u Usage, pricing map[string]ModelPricing) float64 {
 	if pricing == nil {
-		pricing = DefaultPricing()
+		pricing = defaultPricing
 	}
 	rate, ok := lookupModelPricing(modelName, pricing)
 	if !ok {
@@ -437,32 +441,28 @@ func CalculateCost(modelName string, u Usage, pricing map[string]ModelPricing) f
 	return cost
 }
 
+var pricingFamilies = []struct {
+	family   string
+	fallback string
+}{
+	{family: "opus", fallback: "claude-opus-4-7"},
+	{family: "sonnet", fallback: "claude-sonnet-4-6"},
+	{family: "haiku", fallback: "claude-haiku-4-5-20251001"},
+}
+
 func lookupModelPricing(modelName string, pricing map[string]ModelPricing) (ModelPricing, bool) {
 	norm := strings.ToLower(strings.TrimSpace(modelName))
 	if rate, ok := pricing[norm]; ok {
 		return rate, true
 	}
-	switch {
-	case strings.Contains(norm, "opus"):
-		if rate, ok := pricing["opus"]; ok {
-			return rate, true
-		}
-		if rate, ok := pricing["claude-opus-4-7"]; ok {
-			return rate, true
-		}
-	case strings.Contains(norm, "sonnet"):
-		if rate, ok := pricing["sonnet"]; ok {
-			return rate, true
-		}
-		if rate, ok := pricing["claude-sonnet-4-6"]; ok {
-			return rate, true
-		}
-	case strings.Contains(norm, "haiku"):
-		if rate, ok := pricing["haiku"]; ok {
-			return rate, true
-		}
-		if rate, ok := pricing["claude-haiku-4-5-20251001"]; ok {
-			return rate, true
+	for _, f := range pricingFamilies {
+		if strings.Contains(norm, f.family) {
+			if rate, ok := pricing[f.family]; ok {
+				return rate, true
+			}
+			if rate, ok := pricing[f.fallback]; ok {
+				return rate, true
+			}
 		}
 	}
 	return ModelPricing{}, false
@@ -482,6 +482,17 @@ type Request struct {
 	MaxTurns      int               `json:"-"`
 }
 
+func cloneMessages(msgs []Message) []Message {
+	if msgs == nil {
+		return nil
+	}
+	out := make([]Message, len(msgs))
+	for i := range msgs {
+		out[i] = msgs[i].Clone()
+	}
+	return out
+}
+
 func (r Request) Clone() Request {
 	out := r
 	if r.Metadata != nil {
@@ -491,12 +502,7 @@ func (r Request) Clone() Request {
 		v := *r.Temperature
 		out.Temperature = &v
 	}
-	if r.Messages != nil {
-		out.Messages = make([]Message, len(r.Messages))
-		for i := range r.Messages {
-			out.Messages[i] = r.Messages[i].Clone()
-		}
-	}
+	out.Messages = cloneMessages(r.Messages)
 	if r.Tools != nil {
 		out.Tools = make([]ToolDefinition, len(r.Tools))
 		for i := range r.Tools {
@@ -521,12 +527,7 @@ type Response struct {
 func (r Response) Clone() Response {
 	out := r
 	out.Message = r.Message.Clone()
-	if r.Transcript != nil {
-		out.Transcript = make([]Message, len(r.Transcript))
-		for i := range r.Transcript {
-			out.Transcript[i] = r.Transcript[i].Clone()
-		}
-	}
+	out.Transcript = cloneMessages(r.Transcript)
 	return out
 }
 
@@ -808,11 +809,7 @@ func collectStructFields(t reflect.Type, props map[string]any, required *[]strin
 			if parts[0] != "" {
 				name = parts[0]
 			}
-			for _, opt := range parts[1:] {
-				if opt == "omitempty" {
-					omitempty = true
-				}
-			}
+			omitempty = slices.Contains(parts[1:], "omitempty")
 		}
 		prop := reflectSchema(f.Type)
 		isReq := !omitempty
@@ -913,10 +910,7 @@ func RunToolLoop(
 		curReq.Tools = reg.Definitions()
 	}
 
-	messages := make([]Message, len(curReq.Messages))
-	for i := range curReq.Messages {
-		messages[i] = curReq.Messages[i].Clone()
-	}
+	messages := curReq.Messages
 
 	var (
 		turns      []Response
@@ -927,10 +921,7 @@ func RunToolLoop(
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		curReq.Messages = make([]Message, len(messages))
-		for i := range messages {
-			curReq.Messages[i] = messages[i].Clone()
-		}
+		curReq.Messages = cloneMessages(messages)
 
 		resp, err := client.CreateMessage(ctx, curReq)
 		if err != nil {
@@ -956,39 +947,27 @@ func RunToolLoop(
 			cfg.onTurn(turn, turnResp)
 		}
 
-		calls := turnResp.ToolCalls()
-		if turnResp.StopReason != StopReasonToolUse || len(calls) == 0 {
+		buildResult := func() *ToolLoopResult {
 			finalResp := turnResp.Clone()
 			finalResp.Usage = totalUsage
 			finalResp.Turns = turn
-			finalResp.Transcript = make([]Message, len(messages))
-			for i := range messages {
-				finalResp.Transcript[i] = messages[i].Clone()
-			}
+			finalResp.Transcript = cloneMessages(messages)
 			return &ToolLoopResult{
 				Response:  finalResp,
 				Messages:  messages,
 				Turns:     turns,
 				Usage:     totalUsage,
 				TurnCount: turn,
-			}, nil
+			}
+		}
+
+		calls := turnResp.ToolCalls()
+		if turnResp.StopReason != StopReasonToolUse || len(calls) == 0 {
+			return buildResult(), nil
 		}
 
 		if turn >= cfg.maxTurns {
-			finalResp := turnResp.Clone()
-			finalResp.Usage = totalUsage
-			finalResp.Turns = turn
-			finalResp.Transcript = make([]Message, len(messages))
-			for i := range messages {
-				finalResp.Transcript[i] = messages[i].Clone()
-			}
-			return &ToolLoopResult{
-				Response:  finalResp,
-				Messages:  messages,
-				Turns:     turns,
-				Usage:     totalUsage,
-				TurnCount: turn,
-			}, fmt.Errorf("%w: stopped after %d turns", ErrMaxTurnsExceeded, turn)
+			return buildResult(), fmt.Errorf("%w: stopped after %d turns", ErrMaxTurnsExceeded, turn)
 		}
 
 		if reg == nil {
@@ -1010,6 +989,35 @@ func RunToolLoop(
 	}
 
 	return nil, fmt.Errorf("%w: stopped after %d turns", ErrMaxTurnsExceeded, cfg.maxTurns)
+}
+
+func runToolLoopResponse(ctx context.Context, client ModelClient, req Request) (*Response, error) {
+	res, err := RunToolLoop(ctx, client, req, req.ToolRegistry, WithMaxTurns(req.MaxTurns))
+	if res != nil {
+		return &res.Response, err
+	}
+	return nil, err
+}
+
+func cloneExchanges(exchanges []RecordedExchange) []RecordedExchange {
+	out := make([]RecordedExchange, len(exchanges))
+	for i := range exchanges {
+		out[i] = exchanges[i].Clone()
+	}
+	return out
+}
+
+func exchangeToScriptedCall(ex RecordedExchange) scriptedCall {
+	reqCopy := ex.Request.Clone()
+	var callErr error
+	if ex.Error != "" {
+		callErr = errors.New(ex.Error)
+	}
+	return scriptedCall{
+		req:  &reqCopy,
+		resp: ex.Response.Clone(),
+		err:  callErr,
+	}
 }
 
 // RecordedExchange captures a single request and its corresponding response (or error)
@@ -1113,27 +1121,14 @@ func (f *FakeClient) Enqueue(resp Response, err error) {
 func (f *FakeClient) EnqueueExchange(ex RecordedExchange) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	reqCopy := ex.Request.Clone()
-	var callErr error
-	if ex.Error != "" {
-		callErr = errors.New(ex.Error)
-	}
-	f.queue = append(f.queue, scriptedCall{
-		req:  &reqCopy,
-		resp: ex.Response.Clone(),
-		err:  callErr,
-	})
+	f.queue = append(f.queue, exchangeToScriptedCall(ex))
 }
 
 // Exchanges returns a copy of all recorded request/response exchanges.
 func (f *FakeClient) Exchanges() []RecordedExchange {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]RecordedExchange, len(f.exchanges))
-	for i := range f.exchanges {
-		out[i] = f.exchanges[i].Clone()
-	}
-	return out
+	return cloneExchanges(f.exchanges)
 }
 
 // TotalUsage returns the cumulative token usage and cost across all completed calls.
@@ -1146,10 +1141,7 @@ func (f *FakeClient) TotalUsage() Usage {
 // Save writes the recorded exchanges to path as indented JSON.
 func (f *FakeClient) Save(path string) error {
 	f.mu.Lock()
-	snapshot := make([]RecordedExchange, len(f.exchanges))
-	for i := range f.exchanges {
-		snapshot[i] = f.exchanges[i].Clone()
-	}
+	snapshot := cloneExchanges(f.exchanges)
 	f.mu.Unlock()
 	return SaveRecording(path, snapshot)
 }
@@ -1163,17 +1155,7 @@ func (f *FakeClient) Load(path string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for i := range exchanges {
-		ex := &exchanges[i]
-		reqCopy := ex.Request.Clone()
-		var callErr error
-		if ex.Error != "" {
-			callErr = errors.New(ex.Error)
-		}
-		f.queue = append(f.queue, scriptedCall{
-			req:  &reqCopy,
-			resp: ex.Response.Clone(),
-			err:  callErr,
-		})
+		f.queue = append(f.queue, exchangeToScriptedCall(exchanges[i]))
 	}
 	return nil
 }
@@ -1226,12 +1208,7 @@ func LoadRecording(path string) ([]RecordedExchange, error) {
 // CreateMessage executes the bounded tool loop using RunToolLoop.
 func (f *FakeClient) CreateMessage(ctx context.Context, req Request) (*Response, error) {
 	if req.ToolRegistry != nil {
-		res, err := RunToolLoop(ctx, f, req, req.ToolRegistry, WithMaxTurns(req.MaxTurns))
-		if res != nil {
-			cp := res.Response.Clone()
-			return &cp, err
-		}
-		return nil, err
+		return runToolLoopResponse(ctx, f, req)
 	}
 
 	f.mu.Lock()
@@ -1241,9 +1218,10 @@ func (f *FakeClient) CreateMessage(ctx context.Context, req Request) (*Response,
 
 	if upstream != nil {
 		resp, err := upstream.CreateMessage(ctx, req.Clone())
+		reqCopy := req.Clone()
 		f.mu.Lock()
-		f.Requests = append(f.Requests, req.Clone())
-		ex := RecordedExchange{Request: req.Clone()}
+		f.Requests = append(f.Requests, reqCopy)
+		ex := RecordedExchange{Request: reqCopy.Clone()}
 		if err != nil {
 			ex.Error = err.Error()
 		} else if resp != nil {
@@ -1251,9 +1229,9 @@ func (f *FakeClient) CreateMessage(ctx context.Context, req Request) (*Response,
 			f.totalUsage = f.totalUsage.Add(resp.Usage)
 		}
 		f.exchanges = append(f.exchanges, ex)
-		snapshot := make([]RecordedExchange, len(f.exchanges))
-		for i := range f.exchanges {
-			snapshot[i] = f.exchanges[i].Clone()
+		var snapshot []RecordedExchange
+		if recordPath != "" {
+			snapshot = cloneExchanges(f.exchanges)
 		}
 		f.mu.Unlock()
 
