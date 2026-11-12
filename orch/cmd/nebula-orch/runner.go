@@ -283,6 +283,7 @@ type Runner struct {
 	cfg               Config
 	lastLoggedSeq     int64
 	mu                sync.Mutex
+	leaseHeld         bool
 }
 
 func NewRunner(
@@ -348,6 +349,23 @@ func (r *Runner) Planner() *Planner {
 	return r.planner
 }
 
+func (r *Runner) ensureLease(ctx context.Context) error {
+	_, err := r.store.Runs().AcquireLease(ctx, r.cfg.RunID, r.cfg.HolderID, r.cfg.LeaseTTL)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.leaseHeld = true
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *Runner) hasHeldLease() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.leaseHeld
+}
+
 func (r *Runner) judgeBatch(ctx context.Context, runID string, events []store.Event) error {
 	r.logger.Info("dispatching judgment batch",
 		"run_id", runID,
@@ -357,7 +375,30 @@ func (r *Runner) judgeBatch(ctx context.Context, runID string, events []store.Ev
 	if r.client == nil {
 		return nil
 	}
+	// Concurrency ordering: hbStop is closed before waiting on hbDone, ensuring
+	// the heartbeat goroutine exits before judgeBatch returns and before
+	// Runner.shutdown can release the lease.
+	hbStop := make(chan struct{})
+	hbDone := make(chan struct{})
+	hbTicker := r.clock.NewTicker(r.cfg.HeartbeatInterval)
+	go func() {
+		defer close(hbDone)
+		defer hbTicker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hbStop:
+				return
+			case <-hbTicker.C():
+				_, _ = r.store.Runs().HeartbeatLease(ctx, runID, r.cfg.HolderID, r.cfg.LeaseTTL)
+			}
+		}
+	}()
+
 	res, err := r.dispatcher.Dispatch(ctx, runID, events)
+	close(hbStop)
+	<-hbDone
 	if err != nil {
 		r.logger.Error("dispatcher batch failed", "run_id", runID, "error", err)
 		return err
@@ -393,11 +434,18 @@ func (r *Runner) Bootstrap(ctx context.Context) error {
 		}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			return err
 		}
-	} else if (r.cfg.Objective != "" && existing.Objective != r.cfg.Objective) || (r.cfg.PlanRef != "" && existing.PlanRef != r.cfg.PlanRef) {
-		obj := cmp.Or(strings.TrimSpace(r.cfg.Objective), existing.Objective)
-		ref := cmp.Or(strings.TrimSpace(r.cfg.PlanRef), existing.PlanRef)
-		if err := r.store.Runs().UpdateObjective(ctx, runID, obj, ref); err != nil {
-			return err
+	} else {
+		now := r.clock.Now().UTC()
+		if existing.Lease != nil && !existing.Lease.Expired(now) && existing.Lease.HolderID != r.cfg.HolderID {
+			return fmt.Errorf("%w: run %q held by %q until %s",
+				store.ErrLeaseHeld, runID, existing.Lease.HolderID, existing.Lease.ExpiresAt.Format(time.RFC3339))
+		}
+		if (r.cfg.Objective != "" && existing.Objective != r.cfg.Objective) || (r.cfg.PlanRef != "" && existing.PlanRef != r.cfg.PlanRef) {
+			obj := cmp.Or(strings.TrimSpace(r.cfg.Objective), existing.Objective)
+			ref := cmp.Or(strings.TrimSpace(r.cfg.PlanRef), existing.PlanRef)
+			if err := r.store.Runs().UpdateObjective(ctx, runID, obj, ref); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -441,6 +489,10 @@ func (r *Runner) Bootstrap(ctx context.Context) error {
 
 // Step executes one orchestration pass across Planner, Controller, and decision logging.
 func (r *Runner) Step(ctx context.Context) error {
+	if err := r.ensureLease(ctx); err != nil {
+		return err
+	}
+
 	if err := r.planner.ReconcileDirectives(ctx, r.cfg.RunID, r.cfg.ConcurrencyCap); err != nil {
 		return err
 	}
@@ -697,11 +749,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
-		if err := r.Step(ctx); err != nil && !errors.Is(err, store.ErrLeaseHeld) && !errors.Is(err, controller.ErrControllerStopped) {
-			if ctx.Err() != nil {
+		if err := r.Step(ctx); err != nil {
+			if errors.Is(err, store.ErrLeaseHeld) && !r.cfg.Once {
+				// Standby runner waits for the active holder's lease to expire.
+			} else if errors.Is(err, controller.ErrControllerStopped) || ctx.Err() != nil {
 				return nil
+			} else {
+				return err
 			}
-			return err
 		}
 		steps++
 
@@ -736,6 +791,9 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 func (r *Runner) shutdown(parentCtx context.Context) {
+	if !r.hasHeldLease() {
+		return
+	}
 	shutCtx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), 5*time.Second)
 	defer cancel()
 

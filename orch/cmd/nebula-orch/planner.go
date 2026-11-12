@@ -7,10 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bazelment/yoloswe/orch/clock"
@@ -81,8 +79,6 @@ type Planner struct {
 	compiler  *recipe.Compiler
 	logger    *slog.Logger
 	modelName string
-	seq       int64
-	mu        sync.Mutex
 }
 
 var _ dispatcher.RecipeCompiler = (*Planner)(nil)
@@ -117,10 +113,7 @@ func NewPlanner(
 }
 
 func (p *Planner) nextID(prefix string) string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.seq++
-	return fmt.Sprintf("%s-%d", prefix, p.seq)
+	return nextUniqueID(prefix, p.clock)
 }
 
 // CompileOverride implements dispatcher.RecipeCompiler for per-lane recipe overrides.
@@ -228,15 +221,24 @@ func (p *Planner) ReconcileDirectives(ctx context.Context, runID string, concurr
 	}
 	for i := range dirs {
 		d := dirs[i]
+		var recErr error
 		switch d.Kind {
 		case store.DirectiveRecipeEdit:
-			if err := p.handleRecipeEditDirective(ctx, runID, d, concurrencyCap); err != nil {
-				return err
-			}
+			recErr = p.handleRecipeEditDirective(ctx, runID, d, concurrencyCap)
 		case store.DirectivePlanImport:
-			if err := p.handlePlanImportDirective(ctx, runID, d); err != nil {
-				return err
+			recErr = p.handlePlanImportDirective(ctx, runID, d)
+		}
+		if recErr != nil {
+			if ctx.Err() != nil {
+				return recErr
 			}
+			p.logger.Warn("planner directive reconciliation failed; revoking directive",
+				"run_id", runID,
+				"directive_id", d.ID,
+				"kind", d.Kind,
+				"error", recErr,
+			)
+			_ = p.store.Directives().UpdateStatus(ctx, runID, d.ID, store.DirectiveRevoked)
 		}
 	}
 	return nil
@@ -258,10 +260,8 @@ func (p *Planner) handleRecipeEditDirective(ctx context.Context, runID string, d
 
 func (p *Planner) handlePlanImportDirective(ctx context.Context, runID string, d store.Directive) error {
 	planText := strings.TrimSpace(d.Text)
-	if ref := strings.TrimSpace(d.Ref); ref != "" && !strings.HasPrefix(ref, "post:") && !strings.HasPrefix(ref, "http") {
-		if data, err := os.ReadFile(ref); err == nil {
-			planText = strings.TrimSpace(string(data))
-		}
+	if planText == "" {
+		return fmt.Errorf("%w: plan_import directive %q has empty text", store.ErrInvalidArgument, d.ID)
 	}
 	if err := p.runReconciliation(ctx, runID, ToolPlannerImport, "Import plan "+cmp.Or(d.Ref, d.ID), planText, d.Ref); err != nil {
 		return err

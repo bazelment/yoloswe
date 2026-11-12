@@ -271,7 +271,7 @@ func ComputeMetrics(ctx context.Context, st store.Store, clk clock.Clock, runID 
 
 	for i := range events {
 		ev := events[i]
-		if ev.Kind == store.EventOwnerMessage {
+		if ev.Kind == store.EventOwnerMessage && ev.Source != ActorConcierge {
 			out.OwnerNudges++
 		}
 		if ev.LaneID == "" || !isActionableLaneEvent(ev) {
@@ -337,17 +337,14 @@ func RecordMetricsDecision(
 		return m, store.Decision{}, err
 	}
 	dec, err := st.Decisions().Append(ctx, store.Decision{
-		RunID:        runID,
-		Category:     store.DecisionAuto,
-		Actor:        ActorMetrics,
-		Tool:         ToolMetricsSnapshot,
-		Reason:       cmp.Or(strings.TrimSpace(reason), "metrics snapshot"),
-		Result:       m.Summary(),
-		Args:         rawArgs,
-		InputTokens:  m.TotalInputTokens,
-		OutputTokens: m.TotalOutputTokens,
-		CostUSD:      m.TotalCostUSD,
-		Vetted:       true,
+		RunID:    runID,
+		Category: store.DecisionAuto,
+		Actor:    ActorMetrics,
+		Tool:     ToolMetricsSnapshot,
+		Reason:   cmp.Or(strings.TrimSpace(reason), "metrics snapshot"),
+		Result:   m.Summary(),
+		Args:     rawArgs,
+		Vetted:   true,
 	})
 	if err != nil {
 		return m, store.Decision{}, err

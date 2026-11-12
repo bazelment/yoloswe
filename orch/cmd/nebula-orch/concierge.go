@@ -69,7 +69,6 @@ type Concierge struct {
 	modelName string
 	threadID  string
 	history   []model.Message
-	seq       int64
 	mu        sync.Mutex
 }
 
@@ -93,10 +92,7 @@ func NewConcierge(
 }
 
 func (c *Concierge) nextID(prefix string) string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.seq++
-	return fmt.Sprintf("%s-%d", prefix, c.seq)
+	return nextUniqueID(prefix, c.clock)
 }
 
 func (c *Concierge) ensureThread(ctx context.Context) (string, error) {
@@ -106,10 +102,9 @@ func (c *Concierge) ensureThread(ctx context.Context) (string, error) {
 		c.mu.Unlock()
 		return id, nil
 	}
-	c.seq++
-	candidateID := fmt.Sprintf("concierge-%s-%d", c.runID, c.clock.Now().UTC().UnixNano()+c.seq)
 	c.mu.Unlock()
 
+	candidateID := c.nextID("concierge-" + c.runID)
 	th, err := c.store.Threads().StartThread(ctx, store.Thread{
 		ID:     candidateID,
 		RunID:  c.runID,
@@ -338,7 +333,7 @@ func (c *Concierge) FormatStatusReport(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	metrics, err := LatestMetricsFromDecisions(ctx, c.store, c.clock, c.runID)
+	metrics, err := ComputeMetrics(ctx, c.store, c.clock, c.runID)
 	if err != nil {
 		return "", err
 	}

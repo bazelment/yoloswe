@@ -511,3 +511,194 @@ func TestGracefulShutdown_ReleasesLeaseAndWritesMetrics(t *testing.T) {
 		t.Fatalf("expected final decision to be %s, got %+v", ToolMetricsSnapshot, decs)
 	}
 }
+
+func TestRestart_UniqueIDsAcrossInstances(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 12, 18, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	defer func() { _ = st.Close() }()
+
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:        "run-restart",
+		Objective: "Verify unique IDs across restarted instances",
+	}); err != nil {
+		t.Fatalf("Create run: %v", err)
+	}
+
+	makeSubmitClient := func(text string) model.ModelClient {
+		return model.NewFakeClient(
+			model.Response{
+				ID:         "msg-1",
+				Model:      DefaultConciergeModel,
+				StopReason: model.StopReasonToolUse,
+				Message: model.NewAssistantMessage(
+					model.NewToolUseBlock("call-1", ToolDirectiveSubmit, json.RawMessage(`{"kind":"instruction","text":"`+text+`"}`)),
+				),
+			},
+			model.Response{
+				ID:         "msg-2",
+				Model:      DefaultConciergeModel,
+				StopReason: model.StopReasonEndTurn,
+				Message:    model.NewAssistantMessage(model.NewTextBlock("ok")),
+			},
+		)
+	}
+
+	c1 := NewConcierge("run-restart", st, clk, makeSubmitClient("first instruction"), DefaultConciergeModel)
+	if _, err := c1.Ask(ctx, "submit first"); err != nil {
+		t.Fatalf("c1.Ask: %v", err)
+	}
+	c2 := NewConcierge("run-restart", st, clk, makeSubmitClient("second instruction"), DefaultConciergeModel)
+	if _, err := c2.Ask(ctx, "submit second"); err != nil {
+		t.Fatalf("c2.Ask: %v", err)
+	}
+
+	dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: "run-restart"})
+	if err != nil {
+		t.Fatalf("List directives: %v", err)
+	}
+	if len(dirs) != 2 || dirs[0].ID == dirs[1].ID {
+		t.Fatalf("expected 2 distinct directives across Concierge instances, got %+v", dirs)
+	}
+
+	p1 := NewPlanner(st, clk, nil, DefaultPlannerModel, nil)
+	if _, err := p1.CompileAndSaveRecipe(ctx, "run-restart", "default", "skip clean", nil, 2); err != nil {
+		t.Fatalf("p1.CompileAndSaveRecipe: %v", err)
+	}
+	p2 := NewPlanner(st, clk, nil, DefaultPlannerModel, nil)
+	if _, err := p2.CompileAndSaveRecipe(ctx, "run-restart", "default", "lanes merge themselves", nil, 2); err != nil {
+		t.Fatalf("p2.CompileAndSaveRecipe: %v", err)
+	}
+
+	metrics, err := ComputeMetrics(ctx, st, clk, "run-restart")
+	if err != nil {
+		t.Fatalf("ComputeMetrics: %v", err)
+	}
+	if metrics.OwnerNudges != 2 {
+		t.Fatalf("OwnerNudges = %d, want 2 (no double count with EventOwnerMessage)", metrics.OwnerNudges)
+	}
+}
+
+func TestStandbyRunner_DoesNotMutateWithoutLeaseAndRevokesBadDirective(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 12, 19, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	defer func() { _ = st.Close() }()
+
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:        "run-lease",
+		Objective: "Verify lease gating before store mutations",
+	}); err != nil {
+		t.Fatalf("Create run: %v", err)
+	}
+	if _, err := st.Runs().AcquireLease(ctx, "run-lease", "primary-holder", 30*time.Second); err != nil {
+		t.Fatalf("AcquireLease primary: %v", err)
+	}
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:     "dir-edit-1",
+		RunID:  "run-lease",
+		Kind:   store.DirectiveRecipeEdit,
+		Source: store.DirectiveSourceOwner,
+		Ref:    "default",
+		Text:   "skip clean",
+		Status: store.DirectiveActive,
+	}); err != nil {
+		t.Fatalf("Add directive: %v", err)
+	}
+
+	drv := NewScriptedFakeDriver(lane.NewFakeDriver(), st.Events(), clk, true)
+	standbyCfg := Config{
+		RunID:      "run-lease",
+		HolderID:   "standby-holder",
+		StoreSpec:  "memory",
+		DriverKind: "fake",
+		Once:       true,
+		MaxSteps:   1,
+	}.withDefaults()
+	standby := NewRunner(standbyCfg, st, drv, clk, nil, nil)
+
+	if err := standby.Run(ctx); !errors.Is(err, store.ErrLeaseHeld) {
+		t.Fatalf("standby.Run error = %v, want %v", err, store.ErrLeaseHeld)
+	}
+
+	dirAfterStandby, err := st.Directives().Get(ctx, "run-lease", "dir-edit-1")
+	if err != nil {
+		t.Fatalf("Get directive: %v", err)
+	}
+	if dirAfterStandby.Status != store.DirectiveActive {
+		t.Fatalf("expected directive to remain active when standby lacks lease, got %q", dirAfterStandby.Status)
+	}
+	decsAfterStandby, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-lease"})
+	if err != nil {
+		t.Fatalf("List decisions: %v", err)
+	}
+	if len(decsAfterStandby) != 0 {
+		t.Fatalf("expected standby runner to record 0 decisions on shutdown, got %+v", decsAfterStandby)
+	}
+
+	// Add an invalid empty plan_import directive and verify primary runner revokes it without failing Step.
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:     "dir-bad-import",
+		RunID:  "run-lease",
+		Kind:   store.DirectivePlanImport,
+		Source: store.DirectiveSourceConcierge,
+		Ref:    "/etc/passwd",
+		Text:   "",
+		Status: store.DirectiveActive,
+	}); err != nil {
+		t.Fatalf("Add bad directive: %v", err)
+	}
+
+	primaryCfg := Config{
+		RunID:      "run-lease",
+		HolderID:   "primary-holder",
+		StoreSpec:  "memory",
+		DriverKind: "fake",
+	}.withDefaults()
+	primary := NewRunner(primaryCfg, st, drv, clk, nil, nil)
+	if err := primary.Bootstrap(ctx); err != nil {
+		t.Fatalf("primary.Bootstrap: %v", err)
+	}
+	if err := primary.Step(ctx); err != nil {
+		t.Fatalf("primary.Step: %v", err)
+	}
+
+	badDir, err := st.Directives().Get(ctx, "run-lease", "dir-bad-import")
+	if err != nil {
+		t.Fatalf("Get bad directive: %v", err)
+	}
+	if badDir.Status != store.DirectiveRevoked {
+		t.Fatalf("bad directive status = %q, want %q", badDir.Status, store.DirectiveRevoked)
+	}
+}
+
+func TestConfig_BoolMergePrecedenceAndNegativeCapValidation(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	cfgFile := filepath.Join(tmpDir, "cfg.json")
+	if err := os.WriteFile(cfgFile, []byte(`{"run_id":"run-bool","once":true,"fake_auto_complete":true}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var errBuf bytes.Buffer
+	cfg, _, err := parseFlags("run", []string{
+		"--config", cfgFile,
+		"--once=false",
+		"--fake-auto=false",
+		"--concurrency-cap", "-2",
+	}, &errBuf)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.Once {
+		t.Fatalf("expected explicit --once=false to override config file once=true")
+	}
+	if cfg.FakeAutoComplete {
+		t.Fatalf("expected explicit --fake-auto=false to override config file fake_auto_complete=true")
+	}
+	if err := cfg.Validate(true); err == nil {
+		t.Fatalf("expected Validate to reject negative concurrency cap %d", cfg.ConcurrencyCap)
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bazelment/yoloswe/orch/clock"
@@ -21,6 +23,28 @@ import (
 	"github.com/bazelment/yoloswe/orch/recipe"
 	"github.com/bazelment/yoloswe/orch/store"
 )
+
+var (
+	globalIDSeq  atomic.Uint64
+	processNonce = initProcessNonce()
+)
+
+func initProcessNonce() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return fmt.Sprintf("%x", b[:])
+	}
+	return fmt.Sprintf("%x", os.Getpid())
+}
+
+func nextUniqueID(prefix string, clk clock.Clock) string {
+	seq := globalIDSeq.Add(1)
+	var ts int64
+	if clk != nil {
+		ts = clk.Now().UTC().UnixNano()
+	}
+	return fmt.Sprintf("%s-%d-%s-%d", prefix, ts, processNonce, seq)
+}
 
 const (
 	DefaultDispatcherModel     = dispatcher.DefaultModel
@@ -82,6 +106,8 @@ type Config struct {
 	MaxSteps          int           `json:"max_steps,omitempty"`
 	Once              bool          `json:"once,omitempty"`
 	FakeAutoComplete  bool          `json:"fake_auto_complete,omitempty"`
+	onceSet           bool
+	fakeAutoSet       bool
 }
 
 func (c Config) withDefaults() Config {
@@ -93,7 +119,7 @@ func (c Config) withDefaults() Config {
 		strings.TrimSpace(os.Getenv("LLM_GATEWAY_URL")),
 		strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")),
 	)
-	if c.ConcurrencyCap <= 0 {
+	if c.ConcurrencyCap == 0 {
 		c.ConcurrencyCap = DefaultConcurrencyCap
 	}
 	if c.HolderID == "" {
@@ -163,6 +189,17 @@ func LoadConfigFile(path string, base Config) (Config, error) {
 	if err := json.Unmarshal(data, &fileCfg); err != nil {
 		return base, fmt.Errorf("parse config file %q: %w", path, err)
 	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err == nil {
+		if _, ok := raw["once"]; ok {
+			fileCfg.onceSet = true
+		}
+		if _, ok := raw["fake_auto_complete"]; ok {
+			fileCfg.fakeAutoSet = true
+		} else {
+			fileCfg.FakeAutoComplete = true
+		}
+	}
 	return mergeConfig(fileCfg, base), nil
 }
 
@@ -191,7 +228,7 @@ func mergeConfig(lower, higher Config) Config {
 	if len(higher.RecipeFiles) > 0 {
 		out.RecipeFiles = append(append([]string(nil), lower.RecipeFiles...), higher.RecipeFiles...)
 	}
-	if higher.ConcurrencyCap > 0 {
+	if higher.ConcurrencyCap != 0 {
 		out.ConcurrencyCap = higher.ConcurrencyCap
 	}
 	if higher.MaxSteps > 0 {
@@ -212,11 +249,17 @@ func mergeConfig(lower, higher Config) Config {
 	if higher.StallTimeout != 0 {
 		out.StallTimeout = higher.StallTimeout
 	}
-	if higher.Once {
+	if higher.onceSet {
+		out.Once = higher.Once
+		out.onceSet = true
+	} else if !lower.onceSet && higher.Once {
 		out.Once = true
 	}
-	if higher.FakeAutoComplete {
-		out.FakeAutoComplete = true
+	if higher.fakeAutoSet {
+		out.FakeAutoComplete = higher.FakeAutoComplete
+		out.fakeAutoSet = true
+	} else if !lower.fakeAutoSet {
+		out.FakeAutoComplete = higher.FakeAutoComplete
 	}
 	return out
 }
@@ -280,6 +323,14 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 		return Config{}, nil, err
 	}
 	cfg.RecipeFiles = recipes
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "once":
+			cfg.onceSet = true
+		case "fake-auto":
+			cfg.fakeAutoSet = true
+		}
+	})
 
 	if strings.TrimSpace(configPath) != "" {
 		merged, err := LoadConfigFile(configPath, cfg)
