@@ -69,7 +69,6 @@ func TestHTTPClient_SingleTurn(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Point BaseURL with a gateway subpath + /v1 to verify URL normalization.
 	client := model.NewHTTPClient(
 		model.WithBaseURL(srv.URL+"/anthropic/v1/"),
 		model.WithAPIKey("sk-ant-test"),
@@ -550,7 +549,6 @@ func TestRecordAndReplayFake(t *testing.T) {
 		t.Fatalf("len(recorder.Exchanges()) = %d, want 2", len(recorder.Exchanges()))
 	}
 
-	// Now replay deterministically from the saved JSON file with the server closed.
 	replayer, err := model.NewRecordOrReplayClient(recordFile, false, nil)
 	if err != nil {
 		t.Fatalf("NewRecordOrReplayClient(record=false): %v", err)

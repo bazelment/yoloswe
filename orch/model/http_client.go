@@ -104,8 +104,7 @@ type HTTPClient struct {
 // ClientOption configures an HTTPClient.
 type ClientOption func(*HTTPClient)
 
-// WithBaseURL sets the base URL for the Messages API (e.g. "https://api.anthropic.com"
-// or an llm-gateway URL).
+// WithBaseURL sets the Messages API base URL.
 func WithBaseURL(baseURL string) ClientOption {
 	return func(c *HTTPClient) {
 		c.baseURL = strings.TrimSpace(baseURL)
@@ -193,8 +192,7 @@ func WithPricing(pricing map[string]ModelPricing) ClientOption {
 	}
 }
 
-// ParseCustomHeaders parses a newline-separated list of "Header: Value" pairs
-// (the format used by ANTHROPIC_CUSTOM_HEADERS).
+// ParseCustomHeaders parses newline-separated "Header: Value" pairs (ANTHROPIC_CUSTOM_HEADERS format).
 func ParseCustomHeaders(raw string) map[string]string {
 	out := make(map[string]string)
 	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {

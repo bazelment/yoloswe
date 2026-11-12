@@ -76,8 +76,7 @@ func (b ContentBlock) Clone() ContentBlock {
 	return out
 }
 
-// MarshalJSON serializes ContentBlock using the wire shape required by the
-// Anthropic Messages API for each block type.
+// MarshalJSON serializes ContentBlock in the Anthropic Messages API wire format.
 func (b ContentBlock) MarshalJSON() ([]byte, error) {
 	switch b.Type {
 	case BlockTypeText:
@@ -531,9 +530,8 @@ func (r Response) Clone() Response {
 	return out
 }
 
-// UnmarshalJSON supports both the internal Response shape (with a nested
-// "message" field) and the raw Anthropic Messages API wire shape (with top-level
-// "role" and "content" fields).
+// UnmarshalJSON decodes either the internal Response shape ("message" field)
+// or the Anthropic Messages API wire shape (top-level "role" and "content").
 func (r *Response) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Message    *Message       `json:"message"`
@@ -1068,9 +1066,8 @@ func NewFakeClient(responses ...Response) *FakeClient {
 	return &FakeClient{queue: queue}
 }
 
-// NewRecordingFakeClient creates a FakeClient that forwards every call to upstream,
-// records each Request+Response pair in memory, and writes the JSON recording to
-// path (when path is non-empty).
+// NewRecordingFakeClient creates a FakeClient that forwards calls to upstream
+// and writes the recorded exchanges to path (when non-empty).
 func NewRecordingFakeClient(path string, upstream ModelClient) *FakeClient {
 	return &FakeClient{
 		upstream:   upstream,
@@ -1078,8 +1075,7 @@ func NewRecordingFakeClient(path string, upstream ModelClient) *FakeClient {
 	}
 }
 
-// LoadFakeClient loads recorded request/response exchanges from path and returns
-// a FakeClient ready to replay them deterministically.
+// LoadFakeClient loads recorded exchanges from path for deterministic replay.
 func LoadFakeClient(path string) (*FakeClient, error) {
 	f := &FakeClient{}
 	if err := f.Load(path); err != nil {
@@ -1088,9 +1084,8 @@ func LoadFakeClient(path string) (*FakeClient, error) {
 	return f, nil
 }
 
-// NewRecordOrReplayClient returns a FakeClient in record mode (forwarding to upstream
-// and writing path) when record is true, or in deterministic replay mode (reading
-// from path with no upstream calls) when record is false.
+// NewRecordOrReplayClient returns a FakeClient in record mode (forwarding to
+// upstream and saving to path) when record is true, or replay mode when false.
 func NewRecordOrReplayClient(path string, record bool, upstream ModelClient) (*FakeClient, error) {
 	if record {
 		if upstream == nil {
@@ -1101,8 +1096,7 @@ func NewRecordOrReplayClient(path string, record bool, upstream ModelClient) (*F
 	return LoadFakeClient(path)
 }
 
-// SetStrictMatch configures whether replayed calls verify that the incoming
-// Request matches the recorded Request (model, system, messages, and tools).
+// SetStrictMatch configures whether replay verifies incoming requests against recorded requests.
 func (f *FakeClient) SetStrictMatch(strict bool) *FakeClient {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1160,8 +1154,7 @@ func (f *FakeClient) Load(path string) error {
 	return nil
 }
 
-// SaveRecording writes exchanges to path as formatted JSON, creating parent
-// directories as needed.
+// SaveRecording writes exchanges to path as formatted JSON.
 func SaveRecording(path string, exchanges []RecordedExchange) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("orch/model: create recording dir: %w", err)
@@ -1178,8 +1171,7 @@ func SaveRecording(path string, exchanges []RecordedExchange) error {
 	return nil
 }
 
-// LoadRecording reads recorded exchanges from a JSON file (supporting either a
-// Recording object {"exchanges": [...]} or a top-level []RecordedExchange array).
+// LoadRecording reads recorded exchanges from a JSON file (Recording object or array).
 func LoadRecording(path string) ([]RecordedExchange, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -1203,9 +1195,8 @@ func LoadRecording(path string) ([]RecordedExchange, error) {
 	return rec.Exchanges, nil
 }
 
-// CreateMessage records req and either forwards to upstream (in record mode) or
-// returns the next queued response (in replay mode). If req.ToolRegistry is set,
-// CreateMessage executes the bounded tool loop using RunToolLoop.
+// CreateMessage records req and either forwards to upstream (record mode) or
+// returns the next queued response (replay mode).
 func (f *FakeClient) CreateMessage(ctx context.Context, req Request) (*Response, error) {
 	if req.ToolRegistry != nil {
 		return runToolLoopResponse(ctx, f, req)
