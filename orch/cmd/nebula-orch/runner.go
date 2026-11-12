@@ -283,7 +283,6 @@ type Runner struct {
 	dispatchedOpenSet map[string]bool
 	cfg               Config
 	lastLoggedSeq     int64
-	lastMetricsSeq    int64
 	mu                sync.Mutex
 }
 
@@ -464,24 +463,41 @@ func (r *Runner) Step(ctx context.Context) error {
 	return r.logNewDecisions(ctx)
 }
 
-func (r *Runner) enqueueOpenBacklogTriggerIfNeeded(ctx context.Context) error {
-	if r.client == nil {
-		return nil
-	}
-
+func (r *Runner) hasUnprocessedEvents(ctx context.Context) (bool, error) {
 	cur, err := r.store.Events().GetCursor(ctx, r.cfg.RunID, controller.DefaultConsumer)
 	if err != nil {
-		return err
+		return false, err
 	}
 	unprocessed, err := r.store.Events().List(ctx, store.EventFilter{
 		RunID:    r.cfg.RunID,
 		AfterSeq: cur.Seq,
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
-	if len(unprocessed) > 0 {
+	return len(unprocessed) > 0, nil
+}
+
+func (r *Runner) hasPendingPlannerDirectives(ctx context.Context) (bool, error) {
+	dirs, err := r.store.Directives().List(ctx, store.DirectiveFilter{
+		RunID:      r.cfg.RunID,
+		Kinds:      plannerDirectiveKinds,
+		ActiveOnly: true,
+	})
+	if err != nil {
+		return false, err
+	}
+	return len(dirs) > 0, nil
+}
+
+func (r *Runner) enqueueOpenBacklogTriggerIfNeeded(ctx context.Context) error {
+	if r.client == nil {
 		return nil
+	}
+
+	hasUnprocessed, err := r.hasUnprocessedEvents(ctx)
+	if err != nil || hasUnprocessed {
+		return err
 	}
 
 	lanes, err := r.store.Lanes().List(ctx, store.LaneFilter{RunID: r.cfg.RunID})
@@ -569,14 +585,10 @@ func (r *Runner) logNewDecisions(ctx context.Context) error {
 	}
 
 	maxSeq := sinceSeq
-	nonMetricCount := 0
 	for i := range decs {
 		d := decs[i]
 		if d.Seq > maxSeq {
 			maxSeq = d.Seq
-		}
-		if d.Tool != ToolMetricsSnapshot {
-			nonMetricCount++
 		}
 		r.logger.Info("decision recorded",
 			"run_id", d.RunID,
@@ -605,31 +617,11 @@ func (r *Runner) logNewDecisions(ctx context.Context) error {
 // IsSettledAndComplete reports whether the run has at least one backlog item or lane,
 // all backlog items and lanes are in terminal states, and no unprocessed events remain.
 func (r *Runner) IsSettledAndComplete(ctx context.Context) (bool, error) {
-	cur, err := r.store.Events().GetCursor(ctx, r.cfg.RunID, controller.DefaultConsumer)
-	if err != nil {
+	if hasUnprocessed, err := r.hasUnprocessedEvents(ctx); err != nil || hasUnprocessed {
 		return false, err
 	}
-	unprocessed, err := r.store.Events().List(ctx, store.EventFilter{
-		RunID:    r.cfg.RunID,
-		AfterSeq: cur.Seq,
-	})
-	if err != nil {
+	if hasDirs, err := r.hasPendingPlannerDirectives(ctx); err != nil || hasDirs {
 		return false, err
-	}
-	if len(unprocessed) > 0 {
-		return false, nil
-	}
-
-	dirs, err := r.store.Directives().List(ctx, store.DirectiveFilter{
-		RunID:      r.cfg.RunID,
-		Kinds:      []store.DirectiveKind{store.DirectiveRecipeEdit, store.DirectivePlanImport},
-		ActiveOnly: true,
-	})
-	if err != nil {
-		return false, err
-	}
-	if len(dirs) > 0 {
-		return false, nil
 	}
 
 	backlog, err := r.store.Backlog().List(ctx, store.BacklogFilter{RunID: r.cfg.RunID})
@@ -661,31 +653,11 @@ func (r *Runner) hasImmediateWork(ctx context.Context) (bool, error) {
 	if err := r.enqueueOpenBacklogTriggerIfNeeded(ctx); err != nil {
 		return false, err
 	}
-	cur, err := r.store.Events().GetCursor(ctx, r.cfg.RunID, controller.DefaultConsumer)
-	if err != nil {
-		return false, err
+	if hasUnprocessed, err := r.hasUnprocessedEvents(ctx); err != nil || hasUnprocessed {
+		return hasUnprocessed, err
 	}
-	pending, err := r.store.Events().List(ctx, store.EventFilter{
-		RunID:    r.cfg.RunID,
-		AfterSeq: cur.Seq,
-	})
-	if err != nil {
-		return false, err
-	}
-	if len(pending) > 0 {
-		return true, nil
-	}
-
-	dirs, err := r.store.Directives().List(ctx, store.DirectiveFilter{
-		RunID:      r.cfg.RunID,
-		Kinds:      []store.DirectiveKind{store.DirectiveRecipeEdit, store.DirectivePlanImport},
-		ActiveOnly: true,
-	})
-	if err != nil {
-		return false, err
-	}
-	if len(dirs) > 0 {
-		return true, nil
+	if hasDirs, err := r.hasPendingPlannerDirectives(ctx); err != nil || hasDirs {
+		return hasDirs, err
 	}
 
 	lanes, err := r.store.Lanes().List(ctx, store.LaneFilter{RunID: r.cfg.RunID})
@@ -745,8 +717,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		if r.cfg.Once {
 			// Drain any immediately actionable work (events, planned lanes, open backlog items) before waiting on ticker.
 			for range 64 {
-				done, err := r.IsSettledAndComplete(ctx)
-				if err == nil && done {
+				if done, err := r.IsSettledAndComplete(ctx); err == nil && done {
 					return nil
 				}
 				more, mErr := r.hasImmediateWork(ctx)
@@ -757,9 +728,6 @@ func (r *Runner) Run(ctx context.Context) error {
 					return stepErr
 				}
 				steps++
-			}
-			if done, err := r.IsSettledAndComplete(ctx); err == nil && done {
-				return nil
 			}
 		}
 
@@ -785,9 +753,6 @@ func (r *Runner) shutdown(parentCtx context.Context) {
 	if err != nil {
 		r.logger.Warn("failed to record run metrics decision", "run_id", r.cfg.RunID, "error", err)
 	} else {
-		r.mu.Lock()
-		r.lastMetricsSeq = dec.Seq
-		r.mu.Unlock()
 		r.logger.Info("recorded run metrics to decision log",
 			"run_id", r.cfg.RunID,
 			"decision_seq", dec.Seq,

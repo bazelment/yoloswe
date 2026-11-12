@@ -404,23 +404,8 @@ func LoadRecipeFile(
 		return st.Recipes().Save(ctx, r)
 	}
 
-	if planner != nil {
-		compiled, err := planner.CompileAndSaveRecipe(ctx, runID, baseName, trimmed, nil, concurrencyCap)
-		if err == nil {
-			return compiled, nil
-		}
+	if planner == nil {
+		planner = NewPlanner(st, nil, nil, "", nil)
 	}
-
-	fallback := dispatcher.CompileRecipeOverride(recipe.Default(), trimmed)
-	fallback.RunID = runID
-	fallback.Name = baseName
-	fallback.Version = 0
-	fallback.Source = trimmed
-	if concurrencyCap > 0 {
-		fallback.Limits.MaxConcurrentLanes = concurrencyCap
-	}
-	if err := fallback.Validate(); err != nil {
-		return recipe.Recipe{}, err
-	}
-	return st.Recipes().Save(ctx, fallback)
+	return planner.CompileAndSaveRecipe(ctx, runID, baseName, trimmed, nil, concurrencyCap)
 }

@@ -114,7 +114,7 @@ func (c *Concierge) ensureThread(ctx context.Context) (string, error) {
 		return id, nil
 	}
 	c.seq++
-	candidateID := fmt.Sprintf("concierge-%s-%d", c.runID, time.Now().UTC().UnixNano()+c.seq)
+	candidateID := fmt.Sprintf("concierge-%s-%d", c.runID, c.clock.Now().UTC().UnixNano()+c.seq)
 	c.mu.Unlock()
 
 	th, err := c.store.Threads().StartThread(ctx, store.Thread{
@@ -298,36 +298,30 @@ func (c *Concierge) buildToolRegistry(threadID, turnID string) *model.ToolRegist
 		},
 	)
 
-	laneShowHandler := func(ctx context.Context, p ConciergeLaneShowParams) (string, error) {
-		return c.handleLaneShow(ctx, p.LaneID)
-	}
 	model.AddTool[ConciergeLaneShowParams](reg, ToolConciergeLaneShow,
 		"Show detailed state, rounds, terminals, PR/CI, and recent decisions for a lane",
-		laneShowHandler,
+		func(ctx context.Context, p ConciergeLaneShowParams) (string, error) {
+			return c.handleLaneShow(ctx, p.LaneID)
+		},
 	)
 
-	decisionsHandler := func(ctx context.Context, p ConciergeDecisionsParams) (string, error) {
-		return c.handleDecisionsSince(ctx, p)
-	}
 	model.AddTool[ConciergeDecisionsParams](reg, ToolConciergeDecisions,
 		"List decisions from the append-only DecisionStore since a sequence number",
-		decisionsHandler,
+		c.handleDecisionsSince,
 	)
 
-	prCIHandler := func(ctx context.Context, p ConciergePRCIParams) (string, error) {
-		return c.handlePRCI(ctx, p.LaneID)
-	}
 	model.AddTool[ConciergePRCIParams](reg, ToolConciergePRCI,
 		"Read PR metadata, review approval status, and CI check status for a lane",
-		prCIHandler,
+		func(ctx context.Context, p ConciergePRCIParams) (string, error) {
+			return c.handlePRCI(ctx, p.LaneID)
+		},
 	)
 
-	directiveHandler := func(ctx context.Context, p DirectiveSubmitParams) (string, error) {
-		return c.handleDirectiveSubmit(ctx, threadID, turnID, p)
-	}
 	model.AddTool[DirectiveSubmitParams](reg, ToolDirectiveSubmit,
 		"Submit a typed owner directive (standing, instruction, recipe_edit, plan_import) for the Controller/Dispatcher/Planner",
-		directiveHandler,
+		func(ctx context.Context, p DirectiveSubmitParams) (string, error) {
+			return c.handleDirectiveSubmit(ctx, threadID, turnID, p)
+		},
 	)
 
 	return reg

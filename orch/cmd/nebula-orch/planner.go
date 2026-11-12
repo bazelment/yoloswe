@@ -68,7 +68,10 @@ type PlanReconciliation struct {
 	UnmappedPhrases []string          `json:"unmapped,omitempty" jsonschema:"description=Unmappable plan phrases"`
 }
 
-var submitPlanReconcileSchema = model.SchemaFor[PlanReconciliation]()
+var (
+	submitPlanReconcileSchema = model.SchemaFor[PlanReconciliation]()
+	plannerDirectiveKinds     = []store.DirectiveKind{store.DirectiveRecipeEdit, store.DirectivePlanImport}
+)
 
 // Planner handles recipe compilation, per-lane overrides, recipe_edit directives,
 // plan_import directives, and Dispatcher replanning requests in fresh Planner threads.
@@ -218,7 +221,7 @@ func (p *Planner) CompileAndSaveRecipe(
 func (p *Planner) ReconcileDirectives(ctx context.Context, runID string, concurrencyCap int) error {
 	dirs, err := p.store.Directives().List(ctx, store.DirectiveFilter{
 		RunID:      runID,
-		Kinds:      []store.DirectiveKind{store.DirectiveRecipeEdit, store.DirectivePlanImport},
+		Kinds:      plannerDirectiveKinds,
 		ActiveOnly: true,
 	})
 	if err != nil {
@@ -453,7 +456,7 @@ func (p *Planner) applyReconciliation(
 			RunID:     runID,
 			Kind:      store.DirectiveInstruction,
 			Source:    store.DirectiveSourcePlanner,
-			Ref:       "owner_ask:" + ask.ID,
+			Ref:       ownerAskRefPrefix + ask.ID,
 			Text:      string(raw),
 			ExpiresAt: &dl,
 			Status:    store.DirectiveActive,

@@ -21,6 +21,7 @@ import (
 const (
 	ToolMetricsSnapshot = "metrics.snapshot"
 	ActorMetrics        = "metrics"
+	ownerAskRefPrefix   = "owner_ask:"
 )
 
 // DayMetrics aggregates decision counts, token usage, and USD cost for a single UTC calendar day.
@@ -179,7 +180,7 @@ func ComputeMetrics(ctx context.Context, st store.Store, clk clock.Clock, runID 
 				ID string `json:"id"`
 			}
 			if len(d.Args) > 0 && json.Unmarshal(d.Args, &p) == nil && p.ID != "" {
-				seenAskRefs["owner_ask:"+p.ID] = true
+				seenAskRefs[ownerAskRefPrefix+p.ID] = true
 			}
 		}
 		if d.Tool == controller.ToolOwnerAskDefault {
@@ -244,7 +245,7 @@ func ComputeMetrics(ctx context.Context, st store.Store, clk clock.Clock, runID 
 
 	for i := range dirs {
 		dir := dirs[i]
-		if strings.HasPrefix(dir.Ref, "owner_ask:") && !seenAskRefs[dir.Ref] {
+		if strings.HasPrefix(dir.Ref, ownerAskRefPrefix) && !seenAskRefs[dir.Ref] {
 			seenAskRefs[dir.Ref] = true
 			out.OwnerAsks++
 		}
@@ -253,30 +254,26 @@ func ComputeMetrics(ctx context.Context, st store.Store, clk clock.Clock, runID 
 			case store.DirectiveStanding, store.DirectiveRecipeEdit:
 				out.OwnerCorrections++
 			case store.DirectiveInstruction:
-				if !strings.HasPrefix(dir.Ref, "owner_ask:") {
+				if !strings.HasPrefix(dir.Ref, ownerAskRefPrefix) {
 					out.OwnerNudges++
 				}
 			}
 		}
 	}
-	for i := range events {
-		if events[i].Kind == store.EventOwnerMessage {
-			out.OwnerNudges++
-		}
-	}
 
 	// Compute lane idle time with an actionable event (either waiting to be handled or latency until handled).
 	laneIdleByID := make(map[string]*LaneIdleMetric, len(lanes))
-	for i := range lanes {
-		laneIdleByID[lanes[i].ID] = &LaneIdleMetric{LaneID: lanes[i].ID}
-	}
 	lanesByID := make(map[string]lane.Lane, len(lanes))
 	for i := range lanes {
+		laneIdleByID[lanes[i].ID] = &LaneIdleMetric{LaneID: lanes[i].ID}
 		lanesByID[lanes[i].ID] = lanes[i]
 	}
 
 	for i := range events {
 		ev := events[i]
+		if ev.Kind == store.EventOwnerMessage {
+			out.OwnerNudges++
+		}
 		if ev.LaneID == "" || !isActionableLaneEvent(ev) {
 			continue
 		}
