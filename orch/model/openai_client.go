@@ -265,7 +265,7 @@ func readResponsesStream(r io.ReadCloser, idle time.Duration) ([]byte, error) {
 				Type     string          `json:"type"`
 				Response json.RawMessage `json:"response"`
 			}
-			if json.Unmarshal([]byte(line), &event) == nil && event.Type == "response.completed" && len(event.Response) > 0 {
+			if json.Unmarshal([]byte(line), &event) == nil && (event.Type == "response.completed" || event.Type == "response.failed" || event.Type == "response.incomplete") && len(event.Response) > 0 {
 				results <- result{data: event.Response}
 				return
 			}

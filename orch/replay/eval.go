@@ -109,6 +109,7 @@ type EvalReport struct {
 	InvariantViolations        int
 	TotalQuestions             int
 	AccurateQuestions          int
+	ErrorCount                 int
 	ConciergeAccuracy          float64
 	MedianInputTokens          int64
 	P90InputTokens             int64
@@ -133,6 +134,7 @@ const (
 // BarsPass reports whether all five Validation Gate 2 bars passed on the evidence at hand.
 func (r *EvalReport) BarsPass() bool {
 	return r != nil &&
+		r.ErrorCount == 0 &&
 		r.AgreementPass &&
 		r.AskRatePass &&
 		r.InvariantsPass &&
@@ -674,6 +676,9 @@ func ComputeReport(moments []MomentResult, questions []QuestionResult) *EvalRepo
 	latencies := make([]int64, 0, len(moments))
 	for i := range moments {
 		m := &moments[i]
+		if m.Error != "" {
+			rep.ErrorCount++
+		}
 		if m.AskedOwner {
 			rep.TotalDispatcherAsks++
 		}
@@ -734,6 +739,9 @@ func ComputeReport(moments []MomentResult, questions []QuestionResult) *EvalRepo
 	}
 
 	for i := range questions {
+		if questions[i].Error != "" {
+			rep.ErrorCount++
+		}
 		if questions[i].Accurate {
 			rep.AccurateQuestions++
 		}
