@@ -284,6 +284,7 @@ type Runner struct {
 	lastLoggedSeq     int64
 	mu                sync.Mutex
 	leaseHeld         bool
+	bootstrapped      bool
 }
 
 func NewRunner(
@@ -418,11 +419,10 @@ func (r *Runner) judgeBatch(ctx context.Context, runID string, events []store.Ev
 }
 
 // Bootstrap initializes the Run record, default recipe (with concurrency cap),
-// and any configured recipe files in Store.
+// and any configured recipe files in Store after acquiring the run lease.
 func (r *Runner) Bootstrap(ctx context.Context) error {
 	runID := r.cfg.RunID
-	existing, err := r.store.Runs().Get(ctx, runID)
-	if err != nil {
+	if _, err := r.store.Runs().Get(ctx, runID); err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
@@ -434,18 +434,31 @@ func (r *Runner) Bootstrap(ctx context.Context) error {
 		}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			return err
 		}
-	} else {
-		now := r.clock.Now().UTC()
-		if existing.Lease != nil && !existing.Lease.Expired(now) && existing.Lease.HolderID != r.cfg.HolderID {
-			return fmt.Errorf("%w: run %q held by %q until %s",
-				store.ErrLeaseHeld, runID, existing.Lease.HolderID, existing.Lease.ExpiresAt.Format(time.RFC3339))
-		}
-		if (r.cfg.Objective != "" && existing.Objective != r.cfg.Objective) || (r.cfg.PlanRef != "" && existing.PlanRef != r.cfg.PlanRef) {
-			obj := cmp.Or(strings.TrimSpace(r.cfg.Objective), existing.Objective)
-			ref := cmp.Or(strings.TrimSpace(r.cfg.PlanRef), existing.PlanRef)
-			if err := r.store.Runs().UpdateObjective(ctx, runID, obj, ref); err != nil {
-				return err
-			}
+	}
+
+	if err := r.ensureLease(ctx); err != nil {
+		return err
+	}
+	return r.bootstrapMetadataAndRecipes(ctx)
+}
+
+func (r *Runner) isBootstrapped() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.bootstrapped
+}
+
+func (r *Runner) bootstrapMetadataAndRecipes(ctx context.Context) error {
+	runID := r.cfg.RunID
+	existing, err := r.store.Runs().Get(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if (r.cfg.Objective != "" && existing.Objective != r.cfg.Objective) || (r.cfg.PlanRef != "" && existing.PlanRef != r.cfg.PlanRef) {
+		obj := cmp.Or(strings.TrimSpace(r.cfg.Objective), existing.Objective)
+		ref := cmp.Or(strings.TrimSpace(r.cfg.PlanRef), existing.PlanRef)
+		if err := r.store.Runs().UpdateObjective(ctx, runID, obj, ref); err != nil {
+			return err
 		}
 	}
 
@@ -484,6 +497,10 @@ func (r *Runner) Bootstrap(ctx context.Context) error {
 			return err
 		}
 	}
+
+	r.mu.Lock()
+	r.bootstrapped = true
+	r.mu.Unlock()
 	return nil
 }
 
@@ -491,6 +508,11 @@ func (r *Runner) Bootstrap(ctx context.Context) error {
 func (r *Runner) Step(ctx context.Context) error {
 	if err := r.ensureLease(ctx); err != nil {
 		return err
+	}
+	if !r.isBootstrapped() {
+		if err := r.bootstrapMetadataAndRecipes(ctx); err != nil {
+			return err
+		}
 	}
 
 	if err := r.planner.ReconcileDirectives(ctx, r.cfg.RunID, r.cfg.ConcurrencyCap); err != nil {
@@ -727,7 +749,7 @@ func (r *Runner) hasImmediateWork(ctx context.Context) (bool, error) {
 
 // Run executes the orchestration loop until ctx is cancelled or completion criteria are met.
 func (r *Runner) Run(ctx context.Context) error {
-	if err := r.Bootstrap(ctx); err != nil {
+	if err := r.Bootstrap(ctx); err != nil && !errors.Is(err, store.ErrLeaseHeld) {
 		return err
 	}
 

@@ -513,7 +513,6 @@ func TestGracefulShutdown_ReleasesLeaseAndWritesMetrics(t *testing.T) {
 }
 
 func TestRestart_UniqueIDsAcrossInstances(t *testing.T) {
-	t.Parallel()
 	ctx := t.Context()
 	clk := clock.NewFakeClock(time.Date(2026, 11, 12, 18, 0, 0, 0, time.UTC))
 	st := store.NewMemoryStore(clk)
@@ -545,13 +544,27 @@ func TestRestart_UniqueIDsAcrossInstances(t *testing.T) {
 		)
 	}
 
+	globalIDSeq.Store(0)
+	processNonce = "proc1aaa"
 	c1 := NewConcierge("run-restart", st, clk, makeSubmitClient("first instruction"), DefaultConciergeModel)
 	if _, err := c1.Ask(ctx, "submit first"); err != nil {
 		t.Fatalf("c1.Ask: %v", err)
 	}
+	p1 := NewPlanner(st, clk, nil, DefaultPlannerModel, nil)
+	if _, err := p1.CompileAndSaveRecipe(ctx, "run-restart", "default", "skip clean", nil, 2); err != nil {
+		t.Fatalf("p1.CompileAndSaveRecipe: %v", err)
+	}
+
+	// Simulate a process restart: reset sequence counter to 0 and rotate processNonce at the same clock timestamp.
+	globalIDSeq.Store(0)
+	processNonce = "proc2bbb"
 	c2 := NewConcierge("run-restart", st, clk, makeSubmitClient("second instruction"), DefaultConciergeModel)
 	if _, err := c2.Ask(ctx, "submit second"); err != nil {
 		t.Fatalf("c2.Ask: %v", err)
+	}
+	p2 := NewPlanner(st, clk, nil, DefaultPlannerModel, nil)
+	if _, err := p2.CompileAndSaveRecipe(ctx, "run-restart", "default", "lanes merge themselves", nil, 2); err != nil {
+		t.Fatalf("p2.CompileAndSaveRecipe: %v", err)
 	}
 
 	dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: "run-restart"})
@@ -560,15 +573,6 @@ func TestRestart_UniqueIDsAcrossInstances(t *testing.T) {
 	}
 	if len(dirs) != 2 || dirs[0].ID == dirs[1].ID {
 		t.Fatalf("expected 2 distinct directives across Concierge instances, got %+v", dirs)
-	}
-
-	p1 := NewPlanner(st, clk, nil, DefaultPlannerModel, nil)
-	if _, err := p1.CompileAndSaveRecipe(ctx, "run-restart", "default", "skip clean", nil, 2); err != nil {
-		t.Fatalf("p1.CompileAndSaveRecipe: %v", err)
-	}
-	p2 := NewPlanner(st, clk, nil, DefaultPlannerModel, nil)
-	if _, err := p2.CompileAndSaveRecipe(ctx, "run-restart", "default", "lanes merge themselves", nil, 2); err != nil {
-		t.Fatalf("p2.CompileAndSaveRecipe: %v", err)
 	}
 
 	metrics, err := ComputeMetrics(ctx, st, clk, "run-restart")
@@ -611,6 +615,7 @@ func TestStandbyRunner_DoesNotMutateWithoutLeaseAndRevokesBadDirective(t *testin
 	drv := NewScriptedFakeDriver(lane.NewFakeDriver(), st.Events(), clk, true)
 	standbyCfg := Config{
 		RunID:      "run-lease",
+		Objective:  "standby-should-not-overwrite",
 		HolderID:   "standby-holder",
 		StoreSpec:  "memory",
 		DriverKind: "fake",
@@ -619,8 +624,26 @@ func TestStandbyRunner_DoesNotMutateWithoutLeaseAndRevokesBadDirective(t *testin
 	}.withDefaults()
 	standby := NewRunner(standbyCfg, st, drv, clk, nil, nil)
 
+	if err := standby.Step(ctx); !errors.Is(err, store.ErrLeaseHeld) {
+		t.Fatalf("standby.Step error = %v, want %v", err, store.ErrLeaseHeld)
+	}
 	if err := standby.Run(ctx); !errors.Is(err, store.ErrLeaseHeld) {
 		t.Fatalf("standby.Run error = %v, want %v", err, store.ErrLeaseHeld)
+	}
+
+	standbyPollCfg := standbyCfg
+	standbyPollCfg.Once = false
+	standbyPoll := NewRunner(standbyPollCfg, st, drv, clk, nil, nil)
+	if err := standbyPoll.Run(ctx); err != nil {
+		t.Fatalf("non-Once standbyPoll.Run should wait on lease rather than fail in Bootstrap, got %v", err)
+	}
+
+	runAfterStandby, err := st.Runs().Get(ctx, "run-lease")
+	if err != nil {
+		t.Fatalf("Get run: %v", err)
+	}
+	if runAfterStandby.Objective != "Verify lease gating before store mutations" {
+		t.Fatalf("expected run objective to remain %q when standby lacks lease, got %q", "Verify lease gating before store mutations", runAfterStandby.Objective)
 	}
 
 	dirAfterStandby, err := st.Directives().Get(ctx, "run-lease", "dir-edit-1")
@@ -678,11 +701,25 @@ func TestConfig_BoolMergePrecedenceAndNegativeCapValidation(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	cfgFile := filepath.Join(tmpDir, "cfg.json")
-	if err := os.WriteFile(cfgFile, []byte(`{"run_id":"run-bool","once":true,"fake_auto_complete":true}`), 0o644); err != nil {
+	if err := os.WriteFile(cfgFile, []byte(`{"run_id":"run-bool","once":true,"fake_auto_complete":false}`), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
 	var errBuf bytes.Buffer
+	fileOnlyCfg, _, err := parseFlags("run", []string{"--config", cfgFile}, &errBuf)
+	if err != nil {
+		t.Fatalf("parseFlags fileOnly: %v", err)
+	}
+	if !fileOnlyCfg.Once {
+		t.Fatalf("expected config file once=true to take effect when --once flag is omitted")
+	}
+	if fileOnlyCfg.FakeAutoComplete {
+		t.Fatalf("expected config file fake_auto_complete=false to override default true when --fake-auto flag is omitted")
+	}
+
+	if err := os.WriteFile(cfgFile, []byte(`{"run_id":"run-bool","once":true,"fake_auto_complete":true}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	cfg, _, err := parseFlags("run", []string{
 		"--config", cfgFile,
 		"--once=false",

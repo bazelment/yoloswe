@@ -196,8 +196,6 @@ func LoadConfigFile(path string, base Config) (Config, error) {
 		}
 		if _, ok := raw["fake_auto_complete"]; ok {
 			fileCfg.fakeAutoSet = true
-		} else {
-			fileCfg.FakeAutoComplete = true
 		}
 	}
 	return mergeConfig(fileCfg, base), nil
