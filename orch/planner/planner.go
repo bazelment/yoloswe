@@ -456,11 +456,28 @@ func (p *Planner) DirectiveHandler() func(ctx context.Context, runID string, dir
 
 // OnPlannerRequest adapts Planner to dispatcher.Config.OnPlannerRequest.
 func (p *Planner) OnPlannerRequest(ctx context.Context, runID, reason, planRef string) error {
+	var dirID string
+	if p.store != nil {
+		if dirs, err := p.store.Directives().List(ctx, store.DirectiveFilter{
+			RunID:      runID,
+			Kinds:      []store.DirectiveKind{store.DirectiveInstruction},
+			ActiveOnly: true,
+		}); err == nil {
+			for i := len(dirs) - 1; i >= 0; i-- {
+				d := dirs[i]
+				if strings.HasPrefix(strings.TrimSpace(d.Ref), plannerRefPrefix) {
+					dirID = d.ID
+					break
+				}
+			}
+		}
+	}
 	_, err := p.HandleSignal(ctx, Signal{
-		RunID:   runID,
-		Kind:    SignalDispatcherRequest,
-		Reason:  reason,
-		PlanRef: planRef,
+		RunID:       runID,
+		Kind:        SignalDispatcherRequest,
+		Reason:      reason,
+		PlanRef:     planRef,
+		DirectiveID: dirID,
 	})
 	return err
 }
@@ -496,16 +513,17 @@ func (p *Planner) HandleDirective(ctx context.Context, runID string, dir store.D
 		res, err = p.reconcile(ctx, runID, ModePlanImport, planRef, dir.Text)
 
 	case store.DirectiveRecipeEdit:
-		recipeName := cmp.Or(strings.TrimSpace(dir.Scope), strings.TrimSpace(dir.Ref))
-		if recipeName == "run" {
-			recipeName = ""
-		}
+		recipeName := p.resolveRecipeEditTarget(ctx, runID, dir)
 		editText := cmp.Or(strings.TrimSpace(dir.Text), strings.TrimSpace(dir.Ref))
 		res, err = p.EditRecipe(ctx, runID, recipeName, editText)
 
-	default:
-		planRef := strings.TrimPrefix(strings.TrimSpace(dir.Ref), plannerRefPrefix)
-		if strings.HasPrefix(planRef, "planreq-") {
+	case store.DirectiveInstruction:
+		rawRef := strings.TrimSpace(dir.Ref)
+		if !strings.HasPrefix(rawRef, plannerRefPrefix) {
+			return nil, fmt.Errorf("%w: unsupported planner instruction directive %q (ref=%q)", store.ErrInvalidArgument, dir.ID, dir.Ref)
+		}
+		planRef := strings.TrimSpace(strings.TrimPrefix(rawRef, plannerRefPrefix))
+		if planRef == dir.ID {
 			planRef = ""
 		}
 		mode := ModeReplan
@@ -513,40 +531,69 @@ func (p *Planner) HandleDirective(ctx context.Context, runID string, dir store.D
 			mode = ModePlanImport
 		}
 		res, err = p.reconcile(ctx, runID, mode, planRef, dir.Text)
+
+	default:
+		return nil, fmt.Errorf("%w: unsupported planner directive kind %q", store.ErrInvalidArgument, dir.Kind)
 	}
 	if err != nil {
 		return res, err
 	}
 
 	if dir.ID != "" {
-		_ = p.store.Directives().UpdateStatus(ctx, runID, dir.ID, store.DirectiveHandled)
+		if err := p.store.Directives().UpdateStatus(ctx, runID, dir.ID, store.DirectiveHandled); err != nil {
+			return res, err
+		}
 	}
 	return res, nil
 }
 
-// ProcessPendingDirectives scans active plan_import and recipe_edit directives
-// for runID and executes a Planner thread for each.
+func (p *Planner) resolveRecipeEditTarget(ctx context.Context, runID string, dir store.Directive) string {
+	ref := strings.TrimSpace(dir.Ref)
+	text := strings.TrimSpace(dir.Text)
+	if ref != "" && text != "" {
+		return ref
+	}
+	scope := strings.TrimSpace(dir.Scope)
+	if scope == "" || scope == "run" {
+		return ""
+	}
+	if ln, err := p.store.Lanes().Get(ctx, runID, scope); err == nil && ln != nil {
+		return strings.TrimSpace(ln.RecipeName)
+	}
+	return scope
+}
+
+// ProcessPendingDirectives scans active plan_import, recipe_edit, and planner_request
+// directives for runID and executes a Planner thread for each.
 func (p *Planner) ProcessPendingDirectives(ctx context.Context, runID string) ([]*Result, error) {
 	if p.store == nil {
 		return nil, errors.New("orch/planner: store is required")
 	}
 	dirs, err := p.store.Directives().List(ctx, store.DirectiveFilter{
 		RunID:      runID,
-		Kinds:      []store.DirectiveKind{store.DirectivePlanImport, store.DirectiveRecipeEdit},
+		Kinds:      []store.DirectiveKind{store.DirectivePlanImport, store.DirectiveRecipeEdit, store.DirectiveInstruction},
 		ActiveOnly: true,
 	})
 	if err != nil {
 		return nil, err
 	}
-	var results []*Result
+	var (
+		results []*Result
+		errs    []error
+	)
 	for i := range dirs {
-		res, hErr := p.HandleDirective(ctx, runID, dirs[i])
+		d := dirs[i]
+		if d.Kind == store.DirectiveInstruction && !strings.HasPrefix(strings.TrimSpace(d.Ref), plannerRefPrefix) {
+			continue
+		}
+		res, hErr := p.HandleDirective(ctx, runID, d)
 		if hErr != nil {
-			return results, hErr
+			errs = append(errs, hErr)
+			continue
 		}
 		results = append(results, res)
 	}
-	return results, nil
+	return results, errors.Join(errs...)
 }
 
 // HandleSignal triggers a fresh Planner thread in response to a Controller or Dispatcher signal.
@@ -649,10 +696,11 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 	}
 
 	var (
-		reconciled *Reconciliation
-		applied    AppliedChanges
-		decisions  []store.Decision
-		turnUsage  model.Usage
+		reconciled   *Reconciliation
+		applied      AppliedChanges
+		decisions    []store.Decision
+		turnUsage    model.Usage
+		lastApplyErr error
 	)
 
 	applyOnce := func(callCtx context.Context, rec Reconciliation, usage model.Usage) (string, error) {
@@ -660,12 +708,15 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 			return FormatReconciliationSummary(runID, effectiveRef, *reconciled, applied), nil
 		}
 		cp := rec.Clone()
-		reconciled = &cp
-		var applyErr error
-		applied, decisions, applyErr = p.applyReconciliation(callCtx, *run, th.ID, turnRec.ID, effectiveRef, cp, usage, p.clock.Now().Sub(start))
+		curApplied, curDecisions, applyErr := p.applyReconciliation(callCtx, *run, th.ID, turnRec.ID, effectiveRef, cp, usage, p.clock.Now().Sub(start))
 		if applyErr != nil {
+			lastApplyErr = applyErr
 			return "", applyErr
 		}
+		reconciled = &cp
+		applied = curApplied
+		decisions = curDecisions
+		lastApplyErr = nil
 		return FormatReconciliationSummary(runID, effectiveRef, cp, applied), nil
 	}
 
@@ -682,7 +733,12 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 		if err := json.Unmarshal(raw, &rp); err != nil {
 			return "", fmt.Errorf("decode %s: %w", ToolReadPlan, err)
 		}
-		ref := cmp.Or(strings.TrimSpace(rp.Ref), effectiveRef, run.PlanRef)
+		reqRef := strings.TrimSpace(rp.Ref)
+		pinnedRef := cmp.Or(effectiveRef, strings.TrimSpace(run.PlanRef))
+		if pinnedRef != "" && reqRef != "" && reqRef != effectiveRef && reqRef != strings.TrimSpace(run.PlanRef) {
+			return "", fmt.Errorf("%w: read.plan ref %q does not match pinned plan %q", store.ErrInvalidArgument, reqRef, pinnedRef)
+		}
+		ref := cmp.Or(reqRef, pinnedRef)
 		doc, readErr := p.cfg.PlanReader.ReadPlan(callCtx, ref)
 		if readErr != nil {
 			return "", readErr
@@ -749,7 +805,7 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 	}
 
 	// Support single-turn responses where submit_reconciliation was emitted on an end_turn response or JSON text.
-	if loopErr == nil && reconciled == nil && loopRes != nil {
+	if loopErr == nil && reconciled == nil && lastApplyErr == nil && loopRes != nil {
 		extracted, extErr := extractReconciliationFromResponse(loopRes.Response)
 		if extErr != nil {
 			loopErr = extErr
@@ -761,7 +817,11 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 	}
 
 	if loopErr == nil && reconciled == nil {
-		loopErr = fmt.Errorf("orch/planner: model did not call %s", ToolSubmitReconciliation)
+		if lastApplyErr != nil {
+			loopErr = lastApplyErr
+		} else {
+			loopErr = fmt.Errorf("orch/planner: model did not call %s", ToolSubmitReconciliation)
+		}
 	}
 
 	var summary string
@@ -971,6 +1031,43 @@ func (p *Planner) applyReconciliation(
 		return nil
 	}
 
+	for i := range rec.BacklogDiff.Update {
+		itemID := strings.TrimSpace(rec.BacklogDiff.Update[i].ID)
+		if itemID == "" {
+			continue
+		}
+		if _, err := p.store.Backlog().Get(ctx, run.ID, itemID); err != nil {
+			return applied, decisions, err
+		}
+	}
+	for _, drop := range rec.BacklogDiff.Drop {
+		itemID := strings.TrimSpace(drop.ID)
+		if itemID == "" {
+			continue
+		}
+		if _, err := p.store.Backlog().Get(ctx, run.ID, itemID); err != nil {
+			return applied, decisions, err
+		}
+	}
+	for _, stopSpec := range rec.LanesToStop {
+		laneID := strings.TrimSpace(stopSpec.LaneID)
+		if laneID == "" {
+			continue
+		}
+		if _, err := p.store.Lanes().Get(ctx, run.ID, laneID); err != nil {
+			return applied, decisions, err
+		}
+	}
+	for _, rebriefSpec := range rec.LanesToRebrief {
+		laneID := strings.TrimSpace(rebriefSpec.LaneID)
+		if laneID == "" {
+			continue
+		}
+		if _, err := p.store.Lanes().Get(ctx, run.ID, laneID); err != nil {
+			return applied, decisions, err
+		}
+	}
+
 	newObj := strings.TrimSpace(rec.Objective)
 	newPlanRef := cmp.Or(strings.TrimSpace(planRef), run.PlanRef)
 	if (newObj != "" && newObj != run.Objective) || (newPlanRef != "" && newPlanRef != run.PlanRef) {
@@ -1116,6 +1213,9 @@ func (p *Planner) applyReconciliation(
 		if err != nil {
 			return applied, decisions, err
 		}
+		if ln.Status.Terminal() {
+			continue
+		}
 		reason := cmp.Or(strings.TrimSpace(stopSpec.Reason), "stopped by plan reconciliation")
 		if p.driver != nil && (ln.SessionID != "" || ln.TerminalID != "") {
 			if err := p.driver.Stop(ctx, lane.StopRequest{
@@ -1136,7 +1236,9 @@ func (p *Planner) applyReconciliation(
 		if ln.ItemID != "" && !droppedSet[ln.ItemID] {
 			if item, getErr := p.store.Backlog().Get(ctx, run.ID, ln.ItemID); getErr == nil && item != nil && item.Status == store.BacklogInProgress {
 				item.Status = store.BacklogBlocked
-				_ = p.store.Backlog().Update(ctx, *item, ActorPlanner, "lane stopped by plan reconciliation: "+reason)
+				if err := p.store.Backlog().Update(ctx, *item, ActorPlanner, "lane stopped by plan reconciliation: "+reason); err != nil {
+					return applied, decisions, err
+				}
 			}
 		}
 		applied.StoppedLanes = append(applied.StoppedLanes, ln.ID)
@@ -1288,8 +1390,17 @@ func (p *Planner) registerReconcileAsk(
 		Status:    store.DirectiveActive,
 		CreatedAt: now,
 	}
-	if err := p.store.Directives().Add(ctx, dir); err != nil {
+	if err := p.store.Directives().Add(ctx, dir); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		return controller.OwnerAsk{}, err
+	}
+	if ask.LaneID != "" {
+		if ln, err := p.store.Lanes().Get(ctx, runID, ask.LaneID); err == nil && ln != nil && ln.Status == lane.StatusRunning {
+			ln.Status = lane.StatusBlocked
+			ln.LastEventAt = now
+			if err := p.store.Lanes().Upsert(ctx, *ln); err != nil {
+				return controller.OwnerAsk{}, err
+			}
+		}
 	}
 	return ask, nil
 }

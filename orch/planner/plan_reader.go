@@ -3,6 +3,7 @@ package planner
 import (
 	"context"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 const (
 	PlanSourceFile       = "file"
 	PlanSourceNebulaPost = "nebula_post"
+	DefaultMaxPlanBytes  = 1 << 20
 )
 
 // PlanDocument is the resolved text of a plan referenced by file path or Nebula post ID.
@@ -48,6 +50,7 @@ type DefaultPlanReader struct {
 	FetchPost   PostFetcher
 	NebulaBin   string
 	BaseDir     string
+	MaxBytes    int
 	DisableExec bool
 }
 
@@ -120,20 +123,15 @@ func (r *DefaultPlanReader) ReadPlan(ctx context.Context, ref string) (PlanDocum
 	}
 
 	if sourceKind == PlanSourceFile {
-		data, err := os.ReadFile(target)
-		if err != nil && r != nil && r.BaseDir != "" && !filepath.IsAbs(target) {
-			if altData, altErr := os.ReadFile(filepath.Join(r.BaseDir, target)); altErr == nil {
-				data, err = altData, nil
-			}
-		}
+		data, err := r.readPlanFile(target)
 		if err != nil {
-			return PlanDocument{}, fmt.Errorf("orch/planner: read plan file %q: %w", target, err)
+			return PlanDocument{}, err
 		}
 		return buildPlanDocument(trimmed, PlanSourceFile, target, string(data)), nil
 	}
 
-	if data, err := os.ReadFile(target); err == nil {
-		return buildPlanDocument(trimmed, PlanSourceFile, target, string(data)), nil
+	if strings.HasPrefix(target, "-") {
+		return PlanDocument{}, fmt.Errorf("%w: invalid nebula post target %q", store.ErrInvalidArgument, target)
 	}
 
 	if r != nil && r.FetchPost != nil {
@@ -152,12 +150,55 @@ func (r *DefaultPlanReader) ReadPlan(ctx context.Context, ref string) (PlanDocum
 	if r != nil && strings.TrimSpace(r.NebulaBin) != "" {
 		bin = strings.TrimSpace(r.NebulaBin)
 	}
-	cmd := exec.CommandContext(ctx, bin, "post", "get", target)
+	cmd := exec.CommandContext(ctx, bin, "post", "get", "--", target)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return PlanDocument{}, fmt.Errorf("orch/planner: fetch nebula post %q: %w (%s)", target, err, strings.TrimSpace(string(out)))
 	}
 	return buildPlanDocument(trimmed, PlanSourceNebulaPost, target, string(out)), nil
+}
+
+func (r *DefaultPlanReader) readPlanFile(target string) ([]byte, error) {
+	resolved := filepath.Clean(target)
+	if r != nil && strings.TrimSpace(r.BaseDir) != "" {
+		baseAbs, err := filepath.Abs(r.BaseDir)
+		if err != nil {
+			return nil, fmt.Errorf("orch/planner: resolve base dir %q: %w", r.BaseDir, err)
+		}
+		candidate := resolved
+		if !filepath.IsAbs(candidate) {
+			candidate = filepath.Join(baseAbs, candidate)
+		}
+		candAbs, err := filepath.Abs(candidate)
+		if err != nil {
+			return nil, fmt.Errorf("orch/planner: resolve plan file %q: %w", target, err)
+		}
+		rel, err := filepath.Rel(baseAbs, candAbs)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("%w: plan path %q escapes base directory %q", store.ErrInvalidArgument, target, r.BaseDir)
+		}
+		resolved = candAbs
+	}
+
+	maxBytes := DefaultMaxPlanBytes
+	if r != nil && r.MaxBytes > 0 {
+		maxBytes = r.MaxBytes
+	}
+
+	f, err := os.Open(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("orch/planner: read plan file %q: %w", target, err)
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, int64(maxBytes)+1))
+	if err != nil {
+		return nil, fmt.Errorf("orch/planner: read plan file %q: %w", target, err)
+	}
+	if len(data) > maxBytes {
+		return nil, fmt.Errorf("%w: plan file %q exceeds max size (%d bytes)", store.ErrInvalidArgument, target, maxBytes)
+	}
+	return data, nil
 }
 
 func buildPlanDocument(ref, sourceKind, target, content string) PlanDocument {

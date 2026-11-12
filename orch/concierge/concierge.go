@@ -813,13 +813,13 @@ func (c *Concierge) execDecisionsSince(ctx context.Context, runID string, p Deci
 	if limit <= 0 {
 		limit = DefaultDecisionLim
 	}
+	hasCursor := p.SinceSeq > 0 || strings.TrimSpace(p.SinceTime) != ""
 	filter := store.DecisionFilter{
 		RunID:    runID,
 		LaneID:   strings.TrimSpace(p.LaneID),
 		Actor:    strings.TrimSpace(p.Actor),
 		Category: store.DecisionCategory(strings.TrimSpace(p.Category)),
 		SinceSeq: p.SinceSeq,
-		Limit:    limit,
 	}
 	if strings.TrimSpace(p.SinceTime) != "" {
 		t, err := parseSinceTime(c.clock.Now().UTC(), p.SinceTime)
@@ -834,8 +834,23 @@ func (c *Concierge) execDecisionsSince(ctx context.Context, runID string, p Deci
 		return "", err
 	}
 
+	total := len(decs)
+	truncated := false
+	if total > limit {
+		truncated = true
+		if hasCursor {
+			decs = decs[:limit]
+		} else {
+			decs = decs[total-limit:]
+		}
+	}
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "Decisions (%d):\n", len(decs))
+	if truncated {
+		fmt.Fprintf(&b, "Decisions (%d shown of %d, next since_seq=%d):\n", len(decs), total, decs[len(decs)-1].Seq)
+	} else {
+		fmt.Fprintf(&b, "Decisions (%d):\n", len(decs))
+	}
 	if len(decs) == 0 {
 		b.WriteString("(none)\n")
 		return b.String(), nil
@@ -972,12 +987,15 @@ func (c *Concierge) execDirectiveSubmit(
 		dirID = c.nextID("dir")
 	}
 
+	scope := strings.TrimSpace(p.Scope)
+	laneID := c.resolveLaneScope(ctx, runID, scope)
+
 	dir := store.Directive{
 		ID:        dirID,
 		RunID:     runID,
 		Kind:      kind,
 		Source:    store.DirectiveSourceConcierge,
-		Scope:     strings.TrimSpace(p.Scope),
+		Scope:     scope,
 		Text:      text,
 		Ref:       ref,
 		ExpiresAt: expiresAt,
@@ -993,7 +1011,7 @@ func (c *Concierge) execDirectiveSubmit(
 		RunID:   runID,
 		Kind:    store.EventOwnerMessage,
 		Class:   store.EventClassJudgment,
-		LaneID:  dir.Scope,
+		LaneID:  laneID,
 		Source:  ActorConcierge,
 		Summary: fmt.Sprintf("directive %s (%s): %s", dir.ID, dir.Kind, cmp.Or(dir.Text, dir.Ref)),
 		Payload: evPayload,
@@ -1003,16 +1021,21 @@ func (c *Concierge) execDirectiveSubmit(
 	resultMsg := fmt.Sprintf("submitted directive %s (kind=%s status=%s text=%q ref=%q)",
 		dir.ID, dir.Kind, dir.Status, dir.Text, dir.Ref)
 
+	var handlerErr error
 	if c.cfg.OnDirective != nil {
 		handlerSummary, hErr := c.cfg.OnDirective(ctx, runID, dir)
 		if hErr != nil {
-			return "", hErr
-		}
-		if updatedDir, getErr := c.store.Directives().Get(ctx, runID, dir.ID); getErr == nil && updatedDir != nil {
-			dir = *updatedDir
-		}
-		if strings.TrimSpace(handlerSummary) != "" {
-			resultMsg += "\n" + strings.TrimSpace(handlerSummary)
+			handlerErr = hErr
+			_ = c.store.Directives().UpdateStatus(context.WithoutCancel(ctx), runID, dir.ID, store.DirectiveRevoked)
+			dir.Status = store.DirectiveRevoked
+			resultMsg = fmt.Sprintf("directive %s (%s) handler failed: %v", dir.ID, dir.Kind, hErr)
+		} else {
+			if updatedDir, getErr := c.store.Directives().Get(ctx, runID, dir.ID); getErr == nil && updatedDir != nil {
+				dir = *updatedDir
+			}
+			if strings.TrimSpace(handlerSummary) != "" {
+				resultMsg += "\n" + strings.TrimSpace(handlerSummary)
+			}
 		}
 	}
 
@@ -1028,7 +1051,9 @@ func (c *Concierge) execDirectiveSubmit(
 			usage = state.turnUsage
 			state.turnUsageRecorded = true
 		}
-		state.submittedDirectives = append(state.submittedDirectives, dir)
+		if handlerErr == nil {
+			state.submittedDirectives = append(state.submittedDirectives, dir)
+		}
 	}
 
 	dec, err := c.store.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
@@ -1037,12 +1062,12 @@ func (c *Concierge) execDirectiveSubmit(
 		Actor:        ActorConcierge,
 		ThreadID:     threadID,
 		TurnID:       turnID,
-		LaneID:       dir.Scope,
+		LaneID:       laneID,
 		Tool:         ToolDirectiveSubmit,
 		Reason:       cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("owner submitted %s directive %s", p.Kind, dir.ID)),
 		Result:       resultMsg,
 		Args:         slices.Clone(rawArgs),
-		Vetted:       true,
+		Vetted:       handlerErr == nil,
 		InputTokens:  usage.InputTokens,
 		OutputTokens: usage.OutputTokens,
 		CostUSD:      usage.CostUSD,
@@ -1054,8 +1079,22 @@ func (c *Concierge) execDirectiveSubmit(
 	if state != nil {
 		state.decisions = append(state.decisions, dec)
 	}
+	if handlerErr != nil {
+		return "", handlerErr
+	}
 
 	return resultMsg, nil
+}
+
+func (c *Concierge) resolveLaneScope(ctx context.Context, runID, scope string) string {
+	scope = strings.TrimSpace(scope)
+	if scope == "" || scope == "run" {
+		return ""
+	}
+	if ln, err := c.store.Lanes().Get(ctx, runID, scope); err == nil && ln != nil {
+		return ln.ID
+	}
+	return ""
 }
 
 // VerifyAnswerCitations checks that answer cites at least one concrete fact from
@@ -1076,6 +1115,8 @@ func VerifyAnswerCitations(
 	seenCandidates := make(map[string]bool)
 	knownLanes := make(map[string]bool)
 	knownItems := make(map[string]bool)
+	knownDirectives := make(map[string]bool)
+	knownDecisions := make(map[string]bool)
 
 	addCandidate := func(s string) {
 		s = strings.TrimSpace(s)
@@ -1086,81 +1127,92 @@ func VerifyAnswerCitations(
 	}
 
 	addCandidate(runID)
-	if run, err := st.Runs().Get(ctx, runID); err == nil && run != nil {
+	run, err := st.Runs().Get(ctx, runID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	if run != nil {
 		addCandidate(run.ID)
 		addCandidate(run.PlanRef)
-		addCandidate(run.DefaultRecipe)
 		if run.Lease != nil {
 			addCandidate(run.Lease.HolderID)
 		}
 	}
 
-	if items, err := st.Backlog().List(ctx, store.BacklogFilter{RunID: runID}); err == nil {
-		for i := range items {
-			it := items[i]
-			knownItems[it.ID] = true
-			addCandidate(it.ID)
-			addCandidate(it.Title)
+	items, err := st.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		it := items[i]
+		knownItems[it.ID] = true
+		addCandidate(it.ID)
+		addCandidate(it.Title)
+	}
+
+	lanes, err := st.Lanes().List(ctx, store.LaneFilter{RunID: runID})
+	if err != nil {
+		return nil, err
+	}
+	for i := range lanes {
+		ln := lanes[i]
+		knownLanes[ln.ID] = true
+		addCandidate(ln.ID)
+		addCandidate(ln.SessionID)
+		addCandidate(ln.TerminalID)
+		if ln.PR > 0 {
+			addCandidate(fmt.Sprintf("#%d", ln.PR))
+			addCandidate(fmt.Sprintf("PR %d", ln.PR))
+		}
+		if ln.PRHead != "" {
+			addCandidate(ln.PRHead)
+			if len(ln.PRHead) >= 8 {
+				addCandidate(ln.PRHead[:8])
+			}
+			if len(ln.PRHead) >= 7 {
+				addCandidate(ln.PRHead[:7])
+			}
 		}
 	}
 
-	if lanes, err := st.Lanes().List(ctx, store.LaneFilter{RunID: runID}); err == nil {
-		for i := range lanes {
-			ln := lanes[i]
-			knownLanes[ln.ID] = true
-			addCandidate(ln.ID)
-			addCandidate(ln.Phase)
-			addCandidate(ln.SessionID)
-			addCandidate(ln.TerminalID)
-			if ln.PR > 0 {
-				addCandidate(fmt.Sprintf("#%d", ln.PR))
-				addCandidate(fmt.Sprintf("PR %d", ln.PR))
-			}
-			if ln.PRHead != "" {
-				addCandidate(ln.PRHead)
-				if len(ln.PRHead) >= 8 {
-					addCandidate(ln.PRHead[:8])
-				}
-				if len(ln.PRHead) >= 7 {
-					addCandidate(ln.PRHead[:7])
-				}
-			}
-		}
+	dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: runID})
+	if err != nil {
+		return nil, err
 	}
-
-	if dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: runID}); err == nil {
-		for i := range dirs {
-			d := dirs[i]
-			addCandidate(d.ID)
-			addCandidate(d.Ref)
-			addCandidate(d.Text)
-		}
+	for i := range dirs {
+		d := dirs[i]
+		knownDirectives[d.ID] = true
+		addCandidate(d.ID)
+		addCandidate(d.Ref)
+		addCandidate(d.Text)
 	}
 	for i := range submitted {
 		d := submitted[i]
+		knownDirectives[d.ID] = true
 		addCandidate(d.ID)
 		addCandidate(d.Ref)
 		addCandidate(d.Text)
 	}
 
-	if decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: runID}); err == nil {
-		for i := range decs {
-			d := decs[i]
-			addCandidate(d.ID)
-			addCandidate(d.Tool)
-			addCandidate(fmt.Sprintf("seq %d", d.Seq))
-			addCandidate(fmt.Sprintf("seq=%d", d.Seq))
-			addCandidate(fmt.Sprintf("#%d", d.Seq))
-		}
+	decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: runID})
+	if err != nil {
+		return nil, err
+	}
+	for i := range decs {
+		d := decs[i]
+		knownDecisions[d.ID] = true
+		addCandidate(d.ID)
+		addCandidate(fmt.Sprintf("seq %d", d.Seq))
+		addCandidate(fmt.Sprintf("seq=%d", d.Seq))
 	}
 
-	if recs, err := st.Recipes().ListLatest(ctx, runID); err == nil {
-		for i := range recs {
-			r := recs[i]
-			addCandidate(r.Name)
-			addCandidate(fmt.Sprintf("%s@v%d", r.Name, r.Version))
-			addCandidate(fmt.Sprintf("v%d", r.Version))
-		}
+	recs, err := st.Recipes().ListLatest(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range recs {
+		r := recs[i]
+		addCandidate(fmt.Sprintf("%s@v%d", r.Name, r.Version))
 	}
 
 	lowerAnswer := strings.ToLower(trimmed)
@@ -1179,6 +1231,16 @@ func VerifyAnswerCitations(
 	for _, tok := range extractPrefixedTokens(trimmed, "item-") {
 		if !knownItems[tok] {
 			return cited, fmt.Errorf("%w: answer cites unknown backlog item %q", ErrUncitedAnswer, tok)
+		}
+	}
+	for _, tok := range extractPrefixedTokens(trimmed, "dir-") {
+		if !knownDirectives[tok] {
+			return cited, fmt.Errorf("%w: answer cites unknown directive %q", ErrUncitedAnswer, tok)
+		}
+	}
+	for _, tok := range extractPrefixedTokens(trimmed, "dec-") {
+		if !knownDecisions[tok] {
+			return cited, fmt.Errorf("%w: answer cites unknown decision %q", ErrUncitedAnswer, tok)
 		}
 	}
 

@@ -3,6 +3,7 @@ package planner_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -620,4 +621,288 @@ func TestHandleSignal_ReplanOnControllerSignal(t *testing.T) {
 	}
 
 	var _ []controller.OwnerAsk = res.Applied.OwnerAsks
+}
+
+func TestReconcile_ApplyFailureAndRetry(t *testing.T) {
+	t.Parallel()
+
+	t.Run("FailurePropagatesAndKeepsDirectiveActive", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		clk, st, drv := seedPlannerStore(t)
+
+		badInput, _ := json.Marshal(planner.Reconciliation{
+			Summary: "Stop nonexistent lane",
+			LanesToStop: []planner.LaneStopSpec{
+				{LaneID: "lane-does-not-exist", Reason: "obsolete"},
+			},
+		})
+		client := model.NewFakeClient(
+			model.Response{
+				ID:         "msg_bad_1",
+				Model:      planner.DefaultModel,
+				StopReason: model.StopReasonToolUse,
+				Message: model.NewAssistantMessage(
+					model.NewToolUseBlock("tu_bad_1", planner.ToolSubmitReconciliation, badInput),
+				),
+			},
+			model.Response{
+				ID:         "msg_bad_2",
+				Model:      planner.DefaultModel,
+				StopReason: model.StopReasonEndTurn,
+				Message: model.NewAssistantMessage(
+					model.NewTextBlock("Unable to stop unknown lane."),
+				),
+			},
+		)
+
+		dir := store.Directive{
+			ID:     "dir-plan-fail",
+			RunID:  "run-1",
+			Kind:   store.DirectivePlanImport,
+			Source: store.DirectiveSourceConcierge,
+			Ref:    filepath.Join("testdata", "plan_v2.md"),
+			Status: store.DirectiveActive,
+		}
+		if err := st.Directives().Add(ctx, dir); err != nil {
+			t.Fatalf("Add directive: %v", err)
+		}
+
+		pln := planner.New(planner.Config{}, st, drv, clk, client)
+		res, err := pln.HandleDirective(ctx, "run-1", dir)
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("expected store.ErrNotFound from failing apply, got %v", err)
+		}
+		if res == nil || res.Reconciliation != nil {
+			t.Fatalf("expected nil Reconciliation on failed apply, got %+v", res)
+		}
+		storedDir, err := st.Directives().Get(ctx, "run-1", "dir-plan-fail")
+		if err != nil {
+			t.Fatalf("Get directive: %v", err)
+		}
+		if storedDir.Status != store.DirectiveActive {
+			t.Fatalf("expected directive to stay active on failed apply, got %q", storedDir.Status)
+		}
+	})
+
+	t.Run("ModelRetryAppliesSecondAttempt", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		clk, st, drv := seedPlannerStore(t)
+
+		badInput, _ := json.Marshal(planner.Reconciliation{
+			LanesToStop: []planner.LaneStopSpec{
+				{LaneID: "lane-does-not-exist", Reason: "typo"},
+			},
+		})
+		goodInput, _ := json.Marshal(planner.Reconciliation{
+			Summary: "Stopped lane-legacy on retry.",
+			LanesToStop: []planner.LaneStopSpec{
+				{LaneID: "lane-legacy", Reason: "superseded"},
+			},
+		})
+		client := model.NewFakeClient(
+			model.Response{
+				ID:         "msg_retry_1",
+				Model:      planner.DefaultModel,
+				StopReason: model.StopReasonToolUse,
+				Message: model.NewAssistantMessage(
+					model.NewToolUseBlock("tu_retry_1", planner.ToolSubmitReconciliation, badInput),
+				),
+			},
+			model.Response{
+				ID:         "msg_retry_2",
+				Model:      planner.DefaultModel,
+				StopReason: model.StopReasonToolUse,
+				Message: model.NewAssistantMessage(
+					model.NewToolUseBlock("tu_retry_2", planner.ToolSubmitReconciliation, goodInput),
+				),
+			},
+			model.Response{
+				ID:         "msg_retry_3",
+				Model:      planner.DefaultModel,
+				StopReason: model.StopReasonEndTurn,
+				Message: model.NewAssistantMessage(
+					model.NewTextBlock("Stopped lane-legacy on retry."),
+				),
+			},
+		)
+
+		pln := planner.New(planner.Config{}, st, drv, clk, client)
+		res, err := pln.Replan(ctx, "run-1", "retry test")
+		if err != nil {
+			t.Fatalf("Replan retry: %v", err)
+		}
+		if !slices.Equal(res.Applied.StoppedLanes, []string{"lane-legacy"}) {
+			t.Fatalf("StoppedLanes = %v, want [lane-legacy]", res.Applied.StoppedLanes)
+		}
+	})
+}
+
+func TestReconcile_SkipsTerminalLaneOnStopAndBlocksLaneOnAsk(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	clk, st, drv := seedPlannerStore(t)
+
+	doneLane := lane.Lane{
+		ID:     "lane-done",
+		RunID:  "run-1",
+		Status: lane.StatusDone,
+	}
+	if err := st.Lanes().Upsert(ctx, doneLane); err != nil {
+		t.Fatalf("Upsert lane-done: %v", err)
+	}
+
+	reconcileInput, _ := json.Marshal(planner.Reconciliation{
+		Summary: "Check terminal lane stop and duplicate ask ID.",
+		LanesToStop: []planner.LaneStopSpec{
+			{LaneID: "lane-done", Reason: "already done"},
+		},
+		Conflicts: []planner.ConflictPoint{
+			{
+				ID:          "ask-dup",
+				Description: "first conflict on lane-alpha",
+				LaneID:      "lane-alpha",
+			},
+			{
+				ID:          "ask-dup",
+				Description: "duplicate ask ID should not fail",
+				LaneID:      "lane-alpha",
+			},
+		},
+	})
+	client := model.NewFakeClient(
+		model.Response{
+			ID:         "msg_term_1",
+			Model:      planner.DefaultModel,
+			StopReason: model.StopReasonEndTurn,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_term_1", planner.ToolSubmitReconciliation, reconcileInput),
+			),
+		},
+	)
+
+	pln := planner.New(planner.Config{}, st, drv, clk, client)
+	res, err := pln.Replan(ctx, "run-1", "terminal lane and ask test")
+	if err != nil {
+		t.Fatalf("Replan: %v", err)
+	}
+	if len(res.Applied.StoppedLanes) != 0 {
+		t.Fatalf("expected terminal lane-done not to be stopped, got %v", res.Applied.StoppedLanes)
+	}
+	gotDone, err := st.Lanes().Get(ctx, "run-1", "lane-done")
+	if err != nil {
+		t.Fatalf("Get lane-done: %v", err)
+	}
+	if gotDone.Status != lane.StatusDone {
+		t.Fatalf("lane-done Status = %q, want %q", gotDone.Status, lane.StatusDone)
+	}
+	gotAlpha, err := st.Lanes().Get(ctx, "run-1", "lane-alpha")
+	if err != nil {
+		t.Fatalf("Get lane-alpha: %v", err)
+	}
+	if gotAlpha.Status != lane.StatusBlocked {
+		t.Fatalf("expected conflict ask on lane-alpha to block lane, got %q", gotAlpha.Status)
+	}
+}
+
+func TestPlanner_DirectiveLifecycleAndOnPlannerRequest(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	clk, st, drv := seedPlannerStore(t)
+
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:     "planreq-1",
+		RunID:  "run-1",
+		Kind:   store.DirectiveInstruction,
+		Source: store.DirectiveSourceDispatcher,
+		Ref:    "planner_request:planreq-1",
+		Text:   "dispatcher requested replan",
+		Status: store.DirectiveActive,
+	}); err != nil {
+		t.Fatalf("Add planreq-1: %v", err)
+	}
+
+	reconcileInput, _ := json.Marshal(planner.Reconciliation{
+		Summary: "Replanned for dispatcher request.",
+	})
+	client := model.NewFakeClient(
+		model.Response{
+			ID:         "msg_req_1",
+			Model:      planner.DefaultModel,
+			StopReason: model.StopReasonEndTurn,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_req_1", planner.ToolSubmitReconciliation, reconcileInput),
+			),
+		},
+	)
+
+	pln := planner.New(planner.Config{}, st, drv, clk, client)
+	if err := pln.OnPlannerRequest(ctx, "run-1", "dispatcher requested replan", ""); err != nil {
+		t.Fatalf("OnPlannerRequest: %v", err)
+	}
+	reqDir, err := st.Directives().Get(ctx, "run-1", "planreq-1")
+	if err != nil {
+		t.Fatalf("Get planreq-1: %v", err)
+	}
+	if reqDir.Status != store.DirectiveHandled {
+		t.Fatalf("planreq-1 Status = %q, want %q", reqDir.Status, store.DirectiveHandled)
+	}
+
+	standingDir, err := st.Directives().Get(ctx, "run-1", "dir-rule-store-cap")
+	if err != nil {
+		t.Fatalf("Get standing directive: %v", err)
+	}
+	if _, err := pln.HandleDirective(ctx, "run-1", *standingDir); !errors.Is(err, store.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument when passing standing directive to HandleDirective, got %v", err)
+	}
+}
+
+func TestPlanReader_ValidationAndConfinement(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	for _, tc := range []struct {
+		ref      string
+		wantKind string
+		wantTgt  string
+	}{
+		{"post:5aaec193-a1f1-4009-aa55-f6174d583653", planner.PlanSourceNebulaPost, "5aaec193-a1f1-4009-aa55-f6174d583653"},
+		{"nebula://post/abc-123", planner.PlanSourceNebulaPost, "abc-123"},
+		{"5aaec193-a1f1-4009-aa55-f6174d583653", planner.PlanSourceNebulaPost, "5aaec193-a1f1-4009-aa55-f6174d583653"},
+		{"file://testdata/plan_v2.md", planner.PlanSourceFile, "testdata/plan_v2.md"},
+		{"testdata/plan_v2.md", planner.PlanSourceFile, "testdata/plan_v2.md"},
+	} {
+		kind, tgt := planner.ParsePlanRef(tc.ref)
+		if kind != tc.wantKind || tgt != tc.wantTgt {
+			t.Fatalf("ParsePlanRef(%q) = (%q, %q), want (%q, %q)", tc.ref, kind, tgt, tc.wantKind, tc.wantTgt)
+		}
+	}
+
+	reader := &planner.DefaultPlanReader{
+		BaseDir:     "testdata",
+		DisableExec: true,
+	}
+	doc, err := reader.ReadPlan(ctx, "plan_v2.md")
+	if err != nil {
+		t.Fatalf("ReadPlan within BaseDir: %v", err)
+	}
+	if doc.SourceKind != planner.PlanSourceFile || doc.Title == "" {
+		t.Fatalf("unexpected doc: %+v", doc)
+	}
+
+	if _, err := reader.ReadPlan(ctx, "../planner.go"); !errors.Is(err, store.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument for path escaping BaseDir, got %v", err)
+	}
+	if _, err := reader.ReadPlan(ctx, "post:--help"); !errors.Is(err, store.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument for flag-like post target, got %v", err)
+	}
+
+	smallReader := &planner.DefaultPlanReader{
+		BaseDir:  "testdata",
+		MaxBytes: 16,
+	}
+	if _, err := smallReader.ReadPlan(ctx, "plan_v2.md"); !errors.Is(err, store.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument when plan exceeds MaxBytes, got %v", err)
+	}
 }
