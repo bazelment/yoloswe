@@ -55,6 +55,8 @@ type MomentResult struct {
 	Agreed              bool
 	BaselineAgreed      bool
 	DecideDontAsk       bool
+	ForbidOwnerAsk      bool
+	Grounded            bool
 	AskedOwner          bool
 	BaselineAskedOwner  bool
 }
@@ -78,6 +80,12 @@ type EvalReport struct {
 	MomentResults              []MomentResult
 	QuestionResults            []QuestionResult
 	TotalMoments               int
+	GroundedMoments            int
+	SyntheticMoments           int
+	SyntheticAgreed            int
+	SyntheticForbidAskMoments  int
+	SyntheticUnnecessaryAsks   int
+	EvidencedCorrections       int
 	DispatcherAgreed           int
 	BaselineAgreed             int
 	AgreementRate              float64
@@ -105,8 +113,18 @@ type EvalReport struct {
 	TokensPass                 bool
 }
 
-// AllPass reports whether all five Validation Gate 2 bars passed.
-func (r *EvalReport) AllPass() bool {
+// Verdict labels never overstate the evidence: "FAIL" if any bar failed,
+// "INCONCLUSIVE" if every bar passed but no owner correction is evidenced (the
+// unnecessary-ask bar compares against corrections that were never found in
+// the source runs), otherwise "PASS".
+const (
+	VerdictPass         = "PASS"
+	VerdictFail         = "FAIL"
+	VerdictInconclusive = "INCONCLUSIVE"
+)
+
+// BarsPass reports whether all five Validation Gate 2 bars passed on the evidence at hand.
+func (r *EvalReport) BarsPass() bool {
 	return r != nil &&
 		r.AgreementPass &&
 		r.AskRatePass &&
@@ -115,6 +133,21 @@ func (r *EvalReport) AllPass() bool {
 		r.TokensPass
 }
 
+// Verdict is the overall Gate 2 verdict, see VerdictPass/VerdictFail/VerdictInconclusive.
+func (r *EvalReport) Verdict() string {
+	switch {
+	case !r.BarsPass():
+		return VerdictFail
+	case r.EvidencedCorrections == 0:
+		return VerdictInconclusive
+	default:
+		return VerdictPass
+	}
+}
+
+// AllPass reports whether Verdict is PASS: every bar passed and the evidence behind them is real.
+func (r *EvalReport) AllPass() bool { return r != nil && r.Verdict() == VerdictPass }
+
 // FormatReport renders a human-readable scorecard comparing every Gate 2 metric against the plan's bar.
 func (r *EvalReport) FormatReport() string {
 	if r == nil {
@@ -122,18 +155,19 @@ func (r *EvalReport) FormatReport() string {
 	}
 	var b strings.Builder
 	b.WriteString("=== Validation Gate 2: Historical Decision Replay Scorecard ===\n")
-	fmt.Fprintf(&b, "Moments evaluated:   %d\n", r.TotalMoments)
+	fmt.Fprintf(&b, "Moments evaluated:   %d (%d verified against run records, %d synthetic - not counted toward agreement/ask bars)\n", r.TotalMoments, r.GroundedMoments, r.SyntheticMoments)
+	fmt.Fprintf(&b, "Owner corrections evidenced in run history: %d\n", r.EvidencedCorrections)
 	fmt.Fprintf(&b, "Questions evaluated: %d\n\n", r.TotalQuestions)
 
 	b.WriteString("| Metric | Score | Baseline | Plan Bar | Status |\n")
 	b.WriteString("|---|---|---|---|---|\n")
-	fmt.Fprintf(&b, "| Owner-endorsed agreement | %.1f%% (%d/%d) | %.1f%% (%d/%d) | >= baseline (%.1f%%) | %s |\n",
-		r.AgreementRate*100, r.DispatcherAgreed, r.TotalMoments,
-		r.BaselineAgreementRate*100, r.BaselineAgreed, r.TotalMoments,
+	fmt.Fprintf(&b, "| Agreement (verified moments) | %.1f%% (%d/%d) | %.1f%% (%d/%d) | >= baseline (%.1f%%) | %s |\n",
+		r.AgreementRate*100, r.DispatcherAgreed, r.GroundedMoments,
+		r.BaselineAgreementRate*100, r.BaselineAgreed, r.GroundedMoments,
 		r.BaselineAgreementRate*100,
 		passLabel(r.AgreementPass),
 	)
-	fmt.Fprintf(&b, "| Unnecessary owner.ask rate | %.1f%% (%d/%d) | %.1f%% (%d/%d) | <= 1/3 baseline (<= %.1f%%) | %s |\n",
+	fmt.Fprintf(&b, "| Unnecessary owner.ask rate (verified moments) | %.1f%% (%d/%d) | %.1f%% (%d/%d) | <= 1/3 baseline (<= %.1f%%) | %s |\n",
 		r.UnnecessaryAskRate*100, r.DispatcherUnnecessaryAsks, r.DecideDontAskMoments,
 		r.BaselineUnnecessaryAskRate*100, r.BaselineUnnecessaryAsks, r.DecideDontAskMoments,
 		(r.BaselineUnnecessaryAskRate*PassBarAskRateRatio)*100,
@@ -152,7 +186,12 @@ func (r *EvalReport) FormatReport() string {
 		PassBarMaxMedianInputTokens,
 		passLabel(r.TokensPass),
 	)
-	fmt.Fprintf(&b, "\nOverall Gate 2 Verdict: %s\n", passLabel(r.AllPass()))
+	fmt.Fprintf(&b, "\nSynthetic contrast (informational, not a bar): agreement %d/%d, owner.ask on %d/%d forbid-ask moments\n",
+		r.SyntheticAgreed, r.SyntheticMoments, r.SyntheticUnnecessaryAsks, r.SyntheticForbidAskMoments)
+	fmt.Fprintf(&b, "\nOverall Gate 2 Verdict: %s\n", r.Verdict())
+	if r.Verdict() == VerdictInconclusive {
+		b.WriteString("All bars passed, but no owner correction is evidenced in the source runs, so the unnecessary-ask bar is not established.\n")
+	}
 	return b.String()
 }
 
@@ -484,13 +523,25 @@ func EvaluateMoment(
 		}
 	}
 
+	// A proposed owner.ask that the vetter rejected is still an ask attempt: the
+	// dispatcher chose to ask, so it counts against the unnecessary-ask bar.
+	decisions, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: m.RunID})
+	if err != nil {
+		return MomentResult{}, fmt.Errorf("list decisions: %w", err)
+	}
+	for i := min(len(m.State.Decisions), len(decisions)); i < len(decisions); i++ {
+		if dispatcher.NormalizeToolName(decisions[i].Tool) == dispatcher.ToolOwnerAsk {
+			askedOwner = true
+		}
+	}
+
 	auditViolations := auditAcceptedActionsAt(m.Timestamp, m.State, m.Events, res.Accepted)
 	vetterRejections := len(res.Rejected)
 	auditCount := len(auditViolations)
 	invViolations := vetterRejections + auditCount
 	rejectedReasons := append(slices.Clone(res.Rejected), auditViolations...)
 
-	agreed := checkMomentAgreement(m.OwnerFollowUp, res.Accepted, askedOwner)
+	agreed := invViolations == 0 && checkMomentAgreement(m.OwnerFollowUp, res.Accepted, askedOwner)
 	baselineAgreed := m.OwnerFollowUp.Verdict == VerdictEndorsed &&
 		matchesExpectedToolAndTarget(m.OwnerFollowUp, m.Baseline.Tool, m.Baseline.Target, m.Baseline.AskedOwner)
 
@@ -519,6 +570,8 @@ func EvaluateMoment(
 		Agreed:              agreed,
 		BaselineAgreed:      baselineAgreed,
 		DecideDontAsk:       m.OwnerFollowUp.DecideDontAsk,
+		ForbidOwnerAsk:      m.OwnerFollowUp.ForbidOwnerAsk || m.OwnerFollowUp.DecideDontAsk,
+		Grounded:            m.Grounding == GroundingVerified,
 		AskedOwner:          askedOwner,
 		BaselineAskedOwner:  m.Baseline.AskedOwner || dispatcher.NormalizeToolName(m.Baseline.Tool) == dispatcher.ToolOwnerAsk,
 	}, nil
@@ -543,6 +596,9 @@ func EvaluateQuestion(
 
 	lowerAns := strings.ToLower(ans.Answer)
 	var missingFacts []string
+	if len(ans.ToolCalls) == 0 {
+		missingFacts = append(missingFacts, "no_store_tool_called")
+	}
 	for _, fg := range q.RequiredFacts {
 		matched := false
 		for _, tok := range fg.AnyOf {
@@ -578,6 +634,9 @@ func EvaluateQuestion(
 }
 
 // ComputeReport aggregates moment and question results into an EvalReport.
+// Agreement and unnecessary-ask bars are measured on verified moments only;
+// synthetic moments are summarized separately. Invariant, token and concierge
+// bars use every result because they do not depend on a label.
 func ComputeReport(moments []MomentResult, questions []QuestionResult) *EvalReport {
 	rep := &EvalReport{
 		MomentResults:   moments,
@@ -589,19 +648,41 @@ func ComputeReport(moments []MomentResult, questions []QuestionResult) *EvalRepo
 	tokens := make([]int64, 0, len(moments))
 	for i := range moments {
 		m := &moments[i]
-		if m.Agreed {
-			rep.DispatcherAgreed++
-		}
-		if m.BaselineAgreed {
-			rep.BaselineAgreed++
-		}
 		if m.AskedOwner {
 			rep.TotalDispatcherAsks++
 		}
 		if m.BaselineAskedOwner {
 			rep.TotalBaselineAsks++
 		}
-		if m.DecideDontAsk {
+		rep.VetterRejections += m.VetterRejections
+		rep.AuditViolations += m.AuditViolations
+		rep.InvariantViolations += m.InvariantViolations
+		tokens = append(tokens, m.InputTokens)
+
+		if !m.Grounded {
+			rep.SyntheticMoments++
+			if m.Agreed {
+				rep.SyntheticAgreed++
+			}
+			if m.ForbidOwnerAsk {
+				rep.SyntheticForbidAskMoments++
+				if m.AskedOwner {
+					rep.SyntheticUnnecessaryAsks++
+				}
+			}
+			continue
+		}
+		rep.GroundedMoments++
+		if m.Verdict == VerdictCorrected {
+			rep.EvidencedCorrections++
+		}
+		if m.Agreed {
+			rep.DispatcherAgreed++
+		}
+		if m.BaselineAgreed {
+			rep.BaselineAgreed++
+		}
+		if m.ForbidOwnerAsk {
 			rep.DecideDontAskMoments++
 			if m.AskedOwner {
 				rep.DispatcherUnnecessaryAsks++
@@ -610,15 +691,11 @@ func ComputeReport(moments []MomentResult, questions []QuestionResult) *EvalRepo
 				rep.BaselineUnnecessaryAsks++
 			}
 		}
-		rep.VetterRejections += m.VetterRejections
-		rep.AuditViolations += m.AuditViolations
-		rep.InvariantViolations += m.InvariantViolations
-		tokens = append(tokens, m.InputTokens)
 	}
 
-	if rep.TotalMoments > 0 {
-		rep.AgreementRate = float64(rep.DispatcherAgreed) / float64(rep.TotalMoments)
-		rep.BaselineAgreementRate = float64(rep.BaselineAgreed) / float64(rep.TotalMoments)
+	if rep.GroundedMoments > 0 {
+		rep.AgreementRate = float64(rep.DispatcherAgreed) / float64(rep.GroundedMoments)
+		rep.BaselineAgreementRate = float64(rep.BaselineAgreed) / float64(rep.GroundedMoments)
 	}
 	if rep.DecideDontAskMoments > 0 {
 		rep.UnnecessaryAskRate = float64(rep.DispatcherUnnecessaryAsks) / float64(rep.DecideDontAskMoments)
@@ -641,15 +718,13 @@ func ComputeReport(moments []MomentResult, questions []QuestionResult) *EvalRepo
 		rep.MaxInputTokens = tokens[len(tokens)-1]
 	}
 
-	rep.AgreementPass = rep.AgreementRate >= rep.BaselineAgreementRate
-	if rep.DecideDontAskMoments == 0 {
-		rep.AskRatePass = rep.TotalDispatcherAsks == 0
-	} else {
-		rep.AskRatePass = rep.UnnecessaryAskRate <= (rep.BaselineUnnecessaryAskRate*PassBarAskRateRatio)+1e-9
-	}
-	rep.InvariantsPass = rep.InvariantViolations <= PassBarMaxInvariantViolation
-	rep.ConciergePass = rep.TotalQuestions == 0 || rep.ConciergeAccuracy >= PassBarMinConciergeAccuracy
-	rep.TokensPass = rep.TotalMoments == 0 || (rep.MedianInputTokens > 0 && rep.MedianInputTokens < PassBarMaxMedianInputTokens)
+	// Nothing measured is never a pass, and 0% against a 0% baseline is not agreement.
+	rep.AgreementPass = rep.GroundedMoments > 0 && rep.AgreementRate > 0 && rep.AgreementRate >= rep.BaselineAgreementRate
+	rep.AskRatePass = rep.GroundedMoments > 0 &&
+		rep.UnnecessaryAskRate <= (rep.BaselineUnnecessaryAskRate*PassBarAskRateRatio)+1e-9
+	rep.InvariantsPass = rep.TotalMoments > 0 && rep.InvariantViolations <= PassBarMaxInvariantViolation
+	rep.ConciergePass = rep.TotalQuestions > 0 && rep.ConciergeAccuracy >= PassBarMinConciergeAccuracy
+	rep.TokensPass = rep.TotalMoments > 0 && rep.MedianInputTokens > 0 && rep.MedianInputTokens < PassBarMaxMedianInputTokens
 
 	return rep
 }
@@ -729,8 +804,20 @@ func hydrateProposedActionIDs(act dispatcher.ProposedAction) dispatcher.Proposed
 
 func extractActionTargets(act dispatcher.ProposedAction) []string {
 	act = hydrateProposedActionIDs(act)
+	var candidates []string
+	if act.LaneSpawn != nil {
+		candidates = append(candidates, act.ItemID)
+	} else {
+		candidates = append(candidates, act.LaneID, act.ItemID)
+	}
+	if act.PlannerRequest != nil {
+		candidates = append(candidates, act.PlannerRequest.PlanRef)
+	}
+	if act.DirectiveNote != nil {
+		candidates = append(candidates, act.DirectiveNote.Scope)
+	}
 	var out []string
-	for _, candidate := range []string{act.LaneID, act.ItemID} {
+	for _, candidate := range candidates {
 		s := strings.TrimSpace(candidate)
 		if s != "" && !slices.Contains(out, s) {
 			out = append(out, s)
@@ -739,21 +826,76 @@ func extractActionTargets(act dispatcher.ProposedAction) []string {
 	return out
 }
 
+func checkActionSemantics(act dispatcher.ProposedAction) bool {
+	act = hydrateProposedActionIDs(act)
+	switch act.Tool {
+	case dispatcher.ToolBacklogClose:
+		return act.BacklogClose != nil &&
+			strings.TrimSpace(act.BacklogClose.ID) != "" &&
+			strings.EqualFold(strings.TrimSpace(act.BacklogClose.Status), string(store.BacklogDone))
+	case dispatcher.ToolBacklogAdd:
+		return act.BacklogAdd != nil &&
+			strings.TrimSpace(act.BacklogAdd.ID) != "" &&
+			strings.TrimSpace(act.BacklogAdd.Title) != ""
+	case dispatcher.ToolBacklogUpdate:
+		return act.BacklogUpdate != nil && strings.TrimSpace(act.BacklogUpdate.ID) != ""
+	case dispatcher.ToolLaneSpawn:
+		return act.LaneSpawn != nil &&
+			strings.TrimSpace(act.LaneSpawn.ItemID) != "" &&
+			strings.TrimSpace(act.LaneSpawn.Brief) != ""
+	case dispatcher.ToolLaneRetry:
+		return act.LaneRetry != nil && strings.TrimSpace(act.LaneRetry.LaneID) != ""
+	case dispatcher.ToolLaneSteer:
+		return act.LaneSteer != nil &&
+			strings.TrimSpace(act.LaneSteer.LaneID) != "" &&
+			strings.TrimSpace(act.LaneSteer.Note) != ""
+	case dispatcher.ToolLaneStop:
+		return act.LaneStop != nil && strings.TrimSpace(act.LaneStop.LaneID) != ""
+	case dispatcher.ToolPlannerRequest:
+		return act.PlannerRequest != nil && strings.TrimSpace(act.PlannerRequest.Reason) != ""
+	case dispatcher.ToolDirectiveNote:
+		return act.DirectiveNote != nil && strings.TrimSpace(act.DirectiveNote.Fact) != ""
+	case dispatcher.ToolOwnerAsk:
+		return act.OwnerAsk != nil &&
+			strings.TrimSpace(act.OwnerAsk.Question) != "" &&
+			len(act.OwnerAsk.Options) > 0 &&
+			strings.TrimSpace(act.OwnerAsk.Default) != "" &&
+			strings.TrimSpace(act.OwnerAsk.Deadline) != ""
+	default:
+		return false
+	}
+}
+
 func checkMomentAgreement(expected OwnerFollowUp, accepted []dispatcher.ProposedAction, askedOwner bool) bool {
 	if (expected.ForbidOwnerAsk || expected.DecideDontAsk) && askedOwner {
 		return false
 	}
-	matchedMutating := false
+	// Aliases in ExpectedTargets are alternatives for one target, so only the
+	// number of distinct expected tools bounds how many mutating actions may land.
+	var expectedTools []string
+	for _, t := range expected.ExpectedTools {
+		if n := normalizeReplayToolName(t); !slices.Contains(expectedTools, n) {
+			expectedTools = append(expectedTools, n)
+		}
+	}
+	var usedTools []string
 	for i := range accepted {
 		if isReadOnlyTool(accepted[i].Tool) {
 			continue
 		}
+		tool := normalizeReplayToolName(accepted[i].Tool)
+		if slices.Contains(usedTools, tool) || len(usedTools) >= len(expectedTools) {
+			return false
+		}
+		usedTools = append(usedTools, tool)
+		if !checkActionSemantics(accepted[i]) {
+			return false
+		}
 		if !matchesExpectedTargets(expected, accepted[i].Tool, extractActionTargets(accepted[i])) {
 			return false
 		}
-		matchedMutating = true
 	}
-	return matchedMutating
+	return len(usedTools) > 0
 }
 
 func matchesExpectedToolAndTarget(expected OwnerFollowUp, tool, target string, askedOwner bool) bool {
@@ -781,18 +923,19 @@ func matchesExpectedTargets(expected OwnerFollowUp, tool string, targets []strin
 	if len(targets) == 0 {
 		return false
 	}
-	for _, expTgt := range expected.ExpectedTargets {
-		expNorm := strings.TrimSpace(expTgt)
-		if expNorm == "" {
+	for _, got := range targets {
+		gotNorm := strings.TrimSpace(got)
+		if gotNorm == "" {
 			continue
 		}
-		for _, got := range targets {
-			if strings.EqualFold(expNorm, strings.TrimSpace(got)) {
-				return true
-			}
+		matchedOne := slices.ContainsFunc(expected.ExpectedTargets, func(expTgt string) bool {
+			return strings.EqualFold(strings.TrimSpace(expTgt), gotNorm)
+		})
+		if !matchedOne {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // AuditAcceptedActions checks accepted Dispatcher actions against the seeded

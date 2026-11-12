@@ -78,8 +78,8 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 	for i := range rep.MomentResults {
 		mr := &rep.MomentResults[i]
 		if !mr.Agreed || mr.InvariantViolations > 0 || (mr.DecideDontAsk && mr.AskedOwner) {
-			t.Logf("MOMENT MISS %s (run=%s): got tools=%v targets=%v asked=%t inv=%d | want tools=%v targets=%v",
-				mr.ID, mr.RunID, mr.AcceptedTools, mr.AcceptedTargets, mr.AskedOwner, mr.InvariantViolations,
+			t.Logf("MOMENT MISS %s (run=%s verified=%t): got tools=%v targets=%v asked=%t inv=%d | want tools=%v targets=%v",
+				mr.ID, mr.RunID, mr.Grounded, mr.AcceptedTools, mr.AcceptedTargets, mr.AskedOwner, mr.InvariantViolations,
 				mr.ExpectedTools, mr.ExpectedTargets)
 		}
 	}
@@ -91,7 +91,9 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 		}
 	}
 
+	// INCONCLUSIVE (every bar passed but no owner correction is evidenced) is
+	// not a pass: the gate must not read green on evidence it does not have.
 	if !rep.AllPass() {
-		t.Fatalf("Validation Gate 2 failed one or more bars:\n%s", rep.FormatReport())
+		t.Fatalf("Validation Gate 2 verdict %s:\n%s", rep.Verdict(), rep.FormatReport())
 	}
 }

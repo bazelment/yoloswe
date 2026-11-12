@@ -25,11 +25,17 @@ go_library(
 
 go_test(
     name = "replay_test",
-    srcs = ["replay_test.go"],
+    srcs = [
+        "adversarial_test.go",
+        "replay_test.go",
+    ],
     data = glob(["testdata/**"]),
     deps = [
         ":replay",
+        "//orch/clock",
         "//orch/dispatcher",
+        "//orch/lane",
         "//orch/model",
+        "//orch/store",
     ],
 )

@@ -24,15 +24,16 @@ const ConciergeSystemPrompt = `# Nebula Orchestrator Concierge (` + ConciergeSys
 You are the **Concierge** for a Nebula swarm run — a fast, read-mostly conversational agent sitting in front of the Store so the owner gets immediate, factually accurate answers without blocking the Dispatcher.
 
 ## Rules
-1. **Strict Store grounding**: Every lane ID, status, phase, round, PR number, head SHA, CI check state, blocker, backlog item, and decision you mention **must** match the Store state exactly. Never invent or guess PR numbers, lane states, or blockers that are not in the Store.
-2. **Cite concrete facts**: When answering questions like "where are we?", "how is lane X doing?", or "why is lane Y blocked/idle?", explicitly cite the relevant lane IDs, their current status and phase/round, PR numbers (e.g. ` + "`#5127`" + `), CI check state, backlog status/blockers, and recent Dispatcher decisions/reasons.
-3. **Tools available**:
+1. **Always query the Store first**: The initial prompt gives only the Run ID, timestamp, and Owner Question. You **must** call ` + "`status`" + ` (and ` + "`lane.show`" + `, ` + "`pr.status`" + `, ` + "`ci.status`" + `, or ` + "`decisions.since`" + ` as needed) to read the Store state before answering.
+2. **Strict Store grounding**: Every lane ID, status, phase, round, PR number, head SHA, CI check state, blocker, backlog item, and decision you mention **must** match the Store tool output exactly. Never invent or guess PR numbers, lane states, or blockers that are not in the Store.
+3. **Cite concrete facts**: When answering questions like "where are we?", "how is lane X doing?", or "why is lane Y blocked/idle?", explicitly cite the relevant lane IDs, their current status and phase/round, PR numbers (e.g. ` + "`#5127`" + `), CI check state, backlog status/blockers, and recent Dispatcher decisions/reasons.
+4. **Tools available**:
    - ` + "`status`" + `: Query full run status (lanes by phase, backlog items, active directives, pending owner asks).
    - ` + "`lane.show`" + `: Inspect a specific lane's details, PR/CI status, and latest phase report.
    - ` + "`decisions.since`" + `: List Dispatcher/Controller decisions and reasons.
    - ` + "`pr.status`" + ` / ` + "`ci.status`" + `: Inspect PR approval and CI check state for a lane.
    - ` + "`directive.submit`" + `: Record an owner directive when the owner explicitly issues a command or override.
-4. Keep answers concise, direct, and grounded in the exact Store state at the current timestamp.
+5. Keep answers concise, direct, and grounded in the exact Store state at the current timestamp.
 `
 
 // ConciergeAnswer captures the Concierge's response and usage for a single status question.
@@ -121,8 +122,7 @@ func (c *StoreConcierge) Answer(
 		clk = clock.NewRealClock()
 	}
 
-	statusSummary, err := buildConciergeStatusView(ctx, st, drv, clk, runID)
-	if err != nil {
+	if _, err := st.Runs().Get(ctx, runID); err != nil {
 		return ConciergeAnswer{}, err
 	}
 
@@ -135,9 +135,9 @@ func (c *StoreConcierge) Answer(
 		})
 	}
 
-	prompt := fmt.Sprintf("## Store State at %s\n%s\n## Owner Question\n%s",
+	prompt := fmt.Sprintf("Run: %s\nNow: %s\n\n## Owner Question\n%s",
+		runID,
 		clk.Now().UTC().Format(time.RFC3339),
-		statusSummary,
 		strings.TrimSpace(question),
 	)
 

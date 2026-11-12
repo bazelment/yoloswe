@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/bazelment/yoloswe/orch/lane"
@@ -43,6 +44,19 @@ type MomentState struct {
 	Decisions  []store.Decision            `json:"decisions,omitempty"`
 }
 
+// Grounding says whether a moment's expected decision is backed by the source
+// run's own records. Only verified moments count toward the Gate 2 bars.
+type Grounding string
+
+const (
+	// GroundingVerified means the event, target, timing and the old orchestrator's
+	// action were checked against the source run's records (see Dataset.ProvenanceRubric).
+	GroundingVerified Grounding = "verified"
+	// GroundingSynthetic means the moment was authored or could not be checked; it
+	// is still run and reported, but never counted toward a bar.
+	GroundingSynthetic Grounding = "synthetic"
+)
+
 // BaselineDecision records what the legacy shell/prompt orchestrator did at a moment.
 type BaselineDecision struct {
 	Tool       string `json:"tool"`
@@ -63,15 +77,18 @@ type OwnerFollowUp struct {
 
 // JudgmentMoment is a single historical judgment batch extracted from a past Nebula swarm run.
 type JudgmentMoment struct {
-	Timestamp     time.Time        `json:"timestamp"`
-	State         MomentState      `json:"state"`
-	ID            string           `json:"id"`
-	RunID         string           `json:"run_id"`
-	Category      string           `json:"category,omitempty"`
-	Description   string           `json:"description"`
-	Events        []store.Event    `json:"events"`
-	Baseline      BaselineDecision `json:"baseline"`
-	OwnerFollowUp OwnerFollowUp    `json:"owner_follow_up"`
+	Timestamp   time.Time   `json:"timestamp"`
+	State       MomentState `json:"state"`
+	ID          string      `json:"id"`
+	RunID       string      `json:"run_id"`
+	Category    string      `json:"category,omitempty"`
+	Description string      `json:"description"`
+	// Grounding and GroundingEvidence record how this moment's label was checked.
+	Grounding         Grounding        `json:"grounding"`
+	GroundingEvidence string           `json:"grounding_evidence"`
+	Events            []store.Event    `json:"events"`
+	Baseline          BaselineDecision `json:"baseline"`
+	OwnerFollowUp     OwnerFollowUp    `json:"owner_follow_up"`
 }
 
 // FactGroup requires at least one token in AnyOf to match a Concierge answer case-insensitively.
@@ -93,10 +110,12 @@ type ConciergeQuestion struct {
 
 // Dataset holds the extracted historical Validation Gate 2 dataset.
 type Dataset struct {
-	Version   string              `json:"version"`
-	Runs      []string            `json:"runs"`
-	Moments   []JudgmentMoment    `json:"moments"`
-	Questions []ConciergeQuestion `json:"questions"`
+	// ProvenanceRubric states the checks a moment must pass to be verified.
+	ProvenanceRubric string              `json:"provenance_rubric"`
+	Version          string              `json:"version"`
+	Runs             []string            `json:"runs"`
+	Moments          []JudgmentMoment    `json:"moments"`
+	Questions        []ConciergeQuestion `json:"questions"`
 }
 
 func LoadDefaultDataset() (*Dataset, error) {
@@ -151,6 +170,9 @@ func (ds *Dataset) Validate() error {
 	if len(ds.Moments) == 0 {
 		return errors.New("orch/replay: dataset has no judgment moments")
 	}
+	if strings.TrimSpace(ds.ProvenanceRubric) == "" {
+		return errors.New("orch/replay: dataset missing provenance_rubric")
+	}
 	seenMoments := make(map[string]struct{}, len(ds.Moments))
 	for i := range ds.Moments {
 		m := &ds.Moments[i]
@@ -175,6 +197,15 @@ func (ds *Dataset) Validate() error {
 		}
 		if len(m.OwnerFollowUp.ExpectedTools) == 0 {
 			return fmt.Errorf("orch/replay: moment %q missing expected_tools", m.ID)
+		}
+		if m.Grounding != GroundingVerified && m.Grounding != GroundingSynthetic {
+			return fmt.Errorf("orch/replay: moment %q has grounding %q, want %q or %q", m.ID, m.Grounding, GroundingVerified, GroundingSynthetic)
+		}
+		if strings.TrimSpace(m.GroundingEvidence) == "" {
+			return fmt.Errorf("orch/replay: moment %q missing grounding_evidence", m.ID)
+		}
+		if err := validateMomentNoLeakage(m); err != nil {
+			return err
 		}
 	}
 
@@ -202,10 +233,40 @@ func (ds *Dataset) Validate() error {
 }
 
 var (
-	reEmail   = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
-	reRawUUID = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
-	reToken   = regexp.MustCompile(`(?i)(?:ghp_[A-Za-z0-9]{16,}|ghs_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-ant-[A-Za-z0-9\-_]{12,}|neb_[A-Za-z0-9\-_]{12,}|xox[baprs]-[A-Za-z0-9\-]{10,}|AKIA[0-9A-Z]{16}|Bearer\s+[A-Za-z0-9._\-]{20,})`)
+	reEmail          = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
+	reRawUUID        = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
+	reToken          = regexp.MustCompile(`(?i)(?:ghp_[A-Za-z0-9]{16,}|ghs_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-ant-[A-Za-z0-9\-_]{12,}|neb_[A-Za-z0-9\-_]{12,}|xox[baprs]-[A-Za-z0-9\-]{10,}|AKIA[0-9A-Z]{16}|Bearer\s+[A-Za-z0-9._\-]{20,})`)
+	reLeakedToolName = regexp.MustCompile(`(?i)\b(?:lane[._](?:spawn|steer|retry|stop)|backlog[._](?:add|update|reorder|close)|planner[._]request|directive[._]note|owner[._]ask|read[._](?:lane_report|pr|ci))\b`)
 )
+
+func validateMomentNoLeakage(m *JudgmentMoment) error {
+	ownerNote := strings.ToLower(strings.TrimSpace(m.OwnerFollowUp.OwnerNote))
+	for j := range m.Events {
+		ev := &m.Events[j]
+		if match := reLeakedToolName.FindString(ev.Summary); match != "" {
+			return fmt.Errorf("orch/replay: moment %q event %q leaks tool name %q in summary", m.ID, ev.ID, match)
+		}
+		if match := reLeakedToolName.Find(ev.Payload); match != nil {
+			return fmt.Errorf("orch/replay: moment %q event %q leaks tool name %q in payload", m.ID, ev.ID, string(match))
+		}
+		if ownerNote != "" && strings.Contains(strings.ToLower(ev.Summary), ownerNote) {
+			return fmt.Errorf("orch/replay: moment %q event %q leaks owner_follow_up.owner_note in summary", m.ID, ev.ID)
+		}
+	}
+	for j := range m.State.Directives {
+		d := &m.State.Directives[j]
+		if match := reLeakedToolName.FindString(d.Text); match != "" {
+			return fmt.Errorf("orch/replay: moment %q directive %q leaks tool name %q in text", m.ID, d.ID, match)
+		}
+		if strings.Contains(strings.ToLower(d.ID), strings.ToLower(m.ID)) {
+			return fmt.Errorf("orch/replay: moment %q directive %q is a per-moment leaked directive", m.ID, d.ID)
+		}
+		if ownerNote != "" && strings.Contains(strings.ToLower(d.Text), ownerNote) {
+			return fmt.Errorf("orch/replay: moment %q directive %q leaks owner_follow_up.owner_note in text", m.ID, d.ID)
+		}
+	}
+	return nil
+}
 
 // ValidateScrubbedBytes rejects raw dataset JSON containing unscrubbed tokens, emails, or UUIDs.
 func ValidateScrubbedBytes(raw []byte) error {
