@@ -39,7 +39,6 @@ const (
 	maxSSELineBytes      = 1024 * 1024
 )
 
-// Sentinel errors returned by Driver.
 var (
 	ErrMissingCredentials = errors.New("orch/lane/nebula: NEBULA_API_URL and NEBULA_TOKEN are required")
 	ErrNoReport           = fmt.Errorf("%w: no phase report filed for terminal", store.ErrNotFound)
@@ -83,8 +82,7 @@ func IsNotReady(err error) bool {
 	return false
 }
 
-// Config configures a Nebula Driver. Empty APIURL and Token fall back to
-// NEBULA_API_URL and NEBULA_TOKEN environment variables.
+// Config configures a Driver. Empty APIURL and Token fall back to env vars.
 type Config struct {
 	Clock              clock.Clock
 	Events             store.EventStore
@@ -160,8 +158,7 @@ type NebulaDriver = Driver
 
 var _ lane.LaneDriver = (*Driver)(nil)
 
-// New constructs a Nebula Driver from cfg and options, falling back to
-// NEBULA_API_URL and NEBULA_TOKEN environment variables when unset.
+// New constructs a Driver from cfg and options.
 func New(cfg Config, opts ...Option) (*Driver, error) {
 	for _, opt := range opts {
 		opt(&cfg)
@@ -296,8 +293,7 @@ type CapacityStatus struct {
 	MaxWaitSeconds int               `json:"maxWaitSeconds,omitempty"`
 }
 
-// SpawnSession creates or reuses a lane code session on a branch and, when a
-// phase or harness is specified in req, starts the initial phase terminal.
+// SpawnSession ensures a lane code session and optionally starts its initial phase terminal.
 func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
 	sess, err := d.EnsureSession(ctx, req)
 	if err != nil {
@@ -330,8 +326,7 @@ func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.
 	return res, nil
 }
 
-// EnsureSession finds an existing active/sleeping code session for the lane on
-// the target branch or creates a new one, then waits until its status is "ready".
+// EnsureSession reuses or creates a lane code session and waits until it is ready.
 func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*SessionInfo, error) {
 	if strings.TrimSpace(req.LaneID) == "" {
 		return nil, fmt.Errorf("%w: lane_id is required", store.ErrInvalidArgument)
@@ -526,8 +521,7 @@ func (d *Driver) GetSession(ctx context.Context, sessionID string) (*SessionDeta
 	return &detail, nil
 }
 
-// StartPhaseTerminal starts a phase terminal (kind, model, effort, prompt) on
-// an existing or newly ensured code session.
+// StartPhaseTerminal starts a phase terminal on an existing or newly ensured session.
 func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (lane.StartPhaseResult, error) {
 	sessionID := strings.TrimSpace(req.SessionID)
 	if sessionID == "" {
@@ -647,8 +641,7 @@ func (d *Driver) GetTerminal(ctx context.Context, terminalID string) (*TerminalI
 	return &term, nil
 }
 
-// Stop stops a running terminal (POST /api/code-terminals/{id}/stop) or all
-// terminals in a session (POST /api/code-sessions/{id}/stop-all).
+// Stop stops a terminal or, when TerminalID is empty, all terminals in the session.
 func (d *Driver) Stop(ctx context.Context, req lane.StopRequest) error {
 	terminalID := strings.TrimSpace(req.TerminalID)
 	sessionID := strings.TrimSpace(req.SessionID)
@@ -696,8 +689,7 @@ func (d *Driver) ReadReport(ctx context.Context, runID, laneID, terminalID strin
 	return d.ReadReportRevision(ctx, runID, laneID, terminalID, 0)
 }
 
-// ReadReportRevision reads a specific revision (or latest when revision <= 0)
-// of a terminal's filed phase report via GET /api/code-terminals/{id}/phase-report.
+// ReadReportRevision reads a specific revision (or latest when revision <= 0) of a phase report.
 func (d *Driver) ReadReportRevision(ctx context.Context, _, laneID, terminalID string, revision int) (*lane.PhaseReport, error) {
 	terminalID = strings.TrimSpace(terminalID)
 	if terminalID == "" {
@@ -807,8 +799,7 @@ func (d *Driver) resolveEvents(events store.EventStore) (store.EventStore, error
 	return nil, fmt.Errorf("%w: store.EventStore is required", store.ErrInvalidArgument)
 }
 
-// StreamEvents streams SSE lane events from GET /api/code-terminals/{id}/events/stream
-// into store.EventStore (using req.Events or the Driver's configured EventStore).
+// StreamEvents streams terminal SSE events into store.EventStore.
 func (d *Driver) StreamEvents(ctx context.Context, req StreamRequest) error {
 	events, err := d.resolveEvents(req.Events)
 	if err != nil {
@@ -1079,9 +1070,7 @@ func isStopTurnOutcome(outcome string) bool {
 	}
 }
 
-// PollSessionUsage queries GET /api/code-sessions/{sessionID} and appends a
-// usage/capacity store.Event for terminalID (or all terminals in the session if
-// terminalID is empty) into events.
+// PollSessionUsage polls session terminal usage and appends stall/usage events.
 func (d *Driver) PollSessionUsage(
 	ctx context.Context,
 	events store.EventStore,
@@ -1143,8 +1132,7 @@ func (d *Driver) PollSessionUsage(
 	return appended, nil
 }
 
-// PollCapacity queries GET /api/code-sessions/capacity and appends a capacity
-// event into events.
+// PollCapacity polls cluster capacity and appends a capacity event.
 func (d *Driver) PollCapacity(ctx context.Context, events store.EventStore, runID, laneID string) (store.Event, error) {
 	events, err := d.resolveEvents(events)
 	if err != nil {

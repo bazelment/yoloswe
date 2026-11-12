@@ -401,7 +401,6 @@ func TestReadReport(t *testing.T) {
 	drv, _, _ := newTestDriver(t, srv)
 	ctx := context.Background()
 
-	// Missing report returns ErrNoReport / store.ErrNotFound.
 	_, err := drv.ReadReport(ctx, "run-1", "core", "term-missing")
 	if !errors.Is(err, nebula.ErrNoReport) || !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected ErrNoReport/ErrNotFound, got %v", err)
@@ -466,7 +465,6 @@ func TestReadReport(t *testing.T) {
 		t.Fatalf("ReportedAt = %v, want %v", rep.ReportedAt, reportedAt)
 	}
 
-	// Read specific revision where Outcome is only in top-level JSON field.
 	rev1, err := drv.ReadReportRevision(ctx, "run-1", "core", "term-1", 1)
 	if err != nil {
 		t.Fatalf("ReadReportRevision(1): %v", err)
@@ -484,7 +482,6 @@ func TestSpawnReuseWakeAndSettleTimeout(t *testing.T) {
 	drv, _, _ := newTestDriver(t, srv)
 	ctx := context.Background()
 
-	// 1. Spawn a brand-new session + initial phase terminal.
 	res, err := drv.SpawnSession(ctx, lane.SpawnRequest{
 		RunID:      "run-42",
 		LaneID:     "nebuladriver",
@@ -505,7 +502,6 @@ func TestSpawnReuseWakeAndSettleTimeout(t *testing.T) {
 		t.Fatalf("SpawnResult = %+v, want sess-1 / term-1", res)
 	}
 
-	// 2. Put sess-1 to sleep and verify SpawnSession reuses and wakes it instead of creating sess-2.
 	srv.mu.Lock()
 	srv.sessions["sess-1"].Status = "sleeping"
 	srv.mu.Unlock()
@@ -525,7 +521,6 @@ func TestSpawnReuseWakeAndSettleTimeout(t *testing.T) {
 		t.Fatalf("expected empty TerminalID when Phase/Harness omitted, got %q", reused.TerminalID)
 	}
 
-	// 3. Verify settle timeout when a new session stays in provisioning past SettleTimeout.
 	srv.mu.Lock()
 	srv.stayProvisioning = true
 	srv.mu.Unlock()
@@ -545,7 +540,6 @@ func TestStartPhaseTerminalSteerStopAndRelease(t *testing.T) {
 	drv, _, _ := newTestDriver(t, srv)
 	ctx := context.Background()
 
-	// Pre-populate a ready session.
 	srv.mu.Lock()
 	srv.sessions["sess-10"] = &nebula.SessionInfo{
 		ID:         "sess-10",
@@ -553,7 +547,6 @@ func TestStartPhaseTerminalSteerStopAndRelease(t *testing.T) {
 		WorkBranch: "swarm-lane/run-1/lane-a",
 		Metadata:   map[string]string{"swarmRun": "run-1", "swarmLane": "lane-a"},
 	}
-	// Inject one 409 on start terminal to verify wake-and-retry.
 	srv.startTerm409s = 1
 	srv.mu.Unlock()
 
@@ -583,7 +576,6 @@ func TestStartPhaseTerminalSteerStopAndRelease(t *testing.T) {
 		t.Fatalf("unexpected terminal fields: %+v", term)
 	}
 
-	// Steer with 409 wake-and-retry.
 	srv.mu.Lock()
 	srv.steer409s = 1
 	srv.mu.Unlock()
@@ -597,7 +589,6 @@ func TestStartPhaseTerminalSteerStopAndRelease(t *testing.T) {
 		t.Fatalf("Steer: %v", err)
 	}
 
-	// Stop single terminal.
 	if err := drv.Stop(ctx, lane.StopRequest{
 		RunID:      "run-1",
 		LaneID:     "lane-a",
@@ -606,7 +597,6 @@ func TestStartPhaseTerminalSteerStopAndRelease(t *testing.T) {
 		t.Fatalf("Stop terminal: %v", err)
 	}
 
-	// Stop all terminals in session.
 	if err := drv.Stop(ctx, lane.StopRequest{
 		RunID:     "run-1",
 		LaneID:    "lane-a",
@@ -615,7 +605,6 @@ func TestStartPhaseTerminalSteerStopAndRelease(t *testing.T) {
 		t.Fatalf("Stop session: %v", err)
 	}
 
-	// Release session with force=true.
 	if err := drv.ReleaseSession(ctx, "sess-10", true); err != nil {
 		t.Fatalf("ReleaseSession: %v", err)
 	}
@@ -690,7 +679,6 @@ func TestStreamEventsAndUsageCapacityIntoStore(t *testing.T) {
 		t.Fatalf("StreamEvents: %v", err)
 	}
 
-	// Also poll session usage and cluster capacity into Store Events.
 	usageEvs, err := drv.PollSessionUsage(ctx, st.Events(), "run-stream", "nebuladriver", "sess-99", "term-99")
 	if err != nil {
 		t.Fatalf("PollSessionUsage: %v", err)
@@ -711,7 +699,7 @@ func TestStreamEventsAndUsageCapacityIntoStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Events().List: %v", err)
 	}
-	// Expect 5 SSE events (seq 1, 3, 4, 5, 6; seq 2 skipped because pendingSubagents=2) + 1 usage event + 1 capacity event = 7 events.
+	// 5 SSE events (seq 2 skipped) + 1 usage + 1 capacity = 7.
 	if len(evs) != 7 {
 		t.Fatalf("got %d store events, want 7: %+v", len(evs), evs)
 	}
