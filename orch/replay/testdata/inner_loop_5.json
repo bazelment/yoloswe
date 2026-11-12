@@ -20,7 +20,7 @@
         },
         "backlog": [
           {
-            "id": "item-cd-deploy-dev",
+            "id": "cd-deploy-dev",
             "run_id": "20261103-cicd-300",
             "title": "Move cd-deploy-dev #5127 onto shared manifest validator",
             "acceptance": "scripts/lint.sh and bazel test green on #5127",
@@ -33,14 +33,14 @@
           {
             "id": "cd-deploy-dev",
             "run_id": "20261103-cicd-300",
-            "item_id": "item-cd-deploy-dev",
+            "item_id": "cd-deploy-dev",
             "title": "Move cd-deploy-dev #5127 onto shared manifest validator",
             "status": "blocked",
             "phase": "swe",
             "round": 1,
             "attempt": 1,
             "pr": 5127,
-            "pr_head": "a1b2c3d4",
+            "pr_head": "44f47212",
             "checks": "pending",
             "last_event_at": "2026-11-11T21:35:00Z"
           }
@@ -54,7 +54,7 @@
           "class": "judgment",
           "lane_id": "cd-deploy-dev",
           "source": "controller",
-          "summary": "lane cd-deploy-dev stalled in phase swe (round 1, attempt 1) after 53m10s (sw_phase wake cooldown exit 75); retry lane cd-deploy-dev in phase swe on round 2."
+          "summary": "Lane cd-deploy-dev stalled in phase swe (round 1, attempt 1) after 53m10s due to wake cooldown exit 75; terminal exited and lane is blocked awaiting a fresh round 2 attempt in swe."
         }
       ],
       "baseline": {
@@ -67,9 +67,15 @@
         "verdict": "endorsed",
         "decide_dont_ask": false,
         "forbid_owner_ask": true,
-        "expected_tools": ["lane.retry"],
-        "expected_targets": ["cd-deploy-dev"]
-      }
+        "expected_tools": [
+          "lane.retry"
+        ],
+        "expected_targets": [
+          "cd-deploy-dev"
+        ]
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 3, 193min after start (need round>=2 and 52+-15min), finished 2026-11-12T01:24:14Z"
     },
     {
       "id": "cicd-300-m002",
@@ -95,7 +101,7 @@
         ],
         "backlog": [
           {
-            "id": "item-cd-deploy-dev",
+            "id": "cd-deploy-dev",
             "run_id": "20261103-cicd-300",
             "title": "Implement cd-deploy-dev workflow manifest validation",
             "acceptance": "Uses shared manifest validator and passes CI",
@@ -122,14 +128,14 @@
           {
             "id": "cd-deploy-dev",
             "run_id": "20261103-cicd-300",
-            "item_id": "item-cd-deploy-dev",
+            "item_id": "cd-deploy-dev",
             "title": "Implement cd-deploy-dev workflow manifest validation",
             "status": "running",
             "phase": "swe",
             "round": 1,
             "attempt": 1,
             "pr": 5127,
-            "pr_head": "b4c5d6e7",
+            "pr_head": "44f47212",
             "checks": "pending",
             "last_event_at": "2026-11-11T20:54:00Z"
           }
@@ -143,7 +149,7 @@
           "class": "judgment",
           "lane_id": "cd-deploy-dev",
           "source": "cd-deploy-dev",
-          "summary": "Lane cd-deploy-dev asks whether to keep its local manifest schema or adopt cd-publish's merged shared schema (#5124). Per standing directive, steer cd-deploy-dev to adopt cd-publish's shared schema."
+          "summary": "In-flight running lane cd-deploy-dev (mid-turn in swe round 1 on PR #5127) sent an advisory note asking whether to keep its local manifest validator or align with cd-publish (#5124, already merged on main)."
         }
       ],
       "baseline": {
@@ -157,9 +163,16 @@
         "owner_note": "Decide, don't ask: cd-publish already landed the shared schema; steer cd-deploy-dev to use it.",
         "decide_dont_ask": true,
         "forbid_owner_ask": true,
-        "expected_tools": ["lane.steer", "lane.retry"],
-        "expected_targets": ["cd-deploy-dev"]
-      }
+        "expected_tools": [
+          "lane.steer",
+          "lane.retry"
+        ],
+        "expected_targets": [
+          "cd-deploy-dev"
+        ]
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m001",
@@ -204,10 +217,10 @@
         {
           "id": "ev-feedback-m001",
           "run_id": "20261026-feedback",
-          "kind": "owner_msg",
+          "kind": "timer",
           "class": "judgment",
-          "source": "owner",
-          "summary": "P0 backlog item fb880-release-backup (code release --backup data safety) is open and ready with free lane capacity; spawn a worker lane for fb880-release-backup now."
+          "source": "controller",
+          "summary": "Worker slot check: 1 of 8 running lane slots in use and open P0 backlog item fb880-release-backup (FB-880: code release --backup must refuse release when backup fails) has all dependencies satisfied."
         }
       ],
       "baseline": {
@@ -220,9 +233,15 @@
         "verdict": "endorsed",
         "decide_dont_ask": false,
         "forbid_owner_ask": true,
-        "expected_tools": ["lane.spawn"],
-        "expected_targets": ["fb880-release-backup"]
-      }
+        "expected_tools": [
+          "lane.spawn"
+        ],
+        "expected_targets": [
+          "fb880-release-backup"
+        ]
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "lane fb880-release-backup not in run records"
     },
     {
       "id": "feedback-m002",
@@ -273,7 +292,7 @@
           "class": "judgment",
           "source": "owner",
           "urgent": true,
-          "summary": "Owner directive: reassess the run goal and request a Planner turn (planner.request) to replan the backlog against plan_ref post:feedback-reliability-v2."
+          "summary": "Owner message (2026-11-10 18:00Z): reassess your goal and replan the run against plan reference post:feedback-reliability-v2."
         }
       ],
       "baseline": {
@@ -286,8 +305,15 @@
         "verdict": "endorsed",
         "decide_dont_ask": false,
         "forbid_owner_ask": true,
-        "expected_tools": ["planner.request"]
-      }
+        "expected_tools": [
+          "planner.request"
+        ],
+        "expected_targets": [
+          "post:feedback-reliability-v2"
+        ]
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "category replan_request: referenced ids/posts absent from run history"
     },
     {
       "id": "s1-main-m001",
@@ -307,13 +333,13 @@
             "run_id": "20261023-s1-main",
             "kind": "standing",
             "source": "owner",
-            "text": "Standing rule: keep each lane to one narrow PR; when a lane discovers a separate defect, split it into a new backlog item (backlog.add) without calling owner.ask.",
+            "text": "Standing rule: keep each lane to one narrow PR; when a lane discovers an unrelated defect outside its PR scope, track it as a separate P1 work item in the backlog.",
             "status": "active"
           }
         ],
         "backlog": [
           {
-            "id": "item-sleep-copy-fsck-gate",
+            "id": "sleep-copy-fsck-gate",
             "run_id": "20261023-s1-main",
             "title": "Gate sleep copy publication on e2fsck pass",
             "acceptance": "Sleep copy refuses publication on fsck failure",
@@ -326,14 +352,14 @@
           {
             "id": "sleep-copy-fsck-gate",
             "run_id": "20261023-s1-main",
-            "item_id": "item-sleep-copy-fsck-gate",
+            "item_id": "sleep-copy-fsck-gate",
             "title": "Gate sleep copy publication on e2fsck pass",
             "status": "running",
             "phase": "swe",
             "round": 1,
             "attempt": 1,
             "pr": 4228,
-            "pr_head": "c0ffee12",
+            "pr_head": "6b74f629",
             "checks": "pass",
             "last_event_at": "2026-11-09T05:40:00Z"
           }
@@ -347,7 +373,7 @@
           "class": "judgment",
           "lane_id": "sleep-copy-fsck-gate",
           "source": "sleep-copy-fsck-gate",
-          "summary": "Lane sleep-copy-fsck-gate notes a separate defect in fsck refusal branch cleanup (id: fsck-refusal-branches) outside PR #4228. Per standing rule, add fsck-refusal-branches to the backlog with backlog.add."
+          "summary": "Lane sleep-copy-fsck-gate (running on PR #4228) reported an unrelated defect in fsck refusal branch cleanup outside PR #4228's scope that needs to be tracked as a separate P1 backlog item with id=fsck-refusal-branches."
         }
       ],
       "baseline": {
@@ -361,9 +387,15 @@
         "owner_note": "Decide, don't ask: wrong lane, split fsck-refusal-branches into its own backlog item.",
         "decide_dont_ask": true,
         "forbid_owner_ask": true,
-        "expected_tools": ["backlog.add"],
-        "expected_targets": ["fsck-refusal-branches"]
-      }
+        "expected_tools": [
+          "backlog.add"
+        ],
+        "expected_targets": [
+          "fsck-refusal-branches"
+        ]
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     }
   ],
   "questions": [
@@ -414,10 +446,37 @@
         ]
       },
       "required_facts": [
-        {"label": "running lane merge-red-check-guard", "any_of": ["merge-red-check-guard", "#5039", "5039"]},
-        {"label": "running lane image-retention", "any_of": ["image-retention", "#5118", "5118"]},
-        {"label": "blocked lane cd-deploy-dev", "any_of": ["cd-deploy-dev", "#5127", "5127"]},
-        {"label": "cd-deploy-dev blocked status", "any_of": ["blocked", "swe"]}
+        {
+          "label": "running lane merge-red-check-guard",
+          "any_of": [
+            "merge-red-check-guard",
+            "#5039",
+            "5039"
+          ]
+        },
+        {
+          "label": "running lane image-retention",
+          "any_of": [
+            "image-retention",
+            "#5118",
+            "5118"
+          ]
+        },
+        {
+          "label": "blocked lane cd-deploy-dev",
+          "any_of": [
+            "cd-deploy-dev",
+            "#5127",
+            "5127"
+          ]
+        },
+        {
+          "label": "cd-deploy-dev blocked status",
+          "any_of": [
+            "blocked",
+            "swe"
+          ]
+        }
       ],
       "forbidden_claims": [
         "cd-deploy-dev is merged",
@@ -449,9 +508,27 @@
         ]
       },
       "required_facts": [
-        {"label": "lane name", "any_of": ["cd-deploy-dev"]},
-        {"label": "phase and round", "any_of": ["swe", "round 2", "r2"]},
-        {"label": "PR number", "any_of": ["5127", "#5127"]}
+        {
+          "label": "lane name",
+          "any_of": [
+            "cd-deploy-dev"
+          ]
+        },
+        {
+          "label": "phase and round",
+          "any_of": [
+            "swe",
+            "round 2",
+            "r2"
+          ]
+        },
+        {
+          "label": "PR number",
+          "any_of": [
+            "5127",
+            "#5127"
+          ]
+        }
       ],
       "forbidden_claims": [
         "status is done",
@@ -496,9 +573,28 @@
         ]
       },
       "required_facts": [
-        {"label": "lane sl503-west-session-logs", "any_of": ["sl503-west-session-logs"]},
-        {"label": "PR 4688", "any_of": ["4688", "#4688"]},
-        {"label": "rework reason", "any_of": ["real-router", "archive lifecycle", "lifecycle-safety", "review"]}
+        {
+          "label": "lane sl503-west-session-logs",
+          "any_of": [
+            "sl503-west-session-logs"
+          ]
+        },
+        {
+          "label": "PR 4688",
+          "any_of": [
+            "4688",
+            "#4688"
+          ]
+        },
+        {
+          "label": "rework reason",
+          "any_of": [
+            "real-router",
+            "archive lifecycle",
+            "lifecycle-safety",
+            "review"
+          ]
+        }
       ],
       "forbidden_claims": [
         "#4688 is merged"
@@ -542,10 +638,34 @@
         ]
       },
       "required_facts": [
-        {"label": "ml-s1-lease merged PR #1648", "any_of": ["1648", "#1648", "b9aef18a"]},
-        {"label": "ml-s1-lease done/merged", "any_of": ["merged", "done"]},
-        {"label": "ml-s1-log PR #1655", "any_of": ["1655", "#1655"]},
-        {"label": "ml-s1-log in review", "any_of": ["review"]}
+        {
+          "label": "ml-s1-lease merged PR #1648",
+          "any_of": [
+            "1648",
+            "#1648",
+            "b9aef18a"
+          ]
+        },
+        {
+          "label": "ml-s1-lease done/merged",
+          "any_of": [
+            "merged",
+            "done"
+          ]
+        },
+        {
+          "label": "ml-s1-log PR #1655",
+          "any_of": [
+            "1655",
+            "#1655"
+          ]
+        },
+        {
+          "label": "ml-s1-log in review",
+          "any_of": [
+            "review"
+          ]
+        }
       ],
       "forbidden_claims": [
         "ml-s1-lease is blocked",
@@ -590,14 +710,33 @@
         ]
       },
       "required_facts": [
-        {"label": "lane ml-s2-fsync-contract", "any_of": ["ml-s2-fsync-contract"]},
-        {"label": "PR #3061", "any_of": ["3061", "#3061"]},
-        {"label": "CI failed", "any_of": ["ci", "check", "failed"]}
+        {
+          "label": "lane ml-s2-fsync-contract",
+          "any_of": [
+            "ml-s2-fsync-contract"
+          ]
+        },
+        {
+          "label": "PR #3061",
+          "any_of": [
+            "3061",
+            "#3061"
+          ]
+        },
+        {
+          "label": "CI failed",
+          "any_of": [
+            "ci",
+            "check",
+            "failed"
+          ]
+        }
       ],
       "forbidden_claims": [
         "checks are green",
         "checks passed"
       ]
     }
-  ]
+  ],
+  "provenance_rubric": "A moment is 'verified' only if all hold against the source run's lane records (nebula run show --part lanes): (1) owner verdict is endorsed (no real owner correction was found in any readable orchestrator transcript, so every corrected moment is synthetic); (2) category is spawn_ready, merged_close, rework_retry or stall_retry (replan/directive/owner-ask moments reference ids or posts absent from run history); (3) the target lane exists in the run; (4) spawn_ready: lane started within 120s of the moment; merged_close: PR number in the event equals the lane's recorded PR and the lane finished within 1h; rework_retry: same PR match, lane reached round>=2 inside its lifetime; stall_retry: lane reached round>=2 and the moment is 52+-15min after lane start. Everything else is 'synthetic': still run and reported, never counted toward the Gate 2 bars."
 }

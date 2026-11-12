@@ -18,39 +18,53 @@ type scriptedEvalClient struct {
 	questionAnswers map[string]string
 }
 
-func (s *scriptedEvalClient) CreateMessage(_ context.Context, req model.Request) (*model.Response, error) {
-	if len(req.Messages) > 0 {
-		last := req.Messages[len(req.Messages)-1]
-		for _, b := range last.Content {
-			if b.Type == model.BlockTypeToolResult {
-				return &model.Response{
-					StopReason: model.StopReasonEndTurn,
-					Message:    model.NewAssistantMessage(model.NewTextBlock("Completed judgment action.")),
-					Usage:      model.Usage{InputTokens: 2400, OutputTokens: 60},
-				}, nil
-			}
+func lastToolResult(req model.Request) (string, bool) {
+	if len(req.Messages) == 0 {
+		return "", false
+	}
+	for _, b := range req.Messages[len(req.Messages)-1].Content {
+		if b.Type == model.BlockTypeToolResult {
+			return b.Content, true
 		}
 	}
+	return "", false
+}
+
+func (s *scriptedEvalClient) CreateMessage(_ context.Context, req model.Request) (*model.Response, error) {
+	result, haveResult := lastToolResult(req)
 
 	userText := ""
 	if len(req.Messages) > 0 {
 		userText = req.Messages[0].Text()
 	}
 
+	// The concierge is only handed the run id and question, so a scripted
+	// concierge must read the Store through the status tool and relay it.
 	if strings.Contains(req.System, replay.ConciergeSystemPromptVersion) {
+		if !haveResult {
+			return &model.Response{
+				StopReason: model.StopReasonToolUse,
+				Message:    model.NewAssistantMessage(model.NewToolUseBlock("status-1", "status", json.RawMessage(`{}`))),
+				Usage:      model.Usage{InputTokens: 900, OutputTokens: 20},
+			}, nil
+		}
 		for qID, ans := range s.questionAnswers {
 			if strings.Contains(userText, qID) {
-				return &model.Response{
-					StopReason: model.StopReasonEndTurn,
-					Message:    model.NewAssistantMessage(model.NewTextBlock(ans)),
-					Usage:      model.Usage{InputTokens: 1200, OutputTokens: 80},
-				}, nil
+				result = ans
 			}
 		}
 		return &model.Response{
 			StopReason: model.StopReasonEndTurn,
-			Message:    model.NewAssistantMessage(model.NewTextBlock(userText)),
+			Message:    model.NewAssistantMessage(model.NewTextBlock(result)),
 			Usage:      model.Usage{InputTokens: 1200, OutputTokens: 80},
+		}, nil
+	}
+
+	if haveResult {
+		return &model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Completed judgment action.")),
+			Usage:      model.Usage{InputTokens: 2400, OutputTokens: 60},
 		}, nil
 	}
 
@@ -207,17 +221,16 @@ func TestInnerLoop5MomentsEndToEnd(t *testing.T) {
 		t.Fatalf("Evaluate: %v", err)
 	}
 
-	if !rep.AllPass() {
-		t.Fatalf("AllPass() = false, want true:\n%s", rep.FormatReport())
+	// The 5 hand-picked moments are not verified against run records, so they
+	// exercise the plumbing but must not produce a PASS verdict on their own.
+	if rep.GroundedMoments != 0 || rep.SyntheticMoments != 5 {
+		t.Fatalf("grounded/synthetic = %d/%d, want 0/5", rep.GroundedMoments, rep.SyntheticMoments)
 	}
-	if rep.AgreementRate != 1.0 {
-		t.Fatalf("AgreementRate = %.2f, want 1.0", rep.AgreementRate)
+	if rep.SyntheticAgreed != 5 {
+		t.Fatalf("SyntheticAgreed = %d, want 5:\n%s", rep.SyntheticAgreed, rep.FormatReport())
 	}
-	if rep.BaselineAgreementRate != 0.60 {
-		t.Fatalf("BaselineAgreementRate = %.2f, want 0.60", rep.BaselineAgreementRate)
-	}
-	if rep.UnnecessaryAskRate != 0.0 {
-		t.Fatalf("UnnecessaryAskRate = %.2f, want 0.0", rep.UnnecessaryAskRate)
+	if rep.AllPass() || rep.AgreementPass {
+		t.Fatalf("a run with no verified moments passed:\n%s", rep.FormatReport())
 	}
 	if rep.InvariantViolations != 0 {
 		t.Fatalf("InvariantViolations = %d, want 0", rep.InvariantViolations)
@@ -347,8 +360,19 @@ func TestFullGate2DatasetStructureAndDeterministicEval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate full dataset: %v", err)
 	}
-	if !rep.AllPass() {
-		t.Fatalf("AllPass() = false on deterministic full-set run:\n%s", rep.FormatReport())
+	// An oracle that replays each label must satisfy every measured bar, yet the
+	// verdict stays INCONCLUSIVE: no owner correction is evidenced in the source runs.
+	if !rep.BarsPass() {
+		t.Fatalf("BarsPass() = false for the label oracle:\n%s", rep.FormatReport())
+	}
+	if rep.AgreementRate != 1.0 || rep.SyntheticAgreed != rep.SyntheticMoments {
+		t.Fatalf("oracle agreement verified=%.2f synthetic=%d/%d, want all", rep.AgreementRate, rep.SyntheticAgreed, rep.SyntheticMoments)
+	}
+	if rep.GroundedMoments != 24 || rep.SyntheticMoments != 126 {
+		t.Fatalf("grounded/synthetic = %d/%d, want 24/126 (recount with the rubric before changing)", rep.GroundedMoments, rep.SyntheticMoments)
+	}
+	if rep.EvidencedCorrections != 0 || rep.Verdict() != replay.VerdictInconclusive || rep.AllPass() {
+		t.Fatalf("verdict %s, evidenced corrections %d: want INCONCLUSIVE/0 until real owner corrections are evidenced", rep.Verdict(), rep.EvidencedCorrections)
 	}
 }
 

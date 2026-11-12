@@ -152,6 +152,8 @@ Borrowed from Codex `app-server`:
 2. **Gate 2 — Offline replay evaluation (`manual` tag, real model)**:
    - ~150 historical judgment moments and ~40 concierge questions replayed against recorded run state.
    - Pass bars: owner-agreement >= baseline, unnecessary owner asks <= 1/3 of baseline, zero invariant violations, >= 90% factual concierge accuracy, median input tokens < 30k/decision.
+   - Evidence rules (`orch/replay`): only moments *verified* against the source run's records count toward the agreement and unnecessary-ask bars (rubric in the dataset's `provenance_rubric`); the rest are `synthetic`, still run and reported, never counted. The baseline is the old orchestrator's recorded action, not an assumption. Event text, directives and the Concierge prompt must not contain the answer: the dispatcher sees facts only, and the Concierge must read the Store through its tools. Verdicts are PASS / FAIL / INCONCLUSIVE; INCONCLUSIVE means every bar passed but no real owner correction is evidenced, so the ask bar is not established.
+   - `orch/replay/adversarial_test.go` guards the grader: always-`lane.stop`, always-`owner.ask`, never-acts, an event-text scraper and a prompt-parroting Concierge must all fail the bars.
 3. **Gate 3 — Live sandbox run**:
    - 5–10 real low-risk backlog items across `default` and custom recipes, surviving a forced restart, < 15 min max unhandled event latency, total model cost < $25/day.
 4. **Gate 4 — Shadow mode & cutover**:

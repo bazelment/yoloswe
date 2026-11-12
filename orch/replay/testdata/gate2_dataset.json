@@ -55,7 +55,7 @@
           "class": "judgment",
           "lane_id": "handlers-slack-split",
           "source": "controller",
-          "summary": "Lane handlers-slack-split stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 4 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=handlers-slack-split on phase swe round 2."
+          "summary": "Lane handlers-slack-split stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 4 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -75,7 +75,9 @@
         "expected_targets": [
           "handlers-slack-split"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 2, 110min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:51:25Z"
     },
     {
       "id": "cicd-300-m002",
@@ -89,16 +91,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m002-decide",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-prepush-crash-not-lost-inputs",
@@ -135,7 +127,7 @@
           "class": "judgment",
           "lane_id": "prepush-crash-not-lost-inputs",
           "source": "controller",
-          "summary": "Lane prepush-crash-not-lost-inputs stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 6 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=prepush-crash-not-lost-inputs on phase swe round 2."
+          "summary": "Lane prepush-crash-not-lost-inputs stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 6 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -155,7 +147,9 @@
         "expected_targets": [
           "prepush-crash-not-lost-inputs"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m003",
@@ -206,7 +200,7 @@
           "class": "judgment",
           "lane_id": "bb-cas-notfound-residual",
           "source": "controller",
-          "summary": "Lane bb-cas-notfound-residual stalled in phase swe (round 1, max_round 1) after 52m (decision: lane-health stale; investigate the blocker; choose re-delegation or escalation). Call lane.retry for lane_id=bb-cas-notfound-residual on phase swe round 2."
+          "summary": "Lane bb-cas-notfound-residual stalled in phase swe (round 1, max_round 1) after 52m (decision: lane-health stale; investigate the blocker; choose re-delegation or escalation)."
         }
       ],
       "baseline": {
@@ -226,7 +220,9 @@
         "expected_targets": [
           "bb-cas-notfound-residual"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 132min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:51:20Z"
     },
     {
       "id": "cicd-300-m004",
@@ -277,7 +273,7 @@
           "class": "judgment",
           "lane_id": "bb-scrape-blob-bytes",
           "source": "controller",
-          "summary": "Lane bb-scrape-blob-bytes stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=bb-scrape-blob-bytes on phase swe round 2."
+          "summary": "Lane bb-scrape-blob-bytes stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -297,7 +293,9 @@
         "expected_targets": [
           "bb-scrape-blob-bytes"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 8min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:51:20Z"
     },
     {
       "id": "cicd-300-m005",
@@ -311,16 +309,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m005-decide",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-startup-taint-marker-test",
@@ -357,7 +345,7 @@
           "class": "judgment",
           "lane_id": "startup-taint-marker-test",
           "source": "controller",
-          "summary": "Lane startup-taint-marker-test stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=startup-taint-marker-test on phase swe round 2."
+          "summary": "Lane startup-taint-marker-test stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -377,7 +365,9 @@
         "expected_targets": [
           "startup-taint-marker-test"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m006",
@@ -428,7 +418,7 @@
           "class": "judgment",
           "lane_id": "test-manual-netpol-row",
           "source": "controller",
-          "summary": "Lane test-manual-netpol-row stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=test-manual-netpol-row on phase swe round 2."
+          "summary": "Lane test-manual-netpol-row stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -448,7 +438,9 @@
         "expected_targets": [
           "test-manual-netpol-row"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 66min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:51:32Z"
     },
     {
       "id": "cicd-300-m007",
@@ -499,7 +491,7 @@
           "class": "judgment",
           "lane_id": "llm-gateway-cell-reach-check",
           "source": "controller",
-          "summary": "Lane llm-gateway-cell-reach-check stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 3 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=llm-gateway-cell-reach-check on phase swe round 2."
+          "summary": "Lane llm-gateway-cell-reach-check stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 3 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -519,7 +511,9 @@
         "expected_targets": [
           "llm-gateway-cell-reach-check"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 8, 219min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:51:27Z"
     },
     {
       "id": "cicd-300-m008",
@@ -533,16 +527,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m008-decide",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-web-ui-session-history-timeout",
@@ -579,7 +563,7 @@
           "class": "judgment",
           "lane_id": "web-ui-session-history-timeout",
           "source": "controller",
-          "summary": "Lane web-ui-session-history-timeout stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 4 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=web-ui-session-history-timeout on phase swe round 2."
+          "summary": "Lane web-ui-session-history-timeout stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 4 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -599,7 +583,9 @@
         "expected_targets": [
           "web-ui-session-history-timeout"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m009",
@@ -650,7 +636,7 @@
           "class": "judgment",
           "lane_id": "cell-env-flush-key-test",
           "source": "controller",
-          "summary": "Lane cell-env-flush-key-test stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=cell-env-flush-key-test on phase swe round 2."
+          "summary": "Lane cell-env-flush-key-test stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -670,7 +656,9 @@
         "expected_targets": [
           "cell-env-flush-key-test"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 26min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:51:21Z"
     },
     {
       "id": "cicd-300-m010",
@@ -721,7 +709,7 @@
           "class": "judgment",
           "lane_id": "byod-e2e-tempdir-flake",
           "source": "controller",
-          "summary": "Lane byod-e2e-tempdir-flake stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 4 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=byod-e2e-tempdir-flake on phase swe round 2."
+          "summary": "Lane byod-e2e-tempdir-flake stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 4 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -741,7 +729,9 @@
         "expected_targets": [
           "byod-e2e-tempdir-flake"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 53min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:51:21Z"
     },
     {
       "id": "cicd-300-m011",
@@ -755,16 +745,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m011-decide",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-merge-helpers-migration-order",
@@ -801,7 +781,7 @@
           "class": "judgment",
           "lane_id": "merge-helpers-migration-order",
           "source": "controller",
-          "summary": "Lane merge-helpers-migration-order stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=merge-helpers-migration-order on phase swe round 2."
+          "summary": "Lane merge-helpers-migration-order stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -821,7 +801,9 @@
         "expected_targets": [
           "merge-helpers-migration-order"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m012",
@@ -872,7 +854,7 @@
           "class": "judgment",
           "lane_id": "handlers-prod-split",
           "source": "controller",
-          "summary": "Lane handlers-prod-split stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 10 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from t). Call lane.retry for lane_id=handlers-prod-split on phase swe round 2."
+          "summary": "Lane handlers-prod-split stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 10 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from t)."
         }
       ],
       "baseline": {
@@ -892,7 +874,9 @@
         "expected_targets": [
           "handlers-prod-split"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 2, 87min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:51:25Z"
     },
     {
       "id": "cicd-300-m013",
@@ -943,7 +927,7 @@
           "class": "judgment",
           "lane_id": "datagarden-doctor-cost-freshness-read",
           "source": "controller",
-          "summary": "Lane datagarden-doctor-cost-freshness-read stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 23 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from t). Call lane.retry for lane_id=datagarden-doctor-cost-freshness-read on phase swe round 2."
+          "summary": "Lane datagarden-doctor-cost-freshness-read stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 23 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from t)."
         }
       ],
       "baseline": {
@@ -963,7 +947,9 @@
         "expected_targets": [
           "datagarden-doctor-cost-freshness-read"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 48min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:51:22Z"
     },
     {
       "id": "cicd-300-m014",
@@ -977,16 +963,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m014-decide",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-handlers-test-gogc",
@@ -1023,7 +999,7 @@
           "class": "judgment",
           "lane_id": "handlers-test-gogc",
           "source": "controller",
-          "summary": "Lane handlers-test-gogc stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 21 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from t). Call lane.retry for lane_id=handlers-test-gogc on phase swe round 2."
+          "summary": "Lane handlers-test-gogc stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 21 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from t)."
         }
       ],
       "baseline": {
@@ -1043,7 +1019,9 @@
         "expected_targets": [
           "handlers-test-gogc"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m015",
@@ -1094,7 +1072,7 @@
           "class": "judgment",
           "lane_id": "buildbarn-south-lost-inputs-after-4435",
           "source": "controller",
-          "summary": "Lane buildbarn-south-lost-inputs-after-4435 stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=buildbarn-south-lost-inputs-after-4435 on phase swe round 2."
+          "summary": "Lane buildbarn-south-lost-inputs-after-4435 stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -1114,7 +1092,9 @@
         "expected_targets": [
           "buildbarn-south-lost-inputs-after-4435"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 24min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:51:20Z"
     },
     {
       "id": "cicd-300-m016",
@@ -1165,7 +1145,7 @@
           "class": "judgment",
           "lane_id": "web-ui-gate-8g",
           "source": "controller",
-          "summary": "Lane web-ui-gate-8g stalled in phase swe (round 1, max_round 1) after 52m (decision: lane-health stale; investigate the blocker; choose re-delegation or escalation). Call lane.retry for lane_id=web-ui-gate-8g on phase swe round 2."
+          "summary": "Lane web-ui-gate-8g stalled in phase swe (round 1, max_round 1) after 52m (decision: lane-health stale; investigate the blocker; choose re-delegation or escalation)."
         }
       ],
       "baseline": {
@@ -1185,7 +1165,9 @@
         "expected_targets": [
           "web-ui-gate-8g"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 3, 122min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:51:32Z"
     },
     {
       "id": "cicd-300-m017",
@@ -1199,16 +1181,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m017-rework",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-cap-raise",
@@ -1245,7 +1217,7 @@
           "class": "judgment",
           "lane_id": "cap-raise",
           "source": "controller",
-          "summary": "Lane cap-raise PR #3117 failed gate/review (decision: sw_merge refused (exit 3): denied merge path: .github/workflows/deploy-arc-runners.yaml). Retry lane_id=cap-raise in phase swe on round 2 with a rework note."
+          "summary": "Lane cap-raise PR #3117 failed gate/review (decision: sw_merge refused (exit 3): denied merge path: .github/workflows/deploy-arc-runners.yaml)."
         }
       ],
       "baseline": {
@@ -1266,7 +1238,9 @@
         "expected_targets": [
           "cap-raise"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m018",
@@ -1280,16 +1254,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m018-rework",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ci-tools-image",
@@ -1326,7 +1290,7 @@
           "class": "judgment",
           "lane_id": "ci-tools-image",
           "source": "controller",
-          "summary": "Lane ci-tools-image PR #3118 failed gate/review (decision: sw_merge refused (exit 3): denied merge path: .github/workflows/ci.yaml). Retry lane_id=ci-tools-image in phase swe on round 2 with a rework note."
+          "summary": "Lane ci-tools-image PR #3118 failed gate/review (decision: sw_merge refused (exit 3): denied merge path: .github/workflows/ci.yaml)."
         }
       ],
       "baseline": {
@@ -1347,7 +1311,9 @@
         "expected_targets": [
           "ci-tools-image"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m019",
@@ -1361,16 +1327,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m019-rework",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-mf-ci-gate-decide",
@@ -1407,7 +1363,7 @@
           "class": "judgment",
           "lane_id": "mf-ci-gate-decide",
           "source": "controller",
-          "summary": "Lane mf-ci-gate-decide PR #3119 failed gate/review (decision: sw_merge refused (exit 3): denied merge path: .github/workflows/ci.yaml). Retry lane_id=mf-ci-gate-decide in phase swe on round 2 with a rework note."
+          "summary": "Lane mf-ci-gate-decide PR #3119 failed gate/review (decision: sw_merge refused (exit 3): denied merge path: .github/workflows/ci.yaml)."
         }
       ],
       "baseline": {
@@ -1428,7 +1384,9 @@
         "expected_targets": [
           "mf-ci-gate-decide"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m020",
@@ -1442,16 +1400,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m020-rework",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-deploy-preflight-hold",
@@ -1488,7 +1436,7 @@
           "class": "judgment",
           "lane_id": "deploy-preflight-hold",
           "source": "controller",
-          "summary": "Lane deploy-preflight-hold PR #3120 failed gate/review (decision: sw_merge refused (exit 3): denied merge path: .github/workflows/deploy.yaml). Retry lane_id=deploy-preflight-hold in phase swe on round 2 with a rework note."
+          "summary": "Lane deploy-preflight-hold PR #3120 failed gate/review (decision: sw_merge refused (exit 3): denied merge path: .github/workflows/deploy.yaml)."
         }
       ],
       "baseline": {
@@ -1509,7 +1457,9 @@
         "expected_targets": [
           "deploy-preflight-hold"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m021",
@@ -1523,16 +1473,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m021-rework",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ci-first-error",
@@ -1569,7 +1509,7 @@
           "class": "judgment",
           "lane_id": "ci-first-error",
           "source": "controller",
-          "summary": "Lane ci-first-error PR #3121 failed gate/review (decision: sw_merge refused (exit 3): POST /api/mail: HTTP 409: {\"error\":\"The recipient session has no live age). Retry lane_id=ci-first-error in phase swe on round 2 with a rework note."
+          "summary": "Lane ci-first-error PR #3121 failed gate/review (decision: sw_merge refused (exit 3): POST /api/mail: HTTP 409: {\"error\":\"The recipient session has no live age)."
         }
       ],
       "baseline": {
@@ -1590,7 +1530,9 @@
         "expected_targets": [
           "ci-first-error"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #3121 vs record 3225, final round 1"
     },
     {
       "id": "cicd-300-m022",
@@ -1604,16 +1546,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m022-rework",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-deploy-verify-aux",
@@ -1650,7 +1582,7 @@
           "class": "judgment",
           "lane_id": "deploy-verify-aux",
           "source": "controller",
-          "summary": "Lane deploy-verify-aux PR #3122 failed gate/review (decision: sw_merge refused (exit 3): merge state is not CLEAN). Retry lane_id=deploy-verify-aux in phase swe on round 2 with a rework note."
+          "summary": "Lane deploy-verify-aux PR #3122 failed gate/review (decision: sw_merge refused (exit 3): merge state is not CLEAN)."
         }
       ],
       "baseline": {
@@ -1671,7 +1603,9 @@
         "expected_targets": [
           "deploy-verify-aux"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #3122 vs record 3249, final round 1"
     },
     {
       "id": "cicd-300-m023",
@@ -1685,16 +1619,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m023-rework",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-deploy-cpu-override",
@@ -1731,7 +1655,7 @@
           "class": "judgment",
           "lane_id": "deploy-cpu-override",
           "source": "controller",
-          "summary": "Lane deploy-cpu-override PR #3123 failed gate/review (decision: sw_merge refused (exit 3): denied merge path: .github/workflows/deploy.yaml). Retry lane_id=deploy-cpu-override in phase swe on round 2 with a rework note."
+          "summary": "Lane deploy-cpu-override PR #3123 failed gate/review (decision: sw_merge refused (exit 3): denied merge path: .github/workflows/deploy.yaml)."
         }
       ],
       "baseline": {
@@ -1752,7 +1676,9 @@
         "expected_targets": [
           "deploy-cpu-override"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #3123 vs record 3250, final round 1"
     },
     {
       "id": "cicd-300-m024",
@@ -1766,16 +1692,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m024-rework",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-arc-refresh-main-advance",
@@ -1812,7 +1728,7 @@
           "class": "judgment",
           "lane_id": "arc-refresh-main-advance",
           "source": "controller",
-          "summary": "Lane arc-refresh-main-advance PR #3124 failed gate/review (decision: sw_merge refused (exit 3): merge state is not CLEAN). Retry lane_id=arc-refresh-main-advance in phase swe on round 2 with a rework note."
+          "summary": "Lane arc-refresh-main-advance PR #3124 failed gate/review (decision: sw_merge refused (exit 3): merge state is not CLEAN)."
         }
       ],
       "baseline": {
@@ -1833,7 +1749,9 @@
         "expected_targets": [
           "arc-refresh-main-advance"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #3124 vs record 3246, final round 1"
     },
     {
       "id": "cicd-300-m025",
@@ -1847,16 +1765,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m025-rework",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-flake-wake-restore",
@@ -1893,7 +1801,7 @@
           "class": "judgment",
           "lane_id": "flake-wake-restore",
           "source": "controller",
-          "summary": "Lane flake-wake-restore PR #3125 failed gate/review (decision: sw_merge refused (exit 3): POST /api/mail: HTTP 409: {\"error\":\"The recipient session has no live age). Retry lane_id=flake-wake-restore in phase swe on round 2 with a rework note."
+          "summary": "Lane flake-wake-restore PR #3125 failed gate/review (decision: sw_merge refused (exit 3): POST /api/mail: HTTP 409: {\"error\":\"The recipient session has no live age)."
         }
       ],
       "baseline": {
@@ -1914,7 +1822,9 @@
         "expected_targets": [
           "flake-wake-restore"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #3125 vs record 3261, final round 1"
     },
     {
       "id": "cicd-300-m026",
@@ -1928,16 +1838,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m026-rework",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-handlers-ratelimit-flake",
@@ -1974,7 +1874,7 @@
           "class": "judgment",
           "lane_id": "handlers-ratelimit-flake",
           "source": "controller",
-          "summary": "Lane handlers-ratelimit-flake PR #3126 failed gate/review (decision: sw_merge refused (exit 3): merge state is not CLEAN). Retry lane_id=handlers-ratelimit-flake in phase swe on round 2 with a rework note."
+          "summary": "Lane handlers-ratelimit-flake PR #3126 failed gate/review (decision: sw_merge refused (exit 3): merge state is not CLEAN)."
         }
       ],
       "baseline": {
@@ -1995,7 +1895,9 @@
         "expected_targets": [
           "handlers-ratelimit-flake"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #3126 vs record 3277, final round 2"
     },
     {
       "id": "cicd-300-m027",
@@ -2009,16 +1911,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m027-rework",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-flake-ws-pins-replay",
@@ -2055,7 +1947,7 @@
           "class": "judgment",
           "lane_id": "flake-ws-pins-replay",
           "source": "controller",
-          "summary": "Lane flake-ws-pins-replay PR #3127 failed gate/review (decision: sw_merge refused (exit 3): POST /api/mail: HTTP 409: {\"error\":\"The recipient session has no live age). Retry lane_id=flake-ws-pins-replay in phase swe on round 2 with a rework note."
+          "summary": "Lane flake-ws-pins-replay PR #3127 failed gate/review (decision: sw_merge refused (exit 3): POST /api/mail: HTTP 409: {\"error\":\"The recipient session has no live age)."
         }
       ],
       "baseline": {
@@ -2076,7 +1968,9 @@
         "expected_targets": [
           "flake-ws-pins-replay"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #3127 vs record 3267, final round 2"
     },
     {
       "id": "cicd-300-m028",
@@ -2090,16 +1984,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m028-rework",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-preflight-full-gates",
@@ -2136,7 +2020,7 @@
           "class": "judgment",
           "lane_id": "preflight-full-gates",
           "source": "controller",
-          "summary": "Lane preflight-full-gates PR #3128 failed gate/review (decision: sw_merge refused (exit 3): denied merge path: .github/workflows/deploy.yaml). Retry lane_id=preflight-full-gates in phase swe on round 2 with a rework note."
+          "summary": "Lane preflight-full-gates PR #3128 failed gate/review (decision: sw_merge refused (exit 3): denied merge path: .github/workflows/deploy.yaml)."
         }
       ],
       "baseline": {
@@ -2157,7 +2041,9 @@
         "expected_targets": [
           "preflight-full-gates"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #3128 vs record 3257, final round 3"
     },
     {
       "id": "cicd-300-m029",
@@ -2191,7 +2077,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item hostgate-analysis (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=hostgate-analysis with a focused implementation brief."
+          "summary": "Backlog item hostgate-analysis (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -2211,7 +2097,9 @@
         "expected_targets": [
           "hostgate-analysis"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m030",
@@ -2245,7 +2133,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item merge-model-1k (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=merge-model-1k with a focused implementation brief."
+          "summary": "Backlog item merge-model-1k (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -2265,7 +2153,9 @@
         "expected_targets": [
           "merge-model-1k"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m031",
@@ -2299,7 +2189,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item merge-model-1k-v2 (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=merge-model-1k-v2 with a focused implementation brief."
+          "summary": "Backlog item merge-model-1k-v2 (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -2319,7 +2209,9 @@
         "expected_targets": [
           "merge-model-1k-v2"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 105s from moment"
     },
     {
       "id": "cicd-300-m032",
@@ -2353,7 +2245,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item merge-model-1k-v3 (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=merge-model-1k-v3 with a focused implementation brief."
+          "summary": "Backlog item merge-model-1k-v3 (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -2373,7 +2265,9 @@
         "expected_targets": [
           "merge-model-1k-v3"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "lane started 161s from moment (>120s)"
     },
     {
       "id": "cicd-300-m033",
@@ -2407,7 +2301,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item fullstack-playwright (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=fullstack-playwright with a focused implementation brief."
+          "summary": "Backlog item fullstack-playwright (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -2427,7 +2321,9 @@
         "expected_targets": [
           "fullstack-playwright"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 59s from moment"
     },
     {
       "id": "cicd-300-m034",
@@ -2461,7 +2357,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item quiet10-preflight (Problem: QUIET10 is the one dispatch number the host still reads by hand. The question a06f4737 defaulted to () is open and ready with 0/8 running lanes. Call lane.spawn for item_id=quiet10-preflight with a focused implementation brief."
+          "summary": "Backlog item quiet10-preflight (Problem: QUIET10 is the one dispatch number the host still reads by hand. The question a06f4737 defaulted to () is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -2481,7 +2377,9 @@
         "expected_targets": [
           "quiet10-preflight"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "lane started 289s from moment (>120s)"
     },
     {
       "id": "cicd-300-m035",
@@ -2515,7 +2413,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item receipt-dryrun (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=receipt-dryrun with a focused implementation brief."
+          "summary": "Backlog item receipt-dryrun (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -2535,7 +2433,9 @@
         "expected_targets": [
           "receipt-dryrun"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 113s from moment"
     },
     {
       "id": "cicd-300-m036",
@@ -2569,7 +2469,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item ac-poison-invalidate (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=ac-poison-invalidate with a focused implementation brief."
+          "summary": "Backlog item ac-poison-invalidate (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -2589,7 +2489,9 @@
         "expected_targets": [
           "ac-poison-invalidate"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 77s from moment"
     },
     {
       "id": "cicd-300-m037",
@@ -2623,7 +2525,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item hermetic-bazel-enforce (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=hermetic-bazel-enforce with a focused implementation brief."
+          "summary": "Backlog item hermetic-bazel-enforce (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -2643,7 +2545,9 @@
         "expected_targets": [
           "hermetic-bazel-enforce"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 73s from moment"
     },
     {
       "id": "cicd-300-m038",
@@ -2677,7 +2581,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item inc-lane-helpers-data (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=inc-lane-helpers-data with a focused implementation brief."
+          "summary": "Backlog item inc-lane-helpers-data (Run 20261103-cicd-300 (owner-approved CI/CD plan: sycamore-labs/nebula to 300 merged PRs/day, merge->live p50) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -2697,7 +2601,9 @@
         "expected_targets": [
           "inc-lane-helpers-data"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "lane started 376s from moment (>120s)"
     },
     {
       "id": "cicd-300-m039",
@@ -2749,7 +2655,7 @@
           "class": "judgment",
           "lane_id": "app-token-design",
           "source": "controller",
-          "summary": "Lane app-token-design PR #3103 merged into main (8b6b3f0a) and lane status is done. Close backlog item id=item-app-token-design with status=done using backlog.close."
+          "summary": "Lane app-token-design PR #3103 merged into main (8b6b3f0a) and lane status is done."
         }
       ],
       "baseline": {
@@ -2769,7 +2675,9 @@
           "item-app-token-design",
           "app-token-design"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #3103 vs record 3103; finish 2026-11-11T06:51:19Z"
     },
     {
       "id": "cicd-300-m040",
@@ -2821,7 +2729,7 @@
           "class": "judgment",
           "lane_id": "lead-time-metrics",
           "source": "controller",
-          "summary": "Lane lead-time-metrics PR #3109 merged into main (77092eb8) and lane status is done. Close backlog item id=item-lead-time-metrics with status=done using backlog.close."
+          "summary": "Lane lead-time-metrics PR #3109 merged into main (77092eb8) and lane status is done."
         }
       ],
       "baseline": {
@@ -2841,7 +2749,9 @@
           "item-lead-time-metrics",
           "lead-time-metrics"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #3109 vs record 3109; finish 2026-11-11T06:51:27Z"
     },
     {
       "id": "cicd-300-m041",
@@ -2893,7 +2803,7 @@
           "class": "judgment",
           "lane_id": "ci-queue",
           "source": "controller",
-          "summary": "Lane ci-queue PR #3105 merged into main (3a7255a1) and lane status is done. Close backlog item id=item-ci-queue with status=done using backlog.close."
+          "summary": "Lane ci-queue PR #3105 merged into main (3a7255a1) and lane status is done."
         }
       ],
       "baseline": {
@@ -2913,7 +2823,9 @@
           "item-ci-queue",
           "ci-queue"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #3105 vs record 3105; finish 2026-11-11T06:51:21Z"
     },
     {
       "id": "cicd-300-m042",
@@ -2965,7 +2877,7 @@
           "class": "judgment",
           "lane_id": "reenqueue",
           "source": "controller",
-          "summary": "Lane reenqueue PR #3113 merged into main (d42daa6e) and lane status is done. Close backlog item id=item-reenqueue with status=done using backlog.close."
+          "summary": "Lane reenqueue PR #3113 merged into main (d42daa6e) and lane status is done."
         }
       ],
       "baseline": {
@@ -2985,7 +2897,9 @@
           "item-reenqueue",
           "reenqueue"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #3113 vs record 3113; finish 2026-11-11T06:51:30Z"
     },
     {
       "id": "cicd-300-m043",
@@ -3037,7 +2951,7 @@
           "class": "judgment",
           "lane_id": "mf-pr-wait",
           "source": "controller",
-          "summary": "Lane mf-pr-wait PR #3141 merged into main (19be770d) and lane status is done. Close backlog item id=item-mf-pr-wait with status=done using backlog.close."
+          "summary": "Lane mf-pr-wait PR #3141 merged into main (19be770d) and lane status is done."
         }
       ],
       "baseline": {
@@ -3057,7 +2971,9 @@
           "item-mf-pr-wait",
           "mf-pr-wait"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #3141 vs record 3141; finish 2026-11-11T06:51:28Z"
     },
     {
       "id": "cicd-300-m044",
@@ -3071,16 +2987,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m044-steer",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: resolve cross-lane contract and rebase questions internally by steering the active lane; do not call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-cutover",
@@ -3117,7 +3023,7 @@
           "class": "judgment",
           "lane_id": "cutover",
           "source": "cutover",
-          "summary": "Lane cutover asks whether to rebase onto the newly merged shared contract on main (note <scrubbed-id> from=cutover subject=Done: dropped my re-pointing commit; #43). Per standing directive, call lane.steer on lane_id=cutover to adopt the main contract."
+          "summary": "Lane cutover asks whether to rebase onto the newly merged shared contract on main (note <scrubbed-id> from=cutover subject=Done: dropped my re-pointing commit; #43)."
         }
       ],
       "baseline": {
@@ -3138,7 +3044,9 @@
         "expected_targets": [
           "cutover"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m045",
@@ -3152,16 +3060,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m045-steer",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: resolve cross-lane contract and rebase questions internally by steering the active lane; do not call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-heal-red-deploys",
@@ -3198,7 +3096,7 @@
           "class": "judgment",
           "lane_id": "heal-red-deploys",
           "source": "heal-red-deploys",
-          "summary": "Lane heal-red-deploys asks whether to rebase onto the newly merged shared contract on main (note <scrubbed-id> from=heal-red-deploys subject=Thanks. Branch base is 6f39aad ). Per standing directive, call lane.steer on lane_id=heal-red-deploys to adopt the main contract."
+          "summary": "Lane heal-red-deploys asks whether to rebase onto the newly merged shared contract on main (note <scrubbed-id> from=heal-red-deploys subject=Thanks. Branch base is 6f39aad )."
         }
       ],
       "baseline": {
@@ -3219,7 +3117,9 @@
         "expected_targets": [
           "heal-red-deploys"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m046",
@@ -3233,16 +3133,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m046-split",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: keep each lane to one PR; split newly discovered out-of-scope defects into a separate backlog item with backlog.add.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-fb699-close-session-tab",
@@ -3279,7 +3169,7 @@
           "class": "judgment",
           "lane_id": "fb699-close-session-tab",
           "source": "fb699-close-session-tab",
-          "summary": "Lane fb699-close-session-tab discovered a separate out-of-scope defect (id=fb699-close-session-tab-followup-2) while working on PR #3146. Per standing rule, call backlog.add with id=fb699-close-session-tab-followup-2 and priority=p1."
+          "summary": "Lane fb699-close-session-tab discovered a separate out-of-scope defect (id=fb699-close-session-tab-followup-2) while working on PR #3146."
         }
       ],
       "baseline": {
@@ -3299,7 +3189,9 @@
         "expected_targets": [
           "fb699-close-session-tab-followup-2"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m047",
@@ -3313,16 +3205,6 @@
           "objective": "Top-priority platform swarm: 300 then 500 merged PRs/day; merge->live p50 <= 25 min; main deterministic.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-cicd-300-m047-split",
-            "run_id": "20261103-cicd-300",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: keep each lane to one PR; split newly discovered out-of-scope defects into a separate backlog item with backlog.add.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-fb722-typing-paused",
@@ -3359,7 +3241,7 @@
           "class": "judgment",
           "lane_id": "fb722-typing-paused",
           "source": "fb722-typing-paused",
-          "summary": "Lane fb722-typing-paused discovered a separate out-of-scope defect (id=fb722-typing-paused-followup-3) while working on PR #3147. Per standing rule, call backlog.add with id=fb722-typing-paused-followup-3 and priority=p1."
+          "summary": "Lane fb722-typing-paused discovered a separate out-of-scope defect (id=fb722-typing-paused-followup-3) while working on PR #3147."
         }
       ],
       "baseline": {
@@ -3379,7 +3261,9 @@
         "expected_targets": [
           "fb722-typing-paused-followup-3"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "cicd-300-m048",
@@ -3405,7 +3289,7 @@
           "class": "judgment",
           "source": "owner",
           "urgent": true,
-          "summary": "Owner directive on 20261103-cicd-300: import updated milestone plan post:cicd-300-plan-v2 and reconcile the backlog by calling planner.request."
+          "summary": "Owner directive on 20261103-cicd-300: import updated milestone plan post:cicd-300-plan-v2 and reconcile the backlog."
         }
       ],
       "baseline": {
@@ -3421,7 +3305,9 @@
         "expected_tools": [
           "planner.request"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "category replan_request: referenced ids/posts absent from run history"
     },
     {
       "id": "cicd-300-m049",
@@ -3445,7 +3331,7 @@
           "kind": "mail",
           "class": "judgment",
           "source": "controller",
-          "summary": "Operational observation on 20261103-cicd-300: upstream GitHub Actions queue latency spiked above 15m; record an operational note directive using directive.note with scope=ci-queue and expiry=6h."
+          "summary": "Operational observation on 20261103-cicd-300: upstream GitHub Actions queue latency spiked above 15m."
         }
       ],
       "baseline": {
@@ -3461,7 +3347,9 @@
         "expected_tools": [
           "directive.note"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "category directive_note: referenced ids/posts absent from run history"
     },
     {
       "id": "cicd-300-m050",
@@ -3511,7 +3399,7 @@
           "class": "judgment",
           "lane_id": "cicd-300-app-grant",
           "source": "cicd-300-app-grant",
-          "summary": "Lane cicd-300-app-grant is blocked on a decision only the owner can make: granting production GitHub App organization permissions in the owner's browser. Call owner.ask for lane_id=cicd-300-app-grant with options=['defer-until-impl-merged', 'grant-now'], default='defer-until-impl-merged', and deadline='4h'."
+          "summary": "Lane cicd-300-app-grant is blocked on a decision only the owner can make: granting production GitHub App organization permissions in the owner's browser."
         }
       ],
       "baseline": {
@@ -3530,7 +3418,9 @@
         "expected_targets": [
           "cicd-300-app-grant"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "category legitimate_owner_ask: referenced ids/posts absent from run history"
     },
     {
       "id": "feedback-m001",
@@ -3581,7 +3471,7 @@
           "class": "judgment",
           "lane_id": "sl503-west-session-logs",
           "source": "controller",
-          "summary": "Lane sl503-west-session-logs stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 3 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=sl503-west-session-logs on phase swe round 2."
+          "summary": "Lane sl503-west-session-logs stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 3 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -3601,7 +3491,9 @@
         "expected_targets": [
           "sl503-west-session-logs"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 2, 83min after start (need round>=2 and 52+-15min), finished 2026-11-11T07:00:04Z"
     },
     {
       "id": "feedback-m002",
@@ -3615,16 +3507,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m002-decide",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-mail-route-probe",
@@ -3661,7 +3543,7 @@
           "class": "judgment",
           "lane_id": "mail-route-probe",
           "source": "controller",
-          "summary": "Lane mail-route-probe stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 4 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=mail-route-probe on phase swe round 2."
+          "summary": "Lane mail-route-probe stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 4 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -3681,7 +3563,9 @@
         "expected_targets": [
           "mail-route-probe"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m003",
@@ -3732,7 +3616,7 @@
           "class": "judgment",
           "lane_id": "fb748-health-repo-slug",
           "source": "controller",
-          "summary": "Lane fb748-health-repo-slug stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=fb748-health-repo-slug on phase swe round 2."
+          "summary": "Lane fb748-health-repo-slug stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -3752,7 +3636,9 @@
         "expected_targets": [
           "fb748-health-repo-slug"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 54min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:59:59Z"
     },
     {
       "id": "feedback-m004",
@@ -3803,7 +3689,7 @@
           "class": "judgment",
           "lane_id": "keep-d6234fe3",
           "source": "controller",
-          "summary": "Lane keep-d6234fe3 stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 6 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=keep-d6234fe3 on phase swe round 2."
+          "summary": "Lane keep-d6234fe3 stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 6 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -3823,7 +3709,9 @@
         "expected_targets": [
           "keep-d6234fe3"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 48min after start (need round>=2 and 52+-15min), finished 2026-11-11T07:00:00Z"
     },
     {
       "id": "feedback-m005",
@@ -3837,16 +3725,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m005-decide",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-fb750-slack-reply-route",
@@ -3883,7 +3761,7 @@
           "class": "judgment",
           "lane_id": "fb750-slack-reply-route",
           "source": "controller",
-          "summary": "Lane fb750-slack-reply-route stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 12 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from t). Call lane.retry for lane_id=fb750-slack-reply-route on phase swe round 2."
+          "summary": "Lane fb750-slack-reply-route stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 12 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from t)."
         }
       ],
       "baseline": {
@@ -3903,7 +3781,9 @@
         "expected_targets": [
           "fb750-slack-reply-route"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m006",
@@ -3954,7 +3834,7 @@
           "class": "judgment",
           "lane_id": "fb725-live-check",
           "source": "controller",
-          "summary": "Lane fb725-live-check stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 10 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from t). Call lane.retry for lane_id=fb725-live-check on phase swe round 2."
+          "summary": "Lane fb725-live-check stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 10 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from t)."
         }
       ],
       "baseline": {
@@ -3974,7 +3854,9 @@
         "expected_targets": [
           "fb725-live-check"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 8min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:59:59Z"
     },
     {
       "id": "feedback-m007",
@@ -4025,7 +3907,7 @@
           "class": "judgment",
           "lane_id": "gate-webui-timeouts",
           "source": "controller",
-          "summary": "Lane gate-webui-timeouts stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=gate-webui-timeouts on phase swe round 2."
+          "summary": "Lane gate-webui-timeouts stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -4045,7 +3927,9 @@
         "expected_targets": [
           "gate-webui-timeouts"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 69min after start (need round>=2 and 52+-15min), finished 2026-11-11T07:00:00Z"
     },
     {
       "id": "feedback-m008",
@@ -4059,16 +3943,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m008-decide",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-fb755-gh-401-after-push",
@@ -4105,7 +3979,7 @@
           "class": "judgment",
           "lane_id": "fb755-gh-401-after-push",
           "source": "controller",
-          "summary": "Lane fb755-gh-401-after-push stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 16 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from t). Call lane.retry for lane_id=fb755-gh-401-after-push on phase swe round 2."
+          "summary": "Lane fb755-gh-401-after-push stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 16 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from t)."
         }
       ],
       "baseline": {
@@ -4125,7 +3999,9 @@
         "expected_targets": [
           "fb755-gh-401-after-push"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m009",
@@ -4176,7 +4052,7 @@
           "class": "judgment",
           "lane_id": "skill-gate-budget",
           "source": "controller",
-          "summary": "Lane skill-gate-budget stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=skill-gate-budget on phase swe round 2."
+          "summary": "Lane skill-gate-budget stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -4196,7 +4072,9 @@
         "expected_targets": [
           "skill-gate-budget"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 34min after start (need round>=2 and 52+-15min), finished 2026-11-11T07:00:04Z"
     },
     {
       "id": "feedback-m010",
@@ -4247,7 +4125,7 @@
           "class": "judgment",
           "lane_id": "gate-webui-timeouts",
           "source": "controller",
-          "summary": "Lane gate-webui-timeouts stalled in phase swe (round 1, max_round 1) after 52m (decision: lane-health stale; investigate the blocker; choose re-delegation or escalation). Call lane.retry for lane_id=gate-webui-timeouts on phase swe round 2."
+          "summary": "Lane gate-webui-timeouts stalled in phase swe (round 1, max_round 1) after 52m (decision: lane-health stale; investigate the blocker; choose re-delegation or escalation)."
         }
       ],
       "baseline": {
@@ -4267,7 +4145,9 @@
         "expected_targets": [
           "gate-webui-timeouts"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 130min after start (need round>=2 and 52+-15min), finished 2026-11-11T07:00:00Z"
     },
     {
       "id": "feedback-m011",
@@ -4281,16 +4161,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m011-decide",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-fb758-orbit-slack-join",
@@ -4327,7 +4197,7 @@
           "class": "judgment",
           "lane_id": "fb758-orbit-slack-join",
           "source": "controller",
-          "summary": "Lane fb758-orbit-slack-join stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=fb758-orbit-slack-join on phase swe round 2."
+          "summary": "Lane fb758-orbit-slack-join stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -4347,7 +4217,9 @@
         "expected_targets": [
           "fb758-orbit-slack-join"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m012",
@@ -4398,7 +4270,7 @@
           "class": "judgment",
           "lane_id": "fb761-restore-keeps-branch",
           "source": "controller",
-          "summary": "Lane fb761-restore-keeps-branch stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=fb761-restore-keeps-branch on phase swe round 2."
+          "summary": "Lane fb761-restore-keeps-branch stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -4418,7 +4290,9 @@
         "expected_targets": [
           "fb761-restore-keeps-branch"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 111min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:59:59Z"
     },
     {
       "id": "feedback-m013",
@@ -4469,7 +4343,7 @@
           "class": "judgment",
           "lane_id": "fb763-waits-on-pr-live-lane",
           "source": "controller",
-          "summary": "Lane fb763-waits-on-pr-live-lane stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 11 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from t). Call lane.retry for lane_id=fb763-waits-on-pr-live-lane on phase swe round 2."
+          "summary": "Lane fb763-waits-on-pr-live-lane stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 11 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from t)."
         }
       ],
       "baseline": {
@@ -4489,7 +4363,9 @@
         "expected_targets": [
           "fb763-waits-on-pr-live-lane"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 3, 95min after start (need round>=2 and 52+-15min), finished 2026-11-11T06:59:59Z"
     },
     {
       "id": "feedback-m014",
@@ -4503,16 +4379,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m014-decide",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-turn-events-lost",
@@ -4549,7 +4415,7 @@
           "class": "judgment",
           "lane_id": "turn-events-lost",
           "source": "controller",
-          "summary": "Lane turn-events-lost stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=turn-events-lost on phase swe round 2."
+          "summary": "Lane turn-events-lost stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -4569,7 +4435,9 @@
         "expected_targets": [
           "turn-events-lost"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m015",
@@ -4620,7 +4488,7 @@
           "class": "judgment",
           "lane_id": "report-format-first-time",
           "source": "controller",
-          "summary": "Lane report-format-first-time stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te). Call lane.retry for lane_id=report-format-first-time on phase swe round 2."
+          "summary": "Lane report-format-first-time stalled in phase swe (round 1, max_round 1) after 52m (turn-lost: turn.ended seq 7 of <scrubbed-id> was never seen by the event stream; delivered by the sweep from te)."
         }
       ],
       "baseline": {
@@ -4640,7 +4508,9 @@
         "expected_targets": [
           "report-format-first-time"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 2, 100min after start (need round>=2 and 52+-15min), finished 2026-11-11T07:00:03Z"
     },
     {
       "id": "feedback-m016",
@@ -4691,7 +4561,7 @@
           "class": "judgment",
           "lane_id": "our-routes-error-hunt",
           "source": "controller",
-          "summary": "Lane our-routes-error-hunt stalled in phase swe (round 1, max_round 1) after 52m (decision: lane-health stale; investigate the blocker; choose re-delegation or escalation). Call lane.retry for lane_id=our-routes-error-hunt on phase swe round 2."
+          "summary": "Lane our-routes-error-hunt stalled in phase swe (round 1, max_round 1) after 52m (decision: lane-health stale; investigate the blocker; choose re-delegation or escalation)."
         }
       ],
       "baseline": {
@@ -4711,7 +4581,9 @@
         "expected_targets": [
           "our-routes-error-hunt"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 123min after start (need round>=2 and 52+-15min), finished 2026-11-11T07:00:02Z"
     },
     {
       "id": "feedback-m017",
@@ -4725,16 +4597,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m017-rework",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-terminal-selection-copy",
@@ -4771,7 +4633,7 @@
           "class": "judgment",
           "lane_id": "terminal-selection-copy",
           "source": "controller",
-          "summary": "Lane terminal-selection-copy PR #4617 failed gate/review (decision: sw_merge refused (exit 3)). Retry lane_id=terminal-selection-copy in phase swe on round 2 with a rework note."
+          "summary": "Lane terminal-selection-copy PR #4617 failed gate/review (decision: sw_merge refused (exit 3))."
         }
       ],
       "baseline": {
@@ -4792,7 +4654,9 @@
         "expected_targets": [
           "terminal-selection-copy"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m018",
@@ -4806,16 +4670,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m018-rework",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-workspace-inline-rename",
@@ -4852,7 +4706,7 @@
           "class": "judgment",
           "lane_id": "workspace-inline-rename",
           "source": "controller",
-          "summary": "Lane workspace-inline-rename PR #4618 failed gate/review (decision: sw_merge refused (exit 3)). Retry lane_id=workspace-inline-rename in phase swe on round 2 with a rework note."
+          "summary": "Lane workspace-inline-rename PR #4618 failed gate/review (decision: sw_merge refused (exit 3))."
         }
       ],
       "baseline": {
@@ -4873,7 +4727,9 @@
         "expected_targets": [
           "workspace-inline-rename"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m019",
@@ -4887,16 +4743,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m019-rework",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-swarm-question-cards",
@@ -4933,7 +4779,7 @@
           "class": "judgment",
           "lane_id": "swarm-question-cards",
           "source": "controller",
-          "summary": "Lane swarm-question-cards PR #4619 failed gate/review (decision: sw_merge refused (exit 3)). Retry lane_id=swarm-question-cards in phase swe on round 2 with a rework note."
+          "summary": "Lane swarm-question-cards PR #4619 failed gate/review (decision: sw_merge refused (exit 3))."
         }
       ],
       "baseline": {
@@ -4954,7 +4800,9 @@
         "expected_targets": [
           "swarm-question-cards"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m020",
@@ -4968,16 +4816,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m020-rework",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-terminal-alt-steering",
@@ -5014,7 +4852,7 @@
           "class": "judgment",
           "lane_id": "terminal-alt-steering",
           "source": "controller",
-          "summary": "Lane terminal-alt-steering PR #4620 failed gate/review (decision: sw_merge refused (exit 3)). Retry lane_id=terminal-alt-steering in phase swe on round 2 with a rework note."
+          "summary": "Lane terminal-alt-steering PR #4620 failed gate/review (decision: sw_merge refused (exit 3))."
         }
       ],
       "baseline": {
@@ -5035,7 +4873,9 @@
         "expected_targets": [
           "terminal-alt-steering"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m021",
@@ -5049,16 +4889,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m021-rework",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-mail-address-guidance",
@@ -5095,7 +4925,7 @@
           "class": "judgment",
           "lane_id": "mail-address-guidance",
           "source": "controller",
-          "summary": "Lane mail-address-guidance PR #4621 failed gate/review (decision: sw_merge refused (exit 3)). Retry lane_id=mail-address-guidance in phase swe on round 2 with a rework note."
+          "summary": "Lane mail-address-guidance PR #4621 failed gate/review (decision: sw_merge refused (exit 3))."
         }
       ],
       "baseline": {
@@ -5116,7 +4946,9 @@
         "expected_targets": [
           "mail-address-guidance"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #4621 vs record 1820, final round 1"
     },
     {
       "id": "feedback-m022",
@@ -5130,16 +4962,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m022-rework",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-prompt-hook-python-startup",
@@ -5176,7 +4998,7 @@
           "class": "judgment",
           "lane_id": "prompt-hook-python-startup",
           "source": "controller",
-          "summary": "Lane prompt-hook-python-startup PR #4622 failed gate/review (decision: sw_merge refused (exit 3)). Retry lane_id=prompt-hook-python-startup in phase swe on round 2 with a rework note."
+          "summary": "Lane prompt-hook-python-startup PR #4622 failed gate/review (decision: sw_merge refused (exit 3))."
         }
       ],
       "baseline": {
@@ -5197,7 +5019,9 @@
         "expected_targets": [
           "prompt-hook-python-startup"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #4622 vs record 1817, final round 1"
     },
     {
       "id": "feedback-m023",
@@ -5211,16 +5035,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m023-rework",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-draft-safe-mail",
@@ -5257,7 +5071,7 @@
           "class": "judgment",
           "lane_id": "draft-safe-mail",
           "source": "controller",
-          "summary": "Lane draft-safe-mail PR #4623 failed gate/review (decision: sw_merge refused (exit 3)). Retry lane_id=draft-safe-mail in phase swe on round 2 with a rework note."
+          "summary": "Lane draft-safe-mail PR #4623 failed gate/review (decision: sw_merge refused (exit 3))."
         }
       ],
       "baseline": {
@@ -5278,7 +5092,9 @@
         "expected_targets": [
           "draft-safe-mail"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #4623 vs record 1823, final round 1"
     },
     {
       "id": "feedback-m024",
@@ -5292,16 +5108,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m024-rework",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-inbox-needs-you",
@@ -5338,7 +5144,7 @@
           "class": "judgment",
           "lane_id": "inbox-needs-you",
           "source": "controller",
-          "summary": "Lane inbox-needs-you PR #4624 failed gate/review (decision: sw_merge refused (exit 3)). Retry lane_id=inbox-needs-you in phase swe on round 2 with a rework note."
+          "summary": "Lane inbox-needs-you PR #4624 failed gate/review (decision: sw_merge refused (exit 3))."
         }
       ],
       "baseline": {
@@ -5359,7 +5165,9 @@
         "expected_targets": [
           "inbox-needs-you"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #4624 vs record 1825, final round 2"
     },
     {
       "id": "feedback-m025",
@@ -5373,16 +5181,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m025-rework",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-inbox-polish",
@@ -5419,7 +5217,7 @@
           "class": "judgment",
           "lane_id": "inbox-polish",
           "source": "controller",
-          "summary": "Lane inbox-polish PR #4625 failed gate/review (decision: sw_merge refused (exit 3)). Retry lane_id=inbox-polish in phase swe on round 2 with a rework note."
+          "summary": "Lane inbox-polish PR #4625 failed gate/review (decision: sw_merge refused (exit 3))."
         }
       ],
       "baseline": {
@@ -5440,7 +5238,9 @@
         "expected_targets": [
           "inbox-polish"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #4625 vs record 1837, final round 1"
     },
     {
       "id": "feedback-m026",
@@ -5454,16 +5254,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m026-rework",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-fb176-home-root-cause",
@@ -5500,7 +5290,7 @@
           "class": "judgment",
           "lane_id": "fb176-home-root-cause",
           "source": "controller",
-          "summary": "Lane fb176-home-root-cause PR #4626 failed gate/review (decision: sw_merge refused (exit 3)). Retry lane_id=fb176-home-root-cause in phase swe on round 2 with a rework note."
+          "summary": "Lane fb176-home-root-cause PR #4626 failed gate/review (decision: sw_merge refused (exit 3))."
         }
       ],
       "baseline": {
@@ -5521,7 +5311,9 @@
         "expected_targets": [
           "fb176-home-root-cause"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #4626 vs record 1836, final round 2"
     },
     {
       "id": "feedback-m027",
@@ -5535,16 +5327,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m027-rework",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-downloadable-files",
@@ -5581,7 +5363,7 @@
           "class": "judgment",
           "lane_id": "downloadable-files",
           "source": "controller",
-          "summary": "Lane downloadable-files PR #4627 failed gate/review (decision: sw_merge refused (exit 3)). Retry lane_id=downloadable-files in phase swe on round 2 with a rework note."
+          "summary": "Lane downloadable-files PR #4627 failed gate/review (decision: sw_merge refused (exit 3))."
         }
       ],
       "baseline": {
@@ -5602,7 +5384,9 @@
         "expected_targets": [
           "downloadable-files"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #4627 vs record 1806, final round 3"
     },
     {
       "id": "feedback-m028",
@@ -5616,16 +5400,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m028-rework",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-draft-safe-mail-optin",
@@ -5662,7 +5436,7 @@
           "class": "judgment",
           "lane_id": "draft-safe-mail-optin",
           "source": "controller",
-          "summary": "Lane draft-safe-mail-optin PR #4628 failed gate/review (decision: sw_merge refused (exit 3)). Retry lane_id=draft-safe-mail-optin in phase swe on round 2 with a rework note."
+          "summary": "Lane draft-safe-mail-optin PR #4628 failed gate/review (decision: sw_merge refused (exit 3))."
         }
       ],
       "baseline": {
@@ -5683,7 +5457,9 @@
         "expected_targets": [
           "draft-safe-mail-optin"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #4628 vs record 1834, final round 2"
     },
     {
       "id": "feedback-m029",
@@ -5717,7 +5493,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item feedback-closure-audit (Credential rule: NEVER open/read/cat ~/.keys.sh or other credential files, even with redaction, and never sear) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=feedback-closure-audit with a focused implementation brief."
+          "summary": "Backlog item feedback-closure-audit (Credential rule: NEVER open/read/cat ~/.keys.sh or other credential files, even with redaction, and never sear) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -5737,7 +5513,9 @@
         "expected_targets": [
           "feedback-closure-audit"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m030",
@@ -5771,7 +5549,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item feedback-product-triage (Credential rule: NEVER open/read/cat ~/.keys.sh or other credential files, even with redaction, and never sear) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=feedback-product-triage with a focused implementation brief."
+          "summary": "Backlog item feedback-product-triage (Credential rule: NEVER open/read/cat ~/.keys.sh or other credential files, even with redaction, and never sear) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -5791,7 +5569,9 @@
         "expected_targets": [
           "feedback-product-triage"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m031",
@@ -5825,7 +5605,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item feedback-ui-live-batch (Auth readiness (before any browser journey): old e2e/live/auth.py and mint_token.py fetch vault credentials an) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=feedback-ui-live-batch with a focused implementation brief."
+          "summary": "Backlog item feedback-ui-live-batch (Auth readiness (before any browser journey): old e2e/live/auth.py and mint_token.py fetch vault credentials an) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -5845,7 +5625,9 @@
         "expected_targets": [
           "feedback-ui-live-batch"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 46s from moment"
     },
     {
       "id": "feedback-m032",
@@ -5879,7 +5661,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item closure-proof-batch (Mission: live user proof for five in-review feedback items whose fixes were declared live more than 24 hours a) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=closure-proof-batch with a focused implementation brief."
+          "summary": "Backlog item closure-proof-batch (Mission: live user proof for five in-review feedback items whose fixes were declared live more than 24 hours a) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -5899,7 +5681,9 @@
         "expected_targets": [
           "closure-proof-batch"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 59s from moment"
     },
     {
       "id": "feedback-m033",
@@ -5933,7 +5717,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item live-batch-2b (Mission: live user proof on https://nebula.sycloud.ai for three fixes merged at 16:06 today. Proof only: if no) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=live-batch-2b with a focused implementation brief."
+          "summary": "Backlog item live-batch-2b (Mission: live user proof on https://nebula.sycloud.ai for three fixes merged at 16:06 today. Proof only: if no) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -5953,7 +5737,9 @@
         "expected_targets": [
           "live-batch-2b"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 47s from moment"
     },
     {
       "id": "feedback-m034",
@@ -5987,7 +5773,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item inbox-needs-you-live (Mission: prove FB-178 (#1825, live at c662b52f) on the live site as a user. The Inbox lists your own sessions) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=inbox-needs-you-live with a focused implementation brief."
+          "summary": "Backlog item inbox-needs-you-live (Mission: prove FB-178 (#1825, live at c662b52f) on the live site as a user. The Inbox lists your own sessions) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -6007,7 +5793,9 @@
         "expected_targets": [
           "inbox-needs-you-live"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 29s from moment"
     },
     {
       "id": "feedback-m035",
@@ -6041,7 +5829,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item fb176-live (Mission: prove FB-176's root fix (#1836, merged 848951bc) live. A fresh workspace's home has `~/.local/share`) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=fb176-live with a focused implementation brief."
+          "summary": "Backlog item fb176-live (Mission: prove FB-176's root fix (#1836, merged 848951bc) live. A fresh workspace's home has `~/.local/share`) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -6061,7 +5849,9 @@
         "expected_targets": [
           "fb176-live"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 88s from moment"
     },
     {
       "id": "feedback-m036",
@@ -6095,7 +5885,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item live-batch-3 (Mission: prove three merged fixes live as a user, once the deployed apiserver, web and session-runner images c) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=live-batch-3 with a focused implementation brief."
+          "summary": "Backlog item live-batch-3 (Mission: prove three merged fixes live as a user, once the deployed apiserver, web and session-runner images c) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -6115,7 +5905,9 @@
         "expected_targets": [
           "live-batch-3"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "lane started 126s from moment (>120s)"
     },
     {
       "id": "feedback-m037",
@@ -6149,7 +5941,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item files-live (Mission: prove FB-173 (#1806, merged 1996d673, file posts: ZIP/CSV/JSON/text) live as a user once the deployed) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=files-live with a focused implementation brief."
+          "summary": "Backlog item files-live (Mission: prove FB-173 (#1806, merged 1996d673, file posts: ZIP/CSV/JSON/text) live as a user once the deployed) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -6169,7 +5961,9 @@
         "expected_targets": [
           "files-live"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "lane started 248s from moment (>120s)"
     },
     {
       "id": "feedback-m038",
@@ -6203,7 +5997,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item close-tab-live (Mission: prove FB-180 and FB-181 (#1851, merge bae76e85, \"close a terminal tab any time\") live as a user. Read) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=close-tab-live with a focused implementation brief."
+          "summary": "Backlog item close-tab-live (Mission: prove FB-180 and FB-181 (#1851, merge bae76e85, \"close a terminal tab any time\") live as a user. Read) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -6223,7 +6017,9 @@
         "expected_targets": [
           "close-tab-live"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 85s from moment"
     },
     {
       "id": "feedback-m039",
@@ -6275,7 +6071,7 @@
           "class": "judgment",
           "lane_id": "close-tab-live",
           "source": "controller",
-          "summary": "Lane close-tab-live PR #4639 merged into main (a1000ec7) and lane status is done. Close backlog item id=item-close-tab-live with status=done using backlog.close."
+          "summary": "Lane close-tab-live PR #4639 merged into main (a1000ec7) and lane status is done."
         }
       ],
       "baseline": {
@@ -6295,7 +6091,9 @@
           "item-close-tab-live",
           "close-tab-live"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #4639 vs record None; finish 2026-11-11T06:59:37Z"
     },
     {
       "id": "feedback-m040",
@@ -6347,7 +6145,7 @@
           "class": "judgment",
           "lane_id": "live-proof-3",
           "source": "controller",
-          "summary": "Lane live-proof-3 PR #4640 merged into main (a1000f28) and lane status is done. Close backlog item id=item-live-proof-3 with status=done using backlog.close."
+          "summary": "Lane live-proof-3 PR #4640 merged into main (a1000f28) and lane status is done."
         }
       ],
       "baseline": {
@@ -6367,7 +6165,9 @@
           "item-live-proof-3",
           "live-proof-3"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #4640 vs record None; finish 2026-11-11T07:00:01Z"
     },
     {
       "id": "feedback-m041",
@@ -6419,7 +6219,7 @@
           "class": "judgment",
           "lane_id": "live-proof-4",
           "source": "controller",
-          "summary": "Lane live-proof-4 PR #4641 merged into main (a1000f89) and lane status is done. Close backlog item id=item-live-proof-4 with status=done using backlog.close."
+          "summary": "Lane live-proof-4 PR #4641 merged into main (a1000f89) and lane status is done."
         }
       ],
       "baseline": {
@@ -6439,7 +6239,9 @@
           "item-live-proof-4",
           "live-proof-4"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #4641 vs record None; finish 2026-11-11T07:00:01Z"
     },
     {
       "id": "feedback-m042",
@@ -6491,7 +6293,7 @@
           "class": "judgment",
           "lane_id": "live-proof-5",
           "source": "controller",
-          "summary": "Lane live-proof-5 PR #4642 merged into main (a1000fea) and lane status is done. Close backlog item id=item-live-proof-5 with status=done using backlog.close."
+          "summary": "Lane live-proof-5 PR #4642 merged into main (a1000fea) and lane status is done."
         }
       ],
       "baseline": {
@@ -6511,7 +6313,9 @@
           "item-live-proof-5",
           "live-proof-5"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #4642 vs record None; finish 2026-11-11T07:00:01Z"
     },
     {
       "id": "feedback-m043",
@@ -6563,7 +6367,7 @@
           "class": "judgment",
           "lane_id": "live-proof-6",
           "source": "controller",
-          "summary": "Lane live-proof-6 PR #4643 merged into main (a100104b) and lane status is done. Close backlog item id=item-live-proof-6 with status=done using backlog.close."
+          "summary": "Lane live-proof-6 PR #4643 merged into main (a100104b) and lane status is done."
         }
       ],
       "baseline": {
@@ -6583,7 +6387,9 @@
           "item-live-proof-6",
           "live-proof-6"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #4643 vs record None; finish 2026-11-11T07:00:01Z"
     },
     {
       "id": "feedback-m044",
@@ -6597,16 +6403,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m044-steer",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: resolve cross-lane contract and rebase questions internally by steering the active lane; do not call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-swarm-handover",
@@ -6643,7 +6439,7 @@
           "class": "judgment",
           "lane_id": "swarm-handover",
           "source": "swarm-handover",
-          "summary": "Lane swarm-handover asks whether to rebase onto the newly merged shared contract on main (note <scrubbed-id>). Per standing directive, call lane.steer on lane_id=swarm-handover to adopt the main contract."
+          "summary": "Lane swarm-handover asks whether to rebase onto the newly merged shared contract on main (note <scrubbed-id>)."
         }
       ],
       "baseline": {
@@ -6664,7 +6460,9 @@
         "expected_targets": [
           "swarm-handover"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m045",
@@ -6678,16 +6476,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m045-steer",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: resolve cross-lane contract and rebase questions internally by steering the active lane; do not call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-terminal-busy-until",
@@ -6724,7 +6512,7 @@
           "class": "judgment",
           "lane_id": "terminal-busy-until",
           "source": "terminal-busy-until",
-          "summary": "Lane terminal-busy-until asks whether to rebase onto the newly merged shared contract on main (note <scrubbed-id>). Per standing directive, call lane.steer on lane_id=terminal-busy-until to adopt the main contract."
+          "summary": "Lane terminal-busy-until asks whether to rebase onto the newly merged shared contract on main (note <scrubbed-id>)."
         }
       ],
       "baseline": {
@@ -6745,7 +6533,9 @@
         "expected_targets": [
           "terminal-busy-until"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m046",
@@ -6759,16 +6549,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m046-split",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: keep each lane to one PR; split newly discovered out-of-scope defects into a separate backlog item with backlog.add.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-fb679-gcloud-indicator-live",
@@ -6805,7 +6585,7 @@
           "class": "judgment",
           "lane_id": "fb679-gcloud-indicator-live",
           "source": "fb679-gcloud-indicator-live",
-          "summary": "Lane fb679-gcloud-indicator-live discovered a separate out-of-scope defect (id=fb679-gcloud-indicator-live-followup-2) while working on PR #4646. Per standing rule, call backlog.add with id=fb679-gcloud-indicator-live-followup-2 and priority=p1."
+          "summary": "Lane fb679-gcloud-indicator-live discovered a separate out-of-scope defect (id=fb679-gcloud-indicator-live-followup-2) while working on PR #4646."
         }
       ],
       "baseline": {
@@ -6825,7 +6605,9 @@
         "expected_targets": [
           "fb679-gcloud-indicator-live-followup-2"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m047",
@@ -6839,16 +6621,6 @@
           "objective": "Agent and swarm-tooling reliability: triage and fix feedback filed by agents and sessions about CLI, mail, terminals, and runs.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-feedback-m047-split",
-            "run_id": "20261026-feedback",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: keep each lane to one PR; split newly discovered out-of-scope defects into a separate backlog item with backlog.add.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-session-remote-cache-lost-inputs",
@@ -6885,7 +6657,7 @@
           "class": "judgment",
           "lane_id": "session-remote-cache-lost-inputs",
           "source": "session-remote-cache-lost-inputs",
-          "summary": "Lane session-remote-cache-lost-inputs discovered a separate out-of-scope defect (id=session-remote-cache-lost-inputs-followup-3) while working on PR #4647. Per standing rule, call backlog.add with id=session-remote-cache-lost-inputs-followup-3 and priority=p1."
+          "summary": "Lane session-remote-cache-lost-inputs discovered a separate out-of-scope defect (id=session-remote-cache-lost-inputs-followup-3) while working on PR #4647."
         }
       ],
       "baseline": {
@@ -6905,7 +6677,9 @@
         "expected_targets": [
           "session-remote-cache-lost-inputs-followup-3"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "feedback-m048",
@@ -6931,7 +6705,7 @@
           "class": "judgment",
           "source": "owner",
           "urgent": true,
-          "summary": "Owner directive on 20261026-feedback: import updated milestone plan post:feedback-plan-v2 and reconcile the backlog by calling planner.request."
+          "summary": "Owner directive on 20261026-feedback: import updated milestone plan post:feedback-plan-v2 and reconcile the backlog."
         }
       ],
       "baseline": {
@@ -6947,7 +6721,9 @@
         "expected_tools": [
           "planner.request"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "category replan_request: referenced ids/posts absent from run history"
     },
     {
       "id": "feedback-m049",
@@ -6971,7 +6747,7 @@
           "kind": "mail",
           "class": "judgment",
           "source": "controller",
-          "summary": "Operational observation on 20261026-feedback: upstream GitHub Actions queue latency spiked above 15m; record an operational note directive using directive.note with scope=ci-queue and expiry=6h."
+          "summary": "Operational observation on 20261026-feedback: upstream GitHub Actions queue latency spiked above 15m."
         }
       ],
       "baseline": {
@@ -6987,7 +6763,9 @@
         "expected_tools": [
           "directive.note"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "category directive_note: referenced ids/posts absent from run history"
     },
     {
       "id": "feedback-m050",
@@ -7037,7 +6815,7 @@
           "class": "judgment",
           "lane_id": "feedback-app-grant",
           "source": "feedback-app-grant",
-          "summary": "Lane feedback-app-grant is blocked on a decision only the owner can make: granting production GitHub App organization permissions in the owner's browser. Call owner.ask for lane_id=feedback-app-grant with options=['defer-until-impl-merged', 'grant-now'], default='defer-until-impl-merged', and deadline='4h'."
+          "summary": "Lane feedback-app-grant is blocked on a decision only the owner can make: granting production GitHub App organization permissions in the owner's browser."
         }
       ],
       "baseline": {
@@ -7056,7 +6834,9 @@
         "expected_targets": [
           "feedback-app-grant"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "category legitimate_owner_ask: referenced ids/posts absent from run history"
     },
     {
       "id": "s1-main-m001",
@@ -7107,7 +6887,7 @@
           "class": "judgment",
           "lane_id": "p2-broker-permset-review",
           "source": "controller",
-          "summary": "Lane p2-broker-permset-review stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> marker_mtime=none reason=Selected model is at capacity. Please try ). Call lane.retry for lane_id=p2-broker-permset-review on phase swe round 2."
+          "summary": "Lane p2-broker-permset-review stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> marker_mtime=none reason=Selected model is at capacity. Please try )."
         }
       ],
       "baseline": {
@@ -7127,7 +6907,9 @@
         "expected_targets": [
           "p2-broker-permset-review"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 7min after start (need round>=2 and 52+-15min), finished 2026-11-03T08:39:04Z"
     },
     {
       "id": "s1-main-m002",
@@ -7141,16 +6923,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m002-decide",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-tb-fb476-cold-wake",
@@ -7187,7 +6959,7 @@
           "class": "judgment",
           "lane_id": "tb-fb476-cold-wake",
           "source": "controller",
-          "summary": "Lane tb-fb476-cold-wake stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> marker_mtime=none reason=This content was flagged for possible cybe). Call lane.retry for lane_id=tb-fb476-cold-wake on phase swe round 2."
+          "summary": "Lane tb-fb476-cold-wake stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> marker_mtime=none reason=This content was flagged for possible cybe)."
         }
       ],
       "baseline": {
@@ -7207,7 +6979,9 @@
         "expected_targets": [
           "tb-fb476-cold-wake"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m003",
@@ -7258,7 +7032,7 @@
           "class": "judgment",
           "lane_id": "ml-vmm-lifecycle-records",
           "source": "controller",
-          "summary": "Lane ml-vmm-lifecycle-records stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> marker_mtime=none reason=Selected model is at capacity. Please try ). Call lane.retry for lane_id=ml-vmm-lifecycle-records on phase swe round 2."
+          "summary": "Lane ml-vmm-lifecycle-records stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> marker_mtime=none reason=Selected model is at capacity. Please try )."
         }
       ],
       "baseline": {
@@ -7278,7 +7052,9 @@
         "expected_targets": [
           "ml-vmm-lifecycle-records"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 11, 2948min after start (need round>=2 and 52+-15min), finished 2026-11-05T03:04:57Z"
     },
     {
       "id": "s1-main-m004",
@@ -7329,7 +7105,7 @@
           "class": "judgment",
           "lane_id": "ml-codex-migrate-race",
           "source": "controller",
-          "summary": "Lane ml-codex-migrate-race stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> marker_mtime=none reason=Selected model is at capacity. Please try ). Call lane.retry for lane_id=ml-codex-migrate-race on phase swe round 2."
+          "summary": "Lane ml-codex-migrate-race stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> marker_mtime=none reason=Selected model is at capacity. Please try )."
         }
       ],
       "baseline": {
@@ -7349,7 +7125,9 @@
         "expected_targets": [
           "ml-codex-migrate-race"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 6, 2698min after start (need round>=2 and 52+-15min), finished 2026-11-04T19:25:30Z"
     },
     {
       "id": "s1-main-m005",
@@ -7363,16 +7141,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m005-decide",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-move-event-records",
@@ -7409,7 +7177,7 @@
           "class": "judgment",
           "lane_id": "move-event-records",
           "source": "controller",
-          "summary": "Lane move-event-records stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=review terminal=<scrubbed-id> reason=idle-expired busy_restarts=0). Call lane.retry for lane_id=move-event-records on phase swe round 2."
+          "summary": "Lane move-event-records stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=review terminal=<scrubbed-id> reason=idle-expired busy_restarts=0)."
         }
       ],
       "baseline": {
@@ -7429,7 +7197,9 @@
         "expected_targets": [
           "move-event-records"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m006",
@@ -7480,7 +7250,7 @@
           "class": "judgment",
           "lane_id": "runc-create-off",
           "source": "controller",
-          "summary": "Lane runc-create-off stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=1). Call lane.retry for lane_id=runc-create-off on phase swe round 2."
+          "summary": "Lane runc-create-off stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=1)."
         }
       ],
       "baseline": {
@@ -7500,7 +7270,9 @@
         "expected_targets": [
           "runc-create-off"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 3, 1475min after start (need round>=2 and 52+-15min), finished 2026-11-04T23:48:09Z"
     },
     {
       "id": "s1-main-m007",
@@ -7551,7 +7323,7 @@
           "class": "judgment",
           "lane_id": "s1-recovery-records",
           "source": "controller",
-          "summary": "Lane s1-recovery-records stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0). Call lane.retry for lane_id=s1-recovery-records on phase swe round 2."
+          "summary": "Lane s1-recovery-records stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0)."
         }
       ],
       "baseline": {
@@ -7571,7 +7343,9 @@
         "expected_targets": [
           "s1-recovery-records"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 1057min after start (need round>=2 and 52+-15min), finished 2026-11-05T12:14:33Z"
     },
     {
       "id": "s1-main-m008",
@@ -7585,16 +7359,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m008-decide",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-legacy-upgrade-safe",
@@ -7631,7 +7395,7 @@
           "class": "judgment",
           "lane_id": "ml-legacy-upgrade-safe",
           "source": "controller",
-          "summary": "Lane ml-legacy-upgrade-safe stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0). Call lane.retry for lane_id=ml-legacy-upgrade-safe on phase swe round 2."
+          "summary": "Lane ml-legacy-upgrade-safe stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0)."
         }
       ],
       "baseline": {
@@ -7651,7 +7415,9 @@
         "expected_targets": [
           "ml-legacy-upgrade-safe"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m009",
@@ -7702,7 +7468,7 @@
           "class": "judgment",
           "lane_id": "runc-purge-infra",
           "source": "controller",
-          "summary": "Lane runc-purge-infra stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0). Call lane.retry for lane_id=runc-purge-infra on phase swe round 2."
+          "summary": "Lane runc-purge-infra stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0)."
         }
       ],
       "baseline": {
@@ -7722,7 +7488,9 @@
         "expected_targets": [
           "runc-purge-infra"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 140min after start (need round>=2 and 52+-15min), finished 2026-11-07T14:43:23Z"
     },
     {
       "id": "s1-main-m010",
@@ -7773,7 +7541,7 @@
           "class": "judgment",
           "lane_id": "runc-purge-data",
           "source": "controller",
-          "summary": "Lane runc-purge-data stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0). Call lane.retry for lane_id=runc-purge-data on phase swe round 2."
+          "summary": "Lane runc-purge-data stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0)."
         }
       ],
       "baseline": {
@@ -7793,7 +7561,9 @@
         "expected_targets": [
           "runc-purge-data"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 4, 164min after start (need round>=2 and 52+-15min), finished 2026-11-09T00:35:59Z"
     },
     {
       "id": "s1-main-m011",
@@ -7807,16 +7577,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m011-decide",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-runner-wedge-recovery",
@@ -7853,7 +7613,7 @@
           "class": "judgment",
           "lane_id": "ml-runner-wedge-recovery",
           "source": "controller",
-          "summary": "Lane ml-runner-wedge-recovery stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=1). Call lane.retry for lane_id=ml-runner-wedge-recovery on phase swe round 2."
+          "summary": "Lane ml-runner-wedge-recovery stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=1)."
         }
       ],
       "baseline": {
@@ -7873,7 +7633,9 @@
         "expected_targets": [
           "ml-runner-wedge-recovery"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m012",
@@ -7924,7 +7686,7 @@
           "class": "judgment",
           "lane_id": "tb-prewarm-mem-guard",
           "source": "controller",
-          "summary": "Lane tb-prewarm-mem-guard stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0). Call lane.retry for lane_id=tb-prewarm-mem-guard on phase swe round 2."
+          "summary": "Lane tb-prewarm-mem-guard stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0)."
         }
       ],
       "baseline": {
@@ -7944,7 +7706,9 @@
         "expected_targets": [
           "tb-prewarm-mem-guard"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 162min after start (need round>=2 and 52+-15min), finished None"
     },
     {
       "id": "s1-main-m013",
@@ -7995,7 +7759,7 @@
           "class": "judgment",
           "lane_id": "same-owner-run-mail",
           "source": "controller",
-          "summary": "Lane same-owner-run-mail stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0). Call lane.retry for lane_id=same-owner-run-mail on phase swe round 2."
+          "summary": "Lane same-owner-run-mail stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0)."
         }
       ],
       "baseline": {
@@ -8015,7 +7779,9 @@
         "expected_targets": [
           "same-owner-run-mail"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 200min after start (need round>=2 and 52+-15min), finished None"
     },
     {
       "id": "s1-main-m014",
@@ -8029,16 +7795,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m014-decide",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when a lane stalls or loses a turn in swe, decide and call lane.retry on the next round yourself; never call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-admin-cluster-view",
@@ -8075,7 +7831,7 @@
           "class": "judgment",
           "lane_id": "admin-cluster-view",
           "source": "controller",
-          "summary": "Lane admin-cluster-view stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=1). Call lane.retry for lane_id=admin-cluster-view on phase swe round 2."
+          "summary": "Lane admin-cluster-view stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=1)."
         }
       ],
       "baseline": {
@@ -8095,7 +7851,9 @@
         "expected_targets": [
           "admin-cluster-view"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m015",
@@ -8146,7 +7904,7 @@
           "class": "judgment",
           "lane_id": "handlers-repeat-flakes",
           "source": "controller",
-          "summary": "Lane handlers-repeat-flakes stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0). Call lane.retry for lane_id=handlers-repeat-flakes on phase swe round 2."
+          "summary": "Lane handlers-repeat-flakes stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0)."
         }
       ],
       "baseline": {
@@ -8166,7 +7924,9 @@
         "expected_targets": [
           "handlers-repeat-flakes"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 229min after start (need round>=2 and 52+-15min), finished None"
     },
     {
       "id": "s1-main-m016",
@@ -8217,7 +7977,7 @@
           "class": "judgment",
           "lane_id": "adopt-missing-base-r2",
           "source": "controller",
-          "summary": "Lane adopt-missing-base-r2 stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0). Call lane.retry for lane_id=adopt-missing-base-r2 on phase swe round 2."
+          "summary": "Lane adopt-missing-base-r2 stalled in phase swe (round 1, max_round 1) after 52m (idle-attention: phase=swe terminal=<scrubbed-id> reason=idle-expired busy_restarts=0)."
         }
       ],
       "baseline": {
@@ -8237,7 +7997,9 @@
         "expected_targets": [
           "adopt-missing-base-r2"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "final round 1, 144min after start (need round>=2 and 52+-15min), finished None"
     },
     {
       "id": "s1-main-m017",
@@ -8251,16 +8013,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m017-rework",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-s1-resume",
@@ -8297,7 +8049,7 @@
           "class": "judgment",
           "lane_id": "ml-s1-resume",
           "source": "controller",
-          "summary": "Lane ml-s1-resume PR #1667 failed gate/review (failed clean->review: ml-s1-resume: the clean report names no PR and no open PR has head swarm-lane/20261023-s1-main/ml-s1). Retry lane_id=ml-s1-resume in phase swe on round 2 with a rework note."
+          "summary": "Lane ml-s1-resume PR #1667 failed gate/review (failed clean->review: ml-s1-resume: the clean report names no PR and no open PR has head swarm-lane/20261023-s1-main/ml-s1)."
         }
       ],
       "baseline": {
@@ -8318,7 +8070,9 @@
         "expected_targets": [
           "ml-s1-resume"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m018",
@@ -8332,16 +8086,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m018-rework",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-s1-resumed-acks",
@@ -8378,7 +8122,7 @@
           "class": "judgment",
           "lane_id": "ml-s1-resumed-acks",
           "source": "controller",
-          "summary": "Lane ml-s1-resumed-acks PR #1668 failed gate/review (decision: the swe report has no 'Observed:' line for its riskiest step (to merge on deploy-time proof, write t). Retry lane_id=ml-s1-resumed-acks in phase swe on round 2 with a rework note."
+          "summary": "Lane ml-s1-resumed-acks PR #1668 failed gate/review (decision: the swe report has no 'Observed:' line for its riskiest step (to merge on deploy-time proof, write t)."
         }
       ],
       "baseline": {
@@ -8399,7 +8143,9 @@
         "expected_targets": [
           "ml-s1-resumed-acks"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m019",
@@ -8413,16 +8159,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m019-rework",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-s1-agent-log",
@@ -8459,7 +8195,7 @@
           "class": "judgment",
           "lane_id": "ml-s1-agent-log",
           "source": "controller",
-          "summary": "Lane ml-s1-agent-log PR #1669 failed gate/review (decision: the swe report has no 'Observed:' line for its riskiest step (to merge on deploy-time proof, write t). Retry lane_id=ml-s1-agent-log in phase swe on round 2 with a rework note."
+          "summary": "Lane ml-s1-agent-log PR #1669 failed gate/review (decision: the swe report has no 'Observed:' line for its riskiest step (to merge on deploy-time proof, write t)."
         }
       ],
       "baseline": {
@@ -8480,7 +8216,9 @@
         "expected_targets": [
           "ml-s1-agent-log"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m020",
@@ -8494,16 +8232,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m020-rework",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-s1-head-rate",
@@ -8540,7 +8268,7 @@
           "class": "judgment",
           "lane_id": "ml-s1-head-rate",
           "source": "controller",
-          "summary": "Lane ml-s1-head-rate PR #1670 failed gate/review (decision: the swe report has no 'Observed:' line for its riskiest step (to merge on deploy-time proof, write t). Retry lane_id=ml-s1-head-rate in phase swe on round 2 with a rework note."
+          "summary": "Lane ml-s1-head-rate PR #1670 failed gate/review (decision: the swe report has no 'Observed:' line for its riskiest step (to merge on deploy-time proof, write t)."
         }
       ],
       "baseline": {
@@ -8561,7 +8289,9 @@
         "expected_targets": [
           "ml-s1-head-rate"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m021",
@@ -8575,16 +8305,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m021-rework",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-lease-pass-pool",
@@ -8621,7 +8341,7 @@
           "class": "judgment",
           "lane_id": "ml-lease-pass-pool",
           "source": "controller",
-          "summary": "Lane ml-lease-pass-pool PR #1671 failed gate/review (failed swe->clean: ml-lease-pass-pool: no commits this phase). Retry lane_id=ml-lease-pass-pool in phase swe on round 2 with a rework note."
+          "summary": "Lane ml-lease-pass-pool PR #1671 failed gate/review (failed swe->clean: ml-lease-pass-pool: no commits this phase)."
         }
       ],
       "baseline": {
@@ -8642,7 +8362,9 @@
         "expected_targets": [
           "ml-lease-pass-pool"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #1671 vs record 1916, final round 2"
     },
     {
       "id": "s1-main-m022",
@@ -8656,16 +8378,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m022-rework",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-lease-pass-pool",
@@ -8702,7 +8414,7 @@
           "class": "judgment",
           "lane_id": "ml-lease-pass-pool",
           "source": "controller",
-          "summary": "Lane ml-lease-pass-pool PR #1672 failed gate/review (decision: the swe report has no 'Observed:' line for its riskiest step (to merge on deploy-time proof, write t). Retry lane_id=ml-lease-pass-pool in phase swe on round 2 with a rework note."
+          "summary": "Lane ml-lease-pass-pool PR #1672 failed gate/review (decision: the swe report has no 'Observed:' line for its riskiest step (to merge on deploy-time proof, write t)."
         }
       ],
       "baseline": {
@@ -8723,7 +8435,9 @@
         "expected_targets": [
           "ml-lease-pass-pool"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #1672 vs record 1916, final round 2"
     },
     {
       "id": "s1-main-m023",
@@ -8737,16 +8451,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m023-rework",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-s2disk-flag",
@@ -8783,7 +8487,7 @@
           "class": "judgment",
           "lane_id": "ml-s2disk-flag",
           "source": "controller",
-          "summary": "Lane ml-s2disk-flag PR #1673 failed gate/review (decision: the swe report has no 'Observed:' line for its riskiest step (to merge on deploy-time proof, write t). Retry lane_id=ml-s2disk-flag in phase swe on round 2 with a rework note."
+          "summary": "Lane ml-s2disk-flag PR #1673 failed gate/review (decision: the swe report has no 'Observed:' line for its riskiest step (to merge on deploy-time proof, write t)."
         }
       ],
       "baseline": {
@@ -8804,7 +8508,9 @@
         "expected_targets": [
           "ml-s2disk-flag"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #1673 vs record 1925, final round 1"
     },
     {
       "id": "s1-main-m024",
@@ -8818,16 +8524,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m024-rework",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-s2-admin-metrics",
@@ -8864,7 +8560,7 @@
           "class": "judgment",
           "lane_id": "ml-s2-admin-metrics",
           "source": "controller",
-          "summary": "Lane ml-s2-admin-metrics PR #1674 failed gate/review (failed swe->clean: ml-s2-admin-metrics: CHECK_UNAVAILABLE: could not compare 0b4f4b10a8815904747b6ca8b53ffba2947dc608 w). Retry lane_id=ml-s2-admin-metrics in phase swe on round 2 with a rework note."
+          "summary": "Lane ml-s2-admin-metrics PR #1674 failed gate/review (failed swe->clean: ml-s2-admin-metrics: CHECK_UNAVAILABLE: could not compare 0b4f4b10a8815904747b6ca8b53ffba2947dc608 w)."
         }
       ],
       "baseline": {
@@ -8885,7 +8581,9 @@
         "expected_targets": [
           "ml-s2-admin-metrics"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #1674 vs record 1962, final round 1"
     },
     {
       "id": "s1-main-m025",
@@ -8899,16 +8597,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m025-rework",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-s2-wake-real",
@@ -8945,7 +8633,7 @@
           "class": "judgment",
           "lane_id": "ml-s2-wake-real",
           "source": "controller",
-          "summary": "Lane ml-s2-wake-real PR #1972 failed gate/review (rework: review passed on 911fb7a7, but #1972 merged after its rebase: conflict in bulk.go, two cap mechanism). Retry lane_id=ml-s2-wake-real in phase swe on round 2 with a rework note."
+          "summary": "Lane ml-s2-wake-real PR #1972 failed gate/review (rework: review passed on 911fb7a7, but #1972 merged after its rebase: conflict in bulk.go, two cap mechanism)."
         }
       ],
       "baseline": {
@@ -8966,7 +8654,9 @@
         "expected_targets": [
           "ml-s2-wake-real"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #1972 vs record 1979, final round 2"
     },
     {
       "id": "s1-main-m026",
@@ -8980,16 +8670,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m026-rework",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-ch-c4",
@@ -9026,7 +8706,7 @@
           "class": "judgment",
           "lane_id": "ml-ch-c4",
           "source": "controller",
-          "summary": "Lane ml-ch-c4 PR #1974 failed gate/review (rework: conflict with main (C-3 landed as #1974); merge-only swe round 1). Retry lane_id=ml-ch-c4 in phase swe on round 2 with a rework note."
+          "summary": "Lane ml-ch-c4 PR #1974 failed gate/review (rework: conflict with main (C-3 landed as #1974); merge-only swe round 1)."
         }
       ],
       "baseline": {
@@ -9047,7 +8727,9 @@
         "expected_targets": [
           "ml-ch-c4"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #1974 vs record 1977, final round 1"
     },
     {
       "id": "s1-main-m027",
@@ -9061,16 +8743,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m027-rework",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-move-control",
@@ -9107,7 +8779,7 @@
           "class": "judgment",
           "lane_id": "ml-move-control",
           "source": "controller",
-          "summary": "Lane ml-move-control PR #1677 failed gate/review (failed swe->clean: snl_spawn: could not write /mnt/local/lane-guard/lane_guard.py into session <scrubbed-id>: PUT /api/). Retry lane_id=ml-move-control in phase swe on round 2 with a rework note."
+          "summary": "Lane ml-move-control PR #1677 failed gate/review (failed swe->clean: snl_spawn: could not write /mnt/local/lane-guard/lane_guard.py into session <scrubbed-id>: PUT /api/)."
         }
       ],
       "baseline": {
@@ -9128,7 +8800,9 @@
         "expected_targets": [
           "ml-move-control"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #1677 vs record 2122, final round 1"
     },
     {
       "id": "s1-main-m028",
@@ -9142,16 +8816,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m028-rework",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: when CI fails or review finds a real defect or merge conflict, retry the lane in swe on the next unused round (round 2) without asking the owner.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-tb-main-stack",
@@ -9188,7 +8852,7 @@
           "class": "judgment",
           "lane_id": "tb-main-stack",
           "source": "controller",
-          "summary": "Lane tb-main-stack PR #1678 failed gate/review (decision: the swe report has no 'Observed:' line for its riskiest step (to merge on deploy-time proof, write t). Retry lane_id=tb-main-stack in phase swe on round 2 with a rework note."
+          "summary": "Lane tb-main-stack PR #1678 failed gate/review (decision: the swe report has no 'Observed:' line for its riskiest step (to merge on deploy-time proof, write t)."
         }
       ],
       "baseline": {
@@ -9209,7 +8873,9 @@
         "expected_targets": [
           "tb-main-stack"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "PR #1678 vs record 2216, final round 5"
     },
     {
       "id": "s1-main-m029",
@@ -9243,7 +8909,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item scratch-sleep-wipe-check (Deliver scratch-sleep-wipe-check fix on main) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=scratch-sleep-wipe-check with a focused implementation brief."
+          "summary": "Backlog item scratch-sleep-wipe-check (Deliver scratch-sleep-wipe-check fix on main) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -9263,7 +8929,9 @@
         "expected_targets": [
           "scratch-sleep-wipe-check"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m030",
@@ -9297,7 +8965,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item move-record-m14-fields (Deliver move-record-m14-fields fix on main) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=move-record-m14-fields with a focused implementation brief."
+          "summary": "Backlog item move-record-m14-fields (Deliver move-record-m14-fields fix on main) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -9317,7 +8985,9 @@
         "expected_targets": [
           "move-record-m14-fields"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m031",
@@ -9351,7 +9021,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item revert-3547 (Deliver revert-3547 fix on main) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=revert-3547 with a focused implementation brief."
+          "summary": "Backlog item revert-3547 (Deliver revert-3547 fix on main) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -9371,7 +9041,9 @@
         "expected_targets": [
           "revert-3547"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 1s from moment"
     },
     {
       "id": "s1-main-m032",
@@ -9405,7 +9077,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item s2-notice-flush (Deliver s2-notice-flush fix on main) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=s2-notice-flush with a focused implementation brief."
+          "summary": "Backlog item s2-notice-flush (Deliver s2-notice-flush fix on main) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -9425,7 +9097,9 @@
         "expected_targets": [
           "s2-notice-flush"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 2s from moment"
     },
     {
       "id": "s1-main-m033",
@@ -9459,7 +9133,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item revert-3503 (Deliver revert-3503 fix on main) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=revert-3503 with a focused implementation brief."
+          "summary": "Backlog item revert-3503 (Deliver revert-3503 fix on main) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -9479,7 +9153,9 @@
         "expected_targets": [
           "revert-3503"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 2s from moment"
     },
     {
       "id": "s1-main-m034",
@@ -9513,7 +9189,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item tracker-fixforward (Deliver tracker-fixforward fix on main) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=tracker-fixforward with a focused implementation brief."
+          "summary": "Backlog item tracker-fixforward (Deliver tracker-fixforward fix on main) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -9533,7 +9209,9 @@
         "expected_targets": [
           "tracker-fixforward"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 1s from moment"
     },
     {
       "id": "s1-main-m035",
@@ -9567,7 +9245,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item retro-20261106 (Deliver retro-20261106 fix on main) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=retro-20261106 with a focused implementation brief."
+          "summary": "Backlog item retro-20261106 (Deliver retro-20261106 fix on main) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -9587,7 +9265,9 @@
         "expected_targets": [
           "retro-20261106"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 1s from moment"
     },
     {
       "id": "s1-main-m036",
@@ -9621,7 +9301,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item tracker-measurement (Deliver tracker-measurement fix on main) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=tracker-measurement with a focused implementation brief."
+          "summary": "Backlog item tracker-measurement (Deliver tracker-measurement fix on main) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -9641,7 +9321,9 @@
         "expected_targets": [
           "tracker-measurement"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 2s from moment"
     },
     {
       "id": "s1-main-m037",
@@ -9675,7 +9357,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item review-3551 (Deliver review-3551 fix on main) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=review-3551 with a focused implementation brief."
+          "summary": "Backlog item review-3551 (Deliver review-3551 fix on main) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -9695,7 +9377,9 @@
         "expected_targets": [
           "review-3551"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 1s from moment"
     },
     {
       "id": "s1-main-m038",
@@ -9729,7 +9413,7 @@
           "kind": "timer",
           "class": "judgment",
           "source": "controller",
-          "summary": "Backlog item observer-handover (Deliver observer-handover fix on main) is open and ready with 0/8 running lanes. Call lane.spawn for item_id=observer-handover with a focused implementation brief."
+          "summary": "Backlog item observer-handover (Deliver observer-handover fix on main) is open and ready with 0/8 running lanes."
         }
       ],
       "baseline": {
@@ -9749,7 +9433,9 @@
         "expected_targets": [
           "observer-handover"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "lane started 3s from moment"
     },
     {
       "id": "s1-main-m039",
@@ -9801,7 +9487,7 @@
           "class": "judgment",
           "lane_id": "ml-s1-lease",
           "source": "controller",
-          "summary": "Lane ml-s1-lease PR #1648 merged into main (b9aef18a) and lane status is done. Close backlog item id=item-ml-s1-lease with status=done using backlog.close."
+          "summary": "Lane ml-s1-lease PR #1648 merged into main (b9aef18a) and lane status is done."
         }
       ],
       "baseline": {
@@ -9821,7 +9507,9 @@
           "item-ml-s1-lease",
           "ml-s1-lease"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "PR #1648 matches record, lane finished 6min from moment"
     },
     {
       "id": "s1-main-m040",
@@ -9873,7 +9561,7 @@
           "class": "judgment",
           "lane_id": "ml-reaper",
           "source": "controller",
-          "summary": "Lane ml-reaper PR #1650 merged into main (13669051) and lane status is done. Close backlog item id=item-ml-reaper with status=done using backlog.close."
+          "summary": "Lane ml-reaper PR #1650 merged into main (13669051) and lane status is done."
         }
       ],
       "baseline": {
@@ -9893,7 +9581,9 @@
           "item-ml-reaper",
           "ml-reaper"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "PR #1650 matches record, lane finished 19min from moment"
     },
     {
       "id": "s1-main-m041",
@@ -9945,7 +9635,7 @@
           "class": "judgment",
           "lane_id": "ml-s1-log",
           "source": "controller",
-          "summary": "Lane ml-s1-log PR #1655 merged into main (f1345a23) and lane status is done. Close backlog item id=item-ml-s1-log with status=done using backlog.close."
+          "summary": "Lane ml-s1-log PR #1655 merged into main (f1345a23) and lane status is done."
         }
       ],
       "baseline": {
@@ -9965,7 +9655,9 @@
           "item-ml-s1-log",
           "ml-s1-log"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "PR #1655 matches record, lane finished 8min from moment"
     },
     {
       "id": "s1-main-m042",
@@ -10017,7 +9709,7 @@
           "class": "judgment",
           "lane_id": "ml-s1-resume",
           "source": "controller",
-          "summary": "Lane ml-s1-resume PR #1663 merged into main (b05d348c) and lane status is done. Close backlog item id=item-ml-s1-resume with status=done using backlog.close."
+          "summary": "Lane ml-s1-resume PR #1663 merged into main (b05d348c) and lane status is done."
         }
       ],
       "baseline": {
@@ -10037,7 +9729,9 @@
           "item-ml-s1-resume",
           "ml-s1-resume"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "PR #1663 matches record, lane finished 6min from moment"
     },
     {
       "id": "s1-main-m043",
@@ -10089,7 +9783,7 @@
           "class": "judgment",
           "lane_id": "ml-s1-caller",
           "source": "controller",
-          "summary": "Lane ml-s1-caller PR #1669 merged into main (f7bc4300) and lane status is done. Close backlog item id=item-ml-s1-caller with status=done using backlog.close."
+          "summary": "Lane ml-s1-caller PR #1669 merged into main (f7bc4300) and lane status is done."
         }
       ],
       "baseline": {
@@ -10109,7 +9803,9 @@
           "item-ml-s1-caller",
           "ml-s1-caller"
         ]
-      }
+      },
+      "grounding": "verified",
+      "grounding_evidence": "PR #1669 matches record, lane finished 6min from moment"
     },
     {
       "id": "s1-main-m044",
@@ -10123,16 +9819,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m044-steer",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: resolve cross-lane contract and rebase questions internally by steering the active lane; do not call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-s1-lease",
@@ -10169,7 +9855,7 @@
           "class": "judgment",
           "lane_id": "ml-s1-lease",
           "source": "ml-s1-lease",
-          "summary": "Lane ml-s1-lease asks whether to rebase onto the newly merged shared contract on main (swe->clean r1). Per standing directive, call lane.steer on lane_id=ml-s1-lease to adopt the main contract."
+          "summary": "Lane ml-s1-lease asks whether to rebase onto the newly merged shared contract on main (swe->clean r1)."
         }
       ],
       "baseline": {
@@ -10190,7 +9876,9 @@
         "expected_targets": [
           "ml-s1-lease"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m045",
@@ -10204,16 +9892,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m045-steer",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: resolve cross-lane contract and rebase questions internally by steering the active lane; do not call owner.ask.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-s1-log",
@@ -10250,7 +9928,7 @@
           "class": "judgment",
           "lane_id": "ml-s1-log",
           "source": "ml-s1-log",
-          "summary": "Lane ml-s1-log asks whether to rebase onto the newly merged shared contract on main (clean->review r1). Per standing directive, call lane.steer on lane_id=ml-s1-log to adopt the main contract."
+          "summary": "Lane ml-s1-log asks whether to rebase onto the newly merged shared contract on main (clean->review r1)."
         }
       ],
       "baseline": {
@@ -10271,7 +9949,9 @@
         "expected_targets": [
           "ml-s1-log"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m046",
@@ -10285,16 +9965,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m046-split",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: keep each lane to one PR; split newly discovered out-of-scope defects into a separate backlog item with backlog.add.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-reaper",
@@ -10331,7 +10001,7 @@
           "class": "judgment",
           "lane_id": "ml-reaper",
           "source": "ml-reaper",
-          "summary": "Lane ml-reaper discovered a separate out-of-scope defect (id=ml-reaper-followup-2) while working on PR #1696. Per standing rule, call backlog.add with id=ml-reaper-followup-2 and priority=p1."
+          "summary": "Lane ml-reaper discovered a separate out-of-scope defect (id=ml-reaper-followup-2) while working on PR #1696."
         }
       ],
       "baseline": {
@@ -10351,7 +10021,9 @@
         "expected_targets": [
           "ml-reaper-followup-2"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m047",
@@ -10365,16 +10037,6 @@
           "objective": "S1/S2 storage and lease reliability on main: reaper fix, epoch-fenced S1 transcript log, and cold-wake durability.",
           "default_recipe": "default"
         },
-        "directives": [
-          {
-            "id": "dir-s1-main-m047-split",
-            "run_id": "20261023-s1-main",
-            "kind": "standing",
-            "source": "owner",
-            "text": "Standing rule: keep each lane to one PR; split newly discovered out-of-scope defects into a separate backlog item with backlog.add.",
-            "status": "active"
-          }
-        ],
         "backlog": [
           {
             "id": "item-ml-s1-caller",
@@ -10411,7 +10073,7 @@
           "class": "judgment",
           "lane_id": "ml-s1-caller",
           "source": "ml-s1-caller",
-          "summary": "Lane ml-s1-caller discovered a separate out-of-scope defect (id=ml-s1-caller-followup-3) while working on PR #1697. Per standing rule, call backlog.add with id=ml-s1-caller-followup-3 and priority=p1."
+          "summary": "Lane ml-s1-caller discovered a separate out-of-scope defect (id=ml-s1-caller-followup-3) while working on PR #1697."
         }
       ],
       "baseline": {
@@ -10431,7 +10093,9 @@
         "expected_targets": [
           "ml-s1-caller-followup-3"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "verdict corrected: no real owner correction found in readable run history"
     },
     {
       "id": "s1-main-m048",
@@ -10457,7 +10121,7 @@
           "class": "judgment",
           "source": "owner",
           "urgent": true,
-          "summary": "Owner directive on 20261023-s1-main: import updated milestone plan post:s1-main-plan-v2 and reconcile the backlog by calling planner.request."
+          "summary": "Owner directive on 20261023-s1-main: import updated milestone plan post:s1-main-plan-v2 and reconcile the backlog."
         }
       ],
       "baseline": {
@@ -10473,7 +10137,9 @@
         "expected_tools": [
           "planner.request"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "category replan_request: referenced ids/posts absent from run history"
     },
     {
       "id": "s1-main-m049",
@@ -10497,7 +10163,7 @@
           "kind": "mail",
           "class": "judgment",
           "source": "controller",
-          "summary": "Operational observation on 20261023-s1-main: upstream GitHub Actions queue latency spiked above 15m; record an operational note directive using directive.note with scope=ci-queue and expiry=6h."
+          "summary": "Operational observation on 20261023-s1-main: upstream GitHub Actions queue latency spiked above 15m."
         }
       ],
       "baseline": {
@@ -10513,7 +10179,9 @@
         "expected_tools": [
           "directive.note"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "category directive_note: referenced ids/posts absent from run history"
     },
     {
       "id": "s1-main-m050",
@@ -10563,7 +10231,7 @@
           "class": "judgment",
           "lane_id": "s1-main-app-grant",
           "source": "s1-main-app-grant",
-          "summary": "Lane s1-main-app-grant is blocked on a decision only the owner can make: granting production GitHub App organization permissions in the owner's browser. Call owner.ask for lane_id=s1-main-app-grant with options=['defer-until-impl-merged', 'grant-now'], default='defer-until-impl-merged', and deadline='4h'."
+          "summary": "Lane s1-main-app-grant is blocked on a decision only the owner can make: granting production GitHub App organization permissions in the owner's browser."
         }
       ],
       "baseline": {
@@ -10582,7 +10250,9 @@
         "expected_targets": [
           "s1-main-app-grant"
         ]
-      }
+      },
+      "grounding": "synthetic",
+      "grounding_evidence": "category legitimate_owner_ask: referenced ids/posts absent from run history"
     }
   ],
   "questions": [
@@ -13950,5 +13620,6 @@
         "no lanes exist"
       ]
     }
-  ]
+  ],
+  "provenance_rubric": "A moment is 'verified' only if all hold against the source run's lane records (nebula run show --part lanes): (1) owner verdict is endorsed (no real owner correction was found in any readable orchestrator transcript, so every corrected moment is synthetic); (2) category is spawn_ready, merged_close, rework_retry or stall_retry (replan/directive/owner-ask moments reference ids or posts absent from run history); (3) the target lane exists in the run; (4) spawn_ready: lane started within 120s of the moment; merged_close: PR number in the event equals the lane's recorded PR and the lane finished within 1h; rework_retry: same PR match, lane reached round>=2 inside its lifetime; stall_retry: lane reached round>=2 and the moment is 52+-15min after lane start. Everything else is 'synthetic': still run and reported, never counted toward the Gate 2 bars."
 }
