@@ -1,0 +1,169 @@
+{
+  "exchanges": [
+    {
+      "request": {
+        "model": "claude-sonnet-4-5-20250929",
+        "system": "You are the dispatcher.",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Spawn item-42 on lane alpha."
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "name": "lane_spawn",
+            "description": "Spawn a lane for a backlog item",
+            "input_schema": {
+              "properties": {
+                "brief": {
+                  "description": "Brief for the lane",
+                  "type": "string"
+                },
+                "item_id": {
+                  "description": "Backlog item ID",
+                  "type": "string"
+                },
+                "round": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "item_id",
+                "brief"
+              ],
+              "type": "object"
+            }
+          }
+        ],
+        "max_tokens": 1024
+      },
+      "response": {
+        "id": "msg_rec_1",
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Spawning item-42 now."
+            },
+            {
+              "type": "tool_use",
+              "id": "toolu_rec_1",
+              "name": "lane_spawn",
+              "input": {
+                "item_id": "item-42",
+                "brief": "Implement item-42"
+              }
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 500,
+          "output_tokens": 100,
+          "cost_usd": 0.003
+        },
+        "turns": 1
+      }
+    },
+    {
+      "request": {
+        "model": "claude-sonnet-4-5-20250929",
+        "system": "You are the dispatcher.",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Spawn item-42 on lane alpha."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Spawning item-42 now."
+              },
+              {
+                "type": "tool_use",
+                "id": "toolu_rec_1",
+                "name": "lane_spawn",
+                "input": {
+                  "item_id": "item-42",
+                  "brief": "Implement item-42"
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_rec_1",
+                "content": "spawned item-42"
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "name": "lane_spawn",
+            "description": "Spawn a lane for a backlog item",
+            "input_schema": {
+              "properties": {
+                "brief": {
+                  "description": "Brief for the lane",
+                  "type": "string"
+                },
+                "item_id": {
+                  "description": "Backlog item ID",
+                  "type": "string"
+                },
+                "round": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "item_id",
+                "brief"
+              ],
+              "type": "object"
+            }
+          }
+        ],
+        "max_tokens": 1024
+      },
+      "response": {
+        "id": "msg_rec_2",
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "end_turn",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Lane spawned for item-42."
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 600,
+          "output_tokens": 40,
+          "cost_usd": 0.0024
+        },
+        "turns": 1
+      }
+    }
+  ]
+}

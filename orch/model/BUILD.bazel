@@ -2,13 +2,18 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "model",
-    srcs = ["model.go"],
+    srcs = [
+        "http_client.go",
+        "model.go",
+    ],
     importpath = "github.com/bazelment/yoloswe/orch/model",
     visibility = ["//visibility:public"],
+    deps = ["//orch/clock"],
 )
 
 go_test(
     name = "model_test",
     srcs = ["model_test.go"],
+    data = glob(["testdata/**"]),
     deps = [":model"],
 )
