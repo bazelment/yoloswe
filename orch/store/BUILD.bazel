@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "store",
+    srcs = [
+        "contract.go",
+        "memory.go",
+        "store.go",
+        "types.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/orch/store",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//orch/clock",
+        "//orch/lane",
+        "//orch/model",
+        "//orch/recipe",
+    ],
+)
+
+go_test(
+    name = "store_test",
+    srcs = ["memory_test.go"],
+    deps = [
+        ":store",
+        "//orch/clock",
+    ],
+)

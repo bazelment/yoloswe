@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "model",
+    srcs = ["model.go"],
+    importpath = "github.com/bazelment/yoloswe/orch/model",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "model_test",
+    srcs = ["model_test.go"],
+    deps = [":model"],
+)
