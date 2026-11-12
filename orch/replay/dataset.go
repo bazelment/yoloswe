@@ -52,8 +52,8 @@ const (
 	// GroundingVerified means the event, target, timing and the old orchestrator's
 	// action were checked against the source run's records (see Dataset.ProvenanceRubric).
 	GroundingVerified Grounding = "verified"
-	// GroundingSynthetic means the moment was authored or could not be checked; it
-	// is still run and reported, but never counted toward a bar.
+	// GroundingSynthetic means the moment was authored or unchecked; it is run
+	// and reported but never counted toward a bar.
 	GroundingSynthetic Grounding = "synthetic"
 )
 

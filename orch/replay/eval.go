@@ -113,10 +113,8 @@ type EvalReport struct {
 	TokensPass                 bool
 }
 
-// Verdict labels never overstate the evidence: "FAIL" if any bar failed,
-// "INCONCLUSIVE" if every bar passed but no owner correction is evidenced (the
-// unnecessary-ask bar compares against corrections that were never found in
-// the source runs), otherwise "PASS".
+// Verdicts: FAIL if any bar failed; INCONCLUSIVE if all bars passed but no owner
+// correction is evidenced (so the unnecessary-ask bar is unestablished); else PASS.
 const (
 	VerdictPass         = "PASS"
 	VerdictFail         = "FAIL"
@@ -498,9 +496,7 @@ func EvaluateMoment(
 	}
 	disp := dispatcher.New(dispCfg, st, drv, clk, client)
 	res, err := disp.Dispatch(ctx, m.RunID, appended)
-	// A dispatcher that never stops calling tools made no decision: that is a
-	// miss for this moment, not a reason to discard the whole run. Actions it
-	// applied before the cutoff are not graded (res is empty), so it cannot agree.
+	// Exhausting the turn cap is a miss for this moment, not a run abort.
 	exhausted := errors.Is(err, model.ErrMaxTurnsExceeded)
 	if err != nil && !exhausted {
 		return MomentResult{}, err
@@ -531,8 +527,7 @@ func EvaluateMoment(
 		}
 	}
 
-	// A proposed owner.ask that the vetter rejected is still an ask attempt: the
-	// dispatcher chose to ask, so it counts against the unnecessary-ask bar.
+	// A vetter-rejected owner.ask is still an ask attempt.
 	decisions, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: m.RunID})
 	if err != nil {
 		return MomentResult{}, fmt.Errorf("list decisions: %w", err)

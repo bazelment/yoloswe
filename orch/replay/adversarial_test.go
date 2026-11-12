@@ -1,9 +1,7 @@
 package replay_test
 
-// Adversarial tests for the Gate 2 replay grader. Every fake dispatcher here
-// is deliberately wrong or deliberately dumb; the pass bars must fail it. If a
-// regression makes the grader lenient (or the dataset leak its own answers),
-// a test in this file fails.
+// Adversarial tests for the Gate 2 grader: each fake dispatcher here is
+// deliberately wrong or dumb, and the pass bars must fail it.
 
 import (
 	"context"
@@ -22,8 +20,8 @@ import (
 	"github.com/bazelment/yoloswe/orch/store"
 )
 
-// leakedToolRE matches any dispatcher tool name. The tool names are legitimate
-// in the system prompt's tool list, never in the per-moment user message.
+// leakedToolRE matches a dispatcher tool name, which may appear in the system
+// prompt's tool list but never in the per-moment message.
 var leakedToolRE = regexp.MustCompile(`(?i)\b(?:lane[._](?:spawn|steer|retry|stop)|backlog[._](?:add|update|reorder|close)|planner[._]request|directive[._]note|owner[._]ask|read[._](?:lane_report|pr|ci))\b`)
 
 func hasToolResult(req model.Request) bool {
@@ -60,8 +58,7 @@ func noopClient() model.ModelClient {
 	})
 }
 
-// labelTarget returns the strongest possible "wrong tool, right place" target:
-// the label's own first expected target, else the event lane, else any lane.
+// labelTarget picks the lane a "wrong tool, right place" adversary acts on.
 func labelTarget(m replay.JudgmentMoment) string {
 	if len(m.OwnerFollowUp.ExpectedTargets) > 0 {
 		return m.OwnerFollowUp.ExpectedTargets[0]
@@ -188,8 +185,8 @@ func adversaries() []adversary {
 	}
 }
 
-// TestAdversarialWrongDispatchersFailTheBars is the inner-loop case: the
-// 5-moment set with always-lane.stop / always-owner.ask / never-acts.
+// TestAdversarialWrongDispatchersFailTheBars runs always-lane.stop,
+// always-owner.ask and never-acts over both datasets.
 func TestAdversarialWrongDispatchersFailTheBars(t *testing.T) {
 	t.Parallel()
 	for _, set := range datasetSets {
@@ -263,9 +260,8 @@ func TestAdversarialNoZeroOverZeroOrEmptyPass(t *testing.T) {
 	}
 }
 
-// TestAdversarialPromptDoesNotContainTheAnswer captures what the model is
-// actually shown for every moment and checks it for the label's tool name, the
-// owner's follow-up text and the baseline's own summary.
+// TestAdversarialPromptDoesNotContainTheAnswer captures what the model is shown
+// per moment and checks it for tool names and the owner/baseline text.
 func TestAdversarialPromptDoesNotContainTheAnswer(t *testing.T) {
 	t.Parallel()
 	for _, set := range datasetSets {
@@ -322,8 +318,8 @@ var (
 	scrapeRefRE  = regexp.MustCompile(`post:[A-Za-z0-9\-]+`)
 )
 
-// scrapingDispatcher has no model: it copies whatever tool call and id the
-// event text instructs. Its score is the leakage score of the dataset.
+// scrapingDispatcher has no model: it copies the tool call and id named in the
+// event text, so its score measures leakage.
 func scrapingDispatcher(t *testing.T) clientFunc {
 	return func(_ context.Context, req model.Request) (*model.Response, error) {
 		if hasToolResult(req) || len(req.Messages) == 0 {
@@ -372,10 +368,8 @@ func scrapingDispatcher(t *testing.T) clientFunc {
 	}
 }
 
-// TestAdversarialScraperCannotPassTheBar: a regex over the event text, with no
-// model and no understanding, must not clear the agreement bar. At the audited
-// HEAD it agreed with the label on most moments because event summaries told
-// the dispatcher which tool to call and with which id.
+// TestAdversarialScraperCannotPassTheBar: a regex over the event text must not
+// clear the agreement bar.
 func TestAdversarialScraperCannotPassTheBar(t *testing.T) {
 	t.Parallel()
 	for _, set := range datasetSets {
@@ -387,8 +381,7 @@ func TestAdversarialScraperCannotPassTheBar(t *testing.T) {
 			t.Parallel()
 			rep := evalMoments(t, ds, func(replay.JudgmentMoment) model.ModelClient { return scrapingDispatcher(t) })
 			logScore(t, set.name+"/event-text-scraper", rep)
-			// 20%: a handful of mechanical moments may be guessable from facts
-			// alone, but nothing close to the 70%+ a leaked answer yields.
+			// A few mechanical moments may be guessable from facts alone.
 			if rep.AgreementRate > 0.20 {
 				t.Errorf("a model-free event-text scraper agrees on %.1f%% (%d/%d) of moments: the event text contains the answer",
 					rep.AgreementRate*100, rep.DispatcherAgreed, rep.TotalMoments)
@@ -400,9 +393,8 @@ func TestAdversarialScraperCannotPassTheBar(t *testing.T) {
 	}
 }
 
-// TestAdversarialConciergeNeedsTheStore: a concierge that answers from the
-// question text alone must not clear the accuracy bar, and one that never
-// calls a Store tool must not count as accurate.
+// TestAdversarialConciergeNeedsTheStore: a concierge that never calls a Store
+// tool must not count as accurate.
 func TestAdversarialConciergeNeedsTheStore(t *testing.T) {
 	t.Parallel()
 	ds, err := replay.LoadDefaultDataset()
@@ -426,8 +418,7 @@ func TestAdversarialConciergeNeedsTheStore(t *testing.T) {
 			echoAccurate, len(ds.Questions), replay.PassBarMinConciergeAccuracy*100)
 	}
 
-	// Same through the real StoreConcierge with a model that answers from the
-	// prompt only (no tool use): it must not be accurate.
+	// Same through StoreConcierge with a model that parrots its prompt.
 	var promptOnly int
 	sc := replay.NewStoreConcierge(clientFunc(func(_ context.Context, req model.Request) (*model.Response, error) {
 		return endTurn(req.Messages[0].Text()), nil
