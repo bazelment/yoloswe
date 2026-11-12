@@ -5,6 +5,7 @@ package nebula
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -165,24 +166,13 @@ func New(cfg Config, opts ...Option) (*Driver, error) {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	apiURL := strings.TrimSpace(cfg.APIURL)
-	if apiURL == "" {
-		apiURL = strings.TrimSpace(os.Getenv(EnvAPIURL))
-	}
-	apiURL = strings.TrimRight(apiURL, "/")
-
-	token := strings.TrimSpace(cfg.Token)
-	if token == "" {
-		token = strings.TrimSpace(os.Getenv(EnvToken))
-	}
+	apiURL := strings.TrimRight(cmp.Or(strings.TrimSpace(cfg.APIURL), strings.TrimSpace(os.Getenv(EnvAPIURL))), "/")
+	token := cmp.Or(strings.TrimSpace(cfg.Token), strings.TrimSpace(os.Getenv(EnvToken)))
 	if apiURL == "" || token == "" {
 		return nil, ErrMissingCredentials
 	}
 
-	currSessID := strings.TrimSpace(cfg.CurrentSessionID)
-	if currSessID == "" {
-		currSessID = strings.TrimSpace(os.Getenv(EnvSessionID))
-	}
+	currSessID := cmp.Or(strings.TrimSpace(cfg.CurrentSessionID), strings.TrimSpace(os.Getenv(EnvSessionID)))
 
 	clk := cfg.Clock
 	if clk == nil {
@@ -196,10 +186,7 @@ func New(cfg Config, opts ...Option) (*Driver, error) {
 	streamClient := *httpClient
 	streamClient.Timeout = 0
 
-	baseBranch := strings.TrimSpace(cfg.DefaultBaseBranch)
-	if baseBranch == "" {
-		baseBranch = defaultBaseBranch
-	}
+	baseBranch := cmp.Or(strings.TrimSpace(cfg.DefaultBaseBranch), defaultBaseBranch)
 
 	pollInterval := cfg.PollInterval
 	if pollInterval <= 0 {
@@ -281,6 +268,17 @@ type SessionDetail struct {
 	Session   SessionInfo    `json:"session"`
 }
 
+func (d *SessionDetail) UnmarshalJSON(data []byte) error {
+	type plain SessionDetail
+	if err := json.Unmarshal(data, (*plain)(d)); err != nil {
+		return err
+	}
+	if d.Session.ID == "" {
+		return json.Unmarshal(data, &d.Session)
+	}
+	return nil
+}
+
 // BackendCapacity describes capacity for a single Nebula compute backend pool.
 type BackendCapacity struct {
 	Backend      string `json:"backend"`
@@ -346,17 +344,14 @@ func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*Ses
 			workBranch = fmt.Sprintf("swarm-lane/%s", req.LaneID)
 		}
 	}
-	baseBranch := strings.TrimSpace(req.BaseBranch)
-	if baseBranch == "" {
-		baseBranch = d.baseBranch
-	}
+	baseBranch := cmp.Or(strings.TrimSpace(req.BaseBranch), d.baseBranch)
 
 	existing, err := d.findReusableSession(ctx, req.RunID, req.LaneID, workBranch)
 	if err != nil {
 		return nil, err
 	}
 	if existing != nil {
-		return d.settleSession(ctx, existing.ID, existing.Status)
+		return d.settleSession(ctx, *existing)
 	}
 
 	repoID, err := d.resolveRepositoryID(ctx)
@@ -392,18 +387,14 @@ func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*Ses
 		createBody.Env = maps.Clone(req.Env)
 	}
 
-	var raw json.RawMessage
-	if err := d.doJSON(ctx, http.MethodPost, "/api/code-sessions", createBody, &raw); err != nil {
+	var created SessionDetail
+	if err := d.doJSON(ctx, http.MethodPost, "/api/code-sessions", createBody, &created); err != nil {
 		return nil, err
 	}
-	created, err := decodeSessionInfo(raw)
-	if err != nil {
-		return nil, fmt.Errorf("nebula create session decode: %w", err)
-	}
-	if created.ID == "" {
+	if created.Session.ID == "" {
 		return nil, fmt.Errorf("nebula create session returned empty session id")
 	}
-	return d.settleSession(ctx, created.ID, created.Status)
+	return d.settleSession(ctx, created.Session)
 }
 
 func (d *Driver) findReusableSession(ctx context.Context, runID, laneID, workBranch string) (*SessionInfo, error) {
@@ -433,21 +424,17 @@ func (d *Driver) findReusableSession(ctx context.Context, runID, laneID, workBra
 		if s.WorkBranch != "" && workBranch != "" && s.WorkBranch != workBranch {
 			continue
 		}
-		if s.Metadata != nil {
-			if s.Metadata["swarmLane"] != "" && s.Metadata["swarmLane"] != laneID {
-				continue
-			}
-			if runID != "" && s.Metadata["swarmRun"] != "" && s.Metadata["swarmRun"] != runID {
-				continue
-			}
+		if s.Metadata["swarmLane"] != "" && s.Metadata["swarmLane"] != laneID {
+			continue
+		}
+		if runID != "" && s.Metadata["swarmRun"] != "" && s.Metadata["swarmRun"] != runID {
+			continue
 		}
 		if s.Status == "ready" {
-			cp := *s
-			return &cp, nil
+			return s, nil
 		}
 		if fallback == nil {
-			cp := *s
-			fallback = &cp
+			fallback = s
 		}
 	}
 	return fallback, nil
@@ -471,10 +458,12 @@ func isSessionTerminalStatus(status string) bool {
 	}
 }
 
-func (d *Driver) settleSession(ctx context.Context, sessionID, initialStatus string) (*SessionInfo, error) {
-	status := strings.ToLower(strings.TrimSpace(initialStatus))
+func (d *Driver) settleSession(ctx context.Context, initial SessionInfo) (*SessionInfo, error) {
+	sessionID := initial.ID
+	status := strings.ToLower(strings.TrimSpace(initial.Status))
 	if status == "ready" {
-		return &SessionInfo{ID: sessionID, Status: "ready"}, nil
+		initial.Status = "ready"
+		return &initial, nil
 	}
 
 	deadline := d.clock.Now().Add(d.settleWait)
@@ -510,8 +499,7 @@ func (d *Driver) settleSession(ctx context.Context, sessionID, initialStatus str
 		}
 		status = strings.ToLower(strings.TrimSpace(detail.Session.Status))
 		if status == "ready" {
-			cp := detail.Session
-			return &cp, nil
+			return &detail.Session, nil
 		}
 		if status == "sleeping" && !woke {
 			if err := d.WakeSession(ctx, sessionID); err != nil && !IsNotReady(err) {
@@ -531,20 +519,9 @@ func (d *Driver) WakeSession(ctx context.Context, sessionID string) error {
 // GetSession fetches a code session and its terminals.
 func (d *Driver) GetSession(ctx context.Context, sessionID string) (*SessionDetail, error) {
 	path := fmt.Sprintf("/api/code-sessions/%s", url.PathEscape(sessionID))
-	var raw json.RawMessage
-	if err := d.doJSON(ctx, http.MethodGet, path, nil, &raw); err != nil {
-		return nil, err
-	}
 	var detail SessionDetail
-	if err := json.Unmarshal(raw, &detail); err != nil {
-		return nil, fmt.Errorf("nebula get session decode: %w", err)
-	}
-	if detail.Session.ID == "" {
-		sess, err := decodeSessionInfo(raw)
-		if err != nil {
-			return nil, fmt.Errorf("nebula get session decode flat: %w", err)
-		}
-		detail.Session = *sess
+	if err := d.doJSON(ctx, http.MethodGet, path, nil, &detail); err != nil {
+		return nil, err
 	}
 	return &detail, nil
 }
@@ -565,14 +542,8 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 		sessionID = sess.ID
 	}
 
-	kind := strings.TrimSpace(req.Harness)
-	if kind == "" {
-		kind = defaultHarness
-	}
-	round := req.Round
-	if round < 1 {
-		round = 1
-	}
+	kind := cmp.Or(strings.TrimSpace(req.Harness), defaultHarness)
+	round := max(req.Round, 1)
 	var title string
 	if req.LaneID != "" && req.Phase != "" {
 		title = fmt.Sprintf("%s %s r%d", req.LaneID, req.Phase, round)
@@ -600,7 +571,7 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 	var resp TerminalInfo
 	err := d.doJSON(ctx, http.MethodPost, path, body, &resp)
 	if IsNotReady(err) {
-		if _, settleErr := d.settleSession(ctx, sessionID, "sleeping"); settleErr != nil {
+		if _, settleErr := d.settleSession(ctx, SessionInfo{ID: sessionID, Status: "sleeping"}); settleErr != nil {
 			return lane.StartPhaseResult{}, settleErr
 		}
 		err = d.doJSON(ctx, http.MethodPost, path, body, &resp)
@@ -657,7 +628,7 @@ func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
 			}
 		}
 		if sessionID != "" {
-			if _, settleErr := d.settleSession(ctx, sessionID, "sleeping"); settleErr != nil {
+			if _, settleErr := d.settleSession(ctx, SessionInfo{ID: sessionID, Status: "sleeping"}); settleErr != nil {
 				return settleErr
 			}
 			err = d.doJSON(ctx, http.MethodPost, path, body, nil)
@@ -765,18 +736,12 @@ func parseAPIReport(resp phaseReportResponse, laneID, terminalID string, fallbac
 	if resp.Outcome != "" && lane.ReportOutcome(resp.Outcome).Valid() {
 		rep.Outcome = lane.ReportOutcome(resp.Outcome)
 	}
-	if resp.Head != "" && rep.HeadSHA == "" {
-		rep.HeadSHA = resp.Head
-	}
+	rep.HeadSHA = cmp.Or(rep.HeadSHA, resp.Head)
 	if resp.PR > 0 && rep.PR == 0 {
 		rep.PR = resp.PR
 	}
 	rep.LaneID = laneID
-	if resp.TerminalID != "" {
-		rep.TerminalID = resp.TerminalID
-	} else {
-		rep.TerminalID = terminalID
-	}
+	rep.TerminalID = cmp.Or(resp.TerminalID, terminalID)
 	if !resp.ReportedAt.IsZero() {
 		rep.ReportedAt = resp.ReportedAt.UTC()
 	} else if rep.ReportedAt.IsZero() {
@@ -835,15 +800,19 @@ type StreamRequest struct {
 	EmitIntermediateTurns bool
 }
 
+func (d *Driver) resolveEvents(events store.EventStore) (store.EventStore, error) {
+	if events := cmp.Or(events, d.events); events != nil {
+		return events, nil
+	}
+	return nil, fmt.Errorf("%w: store.EventStore is required", store.ErrInvalidArgument)
+}
+
 // StreamEvents streams SSE lane events from GET /api/code-terminals/{id}/events/stream
 // into store.EventStore (using req.Events or the Driver's configured EventStore).
 func (d *Driver) StreamEvents(ctx context.Context, req StreamRequest) error {
-	events := req.Events
-	if events == nil {
-		events = d.events
-	}
-	if events == nil {
-		return fmt.Errorf("%w: store.EventStore is required for StreamEvents", store.ErrInvalidArgument)
+	events, err := d.resolveEvents(req.Events)
+	if err != nil {
+		return err
 	}
 	if strings.TrimSpace(req.RunID) == "" || strings.TrimSpace(req.TerminalID) == "" {
 		return fmt.Errorf("%w: run_id and terminal_id are required for StreamEvents", store.ErrInvalidArgument)
@@ -857,13 +826,11 @@ func (d *Driver) StreamEvents(ctx context.Context, req StreamRequest) error {
 	}
 
 	path := fmt.Sprintf("/api/code-terminals/%s/events/stream", url.PathEscape(req.TerminalID))
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, d.apiURL+path, http.NoBody)
+	httpReq, err := d.newRequest(ctx, http.MethodGet, path, http.NoBody)
 	if err != nil {
 		return err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+d.token)
 	httpReq.Header.Set("Accept", "text/event-stream")
-	httpReq.Header.Set("X-Nebula-Client", "orch")
 	if afterSeq > 0 {
 		httpReq.Header.Set("Last-Event-ID", strconv.FormatInt(afterSeq, 10))
 	}
@@ -919,17 +886,13 @@ func (d *Driver) consumeSSEStream(
 				return false, fmt.Errorf("nebula sse decode event: %w", err)
 			}
 		}
-		if termEv.Type == "" {
-			termEv.Type = evType
-		}
+		termEv.Type = cmp.Or(termEv.Type, evType)
 		if termEv.Seq == 0 && idStr != "" {
 			if seq, err := strconv.ParseInt(idStr, 10, 64); err == nil {
 				termEv.Seq = seq
 			}
 		}
-		if termEv.TerminalID == "" {
-			termEv.TerminalID = req.TerminalID
-		}
+		termEv.TerminalID = cmp.Or(termEv.TerminalID, req.TerminalID)
 		if afterSeq > 0 && termEv.Seq > 0 && termEv.Seq <= afterSeq {
 			return false, nil
 		}
@@ -1021,30 +984,18 @@ func (d *Driver) mapTerminalEvent(ctx context.Context, req StreamRequest, termEv
 	switch termEv.Type {
 	case "phase.reported":
 		kind = store.EventLaneReport
-		rep, err := d.ReadReport(ctx, req.RunID, req.LaneID, termEv.TerminalID)
-		if err == nil && rep != nil {
+		outcome := lane.ReportOutcome(cmp.Or(termEv.Outcome, "reported"))
+		if rep, err := d.ReadReport(ctx, req.RunID, req.LaneID, termEv.TerminalID); err == nil && rep != nil {
 			payload.Report = rep
-			switch rep.Outcome {
-			case lane.OutcomeBlocked, lane.OutcomeNeedsInput:
-				class = store.EventClassJudgment
-				urgent = true
-			default:
-				class = store.EventClassAuto
-			}
-			summary = fmt.Sprintf("lane %s phase reported: %s", req.LaneID, rep.Outcome)
-		} else {
-			outcome := termEv.Outcome
-			if outcome == "" {
-				outcome = "reported"
-			}
-			if outcome == string(lane.OutcomeBlocked) || outcome == string(lane.OutcomeNeedsInput) {
-				class = store.EventClassJudgment
-				urgent = true
-			} else {
-				class = store.EventClassAuto
-			}
-			summary = fmt.Sprintf("lane %s phase reported: %s", req.LaneID, outcome)
+			outcome = rep.Outcome
 		}
+		if outcome == lane.OutcomeBlocked || outcome == lane.OutcomeNeedsInput {
+			class = store.EventClassJudgment
+			urgent = true
+		} else {
+			class = store.EventClassAuto
+		}
+		summary = fmt.Sprintf("lane %s phase reported: %s", req.LaneID, outcome)
 
 	case "turn.ended":
 		outcome := strings.ToLower(strings.TrimSpace(termEv.Outcome))
@@ -1065,10 +1016,7 @@ func (d *Driver) mapTerminalEvent(ctx context.Context, req StreamRequest, termEv
 		default:
 			kind = store.EventPhaseExit
 			class = store.EventClassAuto
-			if outcome == "" {
-				outcome = "completed"
-			}
-			summary = fmt.Sprintf("lane %s turn ended (%s)", req.LaneID, outcome)
+			summary = fmt.Sprintf("lane %s turn ended (%s)", req.LaneID, cmp.Or(outcome, "completed"))
 		}
 
 	case "input.waiting":
@@ -1089,10 +1037,7 @@ func (d *Driver) mapTerminalEvent(ctx context.Context, req StreamRequest, termEv
 		} else {
 			class = store.EventClassAuto
 		}
-		if outcome == "" {
-			outcome = termEv.Type
-		}
-		summary = fmt.Sprintf("lane %s %s (%s)", req.LaneID, termEv.Type, outcome)
+		summary = fmt.Sprintf("lane %s %s (%s)", req.LaneID, termEv.Type, cmp.Or(outcome, termEv.Type))
 
 	case "turn.capacity", "terminal.usage_limited", "usage.updated", "capacity", "usage":
 		kind = store.EventStall
@@ -1142,11 +1087,9 @@ func (d *Driver) PollSessionUsage(
 	events store.EventStore,
 	runID, laneID, sessionID, terminalID string,
 ) ([]store.Event, error) {
-	if events == nil {
-		events = d.events
-	}
-	if events == nil {
-		return nil, fmt.Errorf("%w: store.EventStore is required", store.ErrInvalidArgument)
+	events, err := d.resolveEvents(events)
+	if err != nil {
+		return nil, err
 	}
 	detail, err := d.GetSession(ctx, sessionID)
 	if err != nil {
@@ -1203,11 +1146,9 @@ func (d *Driver) PollSessionUsage(
 // PollCapacity queries GET /api/code-sessions/capacity and appends a capacity
 // event into events.
 func (d *Driver) PollCapacity(ctx context.Context, events store.EventStore, runID, laneID string) (store.Event, error) {
-	if events == nil {
-		events = d.events
-	}
-	if events == nil {
-		return store.Event{}, fmt.Errorf("%w: store.EventStore is required", store.ErrInvalidArgument)
+	events, err := d.resolveEvents(events)
+	if err != nil {
+		return store.Event{}, err
 	}
 	capStatus, err := d.GetCapacity(ctx)
 	if err != nil {
@@ -1296,18 +1237,14 @@ func (d *Driver) resolveRepositoryID(ctx context.Context) (string, error) {
 	return chosen, nil
 }
 
-func decodeSessionInfo(raw json.RawMessage) (*SessionInfo, error) {
-	var wrapped struct {
-		Session SessionInfo `json:"session"`
-	}
-	if err := json.Unmarshal(raw, &wrapped); err == nil && wrapped.Session.ID != "" {
-		return &wrapped.Session, nil
-	}
-	var flat SessionInfo
-	if err := json.Unmarshal(raw, &flat); err != nil {
+func (d *Driver) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, d.apiURL+path, body)
+	if err != nil {
 		return nil, err
 	}
-	return &flat, nil
+	req.Header.Set("Authorization", "Bearer "+d.token)
+	req.Header.Set("X-Nebula-Client", "orch")
+	return req, nil
 }
 
 func (d *Driver) doJSON(ctx context.Context, method, path string, reqBody, respBody any) error {
@@ -1319,12 +1256,10 @@ func (d *Driver) doJSON(ctx context.Context, method, path string, reqBody, respB
 		}
 		bodyReader = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, d.apiURL+path, bodyReader)
+	req, err := d.newRequest(ctx, method, path, bodyReader)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+d.token)
-	req.Header.Set("X-Nebula-Client", "orch")
 	if reqBody != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -1367,31 +1302,20 @@ func decodeAPIError(method, path string, resp *http.Response) error {
 	if err := json.Unmarshal(data, &envelope); err == nil {
 		apiErr.Code = envelope.Code
 		apiErr.Message = envelope.Message
-		if len(envelope.Error) > 0 {
-			var errStr string
-			if err := json.Unmarshal(envelope.Error, &errStr); err == nil && errStr != "" {
-				apiErr.Message = errStr
-			} else {
-				var errObj struct {
-					Code    string `json:"code"`
-					Message string `json:"message"`
-				}
-				if err := json.Unmarshal(envelope.Error, &errObj); err == nil {
-					if errObj.Code != "" {
-						apiErr.Code = errObj.Code
-					}
-					if errObj.Message != "" {
-						apiErr.Message = errObj.Message
-					}
-				}
-			}
+		var errStr string
+		var errObj struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		switch {
+		case len(envelope.Error) == 0:
+		case json.Unmarshal(envelope.Error, &errStr) == nil && errStr != "":
+			apiErr.Message = errStr
+		case json.Unmarshal(envelope.Error, &errObj) == nil:
+			apiErr.Code = cmp.Or(errObj.Code, apiErr.Code)
+			apiErr.Message = cmp.Or(errObj.Message, apiErr.Message)
 		}
 	}
-	if apiErr.Message == "" {
-		apiErr.Message = strings.TrimSpace(string(data))
-	}
-	if apiErr.Message == "" {
-		apiErr.Message = http.StatusText(resp.StatusCode)
-	}
+	apiErr.Message = cmp.Or(apiErr.Message, strings.TrimSpace(string(data)), http.StatusText(resp.StatusCode))
 	return apiErr
 }
