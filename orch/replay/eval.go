@@ -498,8 +498,16 @@ func EvaluateMoment(
 	}
 	disp := dispatcher.New(dispCfg, st, drv, clk, client)
 	res, err := disp.Dispatch(ctx, m.RunID, appended)
-	if err != nil {
+	// A dispatcher that never stops calling tools made no decision: that is a
+	// miss for this moment, not a reason to discard the whole run. Actions it
+	// applied before the cutoff are not graded (res is empty), so it cannot agree.
+	exhausted := errors.Is(err, model.ErrMaxTurnsExceeded)
+	if err != nil && !exhausted {
 		return MomentResult{}, err
+	}
+	if exhausted {
+		res.Rejected = append(res.Rejected, "no decision: tool loop exceeded max turns")
+		res.TurnCount = dispCfg.MaxTurns
 	}
 
 	var (
@@ -541,7 +549,7 @@ func EvaluateMoment(
 	invViolations := vetterRejections + auditCount
 	rejectedReasons := append(slices.Clone(res.Rejected), auditViolations...)
 
-	agreed := invViolations == 0 && checkMomentAgreement(m.OwnerFollowUp, res.Accepted, askedOwner)
+	agreed := !exhausted && invViolations == 0 && checkMomentAgreement(m.OwnerFollowUp, res.Accepted, askedOwner)
 	baselineAgreed := m.OwnerFollowUp.Verdict == VerdictEndorsed &&
 		matchesExpectedToolAndTarget(m.OwnerFollowUp, m.Baseline.Tool, m.Baseline.Target, m.Baseline.AskedOwner)
 

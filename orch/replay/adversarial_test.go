@@ -552,3 +552,30 @@ func TestDatasetRejectsLeakyOrUngroundedMoments(t *testing.T) {
 		t.Errorf("unmutated dataset must validate: %v", err)
 	}
 }
+
+// TestDispatcherThatNeverDecidesIsAMissNotAnAbort: a tool loop that hits the
+// turn cap must score as a non-agreement for that moment and must not abort
+// the evaluation of every other moment.
+func TestDispatcherThatNeverDecidesIsAMissNotAnAbort(t *testing.T) {
+	t.Parallel()
+	ds, err := replay.LoadInnerLoopDataset()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := ds.Moments[0]
+	laneID := m.State.Lanes[0].ID
+	forever := clientFunc(func(context.Context, model.Request) (*model.Response, error) {
+		return &model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(model.NewToolUseBlock("r1", dispatcher.ToolReadLaneReport,
+				marshal(t, dispatcher.ReadLaneReportParams{LaneID: laneID}))),
+		}, nil
+	})
+	mr, err := replay.EvaluateMoment(t.Context(), m, forever, dispatcher.Config{MaxTurns: 2})
+	if err != nil {
+		t.Fatalf("EvaluateMoment aborted on a looping dispatcher: %v", err)
+	}
+	if mr.Agreed {
+		t.Fatal("a dispatcher that never decided was scored as agreeing")
+	}
+}
