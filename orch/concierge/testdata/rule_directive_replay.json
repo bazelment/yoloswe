@@ -1,0 +1,72 @@
+{
+  "exchanges": [
+    {
+      "request": {
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 4096,
+        "messages": [
+          {
+            "role": "user",
+            "content": "Standing rule for the next 24h: never spawn more than 2 concurrent lanes touching store/."
+          }
+        ]
+      },
+      "response": {
+        "id": "msg_concierge_rule_1",
+        "model": "claude-haiku-4-5-20251001",
+        "stop_reason": "tool_use",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_dir_rule_1",
+              "name": "directive.submit",
+              "input": {
+                "id": "dir-rule-store-cap",
+                "kind": "rule",
+                "scope": "run",
+                "expiry": "24h",
+                "text": "Never spawn more than 2 concurrent lanes touching store/.",
+                "reason": "owner standing concurrency rule for store/ changes"
+              }
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 580,
+          "output_tokens": 74,
+          "cost_usd": 0.00076
+        },
+        "turns": 1
+      }
+    },
+    {
+      "request": {
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 4096,
+        "messages": []
+      },
+      "response": {
+        "id": "msg_concierge_rule_2",
+        "model": "claude-haiku-4-5-20251001",
+        "stop_reason": "end_turn",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Recorded standing rule directive `dir-rule-store-cap` on `run-1` (expires in 24h): \"Never spawn more than 2 concurrent lanes touching store/.\""
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 790,
+          "output_tokens": 45,
+          "cost_usd": 0.000812
+        },
+        "turns": 1
+      }
+    }
+  ]
+}

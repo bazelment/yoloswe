@@ -1,0 +1,268 @@
+{
+  "exchanges": [
+    {
+      "request": {
+        "model": "claude-opus-4-6",
+        "max_tokens": 4096,
+        "messages": [
+          {
+            "role": "user",
+            "content": "recipe edit"
+          }
+        ]
+      },
+      "response": {
+        "id": "msg_planner_recipe_edit_1",
+        "model": "claude-opus-4-6",
+        "stop_reason": "tool_use",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_submit_recipe_v2",
+              "name": "submit_recipe",
+              "input": {
+                "name": "default",
+                "phases": [
+                  {
+                    "name": "swe",
+                    "brief_template": "Implement the backlog item, pass lint and scoped tests, push branch, and open a ready PR.",
+                    "agents": [
+                      {
+                        "harness": "claude",
+                        "model": "opus",
+                        "effort": "high"
+                      },
+                      {
+                        "harness": "codex",
+                        "model": "gpt-5.4",
+                        "effort": "high"
+                      }
+                    ],
+                    "gates": [
+                      {
+                        "name": "lint",
+                        "command": "scripts/lint.sh",
+                        "required": true
+                      },
+                      {
+                        "name": "scoped_tests",
+                        "required": true
+                      },
+                      {
+                        "name": "pr_open",
+                        "required": true
+                      }
+                    ],
+                    "exit_contract": {
+                      "allowed_outcomes": [
+                        "done",
+                        "blocked",
+                        "needs-input"
+                      ],
+                      "requires_pr": true,
+                      "requires_report": true
+                    },
+                    "mutating": true
+                  },
+                  {
+                    "name": "clean",
+                    "brief_template": "Trim redundant comments, polish the diff, verify lint and scoped tests remain green, and push.",
+                    "agents": [
+                      {
+                        "harness": "claude",
+                        "model": "sonnet",
+                        "effort": "medium"
+                      },
+                      {
+                        "harness": "codex",
+                        "model": "gpt-5.4-mini",
+                        "effort": "medium"
+                      }
+                    ],
+                    "gates": [
+                      {
+                        "name": "lint",
+                        "command": "scripts/lint.sh",
+                        "required": true
+                      },
+                      {
+                        "name": "scoped_tests",
+                        "required": true
+                      }
+                    ],
+                    "exit_contract": {
+                      "allowed_outcomes": [
+                        "done",
+                        "blocked",
+                        "needs-input"
+                      ],
+                      "requires_pr": true,
+                      "requires_report": true
+                    },
+                    "mutating": true
+                  },
+                  {
+                    "name": "review",
+                    "brief_template": "Review the PR against the brief and verify required CI checks are green on the exact reviewed HEAD.",
+                    "agents": [
+                      {
+                        "harness": "claude",
+                        "model": "sonnet",
+                        "effort": "high"
+                      },
+                      {
+                        "harness": "codex",
+                        "model": "gpt-5.4",
+                        "effort": "high"
+                      }
+                    ],
+                    "gates": [
+                      {
+                        "name": "ci_green",
+                        "required": true
+                      },
+                      {
+                        "name": "review_head_pinned",
+                        "required": true
+                      }
+                    ],
+                    "exit_contract": {
+                      "allowed_outcomes": [
+                        "done",
+                        "needs-swe",
+                        "blocked",
+                        "needs-input"
+                      ],
+                      "requires_pr": true,
+                      "requires_report": true
+                    },
+                    "mutating": false
+                  },
+                  {
+                    "name": "integrate",
+                    "brief_template": "Verify pinned review approval and green CI checks on HEAD, then integrate the PR into the target branch.",
+                    "agents": [
+                      {
+                        "harness": "claude",
+                        "model": "sonnet",
+                        "effort": "medium"
+                      }
+                    ],
+                    "gates": [
+                      {
+                        "name": "ci_green",
+                        "required": true
+                      },
+                      {
+                        "name": "review_approved",
+                        "required": true
+                      }
+                    ],
+                    "exit_contract": {
+                      "allowed_outcomes": [
+                        "done",
+                        "needs-swe",
+                        "blocked",
+                        "needs-input"
+                      ],
+                      "requires_pr": true,
+                      "requires_report": true
+                    },
+                    "mutating": true
+                  }
+                ],
+                "transitions": [
+                  {
+                    "from": "swe",
+                    "to": "review",
+                    "on": {
+                      "verdict": "done",
+                      "judgment_rule": "if the change only modifies documentation or markdown files"
+                    }
+                  },
+                  {
+                    "from": "swe",
+                    "to": "clean",
+                    "on": {
+                      "verdict": "done"
+                    }
+                  },
+                  {
+                    "from": "clean",
+                    "to": "review",
+                    "on": {
+                      "verdict": "done"
+                    }
+                  },
+                  {
+                    "from": "review",
+                    "to": "integrate",
+                    "on": {
+                      "verdict": "done",
+                      "ci_green": true
+                    }
+                  },
+                  {
+                    "from": "review",
+                    "to": "swe",
+                    "on": {
+                      "verdict": "needs-swe",
+                      "max_round": 2
+                    },
+                    "advance_round": true
+                  },
+                  {
+                    "from": "review",
+                    "to": "escalate",
+                    "on": {
+                      "verdict": "needs-swe",
+                      "min_round": 3
+                    }
+                  },
+                  {
+                    "from": "integrate",
+                    "to": "complete",
+                    "on": {
+                      "verdict": "done",
+                      "ci_green": true
+                    }
+                  },
+                  {
+                    "from": "integrate",
+                    "to": "swe",
+                    "on": {
+                      "verdict": "needs-swe"
+                    },
+                    "advance_round": true
+                  }
+                ],
+                "limits": {
+                  "max_rounds": 3,
+                  "max_phase_attempts": 2,
+                  "phase_timeout": "45m",
+                  "max_brief_bytes": 16384,
+                  "max_concurrent_lanes": 4
+                },
+                "merge_policy": {
+                  "mode": "controller",
+                  "script": "pr_arm.sh",
+                  "target_branch": "main",
+                  "require_review_pass": true,
+                  "require_ci_green": true
+                }
+              }
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 1180,
+          "output_tokens": 520,
+          "cost_usd": 0.0567
+        },
+        "turns": 1
+      }
+    }
+  ]
+}
