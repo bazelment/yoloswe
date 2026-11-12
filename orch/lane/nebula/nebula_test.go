@@ -243,17 +243,19 @@ func (f *fakeNebulaServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			var req struct {
-				Kind            string `json:"kind"`
-				Model           string `json:"model"`
-				ReasoningEffort string `json:"reasoningEffort"`
-				Prompt          string `json:"prompt"`
-				Title           string `json:"title"`
-				Start           bool   `json:"start"`
+				Env             map[string]string `json:"env"`
+				Kind            string            `json:"kind"`
+				Model           string            `json:"model"`
+				ReasoningEffort string            `json:"reasoningEffort"`
+				Prompt          string            `json:"prompt"`
+				Title           string            `json:"title"`
+				Start           bool              `json:"start"`
 			}
 			_ = json.Unmarshal([]byte(body), &req)
 			f.nextTermSeq++
 			termID := fmt.Sprintf("term-%d", f.nextTermSeq)
 			tm := &nebula.TerminalInfo{
+				Env:             req.Env,
 				ID:              termID,
 				CodeSessionID:   sessID,
 				Kind:            req.Kind,
@@ -734,5 +736,248 @@ func TestStreamEventsAndUsageCapacityIntoStore(t *testing.T) {
 	}
 	if cur.Seq != 6 {
 		t.Fatalf("cursor seq = %d, want 6", cur.Seq)
+	}
+}
+
+func TestStreamEventsCursorScopingResumeStopAndErrorHandling(t *testing.T) {
+	srv := newFakeNebulaServer(t)
+	drv, _, st := newTestDriver(t, srv)
+	ctx := context.Background()
+
+	// Seed controller cursor on the same run to ensure StreamEvents never overwrites it.
+	if err := st.Events().SetCursor(ctx, "run-cursor", "controller", 42); err != nil {
+		t.Fatalf("SetCursor(controller): %v", err)
+	}
+
+	srv.mu.Lock()
+	srv.sseEvents["term-a"] = []string{
+		"event: ping\ndata: non-json-heartbeat\n\n",
+		"id: 1\nevent: turn.ended\ndata: {\"terminalId\":\"term-a\",\"seq\":1,\"type\":\"turn.ended\",\"outcome\":\"completed\"}\n\n",
+		// Duplicate/out-of-order seq 1 must be ignored.
+		"id: 1\nevent: turn.ended\ndata: {\"terminalId\":\"term-a\",\"seq\":1,\"type\":\"turn.ended\",\"outcome\":\"completed\"}\n\n",
+		"id: 2\nevent: usage.updated\ndata: {\"terminalId\":\"term-a\",\"seq\":2,\"type\":\"usage.updated\",\"text\":\"tokens\"}\n\n",
+		"id: 3\nevent: phase.reported\ndata: {\"terminalId\":\"term-a\",\"seq\":3,\"type\":\"phase.reported\",\"outcome\":\"done\"}\n\n",
+		"id: 4\nevent: terminal.exited\ndata: {\"terminalId\":\"term-a\",\"seq\":4,\"type\":\"terminal.exited\",\"outcome\":\"exited\"}\n\n",
+	}
+	srv.sseEvents["term-b"] = []string{
+		"id: 1\nevent: turn.ended\ndata: {\"terminalId\":\"term-b\",\"seq\":1,\"type\":\"turn.ended\",\"outcome\":\"completed\"}\n\n",
+		"id: 2\nevent: terminal.exited\ndata: {\"terminalId\":\"term-b\",\"seq\":2,\"type\":\"terminal.exited\",\"outcome\":\"exited\"}\n\n",
+	}
+	srv.mu.Unlock()
+
+	// StopOnReport stops at seq=3 (where ReadReport fails because no report is filed).
+	if err := drv.StreamEvents(ctx, nebula.StreamRequest{
+		RunID:        "run-cursor",
+		LaneID:       "lane-1",
+		SessionID:    "sess-1",
+		TerminalID:   "term-a",
+		Consumer:     "controller",
+		StopOnReport: true,
+	}); err != nil {
+		t.Fatalf("StreamEvents(term-a StopOnReport): %v", err)
+	}
+
+	ctrlCur, err := st.Events().GetCursor(ctx, "run-cursor", "controller")
+	if err != nil {
+		t.Fatalf("GetCursor(controller): %v", err)
+	}
+	if ctrlCur.Seq != 42 {
+		t.Fatalf("controller cursor overwritten: got %d, want 42", ctrlCur.Seq)
+	}
+
+	termACur, err := st.Events().GetCursor(ctx, "run-cursor", nebula.StreamCursorConsumer("controller", "term-a"))
+	if err != nil {
+		t.Fatalf("GetCursor(term-a): %v", err)
+	}
+	if termACur.Seq != 3 {
+		t.Fatalf("term-a cursor = %d, want 3", termACur.Seq)
+	}
+
+	// Resume term-a with StopOnExit: should send Last-Event-ID=3 and process only seq=4.
+	if err := drv.StreamEvents(ctx, nebula.StreamRequest{
+		RunID:      "run-cursor",
+		LaneID:     "lane-1",
+		SessionID:  "sess-1",
+		TerminalID: "term-a",
+		Consumer:   "controller",
+		StopOnExit: true,
+	}); err != nil {
+		t.Fatalf("StreamEvents(term-a resume StopOnExit): %v", err)
+	}
+
+	// Second terminal with the SAME Consumer name must start at seq 1 and not skip events.
+	if err := drv.StreamEvents(ctx, nebula.StreamRequest{
+		RunID:      "run-cursor",
+		LaneID:     "lane-1",
+		SessionID:  "sess-1",
+		TerminalID: "term-b",
+		Consumer:   "controller",
+		StopOnExit: true,
+	}); err != nil {
+		t.Fatalf("StreamEvents(term-b StopOnExit): %v", err)
+	}
+
+	evs, err := st.Events().List(ctx, store.EventFilter{RunID: "run-cursor"})
+	if err != nil {
+		t.Fatalf("Events().List: %v", err)
+	}
+	// term-a: seq 1 (turn.ended), seq 2 (usage.updated), seq 3 (phase.reported), seq 4 (terminal.exited)
+	// term-b: seq 1 (turn.ended), seq 2 (terminal.exited)
+	if len(evs) != 6 {
+		t.Fatalf("got %d events, want 6: %+v", len(evs), evs)
+	}
+
+	// seq 2 (usage.updated) is non-urgent telemetry and must be EventClassAuto.
+	if evs[1].Class != store.EventClassAuto || evs[1].Urgent {
+		t.Fatalf("usage.updated event = %+v, want Auto / non-urgent", evs[1])
+	}
+
+	// seq 3 (phase.reported with missing report) must surface ReportError and Judgment/urgent.
+	var repPayload nebula.StreamEventPayload
+	if err := json.Unmarshal(evs[2].Payload, &repPayload); err != nil {
+		t.Fatalf("unmarshal phase.reported payload: %v", err)
+	}
+	if repPayload.ReportError == "" || evs[2].Class != store.EventClassJudgment || !evs[2].Urgent {
+		t.Fatalf("phase.reported missing report: event=%+v payload=%+v", evs[2], repPayload)
+	}
+	if strings.Contains(evs[2].Summary, "reported: reported") {
+		t.Fatalf("phase.reported summary synthesized invalid outcome: %q", evs[2].Summary)
+	}
+
+	// EOF before StopOnReport is satisfied must return ErrStreamEnded.
+	srv.mu.Lock()
+	srv.sseEvents["term-eof"] = []string{
+		"id: 1\nevent: turn.ended\ndata: {\"terminalId\":\"term-eof\",\"seq\":1,\"type\":\"turn.ended\",\"outcome\":\"completed\"}\n\n",
+	}
+	srv.sseEvents["term-bad-json"] = []string{
+		"id: 1\nevent: turn.ended\ndata: {not-valid-json\n\n",
+	}
+	srv.mu.Unlock()
+
+	if err := drv.StreamEvents(ctx, nebula.StreamRequest{
+		RunID:        "run-cursor",
+		LaneID:       "lane-1",
+		TerminalID:   "term-eof",
+		StopOnReport: true,
+	}); !errors.Is(err, nebula.ErrStreamEnded) {
+		t.Fatalf("expected ErrStreamEnded on premature EOF, got %v", err)
+	}
+
+	if err := drv.StreamEvents(ctx, nebula.StreamRequest{
+		RunID:      "run-cursor",
+		LaneID:     "lane-1",
+		TerminalID: "term-bad-json",
+	}); err == nil || !strings.Contains(err.Error(), "nebula sse decode event") {
+		t.Fatalf("expected SSE decode error on malformed JSON, got %v", err)
+	}
+}
+
+func TestSessionMatchingEnvForwardingSteerAndPollDedupe(t *testing.T) {
+	srv := newFakeNebulaServer(t)
+	drv, _, st := newTestDriver(t, srv, nebula.WithAPIURL(srv.srv.URL))
+	ctx := context.Background()
+
+	// Seed an unrelated ready session with empty metadata/workBranch and a host session.
+	t.Setenv(nebula.EnvSessionID, "sess-host")
+	drvWithHost, _, _ := newTestDriver(t, srv)
+
+	srv.mu.Lock()
+	srv.sessions["sess-host"] = &nebula.SessionInfo{
+		ID:         "sess-host",
+		Status:     "ready",
+		WorkBranch: "swarm-lane/run-x/lane-x",
+		Metadata:   map[string]string{"swarmRun": "run-x", "swarmLane": "lane-x"},
+	}
+	srv.sessions["sess-unrelated"] = &nebula.SessionInfo{
+		ID:     "sess-unrelated",
+		Status: "ready",
+	}
+	srv.mu.Unlock()
+
+	// EnsureSession must not reuse sess-host or sess-unrelated; and concurrent calls
+	// for the same lane must serialize and reuse a single newly created session.
+	var wg sync.WaitGroup
+	results := make([]*nebula.SessionInfo, 2)
+	errs := make([]error, 2)
+	for i := range 2 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx], errs[idx] = drvWithHost.EnsureSession(ctx, lane.SpawnRequest{
+				RunID:  "run-x",
+				LaneID: "lane-x",
+			})
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("EnsureSession[%d]: %v", i, err)
+		}
+	}
+	if results[0].ID == "sess-host" || results[0].ID == "sess-unrelated" {
+		t.Fatalf("EnsureSession reused wrong session %q", results[0].ID)
+	}
+	if results[0].ID != results[1].ID {
+		t.Fatalf("concurrent EnsureSession created distinct sessions: %q vs %q", results[0].ID, results[1].ID)
+	}
+
+	// StartPhaseTerminal with an existing SessionID must forward Env.
+	started, err := drv.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
+		RunID:     "run-x",
+		LaneID:    "lane-x",
+		SessionID: results[0].ID,
+		Phase:     "swe",
+		Round:     1,
+		Harness:   "claude",
+		Model:     "sonnet",
+		Env:       map[string]string{"LANE_VAR": "val-1"},
+	})
+	if err != nil {
+		t.Fatalf("StartPhaseTerminal: %v", err)
+	}
+	term, err := drv.GetTerminal(ctx, started.TerminalID)
+	if err != nil {
+		t.Fatalf("GetTerminal: %v", err)
+	}
+	if term.Env["LANE_VAR"] != "val-1" {
+		t.Fatalf("terminal Env = %+v, want LANE_VAR=val-1", term.Env)
+	}
+
+	// Steer with only SessionID must locate the running terminal on that session.
+	if err := drv.Steer(ctx, lane.SteerRequest{
+		RunID:     "run-x",
+		LaneID:    "lane-x",
+		SessionID: results[0].ID,
+		Message:   "steer via session id",
+	}); err != nil {
+		t.Fatalf("Steer(SessionID only): %v", err)
+	}
+
+	// PollSessionUsage and PollCapacity must deduplicate unchanged snapshots.
+	srv.mu.Lock()
+	srv.terminals[started.TerminalID].Usage = &nebula.TerminalUsage{
+		InputTokens:      500,
+		OutputTokens:     100,
+		EstimatedCostUSD: 0.01,
+	}
+	srv.mu.Unlock()
+
+	u1, err := drv.PollSessionUsage(ctx, st.Events(), "run-x", "lane-x", results[0].ID, started.TerminalID)
+	if err != nil || len(u1) != 1 {
+		t.Fatalf("first PollSessionUsage: len=%d err=%v", len(u1), err)
+	}
+	u2, err := drv.PollSessionUsage(ctx, st.Events(), "run-x", "lane-x", results[0].ID, started.TerminalID)
+	if err != nil || len(u2) != 0 {
+		t.Fatalf("second PollSessionUsage (unchanged) should dedupe, got len=%d err=%v", len(u2), err)
+	}
+
+	c1, err := drv.PollCapacity(ctx, st.Events(), "run-x", "lane-x")
+	if err != nil || c1.ID == "" {
+		t.Fatalf("first PollCapacity: ev=%+v err=%v", c1, err)
+	}
+	c2, err := drv.PollCapacity(ctx, st.Events(), "run-x", "lane-x")
+	if err != nil || c2.ID != "" {
+		t.Fatalf("second PollCapacity (unchanged) should dedupe, got ev=%+v err=%v", c2, err)
 	}
 }

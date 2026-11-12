@@ -42,6 +42,7 @@ const (
 var (
 	ErrMissingCredentials = errors.New("orch/lane/nebula: NEBULA_API_URL and NEBULA_TOKEN are required")
 	ErrNoReport           = fmt.Errorf("%w: no phase report filed for terminal", store.ErrNotFound)
+	ErrStreamEnded        = errors.New("orch/lane/nebula: event stream ended before stop condition met")
 )
 
 // APIError represents a non-2xx HTTP response from the Nebula API.
@@ -142,6 +143,9 @@ type Driver struct {
 	events       store.EventStore
 	httpClient   *http.Client
 	streamClient *http.Client
+	laneLocks    map[string]*sync.Mutex
+	lastUsage    map[string]string
+	lastCapacity map[string]string
 	apiURL       string
 	token        string
 	repoID       string
@@ -152,9 +156,6 @@ type Driver struct {
 	settleWait   time.Duration
 	mu           sync.Mutex
 }
-
-// NebulaDriver aliases Driver for callers referencing the full type name.
-type NebulaDriver = Driver
 
 var _ lane.LaneDriver = (*Driver)(nil)
 
@@ -200,6 +201,9 @@ func New(cfg Config, opts ...Option) (*Driver, error) {
 		events:       cfg.Events,
 		httpClient:   httpClient,
 		streamClient: &streamClient,
+		laneLocks:    make(map[string]*sync.Mutex),
+		lastUsage:    make(map[string]string),
+		lastCapacity: make(map[string]string),
 		apiURL:       apiURL,
 		token:        token,
 		repoID:       strings.TrimSpace(cfg.RepositoryID),
@@ -245,18 +249,19 @@ type UsageLimitInfo struct {
 
 // TerminalInfo describes a Nebula code terminal.
 type TerminalInfo struct {
-	Usage           *TerminalUsage  `json:"usage,omitempty"`
-	UsageLimit      *UsageLimitInfo `json:"usageLimit,omitempty"`
-	ID              string          `json:"id"`
-	CodeSessionID   string          `json:"codeSessionId,omitempty"`
-	Kind            string          `json:"kind,omitempty"`
-	Title           string          `json:"title,omitempty"`
-	Status          string          `json:"status,omitempty"`
-	AgentState      string          `json:"agentState,omitempty"`
-	AgentSignal     string          `json:"agentSignal,omitempty"`
-	Model           string          `json:"model,omitempty"`
-	ReasoningEffort string          `json:"reasoningEffort,omitempty"`
-	URL             string          `json:"url,omitempty"`
+	Env             map[string]string `json:"env,omitempty"`
+	Usage           *TerminalUsage    `json:"usage,omitempty"`
+	UsageLimit      *UsageLimitInfo   `json:"usageLimit,omitempty"`
+	ID              string            `json:"id"`
+	CodeSessionID   string            `json:"codeSessionId,omitempty"`
+	Kind            string            `json:"kind,omitempty"`
+	Title           string            `json:"title,omitempty"`
+	Status          string            `json:"status,omitempty"`
+	AgentState      string            `json:"agentState,omitempty"`
+	AgentSignal     string            `json:"agentSignal,omitempty"`
+	Model           string            `json:"model,omitempty"`
+	ReasoningEffort string            `json:"reasoningEffort,omitempty"`
+	URL             string            `json:"url,omitempty"`
 }
 
 // SessionDetail combines a code session and its terminals from GET /api/code-sessions/{id}.
@@ -326,11 +331,30 @@ func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.
 	return res, nil
 }
 
+func (d *Driver) laneLock(runID, laneID string) *sync.Mutex {
+	key := strings.TrimSpace(runID) + "/" + strings.TrimSpace(laneID)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	lk, ok := d.laneLocks[key]
+	if !ok {
+		lk = &sync.Mutex{}
+		d.laneLocks[key] = lk
+	}
+	return lk
+}
+
 // EnsureSession reuses or creates a lane code session and waits until it is ready.
 func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*SessionInfo, error) {
 	if strings.TrimSpace(req.LaneID) == "" {
 		return nil, fmt.Errorf("%w: lane_id is required", store.ErrInvalidArgument)
 	}
+	// Serialize EnsureSession per (runID, laneID) so concurrent callers for the
+	// same lane reuse the session created by whichever caller runs first rather
+	// than racing to POST duplicate code sessions.
+	lk := d.laneLock(req.RunID, req.LaneID)
+	lk.Lock()
+	defer lk.Unlock()
+
 	workBranch := strings.TrimSpace(req.Branch)
 	if workBranch == "" {
 		if strings.TrimSpace(req.RunID) != "" {
@@ -341,7 +365,7 @@ func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*Ses
 	}
 	baseBranch := cmp.Or(strings.TrimSpace(req.BaseBranch), d.baseBranch)
 
-	existing, err := d.findReusableSession(ctx, req.RunID, req.LaneID, workBranch)
+	existing, err := d.findReusableSession(ctx, req.RunID, req.LaneID, workBranch, baseBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -392,7 +416,7 @@ func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*Ses
 	return d.settleSession(ctx, created.Session)
 }
 
-func (d *Driver) findReusableSession(ctx context.Context, runID, laneID, workBranch string) (*SessionInfo, error) {
+func (d *Driver) findReusableSession(ctx context.Context, runID, laneID, workBranch, baseBranch string) (*SessionInfo, error) {
 	q := url.Values{}
 	if laneID != "" {
 		q.Set("metadata.swarmLane", laneID)
@@ -413,16 +437,7 @@ func (d *Driver) findReusableSession(ctx context.Context, runID, laneID, workBra
 	var fallback *SessionInfo
 	for i := range resp.Sessions {
 		s := &resp.Sessions[i]
-		if !isSessionReusableStatus(s.Status) {
-			continue
-		}
-		if s.WorkBranch != "" && workBranch != "" && s.WorkBranch != workBranch {
-			continue
-		}
-		if s.Metadata["swarmLane"] != "" && s.Metadata["swarmLane"] != laneID {
-			continue
-		}
-		if runID != "" && s.Metadata["swarmRun"] != "" && s.Metadata["swarmRun"] != runID {
+		if !d.matchesLaneSession(s, runID, laneID, workBranch, baseBranch) {
 			continue
 		}
 		if s.Status == "ready" {
@@ -433,6 +448,32 @@ func (d *Driver) findReusableSession(ctx context.Context, runID, laneID, workBra
 		}
 	}
 	return fallback, nil
+}
+
+func (d *Driver) matchesLaneSession(s *SessionInfo, runID, laneID, workBranch, baseBranch string) bool {
+	if s == nil || s.ID == "" || !isSessionReusableStatus(s.Status) {
+		return false
+	}
+	if d.currSessID != "" && s.ID == d.currSessID {
+		return false
+	}
+	if s.WorkBranch != "" && workBranch != "" && s.WorkBranch != workBranch {
+		return false
+	}
+	if s.BaseBranch != "" && baseBranch != "" && s.BaseBranch != baseBranch {
+		return false
+	}
+	sessLane := s.Metadata["swarmLane"]
+	sessRun := s.Metadata["swarmRun"]
+	if sessLane != "" && sessLane != laneID {
+		return false
+	}
+	if runID != "" && sessRun != "" && sessRun != runID {
+		return false
+	}
+	hasBranchMatch := workBranch != "" && s.WorkBranch == workBranch
+	hasMetaMatch := laneID != "" && sessLane == laneID && (runID == "" || sessRun == runID || hasBranchMatch)
+	return hasMetaMatch || hasBranchMatch
 }
 
 func isSessionReusableStatus(status string) bool {
@@ -546,12 +587,13 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 	}
 
 	body := struct {
-		Kind            string `json:"kind"`
-		Model           string `json:"model,omitempty"`
-		ReasoningEffort string `json:"reasoningEffort,omitempty"`
-		Prompt          string `json:"prompt,omitempty"`
-		Title           string `json:"title,omitempty"`
-		Start           bool   `json:"start"`
+		Env             map[string]string `json:"env,omitempty"`
+		Kind            string            `json:"kind"`
+		Model           string            `json:"model,omitempty"`
+		ReasoningEffort string            `json:"reasoningEffort,omitempty"`
+		Prompt          string            `json:"prompt,omitempty"`
+		Title           string            `json:"title,omitempty"`
+		Start           bool              `json:"start"`
 	}{
 		Kind:            kind,
 		Model:           strings.TrimSpace(req.Model),
@@ -559,6 +601,9 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 		Prompt:          req.Brief,
 		Start:           true,
 		Title:           title,
+	}
+	if len(req.Env) > 0 {
+		body.Env = maps.Clone(req.Env)
 	}
 
 	path := fmt.Sprintf("/api/code-sessions/%s/terminals", url.PathEscape(sessionID))
@@ -776,6 +821,22 @@ type StreamEventPayload struct {
 	SessionID     string            `json:"session_id,omitempty"`
 	TerminalID    string            `json:"terminal_id,omitempty"`
 	AgentSignal   string            `json:"agent_signal,omitempty"`
+	ReportError   string            `json:"report_error,omitempty"`
+}
+
+// StreamCursorConsumer returns the per-terminal EventStore cursor key used by
+// StreamEvents to persist a terminal's Nebula SSE sequence number without
+// colliding across terminals or with store.Event.Seq consumers (such as "controller").
+func StreamCursorConsumer(consumer, terminalID string) string {
+	terminalID = strings.TrimSpace(terminalID)
+	consumer = strings.TrimSpace(consumer)
+	if consumer == "" {
+		return "nebula:terminal:" + terminalID
+	}
+	if strings.HasPrefix(consumer, "nebula:") && strings.HasSuffix(consumer, ":"+terminalID) {
+		return consumer
+	}
+	return fmt.Sprintf("nebula:terminal:%s:%s", consumer, terminalID)
 }
 
 // StreamRequest configures streaming a terminal's SSE events into store.EventStore.
@@ -809,9 +870,10 @@ func (d *Driver) StreamEvents(ctx context.Context, req StreamRequest) error {
 		return fmt.Errorf("%w: run_id and terminal_id are required for StreamEvents", store.ErrInvalidArgument)
 	}
 
+	cursorConsumer := StreamCursorConsumer(req.Consumer, req.TerminalID)
 	afterSeq := req.AfterSeq
-	if afterSeq == 0 && req.Consumer != "" {
-		if cur, err := events.GetCursor(ctx, req.RunID, req.Consumer); err == nil && cur.Seq > 0 {
+	if afterSeq == 0 {
+		if cur, err := events.GetCursor(ctx, req.RunID, cursorConsumer); err == nil && cur.Seq > 0 {
 			afterSeq = cur.Seq
 		}
 	}
@@ -836,7 +898,7 @@ func (d *Driver) StreamEvents(ctx context.Context, req StreamRequest) error {
 		return decodeAPIError(http.MethodGet, path, resp)
 	}
 
-	return d.consumeSSEStream(ctx, resp.Body, events, req, afterSeq)
+	return d.consumeSSEStream(ctx, resp.Body, events, req, cursorConsumer, afterSeq)
 }
 
 func (d *Driver) consumeSSEStream(
@@ -844,15 +906,17 @@ func (d *Driver) consumeSSEStream(
 	r io.Reader,
 	events store.EventStore,
 	req StreamRequest,
+	cursorConsumer string,
 	afterSeq int64,
 ) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineBytes)
 
 	var (
-		frameID    string
-		frameEvent string
-		dataLines  []string
+		frameID      string
+		frameEvent   string
+		dataLines    []string
+		highWaterSeq = afterSeq
 	)
 
 	resetFrame := func() {
@@ -871,6 +935,10 @@ func (d *Driver) consumeSSEStream(
 		idStr := frameID
 		resetFrame()
 
+		if isHeartbeatSSEEvent(evType) {
+			return false, nil
+		}
+
 		var termEv TerminalEvent
 		if rawData != "" {
 			if err := json.Unmarshal([]byte(rawData), &termEv); err != nil {
@@ -884,8 +952,11 @@ func (d *Driver) consumeSSEStream(
 			}
 		}
 		termEv.TerminalID = cmp.Or(termEv.TerminalID, req.TerminalID)
-		if afterSeq > 0 && termEv.Seq > 0 && termEv.Seq <= afterSeq {
-			return false, nil
+		if termEv.Seq > 0 {
+			if termEv.Seq <= highWaterSeq {
+				return false, nil
+			}
+			highWaterSeq = termEv.Seq
 		}
 
 		storeEv, ok, err := d.mapTerminalEvent(ctx, req, termEv)
@@ -897,8 +968,8 @@ func (d *Driver) consumeSSEStream(
 				return false, err
 			}
 		}
-		if req.Consumer != "" && termEv.Seq > 0 {
-			if err := events.SetCursor(ctx, req.RunID, req.Consumer, termEv.Seq); err != nil {
+		if cursorConsumer != "" && termEv.Seq > 0 {
+			if err := events.SetCursor(ctx, req.RunID, cursorConsumer, termEv.Seq); err != nil {
 				return false, err
 			}
 		}
@@ -940,8 +1011,23 @@ func (d *Driver) consumeSSEStream(
 		}
 		return err
 	}
-	_, err := dispatchFrame()
-	return err
+	stop, err := dispatchFrame()
+	if err != nil {
+		return err
+	}
+	if !stop && (req.StopOnExit || req.StopOnReport) {
+		return ErrStreamEnded
+	}
+	return nil
+}
+
+func isHeartbeatSSEEvent(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "ping", "heartbeat", "keepalive":
+		return true
+	default:
+		return false
+	}
 }
 
 func isTerminalExitEvent(eventType string) bool {
@@ -975,18 +1061,35 @@ func (d *Driver) mapTerminalEvent(ctx context.Context, req StreamRequest, termEv
 	switch termEv.Type {
 	case "phase.reported":
 		kind = store.EventLaneReport
-		outcome := lane.ReportOutcome(cmp.Or(termEv.Outcome, "reported"))
-		if rep, err := d.ReadReport(ctx, req.RunID, req.LaneID, termEv.TerminalID); err == nil && rep != nil {
+		outcome := lane.ReportOutcome(strings.TrimSpace(termEv.Outcome))
+		rep, err := d.ReadReport(ctx, req.RunID, req.LaneID, termEv.TerminalID)
+		if err != nil {
+			payload.ReportError = err.Error()
+		} else if rep != nil {
 			payload.Report = rep
 			outcome = rep.Outcome
 		}
-		if outcome == lane.OutcomeBlocked || outcome == lane.OutcomeNeedsInput {
+		switch {
+		case payload.ReportError != "":
 			class = store.EventClassJudgment
 			urgent = true
-		} else {
+			if outcome.Valid() {
+				summary = fmt.Sprintf("lane %s phase reported (%s): failed to read report: %s", req.LaneID, outcome, payload.ReportError)
+			} else {
+				summary = fmt.Sprintf("lane %s phase reported: failed to read report: %s", req.LaneID, payload.ReportError)
+			}
+		case !outcome.Valid():
+			class = store.EventClassJudgment
+			urgent = true
+			summary = fmt.Sprintf("lane %s phase reported with invalid outcome %q", req.LaneID, outcome)
+		case outcome == lane.OutcomeBlocked || outcome == lane.OutcomeNeedsInput:
+			class = store.EventClassJudgment
+			urgent = true
+			summary = fmt.Sprintf("lane %s phase reported: %s", req.LaneID, outcome)
+		default:
 			class = store.EventClassAuto
+			summary = fmt.Sprintf("lane %s phase reported: %s", req.LaneID, outcome)
 		}
-		summary = fmt.Sprintf("lane %s phase reported: %s", req.LaneID, outcome)
 
 	case "turn.ended":
 		outcome := strings.ToLower(strings.TrimSpace(termEv.Outcome))
@@ -1032,8 +1135,11 @@ func (d *Driver) mapTerminalEvent(ctx context.Context, req StreamRequest, termEv
 
 	case "turn.capacity", "terminal.usage_limited", "usage.updated", "capacity", "usage":
 		kind = store.EventStall
-		class = store.EventClassJudgment
 		urgent = termEv.Type == "turn.capacity" || termEv.Type == "terminal.usage_limited"
+		class = store.EventClassAuto
+		if urgent {
+			class = store.EventClassJudgment
+		}
 		summary = fmt.Sprintf("lane %s %s", req.LaneID, termEv.Type)
 		if termEv.Text != "" {
 			summary = fmt.Sprintf("lane %s %s: %s", req.LaneID, termEv.Type, termEv.Text)
@@ -1104,6 +1210,17 @@ func (d *Driver) PollSessionUsage(
 		if err != nil {
 			return nil, err
 		}
+		snapKey := runID + ":" + laneID + ":" + t.ID
+		snapVal := string(rawPayload)
+		d.mu.Lock()
+		unchanged := d.lastUsage[snapKey] == snapVal
+		if !unchanged {
+			d.lastUsage[snapKey] = snapVal
+		}
+		d.mu.Unlock()
+		if unchanged {
+			continue
+		}
 		urgent := t.AgentSignal == "usage_limited" || t.UsageLimit != nil
 		class := store.EventClassAuto
 		summary := fmt.Sprintf("lane %s usage snapshot", laneID)
@@ -1162,6 +1279,17 @@ func (d *Driver) PollCapacity(ctx context.Context, events store.EventStore, runI
 	rawPayload, err := json.Marshal(payload)
 	if err != nil {
 		return store.Event{}, err
+	}
+	snapKey := runID + ":" + laneID
+	snapVal := string(rawPayload)
+	d.mu.Lock()
+	unchanged := d.lastCapacity[snapKey] == snapVal
+	if !unchanged {
+		d.lastCapacity[snapKey] = snapVal
+	}
+	d.mu.Unlock()
+	if unchanged {
+		return store.Event{}, nil
 	}
 	summary := fmt.Sprintf("nebula capacity: running=%d waiting=%d", totalRunning, totalWaiting)
 	return events.Append(ctx, store.Event{
