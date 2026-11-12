@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/bazelment/yoloswe/orch/model"
 )
@@ -53,5 +54,40 @@ func TestOpenAIResponsesToolLoop(t *testing.T) {
 	last := items[len(items)-1].(map[string]any)
 	if last["type"] != "function_call_output" || last["call_id"] != "call-1" {
 		t.Fatalf("tool output=%#v", last)
+	}
+}
+
+func TestOpenAIStreamFailureRetries(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "truncated", body: "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n"},
+		{name: "no-completed", body: "event: response.created\ndata: {\"type\":\"response.created\"}\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(tc.body))
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			}))
+			defer server.Close()
+			client := model.NewOpenAIClient(
+				model.WithOpenAIBaseURL(server.URL), model.WithOpenAIAPIKey("test"),
+				model.WithOpenAIMaxRetries(1), model.WithOpenAIRetryBackoff(0, 0),
+				model.WithOpenAIRequestTimeout(50*time.Millisecond), model.WithOpenAIStreamIdleTimeout(5*time.Millisecond),
+			)
+			_, err := client.CreateMessage(context.Background(), model.Request{Model: "gpt-test", Messages: []model.Message{model.NewUserMessage("hi")}})
+			if err == nil {
+				t.Fatal("CreateMessage succeeded, want stream failure")
+			}
+			if calls != 2 {
+				t.Fatalf("requests=%d, want 2 retries", calls)
+			}
+		})
 	}
 }
