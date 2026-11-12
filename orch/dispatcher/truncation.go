@@ -38,10 +38,11 @@ func (c retryOnTruncationClient) CreateMessage(ctx context.Context, req model.Re
 		}
 		cur = req.Clone()
 		// The user turn must still alternate with an assistant turn.
-		cur.Messages = append(cur.Messages, model.Message{
-			Role:    model.RoleAssistant,
-			Content: []model.ContentBlock{{Type: model.BlockTypeText, Text: cmp.Or(strings.TrimSpace(resp.Text()), "(cut off)")}},
-		})
-		cur.Messages = append(cur.Messages, model.NewUserMessage(truncationNudge))
+		cur.Messages = append(cur.Messages,
+			model.Message{
+				Role:    model.RoleAssistant,
+				Content: []model.ContentBlock{{Type: model.BlockTypeText, Text: cmp.Or(strings.TrimSpace(resp.Text()), "(cut off)")}},
+			},
+			model.NewUserMessage(truncationNudge))
 	}
 }
