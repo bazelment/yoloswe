@@ -18,7 +18,6 @@ import (
 )
 
 // OpenAIClient implements ModelClient using the OpenAI Responses API.
-//
 //nolint:govet
 type OpenAIClient struct {
 	clock             clock.Clock

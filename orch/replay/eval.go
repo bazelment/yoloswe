@@ -35,7 +35,6 @@ type EvalConfig struct {
 }
 
 // MomentResult captures the evaluation outcome of a single JudgmentMoment.
-//
 //nolint:govet
 type MomentResult struct {
 	ID                  string
@@ -66,7 +65,6 @@ type MomentResult struct {
 }
 
 // QuestionResult captures the evaluation outcome of a single ConciergeQuestion.
-//
 //nolint:govet
 type QuestionResult struct {
 	ID                string
