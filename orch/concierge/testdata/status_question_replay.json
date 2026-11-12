@@ -1,0 +1,75 @@
+{
+  "exchanges": [
+    {
+      "request": {
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 4096,
+        "messages": [
+          {
+            "role": "user",
+            "content": "Where are we on run-1 and how is lane-alpha doing?"
+          }
+        ]
+      },
+      "response": {
+        "id": "msg_concierge_status_1",
+        "model": "claude-haiku-4-5-20251001",
+        "stop_reason": "tool_use",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_status_1",
+              "name": "status",
+              "input": {
+                "backlog_limit": 10
+              }
+            },
+            {
+              "type": "tool_use",
+              "id": "toolu_laneshow_1",
+              "name": "lane.show",
+              "input": {
+                "lane_id": "lane-alpha"
+              }
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 620,
+          "output_tokens": 65,
+          "cost_usd": 0.000756
+        },
+        "turns": 1
+      }
+    },
+    {
+      "request": {
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 4096,
+        "messages": []
+      },
+      "response": {
+        "id": "msg_concierge_status_2",
+        "model": "claude-haiku-4-5-20251001",
+        "stop_reason": "end_turn",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "On `run-1` (plan `post:5aaec193-a1f1-4009-aa55-f6174d583653`), backlog has 2 items (`item-alpha` in_progress at p0, `item-beta` open at p1). `lane-alpha` is `running` in phase `review` (round 1, recipe `default@v1`) on PR `#42` at HEAD `abc12345` with `green` CI checks and terminal `term-alpha-review-1`."
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 1140,
+          "output_tokens": 82,
+          "cost_usd": 0.00124
+        },
+        "turns": 1
+      }
+    }
+  ]
+}
