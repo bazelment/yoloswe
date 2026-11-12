@@ -46,11 +46,9 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 		t.Fatalf("load dataset: %v", err)
 	}
 
-	// ORCH_REPLAY_SPLIT=tune|holdout runs one deterministic half of the moments
-	// (by moment-id hash, see replay.SplitMomentIDs); ORCH_REPLAY_MOMENTS picks
-	// explicit ids. Either one measures the Dispatcher only: the Concierge
-	// questions belong to the full-set run, so a subset reports its bars but
-	// does not assert the overall verdict.
+	// ORCH_REPLAY_SPLIT=tune|holdout (see replay.SplitMomentIDs) or
+	// ORCH_REPLAY_MOMENTS=<ids> runs a subset: the bars are reported, but the
+	// verdict is asserted only on the full set (Concierge questions included).
 	subset := false
 	if split := strings.TrimSpace(os.Getenv("ORCH_REPLAY_SPLIT")); split != "" {
 		if ds, err = ds.Subset(replay.Split(split)); err != nil {
@@ -127,9 +125,8 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 	}
 }
 
-// printSplitReports scores the moments of a full run once per deterministic
-// half (see replay.SplitMomentIDs), so the tune and holdout numbers come from
-// the same single pass over the dataset.
+// printSplitReports scores a full run once per split (see replay.SplitMomentIDs),
+// so tune and holdout numbers come from the same single pass.
 func printSplitReports(rep *replay.EvalReport) {
 	ids := make([]string, len(rep.MomentResults))
 	for i := range rep.MomentResults {

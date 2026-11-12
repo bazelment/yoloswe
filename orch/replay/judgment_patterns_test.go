@@ -13,10 +13,9 @@ import (
 	"github.com/bazelment/yoloswe/orch/replay"
 )
 
-// recordedOutputClient replays recorded model output: the first reply carries
-// the recorded tool calls (as one parallel tool_use turn), any later reply ends
-// the turn. It keeps every request so a test can read the snapshot and tools
-// the model was shown.
+// recordedOutputClient replays recorded tool calls as one parallel tool_use
+// turn; any later reply ends the turn. It keeps every request so tests can read
+// the snapshot and tools the model was shown.
 type recordedOutputClient struct {
 	calls []model.ToolCall
 	reqs  []model.Request
@@ -68,16 +67,14 @@ func replayRecorded(t *testing.T, momentID string, calls ...model.ToolCall) (rep
 func snapshotOf(c *recordedOutputClient) string { return c.reqs[0].Messages[0].Text() }
 
 // Pattern 1: extra mutating actions on top of the expected one. The recorded
-// outputs are the tool calls the live model made before the fix. The grader
-// rightly scores them as misses; the fix is the one-primary-action rule in the
-// prompt, which the test pins so it cannot be dropped silently.
+// outputs are the pre-fix live calls; the grader scores them as misses, and the
+// prompt's one-primary-action rule is pinned here.
 func TestPattern_ExtraMutatingActionsAreMissesAndPromptForbidsThem(t *testing.T) {
 	t.Parallel()
 
-	// planner.request already stores its reason as an active directive, so the
-	// directive.note after it is a redundant second action. The one-primary-
-	// action contract rejects it with an error, and the grader counts that
-	// rejection as a violation: what is scored is exactly what was applied.
+	// planner.request already stores its reason as a directive, so the trailing
+	// directive.note is a redundant second action: rejected, and counted as a
+	// violation by the grader.
 	extra, _ := replayRecorded(t, "cicd-300-g14",
 		call("t1", "planner.request", `{"reason":"owner wants a v3 replan about work, not capacity","urgent":true}`),
 		call("t2", "directive.note", `{"fact":"capacity is not the dispatcher's concern; keep lanes full","reason":"owner rule"}`),
