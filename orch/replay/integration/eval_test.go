@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -45,6 +46,23 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 		t.Fatalf("load dataset: %v", err)
 	}
 
+	// ORCH_REPLAY_SPLIT=tune|holdout (see replay.SplitMomentIDs) or
+	// ORCH_REPLAY_MOMENTS=<ids> runs a subset: the bars are reported, but the
+	// verdict is asserted only on the full set (Concierge questions included).
+	subset := false
+	if split := strings.TrimSpace(os.Getenv("ORCH_REPLAY_SPLIT")); split != "" {
+		if ds, err = ds.Subset(replay.Split(split)); err != nil {
+			t.Fatalf("split dataset: %v", err)
+		}
+		subset = true
+	}
+	if raw := strings.TrimSpace(os.Getenv("ORCH_REPLAY_MOMENTS")); raw != "" {
+		if ds, err = ds.SelectMoments(splitIDs(raw)); err != nil {
+			t.Fatalf("select moments: %v", err)
+		}
+		subset = true
+	}
+
 	concurrency := 6
 	if raw := strings.TrimSpace(os.Getenv("ORCH_REPLAY_CONCURRENCY")); raw != "" {
 		if n, pErr := strconv.Atoi(raw); pErr == nil && n > 0 {
@@ -75,12 +93,16 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 	fmt.Println(reportText)
 	t.Log("\n" + reportText)
 
+	if !subset {
+		printSplitReports(rep)
+	}
+
 	for i := range rep.MomentResults {
 		mr := &rep.MomentResults[i]
 		if !mr.Agreed || mr.InvariantViolations > 0 || (mr.ForbidOwnerAsk && mr.AskedOwner) {
-			t.Logf("MOMENT MISS %s (run=%s verified=%t): got tools=%v targets=%v asked=%t inv=%d rejected=%q | want tools=%v targets=%v",
+			fmt.Printf("MOMENT MISS %s (run=%s verified=%t): got tools=%v targets=%v asked=%t inv=%d rejected=%q | want tools=%v targets=%v | summary=%q\n",
 				mr.ID, mr.RunID, mr.Grounded, mr.AcceptedTools, mr.AcceptedTargets, mr.AskedOwner, mr.InvariantViolations,
-				mr.RejectedReasons, mr.ExpectedTools, mr.ExpectedTargets)
+				mr.RejectedReasons, mr.ExpectedTools, mr.ExpectedTargets, mr.Summary)
 		}
 	}
 	for i := range rep.QuestionResults {
@@ -91,9 +113,48 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 		}
 	}
 
+	if subset {
+		t.Logf("subset run (%d moments): verdict not asserted; compare the per-bar rows above", len(rep.MomentResults))
+		return
+	}
+
 	// INCONCLUSIVE (every bar passed but no owner correction is evidenced) is
 	// not a pass: the gate must not read green on evidence it does not have.
 	if !rep.AllPass() {
 		t.Fatalf("Validation Gate 2 verdict %s:\n%s", rep.Verdict(), rep.FormatReport())
 	}
+}
+
+// printSplitReports scores a full run once per split (see replay.SplitMomentIDs),
+// so tune and holdout numbers come from the same single pass.
+func printSplitReports(rep *replay.EvalReport) {
+	ids := make([]string, len(rep.MomentResults))
+	for i := range rep.MomentResults {
+		ids[i] = rep.MomentResults[i].ID
+	}
+	tune, holdout := replay.SplitMomentIDs(ids)
+	for _, half := range []struct {
+		name string
+		ids  []string
+	}{{string(replay.SplitTune), tune}, {string(replay.SplitHoldout), holdout}} {
+		var moments []replay.MomentResult
+		for i := range rep.MomentResults {
+			if slices.Contains(half.ids, rep.MomentResults[i].ID) {
+				moments = append(moments, rep.MomentResults[i])
+			}
+		}
+		sub := replay.ComputeReport(moments, nil)
+		fmt.Printf("\n--- %s split (%d moments; Concierge questions are scored on the full set only) ---\n%s", half.name, len(moments), sub.FormatReport())
+	}
+}
+
+// splitIDs splits a comma-separated id list, trimming space and dropping empties.
+func splitIDs(raw string) []string {
+	var ids []string
+	for _, id := range strings.Split(raw, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }

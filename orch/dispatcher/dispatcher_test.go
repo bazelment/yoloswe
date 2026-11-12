@@ -337,6 +337,7 @@ func TestDispatcher_FullToolKitReplay(t *testing.T) {
 
 	var plannerReason, plannerRef string
 	disp := dispatcher.New(dispatcher.Config{
+		AllowMultiAction: true, // scripts every tool of the kit into one batch
 		OnPlannerRequest: func(_ context.Context, _, reason, planRef string) error {
 			plannerReason = reason
 			plannerRef = planRef
@@ -734,8 +735,15 @@ func TestDispatcher_InvariantRejections(t *testing.T) {
 				wantErrSub: "owner.ask requires options, default, and deadline",
 			},
 			{
-				name:       "OwnerAskDefaultNotInOptions",
-				action:     mustParse(dispatcher.ToolOwnerAsk, `{"question":"Which DB?","options":["pg","sqlite"],"default":"mysql","deadline":"30m"}`),
+				name: "OwnerAskDefaultNotInOptions",
+				// Built by hand: ParseAction itself turns a stated default into an
+				// option, so only a non-parsed action can reach the vetter mismatched.
+				action: dispatcher.ProposedAction{
+					Tool: dispatcher.ToolOwnerAsk,
+					OwnerAsk: &dispatcher.OwnerAskParams{
+						Question: "Which DB?", Options: []string{"pg", "sqlite"}, Default: "mysql", Deadline: "30m",
+					},
+				},
 				wantErrSub: "must be one of options",
 			},
 			{
@@ -1270,13 +1278,13 @@ func TestDispatcher_RestartOnPersistedStoreDoesNotCollideIDs(t *testing.T) {
 
 	ev := store.Event{ID: "ev-1", RunID: "run-restart", Kind: store.EventOwnerMessage, Summary: "tick"}
 
-	disp1 := dispatcher.New(dispatcher.Config{}, st, drv, clk, makeClient())
+	disp1 := dispatcher.New(dispatcher.Config{AllowMultiAction: true}, st, drv, clk, makeClient())
 	res1, err := disp1.Dispatch(ctx, "run-restart", []store.Event{ev})
 	if err != nil {
 		t.Fatalf("disp1.Dispatch: %v", err)
 	}
 
-	disp2 := dispatcher.New(dispatcher.Config{}, st, drv, clk, makeClient())
+	disp2 := dispatcher.New(dispatcher.Config{AllowMultiAction: true}, st, drv, clk, makeClient())
 	res2, err := disp2.Dispatch(ctx, "run-restart", []store.Event{ev})
 	if err != nil {
 		t.Fatalf("disp2.Dispatch after restart: %v", err)

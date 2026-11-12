@@ -7,6 +7,7 @@ go_library(
         "dataset.go",
         "eval.go",
         "source.go",
+        "split.go",
     ],
     embedsrcs = [
         "testdata/gate2_dataset.json",
@@ -29,6 +30,7 @@ go_test(
     name = "replay_test",
     srcs = [
         "adversarial_test.go",
+        "judgment_patterns_test.go",
         "replay_test.go",
         "source_test.go",
     ],

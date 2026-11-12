@@ -22,7 +22,7 @@ import (
 
 const (
 	ActorDispatcher       = "dispatcher"
-	DefaultModel          = "claude-sonnet-4-5-20250929"
+	DefaultModel          = "claude-sonnet-5-5"
 	DefaultHardBatchModel = "claude-opus-4-6"
 	DefaultMaxTurns       = model.DefaultMaxTurns
 	DefaultMaxTokens      = model.DefaultMaxTokens
@@ -52,16 +52,23 @@ func (f RecipeCompilerFunc) CompileOverride(ctx context.Context, base recipe.Rec
 type Config struct {
 	RecipeCompiler   RecipeCompiler
 	OnPlannerRequest func(ctx context.Context, runID, reason, planRef string) error
-	Model            string
-	HardBatchModel   string
-	SystemPrompt     string
-	ThreadID         string
-	Invariants       []Invariant
-	Snapshot         SnapshotConfig
-	MaxTurns         int
-	MaxTokens        int
-	MaxBriefBytes    int
-	MaxReadBytes     int
+	// Temperature is the sampling temperature for judgment turns. Nil omits it
+	// from the request: newer models reject the parameter outright.
+	Temperature    *float64
+	Model          string
+	HardBatchModel string
+	SystemPrompt   string
+	ThreadID       string
+	Invariants     []Invariant
+	Snapshot       SnapshotConfig
+	MaxTurns       int
+	MaxTokens      int
+	MaxBriefBytes  int
+	MaxReadBytes   int
+	// AllowMultiAction lifts the one-primary-action-per-batch contract
+	// (checkOnePrimaryAction). Production leaves it false; tests that script
+	// every tool into a single batch set it.
+	AllowMultiAction bool
 }
 
 func (c Config) withDefaults() Config {
@@ -321,16 +328,17 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	modelName := d.selectModel(events)
 
 	req := model.Request{
-		Model:     modelName,
-		System:    d.cfg.SystemPrompt,
-		Messages:  []model.Message{model.NewUserMessage(snap.Text)},
-		Tools:     reg.Definitions(),
-		MaxTokens: d.cfg.MaxTokens,
+		Model:       modelName,
+		System:      d.cfg.SystemPrompt,
+		Messages:    []model.Message{model.NewUserMessage(snap.Text)},
+		Tools:       toolsForBatch(reg.Definitions(), events),
+		MaxTokens:   d.cfg.MaxTokens,
+		Temperature: d.cfg.Temperature,
 	}
 
 	loopRes, loopErr := model.RunToolLoop(
 		ctx,
-		d.client,
+		retryOnTruncationClient{inner: d.client},
 		req,
 		reg,
 		model.WithMaxTurns(d.cfg.MaxTurns),
@@ -454,6 +462,21 @@ func (d *Dispatcher) selectModel(events []store.Event) string {
 	return d.cfg.Model
 }
 
+// toolsForBatch drops the read.* tools from a batch that names no lane: they
+// only expand a lane's truncated excerpt, and a model offered them anyway
+// invents a lane ID.
+func toolsForBatch(defs []model.ToolDefinition, events []store.Event) []model.ToolDefinition {
+	if batchNamesLane(events) {
+		return defs
+	}
+	return slices.DeleteFunc(slices.Clone(defs), func(def model.ToolDefinition) bool { return isReadOnlyTool(def.Name) })
+}
+
+// batchNamesLane reports whether any event of the batch is about a lane.
+func batchNamesLane(events []store.Event) bool {
+	return slices.ContainsFunc(events, func(ev store.Event) bool { return strings.TrimSpace(ev.LaneID) != "" })
+}
+
 func isHardBatch(events []store.Event) bool {
 	if len(events) >= 4 {
 		return true
@@ -468,16 +491,16 @@ func isHardBatch(events []store.Event) bool {
 
 var dispatcherToolDefs = []model.ToolDefinition{
 	{Name: ToolBacklogAdd, Description: "Add a new prioritized item to the run backlog", InputSchema: model.SchemaFor[BacklogAddParams]()},
-	{Name: ToolBacklogUpdate, Description: "Update an existing non-terminal backlog item", InputSchema: model.SchemaFor[BacklogUpdateParams]()},
+	{Name: ToolBacklogUpdate, Description: "Edit an existing open or blocked backlog item (title, acceptance, priority, dependencies, open/blocked). Never sets in_progress: lane.spawn does that", InputSchema: model.SchemaFor[BacklogUpdateParams]()},
 	{Name: ToolBacklogReorder, Description: "Reorder backlog items within their priority tier", InputSchema: model.SchemaFor[BacklogReorderParams]()},
 	{Name: ToolBacklogClose, Description: "Close a backlog item as done or dropped", InputSchema: model.SchemaFor[BacklogCloseParams]()},
-	{Name: ToolLaneSpawn, Description: "Spawn a worker lane for an open backlog item with a brief and optional recipe override", InputSchema: model.SchemaFor[LaneSpawnParams]()},
+	{Name: ToolLaneSpawn, Description: "Spawn a worker lane for an open, ready backlog item. This also marks the item in_progress, so it is the only call needed to start work on it", InputSchema: model.SchemaFor[LaneSpawnParams]()},
 	{Name: ToolLaneSteer, Description: "Send a steering note to an active or blocked lane", InputSchema: model.SchemaFor[LaneSteerParams]()},
 	{Name: ToolLaneRetry, Description: "Retry a stalled, blocked, or failed lane on a fresh round", InputSchema: model.SchemaFor[LaneRetryParams]()},
 	{Name: ToolLaneStop, Description: "Stop a non-terminal lane and mark it failed", InputSchema: model.SchemaFor[LaneStopParams]()},
-	{Name: ToolOwnerAsk, Description: "Pose a decision question to the owner with options, a mandatory default, and a deadline", InputSchema: model.SchemaFor[OwnerAskParams]()},
-	{Name: ToolDirectiveNote, Description: "Record an operational fact or note directive with optional expiry", InputSchema: model.SchemaFor[DirectiveNoteParams]()},
-	{Name: ToolPlannerRequest, Description: "Request a Planner turn to replan or import a plan", InputSchema: model.SchemaFor[PlannerRequestParams]()},
+	{Name: ToolOwnerAsk, Description: "Pose a decision to the owner that only the owner can make (product scope, spend, credentials, one-way/destructive policy) and that the batch presents as still open, with options, a mandatory default, and a deadline. Never use it for engineering, ordering or retry choices, or for work the owner already ordered", InputSchema: model.SchemaFor[OwnerAskParams]()},
+	{Name: ToolDirectiveNote, Description: "Persist a standing rule, preference or decision that later batches need and that no backlog item, lane or other call in this batch carries. At most one per batch, holding every point in its fact. Not a log of your own actions or questions", InputSchema: model.SchemaFor[DirectiveNoteParams]()},
+	{Name: ToolPlannerRequest, Description: "Request a Planner turn to replan or import a plan. The reason is delivered to the Planner and also stored as an active directive, so it carries any standing rule given with the request", InputSchema: model.SchemaFor[PlannerRequestParams]()},
 	{Name: ToolReadLaneReport, Description: "Read a bounded phase report for a lane", InputSchema: model.SchemaFor[ReadLaneReportParams]()},
 	{Name: ToolReadPR, Description: "Read bounded PR metadata and approval status for a lane", InputSchema: model.SchemaFor[ReadPRParams]()},
 	{Name: ToolReadCI, Description: "Read bounded CI check status and recent CI events for a lane", InputSchema: model.SchemaFor[ReadCIParams]()},
@@ -553,6 +576,15 @@ func (d *Dispatcher) handleRawToolCall(
 		return "", fmt.Errorf("invariant violation: %s", rejMsg)
 	}
 
+	if state != nil && !d.cfg.AllowMultiAction {
+		if oneErr := checkOnePrimaryAction(state.accepted, act); oneErr != nil {
+			rejMsg := fmt.Sprintf("%s [%s]: one primary action per batch — %v. The batch is answered: do not retry or substitute another mutating call, end your turn", act.Tool, act.Target(), oneErr)
+			state.rejected = append(state.rejected, rejMsg)
+			_ = d.recordDecision(ctx, runID, state, act, false, "rejected: "+rejMsg, d.clock.Now().Sub(start))
+			return "", fmt.Errorf("invariant violation: %s", rejMsg)
+		}
+	}
+
 	result, execErr := d.applyVettedAction(ctx, runID, view, act)
 	if execErr != nil {
 		if state != nil && !isReadOnlyTool(act.Tool) {
@@ -580,6 +612,31 @@ func (d *Dispatcher) handleRawToolCall(
 		return "", err
 	}
 	return result, nil
+}
+
+// isFanOutTool reports whether a tool may repeat or combine within a batch:
+// the work that is naturally plural and independent per target.
+func isFanOutTool(tool string) bool {
+	return tool == ToolBacklogAdd || tool == ToolLaneSpawn || tool == ToolLaneRetry
+}
+
+// checkOnePrimaryAction enforces one primary action per batch: the first
+// mutating call wins, and any further one is rejected (visibly, so the model
+// and the decision log see it) unless both are fan-out tools. Read tools are
+// never limited.
+func checkOnePrimaryAction(accepted []ProposedAction, act ProposedAction) error {
+	if isReadOnlyTool(act.Tool) {
+		return nil
+	}
+	for i := range accepted {
+		prev := accepted[i]
+		if isReadOnlyTool(prev.Tool) || (isFanOutTool(prev.Tool) && isFanOutTool(act.Tool)) {
+			continue
+		}
+		return fmt.Errorf("this batch already applied %s [%s]; answer a batch with a single primary action (only %s, %s and %s may combine)",
+			prev.Tool, prev.Target(), ToolBacklogAdd, ToolLaneSpawn, ToolLaneRetry)
+	}
+	return nil
 }
 
 func isReadOnlyTool(tool string) bool {

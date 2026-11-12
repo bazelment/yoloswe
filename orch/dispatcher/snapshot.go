@@ -25,6 +25,10 @@ const (
 	DefaultMaxItemExcerptBytes  = 512
 	DefaultMaxEventExcerptBytes = 1024
 	DefaultMaxSummaryBytes      = 512
+	// DefaultMaxOwnerSummaryBytes bounds owner-originated event summaries: the
+	// order or decision card often follows a long preamble that the default
+	// cut would drop it with.
+	DefaultMaxOwnerSummaryBytes = 4096
 	bytesPerTokenEstimate       = 4
 )
 
@@ -37,6 +41,8 @@ type SnapshotConfig struct {
 	MaxDirectiveBytes    int
 	MaxItemExcerptBytes  int
 	MaxEventExcerptBytes int
+	// MaxOwnerSummaryBytes bounds owner-originated event summaries.
+	MaxOwnerSummaryBytes int
 }
 
 func (c SnapshotConfig) withDefaults() SnapshotConfig {
@@ -60,6 +66,9 @@ func (c SnapshotConfig) withDefaults() SnapshotConfig {
 	}
 	if c.MaxEventExcerptBytes <= 0 {
 		c.MaxEventExcerptBytes = DefaultMaxEventExcerptBytes
+	}
+	if c.MaxOwnerSummaryBytes <= 0 {
+		c.MaxOwnerSummaryBytes = DefaultMaxOwnerSummaryBytes
 	}
 	return c
 }
@@ -221,6 +230,10 @@ func BuildSnapshot(
 		}
 	}
 	orderedBacklog := slices.Concat(actionableItems, terminalItems)
+	statusByID := make(map[string]store.BacklogStatus, len(allBacklog))
+	for i := range allBacklog {
+		statusByID[allBacklog[i].ID] = allBacklog[i].Status
+	}
 	topItems := orderedBacklog
 	if len(topItems) > cfg.BacklogTopN {
 		topItems = topItems[:cfg.BacklogTopN]
@@ -242,7 +255,12 @@ func BuildSnapshot(
 		for i := range topItems {
 			it := topItems[i]
 			var row strings.Builder
-			fmt.Fprintf(&row, "- **%s** [%s #%d %s]", it.ID, it.Priority, it.Order, it.Status)
+			// "ready": the only state in which lane.spawn accepts an open item.
+			readiness := ""
+			if it.Status == store.BacklogOpen && depsDone(it, statusByID) {
+				readiness = " ready"
+			}
+			fmt.Fprintf(&row, "- **%s** [%s #%d %s%s]", it.ID, it.Priority, it.Order, it.Status, readiness)
 			if it.LaneID != "" {
 				fmt.Fprintf(&row, " lane=%s", it.LaneID)
 			}
@@ -345,16 +363,25 @@ func BuildSnapshot(
 				urgentTag = " [URGENT]"
 			}
 			var row strings.Builder
-			fmt.Fprintf(&row, "- **%s** (seq=%d kind=%s lane=%s source=%s)%s",
+			// Omitted, not "lane=-": a placeholder gets passed to read.* tools as a lane ID.
+			laneLabel := ""
+			if ev.LaneID != "" {
+				laneLabel = " lane=" + ev.LaneID
+			}
+			fmt.Fprintf(&row, "- **%s** (seq=%d kind=%s%s source=%s)%s",
 				cmp.Or(ev.ID, fmt.Sprintf("seq-%d", ev.Seq)),
 				ev.Seq,
 				ev.Kind,
-				cmp.Or(ev.LaneID, "-"),
+				laneLabel,
 				cmp.Or(ev.Source, "-"),
 				urgentTag,
 			)
 			if ev.Summary != "" {
-				fmt.Fprintf(&row, ": %s", singleLine(truncateText(ev.Summary, DefaultMaxSummaryBytes, &truncated)))
+				summaryBudget := DefaultMaxSummaryBytes
+				if isOwnerOriginEvent(ev) {
+					summaryBudget = cfg.MaxOwnerSummaryBytes
+				}
+				fmt.Fprintf(&row, ": %s", singleLine(truncateText(ev.Summary, summaryBudget, &truncated)))
 			}
 			row.WriteString("\n")
 			if len(ev.Payload) > 0 {
@@ -372,6 +399,10 @@ func BuildSnapshot(
 		}
 	}
 
+	if len(events) > 0 && !batchNamesLane(events) {
+		b.WriteString("\nRun-level batch: no lane is named, so read.* tools are not offered. Text cut with `[truncated]` is final; decide with what is shown.\n")
+	}
+
 	text := truncateWithSuffix(b.String(), maxTotalBytes, "\n...[snapshot truncated to fit <30k token budget]\n", &truncated)
 
 	return Snapshot{
@@ -385,6 +416,26 @@ func BuildSnapshot(
 		EventCount:      len(events),
 		Truncated:       truncated,
 	}, nil
+}
+
+func depsDone(it store.BacklogItem, statusByID map[string]store.BacklogStatus) bool {
+	for _, dep := range it.DependsOn {
+		if statusByID[dep] != store.BacklogDone {
+			return false
+		}
+	}
+	return true
+}
+
+// isOwnerOriginEvent reports whether ev carries the owner's own words or a
+// decision addressed to the owner (as opposed to machine-generated lane/CI noise).
+func isOwnerOriginEvent(ev store.Event) bool {
+	switch ev.Kind {
+	case store.EventOwnerMessage, store.EventMail, store.EventOwnerAskExpired:
+		return true
+	default:
+		return false
+	}
 }
 
 func formatLaneAge(now time.Time, ln lane.Lane) string {
