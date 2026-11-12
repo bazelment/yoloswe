@@ -1,0 +1,58 @@
+{
+  "exchanges": [
+    {
+      "request": {
+        "model": "claude-haiku-4-5-20251001",
+        "messages": []
+      },
+      "response": {
+        "id": "msg-chat-1",
+        "model": "claude-haiku-4-5-20251001",
+        "stop_reason": "tool_use",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call-status-1",
+              "name": "status",
+              "input": {
+                "include_metrics": true
+              }
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 600,
+          "output_tokens": 35,
+          "cost_usd": 0.00062
+        }
+      }
+    },
+    {
+      "request": {
+        "model": "claude-haiku-4-5-20251001",
+        "messages": []
+      },
+      "response": {
+        "id": "msg-chat-2",
+        "model": "claude-haiku-4-5-20251001",
+        "stop_reason": "end_turn",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Run run-3lane is complete: 3/3 backlog items (item-1, item-2, item-3) and 3/3 lanes (lane-1, lane-2, lane-3) are done."
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 1100,
+          "output_tokens": 42,
+          "cost_usd": 0.001048
+        }
+      }
+    }
+  ]
+}

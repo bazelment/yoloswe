@@ -1,0 +1,61 @@
+{
+  "exchanges": [
+    {
+      "request": {
+        "model": "claude-sonnet-4-5-20250929",
+        "messages": []
+      },
+      "response": {
+        "id": "msg-single-1",
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call-spawn-1",
+              "name": "lane.spawn",
+              "input": {
+                "item_id": "item-1",
+                "lane_id": "lane-1",
+                "brief": "Implement item-1 and pass all tests.",
+                "reason": "spawn lane-1 for ready P0 item-1"
+              }
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 1200,
+          "output_tokens": 80,
+          "cost_usd": 0.0048
+        }
+      }
+    },
+    {
+      "request": {
+        "model": "claude-sonnet-4-5-20250929",
+        "messages": []
+      },
+      "response": {
+        "id": "msg-single-2",
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "end_turn",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Spawned lane-1 for item-1."
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 1300,
+          "output_tokens": 30,
+          "cost_usd": 0.00435
+        }
+      }
+    }
+  ]
+}
