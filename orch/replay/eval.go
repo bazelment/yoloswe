@@ -484,7 +484,7 @@ func EvaluateMoment(
 		}
 	}
 
-	auditViolations := AuditAcceptedActions(m.State, res.Accepted)
+	auditViolations := auditAcceptedActionsAt(m.Timestamp, m.State, m.Events, res.Accepted)
 	vetterRejections := len(res.Rejected)
 	auditCount := len(auditViolations)
 	invViolations := vetterRejections + auditCount
@@ -798,16 +798,34 @@ func matchesExpectedTargets(expected OwnerFollowUp, tool string, targets []strin
 // AuditAcceptedActions checks accepted Dispatcher actions against the seeded
 // StateView invariants (via dispatcher.VetAction) and secret-leak rules.
 func AuditAcceptedActions(state MomentState, accepted []dispatcher.ProposedAction) []string {
+	return auditAcceptedActionsAt(defaultEvalTimestamp, state, nil, accepted)
+}
+
+func auditAcceptedActionsAt(
+	ts time.Time,
+	state MomentState,
+	events []store.Event,
+	accepted []dispatcher.ProposedAction,
+) []string {
 	if len(accepted) == 0 {
 		return nil
 	}
 	state.Run.ID = cmp.Or(state.Run.ID, "audit-run")
 	ctx := context.Background()
-	st, _, clk, err := newSeededEnv(ctx, defaultEvalTimestamp, state)
+	st, _, clk, err := newSeededEnv(ctx, ts, state)
 	if err != nil {
 		return []string{fmt.Sprintf("seed state view: %v", err)}
 	}
 	defer func() { _ = st.Close() }()
+
+	for i := range events {
+		ev := events[i]
+		ev.RunID = cmp.Or(ev.RunID, state.Run.ID)
+		ev.Class = cmp.Or(ev.Class, store.EventClassJudgment)
+		if _, err := st.Events().Append(ctx, ev); err != nil {
+			return []string{fmt.Sprintf("append event: %v", err)}
+		}
+	}
 
 	view, err := dispatcher.LoadStateView(ctx, st, clk, state.Run.ID, 0)
 	if err != nil {
@@ -831,9 +849,35 @@ func AuditAcceptedActions(state MomentState, accepted []dispatcher.ProposedActio
 					ID:         act.BacklogAdd.ID,
 					RunID:      state.Run.ID,
 					Title:      act.BacklogAdd.Title,
-					Priority:   cmp.Or(store.Priority(act.BacklogAdd.Priority), store.PriorityP1),
+					Priority:   cmp.Or(store.Priority(act.BacklogAdd.Priority), store.PriorityP2),
 					Status:     store.BacklogOpen,
 					RecipeName: act.BacklogAdd.RecipeName,
+					DependsOn:  slices.Clone(act.BacklogAdd.DependsOn),
+				}
+			}
+		case dispatcher.ToolBacklogUpdate:
+			if act.BacklogUpdate != nil && view.Backlog != nil {
+				if existing, ok := view.Backlog[act.BacklogUpdate.ID]; ok {
+					if act.BacklogUpdate.Title != "" {
+						existing.Title = act.BacklogUpdate.Title
+					}
+					if act.BacklogUpdate.Priority != "" {
+						existing.Priority = store.Priority(act.BacklogUpdate.Priority)
+					}
+					if act.BacklogUpdate.Status != "" {
+						existing.Status = store.BacklogStatus(act.BacklogUpdate.Status)
+					}
+					if act.BacklogUpdate.DependsOn != nil {
+						existing.DependsOn = slices.Clone(act.BacklogUpdate.DependsOn)
+					}
+					view.Backlog[act.BacklogUpdate.ID] = existing
+				}
+			}
+		case dispatcher.ToolBacklogClose:
+			if act.BacklogClose != nil && view.Backlog != nil {
+				if existing, ok := view.Backlog[act.BacklogClose.ID]; ok {
+					existing.Status = cmp.Or(store.BacklogStatus(act.BacklogClose.Status), store.BacklogDone)
+					view.Backlog[act.BacklogClose.ID] = existing
 				}
 			}
 		case dispatcher.ToolLaneSpawn:
@@ -849,14 +893,50 @@ func AuditAcceptedActions(state MomentState, accepted []dispatcher.ProposedActio
 						Status: lane.StatusRunning,
 					}
 				}
+				if act.ItemID != "" && view.Backlog != nil {
+					if existing, ok := view.Backlog[act.ItemID]; ok {
+						existing.Status = store.BacklogInProgress
+						existing.LaneID = act.LaneID
+						view.Backlog[act.ItemID] = existing
+					}
+				}
 			}
 		case dispatcher.ToolLaneSteer:
-			if act.LaneSteer != nil && reToken.MatchString(act.LaneSteer.Note) {
-				violations = append(violations, "secret token leaked in lane.steer note")
+			if act.LaneSteer != nil {
+				if reToken.MatchString(act.LaneSteer.Note) {
+					violations = append(violations, "secret token leaked in lane.steer note")
+				}
+				if act.LaneID != "" && view.Lanes != nil {
+					if existing, ok := view.Lanes[act.LaneID]; ok && existing.Status == lane.StatusBlocked {
+						existing.Status = lane.StatusRunning
+						view.Lanes[act.LaneID] = existing
+					}
+				}
 			}
 		case dispatcher.ToolLaneRetry:
-			if act.LaneRetry != nil && reToken.MatchString(act.LaneRetry.Note) {
-				violations = append(violations, "secret token leaked in lane.retry note")
+			if act.LaneRetry != nil {
+				if reToken.MatchString(act.LaneRetry.Note) {
+					violations = append(violations, "secret token leaked in lane.retry note")
+				}
+				if act.LaneID != "" && view.Lanes != nil {
+					if existing, ok := view.Lanes[act.LaneID]; ok {
+						existing.Status = lane.StatusRunning
+						if act.LaneRetry.Phase != "" {
+							existing.Phase = act.LaneRetry.Phase
+						}
+						if act.LaneRetry.Round > 0 {
+							existing.Round = act.LaneRetry.Round
+						}
+						view.Lanes[act.LaneID] = existing
+					}
+				}
+			}
+		case dispatcher.ToolLaneStop:
+			if act.LaneStop != nil && act.LaneID != "" && view.Lanes != nil {
+				if existing, ok := view.Lanes[act.LaneID]; ok {
+					existing.Status = lane.StatusFailed
+					view.Lanes[act.LaneID] = existing
+				}
 			}
 		}
 	}

@@ -73,19 +73,19 @@ func NewStoreConcierge(client model.ModelClient) *StoreConcierge {
 type statusToolParams struct{}
 
 type laneShowParams struct {
-	LaneID string `json:"lane_id"`
+	LaneID string `json:"lane_id" jsonschema:"description=Lane ID to inspect"`
 }
 
 type decisionsSinceParams struct {
-	Since  string `json:"since,omitempty"`
-	LaneID string `json:"lane_id,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
+	Since  string `json:"since,omitempty" jsonschema:"description=Minimum decision sequence integer or RFC3339 timestamp"`
+	LaneID string `json:"lane_id,omitempty" jsonschema:"description=Optional lane ID filter"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"description=Maximum number of recent decisions to return (default 20)"`
 }
 
 type directiveSubmitParams struct {
-	Kind  string `json:"kind"`
-	Text  string `json:"text"`
-	Scope string `json:"scope,omitempty"`
+	Kind  string `json:"kind" jsonschema:"enum=standing,enum=instruction,enum=note,description=Directive kind: standing, instruction, or note"`
+	Text  string `json:"text" jsonschema:"description=Directive text"`
+	Scope string `json:"scope,omitempty" jsonschema:"description=Optional lane or scope identifier"`
 }
 
 const (
@@ -323,17 +323,24 @@ func (c *StoreConcierge) executeTool(
 		}
 		out := fmt.Sprintf("lane=%s pr=#%d pr_head=%s checks=%s",
 			ln.ID, ln.PR, cmp.Or(ln.PRHead, "-"), cmp.Or(ln.Checks, "-"))
-		evs, err := st.Events().List(ctx, store.EventFilter{RunID: runID, LaneID: ln.ID, Limit: 10})
+		evs, err := st.Events().List(ctx, store.EventFilter{RunID: runID, LaneID: ln.ID})
 		if err != nil {
 			return "", err
 		}
+		var ciEvs []store.Event
 		for i := range evs {
-			ev := &evs[i]
+			ev := evs[i]
 			lowerKind := strings.ToLower(string(ev.Kind))
-			lowerSum := strings.ToLower(ev.Summary)
-			if strings.Contains(lowerKind, "ci") || strings.Contains(lowerSum, "ci") || strings.Contains(lowerSum, "check") {
-				out += fmt.Sprintf("\nci_event seq=%d kind=%s summary=%q", ev.Seq, ev.Kind, ev.Summary)
+			if ev.Kind == store.EventCI || strings.HasPrefix(lowerKind, "ci") {
+				ciEvs = append(ciEvs, ev)
 			}
+		}
+		if len(ciEvs) > 10 {
+			ciEvs = ciEvs[len(ciEvs)-10:]
+		}
+		for i := range ciEvs {
+			ev := &ciEvs[i]
+			out += fmt.Sprintf("\nci_event seq=%d kind=%s summary=%q", ev.Seq, ev.Kind, ev.Summary)
 		}
 		return out, nil
 	case toolConciergeDecisions:
@@ -346,7 +353,6 @@ func (c *StoreConcierge) executeTool(
 		filter := store.DecisionFilter{
 			RunID:  runID,
 			LaneID: strings.TrimSpace(p.LaneID),
-			Limit:  cmp.Or(p.Limit, 20),
 		}
 		if s := strings.TrimSpace(p.Since); s != "" {
 			if seq, err := strconv.ParseInt(s, 10, 64); err == nil {
@@ -360,6 +366,10 @@ func (c *StoreConcierge) executeTool(
 		decs, err := st.Decisions().List(ctx, filter)
 		if err != nil {
 			return "", err
+		}
+		limit := cmp.Or(p.Limit, 20)
+		if limit > 0 && len(decs) > limit {
+			decs = decs[len(decs)-limit:]
 		}
 		var lines []string
 		for i := range decs {

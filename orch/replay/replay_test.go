@@ -628,8 +628,14 @@ func TestAuditAcceptedActionsViolations(t *testing.T) {
 			},
 		},
 	})
-	if len(violations) < 3 {
-		t.Fatalf("len(violations) = %d (%v), want >= 3 (concurrency cap, secret token leak, stale approval integrate)", len(violations), violations)
+	if len(violations) != 3 {
+		t.Fatalf("len(violations) = %d (%v), want 3 (concurrency cap, secret token leak, stale approval integrate)", len(violations), violations)
+	}
+	joinedViolations := strings.Join(violations, " | ")
+	for _, wantSub := range []string{"concurrency limit", "secret token leaked", "approval"} {
+		if !strings.Contains(strings.ToLower(joinedViolations), wantSub) {
+			t.Errorf("violations %v missing expected substring %q", violations, wantSub)
+		}
 	}
 }
 
