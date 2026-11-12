@@ -1,0 +1,75 @@
+{
+  "exchanges": [
+    {
+      "request": {
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 4096,
+        "messages": [
+          {
+            "role": "user",
+            "content": "stalled lane snapshot"
+          }
+        ]
+      },
+      "response": {
+        "id": "msg_stall_1",
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Lane alpha stalled in swe round 1; retrying in swe on round 2."
+            },
+            {
+              "type": "tool_use",
+              "id": "toolu_retry_1",
+              "name": "lane.retry",
+              "input": {
+                "lane_id": "lane-alpha",
+                "phase": "swe",
+                "round": 2,
+                "note": "Resume from existing branch and complete unit tests.",
+                "reason": "swe round 1 stalled after 45m timeout"
+              }
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 1850,
+          "output_tokens": 95,
+          "cost_usd": 0.006975
+        },
+        "turns": 1
+      }
+    },
+    {
+      "request": {
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 4096,
+        "messages": []
+      },
+      "response": {
+        "id": "msg_stall_2",
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "end_turn",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Retried lane-alpha in swe on round 2."
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 1980,
+          "output_tokens": 25,
+          "cost_usd": 0.006315
+        },
+        "turns": 1
+      }
+    }
+  ]
+}

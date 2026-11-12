@@ -1,0 +1,1358 @@
+package dispatcher
+
+import (
+	"bytes"
+	"cmp"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/bazelment/yoloswe/orch/clock"
+	"github.com/bazelment/yoloswe/orch/lane"
+	"github.com/bazelment/yoloswe/orch/recipe"
+	"github.com/bazelment/yoloswe/orch/store"
+)
+
+// Canonical tool names exposed to the Dispatcher model.
+const (
+	ToolBacklogAdd     = "backlog.add"
+	ToolBacklogUpdate  = "backlog.update"
+	ToolBacklogReorder = "backlog.reorder"
+	ToolBacklogClose   = "backlog.close"
+	ToolLaneSpawn      = "lane.spawn"
+	ToolLaneSteer      = "lane.steer"
+	ToolLaneRetry      = "lane.retry"
+	ToolLaneStop       = "lane.stop"
+	ToolOwnerAsk       = "owner.ask"
+	ToolDirectiveNote  = "directive.note"
+	ToolPlannerRequest = "planner.request"
+	ToolReadLaneReport = "read.lane_report"
+	ToolReadPR         = "read.pr"
+	ToolReadCI         = "read.ci"
+)
+
+// DefaultMaxBriefBytes is the fallback brief/note size cap when a recipe does
+// not specify Limits.MaxBriefBytes.
+const DefaultMaxBriefBytes = 16 * 1024
+
+// BacklogAddParams holds parameters for the backlog.add tool.
+type BacklogAddParams struct {
+	ID          string   `json:"id" jsonschema:"required,description=Unique backlog item ID"`
+	Title       string   `json:"title" jsonschema:"required,description=Short title of the work item"`
+	Description string   `json:"description,omitempty" jsonschema:"description=Detailed description of the work"`
+	Acceptance  string   `json:"acceptance,omitempty" jsonschema:"description=Acceptance criteria"`
+	Priority    string   `json:"priority,omitempty" jsonschema:"enum=p0,enum=p1,enum=p2,enum=p3,description=Item priority (p0..p3)"`
+	RecipeName  string   `json:"recipe_name,omitempty" jsonschema:"description=Optional recipe name for this item"`
+	Reason      string   `json:"reason,omitempty" jsonschema:"description=Reason for adding this item"`
+	DependsOn   []string `json:"depends_on,omitempty" jsonschema:"description=IDs of backlog items this item depends on"`
+	Tags        []string `json:"tags,omitempty" jsonschema:"description=Optional classification tags"`
+	Order       int      `json:"order,omitempty" jsonschema:"description=Explicit sort order within priority"`
+}
+
+// BacklogUpdateParams holds parameters for the backlog.update tool.
+type BacklogUpdateParams struct {
+	ID          string   `json:"id" jsonschema:"required,description=Backlog item ID to update"`
+	Title       string   `json:"title,omitempty" jsonschema:"description=Updated title"`
+	Description string   `json:"description,omitempty" jsonschema:"description=Updated description"`
+	Acceptance  string   `json:"acceptance,omitempty" jsonschema:"description=Updated acceptance criteria"`
+	Priority    string   `json:"priority,omitempty" jsonschema:"enum=p0,enum=p1,enum=p2,enum=p3,description=Updated priority"`
+	Status      string   `json:"status,omitempty" jsonschema:"enum=open,enum=in_progress,enum=blocked,description=Updated non-terminal status"`
+	RecipeName  string   `json:"recipe_name,omitempty" jsonschema:"description=Updated recipe name"`
+	Reason      string   `json:"reason" jsonschema:"required,description=Reason for updating this item"`
+	DependsOn   []string `json:"depends_on,omitempty" jsonschema:"description=Replacement dependency IDs"`
+	Tags        []string `json:"tags,omitempty" jsonschema:"description=Replacement tags"`
+}
+
+// BacklogReorderParams holds parameters for the backlog.reorder tool.
+type BacklogReorderParams struct {
+	Reason  string   `json:"reason,omitempty" jsonschema:"description=Reason for reordering"`
+	ItemIDs []string `json:"item_ids" jsonschema:"required,description=Ordered backlog item IDs"`
+}
+
+// BacklogCloseParams holds parameters for the backlog.close tool.
+type BacklogCloseParams struct {
+	ID     string `json:"id" jsonschema:"required,description=Backlog item ID to close"`
+	Status string `json:"status" jsonschema:"required,enum=done,enum=dropped,description=Terminal status (done or dropped)"`
+	Reason string `json:"reason" jsonschema:"required,description=Reason for closing this item"`
+}
+
+// LaneSpawnParams holds parameters for the lane.spawn tool.
+type LaneSpawnParams struct {
+	ItemID         string `json:"item_id" jsonschema:"required,description=Backlog item ID to assign to the lane"`
+	LaneID         string `json:"lane_id,omitempty" jsonschema:"description=Optional lane ID (defaults to item_id)"`
+	Brief          string `json:"brief" jsonschema:"required,description=Task brief for the lane"`
+	RecipeName     string `json:"recipe_name,omitempty" jsonschema:"description=Optional recipe name"`
+	RecipeOverride string `json:"recipe_override,omitempty" jsonschema:"description=Optional natural-language recipe override or recipe name for this lane"`
+	Branch         string `json:"branch,omitempty" jsonschema:"description=Optional git branch name"`
+	BaseBranch     string `json:"base_branch,omitempty" jsonschema:"description=Optional base branch name"`
+	Reason         string `json:"reason,omitempty" jsonschema:"description=Reason for spawning this lane"`
+}
+
+func (p *LaneSpawnParams) UnmarshalJSON(data []byte) error {
+	type plain LaneSpawnParams
+	var raw struct {
+		Item   string `json:"item"`
+		Lane   string `json:"lane"`
+		Recipe string `json:"recipe"`
+		plain
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = LaneSpawnParams(raw.plain)
+	if p.ItemID == "" && raw.Item != "" {
+		p.ItemID = raw.Item
+	}
+	if p.LaneID == "" && raw.Lane != "" {
+		p.LaneID = raw.Lane
+	}
+	if p.RecipeOverride == "" && p.RecipeName == "" && raw.Recipe != "" {
+		p.RecipeOverride = raw.Recipe
+	}
+	return nil
+}
+
+// LaneSteerParams holds parameters for the lane.steer tool.
+type LaneSteerParams struct {
+	LaneID string `json:"lane_id" jsonschema:"required,description=Lane ID to steer"`
+	Note   string `json:"note" jsonschema:"required,description=Steering instruction to inject into the lane"`
+	Reason string `json:"reason,omitempty" jsonschema:"description=Reason for steering this lane"`
+}
+
+func (p *LaneSteerParams) UnmarshalJSON(data []byte) error {
+	type plain LaneSteerParams
+	var raw struct {
+		Lane    string `json:"lane"`
+		Message string `json:"message"`
+		plain
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = LaneSteerParams(raw.plain)
+	if p.LaneID == "" && raw.Lane != "" {
+		p.LaneID = raw.Lane
+	}
+	if p.Note == "" && raw.Message != "" {
+		p.Note = raw.Message
+	}
+	return nil
+}
+
+// LaneRetryParams holds parameters for the lane.retry tool.
+type LaneRetryParams struct {
+	LaneID string `json:"lane_id" jsonschema:"required,description=Lane ID to retry"`
+	Phase  string `json:"phase,omitempty" jsonschema:"description=Optional phase to retry (defaults to current lane phase or recipe first phase)"`
+	Note   string `json:"note,omitempty" jsonschema:"description=Optional additional brief or guidance for the retry"`
+	Reason string `json:"reason,omitempty" jsonschema:"description=Reason for retrying this lane"`
+	Round  int    `json:"round,omitempty" jsonschema:"description=Target round number (must be > max recorded round for the phase; defaults to next unused round)"`
+}
+
+func (p *LaneRetryParams) UnmarshalJSON(data []byte) error {
+	type plain LaneRetryParams
+	var raw struct {
+		Lane  string `json:"lane"`
+		Brief string `json:"brief"`
+		plain
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = LaneRetryParams(raw.plain)
+	if p.LaneID == "" && raw.Lane != "" {
+		p.LaneID = raw.Lane
+	}
+	if p.Note == "" && raw.Brief != "" {
+		p.Note = raw.Brief
+	}
+	return nil
+}
+
+// LaneStopParams holds parameters for the lane.stop tool.
+type LaneStopParams struct {
+	LaneID string `json:"lane_id" jsonschema:"required,description=Lane ID to stop"`
+	Reason string `json:"reason" jsonschema:"required,description=Reason for stopping the lane"`
+}
+
+func (p *LaneStopParams) UnmarshalJSON(data []byte) error {
+	type plain LaneStopParams
+	var raw struct {
+		Lane string `json:"lane"`
+		plain
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = LaneStopParams(raw.plain)
+	if p.LaneID == "" && raw.Lane != "" {
+		p.LaneID = raw.Lane
+	}
+	return nil
+}
+
+// OwnerAskParams holds parameters for the owner.ask tool.
+type OwnerAskParams struct {
+	ID        string   `json:"id,omitempty" jsonschema:"description=Optional unique ask ID"`
+	LaneID    string   `json:"lane_id,omitempty" jsonschema:"description=Optional lane ID blocked on this question"`
+	Question  string   `json:"question" jsonschema:"required,description=One-sentence decision question for the owner"`
+	Default   string   `json:"default" jsonschema:"required,description=Default option auto-applied at deadline (must be one of options)"`
+	Deadline  string   `json:"deadline" jsonschema:"required,description=Deadline as RFC3339 timestamp or positive duration (e.g. 30m, 2h)"`
+	SteerNote string   `json:"steer_note,omitempty" jsonschema:"description=Optional steering note to send when the default is applied"`
+	Reason    string   `json:"reason,omitempty" jsonschema:"description=Why owner input is required"`
+	Options   []string `json:"options" jsonschema:"required,description=Concrete options the owner can choose from"`
+}
+
+func (p *OwnerAskParams) UnmarshalJSON(data []byte) error {
+	type plain OwnerAskParams
+	var raw struct {
+		Lane string `json:"lane"`
+		plain
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = OwnerAskParams(raw.plain)
+	if p.LaneID == "" && raw.Lane != "" {
+		p.LaneID = raw.Lane
+	}
+	return nil
+}
+
+// DirectiveNoteParams holds parameters for the directive.note tool.
+type DirectiveNoteParams struct {
+	ID     string `json:"id,omitempty" jsonschema:"description=Optional directive ID"`
+	Fact   string `json:"fact" jsonschema:"required,description=Fact or operational note to persist in the store"`
+	Expiry string `json:"expiry,omitempty" jsonschema:"description=Optional expiry as RFC3339 timestamp or duration (e.g. 24h)"`
+	Scope  string `json:"scope,omitempty" jsonschema:"description=Optional lane ID or scope"`
+	Reason string `json:"reason,omitempty" jsonschema:"description=Reason for recording this note"`
+}
+
+func (p *DirectiveNoteParams) UnmarshalJSON(data []byte) error {
+	type plain DirectiveNoteParams
+	var raw struct {
+		Text      string `json:"text"`
+		ExpiresAt string `json:"expires_at"`
+		plain
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = DirectiveNoteParams(raw.plain)
+	if p.Fact == "" && raw.Text != "" {
+		p.Fact = raw.Text
+	}
+	if p.Expiry == "" && raw.ExpiresAt != "" {
+		p.Expiry = raw.ExpiresAt
+	}
+	return nil
+}
+
+// PlannerRequestParams holds parameters for the planner.request tool.
+type PlannerRequestParams struct {
+	Reason  string `json:"reason" jsonschema:"required,description=Why replanning or plan reconciliation is needed"`
+	PlanRef string `json:"plan_ref,omitempty" jsonschema:"description=Optional plan post/file reference"`
+	Urgent  bool   `json:"urgent,omitempty" jsonschema:"description=Whether replanning is urgent"`
+}
+
+// ReadLaneReportParams holds parameters for the read.lane_report tool.
+type ReadLaneReportParams struct {
+	LaneID     string `json:"lane_id" jsonschema:"required,description=Lane ID whose phase report to read"`
+	TerminalID string `json:"terminal_id,omitempty" jsonschema:"description=Optional terminal ID"`
+	Reason     string `json:"reason,omitempty" jsonschema:"description=Optional reason for reading the report"`
+	MaxBytes   int    `json:"max_bytes,omitempty" jsonschema:"description=Maximum bytes to return"`
+}
+
+func (p *ReadLaneReportParams) UnmarshalJSON(data []byte) error {
+	type plain ReadLaneReportParams
+	var raw struct {
+		Lane string `json:"lane"`
+		plain
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = ReadLaneReportParams(raw.plain)
+	if p.LaneID == "" && raw.Lane != "" {
+		p.LaneID = raw.Lane
+	}
+	return nil
+}
+
+// ReadPRParams holds parameters for the read.pr tool.
+type ReadPRParams struct {
+	LaneID   string `json:"lane_id" jsonschema:"required,description=Lane ID whose PR status to read"`
+	Reason   string `json:"reason,omitempty" jsonschema:"description=Optional reason for reading PR info"`
+	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"description=Maximum bytes to return"`
+}
+
+func (p *ReadPRParams) UnmarshalJSON(data []byte) error {
+	type plain ReadPRParams
+	var raw struct {
+		Lane string `json:"lane"`
+		plain
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = ReadPRParams(raw.plain)
+	if p.LaneID == "" && raw.Lane != "" {
+		p.LaneID = raw.Lane
+	}
+	return nil
+}
+
+// ReadCIParams holds parameters for the read.ci tool.
+type ReadCIParams struct {
+	LaneID   string `json:"lane_id" jsonschema:"required,description=Lane ID whose CI status to read"`
+	Reason   string `json:"reason,omitempty" jsonschema:"description=Optional reason for reading CI info"`
+	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"description=Maximum bytes to return"`
+}
+
+func (p *ReadCIParams) UnmarshalJSON(data []byte) error {
+	type plain ReadCIParams
+	var raw struct {
+		Lane string `json:"lane"`
+		plain
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = ReadCIParams(raw.plain)
+	if p.LaneID == "" && raw.Lane != "" {
+		p.LaneID = raw.Lane
+	}
+	return nil
+}
+
+// ProposedAction is one typed tool call proposed by the Dispatcher model.
+// Following the swarm-queen/decide pattern, a model's output is a proposal, not
+// authority: every ProposedAction must pass Vet before being applied.
+type ProposedAction struct {
+	BacklogAdd     *BacklogAddParams     `json:"-"`
+	BacklogUpdate  *BacklogUpdateParams  `json:"-"`
+	BacklogReorder *BacklogReorderParams `json:"-"`
+	BacklogClose   *BacklogCloseParams   `json:"-"`
+	LaneSpawn      *LaneSpawnParams      `json:"-"`
+	LaneSteer      *LaneSteerParams      `json:"-"`
+	LaneRetry      *LaneRetryParams      `json:"-"`
+	LaneStop       *LaneStopParams       `json:"-"`
+	OwnerAsk       *OwnerAskParams       `json:"-"`
+	DirectiveNote  *DirectiveNoteParams  `json:"-"`
+	PlannerRequest *PlannerRequestParams `json:"-"`
+	ReadLaneReport *ReadLaneReportParams `json:"-"`
+	ReadPR         *ReadPRParams         `json:"-"`
+	ReadCI         *ReadCIParams         `json:"-"`
+	ID             string                `json:"id,omitempty"`
+	Tool           string                `json:"tool"`
+	LaneID         string                `json:"lane_id,omitempty"`
+	ItemID         string                `json:"item_id,omitempty"`
+	Reason         string                `json:"reason,omitempty"`
+	Args           json.RawMessage       `json:"args,omitempty"`
+}
+
+// Target returns a human-readable identifier (lane ID, item ID, or "run") for
+// formatting rejection messages.
+func (a ProposedAction) Target() string {
+	return cmp.Or(a.LaneID, a.ItemID, "run")
+}
+
+// Proposal is a batch of ProposedActions returned by an Advisor turn.
+type Proposal struct {
+	Unresolved string           `json:"unresolved,omitempty"`
+	Actions    []ProposedAction `json:"actions"`
+}
+
+// Advisor proposes orchestration actions from a rendered Store snapshot.
+type Advisor interface {
+	Propose(ctx context.Context, snapshot string) (Proposal, error)
+}
+
+// NormalizeToolName maps underscore tool aliases (e.g. "lane_spawn") to the
+// canonical dotted tool names ("lane.spawn").
+func NormalizeToolName(name string) string {
+	trimmed := strings.TrimSpace(name)
+	switch trimmed {
+	case "backlog_add":
+		return ToolBacklogAdd
+	case "backlog_update":
+		return ToolBacklogUpdate
+	case "backlog_reorder":
+		return ToolBacklogReorder
+	case "backlog_close":
+		return ToolBacklogClose
+	case "lane_spawn":
+		return ToolLaneSpawn
+	case "lane_steer":
+		return ToolLaneSteer
+	case "lane_retry":
+		return ToolLaneRetry
+	case "lane_stop":
+		return ToolLaneStop
+	case "owner_ask":
+		return ToolOwnerAsk
+	case "directive_note":
+		return ToolDirectiveNote
+	case "planner_request":
+		return ToolPlannerRequest
+	case "read_lane_report":
+		return ToolReadLaneReport
+	case "read_pr":
+		return ToolReadPR
+	case "read_ci":
+		return ToolReadCI
+	default:
+		return trimmed
+	}
+}
+
+// ParseAction decodes raw tool call JSON arguments into a typed ProposedAction.
+func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, error) {
+	canonical := NormalizeToolName(toolName)
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		trimmed = []byte("{}")
+	}
+	act := ProposedAction{
+		ID:   callID,
+		Tool: canonical,
+		Args: slices.Clone(trimmed),
+	}
+
+	switch canonical {
+	case ToolBacklogAdd:
+		var p BacklogAddParams
+		if err := json.Unmarshal(trimmed, &p); err != nil {
+			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		}
+		act.BacklogAdd = &p
+		act.ItemID = p.ID
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("add backlog item %s", p.ID))
+
+	case ToolBacklogUpdate:
+		var p BacklogUpdateParams
+		if err := json.Unmarshal(trimmed, &p); err != nil {
+			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		}
+		act.BacklogUpdate = &p
+		act.ItemID = p.ID
+		act.Reason = strings.TrimSpace(p.Reason)
+
+	case ToolBacklogReorder:
+		var p BacklogReorderParams
+		if err := json.Unmarshal(trimmed, &p); err != nil {
+			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		}
+		act.BacklogReorder = &p
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), "reorder backlog items")
+
+	case ToolBacklogClose:
+		var p BacklogCloseParams
+		if err := json.Unmarshal(trimmed, &p); err != nil {
+			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		}
+		act.BacklogClose = &p
+		act.ItemID = p.ID
+		act.Reason = strings.TrimSpace(p.Reason)
+
+	case ToolLaneSpawn:
+		var p LaneSpawnParams
+		if err := json.Unmarshal(trimmed, &p); err != nil {
+			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		}
+		act.LaneSpawn = &p
+		act.ItemID = p.ItemID
+		act.LaneID = cmp.Or(strings.TrimSpace(p.LaneID), strings.TrimSpace(p.ItemID))
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("spawn lane %s for item %s", act.LaneID, p.ItemID))
+
+	case ToolLaneSteer:
+		var p LaneSteerParams
+		if err := json.Unmarshal(trimmed, &p); err != nil {
+			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		}
+		act.LaneSteer = &p
+		act.LaneID = p.LaneID
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Note))
+
+	case ToolLaneRetry:
+		var p LaneRetryParams
+		if err := json.Unmarshal(trimmed, &p); err != nil {
+			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		}
+		act.LaneRetry = &p
+		act.LaneID = p.LaneID
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Note), fmt.Sprintf("retry lane %s", p.LaneID))
+
+	case ToolLaneStop:
+		var p LaneStopParams
+		if err := json.Unmarshal(trimmed, &p); err != nil {
+			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		}
+		act.LaneStop = &p
+		act.LaneID = p.LaneID
+		act.Reason = strings.TrimSpace(p.Reason)
+
+	case ToolOwnerAsk:
+		var p OwnerAskParams
+		if err := json.Unmarshal(trimmed, &p); err != nil {
+			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		}
+		act.OwnerAsk = &p
+		act.LaneID = p.LaneID
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Question))
+
+	case ToolDirectiveNote:
+		var p DirectiveNoteParams
+		if err := json.Unmarshal(trimmed, &p); err != nil {
+			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		}
+		act.DirectiveNote = &p
+		act.LaneID = p.Scope
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Fact))
+
+	case ToolPlannerRequest:
+		var p PlannerRequestParams
+		if err := json.Unmarshal(trimmed, &p); err != nil {
+			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		}
+		act.PlannerRequest = &p
+		act.Reason = strings.TrimSpace(p.Reason)
+
+	case ToolReadLaneReport:
+		var p ReadLaneReportParams
+		if err := json.Unmarshal(trimmed, &p); err != nil {
+			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		}
+		act.ReadLaneReport = &p
+		act.LaneID = p.LaneID
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("read lane report for %s", p.LaneID))
+
+	case ToolReadPR:
+		var p ReadPRParams
+		if err := json.Unmarshal(trimmed, &p); err != nil {
+			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		}
+		act.ReadPR = &p
+		act.LaneID = p.LaneID
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("read PR info for %s", p.LaneID))
+
+	case ToolReadCI:
+		var p ReadCIParams
+		if err := json.Unmarshal(trimmed, &p); err != nil {
+			return act, fmt.Errorf("decode %s: %w", canonical, err)
+		}
+		act.ReadCI = &p
+		act.LaneID = p.LaneID
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("read CI status for %s", p.LaneID))
+	}
+	return act, nil
+}
+
+// StateView holds the verified Store state inspected by Invariant checks.
+type StateView struct {
+	Now            time.Time
+	Run            *store.Run
+	Lanes          map[string]lane.Lane
+	Backlog        map[string]store.BacklogItem
+	Recipes        map[string]recipe.Recipe
+	VersionRecipes map[string]recipe.Recipe
+	Directives     []store.Directive
+	MaxBriefBytes  int
+}
+
+// LoadStateView loads the current Run, Lanes, Backlog, Recipes, and active
+// Directives from st into a StateView for invariant vetting.
+func LoadStateView(
+	ctx context.Context,
+	st store.Store,
+	clk clock.Clock,
+	runID string,
+	maxBriefBytes int,
+) (*StateView, error) {
+	if clk == nil {
+		clk = clock.NewRealClock()
+	}
+	run, err := st.Runs().Get(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	lanes, err := st.Lanes().List(ctx, store.LaneFilter{RunID: runID})
+	if err != nil {
+		return nil, err
+	}
+	backlog, err := st.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
+	if err != nil {
+		return nil, err
+	}
+	directives, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	latestRecipes, err := st.Recipes().ListLatest(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	view := &StateView{
+		Now:            clk.Now().UTC(),
+		Run:            run,
+		Lanes:          make(map[string]lane.Lane, len(lanes)),
+		Backlog:        make(map[string]store.BacklogItem, len(backlog)),
+		Recipes:        make(map[string]recipe.Recipe, len(latestRecipes)+1),
+		VersionRecipes: make(map[string]recipe.Recipe, len(latestRecipes)+1),
+		Directives:     directives,
+		MaxBriefBytes:  maxBriefBytes,
+	}
+	defRecipe := recipe.Default()
+	view.Recipes[recipe.DefaultName] = defRecipe
+	view.VersionRecipes[recipeVersionKey(recipe.DefaultName, defRecipe.Version)] = defRecipe
+
+	for i := range latestRecipes {
+		r := latestRecipes[i]
+		view.Recipes[r.Name] = r
+		view.VersionRecipes[recipeVersionKey(r.Name, r.Version)] = r
+	}
+	for i := range lanes {
+		ln := lanes[i]
+		view.Lanes[ln.ID] = ln
+		if ln.RecipeName != "" && ln.RecipeVersion > 0 {
+			key := recipeVersionKey(ln.RecipeName, ln.RecipeVersion)
+			if _, ok := view.VersionRecipes[key]; !ok {
+				if pinned, gErr := st.Recipes().Get(ctx, runID, ln.RecipeName, ln.RecipeVersion); gErr == nil && pinned != nil {
+					view.VersionRecipes[key] = *pinned
+				}
+			}
+		}
+	}
+	for i := range backlog {
+		it := backlog[i]
+		view.Backlog[it.ID] = it
+	}
+	return view, nil
+}
+
+func recipeVersionKey(name string, version int) string {
+	return fmt.Sprintf("%s@%d", name, version)
+}
+
+// Lane looks up a lane by ID.
+func (s *StateView) Lane(id string) (lane.Lane, bool) {
+	if s == nil {
+		return lane.Lane{}, false
+	}
+	ln, ok := s.Lanes[id]
+	return ln, ok
+}
+
+// BacklogItem looks up a backlog item by ID.
+func (s *StateView) BacklogItem(id string) (store.BacklogItem, bool) {
+	if s == nil {
+		return store.BacklogItem{}, false
+	}
+	it, ok := s.Backlog[id]
+	return it, ok
+}
+
+// RecipeByName resolves the latest recipe for name (falling back to recipe.Default).
+func (s *StateView) RecipeByName(name string) (recipe.Recipe, bool) {
+	if s == nil {
+		def := recipe.Default()
+		return def, name == "" || name == recipe.DefaultName
+	}
+	if name == "" && s.Run != nil && s.Run.DefaultRecipe != "" {
+		name = s.Run.DefaultRecipe
+	}
+	if name == "" {
+		name = recipe.DefaultName
+	}
+	if r, ok := s.Recipes[name]; ok {
+		return r, true
+	}
+	if name == recipe.DefaultName {
+		return recipe.Default(), true
+	}
+	return recipe.Recipe{}, false
+}
+
+// RecipeForLane resolves the pinned or latest recipe for ln.
+func (s *StateView) RecipeForLane(ln lane.Lane) (recipe.Recipe, bool) {
+	name := ln.RecipeName
+	if name == "" && s != nil && s.Run != nil && s.Run.DefaultRecipe != "" {
+		name = s.Run.DefaultRecipe
+	}
+	if name == "" {
+		name = recipe.DefaultName
+	}
+	if s != nil && ln.RecipeVersion > 0 {
+		if r, ok := s.VersionRecipes[recipeVersionKey(name, ln.RecipeVersion)]; ok {
+			return r, true
+		}
+	}
+	return s.RecipeByName(name)
+}
+
+// RunningLaneCount returns the number of lanes currently in StatusRunning.
+func (s *StateView) RunningLaneCount() int {
+	if s == nil {
+		return 0
+	}
+	count := 0
+	for id := range s.Lanes {
+		if s.Lanes[id].Status == lane.StatusRunning {
+			count++
+		}
+	}
+	return count
+}
+
+// EffectiveMaxBriefBytes returns the brief size limit for r, falling back to
+// s.MaxBriefBytes or DefaultMaxBriefBytes.
+func (s *StateView) EffectiveMaxBriefBytes(r recipe.Recipe) int {
+	if r.Limits.MaxBriefBytes > 0 {
+		if s != nil && s.MaxBriefBytes > 0 {
+			return min(r.Limits.MaxBriefBytes, s.MaxBriefBytes)
+		}
+		return r.Limits.MaxBriefBytes
+	}
+	if s != nil && s.MaxBriefBytes > 0 {
+		return s.MaxBriefBytes
+	}
+	return DefaultMaxBriefBytes
+}
+
+// Invariant is a deterministic rule a proposed Dispatcher action must not
+// violate (modeled on swarm-queen/decide.Invariant).
+type Invariant struct {
+	Check func(st *StateView, action ProposedAction) error
+	Name  string
+}
+
+// DefaultInvariants returns the standard invariant suite every proposed
+// Dispatcher tool call must pass before it is applied.
+func DefaultInvariants() []Invariant {
+	return []Invariant{
+		{
+			Name:  "no merge outside recipe",
+			Check: checkNoMergeOutsideRecipe,
+		},
+		{
+			Name:  "tool must be in dispatcher toolkit",
+			Check: checkKnownTool,
+		},
+		{
+			Name:  "owner.ask requires options, default, and deadline",
+			Check: checkOwnerAsk,
+		},
+		{
+			Name:  "brief size within cap",
+			Check: checkBriefSizeCap,
+		},
+		{
+			Name:  "lane must exist",
+			Check: checkLaneExists,
+		},
+		{
+			Name:  "phase must be declared",
+			Check: checkPhaseDeclared,
+		},
+		{
+			Name:  "no spawn onto an occupied lane or ineligible item",
+			Check: checkSpawnInvariants,
+		},
+		{
+			Name:  "a spawn or retry must not reuse a recorded round",
+			Check: checkNoRoundReuse,
+		},
+		{
+			Name:  "lane state must allow steer, retry, or stop",
+			Check: checkLaneActionState,
+		},
+		{
+			Name:  "backlog mutation invariants",
+			Check: checkBacklogInvariants,
+		},
+		{
+			Name:  "directive.note and planner.request invariants",
+			Check: checkDirectiveAndPlannerInvariants,
+		},
+	}
+}
+
+// Vet filters a Proposal to the actions that satisfy every invariant in invs,
+// returning the accepted actions and formatted rejection reasons (matching
+// swarm-queen/decide.Vet).
+func Vet(st *StateView, p Proposal, invs []Invariant) (accepted []ProposedAction, rejected []string) {
+	for i := range p.Actions {
+		act := p.Actions[i]
+		var bad string
+		for _, inv := range invs {
+			if err := inv.Check(st, act); err != nil {
+				bad = fmt.Sprintf("%s [%s]: %s — %v", act.Tool, act.Target(), inv.Name, err)
+				break
+			}
+		}
+		if bad != "" {
+			rejected = append(rejected, bad)
+			continue
+		}
+		accepted = append(accepted, act)
+	}
+	return accepted, rejected
+}
+
+// VetAction checks a single ProposedAction against invs and returns an error
+// describing the first violated invariant, or nil if all pass.
+func VetAction(st *StateView, action ProposedAction, invs []Invariant) error {
+	_, rejected := Vet(st, Proposal{Actions: []ProposedAction{action}}, invs)
+	if len(rejected) > 0 {
+		return errors.New(rejected[0])
+	}
+	return nil
+}
+
+func checkKnownTool(_ *StateView, act ProposedAction) error {
+	switch act.Tool {
+	case ToolBacklogAdd, ToolBacklogUpdate, ToolBacklogReorder, ToolBacklogClose,
+		ToolLaneSpawn, ToolLaneSteer, ToolLaneRetry, ToolLaneStop,
+		ToolOwnerAsk, ToolDirectiveNote, ToolPlannerRequest,
+		ToolReadLaneReport, ToolReadPR, ToolReadCI:
+		return nil
+	default:
+		return fmt.Errorf("tool %q is not permitted for the dispatcher", act.Tool)
+	}
+}
+
+func checkNoMergeOutsideRecipe(st *StateView, act ProposedAction) error {
+	lowerTool := strings.ToLower(act.Tool)
+	if strings.Contains(lowerTool, "merge") {
+		return fmt.Errorf("direct merge tool %q is forbidden; merges are governed by the recipe's integrate phase and merge policy", act.Tool)
+	}
+
+	switch act.Tool {
+	case ToolLaneSpawn:
+		if act.LaneSpawn == nil {
+			return nil
+		}
+		r, _ := st.RecipeByName(act.LaneSpawn.RecipeName)
+		if act.LaneSpawn.RecipeOverride != "" {
+			r = CompileRecipeOverride(r, act.LaneSpawn.RecipeOverride)
+		}
+		if r.MergePolicy.Mode != recipe.MergeModeSelf && containsDirectMergeInstruction(act.LaneSpawn.Brief) {
+			return fmt.Errorf("brief instructs lane to merge directly, but recipe %q has merge mode %q (not %q)",
+				r.Name, r.MergePolicy.Mode, recipe.MergeModeSelf)
+		}
+
+	case ToolLaneSteer:
+		if act.LaneSteer == nil {
+			return nil
+		}
+		if ln, ok := st.Lane(act.LaneSteer.LaneID); ok {
+			r, _ := st.RecipeForLane(ln)
+			if r.MergePolicy.Mode != recipe.MergeModeSelf && containsDirectMergeInstruction(act.LaneSteer.Note) {
+				return fmt.Errorf("steer note instructs lane to merge directly, but recipe %q has merge mode %q",
+					r.Name, r.MergePolicy.Mode)
+			}
+		}
+
+	case ToolLaneRetry:
+		if act.LaneRetry == nil {
+			return nil
+		}
+		ln, ok := st.Lane(act.LaneRetry.LaneID)
+		if !ok {
+			return nil
+		}
+		r, _ := st.RecipeForLane(ln)
+		targetPhase := cmp.Or(strings.TrimSpace(act.LaneRetry.Phase), ln.Phase, r.FirstPhase())
+		if targetPhase == recipe.TargetComplete {
+			return fmt.Errorf("only the controller may mark a lane complete after recipe gates pass")
+		}
+		if r.MergePolicy.Mode != recipe.MergeModeSelf && containsDirectMergeInstruction(act.LaneRetry.Note) {
+			return fmt.Errorf("retry note instructs lane to merge directly, but recipe %q has merge mode %q",
+				r.Name, r.MergePolicy.Mode)
+		}
+		if ph, hasPhase := r.Phase(targetPhase); hasPhase {
+			if (targetPhase == recipe.PhaseIntegrate || hasGate(ph, "review_approved")) && r.MergePolicy.RequireReviewPass {
+				if ln.ApprovalStale() {
+					return fmt.Errorf("cannot enter phase %q with stale or missing review approval (head=%q approval=%q)",
+						targetPhase, ln.PRHead, ln.ApprovalSHA)
+				}
+			}
+			if (targetPhase == recipe.PhaseIntegrate || hasGate(ph, "ci_green")) && targetPhase == recipe.PhaseIntegrate && r.MergePolicy.RequireCIGreen {
+				if !isCIGreen(ln.Checks) {
+					return fmt.Errorf("cannot enter integrate phase %q while CI checks are %q",
+						targetPhase, cmp.Or(ln.Checks, "pending"))
+				}
+			}
+		}
+
+	case ToolBacklogClose:
+		if act.BacklogClose == nil {
+			return nil
+		}
+		if store.BacklogStatus(act.BacklogClose.Status) == store.BacklogDone {
+			if it, ok := st.BacklogItem(act.BacklogClose.ID); ok && it.LaneID != "" {
+				if ln, hasLane := st.Lane(it.LaneID); hasLane && ln.Status != lane.StatusDone {
+					return fmt.Errorf("cannot close backlog item %q as done while assigned lane %q is %s (recipe not completed)",
+						it.ID, ln.ID, ln.Status)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func containsDirectMergeInstruction(text string) bool {
+	lower := strings.ToLower(text)
+	for _, pat := range []string{
+		"gh pr merge",
+		"hub merge",
+		"merge the pr yourself",
+		"merge your own pr",
+		"git push origin main",
+		"git push origin master",
+	} {
+		if strings.Contains(lower, pat) {
+			return true
+		}
+	}
+	return false
+}
+
+func checkOwnerAsk(st *StateView, act ProposedAction) error {
+	if act.Tool != ToolOwnerAsk {
+		return nil
+	}
+	p := act.OwnerAsk
+	if p == nil {
+		return errors.New("missing owner.ask parameters")
+	}
+	if strings.TrimSpace(p.Question) == "" {
+		return errors.New("question is required")
+	}
+	if len(p.Options) == 0 {
+		return errors.New("options are required (decide, don't ask)")
+	}
+	for i, opt := range p.Options {
+		if strings.TrimSpace(opt) == "" {
+			return fmt.Errorf("option %d must not be empty", i)
+		}
+	}
+	if strings.TrimSpace(p.Default) == "" {
+		return errors.New("default option is required")
+	}
+	if !slices.Contains(p.Options, p.Default) {
+		return fmt.Errorf("default %q must be one of options %v", p.Default, p.Options)
+	}
+	if strings.TrimSpace(p.Deadline) == "" {
+		return errors.New("deadline is required")
+	}
+	now := time.Now().UTC()
+	if st != nil && !st.Now.IsZero() {
+		now = st.Now
+	}
+	dl, err := parseFutureTime(now, p.Deadline)
+	if err != nil {
+		return fmt.Errorf("invalid deadline %q: %w", p.Deadline, err)
+	}
+	if !dl.After(now) {
+		return fmt.Errorf("deadline %s must be in the future (now=%s)", dl.Format(time.RFC3339), now.Format(time.RFC3339))
+	}
+	return nil
+}
+
+func checkBriefSizeCap(st *StateView, act ProposedAction) error {
+	switch act.Tool {
+	case ToolLaneSpawn:
+		if act.LaneSpawn == nil {
+			return errors.New("missing lane.spawn parameters")
+		}
+		if strings.TrimSpace(act.LaneSpawn.Brief) == "" {
+			return errors.New("brief is required")
+		}
+		r, _ := st.RecipeByName(act.LaneSpawn.RecipeName)
+		maxBytes := st.EffectiveMaxBriefBytes(r)
+		if len(act.LaneSpawn.Brief) > maxBytes {
+			return fmt.Errorf("brief size %d bytes exceeds recipe cap of %d bytes", len(act.LaneSpawn.Brief), maxBytes)
+		}
+
+	case ToolLaneSteer:
+		if act.LaneSteer == nil {
+			return errors.New("missing lane.steer parameters")
+		}
+		if strings.TrimSpace(act.LaneSteer.Note) == "" {
+			return errors.New("steer note is required")
+		}
+		var r recipe.Recipe
+		if ln, ok := st.Lane(act.LaneSteer.LaneID); ok {
+			r, _ = st.RecipeForLane(ln)
+		} else {
+			r = recipe.Default()
+		}
+		maxBytes := st.EffectiveMaxBriefBytes(r)
+		if len(act.LaneSteer.Note) > maxBytes {
+			return fmt.Errorf("steer note size %d bytes exceeds cap of %d bytes", len(act.LaneSteer.Note), maxBytes)
+		}
+
+	case ToolLaneRetry:
+		if act.LaneRetry == nil || act.LaneRetry.Note == "" {
+			return nil
+		}
+		var r recipe.Recipe
+		if ln, ok := st.Lane(act.LaneRetry.LaneID); ok {
+			r, _ = st.RecipeForLane(ln)
+		} else {
+			r = recipe.Default()
+		}
+		maxBytes := st.EffectiveMaxBriefBytes(r)
+		if len(act.LaneRetry.Note) > maxBytes {
+			return fmt.Errorf("retry note size %d bytes exceeds cap of %d bytes", len(act.LaneRetry.Note), maxBytes)
+		}
+	}
+	return nil
+}
+
+func checkLaneExists(st *StateView, act ProposedAction) error {
+	switch act.Tool {
+	case ToolLaneSteer, ToolLaneRetry, ToolLaneStop,
+		ToolReadLaneReport, ToolReadPR, ToolReadCI:
+		if strings.TrimSpace(act.LaneID) == "" {
+			return errors.New("lane_id is required")
+		}
+		if _, ok := st.Lane(act.LaneID); !ok {
+			return fmt.Errorf("lane %q is not in the store", act.LaneID)
+		}
+	case ToolOwnerAsk:
+		if act.OwnerAsk != nil && strings.TrimSpace(act.OwnerAsk.LaneID) != "" {
+			if _, ok := st.Lane(act.OwnerAsk.LaneID); !ok {
+				return fmt.Errorf("lane %q is not in the store", act.OwnerAsk.LaneID)
+			}
+		}
+	}
+	return nil
+}
+
+func checkPhaseDeclared(st *StateView, act ProposedAction) error {
+	if act.Tool != ToolLaneRetry || act.LaneRetry == nil {
+		return nil
+	}
+	phase := strings.TrimSpace(act.LaneRetry.Phase)
+	if phase == "" || phase == recipe.TargetComplete {
+		return nil
+	}
+	ln, ok := st.Lane(act.LaneRetry.LaneID)
+	if !ok {
+		return nil
+	}
+	r, ok := st.RecipeForLane(ln)
+	if !ok {
+		return fmt.Errorf("recipe %q not found for lane %q", ln.RecipeName, ln.ID)
+	}
+	if _, declared := r.Phase(phase); !declared {
+		return fmt.Errorf("phase %q is not declared by recipe %q (%v)", phase, r.Name, r.PhaseNames())
+	}
+	return nil
+}
+
+func checkNoRoundReuse(st *StateView, act ProposedAction) error {
+	switch act.Tool {
+	case ToolLaneRetry:
+		if act.LaneRetry == nil {
+			return nil
+		}
+		ln, ok := st.Lane(act.LaneRetry.LaneID)
+		if !ok {
+			return nil
+		}
+		r, _ := st.RecipeForLane(ln)
+		phase := cmp.Or(strings.TrimSpace(act.LaneRetry.Phase), ln.Phase, r.FirstPhase())
+		if phase == "" {
+			return nil
+		}
+		recorded := ln.MaxRound(phase)
+		if act.LaneRetry.Round > 0 && recorded > 0 && act.LaneRetry.Round <= recorded {
+			return fmt.Errorf("round %d for phase %q would overwrite an existing attempt (max recorded is %d)",
+				act.LaneRetry.Round, phase, recorded)
+		}
+		targetRound := act.LaneRetry.Round
+		if targetRound <= 0 {
+			targetRound = recorded + 1
+		}
+		if r.Limits.MaxRounds > 0 && targetRound > r.Limits.MaxRounds {
+			return fmt.Errorf("round %d exceeds recipe %q max_rounds %d", targetRound, r.Name, r.Limits.MaxRounds)
+		}
+
+	case ToolLaneSpawn:
+		if act.LaneSpawn == nil {
+			return nil
+		}
+		laneID := cmp.Or(strings.TrimSpace(act.LaneSpawn.LaneID), strings.TrimSpace(act.LaneSpawn.ItemID))
+		ln, ok := st.Lane(laneID)
+		if !ok {
+			return nil
+		}
+		if ln.Status == lane.StatusRunning {
+			return fmt.Errorf("lane %q is already running", laneID)
+		}
+	}
+	return nil
+}
+
+func checkSpawnInvariants(st *StateView, act ProposedAction) error {
+	if act.Tool != ToolLaneSpawn {
+		return nil
+	}
+	p := act.LaneSpawn
+	if p == nil {
+		return errors.New("missing lane.spawn parameters")
+	}
+	itemID := strings.TrimSpace(p.ItemID)
+	if itemID == "" {
+		return errors.New("item_id is required")
+	}
+	item, ok := st.BacklogItem(itemID)
+	if !ok {
+		return fmt.Errorf("backlog item %q does not exist", itemID)
+	}
+	if item.Status.Terminal() {
+		return fmt.Errorf("backlog item %q is already %s", itemID, item.Status)
+	}
+	if item.Status == store.BacklogInProgress && item.LaneID != "" {
+		if existingLane, hasLane := st.Lane(item.LaneID); hasLane && existingLane.Status == lane.StatusRunning {
+			return fmt.Errorf("backlog item %q is already in progress on running lane %q", itemID, existingLane.ID)
+		}
+	}
+
+	for _, depID := range item.DependsOn {
+		dep, hasDep := st.BacklogItem(depID)
+		if !hasDep {
+			return fmt.Errorf("backlog item %q depends on unknown item %q", itemID, depID)
+		}
+		if dep.Status != store.BacklogDone {
+			return fmt.Errorf("backlog item %q depends on %q which is %s (must be done)", itemID, depID, dep.Status)
+		}
+	}
+
+	laneID := cmp.Or(strings.TrimSpace(p.LaneID), itemID)
+	if strings.ContainsRune(laneID, '.') {
+		return fmt.Errorf("lane_id %q must not contain '.'", laneID)
+	}
+	if existing, hasLane := st.Lane(laneID); hasLane {
+		if existing.Status == lane.StatusRunning {
+			return fmt.Errorf("lane %q is already running; spawning onto an occupied lane would collide", laneID)
+		}
+		if existing.Status == lane.StatusDone {
+			return fmt.Errorf("lane %q is already done", laneID)
+		}
+	}
+
+	recipeName := cmp.Or(strings.TrimSpace(p.RecipeName), item.RecipeName)
+	r, hasRecipe := st.RecipeByName(recipeName)
+	if !hasRecipe && strings.TrimSpace(p.RecipeName) != "" {
+		return fmt.Errorf("unknown recipe %q", p.RecipeName)
+	}
+	if r.Limits.MaxConcurrentLanes > 0 && st.RunningLaneCount() >= r.Limits.MaxConcurrentLanes {
+		return fmt.Errorf("concurrency limit reached (%d/%d running lanes)",
+			st.RunningLaneCount(), r.Limits.MaxConcurrentLanes)
+	}
+	return nil
+}
+
+func checkLaneActionState(st *StateView, act ProposedAction) error {
+	switch act.Tool {
+	case ToolLaneSteer:
+		ln, ok := st.Lane(act.LaneID)
+		if !ok {
+			return nil
+		}
+		if ln.Status.Terminal() {
+			return fmt.Errorf("cannot steer lane %q in terminal status %s", ln.ID, ln.Status)
+		}
+		if ln.SessionID == "" && ln.TerminalID == "" {
+			return fmt.Errorf("cannot steer lane %q before a session or terminal has started", ln.ID)
+		}
+
+	case ToolLaneRetry:
+		ln, ok := st.Lane(act.LaneID)
+		if !ok {
+			return nil
+		}
+		if ln.Status == lane.StatusRunning {
+			return fmt.Errorf("lane %q is currently running; stop or wait for it before retrying", ln.ID)
+		}
+		if ln.Status == lane.StatusDone {
+			return fmt.Errorf("lane %q is already done", ln.ID)
+		}
+
+	case ToolLaneStop:
+		if act.LaneStop == nil || strings.TrimSpace(act.LaneStop.Reason) == "" {
+			return errors.New("reason is required to stop a lane")
+		}
+		ln, ok := st.Lane(act.LaneID)
+		if !ok {
+			return nil
+		}
+		if ln.Status.Terminal() {
+			return fmt.Errorf("lane %q is already in terminal status %s", ln.ID, ln.Status)
+		}
+	}
+	return nil
+}
+
+func checkBacklogInvariants(st *StateView, act ProposedAction) error {
+	switch act.Tool {
+	case ToolBacklogAdd:
+		p := act.BacklogAdd
+		if p == nil {
+			return errors.New("missing backlog.add parameters")
+		}
+		if strings.TrimSpace(p.ID) == "" {
+			return errors.New("backlog item id is required")
+		}
+		if strings.TrimSpace(p.Title) == "" {
+			return errors.New("backlog item title is required")
+		}
+		if _, exists := st.BacklogItem(p.ID); exists {
+			return fmt.Errorf("backlog item %q already exists", p.ID)
+		}
+		if p.Priority != "" && !store.Priority(p.Priority).Valid() {
+			return fmt.Errorf("invalid priority %q", p.Priority)
+		}
+		for _, depID := range p.DependsOn {
+			if depID == p.ID {
+				return fmt.Errorf("backlog item %q cannot depend on itself", p.ID)
+			}
+			if _, ok := st.BacklogItem(depID); !ok {
+				return fmt.Errorf("dependency %q does not exist in backlog", depID)
+			}
+		}
+
+	case ToolBacklogUpdate:
+		p := act.BacklogUpdate
+		if p == nil {
+			return errors.New("missing backlog.update parameters")
+		}
+		if strings.TrimSpace(p.ID) == "" {
+			return errors.New("backlog item id is required")
+		}
+		if strings.TrimSpace(p.Reason) == "" {
+			return errors.New("reason is required for backlog.update")
+		}
+		if _, exists := st.BacklogItem(p.ID); !exists {
+			return fmt.Errorf("backlog item %q does not exist", p.ID)
+		}
+		if p.Priority != "" && !store.Priority(p.Priority).Valid() {
+			return fmt.Errorf("invalid priority %q", p.Priority)
+		}
+		if p.Status != "" {
+			status := store.BacklogStatus(p.Status)
+			if !status.Valid() {
+				return fmt.Errorf("invalid backlog status %q", p.Status)
+			}
+			if status.Terminal() {
+				return fmt.Errorf("use %s to set terminal status %q", ToolBacklogClose, p.Status)
+			}
+		}
+
+	case ToolBacklogReorder:
+		p := act.BacklogReorder
+		if p == nil || len(p.ItemIDs) == 0 {
+			return errors.New("item_ids is required for backlog.reorder")
+		}
+		seen := make(map[string]bool, len(p.ItemIDs))
+		for _, id := range p.ItemIDs {
+			if seen[id] {
+				return fmt.Errorf("duplicate item_id %q in backlog.reorder", id)
+			}
+			seen[id] = true
+			if _, exists := st.BacklogItem(id); !exists {
+				return fmt.Errorf("backlog item %q does not exist", id)
+			}
+		}
+
+	case ToolBacklogClose:
+		p := act.BacklogClose
+		if p == nil {
+			return errors.New("missing backlog.close parameters")
+		}
+		if strings.TrimSpace(p.ID) == "" {
+			return errors.New("backlog item id is required")
+		}
+		if strings.TrimSpace(p.Reason) == "" {
+			return errors.New("reason is required for backlog.close")
+		}
+		if _, exists := st.BacklogItem(p.ID); !exists {
+			return fmt.Errorf("backlog item %q does not exist", p.ID)
+		}
+		status := store.BacklogStatus(p.Status)
+		if !status.Terminal() {
+			return fmt.Errorf("backlog.close requires status 'done' or 'dropped', got %q", p.Status)
+		}
+	}
+	return nil
+}
+
+func checkDirectiveAndPlannerInvariants(st *StateView, act ProposedAction) error {
+	switch act.Tool {
+	case ToolDirectiveNote:
+		p := act.DirectiveNote
+		if p == nil || strings.TrimSpace(p.Fact) == "" {
+			return errors.New("fact is required for directive.note")
+		}
+		if strings.TrimSpace(p.Expiry) != "" {
+			now := time.Now().UTC()
+			if st != nil && !st.Now.IsZero() {
+				now = st.Now
+			}
+			exp, err := parseFutureTime(now, p.Expiry)
+			if err != nil {
+				return fmt.Errorf("invalid expiry %q: %w", p.Expiry, err)
+			}
+			if !exp.After(now) {
+				return fmt.Errorf("expiry %s must be in the future (now=%s)", exp.Format(time.RFC3339), now.Format(time.RFC3339))
+			}
+		}
+
+	case ToolPlannerRequest:
+		p := act.PlannerRequest
+		if p == nil || strings.TrimSpace(p.Reason) == "" {
+			return errors.New("reason is required for planner.request")
+		}
+	}
+	return nil
+}
+
+func parseFutureTime(now time.Time, raw string) (time.Time, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return time.Time{}, errors.New("empty time string")
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC(), nil
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t.UTC(), nil
+	}
+	if d, err := time.ParseDuration(s); err == nil {
+		return now.Add(d).UTC(), nil
+	}
+	return time.Time{}, fmt.Errorf("expected RFC3339 timestamp or duration (e.g. 30m, 2h)")
+}
+
+func isCIGreen(checks string) bool {
+	switch strings.ToLower(strings.TrimSpace(checks)) {
+	case "green", "pass", "passed", "success", "ok", "true":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasGate(p recipe.Phase, gateName string) bool {
+	return slices.ContainsFunc(p.Gates, func(g recipe.Gate) bool {
+		return g.Name == gateName
+	})
+}

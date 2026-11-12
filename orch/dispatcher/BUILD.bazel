@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "dispatcher",
+    srcs = [
+        "dispatcher.go",
+        "prompt.go",
+        "snapshot.go",
+        "vet.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/orch/dispatcher",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//orch/clock",
+        "//orch/controller",
+        "//orch/lane",
+        "//orch/model",
+        "//orch/recipe",
+        "//orch/store",
+    ],
+)
+
+go_test(
+    name = "dispatcher_test",
+    srcs = ["dispatcher_test.go"],
+    data = glob(["testdata/**"]),
+    deps = [
+        ":dispatcher",
+        "//orch/clock",
+        "//orch/controller",
+        "//orch/lane",
+        "//orch/model",
+        "//orch/recipe",
+        "//orch/store",
+    ],
+)
