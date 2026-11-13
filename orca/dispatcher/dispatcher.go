@@ -248,6 +248,7 @@ func trailingSeqNumber(id string) int64 {
 	return n
 }
 
+//nolint:govet // state groups are ordered by execution concerns.
 type turnExecState struct {
 	view          *StateView
 	pinnedRecipes map[string]recipe.Recipe
@@ -260,6 +261,9 @@ type turnExecState struct {
 	rejected      []string
 	currentTurn   int
 	nextActionSeq int
+	traceID       string
+	input         string
+	model         string
 }
 
 // Dispatch executes one judgment batch turn and returns its structured BatchResult.
@@ -322,10 +326,13 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 		pinnedRecipes: make(map[string]recipe.Recipe),
 		turnUsage:     make(map[int]model.Usage),
 		turnUsed:      make(map[int]bool),
+		traceID:       turnID,
+		input:         snap.Text,
 	}
 
 	reg := d.buildToolRegistry(runID, state)
 	modelName := d.selectModel(events)
+	state.model = modelName
 
 	req := model.Request{
 		Model:       modelName,
@@ -693,6 +700,10 @@ func (d *Dispatcher) recordDecision(
 		}
 	}
 
+	traceID, modelName, input := "", "", ""
+	if state != nil {
+		traceID, modelName, input = state.traceID, state.model, state.input
+	}
 	dec, err := d.store.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
 		RunID:        runID,
 		Category:     store.DecisionJudgment,
@@ -709,6 +720,10 @@ func (d *Dispatcher) recordDecision(
 		OutputTokens: usage.OutputTokens,
 		CostUSD:      usage.CostUSD,
 		LatencyMs:    max(elapsed.Milliseconds(), 0),
+		TraceID:      traceID,
+		Model:        modelName,
+		Input:        input,
+		Output:       result,
 	})
 	if err != nil {
 		return err
