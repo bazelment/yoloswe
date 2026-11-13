@@ -296,6 +296,10 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 	case store.EventStall:
 		if p.TerminalEvent != nil {
 			outcome := strings.ToLower(strings.TrimSpace(p.TerminalEvent.Outcome))
+			if quota || isQuotaOutcome(outcome) {
+				e.Kind = lane.EventQuotaFailure
+				break
+			}
 			switch strings.ToLower(p.TerminalEvent.Type) {
 			case "input.waiting":
 				e.Kind = lane.EventWaitingForInput
@@ -308,7 +312,7 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 					e.Kind = lane.EventTurnEndedNoReport
 				}
 			}
-		} else if p.UsageLimit != nil || p.Capacity != nil || p.Usage != nil {
+		} else if quota {
 			e.Kind = lane.EventQuotaFailure
 		} else {
 			return lane.Event{}, false
@@ -324,7 +328,17 @@ func isQuotaOutcome(outcome string) bool {
 }
 
 func isQuotaPayload(p StreamEventPayload) bool {
-	return p.UsageLimit != nil || p.Capacity != nil || p.Usage != nil
+	if p.UsageLimit != nil || strings.EqualFold(p.AgentSignal, "usage_limited") {
+		return true
+	}
+	if p.Capacity != nil {
+		for _, b := range p.Capacity.Backends {
+			if b.Full || b.PoolAtMax || b.Waiting > 0 || b.PendingPods > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // New constructs a Driver from cfg and options.

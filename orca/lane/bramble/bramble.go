@@ -125,9 +125,6 @@ func (d *Driver) ReadReport(_ context.Context, runID, laneID, terminalID string)
 	}
 	key := lane.PhaseRoundKey(phase, round)
 	b, err := os.ReadFile(filepath.Join(runDir, laneID+"."+key+".report.md"))
-	if err != nil && key != phase && round <= 1 {
-		b, err = os.ReadFile(filepath.Join(runDir, laneID+"."+phase+".report.md"))
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -186,6 +183,7 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 					kind = lane.EventTurnEndedNoReport
 				case "exited", "exit", "dead", "failed", "done", "complete", "completed", "stopped":
 				default:
+					delete(lastStatus, s.ID)
 					continue
 				}
 				if lastStatus[s.ID] == status {
