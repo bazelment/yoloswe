@@ -86,8 +86,9 @@ func exportRun(ctx context.Context, st store.Store, runID string, out io.Writer)
 	if err != nil {
 		return err
 	}
-	if len(events) == 0 {
-		events = []store.Event{{ID: "synthetic-event-1", RunID: runID, Kind: store.EventTimer, Summary: "recorded decision"}}
+	eventsByID := make(map[string]store.Event, len(events))
+	for i := range events {
+		eventsByID[events[i].ID] = events[i]
 	}
 	moments := make([]replay.JudgmentMoment, 0, len(decs))
 	for i := range decs {
@@ -96,7 +97,26 @@ func exportRun(ctx context.Context, st store.Store, runID string, out io.Writer)
 		if id == "" {
 			id = fmt.Sprintf("moment-%d", i+1)
 		}
-		moments = append(moments, replay.JudgmentMoment{ID: id, RunID: runID, Timestamp: d.CreatedAt, Description: d.Reason, Grounding: replay.GroundingSynthetic, GroundingEvidence: "exported from orca decision log", Events: []store.Event{events[min(i, len(events)-1)]}, State: replay.MomentState{Run: *run, Decisions: []store.Decision{d}}, Source: replay.Source{Relation: replay.RelationFeedback, Evidence: replay.EvidenceOwnerAttributed, LabelBasis: "recorded outcome", IDs: []string{id}}, Baseline: replay.BaselineDecision{Tool: d.Tool, Summary: d.Result}, OwnerFollowUp: replay.OwnerFollowUp{Verdict: replay.VerdictEndorsed, ExpectedTools: []string{d.Tool}}})
+		var refs struct {
+			EventID  string   `json:"event_id"`
+			EventIDs []string `json:"event_ids"`
+		}
+		_ = json.Unmarshal(d.Args, &refs)
+		linked := make([]store.Event, 0, 1+len(refs.EventIDs))
+		if refs.EventID != "" {
+			if ev, ok := eventsByID[refs.EventID]; ok {
+				linked = append(linked, ev)
+			}
+		}
+		for _, eid := range refs.EventIDs {
+			if ev, ok := eventsByID[eid]; ok {
+				linked = append(linked, ev)
+			}
+		}
+		if len(linked) == 0 {
+			continue
+		}
+		moments = append(moments, replay.JudgmentMoment{ID: id, RunID: runID, Timestamp: d.CreatedAt, Description: d.Reason, Grounding: replay.GroundingVerified, GroundingEvidence: "causally linked event IDs", Events: linked, State: replay.MomentState{Run: *run, Decisions: []store.Decision{d}}, Source: replay.Source{Relation: replay.RelationFeedback, Evidence: replay.EvidenceOwnerAttributed, LabelBasis: "recorded outcome", IDs: []string{id}}, Baseline: replay.BaselineDecision{Tool: d.Tool, Summary: d.Result}, OwnerFollowUp: replay.OwnerFollowUp{ExpectedTools: []string{d.Tool}}})
 	}
 	if len(moments) == 0 {
 		return fmt.Errorf("run %q has no decisions", runID)

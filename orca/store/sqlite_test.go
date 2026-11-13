@@ -373,8 +373,8 @@ func TestSQLiteStoreReopenIdenticalState(t *testing.T) {
 	if before.ControllerCursor.Seq != 2 {
 		t.Fatalf("ControllerCursor.Seq = %d, want 2 (monotonic)", before.ControllerCursor.Seq)
 	}
-	if !slices.Equal(before.AppliedMigrations, []string{"0001_init.sql", "0002_memory_notes.sql"}) {
-		t.Fatalf("AppliedMigrations = %v, want [0001_init.sql 0002_memory_notes.sql]", before.AppliedMigrations)
+	if !slices.Equal(before.AppliedMigrations, []string{"0001_init.sql", "0002_memory_notes.sql", "0003_decision_trace.sql"}) {
+		t.Fatalf("AppliedMigrations = %v, want [0001_init.sql 0002_memory_notes.sql 0003_decision_trace.sql]", before.AppliedMigrations)
 	}
 
 	if err := st1.Close(); err != nil {

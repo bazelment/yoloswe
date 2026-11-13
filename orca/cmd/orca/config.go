@@ -237,6 +237,7 @@ func mergeConfig(lower, higher Config) Config {
 	out.LogLevel = cmp.Or(higher.LogLevel, lower.LogLevel)
 	out.LogFormat = cmp.Or(higher.LogFormat, lower.LogFormat)
 	out.Prompt = cmp.Or(higher.Prompt, lower.Prompt)
+	out.ReportDay = cmp.Or(higher.ReportDay, lower.ReportDay)
 	out.Models.Dispatcher = cmp.Or(higher.Models.Dispatcher, lower.Models.Dispatcher)
 	out.Models.DispatcherHard = cmp.Or(higher.Models.DispatcherHard, lower.Models.DispatcherHard)
 	out.Models.Concierge = cmp.Or(higher.Models.Concierge, lower.Models.Concierge)

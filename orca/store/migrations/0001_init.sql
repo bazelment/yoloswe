@@ -102,13 +102,6 @@ CREATE TABLE IF NOT EXISTS decisions (
     output_tokens INTEGER NOT NULL DEFAULT 0,
     cost_usd REAL NOT NULL DEFAULT 0,
     latency_ms INTEGER NOT NULL DEFAULT 0,
-    trace_id TEXT NOT NULL DEFAULT '',
-    outcome_label TEXT NOT NULL DEFAULT '',
-    provider TEXT NOT NULL DEFAULT '',
-    model TEXT NOT NULL DEFAULT '',
-    prompt_version TEXT NOT NULL DEFAULT '',
-    input TEXT NOT NULL DEFAULT '',
-    output TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     PRIMARY KEY (run_id, seq)
 );

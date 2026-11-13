@@ -12,6 +12,7 @@ go_library(
     embedsrcs = [
         "migrations/0001_init.sql",
         "migrations/0002_memory_notes.sql",
+        "migrations/0003_decision_trace.sql",
     ],
     importpath = "github.com/bazelment/yoloswe/orca/store",
     visibility = ["//visibility:public"],
