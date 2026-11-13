@@ -156,6 +156,7 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 			}
 			return strings.Join(out, "\n"), nil
 		}
+		b.Adoption.Handover.HolderID = b.RunID
 		r, e := b.Adoption.Adopt(fields[1])
 		if e != nil {
 			return "", e
@@ -166,7 +167,18 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 		if !b.AdoptionEnabled {
 			return "adoption unavailable: labeler and process adapters are not configured", nil
 		}
+		b.Adoption.Handover.HolderID = b.RunID
 		target := b.AdoptionRunID
+		if target == "" {
+			rs, e := b.Adoption.List()
+			if e != nil {
+				return "", e
+			}
+			if e := b.Adoption.ReleaseOwned(rs); e != nil {
+				return "", e
+			}
+			return "released adopted swarm", nil
+		}
 		if target == "" {
 			return "no adopted swarm", nil
 		}

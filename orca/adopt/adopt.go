@@ -53,10 +53,19 @@ func (i Importer) read(dir string) (Run, error) {
 			x.Sessions[k] = v
 		}
 		x.Session = canonicalSession(l)
+		spawn := laneSpawn(dir, l.ID, l.Phase)
+		if x.Session == "" {
+			x.Session = spawn.Session
+		}
 		x.Reports, x.Terminal = laneFiles(dir, l)
+		if x.Terminal == "" {
+			x.Terminal = spawn.Terminal
+		}
 		x.Terminals = laneTerminals(dir, l.ID)
 		if l.PR > 0 {
 			x.PR = fmt.Sprint(l.PR)
+		} else if spawn.PR != "" {
+			x.PR = spawn.PR
 		} else {
 			x.PR = prNumber(x.Reports + "\n" + readText(filepath.Join(dir, "ledger.md")))
 		}
@@ -65,6 +74,48 @@ func (i Importer) read(dir string) (Run, error) {
 	sort.Slice(r.Lanes, func(a, b int) bool { return r.Lanes[a].ID < r.Lanes[b].ID })
 	r.LastActivity = lastActivity(dir)
 	return r, nil
+}
+
+type spawnOwnership struct{ Session, Terminal, PR string }
+
+func laneSpawn(dir, laneID, phase string) spawnOwnership {
+	p := filepath.Join(dir, laneID+"."+phase+".spawn.json")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return spawnOwnership{}
+	}
+	var v struct {
+		SessionID   string          `json:"session_id"`
+		TerminalID  string          `json:"terminal_id"`
+		TerminalURL string          `json:"terminal_url"`
+		PR          json.RawMessage `json:"pr"`
+		PRNumber    json.RawMessage `json:"pr_number"`
+		PullRequest json.RawMessage `json:"pull_request"`
+	}
+	if json.Unmarshal(b, &v) != nil {
+		return spawnOwnership{}
+	}
+	term := v.TerminalID
+	if term == "" {
+		term = v.TerminalURL
+	}
+	var pr string
+	if len(v.PR) == 0 {
+		v.PR = v.PRNumber
+	}
+	if len(v.PR) == 0 {
+		v.PR = v.PullRequest
+	}
+	if len(v.PR) > 0 {
+		var n int
+		if json.Unmarshal(v.PR, &n) == nil && n > 0 {
+			pr = fmt.Sprint(n)
+		}
+		if pr == "" {
+			_ = json.Unmarshal(v.PR, &pr)
+		}
+	}
+	return spawnOwnership{Session: v.SessionID, Terminal: term, PR: pr}
 }
 
 func laneTerminals(dir, laneID string) map[string]string {
@@ -220,6 +271,9 @@ type Handover struct {
 	Host    string
 	PID     int
 	Now     func() time.Time
+	// HolderID is stable across chat process restarts. When unset the host/PID
+	// identity preserves the command-line behavior used by older callers.
+	HolderID string
 }
 
 var ErrLeaseHeld = errors.New("run is leased by another orca")
@@ -236,6 +290,11 @@ func (h Handover) Adopt(r Run) error {
 	f, e := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if e != nil {
 		if errors.Is(e, os.ErrExist) {
+			b, readErr := os.ReadFile(p)
+			var current lease
+			if readErr == nil && json.Unmarshal(b, &current) == nil && current.Holder == h.holder() {
+				return nil
+			}
 			return ErrLeaseHeld
 		}
 		return e
@@ -247,10 +306,14 @@ func (h Handover) Adopt(r Run) error {
 		return e
 	}
 	_ = f.Close()
-	labelled, stopped, marked := false, false, []string{}
+	original := map[string]fileSnapshot{}
+	for _, n := range []string{"OBJECTIVE.md", "PROGRESS.md"} {
+		original[n] = snapshotFile(filepath.Join(r.Dir, n))
+	}
+	labelled, stopped := false, false
 	rollback := func(cause error) error {
-		for _, n := range marked {
-			_ = removeMarker(filepath.Join(r.Dir, n))
+		for n, b := range original {
+			_ = restoreFile(filepath.Join(r.Dir, n), b)
 		}
 		if stopped && h.Process != nil {
 			_ = h.Process.StartWatcher(r.Dir)
@@ -278,7 +341,6 @@ func (h Handover) Adopt(r Run) error {
 		if e := prepend(filepath.Join(r.Dir, n), marker); e != nil {
 			return rollback(e)
 		}
-		marked = append(marked, n)
 	}
 	return nil
 }
@@ -298,17 +360,18 @@ func (h Handover) Release(r Run) error {
 	if current.Holder != h.holder() {
 		return ErrLeaseNotHeld
 	}
-	if e := os.Remove(p); e != nil {
-		return e
-	}
 	previous := current.PreviousOrchestrator
 	if previous == "" {
 		previous = previousOrchestrator(r.Orchestrator)
 	}
-	labelled, started, removed := false, false, []string{}
+	original := map[string]fileSnapshot{}
+	for _, n := range []string{"OBJECTIVE.md", "PROGRESS.md"} {
+		original[n] = snapshotFile(filepath.Join(r.Dir, n))
+	}
+	labelled, started := false, false
 	rollback := func(cause error) error {
-		for _, n := range removed {
-			_ = prepend(filepath.Join(r.Dir, n), markerForRelease())
+		for n, b := range original {
+			_ = restoreFile(filepath.Join(r.Dir, n), b)
 		}
 		if started && h.Process != nil {
 			_ = h.Process.StopWatcher(r.Dir)
@@ -316,7 +379,6 @@ func (h Handover) Release(r Run) error {
 		if labelled && h.Labeler != nil {
 			_ = h.Labeler.SetOrchestrator(r.ID, "orca")
 		}
-		_ = writeLease(p, current)
 		return cause
 	}
 	if e := h.setLabel(r.ID, previous); e != nil {
@@ -331,19 +393,42 @@ func (h Handover) Release(r Run) error {
 		if e := removeMarker(filepath.Join(r.Dir, n)); e != nil {
 			return rollback(e)
 		}
-		removed = append(removed, n)
+	}
+	if e := os.Remove(p); e != nil {
+		return rollback(e)
 	}
 	return nil
 }
 
-func writeLease(p string, l lease) error {
-	f, e := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if e != nil {
-		return e
-	}
-	defer f.Close()
-	return json.NewEncoder(f).Encode(l)
+type fileSnapshot struct {
+	exists bool
+	data   []byte
 }
+
+func snapshotFile(p string) fileSnapshot {
+	_, err := os.Stat(p)
+	if err != nil {
+		return fileSnapshot{}
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return fileSnapshot{exists: true}
+	}
+	return fileSnapshot{exists: true, data: append([]byte(nil), b...)}
+}
+func restoreFile(p string, s fileSnapshot) error {
+	if !s.exists {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if s.data == nil {
+		return nil
+	}
+	return os.WriteFile(p, s.data, 0644)
+}
+
 func previousOrchestrator(s string) string {
 	s = strings.TrimSpace(s)
 	if i := strings.IndexAny(s, " \t\r\n"); i >= 0 {
@@ -354,7 +439,6 @@ func previousOrchestrator(s string) string {
 	}
 	return s
 }
-func markerForRelease() string { return "ORCHESTRATOR: orca since rollback (rollback).\n" }
 func prepend(p, s string) error {
 	b, e := os.ReadFile(p)
 	if os.IsNotExist(e) {
@@ -371,8 +455,11 @@ func prepend(p, s string) error {
 }
 func removeMarker(p string) error {
 	b, e := os.ReadFile(p)
-	if e != nil {
+	if os.IsNotExist(e) {
 		return nil
+	}
+	if e != nil {
+		return e
 	}
 	lines := strings.SplitAfter(string(b), "\n")
 	if len(lines) > 0 && strings.HasPrefix(lines[0], "ORCHESTRATOR: orca since ") {
@@ -383,6 +470,9 @@ func removeMarker(p string) error {
 func hostname() string { h, _ := os.Hostname(); return h }
 
 func (h Handover) holder() string {
+	if h.HolderID != "" {
+		return h.HolderID
+	}
 	if h.Host != "" || h.PID != 0 {
 		return fmt.Sprintf("%s/%d", h.Host, h.PID)
 	}
@@ -445,4 +535,23 @@ func (s Service) Release(id string) error {
 		}
 	}
 	return fmt.Errorf("run %q not found", id)
+}
+
+// ReleaseOwned hands back the run leased by this stable holder after a chat
+// restart. The caller supplies the runs it imported before issuing /release.
+func (s Service) ReleaseOwned(runs []Run) error {
+	if s.Handover.Labeler == nil || s.Handover.Process == nil {
+		return ErrAdaptersUnavailable
+	}
+	for _, r := range runs {
+		b, err := os.ReadFile(filepath.Join(r.Dir, ".orca-lease.json"))
+		if err != nil {
+			continue
+		}
+		var l lease
+		if json.Unmarshal(b, &l) == nil && l.Holder == s.Handover.holder() {
+			return s.Handover.Release(r)
+		}
+	}
+	return ErrLeaseNotHeld
 }
