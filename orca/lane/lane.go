@@ -484,7 +484,7 @@ func (f *FakeDriver) ReadReport(_ context.Context, _, _, terminalID string) (*Ph
 	return &cp, nil
 }
 
-// Emit publishes an event to watchers. It is intended for deterministic tests and scripted drivers.
+// Emit publishes an event to watchers.
 func (f *FakeDriver) Emit(ev Event) {
 	select {
 	case f.events <- ev:

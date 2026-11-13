@@ -182,7 +182,6 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				return
 			case <-ticker.C:
 			}
-			// Discover sessions for this run and attach one SSE reader per terminal.
 			var sessions []SessionInfo
 			if err := d.doJSON(ctx, http.MethodGet, "/api/code-sessions", nil, &struct {
 				Sessions *[]SessionInfo `json:"sessions"`
