@@ -208,7 +208,10 @@ func executeChat(
 	routerSel := cfg.Models.Roles["router"]
 	routingLog := router.StoreLogger{Store: st, RunID: cfg.RunID, Model: routerSel.Model, Provider: routerSel.Provider}
 	r := router.Select(roleClient(client, cfg, "router"), routerSel.Model, os.Getenv("ORCA_GEMINI_API_KEY"), os.Getenv("GEMINI_DECISIONS_BASE_URL"), routingLog)
-	backend := &chatui.StoreBackend{Store: st, RunID: cfg.RunID, Stream: concierge.AskStream, Adoption: adopt.Service{Importer: adopt.Importer{}, Handover: adopt.Handover{}}, AdoptionEnabled: true}
+	// Adoption requires host integrations that are not available in this CLI
+	// process yet. Keep the commands visible but refuse them clearly instead of
+	// silently performing a lease-only handover.
+	backend := &chatui.StoreBackend{Store: st, RunID: cfg.RunID, Stream: concierge.AskStream, Adoption: adopt.Service{Importer: adopt.Importer{}, Handover: adopt.Handover{}}, AdoptionEnabled: false}
 	if question != "" {
 		d, err := r.Route(ctx, question)
 		if err != nil {

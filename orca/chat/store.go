@@ -28,6 +28,10 @@ type StoreBackend struct {
 	lastDirective   string
 	Adoption        adopt.Service
 	AdoptionEnabled bool
+	// AdoptionRunID is the host swarm currently handed to this chat. It is
+	// deliberately separate from RunID: chat may continue on its own run while
+	// operating an adopted swarm.
+	AdoptionRunID string
 }
 
 func (b *StoreBackend) now() time.Time {
@@ -139,7 +143,7 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 	switch strings.ToLower(fields[0]) {
 	case "/adopt":
 		if !b.AdoptionEnabled {
-			return "adoption unavailable", nil
+			return "adoption unavailable: labeler and process adapters are not configured", nil
 		}
 		if len(fields) == 1 {
 			rs, e := b.Adoption.List()
@@ -156,15 +160,21 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 		if e != nil {
 			return "", e
 		}
+		b.AdoptionRunID = r.ID
 		return "adopted " + r.ID, nil
 	case "/release":
 		if !b.AdoptionEnabled {
-			return "adoption unavailable", nil
+			return "adoption unavailable: labeler and process adapters are not configured", nil
 		}
-		if e := b.Adoption.Release(b.RunID); e != nil {
+		target := b.AdoptionRunID
+		if target == "" {
+			return "no adopted swarm", nil
+		}
+		if e := b.Adoption.Release(target); e != nil {
 			return "", e
 		}
-		return "released " + b.RunID, nil
+		b.AdoptionRunID = ""
+		return "released " + target, nil
 	case "/status":
 		s, e := b.Snapshot(ctx)
 		return s.Status, e

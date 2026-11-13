@@ -20,6 +20,8 @@ type Lane struct {
 	ID, Title, Branch, Phase, Status string
 	Round                            int
 	Session, Terminal, PR            string
+	Sessions                         map[string]string
+	Terminals                        map[string]string
 	Reports, Notes                   string
 }
 type Run struct {
@@ -46,15 +48,62 @@ func (i Importer) read(dir string) (Run, error) {
 		if l == nil {
 			continue
 		}
-		x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: string(l.Status), Round: l.Round, Notes: strings.Join(l.Notes, "\n")}
-		x.Session = l.Sessions[l.Phase]
+		x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: string(l.Status), Round: l.Round, Notes: strings.Join(l.Notes, "\n"), Sessions: map[string]string{}}
+		for k, v := range l.Sessions {
+			x.Sessions[k] = v
+		}
+		x.Session = canonicalSession(l)
 		x.Reports, x.Terminal = laneFiles(dir, l)
-		x.PR = prNumber(x.Reports + "\n" + readText(filepath.Join(dir, "ledger.md")))
+		x.Terminals = laneTerminals(dir, l.ID)
+		if l.PR > 0 {
+			x.PR = fmt.Sprint(l.PR)
+		} else {
+			x.PR = prNumber(x.Reports + "\n" + readText(filepath.Join(dir, "ledger.md")))
+		}
 		r.Lanes = append(r.Lanes, x)
 	}
 	sort.Slice(r.Lanes, func(a, b int) bool { return r.Lanes[a].ID < r.Lanes[b].ID })
 	r.LastActivity = lastActivity(dir)
 	return r, nil
+}
+
+func laneTerminals(dir, laneID string) map[string]string {
+	out := map[string]string{}
+	paths, _ := filepath.Glob(filepath.Join(dir, laneID+".*.spawn.json"))
+	for _, p := range paths {
+		var v struct {
+			SessionID   string `json:"session_id"`
+			TerminalID  string `json:"terminal_id"`
+			TerminalURL string `json:"terminal_url"`
+		}
+		b, err := os.ReadFile(p)
+		if err != nil || json.Unmarshal(b, &v) != nil {
+			continue
+		}
+		phase := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), laneID+"."), ".spawn.json")
+		if v.TerminalID != "" {
+			out[phase] = v.TerminalID
+		} else if v.TerminalURL != "" {
+			out[phase] = v.TerminalURL
+		}
+	}
+	return out
+}
+func canonicalSession(l *swarmstate.Lane) string {
+	if s, ok := l.SessionFor(l.Phase, l.Round); ok {
+		return s
+	}
+	if s := l.Sessions[l.Phase]; s != "" {
+		return s
+	}
+	var best string
+	bestRound := -1
+	for _, a := range l.Attempts() {
+		if a.Phase == l.Phase && a.Round > bestRound {
+			best, bestRound = a.Session, a.Round
+		}
+	}
+	return best
 }
 func (i Importer) Discover() ([]Run, error) {
 	roots := i.Roots
@@ -111,10 +160,14 @@ func laneFiles(dir string, l *swarmstate.Lane) (string, string) {
 		var v struct {
 			TerminalID  string `json:"terminal_id"`
 			TerminalURL string `json:"terminal_url"`
+			SessionID   string `json:"session_id"`
 		}
 		if b, e := os.ReadFile(sp[0]); e == nil {
 			_ = json.Unmarshal(b, &v)
-			term = v.TerminalID + " " + v.TerminalURL
+			term = v.TerminalID
+			if term == "" {
+				term = v.TerminalURL
+			}
 		}
 	}
 	return report, strings.TrimSpace(term)
@@ -171,9 +224,11 @@ type Handover struct {
 
 var ErrLeaseHeld = errors.New("run is leased by another orca")
 var ErrLeaseNotHeld = errors.New("run is not leased by this orca")
+var ErrAdaptersUnavailable = errors.New("adoption requires labeler and process adapters")
 
 type lease struct {
-	Holder string `json:"holder"`
+	Holder               string `json:"holder"`
+	PreviousOrchestrator string `json:"previous_orchestrator,omitempty"`
 }
 
 func (h Handover) Adopt(r Run) error {
@@ -186,19 +241,34 @@ func (h Handover) Adopt(r Run) error {
 		return e
 	}
 	holder := h.holder()
-	_ = json.NewEncoder(f).Encode(lease{Holder: holder})
+	if e = json.NewEncoder(f).Encode(lease{Holder: holder, PreviousOrchestrator: previousOrchestrator(r.Orchestrator)}); e != nil {
+		_ = f.Close()
+		_ = os.Remove(p)
+		return e
+	}
 	_ = f.Close()
-	if h.Labeler != nil {
-		if e = h.Labeler.SetOrchestrator(r.ID, "orca"); e != nil {
-			_ = os.Remove(p)
-			return e
+	labelled, stopped, marked := false, false, []string{}
+	rollback := func(cause error) error {
+		for _, n := range marked {
+			_ = removeMarker(filepath.Join(r.Dir, n))
 		}
-	}
-	if h.Process != nil {
-		if stopErr := h.Process.StopWatcher(r.Dir); stopErr != nil {
-			return stopErr
+		if stopped && h.Process != nil {
+			_ = h.Process.StartWatcher(r.Dir)
 		}
+		if labelled && h.Labeler != nil {
+			_ = h.Labeler.SetOrchestrator(r.ID, previousOrchestrator(r.Orchestrator))
+		}
+		_ = os.Remove(p)
+		return cause
 	}
+	if e = h.setLabel(r.ID, "orca"); e != nil {
+		return rollback(e)
+	}
+	labelled = true
+	if e = h.stop(r.Dir); e != nil {
+		return rollback(e)
+	}
+	stopped = true
 	now := time.Now().UTC()
 	if h.Now != nil {
 		now = h.Now().UTC()
@@ -206,8 +276,9 @@ func (h Handover) Adopt(r Run) error {
 	marker := fmt.Sprintf("ORCHESTRATOR: orca since %s (%s). Claude sessions: do not act on this run; run /release in orca to hand back.\n", now.Format(time.RFC3339), holder)
 	for _, n := range []string{"OBJECTIVE.md", "PROGRESS.md"} {
 		if e := prepend(filepath.Join(r.Dir, n), marker); e != nil {
-			return e
+			return rollback(e)
 		}
+		marked = append(marked, n)
 	}
 	return nil
 }
@@ -230,23 +301,60 @@ func (h Handover) Release(r Run) error {
 	if e := os.Remove(p); e != nil {
 		return e
 	}
-	if h.Labeler != nil {
-		if e := h.Labeler.SetOrchestrator(r.ID, "claude"); e != nil {
-			return e
-		}
+	previous := current.PreviousOrchestrator
+	if previous == "" {
+		previous = previousOrchestrator(r.Orchestrator)
 	}
-	if h.Process != nil {
-		if e := h.Process.StartWatcher(r.Dir); e != nil {
-			return e
+	labelled, started, removed := false, false, []string{}
+	rollback := func(cause error) error {
+		for _, n := range removed {
+			_ = prepend(filepath.Join(r.Dir, n), markerForRelease())
 		}
+		if started && h.Process != nil {
+			_ = h.Process.StopWatcher(r.Dir)
+		}
+		if labelled && h.Labeler != nil {
+			_ = h.Labeler.SetOrchestrator(r.ID, "orca")
+		}
+		_ = writeLease(p, current)
+		return cause
 	}
+	if e := h.setLabel(r.ID, previous); e != nil {
+		return rollback(e)
+	}
+	labelled = true
+	if e := h.start(r.Dir); e != nil {
+		return rollback(e)
+	}
+	started = true
 	for _, n := range []string{"OBJECTIVE.md", "PROGRESS.md"} {
 		if e := removeMarker(filepath.Join(r.Dir, n)); e != nil {
-			return e
+			return rollback(e)
 		}
+		removed = append(removed, n)
 	}
 	return nil
 }
+
+func writeLease(p string, l lease) error {
+	f, e := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if e != nil {
+		return e
+	}
+	defer f.Close()
+	return json.NewEncoder(f).Encode(l)
+}
+func previousOrchestrator(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, " \t\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	if s == "" || s == "orca" {
+		return "claude"
+	}
+	return s
+}
+func markerForRelease() string { return "ORCHESTRATOR: orca since rollback (rollback).\n" }
 func prepend(p, s string) error {
 	b, e := os.ReadFile(p)
 	if os.IsNotExist(e) {
@@ -280,6 +388,24 @@ func (h Handover) holder() string {
 	}
 	return fmt.Sprintf("%s/%d", hostname(), os.Getpid())
 }
+func (h Handover) setLabel(id, value string) error {
+	if h.Labeler == nil {
+		return nil
+	}
+	return h.Labeler.SetOrchestrator(id, value)
+}
+func (h Handover) stop(dir string) error {
+	if h.Process == nil {
+		return nil
+	}
+	return h.Process.StopWatcher(dir)
+}
+func (h Handover) start(dir string) error {
+	if h.Process == nil {
+		return nil
+	}
+	return h.Process.StartWatcher(dir)
+}
 
 type Service struct {
 	Importer Importer
@@ -288,6 +414,9 @@ type Service struct {
 
 func (s Service) List() ([]Run, error) { return s.Importer.Discover() }
 func (s Service) Adopt(id string) (Run, error) {
+	if s.Handover.Labeler == nil || s.Handover.Process == nil {
+		return Run{}, ErrAdaptersUnavailable
+	}
 	rs, e := s.Importer.Discover()
 	if e != nil {
 		return Run{}, e
@@ -303,6 +432,9 @@ func (s Service) Adopt(id string) (Run, error) {
 	return Run{}, fmt.Errorf("run %q not found", id)
 }
 func (s Service) Release(id string) error {
+	if s.Handover.Labeler == nil || s.Handover.Process == nil {
+		return ErrAdaptersUnavailable
+	}
 	rs, e := s.Importer.Discover()
 	if e != nil {
 		return e
