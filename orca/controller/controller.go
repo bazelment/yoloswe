@@ -1425,11 +1425,8 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		}
 	}
 
-	if curPhase.Name == recipe.PhaseSWE && (rep.Outcome == lane.OutcomeNoChange || strings.EqualFold(strings.TrimSpace(rep.Change), "none")) {
-		return c.completeReportOnlyLane(ctx, ln, ev)
-	}
-	if curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 {
-		if rep.Outcome == lane.OutcomeDone {
+	if curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && (rep.Outcome == lane.OutcomeNoChange || strings.EqualFold(strings.TrimSpace(rep.Change), "none") || rep.Outcome == lane.OutcomeDone) {
+		if rep.Outcome == lane.OutcomeNoChange || strings.EqualFold(strings.TrimSpace(rep.Change), "none") || rep.Outcome == lane.OutcomeDone {
 			if checker, ok := c.driver.(lane.ReportOnlyChecker); ok {
 				noWork, err := checker.ReportOnlyNoWork(ctx, *ln)
 				if err == nil && noWork {
@@ -1511,6 +1508,8 @@ func (c *Controller) retryReleases(ctx context.Context) {
 				"lane session release exhausted retries", "release escalation recorded",
 				DecisionArgs{ActionKey: "release-exhausted:" + key, Phase: ln.Phase, Round: max(ln.Round, 1)})
 			delete(c.releaseRetries, key)
+		} else {
+			c.releaseRetries[key]++
 		}
 	}
 }
@@ -1910,6 +1909,14 @@ func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.Ev
 	attempt := max(ln.Attempt, 1)
 	actionKey := stallActionKey(ln.ID, ln.Phase, round, attempt, ln.TerminalID)
 	c.emittedStalls[actionKey] = true
+	if ln.SessionID != "" || ln.TerminalID != "" {
+		if err := c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: "phase stall timeout exceeded"}); err != nil {
+			return store.EventClassUnclassified, err
+		}
+	}
+	if err := c.releaseLaneSession(ctx, ln); err != nil {
+		return store.EventClassUnclassified, err
+	}
 
 	_, already, err := c.recordDecision(ctx, ToolLaneStall, ln.ID,
 		fmt.Sprintf("lane %s stalled in phase %s (round %d, attempt %d)", ln.ID, ln.Phase, round, attempt),
@@ -1928,20 +1935,6 @@ func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.Ev
 		return store.EventClassUnclassified, err
 	}
 	if !already {
-		if ln.SessionID != "" || ln.TerminalID != "" {
-			if err := c.driver.Stop(ctx, lane.StopRequest{
-				RunID:      c.cfg.RunID,
-				LaneID:     ln.ID,
-				SessionID:  ln.SessionID,
-				TerminalID: ln.TerminalID,
-				Reason:     "phase stall timeout exceeded",
-			}); err != nil {
-				return store.EventClassUnclassified, err
-			}
-		}
-		if err := c.releaseLaneSession(ctx, ln); err != nil {
-			return store.EventClassUnclassified, err
-		}
 		ln.Status = lane.StatusBlocked
 		ln.LastEventID = ev.ID
 		ln.LastEventAt = c.clock.Now().UTC()

@@ -832,9 +832,13 @@ func TestControllerReportOnlyCompletionSignals(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if outcome == lane.OutcomeNoChange {
+				if outcome == lane.OutcomeNoChange && same {
 					if ln.Status != lane.StatusDone || len(drv.PhaseStarts) != 0 {
-						t.Fatalf("no-change lane=%+v starts=%d", ln, len(drv.PhaseStarts))
+						t.Fatalf("no-change unchanged lane=%+v starts=%d", ln, len(drv.PhaseStarts))
+					}
+				} else if outcome == lane.OutcomeNoChange && !same {
+					if len(drv.PhaseStarts) != 1 || ln.Phase != recipe.PhaseClean {
+						t.Fatalf("no-change changed starts=%d, want clean", len(drv.PhaseStarts))
 					}
 				} else if same && (ln.Status != lane.StatusDone || len(drv.PhaseStarts) != 0) {
 					t.Fatalf("same-base lane=%+v starts=%d", ln, len(drv.PhaseStarts))
