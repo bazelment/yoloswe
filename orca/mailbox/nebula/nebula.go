@@ -83,25 +83,46 @@ func (m *Mailbox) Watch(ctx context.Context) (<-chan store.Event, error) {
 		ticker := time.NewTicker(m.c.PollInterval)
 		defer ticker.Stop()
 		var cursor string
+		seen := make(map[string]struct{})
 		for {
 			v, err := m.req(ctx, http.MethodGet, "/api/mail?cursor="+cursor, nil)
 			if err == nil {
 				if arr, ok := v["messages"].([]any); ok {
+					pageOK := true
 					for _, raw := range arr {
-						b, _ := json.Marshal(raw)
+						b, marshalErr := json.Marshal(raw)
+						if marshalErr != nil {
+							pageOK = false
+							break
+						}
 						var msg mailbox.Message
-						_ = json.Unmarshal(b, &msg)
-						ev, e := mailbox.AppendEvent(ctx, m.c.Events, m.c.RunID, msg)
-						if e == nil {
-							select {
-							case out <- ev:
-							case <-ctx.Done():
-								return
+						if unmarshalErr := json.Unmarshal(b, &msg); unmarshalErr != nil {
+							pageOK = false
+							break
+						}
+						if msg.ID != "" {
+							if _, duplicate := seen[msg.ID]; duplicate {
+								continue
 							}
 						}
+						ev, appendErr := mailbox.AppendEvent(ctx, m.c.Events, m.c.RunID, msg)
+						if appendErr != nil {
+							pageOK = false
+							break
+						}
+						if msg.ID != "" {
+							seen[msg.ID] = struct{}{}
+						}
+						select {
+						case out <- ev:
+						case <-ctx.Done():
+							return
+						}
 					}
-					if c, ok := v["nextCursor"].(string); ok {
-						cursor = c
+					if pageOK {
+						if c, ok := v["nextCursor"].(string); ok && c != "" {
+							cursor = c
+						}
 					}
 				}
 			}
