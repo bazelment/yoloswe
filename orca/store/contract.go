@@ -22,6 +22,10 @@ type Factory func(t *testing.T, clk clock.Clock) Store
 func RunContractTests(t *testing.T, factory Factory) {
 	t.Helper()
 
+	t.Run("MemoriesAndNotes", func(t *testing.T) {
+		t.Parallel()
+		testMemoriesAndNotes(t, factory)
+	})
 	t.Run("RunsAndLeases", func(t *testing.T) {
 		t.Parallel()
 		testRunsAndLeases(t, factory)
@@ -695,5 +699,76 @@ func testRecipes(t *testing.T, factory Factory) {
 	}
 	if len(latestAll) != 1 || latestAll[0].Version != 2 {
 		t.Fatalf("ListLatest = %+v", latestAll)
+	}
+}
+
+func testMemoriesAndNotes(t *testing.T, factory Factory) {
+	clk := clock.NewFakeClock(time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC))
+	st := factory(t, clk)
+	defer st.Close()
+	ctx := t.Context()
+	m := MemoryEntry{ID: "correction", Name: "correction", Description: "Use scoped checks", Type: "rule", Scope: "run", RunID: "run-1", Source: "Use scoped checks, please", Body: "Why: fast feedback. How: test the changed package.", ProposedBy: "owner"}
+	if _, err := st.Memories().Put(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	invalid := m
+	invalid.RunID = ""
+	if _, err := st.Memories().Put(ctx, invalid); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("run memory without run_id = %v", err)
+	}
+	invalid = m
+	invalid.Scope = "owner"
+	if _, err := st.Memories().Put(ctx, invalid); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("owner memory with run_id = %v", err)
+	}
+	invalid = m
+	invalid.Type = "unknown"
+	if _, err := st.Memories().Put(ctx, invalid); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("invalid memory type = %v", err)
+	}
+	clk.Advance(time.Second)
+	m.Body = "Why: fast feedback. How: start with the smallest case."
+	updated, err := st.Memories().Put(ctx, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.CreatedAt.Equal(clk.Now().Add(-time.Second)) || !updated.UpdatedAt.Equal(clk.Now()) {
+		t.Fatalf("updated timestamps = %v/%v", updated.CreatedAt, updated.UpdatedAt)
+	}
+	got, err := st.Memories().Get(ctx, "run", m.ID)
+	if err != nil || got.Body != m.Body || got.Source != m.Source {
+		t.Fatalf("round trip = %+v, %v", got, err)
+	}
+	if _, err := st.Memories().Get(ctx, "owner", m.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("wrong scope read = %v", err)
+	}
+	if err := st.Memories().Delete(ctx, "owner", m.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("wrong scope delete = %v", err)
+	}
+	memories, err := st.Memories().List(ctx, MemoryFilter{RunID: "other-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(memories) != len(StarterMemories()) {
+		t.Fatalf("other run memories = %d, want only starters", len(memories))
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := st.Notes().Append(ctx, RunNote{RunID: "run-1", TaskID: "task-1", Text: "phase done"}); err != nil {
+			t.Fatalf("fixed-clock append %d: %v", i, err)
+		}
+	}
+	notes, err := st.Notes().List(ctx, NoteFilter{RunID: "run-1", TaskID: "task-1"})
+	if err != nil || len(notes) != 3 {
+		t.Fatalf("notes = %+v, %v", notes, err)
+	}
+	ids := make(map[string]bool)
+	for _, n := range notes {
+		if ids[n.ID] {
+			t.Fatalf("duplicate note ID %s", n.ID)
+		}
+		ids[n.ID] = true
+	}
+	if _, err := st.Notes().Append(ctx, RunNote{ID: notes[0].ID, RunID: "other-run", Text: "duplicate"}); !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("duplicate note error = %v", err)
 	}
 }

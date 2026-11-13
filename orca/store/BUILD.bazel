@@ -9,7 +9,10 @@ go_library(
         "store.go",
         "types.go",
     ],
-    embedsrcs = ["migrations/0001_init.sql"],
+    embedsrcs = [
+        "migrations/0001_init.sql",
+        "migrations/0002_memory_notes.sql",
+    ],
     importpath = "github.com/bazelment/yoloswe/orca/store",
     visibility = ["//visibility:public"],
     deps = [

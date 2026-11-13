@@ -38,6 +38,7 @@ const (
 	ToolDecisionsSince  = "decisions.since"
 	ToolBacklog         = "backlog"
 	ToolDirectiveSubmit = "directive.submit"
+	ToolMemoryRead      = "memory.read"
 )
 
 // Directive submission kinds accepted by directive.submit.
@@ -110,6 +111,9 @@ type BacklogParams struct {
 	Statuses []string `json:"statuses,omitempty" jsonschema:"description=Optional list of status filters"`
 	Limit    int      `json:"limit,omitempty" jsonschema:"description=Max backlog items to return (default 25)"`
 }
+type MemoryReadParams struct {
+	ID string `json:"id" jsonschema:"required,description=Memory ID from the index"`
+}
 
 // DirectiveSubmitParams holds parameters for the directive.submit write tool.
 type DirectiveSubmitParams struct {
@@ -128,6 +132,7 @@ var conciergeToolDefs = []model.ToolDefinition{
 	{Name: ToolDecisionsSince, Description: "Read audit decisions from DecisionStore filtered by sequence, time, lane, actor, or category", InputSchema: model.SchemaFor[DecisionsSinceParams]()},
 	{Name: ToolBacklog, Description: "Read prioritized backlog items and mutation history from BacklogStore", InputSchema: model.SchemaFor[BacklogParams]()},
 	{Name: ToolDirectiveSubmit, Description: "Submit a typed owner directive (rule, plan_import, recipe_edit, order) to DirectiveStore", InputSchema: model.SchemaFor[DirectiveSubmitParams]()},
+	{Name: ToolMemoryRead, Description: "Read the full body of a recalled memory", InputSchema: model.SchemaFor[MemoryReadParams]()},
 }
 
 // NormalizeToolName maps underscore aliases (e.g. "lane_show") to canonical dotted tool names.
@@ -147,7 +152,7 @@ func NormalizeToolName(name string) string {
 
 func isKnownTool(name string) bool {
 	switch name {
-	case ToolStatus, ToolLaneShow, ToolDecisionsSince, ToolBacklog, ToolDirectiveSubmit:
+	case ToolStatus, ToolLaneShow, ToolDecisionsSince, ToolBacklog, ToolDirectiveSubmit, ToolMemoryRead:
 		return true
 	default:
 		return false
@@ -587,6 +592,19 @@ func (c *Concierge) handleRawToolCall(
 			return "", err
 		}
 		return c.execDirectiveSubmit(ctx, runID, state, trimmed, p)
+	case ToolMemoryRead:
+		p, err := decodeToolParams[MemoryReadParams](canonical, trimmed)
+		if err != nil {
+			return "", err
+		}
+		m, err := c.store.Memories().Get(ctx, "", p.ID)
+		if err != nil {
+			return "", err
+		}
+		if m.RunID != "" && m.RunID != runID {
+			return "", fmt.Errorf("%w: memory %q", store.ErrNotFound, p.ID)
+		}
+		return fmt.Sprintf("[%s] %s\n%s\nsource: %s", m.ID, m.Name, m.Body, m.Source), nil
 
 	default:
 		return "", fmt.Errorf("unsupported concierge tool %q", toolName)

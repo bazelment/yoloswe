@@ -5,7 +5,9 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/lane"
@@ -27,6 +29,74 @@ type (
 	LaneStatus = lane.Status
 	Recipe     = recipe.Recipe
 )
+
+// MemoryEntry is durable guidance for orchestration roles.
+type MemoryEntry struct {
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Type        string    `json:"type"`  // rule, preference, fact, reference
+	Scope       string    `json:"scope"` // owner, repo, run
+	RunID       string    `json:"run_id,omitempty"`
+	Source      string    `json:"source"`
+	Body        string    `json:"body"`
+	ProposedBy  string    `json:"proposed_by"` // owner or model
+}
+
+func (m MemoryEntry) Clone() MemoryEntry { return m }
+
+func (m MemoryEntry) validate() error {
+	if strings.TrimSpace(m.ID) == "" || strings.TrimSpace(m.Name) == "" || strings.TrimSpace(m.Body) == "" {
+		return fmt.Errorf("%w: memory id, name and body required", ErrInvalidArgument)
+	}
+	if !slices.Contains([]string{"rule", "preference", "fact", "reference"}, m.Type) ||
+		!slices.Contains([]string{"owner", "repo", "run"}, m.Scope) ||
+		!slices.Contains([]string{"owner", "model"}, m.ProposedBy) {
+		return fmt.Errorf("%w: invalid memory type, scope or proposed_by", ErrInvalidArgument)
+	}
+	if m.Scope != "run" && m.RunID != "" {
+		return fmt.Errorf("%w: only run memories may have run_id", ErrInvalidArgument)
+	}
+	if m.Scope == "run" && strings.TrimSpace(m.RunID) == "" {
+		return fmt.Errorf("%w: run memory requires run_id", ErrInvalidArgument)
+	}
+	return nil
+}
+
+// RunNote is an append-only note attached to a run or task.
+type RunNote struct {
+	CreatedAt time.Time `json:"created_at"`
+	ID        string    `json:"id"`
+	RunID     string    `json:"run_id"`
+	TaskID    string    `json:"task_id,omitempty"`
+	Phase     string    `json:"phase,omitempty"`
+	Text      string    `json:"text"`
+}
+
+func (n RunNote) Clone() RunNote { return n }
+
+// StarterMemories returns the default operating rules.
+func StarterMemories() []MemoryEntry {
+	return []MemoryEntry{
+		{ID: "starter-inner-loop", Name: "fast inner loop", Description: "Validate the smallest case first", Type: "rule", Scope: "owner", Source: "orca starter set", Body: "Why: feedback is fastest on the smallest case. How to apply: run the narrowest deterministic check before broad work.", ProposedBy: "owner"},
+		{ID: "starter-reversible", Name: "reversible decisions", Description: "Decide anything reversible", Type: "rule", Scope: "owner", Source: "orca starter set", Body: "Why: reversible choices do not need delay. How to apply: choose and proceed when undo is cheap.", ProposedBy: "owner"},
+		{ID: "starter-one-way", Name: "one-way doors", Description: "Ask only on irreversible choices", Type: "rule", Scope: "owner", Source: "orca starter set", Body: "Why: owner input matters at irreversible boundaries. How to apply: ask only before a one-way door.", ProposedBy: "owner"},
+		{ID: "starter-verifier", Name: "verifier independence", Description: "Verifier is never the author", Type: "rule", Scope: "owner", Source: "orca starter set", Body: "Why: independent verification catches author bias. How to apply: assign verification to a separate role.", ProposedBy: "owner"},
+		{ID: "starter-language", Name: "plain language", Description: "Use plain language with the owner", Type: "preference", Scope: "owner", Source: "orca starter set", Body: "Why: the owner should understand decisions quickly. How to apply: explain results in direct, plain language.", ProposedBy: "owner"},
+	}
+}
+
+// MemoryIndex renders the compact index shared with orchestration roles.
+func MemoryIndex(entries []MemoryEntry) string {
+	var b strings.Builder
+	for i := range entries {
+		m := &entries[i]
+		fmt.Fprintf(&b, "- [%s] %s (%s/%s): %s\n", m.ID, m.Name, m.Type, m.Scope, strings.TrimSpace(m.Description))
+	}
+	return b.String()
+}
 
 // Lease represents exclusive controller ownership of a Run with a TTL heartbeat.
 type Lease struct {

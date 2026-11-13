@@ -17,7 +17,22 @@ type Store interface {
 	Events() EventStore
 	Threads() ThreadStore
 	Recipes() RecipeStore
+	Memories() MemoryEntryStore
+	Notes() NoteStore
 	Close() error
+}
+
+type MemoryFilter struct{ RunID, Scope, Type string }
+type MemoryEntryStore interface {
+	Put(context.Context, MemoryEntry) (MemoryEntry, error)
+	Get(context.Context, string, string) (*MemoryEntry, error)
+	List(context.Context, MemoryFilter) ([]MemoryEntry, error)
+	Delete(context.Context, string, string) error
+}
+type NoteFilter struct{ RunID, TaskID string }
+type NoteStore interface {
+	Append(context.Context, RunNote) (RunNote, error)
+	List(context.Context, NoteFilter) ([]RunNote, error)
 }
 
 // RunStore manages run objectives, plan references, and controller leases.

@@ -124,6 +124,10 @@ func BuildSnapshot(
 	if err != nil {
 		return Snapshot{}, err
 	}
+	memories, err := st.Memories().List(ctx, store.MemoryFilter{RunID: runID})
+	if err != nil {
+		return Snapshot{}, err
+	}
 
 	allBacklog, err := st.Backlog().List(ctx, store.BacklogFilter{
 		RunID: runID,
@@ -184,6 +188,8 @@ func BuildSnapshot(
 	backlogBudget := remaining * 25 / 100
 	laneBudget := remaining * 25 / 100
 	eventBudget := remaining - dirBudget - backlogBudget - laneBudget
+	memoryBudget := remaining * 10 / 100
+	eventBudget -= memoryBudget
 
 	fmt.Fprintf(&b, "\n## Active Directives (%d)\n", len(directives))
 	if len(directives) == 0 {
@@ -208,6 +214,23 @@ func BuildSnapshot(
 			}
 			omitted := fmt.Sprintf("... (%d more directives omitted for token budget)\n", len(directives)-i)
 			if b.Len()-secStart+len(entry)+len(omitted) > dirBudget {
+				truncated = true
+				b.WriteString(omitted)
+				break
+			}
+			b.WriteString(entry)
+		}
+	}
+	fmt.Fprintf(&b, "\n## Memory Index (%d)\n", len(memories))
+	if len(memories) == 0 {
+		b.WriteString("(none)\n")
+	} else {
+		secStart := b.Len()
+		for i := range memories {
+			m := memories[i]
+			entry := fmt.Sprintf("- [%s] %s (%s/%s): %s\n", singleLine(truncateText(m.ID, 128, &truncated)), singleLine(truncateText(m.Name, 256, &truncated)), m.Type, m.Scope, singleLine(truncateText(m.Description, cfg.MaxDirectiveBytes, &truncated)))
+			omitted := fmt.Sprintf("... (%d more memories omitted for token budget)\n", len(memories)-i)
+			if b.Len()-secStart+len(entry)+len(omitted) > memoryBudget {
 				truncated = true
 				b.WriteString(omitted)
 				break

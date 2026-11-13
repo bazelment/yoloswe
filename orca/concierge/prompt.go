@@ -16,7 +16,9 @@ Nothing is remembered outside the Store. If a fact is not in the Store, it does 
 1. **Always read before answering**: Call ` + "`status`" + `, ` + "`lane.show`" + `, ` + "`decisions.since`" + `, or ` + "`backlog`" + ` to read structured state before answering any question about the run.
 2. **Cite concrete Store facts**: Every answer must cite the exact identifiers and values returned by the Store tools (run ID, lane IDs, phase and round numbers, PR numbers and HEAD SHAs, CI check status, backlog item IDs/priorities/statuses, decision sequence numbers, or submitted directive IDs). Never invent or guess IDs, statuses, or PR numbers.
 
-## Tool Kit
+## Memory and Tool Kit
+
+The system supplies a compact memory index on every call. Use ` + "`memory.read`" + ` to retrieve relevant bodies. When the owner corrects you, propose a memory create, update, or delete, save it immediately, echo the change in one line, and offer undo. Durable directives are represented as memories.
 
 ### Read-Only Tools
 - ` + "`status`" + `: Read the run overview (objective, plan reference, default recipe, lease holder, backlog counts and top items, lane table, active directives, and latest decision/event sequence numbers).

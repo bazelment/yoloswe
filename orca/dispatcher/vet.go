@@ -438,6 +438,8 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 }
 
 // StateView holds the verified Store state inspected by Invariant checks.
+//
+//nolint:govet
 type StateView struct {
 	Now            time.Time
 	Run            *store.Run
@@ -446,6 +448,7 @@ type StateView struct {
 	Recipes        map[string]recipe.Recipe
 	VersionRecipes map[string]recipe.Recipe
 	MaxBriefBytes  int
+	Memories       []store.MemoryEntry
 }
 
 // LoadStateView loads the current Run, Lanes, Backlog, and Recipes from st into
@@ -487,6 +490,7 @@ func loadStateViewWithCache(
 	if err != nil {
 		return nil, err
 	}
+	memories, _ := st.Memories().List(ctx, store.MemoryFilter{RunID: runID})
 
 	view := &StateView{
 		Now:            clk.Now().UTC(),
@@ -496,6 +500,7 @@ func loadStateViewWithCache(
 		Recipes:        make(map[string]recipe.Recipe, len(latestRecipes)+1),
 		VersionRecipes: make(map[string]recipe.Recipe, len(latestRecipes)+1),
 		MaxBriefBytes:  maxBriefBytes,
+		Memories:       memories,
 	}
 	defRecipe := recipe.Default()
 	view.Recipes[recipe.DefaultName] = defRecipe

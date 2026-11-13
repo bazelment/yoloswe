@@ -3,6 +3,7 @@ package store
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"slices"
 	"strings"
@@ -30,6 +31,8 @@ type MemoryStore struct {
 	turns        map[string][]Turn
 	items        map[string][]Item
 	recipes      map[string]map[string][]Recipe
+	memories     map[string]*MemoryEntry
+	notes        map[string][]RunNote
 	mu           sync.RWMutex
 }
 
@@ -39,7 +42,7 @@ func NewMemoryStore(clk clock.Clock) *MemoryStore {
 	if clk == nil {
 		clk = clock.RealClock{}
 	}
-	return &MemoryStore{
+	s := &MemoryStore{
 		clock:        clk,
 		runs:         make(map[string]*Run),
 		backlog:      make(map[string]map[string]*BacklogItem),
@@ -54,7 +57,16 @@ func NewMemoryStore(clk clock.Clock) *MemoryStore {
 		turns:        make(map[string][]Turn),
 		items:        make(map[string][]Item),
 		recipes:      make(map[string]map[string][]Recipe),
+		memories:     make(map[string]*MemoryEntry),
+		notes:        make(map[string][]RunNote),
 	}
+	starter := StarterMemories()
+	for i := range starter {
+		v := starter[i]
+		cp := v
+		s.memories[v.ID] = &cp
+	}
+	return s
 }
 
 func (s *MemoryStore) now() time.Time {
@@ -75,11 +87,116 @@ func (s *MemoryStore) Events() EventStore { return (*memEventStore)(s) }
 
 func (s *MemoryStore) Threads() ThreadStore { return (*memThreadStore)(s) }
 
-func (s *MemoryStore) Recipes() RecipeStore { return (*memRecipeStore)(s) }
+func (s *MemoryStore) Recipes() RecipeStore       { return (*memRecipeStore)(s) }
+func (s *MemoryStore) Memories() MemoryEntryStore { return (*memMemoryStore)(s) }
+func (s *MemoryStore) Notes() NoteStore           { return (*memNoteStore)(s) }
 
 func (s *MemoryStore) Close() error { return nil }
 
 var _ Store = (*MemoryStore)(nil)
+
+type memMemoryStore MemoryStore
+
+func (m *memMemoryStore) s() *MemoryStore { return (*MemoryStore)(m) }
+func (m *memMemoryStore) Put(_ context.Context, v MemoryEntry) (MemoryEntry, error) {
+	s := m.s()
+	if err := v.validate(); err != nil {
+		return MemoryEntry{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	if existing, ok := s.memories[v.ID]; ok {
+		v.CreatedAt = existing.CreatedAt
+	} else if v.CreatedAt.IsZero() {
+		v.CreatedAt = now
+	}
+	v.UpdatedAt = now
+	cp := v
+	s.memories[v.ID] = &cp
+	return cp, nil
+}
+func (m *memMemoryStore) Get(_ context.Context, scope, id string) (*MemoryEntry, error) {
+	s := m.s()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.memories[id]
+	if !ok || (scope != "" && v.Scope != scope) {
+		return nil, fmt.Errorf("%w: memory %q", ErrNotFound, id)
+	}
+	cp := *v
+	return &cp, nil
+}
+func (m *memMemoryStore) List(_ context.Context, f MemoryFilter) ([]MemoryEntry, error) {
+	s := m.s()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []MemoryEntry{}
+	for _, v := range s.memories {
+		if f.RunID != "" && v.RunID != "" && v.RunID != f.RunID {
+			continue
+		}
+		if f.Scope != "" && v.Scope != f.Scope {
+			continue
+		}
+		if f.Type != "" && v.Type != f.Type {
+			continue
+		}
+		out = append(out, *v)
+	}
+	slices.SortFunc(out, func(a, b MemoryEntry) int { return cmp.Compare(a.ID, b.ID) })
+	return out, nil
+}
+func (m *memMemoryStore) Delete(_ context.Context, scope, id string) error {
+	s := m.s()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v, ok := s.memories[id]; !ok || (scope != "" && v.Scope != scope) {
+		return fmt.Errorf("%w: memory %q", ErrNotFound, id)
+	}
+	delete(s.memories, id)
+	return nil
+}
+
+type memNoteStore MemoryStore
+
+func (m *memNoteStore) s() *MemoryStore { return (*MemoryStore)(m) }
+func (m *memNoteStore) Append(_ context.Context, n RunNote) (RunNote, error) {
+	s := m.s()
+	if strings.TrimSpace(n.RunID) == "" || strings.TrimSpace(n.Text) == "" {
+		return RunNote{}, fmt.Errorf("%w: note run_id and text required", ErrInvalidArgument)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n.ID == "" {
+		n.ID = "note-" + rand.Text()
+	}
+	for _, notes := range s.notes {
+		for _, existing := range notes {
+			if existing.ID == n.ID {
+				return RunNote{}, fmt.Errorf("%w: note %q", ErrAlreadyExists, n.ID)
+			}
+		}
+	}
+	if n.CreatedAt.IsZero() {
+		n.CreatedAt = s.now()
+	}
+	s.notes[n.RunID] = append(s.notes[n.RunID], n)
+	return n, nil
+}
+func (m *memNoteStore) List(_ context.Context, f NoteFilter) ([]RunNote, error) {
+	s := m.s()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []RunNote{}
+	for _, n := range s.notes[f.RunID] {
+		if f.TaskID != "" && n.TaskID != f.TaskID {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
 
 type memRunStore MemoryStore
 
