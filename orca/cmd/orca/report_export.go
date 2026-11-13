@@ -13,8 +13,6 @@ import (
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
-// runReport is intentionally JSON so reports can be consumed by scripts.
-//
 //nolint:govet // report layout is kept readable for the JSON contract.
 type runReport struct {
 	RunID                  string             `json:"run_id"`
@@ -30,12 +28,14 @@ type runReport struct {
 
 func reportRun(ctx context.Context, st store.Store, runID string, day string, out io.Writer) error {
 	filter := store.DecisionFilter{RunID: runID}
+	var dayEnd time.Time
 	if day != "" {
 		t, err := time.Parse("2006-01-02", day)
 		if err != nil {
 			return err
 		}
 		filter.SinceTime = &t
+		dayEnd = t.Add(24 * time.Hour)
 	}
 	decs, err := st.Decisions().List(ctx, filter)
 	if err != nil {
@@ -45,6 +45,11 @@ func reportRun(ctx context.Context, st store.Store, runID string, day string, ou
 	seen := map[string]bool{}
 	for i := range decs {
 		d := &decs[i]
+		if !dayEnd.IsZero() {
+			if !d.CreatedAt.Before(dayEnd) {
+				continue
+			}
+		}
 		r.DecisionsByRole[d.Actor]++
 		r.CostByRole[d.Actor] += d.CostUSD
 		if strings.Contains(strings.ToLower(d.Tool), "owner.ask") {

@@ -347,7 +347,7 @@ type Decision struct {
 	CostUSD      float64          `json:"cost_usd,omitempty"`
 	LatencyMs    int64            `json:"latency_ms,omitempty"`
 	Vetted       bool             `json:"vetted"`
-	// TraceID links the complete event -> decision -> action -> outcome chain.
+	// TraceID links the event, decision, action, and outcome chain.
 	TraceID       string `json:"trace_id,omitempty"`
 	OutcomeLabel  string `json:"outcome_label,omitempty"`
 	Provider      string `json:"provider,omitempty"`
