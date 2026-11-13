@@ -354,31 +354,38 @@ func (p *Planner) runReconciliation(
 			}); recordErr != nil {
 				return recordErr
 			}
-			// Keep the planner's first draft when the critic is unavailable.
-			// Keep the planner's first draft when the critic is unavailable.
 		} else {
 			if critique == nil || strings.TrimSpace(critique.Text()) == "" {
-				return errors.New("orca: critic returned no critique")
+				err = errors.New("critic returned no critique")
+				message := "critic unavailable: " + err.Error()
+				if _, recordErr := p.store.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
+					RunID: runID, Category: store.DecisionJudgment, Actor: "critic", ThreadID: threadID, TurnID: turnID,
+					Model: p.criticModel, Provider: p.criticProvider, Tool: "planner.critique", Reason: message, Result: message,
+					Vetted: false, LatencyMs: max(p.clock.Now().Sub(criticStart).Milliseconds(), 0),
+				}); recordErr != nil {
+					return recordErr
+				}
+			} else {
+				usage = usage.Add(critique.Usage)
+				if _, err := p.store.Decisions().Append(ctx, store.Decision{
+					RunID: runID, Category: store.DecisionJudgment, Actor: "critic", ThreadID: threadID, TurnID: turnID,
+					Model: p.criticModel, Provider: p.criticProvider,
+					Tool: "planner.critique", Reason: "challenge open approach before spawning", Result: critique.Text(), Vetted: true,
+					InputTokens: critique.Usage.InputTokens, OutputTokens: critique.Usage.OutputTokens, CostUSD: critique.Usage.CostUSD,
+					LatencyMs: max(p.clock.Now().Sub(criticStart).Milliseconds(), 0),
+				}); err != nil {
+					return err
+				}
+				req.Messages = []model.Message{model.NewUserMessage(prompt + "\n\nYour first draft:\n" + string(raw) + "\n\nCritic feedback:\n" + critique.Text() + "\n\nRevise once and submit the final plan using submit_plan_reconciliation.")}
+				req.Tools = []model.ToolDefinition{planTool(SubmitPlanReconcileTool)}
+				revised, _, revisedUsage, err := p.proposePlan(ctx, req, false)
+				usage = usage.Add(revisedUsage)
+				plannerUsage = plannerUsage.Add(revisedUsage)
+				if err != nil {
+					return fmt.Errorf("planner revision: %w", err)
+				}
+				reconciled = revised
 			}
-			usage = usage.Add(critique.Usage)
-			if _, err := p.store.Decisions().Append(ctx, store.Decision{
-				RunID: runID, Category: store.DecisionJudgment, Actor: "critic", ThreadID: threadID, TurnID: turnID,
-				Model: p.criticModel, Provider: p.criticProvider,
-				Tool: "planner.critique", Reason: "challenge open approach before spawning", Result: critique.Text(), Vetted: true,
-				InputTokens: critique.Usage.InputTokens, OutputTokens: critique.Usage.OutputTokens, CostUSD: critique.Usage.CostUSD,
-				LatencyMs: max(p.clock.Now().Sub(criticStart).Milliseconds(), 0),
-			}); err != nil {
-				return err
-			}
-			req.Messages = []model.Message{model.NewUserMessage(prompt + "\n\nYour first draft:\n" + string(raw) + "\n\nCritic feedback:\n" + critique.Text() + "\n\nRevise once and submit the final plan using submit_plan_reconciliation.")}
-			req.Tools = []model.ToolDefinition{planTool(SubmitPlanReconcileTool)}
-			revised, _, revisedUsage, err := p.proposePlan(ctx, req, false)
-			usage = usage.Add(revisedUsage)
-			plannerUsage = plannerUsage.Add(revisedUsage)
-			if err != nil {
-				return fmt.Errorf("planner revision: %w", err)
-			}
-			reconciled = revised
 		}
 	}
 	appliedSummary, err := p.applyReconciliation(ctx, runID, reconciled, planRef)
