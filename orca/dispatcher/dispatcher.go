@@ -56,6 +56,8 @@ type Config struct {
 	// from the request: newer models reject the parameter outright.
 	Temperature    *float64
 	Model          string
+	Provider       string
+	PromptVersion  string
 	HardBatchModel string
 	SystemPrompt   string
 	ThreadID       string
@@ -705,25 +707,28 @@ func (d *Dispatcher) recordDecision(
 		traceID, modelName, input = state.traceID, state.model, state.input
 	}
 	dec, err := d.store.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
-		RunID:        runID,
-		Category:     store.DecisionJudgment,
-		Actor:        ActorDispatcher,
-		ThreadID:     threadID,
-		TurnID:       turnID,
-		LaneID:       act.LaneID,
-		Tool:         cmp.Or(act.Tool, "unknown"),
-		Reason:       cmp.Or(act.Reason, result),
-		Result:       result,
-		Args:         act.Args,
-		Vetted:       vetted,
-		InputTokens:  usage.InputTokens,
-		OutputTokens: usage.OutputTokens,
-		CostUSD:      usage.CostUSD,
-		LatencyMs:    max(elapsed.Milliseconds(), 0),
-		TraceID:      traceID,
-		Model:        modelName,
-		Input:        input,
-		Output:       result,
+		RunID:         runID,
+		Category:      store.DecisionJudgment,
+		Actor:         ActorDispatcher,
+		ThreadID:      threadID,
+		TurnID:        turnID,
+		LaneID:        act.LaneID,
+		Tool:          cmp.Or(act.Tool, "unknown"),
+		Reason:        cmp.Or(act.Reason, result),
+		Result:        result,
+		Args:          act.Args,
+		Vetted:        vetted,
+		InputTokens:   usage.InputTokens,
+		OutputTokens:  usage.OutputTokens,
+		CostUSD:       usage.CostUSD,
+		LatencyMs:     max(elapsed.Milliseconds(), 0),
+		TraceID:       traceID,
+		Model:         modelName,
+		Input:         input,
+		Output:        result,
+		Provider:      d.cfg.Provider,
+		PromptVersion: d.cfg.PromptVersion,
+		OutcomeLabel:  outcomeLabel(result),
 	})
 	if err != nil {
 		return err
@@ -732,6 +737,22 @@ func (d *Dispatcher) recordDecision(
 		state.decisions = append(state.decisions, dec)
 	}
 	return nil
+}
+
+func outcomeLabel(result string) string {
+	s := strings.ToLower(result)
+	switch {
+	case strings.Contains(s, "owner corrected"), strings.Contains(s, "corrected"):
+		return "owner corrected"
+	case strings.Contains(s, "merged"):
+		return "merged"
+	case strings.Contains(s, "reworked"), strings.Contains(s, "retry"):
+		return "reworked"
+	case strings.Contains(s, "abandoned"), strings.Contains(s, "dropped"):
+		return "abandoned"
+	default:
+		return ""
+	}
 }
 
 func (d *Dispatcher) applyVettedAction(
