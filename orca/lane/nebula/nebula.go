@@ -159,6 +159,110 @@ type Driver struct {
 
 var _ lane.LaneDriver = (*Driver)(nil)
 
+// Watch streams all terminals belonging to runID as uniform lane events.
+func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
+	out := make(chan lane.Event, 32)
+	go func() {
+		defer close(out)
+		if d.events == nil {
+			return
+		}
+		seen := map[int64]bool{}
+		started := map[string]bool{}
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		last := d.clock.Now()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			// Discover sessions for this run and attach one SSE reader per terminal.
+			var sessions []SessionInfo
+			if err := d.doJSON(ctx, http.MethodGet, "/api/code-sessions", nil, &struct {
+				Sessions *[]SessionInfo `json:"sessions"`
+			}{Sessions: &sessions}); err == nil {
+				for i := range sessions {
+					sess := &sessions[i]
+					if sess.Metadata["swarmRun"] != runID {
+						continue
+					}
+					detail, err := d.GetSession(ctx, sess.ID)
+					if err != nil {
+						continue
+					}
+					for i := range detail.Terminals {
+						tm := &detail.Terminals[i]
+						if started[tm.ID] {
+							continue
+						}
+						started[tm.ID] = true
+						go d.StreamEvents(ctx, StreamRequest{Events: d.events, RunID: runID, SessionID: sess.ID, TerminalID: tm.ID})
+					}
+				}
+			}
+			evs, err := d.events.List(ctx, store.EventFilter{RunID: runID})
+			if err != nil {
+				continue
+			}
+			for i := range evs {
+				ev := &evs[i]
+				if seen[ev.Seq] {
+					continue
+				}
+				seen[ev.Seq] = true
+				if e, ok := uniformEvent(*ev, runID); ok {
+					out <- e
+					last = d.clock.Now()
+				}
+			}
+			if d.clock.Now().Sub(last) >= time.Minute {
+				out <- lane.Event{Kind: lane.EventNoActivity, RunID: runID, Since: last}
+				last = d.clock.Now()
+			}
+		}
+	}()
+	return out
+}
+
+func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
+	var p StreamEventPayload
+	_ = json.Unmarshal(ev.Payload, &p)
+	e := lane.Event{RunID: runID, LaneID: ev.LaneID, At: ev.CreatedAt, Text: ev.Summary, TerminalID: p.TerminalID}
+	if p.TerminalEvent != nil {
+		e.TerminalID = p.TerminalEvent.TerminalID
+		e.Text = p.TerminalEvent.Text
+	}
+	switch ev.Kind {
+	case store.EventLaneReport:
+		e.Kind = lane.EventPhaseReported
+		e.Report = p.Report
+	case store.EventPhaseExit:
+		if p.TerminalEvent != nil && strings.Contains(strings.ToLower(p.TerminalEvent.Outcome), "auth") {
+			e.Kind = lane.EventAuthFailure
+		} else {
+			e.Kind = lane.EventExited
+		}
+	case store.EventStall:
+		if p.TerminalEvent != nil {
+			switch strings.ToLower(p.TerminalEvent.Type) {
+			case "input.waiting":
+				e.Kind = lane.EventWaitingForInput
+			case "turn.capacity", "terminal.usage_limited":
+				e.Kind = lane.EventQuotaFailure
+			default:
+				e.Kind = lane.EventTurnEndedNoReport
+			}
+		} else {
+			e.Kind = lane.EventQuotaFailure
+		}
+	default:
+		return lane.Event{}, false
+	}
+	return e, true
+}
+
 // New constructs a Driver from cfg and options.
 func New(cfg Config, opts ...Option) (*Driver, error) {
 	for _, opt := range opts {

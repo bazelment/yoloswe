@@ -299,6 +299,7 @@ func splitHeader(line string) (string, string, bool) {
 
 // SpawnRequest holds the parameters to spawn a new worker session for a lane.
 type SpawnRequest struct {
+	RunDir     string            `json:"run_dir,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	RunID      string            `json:"run_id"`
 	LaneID     string            `json:"lane_id"`
@@ -360,31 +361,57 @@ type StopRequest struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
-// LaneDriver abstracts worker session lifecycle operations across Nebula and test fakes.
+// EventKind identifies a uniform worker lifecycle signal.
+type EventKind string
+
+const (
+	EventPhaseReported     EventKind = "phase_reported"
+	EventTurnEndedNoReport EventKind = "turn_ended_no_report"
+	EventWaitingForInput   EventKind = "waiting_for_input"
+	EventExited            EventKind = "exited"
+	EventQuotaFailure      EventKind = "quota_failure"
+	EventAuthFailure       EventKind = "auth_failure"
+	EventNoActivity        EventKind = "no_activity"
+)
+
+// Event is the backend-independent signal consumed by the controller.
+type Event struct { //nolint:govet // wire-shaped event prioritizes readable fields
+	Kind                                        EventKind
+	RunID, LaneID, SessionID, TerminalID, Phase string
+	Report                                      *PhaseReport
+	Text                                        string
+	Since                                       time.Time
+	At                                          time.Time
+}
+
+// LaneDriver abstracts worker session lifecycle operations across backends.
 type LaneDriver interface {
 	SpawnSession(ctx context.Context, req SpawnRequest) (SpawnResult, error)
 	StartPhaseTerminal(ctx context.Context, req StartPhaseRequest) (StartPhaseResult, error)
 	Steer(ctx context.Context, req SteerRequest) error
 	Stop(ctx context.Context, req StopRequest) error
 	ReadReport(ctx context.Context, runID, laneID, terminalID string) (*PhaseReport, error)
+	Watch(ctx context.Context, runID string) <-chan Event
 }
 
 type Driver = LaneDriver
 
 // FakeDriver is an in-memory LaneDriver implementation for deterministic unit tests.
-type FakeDriver struct {
+type FakeDriver struct { //nolint:govet // test double state is intentionally grouped
 	reports     map[string]*PhaseReport
 	Spawns      []SpawnRequest
 	PhaseStarts []StartPhaseRequest
 	Steers      []SteerRequest
 	Stops       []StopRequest
 	nextSeq     int
+	events      chan Event
 	mu          sync.Mutex
 }
 
 func NewFakeDriver() *FakeDriver {
 	return &FakeDriver{
 		reports: make(map[string]*PhaseReport),
+		events:  make(chan Event, 64),
 	}
 }
 
@@ -455,4 +482,30 @@ func (f *FakeDriver) ReadReport(_ context.Context, _, _, terminalID string) (*Ph
 	}
 	cp := *rep
 	return &cp, nil
+}
+
+// Emit publishes an event to watchers. It is intended for deterministic tests and scripted drivers.
+func (f *FakeDriver) Emit(ev Event) {
+	select {
+	case f.events <- ev:
+	default:
+	}
+}
+
+func (f *FakeDriver) Watch(ctx context.Context, runID string) <-chan Event {
+	out := make(chan Event, 16)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev := <-f.events:
+				if runID == "" || ev.RunID == "" || ev.RunID == runID {
+					out <- ev
+				}
+			}
+		}
+	}()
+	return out
 }
