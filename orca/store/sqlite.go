@@ -117,7 +117,15 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 			return fmt.Errorf("exec %q: %w", p, err)
 		}
 	}
-	return s.applyMigrations(ctx)
+	if err := s.applyMigrations(ctx); err != nil {
+		return err
+	}
+	for _, v := range StarterMemories() {
+		if _, err := (*sqliteMemoryStore)(s).Put(ctx, v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) applyMigrations(ctx context.Context) error {
@@ -219,7 +227,9 @@ func (s *SQLiteStore) Events() EventStore { return (*sqliteEventStore)(s) }
 
 func (s *SQLiteStore) Threads() ThreadStore { return (*sqliteThreadStore)(s) }
 
-func (s *SQLiteStore) Recipes() RecipeStore { return (*sqliteRecipeStore)(s) }
+func (s *SQLiteStore) Recipes() RecipeStore       { return (*sqliteRecipeStore)(s) }
+func (s *SQLiteStore) Memories() MemoryEntryStore { return (*sqliteMemoryStore)(s) }
+func (s *SQLiteStore) Notes() NoteStore           { return (*sqliteNoteStore)(s) }
 
 func (s *SQLiteStore) Close() error {
 	s.mu.Lock()
@@ -237,6 +247,106 @@ func formatTime(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format(time.RFC3339Nano)
+}
+
+type sqliteMemoryStore SQLiteStore
+
+func (m *sqliteMemoryStore) s() *SQLiteStore { return (*SQLiteStore)(m) }
+func (m *sqliteMemoryStore) Put(ctx context.Context, v MemoryEntry) (MemoryEntry, error) {
+	s := m.s()
+	if strings.TrimSpace(v.ID) == "" || strings.TrimSpace(v.Name) == "" || strings.TrimSpace(v.Body) == "" {
+		return MemoryEntry{}, fmt.Errorf("%w: memory id, name and body required", ErrInvalidArgument)
+	}
+	now := s.now()
+	if v.CreatedAt.IsZero() {
+		v.CreatedAt = now
+	}
+	v.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, `INSERT INTO memories(id,name,description,type,scope,run_id,source,body,proposed_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,type=excluded.type,scope=excluded.scope,run_id=excluded.run_id,source=excluded.source,body=excluded.body,proposed_by=excluded.proposed_by,updated_at=excluded.updated_at`, v.ID, v.Name, v.Description, v.Type, v.Scope, v.RunID, v.Source, v.Body, v.ProposedBy, formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
+	return v, err
+}
+func (m *sqliteMemoryStore) Get(ctx context.Context, _, id string) (*MemoryEntry, error) {
+	s := m.s()
+	var v MemoryEntry
+	var ca, ua string
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,description,type,scope,run_id,source,body,proposed_by,created_at,updated_at FROM memories WHERE id=?`, id).Scan(&v.ID, &v.Name, &v.Description, &v.Type, &v.Scope, &v.RunID, &v.Source, &v.Body, &v.ProposedBy, &ca, &ua)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: memory %q", ErrNotFound, id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	v.CreatedAt, _ = time.Parse(time.RFC3339Nano, ca)
+	v.UpdatedAt, _ = time.Parse(time.RFC3339Nano, ua)
+	return &v, nil
+}
+func (m *sqliteMemoryStore) List(ctx context.Context, f MemoryFilter) ([]MemoryEntry, error) {
+	s := m.s()
+	q := `SELECT id,name,description,type,scope,run_id,source,body,proposed_by,created_at,updated_at FROM memories WHERE (?='' OR run_id=?) AND (?='' OR scope=?) AND (?='' OR type=?) ORDER BY id`
+	rows, err := s.db.QueryContext(ctx, q, f.RunID, f.RunID, f.Scope, f.Scope, f.Type, f.Type)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []MemoryEntry{}
+	for rows.Next() {
+		var v MemoryEntry
+		var ca, ua string
+		if err := rows.Scan(&v.ID, &v.Name, &v.Description, &v.Type, &v.Scope, &v.RunID, &v.Source, &v.Body, &v.ProposedBy, &ca, &ua); err != nil {
+			return nil, err
+		}
+		v.CreatedAt, _ = time.Parse(time.RFC3339Nano, ca)
+		v.UpdatedAt, _ = time.Parse(time.RFC3339Nano, ua)
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+func (m *sqliteMemoryStore) Delete(ctx context.Context, _, id string) error {
+	r, err := m.s().db.ExecContext(ctx, `DELETE FROM memories WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	n, _ := r.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("%w: memory %q", ErrNotFound, id)
+	}
+	return nil
+}
+
+type sqliteNoteStore SQLiteStore
+
+func (n *sqliteNoteStore) s() *SQLiteStore { return (*SQLiteStore)(n) }
+func (n *sqliteNoteStore) Append(ctx context.Context, v RunNote) (RunNote, error) {
+	s := n.s()
+	if strings.TrimSpace(v.RunID) == "" || strings.TrimSpace(v.Text) == "" {
+		return RunNote{}, fmt.Errorf("%w: note run_id and text required", ErrInvalidArgument)
+	}
+	if v.ID == "" {
+		v.ID = fmt.Sprintf("note-%d", s.now().UnixNano())
+	}
+	if v.CreatedAt.IsZero() {
+		v.CreatedAt = s.now()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO run_notes(id,run_id,task_id,phase,text,created_at) VALUES(?,?,?,?,?,?)`, v.ID, v.RunID, v.TaskID, v.Phase, v.Text, formatTime(v.CreatedAt))
+	return v, err
+}
+func (n *sqliteNoteStore) List(ctx context.Context, f NoteFilter) ([]RunNote, error) {
+	rows, err := n.s().db.QueryContext(ctx, `SELECT id,run_id,task_id,phase,text,created_at FROM run_notes WHERE run_id=? AND (?='' OR task_id=?) ORDER BY created_at,id`, f.RunID, f.TaskID, f.TaskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []RunNote{}
+	for rows.Next() {
+		var v RunNote
+		var ts string
+		if err := rows.Scan(&v.ID, &v.RunID, &v.TaskID, &v.Phase, &v.Text, &ts); err != nil {
+			return nil, err
+		}
+		v.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 func parseTime(raw string) (time.Time, error) {

@@ -124,6 +124,10 @@ func BuildSnapshot(
 	if err != nil {
 		return Snapshot{}, err
 	}
+	memories, err := st.Memories().List(ctx, store.MemoryFilter{RunID: runID})
+	if err != nil {
+		return Snapshot{}, err
+	}
 
 	allBacklog, err := st.Backlog().List(ctx, store.BacklogFilter{
 		RunID: runID,
@@ -213,6 +217,15 @@ func BuildSnapshot(
 				break
 			}
 			b.WriteString(entry)
+		}
+	}
+	fmt.Fprintf(&b, "\n## Memory Index (%d)\n", len(memories))
+	if len(memories) == 0 {
+		b.WriteString("(none)\n")
+	} else {
+		for i := range memories {
+			m := memories[i]
+			fmt.Fprintf(&b, "- [%s] %s (%s/%s): %s\n", m.ID, m.Name, m.Type, m.Scope, singleLine(truncateText(m.Description, cfg.MaxDirectiveBytes, &truncated)))
 		}
 	}
 
