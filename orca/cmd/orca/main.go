@@ -140,6 +140,12 @@ func executeRun(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		if nebErr != nil {
 			return nebErr
 		}
+		// A session may spawn lanes only into a run it created. Establish
+		// ownership before constructing the runner, whose first step plans and
+		// dispatches lanes.
+		if err := nebDrv.EnsureRun(ctx, cfg.RunID); err != nil {
+			return fmt.Errorf("orca: unable to create Nebula run %q: %w", cfg.RunID, err)
+		}
 		drv = nebDrv
 	default:
 		return fmt.Errorf("orca: unsupported --driver %q", cfg.DriverKind)

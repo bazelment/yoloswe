@@ -114,6 +114,36 @@ func TestInnerLoop_SingleLaneFakeDriverToCompletion(t *testing.T) {
 	}
 }
 
+func TestExecuteNebulaEnsuresRunBeforeRunnerStartup(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "startup.db")
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && r.URL.Path == "/api/code-runs/run-startup" {
+			calls.Add(1)
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"code":"FORBIDDEN","message":"denied"}`)
+			return
+		}
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	t.Setenv("NEBULA_API_URL", srv.URL)
+	t.Setenv("NEBULA_TOKEN", "test-token")
+
+	var stderr bytes.Buffer
+	err := Execute(t.Context(), []string{
+		"run", "--run", "run-startup", "--store", "sqlite:" + dbPath,
+		"--driver", "nebula",
+	}, strings.NewReader(""), io.Discard, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "unable to create Nebula run") {
+		t.Fatalf("Execute error = %v, want startup EnsureRun failure", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("run-create requests = %d, want exactly one before runner startup", calls.Load())
+	}
+}
+
 func TestSmoke_ThreeLaneScenarioAndConciergeChat(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
