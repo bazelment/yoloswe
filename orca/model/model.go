@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"sync"
 )
+
+var unknownPricingModels sync.Map
 
 // Default limits for Messages API requests and tool loops.
 const (
@@ -400,6 +403,11 @@ var defaultPricing = func() map[string]ModelPricing {
 		CacheCreationPerMTok: 1.0,
 	}
 	return map[string]ModelPricing{
+		// The gateway's gpt-6 aliases have no public price; use OpenAI's
+		// published GPT-5.1 tier ($1.25 input/$10 output per million tokens).
+		"gpt-6.1-sol":                {InputPerMTok: 1.25, OutputPerMTok: 10},
+		"gpt-6-sol":                  {InputPerMTok: 1.25, OutputPerMTok: 10},
+		"gpt-6-astra":                {InputPerMTok: 1.25, OutputPerMTok: 10},
 		"opus":                       opus,
 		"claude-opus-4-7":            opus,
 		"claude-opus-4-6":            opus,
@@ -432,6 +440,9 @@ func CalculateCost(modelName string, u Usage, pricing map[string]ModelPricing) f
 	}
 	rate, ok := lookupModelPricing(modelName, pricing)
 	if !ok {
+		if _, loaded := unknownPricingModels.LoadOrStore(strings.ToLower(strings.TrimSpace(modelName)), struct{}{}); !loaded {
+			slog.Default().Warn("orca/model: unknown model pricing", "model", modelName)
+		}
 		return 0
 	}
 	cost := float64(max(u.InputTokens, 0)) / 1_000_000.0 * rate.InputPerMTok

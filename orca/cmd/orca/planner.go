@@ -329,7 +329,10 @@ func (p *Planner) runReconciliation(
 		return err
 	}
 	reconciled = draft
-	if open {
+	// Startup goals must receive the same independent critic pass as open plans,
+	// even when the planner classified the request as a closed reconciliation.
+	// This keeps the pre-spawn safety check visible in the decision log.
+	if open || toolName == ToolPlannerStartup {
 		raw, _ := json.Marshal(draft)
 		criticStart := p.clock.Now()
 		var critique *model.Response

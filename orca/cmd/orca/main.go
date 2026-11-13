@@ -194,19 +194,29 @@ func executeChat(
 	if question == "" && len(posArgs) > 0 {
 		question = strings.TrimSpace(strings.Join(posArgs, " "))
 	}
-	if question != "" {
-		ans, err := concierge.Ask(ctx, question)
-		if err != nil {
-			return err
-		}
-		_, err = fmt.Fprintln(stdout, ans)
-		return err
-	}
-
 	routerSel := cfg.Models.Roles["router"]
 	routingLog := router.StoreLogger{Store: st, RunID: cfg.RunID, Model: routerSel.Model, Provider: routerSel.Provider}
 	r := router.Select(roleClient(client, cfg, "router"), routerSel.Model, os.Getenv("ORCA_GEMINI_API_KEY"), os.Getenv("GEMINI_DECISIONS_BASE_URL"), routingLog)
 	backend := &chatui.StoreBackend{Store: st, RunID: cfg.RunID, Stream: concierge.AskStream}
+	if question != "" {
+		d, err := r.Route(ctx, question)
+		if err != nil {
+			return err
+		}
+		echo := "→ " + string(d.Handler) + ": " + question
+		if d.Fallback {
+			echo += " (via fallback)"
+		}
+		if _, err := fmt.Fprintln(stdout, echo); err != nil {
+			return err
+		}
+		var reply strings.Builder
+		if err := backend.Dispatch(ctx, d, question, func(s string) { reply.WriteString(s) }); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(stdout, reply.String())
+		return err
+	}
 	ui := chatui.New(ctx, cfg.RunID, concierge.Ask, r)
 	ui.Backend = backend
 	ui.Dispatch = backend.Dispatch

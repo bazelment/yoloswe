@@ -107,9 +107,9 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 		}
 		return b.Stream(ctx, text, emit)
 	case router.Planner:
-		id, err := b.directive(ctx, store.DirectivePlanImport, text, "")
-		if err == nil {
-			emit("Plan change queued: " + id)
+		_, err := b.directive(ctx, store.DirectivePlanImport, text, "")
+		if err == nil && emit != nil {
+			emit("Queued for the planner: " + text)
 		}
 		return err
 	case router.Dispatcher:
@@ -121,6 +121,9 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 			return err
 		}
 		_, err := mailbox.AppendEvent(ctx, b.Store.Events(), b.RunID, msg)
+		if err == nil && emit != nil {
+			emit("Queued for the dispatcher: " + text)
+		}
 		return err
 	}
 	return fmt.Errorf("unsupported handler %q", d.Handler)
