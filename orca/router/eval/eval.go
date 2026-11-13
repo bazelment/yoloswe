@@ -69,10 +69,7 @@ func Evaluate(ctx context.Context, backend router.Router, cases []EvalCase) Eval
 	var total time.Duration
 	for i := range cases {
 		c := &cases[i]
-		input := c.Text
-		if c.Context != "" {
-			input += "\nOpen questions:\n" + c.Context
-		}
+		input := router.FormatInput(c.Text, c.Context)
 		start := time.Now()
 		d, err := backend.Route(ctx, input)
 		elapsed := time.Since(start)

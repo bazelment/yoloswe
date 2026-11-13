@@ -114,7 +114,7 @@ func (m Model) route(text string) tea.Cmd {
 				return routeMsg{text: text, err: err}
 			}
 			if len(s.Questions) > 0 {
-				input += "\nOpen questions:\n" + strings.Join(s.Questions, "\n")
+				input = router.FormatInput(input, strings.Join(s.Questions, "\n"))
 			}
 		}
 		d, e := m.router.Route(m.ctx, input)

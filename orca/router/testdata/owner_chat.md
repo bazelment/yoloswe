@@ -54,11 +54,11 @@ is skipped because no Gemini key exists for this owner today.
 
 Five-case gateway inner loop, before full-set scoring:
 
-> routing accuracy: 4/5 (80.00%); unnecessary clarifications: 0/5 (0.00%); errors: 0; latency mean=5.957s p50=6.157s p95=7.175s; targets_met=false
+> routing accuracy: 2/5 (40.00%); unnecessary clarifications: 0/5 (0.00%); errors: 0; latency mean=5.001s p50=3.605s p95=7.579s; targets_met=false
 
 Frozen full set, same fallback model (`gpt-6.1-sol`):
 
-> routing accuracy: 24/60 (40.00%); unnecessary clarifications: 9/55 (16.36%); errors: 0; latency mean=6.935s p50=6.192s p95=12.405s; targets_met=false
+> routing accuracy: 23/60 (38.33%); unnecessary clarifications: 9/55 (16.36%); errors: 0; latency mean=6.14s p50=5.466s p95=10.891s; targets_met=false
 
 Both requested bars are missed by the full set. The manual test intentionally
 returns failure for this score. The ordinary suite remains deterministic and
