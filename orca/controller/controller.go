@@ -1403,11 +1403,43 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		}
 	}
 
+	// A report-only SWE lane has no diff to clean, review, or integrate. The
+	// report's HEAD equal to the recorded base identifies that deterministic
+	// no-op case; a PR or a changed head keeps the normal recipe transitions.
+	if rep.Outcome == lane.OutcomeDone && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && rep.HeadSHA != "" && rep.HeadSHA == ln.BaseBranch {
+		return c.completeReportOnlyLane(ctx, ln, ev)
+	}
+
 	if rep.Outcome == lane.OutcomeDone && isReviewPhase(curPhase) {
 		ln.ApprovalSHA = cmp.Or(rep.HeadSHA, ln.PRHead, ln.ApprovalSHA)
 	}
 
 	return c.advanceByRecipe(ctx, ln, r, string(rep.Outcome), rep.Reason, rep.Breaks, ev)
+}
+
+func (c *Controller) completeReportOnlyLane(ctx context.Context, ln *lane.Lane, ev *store.Event) (store.EventClass, error) {
+	_, already, err := c.recordDecision(ctx, ToolLaneComplete, ln.ID,
+		"SWE reported done with HEAD equal to base and no PR", "lane done (report-only)",
+		DecisionArgs{ActionKey: "report-only-complete:" + ln.ID + ":" + ln.AttemptKey(), EventID: ev.ID, FromPhase: ln.Phase, ToPhase: recipe.TargetComplete, Verdict: string(lane.OutcomeDone), Round: max(ln.Round, 1)})
+	if err != nil {
+		return store.EventClassUnclassified, err
+	}
+	if !already {
+		ln.Status = lane.StatusDone
+		ln.LastEventID = ev.ID
+		ln.LastEventAt = c.clock.Now().UTC()
+		if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+			return store.EventClassUnclassified, err
+		}
+		if ln.ItemID != "" {
+			if item, err := c.store.Backlog().Get(ctx, c.cfg.RunID, ln.ItemID); err == nil && !item.Status.Terminal() {
+				if err := c.store.Backlog().Close(ctx, c.cfg.RunID, ln.ItemID, store.BacklogDone, ActorController, "lane completed report-only"); err != nil {
+					return store.EventClassUnclassified, err
+				}
+			}
+		}
+	}
+	return store.EventClassAuto, nil
 }
 
 func (c *Controller) blockLaneForJudgment(ctx context.Context, ln *lane.Lane) (store.EventClass, error) {
@@ -2024,11 +2056,22 @@ func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Re
 	if extraNote != "" {
 		parts = append(parts, extraNote)
 	}
+	reportInstructions := c.driver.ReportInstructions(c.cfg.RunID, ln.ID, phase.Name, ln.TerminalID)
 	brief := strings.Join(parts, "\n\n")
-	if r.Limits.MaxBriefBytes > 0 && len(brief) > r.Limits.MaxBriefBytes {
-		brief = brief[:r.Limits.MaxBriefBytes]
+	if r.Limits.MaxBriefBytes > 0 {
+		separator := "\n\n"
+		available := r.Limits.MaxBriefBytes - len(reportInstructions) - len(separator)
+		if available < 0 {
+			available = 0
+		}
+		if len(brief) > available {
+			brief = brief[:available]
+		}
+		if brief == "" {
+			return reportInstructions
+		}
 	}
-	return brief
+	return brief + "\n\n" + reportInstructions
 }
 
 func (c *Controller) resolveRecipe(ctx context.Context, ln *lane.Lane) (*recipe.Recipe, error) {

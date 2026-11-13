@@ -559,7 +559,7 @@ func TestStartPhaseTerminalSteerStopAndRelease(t *testing.T) {
 		Phase:     "review",
 		Round:     2,
 		Harness:   "codex",
-		Model:     "gpt-5.4",
+		Model:     "gpt-6.1-sol",
 		Effort:    "high",
 		Brief:     "Review PR #362",
 	})
@@ -574,7 +574,7 @@ func TestStartPhaseTerminalSteerStopAndRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTerminal: %v", err)
 	}
-	if term.Kind != "codex" || term.Model != "gpt-5.4" || term.ReasoningEffort != "high" || term.Title != "lane-a review r2" {
+	if term.Kind != "codex" || term.Model != "gpt-6.1-sol" || term.ReasoningEffort != "high" || term.Title != "lane-a review r2" {
 		t.Fatalf("unexpected terminal fields: %+v", term)
 	}
 

@@ -159,6 +159,10 @@ type Driver struct {
 
 var _ lane.LaneDriver = (*Driver)(nil)
 
+func (d *Driver) ReportInstructions(runID, laneID, phase, terminal string) string {
+	return fmt.Sprintf("File the phase report in this terminal with `nebula phase report --outcome <done|needs-swe|blocked|needs-input> --file <report.md> [--head <sha>] [--pr <n>]` (run %s, lane %s, phase %s, terminal %s). The report must include Outcome, HEAD, and PR lines. The phase is not finished until the report is filed.", runID, laneID, phase, terminal)
+}
+
 // Watch streams all terminals belonging to runID as uniform lane events.
 func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 	out := make(chan lane.Event, 32)

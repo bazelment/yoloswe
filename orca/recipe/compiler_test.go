@@ -340,7 +340,7 @@ func goldenCases() []goldenCase {
 			{
 				Name: "critique",
 				Agents: []recipe.AgentSpec{
-					{Harness: "codex", Model: "gpt-5.4", Effort: "high"},
+					{Harness: "codex", Model: "gpt-6.1-sol", Effort: "high"},
 				},
 				BriefTemplate: "Critique the proposed design, identify failure modes, edge cases, and missing invariants, and file a phase report.",
 				ExitContract: recipe.ExitContract{
@@ -658,9 +658,9 @@ func goldenCases() []goldenCase {
 		Expected: uiSweep,
 	}
 
-	codexSWE := overrideFrom(def, "codex-swe", "this lane: use codex gpt-5.4 high effort as primary agent for swe with claude opus high effort as fallback, and allow up to 3 phase attempts")
+	codexSWE := overrideFrom(def, "codex-swe", "this lane: use codex gpt-6.1-sol high effort as primary agent for swe with claude opus high effort as fallback, and allow up to 3 phase attempts")
 	codexSWE.Phases[0].Agents = []recipe.AgentSpec{
-		{Harness: "codex", Model: "gpt-5.4", Effort: "high"},
+		{Harness: "codex", Model: "gpt-6.1-sol", Effort: "high"},
 		{Harness: "claude", Model: "opus", Effort: "high"},
 	}
 	codexSWE.Limits.MaxPhaseAttempts = 3

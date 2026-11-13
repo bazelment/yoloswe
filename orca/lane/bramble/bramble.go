@@ -45,6 +45,21 @@ type Driver struct { //nolint:govet // compact driver configuration
 
 var _ lane.LaneDriver = (*Driver)(nil)
 
+func (d *Driver) ReportInstructions(runID, laneID, phase, terminal string) string {
+	d.mu.RLock()
+	runDir := d.runDirs[terminal]
+	round := d.rounds[terminal]
+	d.mu.RUnlock()
+	if runDir == "" {
+		runDir = d.runDir
+	}
+	if runDir == "" {
+		runDir = runID
+	}
+	path := filepath.Join(runDir, laneID+"."+lane.PhaseRoundKey(phase, round)+".report.md")
+	return "Write the phase report to " + path + "; the phase is not finished until that file is written. Start it with Outcome: done|needs-swe|blocked|needs-input, include HEAD and PR lines, then include the report details."
+}
+
 func New(cfg Config) (*Driver, error) {
 	if cfg.Client == nil {
 		return nil, errors.New("bramble client is required")
