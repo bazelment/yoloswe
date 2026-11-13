@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/adopt"
 	"github.com/bazelment/yoloswe/orca/concierge"
 	"github.com/bazelment/yoloswe/orca/mailbox"
 	"github.com/bazelment/yoloswe/orca/router"
@@ -19,12 +20,14 @@ import (
 //
 //nolint:govet
 type StoreBackend struct {
-	Store         store.Store
-	RunID         string
-	Stream        func(context.Context, string, func(string)) error
-	Now           func() time.Time
-	memory        concierge.MemoryEditor
-	lastDirective string
+	Store           store.Store
+	RunID           string
+	Stream          func(context.Context, string, func(string)) error
+	Now             func() time.Time
+	memory          concierge.MemoryEditor
+	lastDirective   string
+	Adoption        adopt.Service
+	AdoptionEnabled bool
 }
 
 func (b *StoreBackend) now() time.Time {
@@ -134,6 +137,34 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 		return "", nil
 	}
 	switch strings.ToLower(fields[0]) {
+	case "/adopt":
+		if !b.AdoptionEnabled {
+			return "adoption unavailable", nil
+		}
+		if len(fields) == 1 {
+			rs, e := b.Adoption.List()
+			if e != nil {
+				return "", e
+			}
+			var out []string
+			for _, r := range rs {
+				out = append(out, fmt.Sprintf("%s: %s | lanes=%d | last=%s | orchestrator=%s", r.ID, r.Goal, len(r.Lanes), r.LastActivity, r.Orchestrator))
+			}
+			return strings.Join(out, "\n"), nil
+		}
+		r, e := b.Adoption.Adopt(fields[1])
+		if e != nil {
+			return "", e
+		}
+		return "adopted " + r.ID, nil
+	case "/release":
+		if !b.AdoptionEnabled {
+			return "adoption unavailable", nil
+		}
+		if e := b.Adoption.Release(b.RunID); e != nil {
+			return "", e
+		}
+		return "released " + b.RunID, nil
 	case "/status":
 		s, e := b.Snapshot(ctx)
 		return s.Status, e
@@ -192,7 +223,7 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 		}
 		return b.memory.Undo(ctx, b.Store)
 	default:
-		return "commands: /status /lanes /asks /memory /plan /log <trace> /pause /resume /stop /undo", nil
+		return "commands: /status /lanes /asks /memory /plan /log <trace> /pause /resume /stop /undo /adopt [run-id] /release", nil
 	}
 }
 func pretty(v any, err error) (string, error) {

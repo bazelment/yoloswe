@@ -15,6 +15,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/orca/cmd/orca",
     visibility = ["//visibility:private"],
     deps = [
+        "//orca/adopt",
         "//orca/brief",
         "//orca/chat",
         "//orca/clock",

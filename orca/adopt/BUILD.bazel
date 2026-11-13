@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "adopt",
+    srcs = ["adopt.go"],
+    importpath = "github.com/bazelment/yoloswe/orca/adopt",
+    visibility = ["//visibility:public"],
+    deps = ["//swarm-queen/state"],
+)
+
+go_test(
+    name = "adopt_test",
+    srcs = ["adopt_test.go"],
+    embed = [":adopt"],
+)
