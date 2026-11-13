@@ -3,6 +3,7 @@ package nebula
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -100,19 +101,19 @@ func (m *Mailbox) Watch(ctx context.Context) (<-chan store.Event, error) {
 							pageOK = false
 							break
 						}
-						if msg.ID != "" {
-							if _, duplicate := seen[msg.ID]; duplicate {
-								continue
-							}
+						key := msg.ID
+						if key == "" {
+							key = fmt.Sprintf("body:%x", sha256.Sum256(b))
+						}
+						if _, duplicate := seen[key]; duplicate {
+							continue
 						}
 						ev, appendErr := mailbox.AppendEvent(ctx, m.c.Events, m.c.RunID, msg)
 						if appendErr != nil {
 							pageOK = false
 							break
 						}
-						if msg.ID != "" {
-							seen[msg.ID] = struct{}{}
-						}
+						seen[key] = struct{}{}
 						select {
 						case out <- ev:
 						case <-ctx.Done():
