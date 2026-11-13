@@ -277,7 +277,7 @@ func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge
 	if clk == nil {
 		clk = clock.NewRealClock()
 	}
-	stallTimeoutSet := cfg.StallTimeoutSet || cfg.StallTimeout > 0
+	stallTimeoutSet := cfg.StallTimeoutSet
 	c := &Controller{
 		cfg:                cfg.withDefaults(),
 		store:              st,

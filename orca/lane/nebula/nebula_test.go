@@ -8,7 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -633,53 +634,53 @@ func TestSpawnReuseWakeAndSettleTimeout(t *testing.T) {
 }
 
 func TestSpawnStoresAPIOrResolvedBaseCommit(t *testing.T) {
-	t.Run("api base wins", func(t *testing.T) {
-		srv := newFakeNebulaServer(t)
-		srv.spawnBaseCommit = strings.Repeat("a", 40)
-		drv, _, _ := newTestDriver(t, srv)
-		res, err := drv.SpawnSession(context.Background(), lane.SpawnRequest{RunID: "base", LaneID: "api", BaseBranch: "main"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if res.BaseCommit != srv.spawnBaseCommit {
-			t.Fatalf("BaseCommit=%q, want API commit", res.BaseCommit)
-		}
-	})
-	t.Run("fallback is captured once", func(t *testing.T) {
-		dir := t.TempDir()
-		for _, args := range [][]string{{"init", dir}, {"-C", dir, "config", "user.email", "test@example.com"}, {"-C", dir, "config", "user.name", "Test"}} {
-			if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
-				t.Fatalf("git %v: %v (%s)", args, err, out)
+	dir := t.TempDir()
+	script := "#!/bin/sh\n[ \"$1\" = rev-parse ] && [ \"$2\" = origin/main ] || exit 1\nprintf 'resolve\\n' >> git-calls\ncat origin-main\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	base := strings.Repeat("a", 40)
+	moved := strings.Repeat("b", 40)
+	for _, api := range []bool{true, false} {
+		t.Run(map[bool]string{true: "api base wins", false: "fallback is captured once"}[api], func(t *testing.T) {
+			worktree := t.TempDir()
+			ref := filepath.Join(worktree, "origin-main")
+			if err := os.WriteFile(ref, []byte(base), 0o600); err != nil {
+				t.Fatal(err)
 			}
-		}
-		if out, err := exec.Command("git", "-C", dir, "commit", "--allow-empty", "-m", "base").CombinedOutput(); err != nil {
-			t.Fatal(err, string(out))
-		}
-		shaBytes, _ := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
-		sha := strings.TrimSpace(string(shaBytes))
-		if out, err := exec.Command("git", "-C", dir, "update-ref", "refs/remotes/origin/main", sha).CombinedOutput(); err != nil {
-			t.Fatal(err, string(out))
-		}
-		srv := newFakeNebulaServer(t)
-		drv, _, _ := newTestDriver(t, srv)
-		res, err := drv.SpawnSession(context.Background(), lane.SpawnRequest{RunID: "base", LaneID: "git", BaseBranch: "main", Worktree: dir})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if res.BaseCommit != sha {
-			t.Fatalf("BaseCommit=%q, want %q", res.BaseCommit, sha)
-		}
-		if out, err := exec.Command("git", "-C", dir, "commit", "--allow-empty", "-m", "moved").CombinedOutput(); err != nil {
-			t.Fatal(err, string(out))
-		}
-		movedBytes, _ := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
-		if out, err := exec.Command("git", "-C", dir, "update-ref", "refs/remotes/origin/main", strings.TrimSpace(string(movedBytes))).CombinedOutput(); err != nil {
-			t.Fatal(err, string(out))
-		}
-		if res.BaseCommit != sha {
-			t.Fatalf("stored base changed after origin move: %q", res.BaseCommit)
-		}
-	})
+			srv := newFakeNebulaServer(t)
+			if api {
+				srv.spawnBaseCommit = moved
+			}
+			drv, _, _ := newTestDriver(t, srv)
+			res, err := drv.SpawnSession(t.Context(), lane.SpawnRequest{RunID: "base", LaneID: "git", BaseBranch: "main", Worktree: worktree})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := base
+			if api {
+				want = moved
+			}
+			if res.BaseCommit != want {
+				t.Fatalf("BaseCommit=%q, want %q", res.BaseCommit, want)
+			}
+			if err := os.WriteFile(ref, []byte(moved), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := drv.StartPhaseTerminal(t.Context(), lane.StartPhaseRequest{RunID: "base", LaneID: "git", SessionID: res.SessionID, Phase: "swe", Harness: "claude"}); err != nil {
+				t.Fatal(err)
+			}
+			calls, err := os.ReadFile(filepath.Join(worktree, "git-calls"))
+			if api {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("API base must bypass git: calls=%q err=%v", calls, err)
+				}
+			} else if err != nil || string(calls) != "resolve\n" {
+				t.Fatalf("fallback resolves exactly once across spawn and new terminal: calls=%q err=%v", calls, err)
+			}
+		})
+	}
 }
 
 func TestStartPhaseTerminalSteerStopAndRelease(t *testing.T) {

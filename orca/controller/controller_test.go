@@ -683,7 +683,7 @@ func TestControllerQuietWorkingBeforePhaseLimitDoesNotRestart(t *testing.T) {
 	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-quiet", RunID: "run-1", RecipeName: "stall-test", Status: lane.StatusPlanned}); err != nil {
 		t.Fatalf("Upsert lane: %v", err)
 	}
-	ctrl := controller.New(controller.Config{RunID: "run-1", JudgmentDebounce: time.Minute}, st, drv, clk, judge)
+	ctrl := controller.New(controller.Config{RunID: "run-1", JudgmentDebounce: time.Minute, StallTimeout: controller.DefaultStallTimeout}, st, drv, clk, judge)
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
@@ -712,7 +712,7 @@ func TestControllerQuietWorkingBeforePhaseLimitDoesNotRestart(t *testing.T) {
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("timeout fresh terminal: %v", err)
 	}
-	if len(drv.PhaseStarts) != 1 || len(drv.Stops) != 1 {
+	if len(drv.PhaseStarts) != 1 || len(drv.Stops) != 1 || drv.Stops[0].TerminalID != ln.TerminalID {
 		t.Fatalf("after phase limit: starts=%d stops=%d", len(drv.PhaseStarts), len(drv.Stops))
 	}
 }
@@ -780,7 +780,7 @@ func TestControllerStallTimeoutOverridesRecipe(t *testing.T) {
 			if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-override", RunID: "run-1", RecipeName: "stall-test", Status: lane.StatusPlanned}); err != nil {
 				t.Fatal(err)
 			}
-			ctrl := controller.New(controller.Config{RunID: "run-1", StallTimeout: tc.cfg}, st, drv, clk, judge)
+			ctrl := controller.New(controller.Config{RunID: "run-1", StallTimeout: tc.cfg, StallTimeoutSet: true}, st, drv, clk, judge)
 			if err := ctrl.Step(ctx); err != nil {
 				t.Fatal(err)
 			}
@@ -799,41 +799,50 @@ func TestControllerStallTimeoutOverridesRecipe(t *testing.T) {
 }
 
 func TestControllerReportOnlyUsesStoredBase(t *testing.T) {
-	for _, same := range []bool{true, false} {
-		t.Run(map[bool]string{true: "same", false: "changed"}[same], func(t *testing.T) {
-			clk, st, drv, judge := setupTestEnv(t)
-			ctx := t.Context()
-			base := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-			drv.SpawnBaseCommit = base
-			if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-report", RunID: "run-1", Status: lane.StatusPlanned}); err != nil {
-				t.Fatal(err)
-			}
-			ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
-			if err := ctrl.Step(ctx); err != nil {
-				t.Fatal(err)
-			}
-			head := base
-			if !same {
-				head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-			}
-			appendReportEvent(t, st, "lane-report", lane.PhaseReport{Phase: recipe.PhaseSWE, Outcome: lane.OutcomeDone, HeadSHA: head})
-			if err := ctrl.Step(ctx); err != nil {
-				t.Fatal(err)
-			}
-			ln, err := st.Lanes().Get(ctx, "run-1", "lane-report")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if same && (ln.Status != lane.StatusDone || len(drv.PhaseStarts) != 0) {
-				t.Fatalf("same-base lane=%+v starts=%d", ln, len(drv.PhaseStarts))
-			}
-			if !same && len(drv.PhaseStarts) != 1 {
-				t.Fatalf("changed-base starts=%d, want clean", len(drv.PhaseStarts))
-			}
-		})
+	t.Parallel()
+	for _, outcome := range []lane.ReportOutcome{lane.OutcomeDone, lane.OutcomeNoChange} {
+		for _, same := range []bool{true, false} {
+			t.Run(string(outcome)+"/"+map[bool]string{true: "same", false: "changed"}[same], func(t *testing.T) {
+				t.Parallel()
+				clk, st, drv, judge := setupTestEnv(t)
+				ctx := t.Context()
+				base := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+				drv.SpawnBaseCommit = base
+				if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-report", RunID: "run-1", Status: lane.StatusPlanned}); err != nil {
+					t.Fatal(err)
+				}
+				ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+				if err := ctrl.Step(ctx); err != nil {
+					t.Fatal(err)
+				}
+				// Later spawn metadata must not replace the base persisted for this session.
+				drv.SpawnBaseCommit = strings.Repeat("c", 40)
+				head := base
+				if !same {
+					head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+				}
+				appendReportEvent(t, st, "lane-report", lane.PhaseReport{Phase: recipe.PhaseSWE, Outcome: outcome, HeadSHA: head})
+				if err := ctrl.Step(ctx); err != nil {
+					t.Fatal(err)
+				}
+				ln, err := st.Lanes().Get(ctx, "run-1", "lane-report")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ln.BaseCommit != base {
+					t.Fatalf("stored base=%q, want %q", ln.BaseCommit, base)
+				}
+				if same && (ln.Status != lane.StatusDone || len(drv.PhaseStarts) != 0) {
+					t.Fatalf("same-base lane=%+v starts=%d", ln, len(drv.PhaseStarts))
+				}
+				if !same && (len(drv.PhaseStarts) != 1 || ln.Phase != recipe.PhaseClean) {
+					t.Fatalf("changed-base starts=%d, want clean", len(drv.PhaseStarts))
+				}
+			})
+		}
 	}
-}
 
+}
 func TestControllerJudgmentBatchingAndUrgentBypass(t *testing.T) {
 	t.Parallel()
 	clk, st, drv, judge := setupTestEnv(t)
@@ -1457,7 +1466,7 @@ func TestWorkerOwnerReplyAndDeadline(t *testing.T) {
 			clk, st, drv, judge := setupTestEnv(t)
 			seedLane(t, st)
 			box := &questionBox{}
-			ctrl := controller.New(controller.Config{RunID: "run-1", StallTimeout: time.Minute}, st, drv, clk, judge, box)
+			ctrl := controller.New(controller.Config{RunID: "run-1", StallTimeout: time.Minute, StallTimeoutSet: true}, st, drv, clk, judge, box)
 			mustStep(t, ctrl)
 			mailEvent(t, st, mailbox.Message{LaneID: "worker", Question: true, Body: "Which irreversible option?"})
 			mustStep(t, ctrl)

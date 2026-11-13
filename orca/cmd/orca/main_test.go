@@ -1458,3 +1458,39 @@ func TestConciergeRunControl(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigStallTimeoutExplicitPrecedence(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, body string
+		args       []string
+		explicit   bool
+		timeout    time.Duration
+	}{
+		{name: "default", body: "{}", timeout: 45 * time.Minute},
+		{name: "flag", args: []string{"--stall-timeout", "5m"}, explicit: true, timeout: 5 * time.Minute},
+		{name: "file", body: `{"stall_timeout":1800000000000}`, explicit: true, timeout: 30 * time.Minute},
+		{name: "flag with file", body: "{}", args: []string{"--stall-timeout", "5m"}, explicit: true, timeout: 5 * time.Minute},
+		{name: "flag overrides file", body: `{"stall_timeout":1800000000000}`, args: []string{"--stall-timeout", "5m"}, explicit: true, timeout: 5 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			args := append([]string(nil), tc.args...)
+			if tc.body != "" {
+				path := filepath.Join(t.TempDir(), "config.json")
+				if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				args = append(args, "--config", path)
+			}
+			cfg, _, err := parseFlags("run", args, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg = cfg.withDefaults()
+			if cfg.HasExplicitStallTimeout() != tc.explicit || cfg.StallTimeout != tc.timeout {
+				t.Fatalf("timeout=%s explicit=%v, want %s explicit=%v", cfg.StallTimeout, cfg.HasExplicitStallTimeout(), tc.timeout, tc.explicit)
+			}
+		})
+	}
+}

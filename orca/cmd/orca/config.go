@@ -272,6 +272,9 @@ func LoadConfigFile(path string, base Config) (Config, error) {
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err == nil {
+		if _, ok := raw["stall_timeout"]; ok {
+			fileCfg.stallTimeoutSet = true
+		}
 		if _, ok := raw["once"]; ok {
 			fileCfg.onceSet = true
 		}
@@ -342,6 +345,7 @@ func mergeConfig(lower, higher Config) Config {
 	}
 	if higher.StallTimeout != 0 {
 		out.StallTimeout = higher.StallTimeout
+		out.stallTimeoutSet = higher.stallTimeoutSet
 	}
 	if higher.onceSet {
 		out.Once = higher.Once
