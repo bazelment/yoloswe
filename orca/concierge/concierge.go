@@ -39,6 +39,8 @@ const (
 	ToolBacklog         = "backlog"
 	ToolDirectiveSubmit = "directive.submit"
 	ToolMemoryRead      = "memory.read"
+	ToolMemorySubmit    = "memory.submit"
+	ToolMemoryUndo      = "memory.undo"
 )
 
 // Directive submission kinds accepted by directive.submit.
@@ -127,6 +129,8 @@ type DirectiveSubmitParams struct {
 }
 
 var conciergeToolDefs = []model.ToolDefinition{
+	{Name: ToolMemorySubmit, Description: "Save an owner correction immediately (create, update, delete)", InputSchema: model.SchemaFor[MemorySubmitParams]()},
+	{Name: ToolMemoryUndo, Description: "Undo or forget the last memory change", InputSchema: model.SchemaFor[MemoryUndoParams]()},
 	{Name: ToolStatus, Description: "Read run status overview including objective, lease, backlog counts, lanes, directives, and latest sequence numbers", InputSchema: model.SchemaFor[StatusParams]()},
 	{Name: ToolLaneShow, Description: "Read detailed state, PR/CI checks, latest phase report, and recent events/decisions for a lane", InputSchema: model.SchemaFor[LaneShowParams]()},
 	{Name: ToolDecisionsSince, Description: "Read audit decisions from DecisionStore filtered by sequence, time, lane, actor, or category", InputSchema: model.SchemaFor[DecisionsSinceParams]()},
@@ -152,7 +156,7 @@ func NormalizeToolName(name string) string {
 
 func isKnownTool(name string) bool {
 	switch name {
-	case ToolStatus, ToolLaneShow, ToolDecisionsSince, ToolBacklog, ToolDirectiveSubmit, ToolMemoryRead:
+	case ToolStatus, ToolLaneShow, ToolDecisionsSince, ToolBacklog, ToolDirectiveSubmit, ToolMemoryRead, ToolMemorySubmit, ToolMemoryUndo:
 		return true
 	default:
 		return false
@@ -191,14 +195,16 @@ type TurnResult struct {
 
 // Concierge hosts owner chat threads backed by read-only Store tools and directive.submit.
 type Concierge struct {
-	store      store.Store
-	driver     lane.LaneDriver
-	clock      clock.Clock
-	client     model.ModelClient
-	lastResult *TurnResult
-	cfg        Config
-	seq        int64
-	mu         sync.Mutex
+	store       store.Store
+	driver      lane.LaneDriver
+	clock       clock.Clock
+	client      model.ModelClient
+	lastResult  *TurnResult
+	editors     map[string]*MemoryEditor
+	lastEditors map[string]*MemoryEditor
+	cfg         Config
+	seq         int64
+	mu          sync.Mutex
 }
 
 // New constructs a new Concierge.
@@ -213,11 +219,12 @@ func New(
 		clk = clock.NewRealClock()
 	}
 	return &Concierge{
-		cfg:    cfg.withDefaults(),
-		store:  st,
-		driver: drv,
-		clock:  clk,
-		client: client,
+		cfg:         cfg.withDefaults(),
+		store:       st,
+		driver:      drv,
+		clock:       clk,
+		client:      client,
+		lastEditors: make(map[string]*MemoryEditor),
 	}
 }
 
@@ -327,6 +334,7 @@ func (c *Concierge) Ask(ctx context.Context, runID, question string) (*TurnResul
 	return c.AskInThread(ctx, runID, th.ID, question)
 }
 
+//nolint:govet
 type conciergeTurnState struct {
 	threadID            string
 	turnID              string
@@ -335,6 +343,9 @@ type conciergeTurnState struct {
 	decisions           []store.Decision
 	turnUsage           model.Usage
 	turnUsageRecorded   bool
+	quote               string
+	editor              *MemoryEditor
+	memoryEcho          string
 }
 
 // AskInThread executes a single conversational turn on an existing Concierge thread.
@@ -350,6 +361,13 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 		return nil, fmt.Errorf("%w: question is required", store.ErrInvalidArgument)
 	}
 
+	thread, err := c.store.Threads().GetThread(ctx, threadID)
+	if err != nil {
+		return nil, err
+	}
+	if thread.RunID != runID || thread.Role != store.ThreadRoleConcierge {
+		return nil, store.ErrNotFound
+	}
 	c.syncSeq(ctx, runID)
 	priorMsgs, err := c.loadThreadMessages(ctx, threadID)
 	if err != nil {
@@ -383,7 +401,44 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 		return nil, err
 	}
 
+	c.mu.Lock()
+	if c.editors == nil {
+		c.editors = make(map[string]*MemoryEditor)
+	}
+	editor := c.editors[threadID]
+	if editor == nil {
+		editor = &MemoryEditor{}
+		c.editors[threadID] = editor
+	}
+	// Ask creates a fresh thread for each CLI question. Keep the most recent
+	// editor available so a following standalone "undo" or "forget" can
+	// revert the correction just made in the prior thread.
+	if strings.EqualFold(question, "undo") || strings.EqualFold(question, "forget") {
+		if last := c.lastEditors[runID]; last != nil {
+			editor = last
+		}
+	} else {
+		c.lastEditors[runID] = editor
+	}
+	c.mu.Unlock()
+	if strings.EqualFold(question, "undo") || strings.EqualFold(question, "forget") {
+		answer, undoErr := editor.Undo(ctx, c.store)
+		status, errText := store.TurnStatusCompleted, ""
+		if undoErr != nil {
+			status, errText = store.TurnStatusFailed, undoErr.Error()
+		}
+		_, _ = c.store.Threads().AppendItem(cleanupCtx, store.Item{ThreadID: threadID, TurnID: turnID, Kind: store.ItemKindAssistantMessage, Content: answer})
+		if err := c.store.Threads().CompleteTurn(cleanupCtx, threadID, turnID, status, model.Usage{}, errText); err != nil {
+			return nil, err
+		}
+		result := &TurnResult{ThreadID: threadID, TurnID: turnID, Model: c.cfg.Model, Answer: answer}
+		c.mu.Lock()
+		c.lastResult = result
+		c.mu.Unlock()
+		return result, undoErr
+	}
 	state := &conciergeTurnState{
+		quote: question, editor: editor,
 		threadID: threadID,
 		turnID:   turnID,
 	}
@@ -392,9 +447,13 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 	msgs := slices.Clone(priorMsgs)
 	msgs = append(msgs, model.NewUserMessage(userContent))
 
+	systemPrompt := c.cfg.SystemPrompt
+	if memories, memErr := c.store.Memories().List(ctx, store.MemoryFilter{RunID: runID}); memErr == nil {
+		systemPrompt += "\n\n## Canonical Memory Index\n" + store.MemoryIndex(memories)
+	}
 	req := model.Request{
 		Model:     c.cfg.Model,
-		System:    c.cfg.SystemPrompt,
+		System:    systemPrompt,
 		Messages:  msgs,
 		Tools:     reg.Definitions(),
 		MaxTokens: c.cfg.MaxTokens,
@@ -410,6 +469,9 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 			state.turnUsage = resp.Usage
 			state.turnUsageRecorded = false
 			if txt := strings.TrimSpace(resp.Text()); txt != "" {
+				if state.memoryEcho != "" {
+					txt = state.memoryEcho
+				}
 				_, _ = c.store.Threads().AppendItem(cleanupCtx, store.Item{
 					ThreadID: threadID,
 					TurnID:   turnID,
@@ -458,11 +520,14 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 		answer = strings.TrimSpace(loopRes.Response.Text())
 	}
 
+	if state.memoryEcho != "" {
+		answer = state.memoryEcho
+	}
 	var citedFacts []string
 	if loopErr == nil {
 		var citeErr error
 		citedFacts, citeErr = VerifyAnswerCitations(ctx, c.store, runID, answer, state.submittedDirectives)
-		if citeErr != nil && !c.cfg.DisableCitations {
+		if citeErr != nil && !c.cfg.DisableCitations && state.memoryEcho == "" {
 			loopErr = citeErr
 		}
 	}
@@ -558,6 +623,22 @@ func (c *Concierge) handleRawToolCall(
 	}
 
 	switch canonical {
+	case ToolMemorySubmit:
+		p, err := decodeToolParams[MemorySubmitParams](canonical, trimmed)
+		if err != nil {
+			return "", err
+		}
+		echo, err := state.editor.Submit(ctx, c.store, runID, c.nextID("memory-"+runID), state.quote, p)
+		if err == nil {
+			state.memoryEcho = echo
+		}
+		return echo, err
+	case ToolMemoryUndo:
+		echo, err := state.editor.Undo(ctx, c.store)
+		if err == nil {
+			state.memoryEcho = echo
+		}
+		return echo, err
 	case ToolStatus:
 		p, err := decodeToolParams[StatusParams](canonical, trimmed)
 		if err != nil {
@@ -1002,7 +1083,7 @@ func (c *Concierge) execDirectiveSubmit(
 
 	dirID := strings.TrimSpace(p.ID)
 	if dirID == "" {
-		dirID = c.nextID("dir")
+		dirID = c.nextID("dir-" + runID)
 	}
 
 	scope := strings.TrimSpace(p.Scope)
@@ -1054,6 +1135,27 @@ func (c *Concierge) execDirectiveSubmit(
 			if strings.TrimSpace(handlerSummary) != "" {
 				resultMsg += "\n" + strings.TrimSpace(handlerSummary)
 			}
+		}
+	}
+
+	if handlerErr == nil && expiresAt == nil {
+		quote := text
+		editor := &MemoryEditor{}
+		if state != nil {
+			quote, editor = state.quote, state.editor
+		}
+		// Directive scope identifies its target (for example a recipe name or
+		// lane), while memory scope is the visibility class accepted by the
+		// memory store. Keep the target on the directive and store the folded
+		// memory at run scope unless the caller explicitly selected owner/repo.
+		memoryScope := dir.Scope
+		if memoryScope != "owner" && memoryScope != "repo" && memoryScope != "run" {
+			memoryScope = "run"
+		}
+		_, memErr := editor.Submit(ctx, c.store, runID, dir.ID, quote, MemorySubmitParams{Action: "create", ID: dir.ID, Name: "Directive: " + cmp.Or(text, ref), Description: cmp.Or(text, ref), Body: cmp.Or(text, ref), Scope: memoryScope})
+		if memErr != nil {
+			_ = c.store.Directives().UpdateStatus(context.WithoutCancel(ctx), runID, dir.ID, store.DirectiveRevoked)
+			return "", memErr
 		}
 	}
 

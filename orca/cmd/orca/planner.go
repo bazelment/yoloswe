@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/brief"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/dispatcher"
@@ -298,9 +299,17 @@ func (p *Planner) runReconciliation(
 	}
 
 	if !parsedOK && p.client != nil {
+		memories, err := p.store.Memories().List(ctx, store.MemoryFilter{RunID: runID})
+		if err != nil {
+			return err
+		}
+		memoryContext, err := brief.Render("", memories, 0)
+		if err != nil {
+			return err
+		}
 		req := model.Request{
 			Model:  p.modelName,
-			System: PlannerSystemPrompt,
+			System: PlannerSystemPrompt + memoryContext,
 			Messages: []model.Message{
 				model.NewUserMessage(fmt.Sprintf("Run ID: %s\nPlan Ref: %s\n\nPlan / Request:\n%s", runID, planRef, inputText)),
 			},

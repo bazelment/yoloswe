@@ -9,13 +9,58 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/brief"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/concierge"
+	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
 )
+
+func TestMemoryWorkflow_OwnerCorrectionFlowsToNextDispatcherSnapshotAndWorkerBrief(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupSeededStore(t)
+	ctx := t.Context()
+	fake := model.NewFakeClient(model.Response{
+		StopReason: model.StopReasonToolUse,
+		Message:    model.NewAssistantMessage(model.NewToolUseBlock("save", concierge.ToolMemorySubmit, json.RawMessage(`{"action":"create","id":"memory-random-ports","name":"Random ports","description":"Use random ports","body":"Worker tests use random ports.","type":"rule","scope":"run"}`))),
+	}, model.Response{
+		StopReason: model.StopReasonEndTurn,
+		Message:    model.NewAssistantMessage(model.NewTextBlock("Saved.")),
+	})
+	c := concierge.New(concierge.Config{}, st, drv, clk, fake)
+	_, askErr := c.Ask(ctx, "run-1", "Use random ports in worker tests.")
+	if askErr != nil {
+		t.Fatalf("concierge correction: %v calls=%v", askErr, fake.Requests)
+	}
+	mem, err := st.Memories().Get(ctx, "", "memory-random-ports")
+	if err != nil || mem.Source != "Use random ports in worker tests." {
+		t.Fatalf("memory = %+v, err=%v; want source quote", mem, err)
+	}
+	snap, err := dispatcher.BuildSnapshot(ctx, st, clk, "run-1", nil, dispatcher.SnapshotConfig{})
+	if err != nil {
+		t.Fatalf("dispatcher snapshot: %v", err)
+	}
+	if !strings.Contains(snap.Text, "memory-random-ports") || !strings.Contains(snap.Text, "Use random ports") {
+		t.Fatalf("snapshot missing correction: %s", snap.Text)
+	}
+	raw := lane.NewFakeDriver()
+	decorated := brief.WithMemories(st, raw)
+	if _, err := decorated.SpawnSession(ctx, lane.SpawnRequest{RunID: "run-1", LaneID: "lane-alpha", Brief: "Implement tests"}); err != nil {
+		t.Fatalf("worker brief: %v", err)
+	}
+	if !strings.Contains(raw.Spawns[0].Brief, "Worker tests use random ports.") || !strings.Contains(raw.Spawns[0].Brief, "Use random ports") {
+		t.Fatalf("worker brief missing correction/source: %s", raw.Spawns[0].Brief)
+	}
+	if _, err := c.Ask(ctx, "run-1", "forget"); err != nil {
+		t.Fatalf("forget correction: %v", err)
+	}
+	if _, err := st.Memories().Get(ctx, "", "memory-random-ports"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("forgotten memory still exists, err=%v", err)
+	}
+}
 
 func setupSeededStore(t *testing.T) (*clock.FakeClock, *store.MemoryStore, *lane.FakeDriver) {
 	t.Helper()
@@ -430,4 +475,152 @@ func TestConcierge_RejectsUncitedOrFabricatedAnswers(t *testing.T) {
 			t.Fatalf("expected ErrUncitedAnswer for fabricated dir-ghost, got %v", err)
 		}
 	})
+}
+
+func TestMemoryWorkflow_ChatCorrectionReachesNextSnapshotAndWorkerBrief(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupSeededStore(t)
+	ctx := t.Context()
+	const quote = "Correction: always use random ports in worker tests."
+	client := model.NewFakeClient(
+		model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("save", "memory.submit", json.RawMessage(`{"action":"create","id":"memory-ports","name":"Random ports","description":"Use random ports in worker tests","body":"Always use random ports in worker tests."}`)))},
+		model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock("Saved memory-ports on run-1; undo to revert."))},
+	)
+	conc := concierge.New(concierge.Config{}, st, drv, clk, client)
+	if _, err := conc.Ask(ctx, "run-1", quote); err != nil {
+		t.Fatal(err)
+	}
+	m, err := st.Memories().Get(ctx, "", "memory-ports")
+	if err != nil {
+		t.Fatalf("correction was not saved: %v", err)
+	}
+	if m.Source != quote {
+		t.Fatalf("source = %q, want owner quote %q", m.Source, quote)
+	}
+	if err := st.Backlog().Add(ctx, store.BacklogItem{ID: "item-memory-worker", RunID: "run-1", Title: "Worker tests", Status: store.BacklogOpen, Priority: store.PriorityP1}); err != nil {
+		t.Fatal(err)
+	}
+	workerClient := model.NewFakeClient(
+		model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("spawn", dispatcher.ToolLaneSpawn, json.RawMessage(`{"item_id":"item-memory-worker","lane_id":"lane-memory-worker","brief":"Implement worker tests"}`)))},
+		model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock("Started worker."))},
+	)
+	disp := dispatcher.New(dispatcher.Config{}, st, drv, clk, workerClient)
+	result, err := disp.Dispatch(ctx, "run-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Snapshot.Text, "memory-ports") {
+		t.Fatal("next dispatcher snapshot omitted correction")
+	}
+	if len(result.Rejected) != 0 {
+		t.Fatalf("spawn rejected: %+v", result.Rejected)
+	}
+	if len(drv.Spawns) != 1 || !strings.Contains(drv.Spawns[0].Brief, m.Body) || !strings.Contains(drv.Spawns[0].Brief, quote) {
+		t.Fatalf("next worker brief omitted sourced correction: %+v", drv.Spawns)
+	}
+}
+
+func TestConcierge_MemoryCorrectionsAndUndo(t *testing.T) {
+	t.Parallel()
+	for _, undoWord := range []string{"undo", "forget"} {
+		t.Run(undoWord, func(t *testing.T) {
+			t.Parallel()
+			clk, st, drv := setupSeededStore(t)
+			client := model.NewFakeClient()
+			conc := concierge.New(concierge.Config{}, st, drv, clk, client)
+			th, err := conc.StartThread(t.Context(), "run-1", "Owner corrections")
+			if err != nil {
+				t.Fatal(err)
+			}
+			submit := func(quote, args string) string {
+				t.Helper()
+				client.Enqueue(model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("memory-change", "memory.submit", json.RawMessage(args)))}, nil)
+				client.Enqueue(model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock("arbitrary model answer"))}, nil)
+				res, err := conc.AskInThread(t.Context(), "run-1", th.ID, quote)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(res.Answer, "\n") || !strings.Contains(res.Answer, "undo") {
+					t.Fatalf("missing one-line echo/undo: %q", res.Answer)
+				}
+				return res.Answer
+			}
+			undo := func() {
+				t.Helper()
+				n := len(client.Requests)
+				res, err := conc.AskInThread(t.Context(), "run-1", th.ID, undoWord)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(res.Answer, "Undid memory") || len(client.Requests) != n {
+					t.Fatalf("undo did not revert deterministically: %+v", res)
+				}
+			}
+			submit("Use ephemeral ports.", `{"action":"create","id":"memory-test","name":"Ports","body":"Use ephemeral ports."}`)
+			m, err := st.Memories().Get(t.Context(), "", "memory-test")
+			if err != nil || m.Source != "Use ephemeral ports." {
+				t.Fatalf("memory/source: %+v, %v", m, err)
+			}
+			if !strings.Contains(client.Requests[0].System, "starter-inner-loop") {
+				t.Fatal("canonical index missing")
+			}
+			undo()
+			if _, err := st.Memories().Get(t.Context(), "", "memory-test"); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("create undo: %v", err)
+			}
+			submit("Use ephemeral ports.", `{"action":"create","id":"memory-test","name":"Ports","body":"Use ephemeral ports."}`)
+			submit("Correction: use Unix sockets.", `{"action":"update","id":"memory-test","body":"Use Unix sockets."}`)
+			m, err = st.Memories().Get(t.Context(), "", "memory-test")
+			if err != nil || m.Body != "Use Unix sockets." || m.Source != "Correction: use Unix sockets." {
+				t.Fatalf("updated memory: %+v, %v", m, err)
+			}
+			if !strings.Contains(client.Requests[len(client.Requests)-2].System, "memory-test") {
+				t.Fatal("next canonical index missing created memory")
+			}
+			undo()
+			m, err = st.Memories().Get(t.Context(), "", "memory-test")
+			if err != nil || m.Body != "Use ephemeral ports." || m.Source != "Use ephemeral ports." {
+				t.Fatalf("update undo: %+v, %v", m, err)
+			}
+			submit("Delete the ports memory.", `{"action":"delete","id":"memory-test"}`)
+			if _, err := st.Memories().Get(t.Context(), "", "memory-test"); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("delete: %v", err)
+			}
+			undo()
+			m, err = st.Memories().Get(t.Context(), "", "memory-test")
+			if err != nil || m.Body != "Use ephemeral ports." || m.Source != "Use ephemeral ports." {
+				t.Fatalf("delete undo: %+v, %v", m, err)
+			}
+		})
+	}
+}
+
+func TestConcierge_DirectiveSubmitWritesSourcedMemoryAndUndoRevokesAlias(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupSeededStore(t)
+	ctx := t.Context()
+	const quote = "Standing rule: use random ports."
+	client := model.NewFakeClient(
+		model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("directive", "directive.submit", json.RawMessage(`{"id":"dir-memory-ports","kind":"rule","text":"Use random ports."}`)))},
+		model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock("Saved dir-memory-ports on run-1."))},
+	)
+	concierge := concierge.New(concierge.Config{}, st, drv, clk, client)
+	result, err := concierge.Ask(ctx, "run-1", quote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := st.Memories().Get(ctx, "", "dir-memory-ports")
+	if err != nil || saved.Source != quote || saved.Body != "Use random ports." {
+		t.Fatalf("directive memory: %+v, %v", saved, err)
+	}
+	if _, err := concierge.AskInThread(ctx, "run-1", result.ThreadID, "undo"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Memories().Get(ctx, "", "dir-memory-ports"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("undo kept directive memory: %v", err)
+	}
+	alias, err := st.Directives().Get(ctx, "run-1", "dir-memory-ports")
+	if err != nil || alias.Status != store.DirectiveRevoked {
+		t.Fatalf("undo kept directive alias active: %+v, %v", alias, err)
+	}
 }

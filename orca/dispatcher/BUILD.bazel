@@ -12,6 +12,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/orca/dispatcher",
     visibility = ["//visibility:public"],
     deps = [
+        "//orca/brief",
         "//orca/clock",
         "//orca/controller",
         "//orca/lane",

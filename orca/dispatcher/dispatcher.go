@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/brief"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/lane"
@@ -923,6 +924,10 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	if !hasFirst {
 		return "", fmt.Errorf("recipe %q has no phases", r.Name)
 	}
+	workerBrief, err := brief.Render(p.Brief, view.Memories, view.EffectiveMaxBriefBytes(r))
+	if err != nil {
+		return "", err
+	}
 
 	now := d.clock.Now().UTC()
 	ln := lane.Lane{
@@ -957,7 +962,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	}
 
 	if d.driver != nil && len(firstPhase.Agents) > 0 {
-		spawnRes, err := d.spawnLaneSession(ctx, runID, ln, firstPhase.Name, ln.Round, firstPhase.Agents[0], p.Brief)
+		spawnRes, err := d.spawnLaneSession(ctx, runID, ln, firstPhase.Name, ln.Round, firstPhase.Agents[0], workerBrief)
 		if err != nil {
 			return "", err
 		}
@@ -1029,13 +1034,16 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 		round = ln.MaxRound(targetPhase.Name) + 1
 	}
 
-	brief := d.buildRetryBrief(view, ln, r, targetPhase, p.Note)
+	workerBrief, err := d.buildRetryBrief(view, ln, r, targetPhase, p.Note)
+	if err != nil {
+		return "", err
+	}
 	var sessionID, terminalID string
 
 	if d.driver != nil && len(targetPhase.Agents) > 0 {
 		agent := targetPhase.Agents[0]
 		if ln.SessionID == "" {
-			res, err := d.spawnLaneSession(ctx, runID, ln, targetPhase.Name, round, agent, brief)
+			res, err := d.spawnLaneSession(ctx, runID, ln, targetPhase.Name, round, agent, workerBrief)
 			if err != nil {
 				return "", err
 			}
@@ -1051,7 +1059,7 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 				Harness:   agent.Harness,
 				Model:     agent.Model,
 				Effort:    agent.Effort,
-				Brief:     brief,
+				Brief:     workerBrief,
 			})
 			if err != nil {
 				return "", err
@@ -1098,7 +1106,7 @@ func (d *Dispatcher) spawnLaneSession(
 	})
 }
 
-func (d *Dispatcher) buildRetryBrief(view *StateView, ln lane.Lane, r recipe.Recipe, phase recipe.Phase, note string) string {
+func (d *Dispatcher) buildRetryBrief(view *StateView, ln lane.Lane, r recipe.Recipe, phase recipe.Phase, note string) (string, error) {
 	var parts []string
 	if ln.Title != "" {
 		parts = append(parts, ln.Title)
@@ -1119,14 +1127,7 @@ func (d *Dispatcher) buildRetryBrief(view *StateView, ln lane.Lane, r recipe.Rec
 	if strings.TrimSpace(note) != "" {
 		parts = append(parts, strings.TrimSpace(note))
 	}
-	if len(view.Memories) > 0 {
-		parts = append(parts, "Applicable memories:\n"+store.MemoryIndex(view.Memories))
-	}
-	brief := strings.Join(parts, "\n\n")
-	if maxBytes := view.EffectiveMaxBriefBytes(r); maxBytes > 0 && len(brief) > maxBytes {
-		brief = validUTF8Prefix(brief, maxBytes)
-	}
-	return brief
+	return brief.Render(strings.Join(parts, "\n\n"), view.Memories, view.EffectiveMaxBriefBytes(r))
 }
 
 func (d *Dispatcher) applyLaneStop(ctx context.Context, runID string, view *StateView, p LaneStopParams) (string, error) {
@@ -1240,6 +1241,32 @@ func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, _ *St
 		Status:    store.DirectiveActive,
 	}
 	if err := d.store.Directives().Add(ctx, dir); err != nil {
+		return "", err
+	}
+	if expiresAt != nil {
+		return fmt.Sprintf("recorded time-limited directive note %s", dir.ID), nil
+	}
+	if existing, getErr := d.store.Memories().Get(ctx, "", dir.ID); getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
+		_ = d.store.Directives().UpdateStatus(context.WithoutCancel(ctx), runID, dir.ID, store.DirectiveRevoked)
+		return "", getErr
+	} else if existing != nil {
+		_ = d.store.Directives().UpdateStatus(context.WithoutCancel(ctx), runID, dir.ID, store.DirectiveRevoked)
+		return "", fmt.Errorf("%w: memory %s already exists", store.ErrInvalidArgument, dir.ID)
+	}
+	scope := strings.TrimSpace(dir.Scope)
+	if scope != "owner" && scope != "repo" && scope != "run" {
+		scope = "run"
+	}
+	memRunID := runID
+	if scope != "run" {
+		memRunID = ""
+	}
+	_, err := d.store.Memories().Put(ctx, store.MemoryEntry{
+		ID: dir.ID, Name: "Dispatcher directive", Description: dir.Text, Type: "rule", Scope: scope,
+		RunID: memRunID, Source: dir.Text, Body: dir.Text, ProposedBy: "model",
+	})
+	if err != nil {
+		_ = d.store.Directives().UpdateStatus(context.WithoutCancel(ctx), runID, dir.ID, store.DirectiveRevoked)
 		return "", err
 	}
 	return fmt.Sprintf("recorded directive note %s", dir.ID), nil

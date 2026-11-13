@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/brief"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/lane"
@@ -924,7 +925,10 @@ func (p *Planner) buildReconcilePrompt(
 	if err != nil {
 		return "", err
 	}
-	memories, _ := p.store.Memories().List(ctx, store.MemoryFilter{RunID: run.ID})
+	memories, err := p.store.Memories().List(ctx, store.MemoryFilter{RunID: run.ID})
+	if err != nil {
+		return "", err
+	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Planner Context for Run `%s`\n", run.ID)
@@ -932,7 +936,11 @@ func (p *Planner) buildReconcilePrompt(
 	fmt.Fprintf(&b, "Current PlanRef: %s\n", cmp.Or(strings.TrimSpace(run.PlanRef), "(none)"))
 	fmt.Fprintf(&b, "Default Recipe: %s\n", cmp.Or(strings.TrimSpace(run.DefaultRecipe), recipe.DefaultName))
 	b.WriteString("\n## Memory Index\n")
-	b.WriteString(store.MemoryIndex(memories))
+	memoryContext, err := brief.Render("", memories, 0)
+	if err != nil {
+		return "", err
+	}
+	b.WriteString(memoryContext)
 	if strings.TrimSpace(reason) != "" {
 		fmt.Fprintf(&b, "Trigger Reason: %s\n", strings.TrimSpace(reason))
 	}
@@ -1260,7 +1268,14 @@ func (p *Planner) applyReconciliation(
 		if err != nil {
 			return applied, decisions, err
 		}
-		brief := strings.TrimSpace(rebriefSpec.Brief)
+		memories, err := p.store.Memories().List(ctx, store.MemoryFilter{RunID: run.ID})
+		if err != nil {
+			return applied, decisions, err
+		}
+		workerBrief, err := brief.Render(strings.TrimSpace(rebriefSpec.Brief), memories, brief.DefaultMaxBytes)
+		if err != nil {
+			return applied, decisions, err
+		}
 		reason := cmp.Or(strings.TrimSpace(rebriefSpec.Reason), "re-briefed by plan reconciliation")
 		if p.driver != nil && (ln.SessionID != "" || ln.TerminalID != "") {
 			if err := p.driver.Steer(ctx, lane.SteerRequest{
@@ -1268,7 +1283,7 @@ func (p *Planner) applyReconciliation(
 				LaneID:     ln.ID,
 				SessionID:  ln.SessionID,
 				TerminalID: ln.TerminalID,
-				Message:    brief,
+				Message:    workerBrief,
 			}); err != nil {
 				return applied, decisions, err
 			}
