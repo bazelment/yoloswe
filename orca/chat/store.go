@@ -117,7 +117,25 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 		if err != nil {
 			return err
 		}
-		_, err = mailbox.AppendEvent(ctx, b.Store.Events(), b.RunID, mailbox.Message{Owner: true, From: "owner", Body: text})
+		msg := mailbox.Message{Owner: true, From: "owner", Body: text}
+		// A reply to the sole open owner ask must retain its identity so the
+		// controller can resolve the ask instead of treating it as a new
+		// unanswered owner message.
+		asks, askErr := b.asks(ctx)
+		if askErr != nil {
+			return askErr
+		}
+		if len(asks) == 1 {
+			var ask struct {
+				ID     string `json:"id"`
+				LaneID string `json:"lane_id"`
+			}
+			if json.Unmarshal([]byte(asks[0].Text), &ask) == nil && ask.ID != "" {
+				msg.InReplyTo = ask.ID
+				msg.LaneID = ask.LaneID
+			}
+		}
+		_, err = mailbox.AppendEvent(ctx, b.Store.Events(), b.RunID, msg)
 		return err
 	}
 	return fmt.Errorf("unsupported handler %q", d.Handler)

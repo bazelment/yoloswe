@@ -246,6 +246,17 @@ func TestOpenQuestionReplyReachesDispatcherSnapshot(t *testing.T) {
 	if !strings.Contains(snap.Text, "owner_ask:ask-1") || !strings.Contains(snap.Text, "A or B?") {
 		t.Fatal(snap.Text)
 	}
+	events, err := st.Events().List(t.Context(), store.EventFilter{RunID: "run"})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+	var msg mailbox.Message
+	if err := json.Unmarshal(events[0].Payload, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.InReplyTo != "ask-1" {
+		t.Fatalf("reply=%+v", msg)
+	}
 }
 func TestPauseViaConciergeTool(t *testing.T) {
 	st := store.NewMemoryStore(nil)
