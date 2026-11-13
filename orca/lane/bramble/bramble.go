@@ -61,7 +61,7 @@ func (d *Driver) ReportInstructions(runID, laneID, phase string, round int) stri
 		runDir = runID
 	}
 	path := reportPath(runDir, runID, laneID, phase, round)
-	return "Write the phase report to " + path + "; the phase is not finished until that file is written. Start it with Outcome: done|needs-swe|blocked|needs-input, include HEAD and PR lines, then include the report details."
+	return "Write the phase report to " + path + "; the phase is not finished until that file is written. Start it with Outcome: done|no-change|needs-swe|blocked|needs-input, include HEAD and PR lines, and include a Reason: line when outcome is no-change; then include the report details."
 }
 func (d *Driver) PhaseSkill(phase string) string {
 	switch phase {
@@ -118,7 +118,11 @@ func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnRe
 	if baseDir == "" {
 		baseDir = "."
 	}
-	if out, err := exec.CommandContext(ctx, "git", "-C", baseDir, "rev-parse", "HEAD").Output(); err == nil {
+	baseRef := "HEAD"
+	if req.Worktree == "" && strings.TrimSpace(req.BaseBranch) != "" {
+		baseRef = req.BaseBranch
+	}
+	if out, err := exec.CommandContext(ctx, "git", "-C", baseDir, "rev-parse", baseRef).Output(); err == nil {
 		baseCommit = strings.TrimSpace(string(out))
 	}
 	prompt := req.Brief + "\n[orca run:" + req.RunID + " lane:" + req.LaneID + "]"

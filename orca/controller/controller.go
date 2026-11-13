@@ -1398,12 +1398,12 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 
 	curPhase, hasPhase := r.Phase(ln.Phase)
 	if hasPhase && len(curPhase.ExitContract.AllowedOutcomes) > 0 {
-		if !slices.Contains(curPhase.ExitContract.AllowedOutcomes, string(rep.Outcome)) {
+		if rep.Outcome != lane.OutcomeNoChange && !slices.Contains(curPhase.ExitContract.AllowedOutcomes, string(rep.Outcome)) {
 			return c.blockLaneForJudgment(ctx, ln)
 		}
 	}
 
-	if rep.Outcome == lane.OutcomeDone && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && (strings.EqualFold(strings.TrimSpace(rep.Change), "none") || (rep.HeadSHA != "" && c.reportHeadIsBase(ctx, ln, rep.HeadSHA))) {
+	if (rep.Outcome == lane.OutcomeDone || rep.Outcome == lane.OutcomeNoChange) && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && (rep.Outcome == lane.OutcomeNoChange || strings.EqualFold(strings.TrimSpace(rep.Change), "none") || (rep.HeadSHA != "" && c.reportHeadIsBase(ctx, ln, rep.HeadSHA))) {
 		return c.completeReportOnlyLane(ctx, ln, ev)
 	}
 
@@ -1411,7 +1411,13 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		ln.ApprovalSHA = cmp.Or(rep.HeadSHA, ln.PRHead, ln.ApprovalSHA)
 	}
 
-	return c.advanceByRecipe(ctx, ln, r, string(rep.Outcome), rep.Reason, rep.Breaks, ev)
+	verdict := string(rep.Outcome)
+	// no-change is a successful handback for mechanical phases; follow the
+	// recipe's normal done transition after preserving the reported reason.
+	if rep.Outcome == lane.OutcomeNoChange {
+		verdict = string(lane.OutcomeDone)
+	}
+	return c.advanceByRecipe(ctx, ln, r, verdict, rep.Reason, rep.Breaks, ev)
 }
 
 // reportHeadIsBase compares against the immutable spawn commit.

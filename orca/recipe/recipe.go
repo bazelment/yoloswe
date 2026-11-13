@@ -23,6 +23,7 @@ const (
 // Standard phase report outcomes used in exit contracts and transitions.
 const (
 	OutcomeDone       = "done"
+	OutcomeNoChange   = "no-change"
 	OutcomeNeedsSWE   = "needs-swe"
 	OutcomeBlocked    = "blocked"
 	OutcomeNeedsInput = "needs-input"
