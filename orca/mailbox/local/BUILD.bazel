@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "local",
+    srcs = ["local.go"],
+    importpath = "github.com/bazelment/yoloswe/orca/mailbox/local",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//orca/mailbox",
+        "//orca/store",
+    ],
+)
+
+go_test(
+    name = "local_test",
+    srcs = ["local_test.go"],
+    deps = [
+        ":local",
+        "//orca/mailbox",
+        "//orca/store",
+    ],
+)
