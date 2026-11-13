@@ -1148,7 +1148,8 @@ func (d *Dispatcher) buildRetryBriefText(view *StateView, ln lane.Lane, phase re
 	if ln.Title != "" {
 		parts = append(parts, ln.Title)
 	}
-	if ln.ItemID != "" {
+	mechanical := phase.Name == recipe.PhaseClean || phase.Name == recipe.PhaseReview
+	if ln.ItemID != "" && !mechanical {
 		if item, ok := view.BacklogItem(ln.ItemID); ok {
 			if item.Description != "" {
 				parts = append(parts, item.Description)
@@ -1158,7 +1159,16 @@ func (d *Dispatcher) buildRetryBriefText(view *StateView, ln lane.Lane, phase re
 			}
 		}
 	}
-	if phase.BriefTemplate != "" {
+	var skill string
+	if d.driver != nil {
+		skill = d.driver.PhaseSkill(phase.Name)
+	}
+	if skill != "" {
+		parts = []string{skill}
+		if ln.Title != "" {
+			parts = append(parts, "Goal: "+ln.Title)
+		}
+	} else if phase.BriefTemplate != "" {
 		parts = append(parts, phase.BriefTemplate)
 	}
 	if strings.TrimSpace(note) != "" {

@@ -1398,7 +1398,8 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 
 	curPhase, hasPhase := r.Phase(ln.Phase)
 	if hasPhase && len(curPhase.ExitContract.AllowedOutcomes) > 0 {
-		if !slices.Contains(curPhase.ExitContract.AllowedOutcomes, string(rep.Outcome)) {
+		noChangeAllowed := rep.Outcome == lane.OutcomeNoChange && (curPhase.Name == recipe.PhaseSWE || curPhase.Name == recipe.PhaseClean || curPhase.Name == recipe.PhaseReview)
+		if !noChangeAllowed && !slices.Contains(curPhase.ExitContract.AllowedOutcomes, string(rep.Outcome)) {
 			return c.blockLaneForJudgment(ctx, ln)
 		}
 	}
@@ -1407,11 +1408,17 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		return c.completeReportOnlyLane(ctx, ln, ev)
 	}
 
-	if rep.Outcome == lane.OutcomeDone && isReviewPhase(curPhase) {
+	if (rep.Outcome == lane.OutcomeDone || rep.Outcome == lane.OutcomeNoChange) && isReviewPhase(curPhase) {
 		ln.ApprovalSHA = cmp.Or(rep.HeadSHA, ln.PRHead, ln.ApprovalSHA)
 	}
 
-	return c.advanceByRecipe(ctx, ln, r, string(rep.Outcome), rep.Reason, rep.Breaks, ev)
+	verdict := string(rep.Outcome)
+	// no-change is a successful handback for mechanical phases; follow the
+	// recipe's normal done transition after preserving the reported reason.
+	if rep.Outcome == lane.OutcomeNoChange && (curPhase.Name == recipe.PhaseSWE || curPhase.Name == recipe.PhaseClean || curPhase.Name == recipe.PhaseReview) {
+		verdict = string(lane.OutcomeDone)
+	}
+	return c.advanceByRecipe(ctx, ln, r, verdict, rep.Reason, rep.Breaks, ev)
 }
 
 // reportHeadIsBase compares against the immutable spawn commit.
@@ -2051,7 +2058,8 @@ func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Re
 	if ln.Title != "" {
 		parts = append(parts, ln.Title)
 	}
-	if ln.ItemID != "" {
+	mechanical := phase.Name == recipe.PhaseClean || phase.Name == recipe.PhaseReview
+	if ln.ItemID != "" && !mechanical {
 		if item, err := c.store.Backlog().Get(ctx, c.cfg.RunID, ln.ItemID); err == nil {
 			if item.Description != "" {
 				parts = append(parts, item.Description)
@@ -2061,7 +2069,12 @@ func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Re
 			}
 		}
 	}
-	if phase.BriefTemplate != "" {
+	if skill := c.driver.PhaseSkill(phase.Name); skill != "" {
+		parts = []string{skill}
+		if ln.Title != "" {
+			parts = append(parts, "Goal: "+ln.Title)
+		}
+	} else if phase.BriefTemplate != "" {
 		parts = append(parts, phase.BriefTemplate)
 	}
 	if extraNote != "" {

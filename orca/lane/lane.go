@@ -195,6 +195,7 @@ type ReportOutcome string
 
 const (
 	OutcomeDone       ReportOutcome = "done"
+	OutcomeNoChange   ReportOutcome = "no-change"
 	OutcomeNeedsSWE   ReportOutcome = "needs-swe"
 	OutcomeBlocked    ReportOutcome = "blocked"
 	OutcomeNeedsInput ReportOutcome = "needs-input"
@@ -202,7 +203,7 @@ const (
 
 func (o ReportOutcome) Valid() bool {
 	switch o {
-	case OutcomeDone, OutcomeNeedsSWE, OutcomeBlocked, OutcomeNeedsInput:
+	case OutcomeDone, OutcomeNoChange, OutcomeNeedsSWE, OutcomeBlocked, OutcomeNeedsInput:
 		return true
 	default:
 		return false
@@ -398,6 +399,7 @@ type LaneDriver interface {
 	// ReportInstructions returns the backend-specific contract a terminal must
 	// follow before it considers a phase complete.
 	ReportInstructions(runID, laneID, phase string, round int) string
+	PhaseSkill(phase string) string
 	SpawnSession(ctx context.Context, req SpawnRequest) (SpawnResult, error)
 	StartPhaseTerminal(ctx context.Context, req StartPhaseRequest) (StartPhaseResult, error)
 	Steer(ctx context.Context, req SteerRequest) error
@@ -430,7 +432,18 @@ func NewFakeDriver() *FakeDriver {
 }
 
 func (f *FakeDriver) ReportInstructions(_, laneID, phase string, round int) string {
-	return fmt.Sprintf("File the phase report for lane %s phase %s round %d using the fake driver's report input; the phase is not finished until the report is filed. Report outcome done, needs-swe, blocked, or needs-input, with HEAD and PR lines.", laneID, phase, round)
+	return fmt.Sprintf("File the phase report for lane %s phase %s round %d using the fake driver's report input; the phase is not finished until the report is filed. Report outcome done, no-change, needs-swe, blocked, or needs-input, with HEAD and PR lines; for no-change include a Reason line.", laneID, phase, round)
+}
+
+func (f *FakeDriver) PhaseSkill(phase string) string {
+	switch phase {
+	case "clean":
+		return "/simplify"
+	case "review":
+		return "/pr-polish"
+	default:
+		return ""
+	}
 }
 
 func (f *FakeDriver) SpawnSession(_ context.Context, req SpawnRequest) (SpawnResult, error) {

@@ -23,12 +23,32 @@ func Render(text string, memories []store.MemoryEntry, maxBytes int) (string, er
 	}
 	var b strings.Builder
 	b.WriteString(text)
-	if len(memories) > 0 {
-		b.WriteString("\n\n## Memories for this task\n")
-		b.WriteString(store.MemoryIndex(memories))
+	// Mechanical cleanup and review phases receive their task only through the
+	// goal line. Their phase skill is the complete instruction and must not be
+	// followed by task descriptions or memory bodies.
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "/simplify") || strings.HasPrefix(trimmed, "/pr-polish") {
+		return text, nil
+	}
+	if strings.TrimSpace(text) == "" {
 		for i := range memories {
-			m := &memories[i]
-			entry := fmt.Sprintf("\n### [%s] %s\n%s\nSource: %s\n", m.ID, m.Name, m.Body, m.Source)
+			if line := memoryLine(&memories[i]); line != "" {
+				b.WriteString("\n")
+				b.WriteString(line)
+			}
+		}
+		return b.String(), nil
+	}
+	var applicable []store.MemoryEntry
+	for i := range memories {
+		if applies(text, memories[i]) {
+			applicable = append(applicable, memories[i])
+		}
+	}
+	if len(applicable) > 0 {
+		b.WriteString("\n\n## Memories for this task\n")
+		for i := range applicable {
+			entry := memoryLine(&applicable[i]) + "\n"
 			if maxBytes > 0 && b.Len()+len(entry) > maxBytes {
 				break
 			}
@@ -43,6 +63,32 @@ func Render(text string, memories []store.MemoryEntry, maxBytes int) (string, er
 		return out[:maxBytes], nil
 	}
 	return b.String(), nil
+}
+
+func memoryLine(m *store.MemoryEntry) string {
+	if m == nil {
+		return ""
+	}
+	description := strings.TrimSpace(m.Description)
+	if description == "" {
+		return fmt.Sprintf("- [%s] %s", m.ID, strings.TrimSpace(m.Name))
+	}
+	return fmt.Sprintf("- [%s] %s: %s", m.ID, strings.TrimSpace(m.Name), description)
+}
+
+func applies(text string, m store.MemoryEntry) bool {
+	if m.Scope == "owner" || m.Scope == "repo" {
+		return true
+	}
+	words := strings.Fields(strings.ToLower(text))
+	hay := strings.ToLower(m.Name + " " + m.Description + " " + m.Body)
+	for _, w := range words {
+		w = strings.Trim(w, ".,:;()[]{}\"")
+		if len(w) >= 4 && strings.Contains(hay, w) {
+			return true
+		}
+	}
+	return false
 }
 
 // WithMemories decorates the controller's driver so every fresh phase gets

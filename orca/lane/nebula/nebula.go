@@ -160,7 +160,17 @@ type Driver struct {
 var _ lane.LaneDriver = (*Driver)(nil)
 
 func (d *Driver) ReportInstructions(runID, laneID, phase string, round int) string {
-	return fmt.Sprintf("File the phase report in this terminal with `nebula phase report --outcome <done|needs-swe|blocked|needs-input> --stdin [--head <sha>] [--pr <n>]` (run %s, lane %s, phase %s, round %d). Pipe the report body to stdin; it must include exact `Outcome:`, `HEAD:`, and `PR:` lines. The phase is not finished until the report is filed.", runID, laneID, phase, round)
+	return fmt.Sprintf("File the phase report in this terminal with `nebula phase report --outcome <done|no-change|needs-swe|blocked|needs-input> --stdin [--head <sha>] [--pr <n>]` (run %s, lane %s, phase %s, round %d). Pipe the report body to stdin; it must include exact `Outcome:`, `HEAD:`, and `PR:` lines; for no-change include a Reason: line. The phase is not finished until the report is filed.", runID, laneID, phase, round)
+}
+
+func (d *Driver) PhaseSkill(phase string) string {
+	switch phase {
+	case "clean":
+		return "/simplify"
+	case "review":
+		return "/pr-polish-nebula"
+	}
+	return ""
 }
 
 // EnsureRun creates runID before spawning lanes. A RUN_EXISTS conflict means

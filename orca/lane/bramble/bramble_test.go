@@ -2,7 +2,9 @@ package bramble_test
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +23,67 @@ func (f *fakeClient) NewSession(context.Context, br.SpawnRequest) (br.SpawnResul
 func (f *fakeClient) SendInput(context.Context, string, string) error    { return nil }
 func (f *fakeClient) SendKey(context.Context, string, string) error      { return nil }
 func (f *fakeClient) ListSessions(context.Context) ([]br.Session, error) { return f.sessions, nil }
+
+func TestPhaseBriefContract(t *testing.T) {
+	d, err := bramble.New(bramble.Config{Client: &fakeClient{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := d.PhaseSkill("review"); got != "/pr-polish" {
+		t.Fatalf("review skill=%q", got)
+	}
+	if got := d.PhaseSkill("clean"); got != "/simplify" {
+		t.Fatalf("clean skill=%q", got)
+	}
+	if got := d.ReportInstructions("run", "lane", "review", 1); !strings.Contains(got, "Reason:") {
+		t.Fatalf("handback=%q", got)
+	}
+}
+
+func TestSpawnCapturesBaseBeforeClientStartsWorker(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init", "-q"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "test"}, {"commit", "--allow-empty", "-m", "base", "-q"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	before := strings.TrimSpace(string(mustGit(t, dir, "rev-parse", "HEAD")))
+	client := &commitOnStartClient{dir: dir}
+	d, err := bramble.New(bramble.Config{Client: client, Repo: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.SpawnSession(t.Context(), lane.SpawnRequest{RunID: "r", LaneID: "l", Phase: "swe", Brief: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BaseCommit != before {
+		t.Fatalf("base=%q, want pre-start %q", got.BaseCommit, before)
+	}
+}
+
+type commitOnStartClient struct{ dir string }
+
+func (c *commitOnStartClient) NewSession(ctx context.Context, _ br.SpawnRequest) (br.SpawnResult, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", c.dir, "commit", "--allow-empty", "-m", "worker-start", "-q")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return br.SpawnResult{}, fmt.Errorf("commit: %v: %s", err, out)
+	}
+	return br.SpawnResult{SessionID: "s1"}, nil
+}
+func (c *commitOnStartClient) SendInput(context.Context, string, string) error    { return nil }
+func (c *commitOnStartClient) SendKey(context.Context, string, string) error      { return nil }
+func (c *commitOnStartClient) ListSessions(context.Context) ([]br.Session, error) { return nil, nil }
+func mustGit(t *testing.T, dir string, args ...string) []byte {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
 
 func TestWatchEmitsLifecycleKinds(t *testing.T) {
 	dir := t.TempDir()
