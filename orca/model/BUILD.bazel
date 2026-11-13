@@ -19,5 +19,8 @@ go_test(
         "openai_client_test.go",
     ],
     data = glob(["testdata/**"]),
-    deps = [":model"],
+    deps = [
+        ":model",
+        "//orca/clock",
+    ],
 )

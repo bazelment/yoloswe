@@ -245,8 +245,14 @@ func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Respons
 		}
 		apiErr := parseAPIError(hresp.StatusCode, hresp.Header, data, attempt)
 		if apiErr.Retryable() && attempt <= c.maxRetries {
+			if c.clock.Now().Sub(retryStart) >= DefaultRetryTotalCeiling {
+				return nil, apiErr
+			}
 			if err := c.wait(ctx, attempt, hresp.Header, hresp.StatusCode, retryStart); err != nil {
 				return nil, err
+			}
+			if c.clock.Now().Sub(retryStart) >= DefaultRetryTotalCeiling {
+				return nil, apiErr
 			}
 			continue
 		}

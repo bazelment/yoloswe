@@ -386,8 +386,14 @@ func (c *HTTPClient) CreateMessage(ctx context.Context, req Request) (*Response,
 
 		apiErr := parseAPIError(httpResp.StatusCode, httpResp.Header, respBytes, attempt)
 		if apiErr.Retryable() && attempt < maxAttempts {
+			if c.clock.Now().Sub(retryStart) >= DefaultRetryTotalCeiling {
+				return nil, apiErr
+			}
 			if waitErr := c.sleepRetry(ctx, attempt, httpResp.Header, httpResp.StatusCode, retryStart); waitErr != nil {
 				return nil, waitErr
+			}
+			if c.clock.Now().Sub(retryStart) >= DefaultRetryTotalCeiling {
+				return nil, apiErr
 			}
 			continue
 		}
