@@ -267,7 +267,14 @@ func TestGeminiMultipartPreservesOpenQuestionContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct{ Input string }
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		if !strings.Contains(request.Input, "Open questions:\nask-2: choose a rollout") {
+			t.Errorf("multipart request lost context: %q", request.Input)
+		}
 		var wire map[string]any
 		if err := json.Unmarshal(raw, &wire); err != nil {
 			t.Fatal(err)
