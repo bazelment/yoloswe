@@ -415,6 +415,7 @@ type SessionInfo struct {
 	URL          string            `json:"url,omitempty"`
 	RepositoryID string            `json:"repositoryId,omitempty"`
 	BaseBranch   string            `json:"baseBranch,omitempty"`
+	BaseCommit   string            `json:"baseCommit,omitempty"`
 	WorkBranch   string            `json:"workBranch,omitempty"`
 	SharedHome   bool              `json:"sharedHome,omitempty"`
 }
@@ -491,8 +492,9 @@ func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.
 		return lane.SpawnResult{}, err
 	}
 	res := lane.SpawnResult{
-		SessionID: sess.ID,
-		StartedAt: d.clock.Now().UTC(),
+		SessionID:  sess.ID,
+		BaseCommit: sess.BaseCommit,
+		StartedAt:  d.clock.Now().UTC(),
 	}
 	if req.Phase == "" && req.Harness == "" && req.Brief == "" {
 		return res, nil

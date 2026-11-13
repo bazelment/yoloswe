@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -112,7 +113,13 @@ func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnRe
 	d.runs[r.SessionID] = req.RunID
 	d.runDirs[r.SessionID] = req.RunDir
 	d.mu.Unlock()
-	return lane.SpawnResult{SessionID: r.SessionID, TerminalID: r.SessionID, StartedAt: time.Now().UTC()}, nil
+	baseCommit := ""
+	if r.WorktreePath != "" {
+		if out, err := exec.CommandContext(ctx, "git", "-C", r.WorktreePath, "rev-parse", "HEAD").Output(); err == nil {
+			baseCommit = strings.TrimSpace(string(out))
+		}
+	}
+	return lane.SpawnResult{SessionID: r.SessionID, TerminalID: r.SessionID, StartedAt: time.Now().UTC(), BaseCommit: baseCommit}, nil
 }
 func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
 	id := req.SessionID

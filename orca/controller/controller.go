@@ -1979,6 +1979,9 @@ func (c *Controller) startLanePhase(
 		}
 		sessionID = res.SessionID
 		terminalID = res.TerminalID
+		if strings.TrimSpace(res.BaseCommit) != "" {
+			ln.BaseCommit = strings.TrimSpace(res.BaseCommit)
+		}
 	} else {
 		res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
 			RunID:     c.cfg.RunID,

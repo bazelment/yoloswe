@@ -324,6 +324,9 @@ type SpawnResult struct {
 	StartedAt  time.Time `json:"started_at"`
 	SessionID  string    `json:"session_id"`
 	TerminalID string    `json:"terminal_id"`
+	// BaseCommit is the immutable commit the backend actually started from.
+	// Drivers should populate this from the created checkout/backend response.
+	BaseCommit string `json:"base_commit,omitempty"`
 }
 
 // StartPhaseRequest starts a phase terminal on an existing or new worker session.
@@ -406,15 +409,16 @@ type Driver = LaneDriver
 
 // FakeDriver is an in-memory LaneDriver implementation for deterministic unit tests.
 type FakeDriver struct { //nolint:govet // test double state is intentionally grouped
-	reports     map[string]*PhaseReport
-	Spawns      []SpawnRequest
-	PhaseStarts []StartPhaseRequest
-	Steers      []SteerRequest
-	Stops       []StopRequest
-	nextSeq     int
-	subs        map[int]chan Event
-	nextSub     int
-	mu          sync.Mutex
+	reports         map[string]*PhaseReport
+	Spawns          []SpawnRequest
+	PhaseStarts     []StartPhaseRequest
+	Steers          []SteerRequest
+	Stops           []StopRequest
+	SpawnBaseCommit string
+	nextSeq         int
+	subs            map[int]chan Event
+	nextSub         int
+	mu              sync.Mutex
 }
 
 func NewFakeDriver() *FakeDriver {
@@ -441,6 +445,7 @@ func (f *FakeDriver) SpawnSession(_ context.Context, req SpawnRequest) (SpawnRes
 		SessionID:  fmt.Sprintf("sess-%s-%d", req.LaneID, f.nextSeq),
 		TerminalID: fmt.Sprintf("term-%s-%s-%d", req.LaneID, PhaseRoundKey(req.Phase, req.Round), f.nextSeq),
 		StartedAt:  time.Now().UTC(),
+		BaseCommit: f.SpawnBaseCommit,
 	}, nil
 }
 
