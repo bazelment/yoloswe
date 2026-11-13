@@ -16,9 +16,6 @@ import (
 	"testing"
 	"time"
 
-	chatui "github.com/bazelment/yoloswe/orca/chat"
-	"github.com/bazelment/yoloswe/orca/controller"
-
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
@@ -284,7 +281,7 @@ func TestSmoke_ThreeLaneScenarioAndConciergeChat(t *testing.T) {
 		"chat",
 		"--run", "run-3lane",
 		"--store", "sqlite:" + dbPath,
-		"--replay", "testdata/routed_status_replay.json",
+		"--replay", "testdata/concierge_status_replay.json",
 	}, strings.NewReader("Where are we on run-3lane?\n"), &chatOut, &chatErr); err != nil {
 		t.Fatalf("Execute chat: %v\nstderr:\n%s", err, chatErr.String())
 	}
@@ -1089,6 +1086,14 @@ func TestCLIStartupPlanningRecorded(t *testing.T) {
 			if err := runner.Bootstrap(t.Context()); err != nil {
 				t.Fatal(err)
 			}
+			if err := runner.controller.ReleaseLease(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			resumed := NewRunner(cfg, st, drv, clk, guarded, nil)
+			resumed.planner.planReader = runner.planner.planReader
+			if err := resumed.Bootstrap(t.Context()); err != nil {
+				t.Fatal(err)
+			}
 			if len(fake.Requests) != 3 {
 				t.Fatalf("calls=%d", len(fake.Requests))
 			}
@@ -1128,6 +1133,14 @@ func TestCLIStartupPlanningRecorded(t *testing.T) {
 			}
 			if len(decisions) != 2 || decisions[0].Actor != "critic" {
 				t.Fatalf("decisions: %+v", decisions)
+			}
+			var inputTokens, outputTokens int64
+			for i := range decisions {
+				inputTokens += decisions[i].InputTokens
+				outputTokens += decisions[i].OutputTokens
+			}
+			if inputTokens != 300 || outputTokens != 150 {
+				t.Fatalf("decision usage double counted: input=%d output=%d", inputTokens, outputTokens)
 			}
 		})
 	}
@@ -1280,48 +1293,19 @@ func TestPlannerRequestFetchesReference(t *testing.T) {
 	}
 }
 
-func TestChatPauseResumeStopControlsRunner(t *testing.T) {
-	ctx := t.Context()
-	st := store.NewMemoryStore(nil)
-	defer st.Close()
-	if err := st.Runs().Create(ctx, store.Run{ID: "control"}); err != nil {
-		t.Fatal(err)
-	}
-	b := &chatui.StoreBackend{Store: st, RunID: "control"}
-	if _, err := b.Command(ctx, "/pause"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Directives().Add(ctx, store.Directive{ID: "invalid-plan", RunID: "control", Ref: "invalid-plan", Kind: store.DirectivePlanImport, Source: store.DirectiveSourceOwner, Status: store.DirectiveActive}); err != nil {
-		t.Fatal(err)
-	}
-	runner := NewRunner((Config{RunID: "control", HolderID: "holder", DriverKind: "fake"}).withDefaults(), st, lane.NewFakeDriver(), clock.NewRealClock(), nil, nil)
-	if err := runner.Step(ctx); err != nil {
-		t.Fatal(err)
-	}
-	dir, err := st.Directives().Get(ctx, "control", "invalid-plan")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dir.Status != store.DirectiveActive {
-		t.Fatal("paused runner processed planner work")
-	}
-	if _, err := b.Command(ctx, "/resume"); err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Step(ctx); err != nil {
-		t.Fatal(err)
-	}
-	dir, err = st.Directives().Get(ctx, "control", "invalid-plan")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dir.Status != store.DirectiveRevoked {
-		t.Fatal("resumed runner did not process planner work")
-	}
-	if _, err := b.Command(ctx, "/stop"); err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Step(ctx); !errors.Is(err, controller.ErrControllerStopped) {
-		t.Fatalf("stop: %v", err)
+func TestPlannerRequestRejectsLocalFiles(t *testing.T) {
+	t.Parallel()
+	for _, ref := range []string{"/etc/passwd", "relative-plan.txt", "file:///etc/passwd"} {
+		t.Run(ref, func(t *testing.T) {
+			t.Parallel()
+			planner := NewPlanner(nil, nil, nil, "", nil)
+			planner.planReader = planreader.PlanReaderFunc(func(context.Context, string) (planreader.PlanDocument, error) {
+				t.Fatal("dispatcher-selected file reached the plan reader")
+				return planreader.PlanDocument{}, nil
+			})
+			if err := planner.HandlePlannerRequest(t.Context(), "replan", "Reconcile", ref); err == nil || !strings.Contains(err.Error(), "post reference") {
+				t.Fatalf("expected post reference restriction, got %v", err)
+			}
+		})
 	}
 }

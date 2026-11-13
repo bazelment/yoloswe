@@ -550,7 +550,23 @@ func (r *Runner) bootstrapMetadataAndRecipes(ctx context.Context) error {
 	}
 
 	planRef := cmp.Or(strings.TrimSpace(r.cfg.Plan), strings.TrimSpace(r.cfg.PlanRef))
-	if planRef != "" {
+	decisions, err := r.store.Decisions().List(ctx, store.DecisionFilter{RunID: runID, Actor: ActorPlanner})
+	if err != nil {
+		return err
+	}
+	startupApplied := false
+	for i := range decisions {
+		decision := &decisions[i]
+		if planRef != "" {
+			startupApplied = decision.Tool == ToolPlannerImport && decision.Reason == "Import startup plan" && existing.PlanRef == planRef
+		} else {
+			startupApplied = decision.Tool == ToolPlannerReplan && decision.Reason == "Replan: "+r.cfg.Goal
+		}
+		if startupApplied {
+			break
+		}
+	}
+	if planRef != "" && !startupApplied {
 		doc, err := r.planner.planReader.ReadPlan(ctx, planRef)
 		if err != nil {
 			return fmt.Errorf("load startup plan: %w", err)
@@ -561,7 +577,7 @@ func (r *Runner) bootstrapMetadataAndRecipes(ctx context.Context) error {
 		if err := r.planner.runReconciliation(ctx, runID, ToolPlannerImport, "Import startup plan", doc.Content, planRef); err != nil {
 			return err
 		}
-	} else if strings.TrimSpace(r.cfg.Goal) != "" {
+	} else if planRef == "" && strings.TrimSpace(r.cfg.Goal) != "" && !startupApplied {
 		if err := r.planner.HandlePlannerRequest(ctx, runID, r.cfg.Goal, ""); err != nil {
 			return err
 		}

@@ -265,6 +265,10 @@ func (p *Planner) handlePlanImportDirective(ctx context.Context, runID string, d
 // a fresh Planner reconciliation turn.
 func (p *Planner) HandlePlannerRequest(ctx context.Context, runID, reason, planRef string) error {
 	if strings.TrimSpace(planRef) != "" {
+		// Model-selected references may fetch posts; local files require an owner CLI input.
+		if kind, _ := planreader.ParsePlanRef(planRef); kind != planreader.PlanSourceNebulaPost {
+			return errors.New("orca: planner request requires a post reference")
+		}
 		doc, err := p.planReader.ReadPlan(ctx, planRef)
 		if err != nil {
 			return fmt.Errorf("load plan: %w", err)
@@ -287,6 +291,7 @@ func (p *Planner) runReconciliation(
 		return err
 	}
 	usage := model.Usage{}
+	plannerUsage := model.Usage{}
 	defer func() {
 		if retErr != nil {
 			_ = p.completePlannerTurn(ctx, threadID, turnID, store.TurnStatusFailed, usage, "", retErr)
@@ -318,6 +323,7 @@ func (p *Planner) runReconciliation(
 	}
 	draft, open, draftUsage, err := p.proposePlan(ctx, req, true)
 	usage = usage.Add(draftUsage)
+	plannerUsage = plannerUsage.Add(draftUsage)
 	if err != nil {
 		return err
 	}
@@ -352,6 +358,7 @@ func (p *Planner) runReconciliation(
 		req.Tools = []model.ToolDefinition{planTool(SubmitPlanReconcileTool)}
 		revised, _, revisedUsage, err := p.proposePlan(ctx, req, false)
 		usage = usage.Add(revisedUsage)
+		plannerUsage = plannerUsage.Add(revisedUsage)
 		if err != nil {
 			return fmt.Errorf("planner revision: %w", err)
 		}
@@ -362,7 +369,7 @@ func (p *Planner) runReconciliation(
 		return err
 	}
 	_ = p.completePlannerTurn(ctx, threadID, turnID, store.TurnStatusCompleted, usage, appliedSummary, nil)
-	return p.recordDecision(ctx, runID, threadID, turnID, toolName, goal, appliedSummary, usage, p.clock.Now().Sub(start))
+	return p.recordDecision(ctx, runID, threadID, turnID, toolName, goal, appliedSummary, plannerUsage, p.clock.Now().Sub(start))
 }
 
 func planTool(name string) model.ToolDefinition {
