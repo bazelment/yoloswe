@@ -163,6 +163,26 @@ func (d *Driver) ReportInstructions(runID, laneID, phase string, round int) stri
 	return fmt.Sprintf("File the phase report in this terminal with `nebula phase report --outcome <done|needs-swe|blocked|needs-input> --stdin [--head <sha>] [--pr <n>]` (run %s, lane %s, phase %s, round %d). Pipe the report body to stdin; it must include exact `Outcome:`, `HEAD:`, and `PR:` lines. The phase is not finished until the report is filed.", runID, laneID, phase, round)
 }
 
+// EnsureRun creates runID and makes this session its orchestrator. Nebula's
+// run creation endpoint is idempotent from the caller's perspective: a
+// conflict means another request already created the run, so it is safe to
+// continue and spawn lanes into it.
+func (d *Driver) EnsureRun(ctx context.Context, runID string) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return errors.New("nebula ensure run: run id is required")
+	}
+	path := "/api/code-runs/" + url.PathEscape(runID)
+	if err := d.doJSON(ctx, http.MethodPut, path, struct{}{}, nil); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict {
+			return nil
+		}
+		return fmt.Errorf("nebula ensure run %q: %w", runID, err)
+	}
+	return nil
+}
+
 // Watch streams all terminals belonging to runID as uniform lane events.
 func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 	out := make(chan lane.Event, 32)

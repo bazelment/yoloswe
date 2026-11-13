@@ -398,6 +398,67 @@ func TestNewFromEnvCredentials(t *testing.T) {
 	}
 }
 
+func TestEnsureRunCreatesBeforeFirstSpawn(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/api/code-runs/run-order":
+			_, _ = io.WriteString(w, `{}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-repositories":
+			_, _ = io.WriteString(w, `{"repositories":[{"id":"repo","fullName":"bazelment/yoloswe"}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"session":{"id":"sess-1","status":"ready"}}`)
+		default:
+			http.Error(w, `{"message":"unexpected request"}`, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	drv, _, _ := newTestDriver(t, &fakeNebulaServer{srv: srv}, nebula.WithAPIURL(srv.URL))
+	if err := drv.EnsureRun(context.Background(), "run-order"); err != nil {
+		t.Fatalf("EnsureRun: %v", err)
+	}
+	if _, err := drv.SpawnSession(context.Background(), lane.SpawnRequest{RunID: "run-order", LaneID: "lane-1", BaseBranch: "main", Branch: "lane-1"}); err != nil {
+		t.Fatalf("SpawnSession: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) < 2 || calls[0] != "PUT /api/code-runs/run-order" {
+		t.Fatalf("calls = %v, want run creation first", calls)
+	}
+}
+
+func TestEnsureRunAcceptsAlreadyExists(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"code":"RUN_EXISTS","message":"already exists"}`)
+	}))
+	defer srv.Close()
+	drv, _, _ := newTestDriver(t, &fakeNebulaServer{srv: srv}, nebula.WithAPIURL(srv.URL))
+	if err := drv.EnsureRun(context.Background(), "existing"); err != nil {
+		t.Fatalf("EnsureRun returned error for existing run: %v", err)
+	}
+}
+
+func TestEnsureRunStopsOnOtherErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"code":"FORBIDDEN","message":"denied"}`)
+	}))
+	defer srv.Close()
+	drv, _, _ := newTestDriver(t, &fakeNebulaServer{srv: srv}, nebula.WithAPIURL(srv.URL))
+	if err := drv.EnsureRun(context.Background(), "denied"); err == nil || !strings.Contains(err.Error(), "unable to") && !strings.Contains(err.Error(), "FORBIDDEN") {
+		t.Fatalf("EnsureRun error = %v, want failure", err)
+	}
+}
+
 func TestReadReport(t *testing.T) {
 	srv := newFakeNebulaServer(t)
 	drv, _, _ := newTestDriver(t, srv)
