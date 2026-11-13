@@ -24,6 +24,8 @@ const (
 	Dispatcher Handler = "dispatcher"
 )
 
+var handlers = [...]Handler{Concierge, Planner, Dispatcher}
+
 // Decision records the selected handler and backend evidence.
 //
 //nolint:govet
@@ -56,7 +58,14 @@ const dispatcherCriterion = "Do work now: assign, fund, retry, merge, review, or
 const routingRubric = "Choose which model handles the owner message. concierge: " + conciergeCriterion + " planner: " + plannerCriterion + " dispatcher: " + dispatcherCriterion
 const marginCut = .15
 
-func validHandler(h Handler) bool     { return h == Concierge || h == Planner || h == Dispatcher }
+func validHandler(h Handler) bool {
+	for _, candidate := range handlers {
+		if h == candidate {
+			return true
+		}
+	}
+	return false
+}
 func validProbability(p float64) bool { return !math.IsNaN(p) && !math.IsInf(p, 0) && p >= 0 && p <= 1 }
 func applyMargin(d Decision) Decision {
 	first, second := 0.0, 0.0
@@ -159,7 +168,7 @@ func (c GeminiRouter) Route(ctx context.Context, text string) (Decision, error) 
 		return Decision{}, errors.New("orca/router: invalid Gemini answer")
 	}
 	sum := 0.0
-	for _, h := range []Handler{Concierge, Planner, Dispatcher} {
+	for _, h := range handlers {
 		p, ok := a.Probabilities[string(h)]
 		if !ok || !validProbability(p) {
 			return Decision{}, errors.New("orca/router: invalid Gemini probabilities")

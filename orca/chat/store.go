@@ -119,7 +119,6 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 		}
 		_, err = mailbox.AppendEvent(ctx, b.Store.Events(), b.RunID, mailbox.Message{Owner: true, From: "owner", Body: text})
 		return err
-
 	}
 	return fmt.Errorf("unsupported handler %q", d.Handler)
 }
