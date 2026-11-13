@@ -2,7 +2,6 @@ package fake
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -70,10 +69,5 @@ func (m *Mailbox) Watch(ctx context.Context) (<-chan store.Event, error) {
 	return out, nil
 }
 func event(ctx context.Context, es store.EventStore, runID string, msg mailbox.Message) (store.Event, error) {
-	p, _ := json.Marshal(msg)
-	kind := store.EventMail
-	if msg.Owner {
-		kind = store.EventOwnerMessage
-	}
-	return es.Append(ctx, store.Event{RunID: runID, LaneID: msg.LaneID, Kind: kind, Source: msg.From, Summary: msg.Body, Payload: p})
+	return mailbox.AppendEvent(ctx, es, runID, msg)
 }

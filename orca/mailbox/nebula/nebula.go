@@ -1,6 +1,7 @@
 package nebula
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -38,8 +39,10 @@ func (m *Mailbox) req(ctx context.Context, method, path string, body any) (map[s
 	var err error
 	if body != nil {
 		b, _ := json.Marshal(body)
-		r, err = http.NewRequestWithContext(ctx, method, strings.TrimRight(m.c.BaseURL, "/")+path, strings.NewReader(string(b)))
-		r.Header.Set("Content-Type", "application/json")
+		r, err = http.NewRequestWithContext(ctx, method, strings.TrimRight(m.c.BaseURL, "/")+path, bytes.NewReader(b))
+		if err == nil {
+			r.Header.Set("Content-Type", "application/json")
+		}
 	} else {
 		r, err = http.NewRequestWithContext(ctx, method, strings.TrimRight(m.c.BaseURL, "/")+path, http.NoBody)
 	}
@@ -88,12 +91,7 @@ func (m *Mailbox) Watch(ctx context.Context) (<-chan store.Event, error) {
 						b, _ := json.Marshal(raw)
 						var msg mailbox.Message
 						_ = json.Unmarshal(b, &msg)
-						p, _ := json.Marshal(msg)
-						kind := store.EventMail
-						if msg.Owner {
-							kind = store.EventOwnerMessage
-						}
-						ev, e := m.c.Events.Append(ctx, store.Event{RunID: m.c.RunID, LaneID: msg.LaneID, Kind: kind, Source: msg.From, Summary: msg.Body, Payload: p})
+						ev, e := mailbox.AppendEvent(ctx, m.c.Events, m.c.RunID, msg)
 						if e == nil {
 							select {
 							case out <- ev:

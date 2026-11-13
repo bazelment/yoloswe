@@ -24,8 +24,7 @@ type Config struct {
 
 //nolint:govet
 type Mailbox struct {
-	cfg     Config
-	inbound chan mailbox.Message
+	cfg Config
 }
 
 func New(cfg Config) (*Mailbox, error) {
@@ -38,7 +37,7 @@ func New(cfg Config) (*Mailbox, error) {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 100 * time.Millisecond
 	}
-	return &Mailbox{cfg: cfg, inbound: make(chan mailbox.Message, 32)}, nil
+	return &Mailbox{cfg: cfg}, nil
 }
 func (m *Mailbox) SendLane(ctx context.Context, laneID, body string) error {
 	if m.cfg.SendInput == nil {
@@ -92,7 +91,7 @@ func (m *Mailbox) read(ctx context.Context, out chan<- store.Event) {
 		if json.Unmarshal(b, &msg) != nil {
 			msg.Body = string(b)
 		}
-		ev, err := appendEvent(ctx, m.cfg.Events, m.cfg.RunID, msg)
+		ev, err := mailbox.AppendEvent(ctx, m.cfg.Events, m.cfg.RunID, msg)
 		if err == nil {
 			_ = os.Remove(p)
 			select {
@@ -102,12 +101,4 @@ func (m *Mailbox) read(ctx context.Context, out chan<- store.Event) {
 			}
 		}
 	}
-}
-func appendEvent(ctx context.Context, es store.EventStore, runID string, msg mailbox.Message) (store.Event, error) {
-	p, _ := json.Marshal(msg)
-	kind := store.EventMail
-	if msg.Owner {
-		kind = store.EventOwnerMessage
-	}
-	return es.Append(ctx, store.Event{RunID: runID, LaneID: msg.LaneID, Kind: kind, Source: msg.From, Summary: msg.Body, Payload: p})
 }
