@@ -85,13 +85,17 @@ func (m RoleModels) withDefaults(provider string) RoleModels {
 	if m.Roles == nil {
 		m.Roles = map[string]RoleSelection{}
 	}
+	// Normalize an explicitly configured planner provider before selecting the
+	// critic fallback. This keeps the different-provider invariant correct for
+	// config files that use values such as "Anthropic".
+	plannerProvider := strings.ToLower(strings.TrimSpace(m.Roles["planner"].Provider))
 	legacy := map[string]string{"dispatcher": m.Dispatcher, "planner": m.Planner, "concierge": m.Concierge}
 	for _, role := range []string{"planner", "dispatcher", "concierge", "router", "critic"} {
 		sel := m.Roles[role]
 		fallbackProvider := cmp.Or(strings.ToLower(strings.TrimSpace(provider)), "openai")
 		if role == "critic" {
 			fallbackProvider = "anthropic"
-			if m.Roles["planner"].Provider == "anthropic" {
+			if plannerProvider == "anthropic" {
 				fallbackProvider = "openai"
 			}
 		}
