@@ -14,7 +14,6 @@ import (
 	"github.com/bazelment/yoloswe/orca/router"
 )
 
-type Reply struct{ Text string }
 type AskFunc func(context.Context, string) (string, error)
 
 //nolint:govet // field grouping keeps the model readable.
@@ -60,6 +59,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.lines = append(m.lines, "you> "+text)
+			if m.waiting != "" {
+				m.lines = append(m.lines, "answer> "+text)
+				m.waiting = ""
+				return m, nil
+			}
 			if m.router != nil {
 				d, e := m.router.Route(m.ctx, text)
 				if e != nil {
@@ -170,5 +174,3 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {
 	_, err := p.Run()
 	return err
 }
-
-var _ = fmt.Sprint

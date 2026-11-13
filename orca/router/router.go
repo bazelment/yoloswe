@@ -72,7 +72,9 @@ func (r FallbackRouter) Route(ctx context.Context, text string) (Decision, error
 			out.Parts = append(out.Parts, d)
 		}
 		if r.Logger != nil {
-			_ = r.Logger.LogRouting(ctx, text, out)
+			if err := r.Logger.LogRouting(ctx, text, out); err != nil {
+				return Decision{}, err
+			}
 		}
 		return out, nil
 	}
@@ -89,6 +91,7 @@ func (r FallbackRouter) routeOne(ctx context.Context, text string) (Decision, er
 	}
 	var d Decision
 	raw := strings.TrimSpace(resp.Text())
+	raw = strings.TrimPrefix(raw, "```json")
 	raw = strings.TrimPrefix(raw, "```")
 	raw = strings.TrimSuffix(raw, "```")
 	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &d); err != nil {
@@ -97,21 +100,11 @@ func (r FallbackRouter) routeOne(ctx context.Context, text string) (Decision, er
 	if !validDestination(d.Destination) {
 		return Decision{}, fmt.Errorf("orca/router: invalid destination %q", d.Destination)
 	}
-	threshold := r.ConfidenceThreshold
-	if threshold == 0 {
-		threshold = .75
-	}
-	if d.Confidence < threshold {
-		d.NeedsClarification = true
-		if strings.TrimSpace(d.ClarifyingQuestion) == "" {
-			d.ClarifyingQuestion = "Which part should I handle first?"
-		}
-	}
-	if d.Echo == "" && !d.NeedsClarification {
-		d.Echo = oneLine(text)
-	}
+	d = normalize(d, text, r.ConfidenceThreshold)
 	if r.Logger != nil {
-		_ = r.Logger.LogRouting(ctx, text, d)
+		if err := r.Logger.LogRouting(ctx, text, d); err != nil {
+			return Decision{}, err
+		}
 	}
 	return d, nil
 }
@@ -125,6 +118,22 @@ func splitParts(s string) []string {
 	return out
 }
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+func normalize(d Decision, text string, threshold float64) Decision {
+	if threshold == 0 {
+		threshold = .75
+	}
+	if d.Confidence < threshold {
+		d.NeedsClarification = true
+		if strings.TrimSpace(d.ClarifyingQuestion) == "" {
+			d.ClarifyingQuestion = "Which part should I handle first?"
+		}
+	}
+	if d.Echo == "" && !d.NeedsClarification {
+		d.Echo = oneLine(text)
+	}
+	return d
+}
 func validDestination(d Destination) bool {
 	for _, x := range destinations {
 		if d == x {
@@ -137,9 +146,13 @@ func validDestination(d Destination) bool {
 const routingPrompt = `Classify the owner message. Return JSON only with destination (one of concierge, answer-open-question, planner, memory, dispatcher, controller), confidence (0 to 1), needs_clarification, is_standing_rule, answers_open_question, and optional clarifying_question. Ask one short question when intent is ambiguous.`
 
 // GeminiClient calls Gemini Decisions API (v1beta) and translates its choice response.
+//
+//nolint:govet // field grouping keeps the public client configuration readable.
 type GeminiClient struct {
 	HTTPClient             *http.Client
 	BaseURL, APIKey, Model string
+	Logger                 Logger
+	ConfidenceThreshold    float64
 }
 
 func (c GeminiClient) Route(ctx context.Context, text string) (Decision, error) {
@@ -178,5 +191,11 @@ func (c GeminiClient) Route(ctx context.Context, text string) (Decision, error) 
 	if !validDestination(wire.Destination) {
 		return Decision{}, fmt.Errorf("orca/router: invalid gemini destination %q", wire.Destination)
 	}
-	return wire.Decision, nil
+	d := normalize(wire.Decision, text, c.ConfidenceThreshold)
+	if c.Logger != nil {
+		if err := c.Logger.LogRouting(ctx, text, d); err != nil {
+			return Decision{}, err
+		}
+	}
+	return d, nil
 }
