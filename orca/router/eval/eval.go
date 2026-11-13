@@ -1,4 +1,4 @@
-package router
+package eval
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"slices"
 	"time"
+
+	"github.com/bazelment/yoloswe/orca/router"
 )
 
 //go:embed testdata/owner_chat.json
@@ -16,14 +18,14 @@ var ownerChatData []byte
 //
 //nolint:govet // JSON fixture fields follow the human-readable label schema.
 type EvalCase struct {
-	ID                 string        `json:"id"`
-	SourceMailID       string        `json:"source_mail_id"`
-	Text               string        `json:"text"`
-	Context            string        `json:"context"`
-	Destinations       []Destination `json:"destinations"`
-	Rationale          string        `json:"rationale"`
-	NeedsClarification bool          `json:"needs_clarification"`
-	Excerpt            bool          `json:"excerpt"`
+	ID                 string               `json:"id"`
+	SourceMailID       string               `json:"source_mail_id"`
+	Text               string               `json:"text"`
+	Context            string               `json:"context"`
+	Destinations       []router.Destination `json:"destinations"`
+	Rationale          string               `json:"rationale"`
+	NeedsClarification bool                 `json:"needs_clarification"`
+	Excerpt            bool                 `json:"excerpt"`
 }
 
 // OwnerChatCases loads the frozen owner-mail labels. Labels are not model input.
@@ -39,9 +41,9 @@ func OwnerChatCases() ([]EvalCase, error) {
 type EvalResult struct {
 	ID                       string
 	SourceMailID             string
-	Expected                 []Destination
-	Got                      []Destination
-	Decision                 Decision
+	Expected                 []router.Destination
+	Got                      []router.Destination
+	Decision                 router.Decision
 	Latency                  time.Duration
 	Error                    string
 	Correct                  bool
@@ -61,7 +63,7 @@ type EvalScorecard struct {
 }
 
 // Evaluate scores any Router backend. Errors count as misses; calls are serial.
-func Evaluate(ctx context.Context, backend Router, cases []EvalCase) EvalScorecard {
+func Evaluate(ctx context.Context, backend router.Router, cases []EvalCase) EvalScorecard {
 	var score EvalScorecard
 	var latencies []time.Duration
 	var total time.Duration
@@ -105,16 +107,16 @@ func Evaluate(ctx context.Context, backend Router, cases []EvalCase) EvalScoreca
 	return score
 }
 
-func canonicalDestinations(ds []Destination) []Destination {
+func canonicalDestinations(ds []router.Destination) []router.Destination {
 	ds = slices.Clone(ds)
 	slices.Sort(ds)
 	return slices.Compact(ds)
 }
-func decisionDestinations(d Decision) []Destination {
+func decisionDestinations(d router.Decision) []router.Destination {
 	if len(d.Parts) == 0 {
-		return []Destination{d.Destination}
+		return []router.Destination{d.Destination}
 	}
-	var ds []Destination
+	var ds []router.Destination
 	for i := range d.Parts {
 		ds = append(ds, decisionDestinations(d.Parts[i])...)
 	}

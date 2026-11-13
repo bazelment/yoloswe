@@ -1,14 +1,16 @@
-package router
+package eval
 
 import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/bazelment/yoloswe/orca/router"
 )
 
-type sequenceRouter struct{ decisions []Decision }
+type sequenceRouter struct{ decisions []router.Decision }
 
-func (r *sequenceRouter) Route(context.Context, string) (Decision, error) {
+func (r *sequenceRouter) Route(context.Context, string) (router.Decision, error) {
 	d := r.decisions[0]
 	r.decisions = r.decisions[1:]
 	return d, nil
@@ -16,16 +18,16 @@ func (r *sequenceRouter) Route(context.Context, string) (Decision, error) {
 
 func TestEvaluateScoresWholeMessageAndClarification(t *testing.T) {
 	cases := []EvalCase{
-		{ID: "multipart", Destinations: []Destination{Planner, Memory}},
-		{ID: "ambiguous", Destinations: []Destination{Dispatcher}, NeedsClarification: true},
-		{ID: "needless-ask", Destinations: []Destination{Concierge}},
-		{ID: "missing-part", Destinations: []Destination{Planner, Dispatcher}},
+		{ID: "multipart", Destinations: []router.Destination{router.Planner, router.Memory}},
+		{ID: "ambiguous", Destinations: []router.Destination{router.Dispatcher}, NeedsClarification: true},
+		{ID: "needless-ask", Destinations: []router.Destination{router.Concierge}},
+		{ID: "missing-part", Destinations: []router.Destination{router.Planner, router.Dispatcher}},
 	}
-	backend := &sequenceRouter{decisions: []Decision{
-		{Parts: []Decision{{Destination: Memory}, {Destination: Planner}, {Destination: Memory}}},
-		{Destination: Dispatcher, NeedsClarification: true},
-		{Destination: Concierge, NeedsClarification: true},
-		{Destination: Planner},
+	backend := &sequenceRouter{decisions: []router.Decision{
+		{Parts: []router.Decision{{Destination: router.Memory}, {Destination: router.Planner}, {Destination: router.Memory}}},
+		{Destination: router.Dispatcher, NeedsClarification: true},
+		{Destination: router.Concierge, NeedsClarification: true},
+		{Destination: router.Planner},
 	}}
 	s := Evaluate(context.Background(), backend, cases)
 	if s.Correct != 2 || s.ClearCases != 3 || s.UnnecessaryClarifications != 1 || s.MeetsTargets() {
@@ -61,7 +63,7 @@ func TestOwnerChatDatasetCoverage(t *testing.T) {
 		t.Fatalf("want 60 cases, got %d", len(cases))
 	}
 	seen := map[string]bool{}
-	covered := map[Destination]bool{}
+	covered := map[router.Destination]bool{}
 	ambiguous, multipart := 0, 0
 	for _, c := range cases {
 		if seen[c.ID] || c.Text == "" || c.Rationale == "" || !strings.HasPrefix(c.SourceMailID, "s:") || len(c.Destinations) == 0 {
@@ -69,7 +71,7 @@ func TestOwnerChatDatasetCoverage(t *testing.T) {
 		}
 		seen[c.ID] = true
 		for _, d := range c.Destinations {
-			if !validDestination(d) {
+			if !validEvalDestination(d) {
 				t.Fatalf("invalid destination: %s", d)
 			}
 			covered[d] = true
@@ -83,5 +85,14 @@ func TestOwnerChatDatasetCoverage(t *testing.T) {
 	}
 	if len(covered) != 6 || ambiguous < 5 || multipart < 2 {
 		t.Fatalf("coverage: destinations=%d ambiguous=%d multipart=%d", len(covered), ambiguous, multipart)
+	}
+}
+
+func validEvalDestination(d router.Destination) bool {
+	switch d {
+	case router.Concierge, router.AnswerOpenQuestion, router.Planner, router.Memory, router.Dispatcher, router.Controller:
+		return true
+	default:
+		return false
 	}
 }

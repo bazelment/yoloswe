@@ -22,5 +22,6 @@ go_test(
     deps = [
         "//orca/model",
         "//orca/router",
+        "//orca/router/eval",
     ],
 )

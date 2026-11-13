@@ -2,11 +2,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "router",
-    srcs = [
-        "eval.go",
-        "router.go",
-    ],
-    embedsrcs = ["testdata/owner_chat.json"],
+    srcs = ["router.go"],
     importpath = "github.com/bazelment/yoloswe/orca/router",
     visibility = ["//visibility:public"],
     deps = [
@@ -17,10 +13,7 @@ go_library(
 
 go_test(
     name = "router_test",
-    srcs = [
-        "eval_test.go",
-        "router_test.go",
-    ],
+    srcs = ["router_test.go"],
     data = glob(["testdata/**"]),
     embed = [":router"],
     deps = [

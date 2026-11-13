@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "eval",
+    srcs = ["eval.go"],
+    embedsrcs = ["testdata/owner_chat.json"],
+    importpath = "github.com/bazelment/yoloswe/orca/router/eval",
+    visibility = ["//visibility:public"],
+    deps = ["//orca/router"],
+)
+
+go_test(
+    name = "eval_test",
+    srcs = ["eval_test.go"],
+    data = glob(["testdata/**"]),
+    embed = [":eval"],
+    deps = ["//orca/router"],
+)
