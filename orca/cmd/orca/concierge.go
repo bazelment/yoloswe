@@ -325,6 +325,9 @@ func (c *Concierge) buildToolRegistry(threadID, turnID string) *model.ToolRegist
 		if e != nil {
 			return "", e
 		}
+		if m.RunID != "" && m.RunID != c.runID {
+			return "", store.ErrNotFound
+		}
 		return m.Body, nil
 	})
 
@@ -354,6 +357,9 @@ func (c *Concierge) handleMemorySubmit(ctx context.Context, p MemorySubmitParams
 	}
 	var prev *store.MemoryEntry
 	if o, e := c.store.Memories().Get(ctx, "", id); e == nil {
+		if o.RunID != "" && o.RunID != c.runID {
+			return "", store.ErrNotFound
+		}
 		cp := *o
 		prev = &cp
 	}
@@ -384,6 +390,15 @@ func (c *Concierge) handleMemorySubmit(ctx context.Context, p MemorySubmitParams
 		m.RunID = ""
 	}
 	if prev != nil {
+		if p.Type == "" {
+			m.Type = prev.Type
+		}
+		if p.Scope == "" {
+			m.Scope, m.RunID = prev.Scope, prev.RunID
+		}
+		if p.ProposedBy == "" {
+			m.ProposedBy = prev.ProposedBy
+		}
 		if m.Name == "" {
 			m.Name = prev.Name
 		}

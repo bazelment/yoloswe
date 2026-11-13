@@ -554,6 +554,9 @@ func (d *Dispatcher) handleRawToolCall(
 		if err != nil {
 			return "", err
 		}
+		if m.RunID != "" && m.RunID != runID {
+			return "", store.ErrNotFound
+		}
 		return fmt.Sprintf("%s\n%s", m.Name, m.Body), nil
 	}
 	start := d.clock.Now()
