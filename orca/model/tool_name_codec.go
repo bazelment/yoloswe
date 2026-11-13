@@ -11,10 +11,10 @@ type toolNameCodec struct {
 	wireToOriginal map[string]string
 }
 
-func newToolNameCodec(req Request) (*toolNameCodec, error) {
+func newToolNameCodec(req Request, maxNameLength int) (*toolNameCodec, error) {
 	c := &toolNameCodec{wireToOriginal: make(map[string]string)}
 	for _, tool := range req.Tools {
-		if err := c.add(tool.Name); err != nil {
+		if err := c.add(tool.Name, maxNameLength); err != nil {
 			return nil, err
 		}
 	}
@@ -22,7 +22,7 @@ func newToolNameCodec(req Request) (*toolNameCodec, error) {
 		for i := range message.Content {
 			block := message.Content[i]
 			if block.Type == BlockTypeToolUse {
-				if err := c.add(block.Name); err != nil {
+				if err := c.add(block.Name, maxNameLength); err != nil {
 					return nil, err
 				}
 			}
@@ -31,10 +31,10 @@ func newToolNameCodec(req Request) (*toolNameCodec, error) {
 	return c, nil
 }
 
-func (c *toolNameCodec) add(original string) error {
+func (c *toolNameCodec) add(original string, maxNameLength int) error {
 	wire := encodeToolName(original)
-	if len(wire) < 1 || len(wire) > 64 {
-		return fmt.Errorf("orca/model: tool name length for %q must be 1-64 encoded characters (got %d)", original, len(wire))
+	if len(wire) < 1 || len(wire) > maxNameLength {
+		return fmt.Errorf("orca/model: tool name length for %q must be 1-%d encoded characters (got %d)", original, maxNameLength, len(wire))
 	}
 	if previous, ok := c.wireToOriginal[wire]; ok && previous != original {
 		return fmt.Errorf("orca/model: tool name collision: %q and %q both encode to %q", previous, original, wire)

@@ -286,7 +286,7 @@ func (c *HTTPClient) CreateMessage(ctx context.Context, req Request) (*Response,
 	if req.ToolRegistry != nil {
 		return runToolLoopResponse(ctx, c, req)
 	}
-	codec, err := newToolNameCodec(req)
+	codec, err := newToolNameCodec(req, 128)
 	if err != nil {
 		return nil, err
 	}

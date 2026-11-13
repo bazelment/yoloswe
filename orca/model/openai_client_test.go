@@ -222,6 +222,10 @@ func TestProviderToolNameCodecHistory(t *testing.T) {
 	for _, provider := range []string{"openai", "anthropic"} {
 		t.Run(provider, func(t *testing.T) {
 			t.Parallel()
+			maxNameLength := 64
+			if provider == "anthropic" {
+				maxNameLength = 128
+			}
 			var captured map[string]any
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
@@ -241,7 +245,7 @@ func TestProviderToolNameCodecHistory(t *testing.T) {
 			} else {
 				client = model.NewHTTPClient(model.WithBaseURL(server.URL), model.WithMaxRetries(0))
 			}
-			req := model.Request{Model: "test", Tools: []model.ToolDefinition{{Name: "backlog.add"}, {Name: "memory.submit"}}, Messages: []model.Message{
+			req := model.Request{Model: "test", Tools: []model.ToolDefinition{{Name: "backlog.add"}, {Name: "memory.submit"}, {Name: strings.Repeat("a", maxNameLength)}}, Messages: []model.Message{
 				{Role: model.RoleAssistant, Content: []model.ContentBlock{model.NewToolUseBlock("prior", "backlog.add", json.RawMessage(`{}`))}},
 				{Role: model.RoleUser, Content: []model.ContentBlock{model.NewToolResultBlock("prior", "ok", false)}},
 			}}
@@ -278,7 +282,7 @@ func TestProviderToolNameCodecHistory(t *testing.T) {
 				tools []model.ToolDefinition
 			}{
 				{"empty", "tool name length", []model.ToolDefinition{{Name: ""}}},
-				{"long", "tool name length", []model.ToolDefinition{{Name: strings.Repeat("a", 65)}}},
+				{"long", "tool name length", []model.ToolDefinition{{Name: strings.Repeat("a", maxNameLength+1)}}},
 				{"collision", "tool name collision", []model.ToolDefinition{{Name: "backlog.add"}, {Name: "backlog_add"}}},
 			} {
 				t.Run(invalid.name, func(t *testing.T) {

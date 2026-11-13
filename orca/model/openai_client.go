@@ -150,7 +150,7 @@ type responsesItem struct {
 }
 
 func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Response, error) {
-	codec, err := newToolNameCodec(req)
+	codec, err := newToolNameCodec(req, 64)
 	if err != nil {
 		return nil, err
 	}
