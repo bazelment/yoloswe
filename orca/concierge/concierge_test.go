@@ -51,8 +51,8 @@ func TestMemoryWorkflow_OwnerCorrectionFlowsToNextDispatcherSnapshotAndWorkerBri
 	if _, err := decorated.SpawnSession(ctx, lane.SpawnRequest{RunID: "run-1", LaneID: "lane-alpha", Brief: "Implement tests"}); err != nil {
 		t.Fatalf("worker brief: %v", err)
 	}
-	if !strings.Contains(raw.Spawns[0].Brief, "Worker tests use random ports.") || !strings.Contains(raw.Spawns[0].Brief, "Use random ports") {
-		t.Fatalf("worker brief missing correction/source: %s", raw.Spawns[0].Brief)
+	if !strings.Contains(raw.Spawns[0].Brief, "- [memory-random-ports] Random ports: Use random ports") || strings.Contains(raw.Spawns[0].Brief, "Source:") || strings.Contains(raw.Spawns[0].Brief, "Worker tests use random ports.") {
+		t.Fatalf("worker brief missing one-line correction: %s", raw.Spawns[0].Brief)
 	}
 	if _, err := c.Ask(ctx, "run-1", "forget"); err != nil {
 		t.Fatalf("forget correction: %v", err)
@@ -515,7 +515,7 @@ func TestMemoryWorkflow_ChatCorrectionReachesNextSnapshotAndWorkerBrief(t *testi
 	if len(result.Rejected) != 0 {
 		t.Fatalf("spawn rejected: %+v", result.Rejected)
 	}
-	if len(drv.Spawns) != 1 || !strings.Contains(drv.Spawns[0].Brief, m.Body) || !strings.Contains(drv.Spawns[0].Brief, quote) {
+	if len(drv.Spawns) != 1 || !strings.Contains(drv.Spawns[0].Brief, "- [memory-ports] Random ports: Use random ports in worker tests") || strings.Contains(drv.Spawns[0].Brief, quote) {
 		t.Fatalf("next worker brief omitted sourced correction: %+v", drv.Spawns)
 	}
 }

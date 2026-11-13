@@ -380,6 +380,19 @@ func newTestDriver(t *testing.T, srv *fakeNebulaServer, opts ...nebula.Option) (
 	return drv, fc, st
 }
 
+func TestPhaseBriefContract(t *testing.T) {
+	d, _, _ := newTestDriver(t, newFakeNebulaServer(t))
+	if got := d.PhaseSkill("review"); got != "/pr-polish-nebula" {
+		t.Fatalf("review skill=%q", got)
+	}
+	if got := d.PhaseSkill("clean"); got != "/simplify" {
+		t.Fatalf("clean skill=%q", got)
+	}
+	if got := d.ReportInstructions("run", "lane", "review", 1); !strings.Contains(got, "--outcome <done|no-change|needs-swe|blocked|needs-input>") || !strings.Contains(got, "Reason:") {
+		t.Fatalf("handback=%q", got)
+	}
+}
+
 func TestNewFromEnvCredentials(t *testing.T) {
 	t.Setenv(nebula.EnvAPIURL, "")
 	t.Setenv(nebula.EnvToken, "")

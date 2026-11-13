@@ -23,37 +23,32 @@ func Render(text string, memories []store.MemoryEntry, maxBytes int) (string, er
 	}
 	var b strings.Builder
 	b.WriteString(text)
+	// Mechanical cleanup and review phases receive their task only through the
+	// goal line. Their phase skill is the complete instruction and must not be
+	// followed by task descriptions or memory bodies.
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "/simplify") || strings.HasPrefix(trimmed, "/pr-polish") {
+		return text, nil
+	}
 	if strings.TrimSpace(text) == "" {
-		var b strings.Builder
 		for i := range memories {
-			m := &memories[i]
-			fmt.Fprintf(&b, "\n### [%s] %s\n%s\nSource: %s\n", m.ID, m.Name, m.Body, m.Source)
+			if line := memoryLine(&memories[i]); line != "" {
+				b.WriteString("\n")
+				b.WriteString(line)
+			}
 		}
 		return b.String(), nil
 	}
 	var applicable []store.MemoryEntry
-	generic := len(strings.Fields(text)) <= 2
 	for i := range memories {
-		if generic || applies(text, memories[i]) {
+		if applies(text, memories[i]) {
 			applicable = append(applicable, memories[i])
 		}
 	}
 	if len(applicable) > 0 {
 		b.WriteString("\n\n## Memories for this task\n")
 		for i := range applicable {
-			m := &applicable[i]
-			how := m.Description
-			if strings.TrimSpace(how) == "" {
-				how = strings.SplitN(m.Body, ".", 2)[0]
-			}
-			if strings.Contains(strings.ToLower(m.Source), "correction") {
-				how += " (" + m.Source + ")"
-			}
-			entry := fmt.Sprintf("- [%s] %s: %s", m.ID, m.Name, how)
-			if strings.TrimSpace(m.Body) != "" && strings.TrimSpace(m.Body) != strings.TrimSpace(m.Description) {
-				entry += " (" + m.Body + ")"
-			}
-			entry += "\n"
+			entry := memoryLine(&applicable[i]) + "\n"
 			if maxBytes > 0 && b.Len()+len(entry) > maxBytes {
 				break
 			}
@@ -68,6 +63,17 @@ func Render(text string, memories []store.MemoryEntry, maxBytes int) (string, er
 		return out[:maxBytes], nil
 	}
 	return b.String(), nil
+}
+
+func memoryLine(m *store.MemoryEntry) string {
+	if m == nil {
+		return ""
+	}
+	description := strings.TrimSpace(m.Description)
+	if description == "" {
+		return fmt.Sprintf("- [%s] %s", m.ID, strings.TrimSpace(m.Name))
+	}
+	return fmt.Sprintf("- [%s] %s: %s", m.ID, strings.TrimSpace(m.Name), description)
 }
 
 func applies(text string, m store.MemoryEntry) bool {

@@ -35,7 +35,7 @@ func TestMemoryDriver_FreshPhasesUseCurrentRunMemories(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := raw.Spawns[0].Brief
-	for _, want := range []string{"Implement task", "Owner guidance", "Repository guidance", "First instruction", "owner correction: First instruction"} {
+	for _, want := range []string{"Implement task", "- [memory-owner] memory-owner: Owner guidance", "- [memory-repo] memory-repo: Repository guidance"} {
 		if !strings.Contains(first, want) {
 			t.Fatalf("spawn brief missing %q: %s", want, first)
 		}
@@ -44,11 +44,11 @@ func TestMemoryDriver_FreshPhasesUseCurrentRunMemories(t *testing.T) {
 		t.Fatal("another run leaked into spawn brief")
 	}
 	save("memory-run", "run", "run-a", "Updated instruction")
-	if _, err := driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: "run-a", LaneID: "lane-a", Brief: "Review task"}); err != nil {
+	if _, err := driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: "run-a", LaneID: "lane-a", Brief: "/pr-polish-nebula\n\nGoal: Review task"}); err != nil {
 		t.Fatal(err)
 	}
 	next := raw.PhaseStarts[0].Brief
-	if !strings.Contains(next, "Updated instruction") || strings.Contains(next, "First instruction") || strings.Contains(next, "OTHER RUN PRIVATE") {
+	if next != "/pr-polish-nebula\n\nGoal: Review task" {
 		t.Fatalf("next phase has stale or foreign guidance: %s", next)
 	}
 	save("memory-too-large", "run", "run-a", strings.Repeat("x", brief.DefaultMaxBytes))

@@ -927,11 +927,11 @@ func TestPlanner_MemoryBodiesReachContextAndRebrief(t *testing.T) {
 		t.Fatal(err)
 	}
 	context := client.Requests[0].Messages[0].Text()
-	for _, want := range []string{"memory-ports", "Worker tests must use random ports.", "Correction: random ports only."} {
+	for _, want := range []string{"memory-ports", "Ports guidance"} {
 		if !strings.Contains(context, want) {
 			t.Fatalf("planner context omitted %q: %s", want, context)
 		}
-		if len(drv.Steers) != 1 || !strings.Contains(drv.Steers[0].Message, want) {
+		if len(drv.Steers) != 1 || !strings.Contains(drv.Steers[0].Message, want) || strings.Contains(drv.Steers[0].Message, "Correction: random ports only.") {
 			t.Fatalf("planner rebrief omitted %q: %+v", want, drv.Steers)
 		}
 	}

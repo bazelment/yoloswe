@@ -432,10 +432,19 @@ func NewFakeDriver() *FakeDriver {
 }
 
 func (f *FakeDriver) ReportInstructions(_, laneID, phase string, round int) string {
-	return fmt.Sprintf("File the phase report for lane %s phase %s round %d using the fake driver's report input; the phase is not finished until the report is filed. Report outcome done, needs-swe, blocked, or needs-input, with HEAD and PR lines.", laneID, phase, round)
+	return fmt.Sprintf("File the phase report for lane %s phase %s round %d using the fake driver's report input; the phase is not finished until the report is filed. Report outcome done, no-change, needs-swe, blocked, or needs-input, with HEAD and PR lines; for no-change include a Reason line.", laneID, phase, round)
 }
 
-func (f *FakeDriver) PhaseSkill(phase string) string { return phase }
+func (f *FakeDriver) PhaseSkill(phase string) string {
+	switch phase {
+	case "clean":
+		return "/simplify"
+	case "review":
+		return "/pr-polish"
+	default:
+		return ""
+	}
+}
 
 func (f *FakeDriver) SpawnSession(_ context.Context, req SpawnRequest) (SpawnResult, error) {
 	f.mu.Lock()
