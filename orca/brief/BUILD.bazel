@@ -1,0 +1,23 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "brief",
+    srcs = ["brief.go"],
+    importpath = "github.com/bazelment/yoloswe/orca/brief",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//orca/lane",
+        "//orca/recipe",
+        "//orca/store",
+    ],
+)
+
+go_test(
+    name = "brief_test",
+    srcs = ["brief_test.go"],
+    deps = [
+        ":brief",
+        "//orca/lane",
+        "//orca/store",
+    ],
+)

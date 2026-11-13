@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/brief"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/dispatcher"
@@ -304,6 +305,9 @@ func NewRunner(
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// Decorate at the CLI boundary so every controller-launched phase receives
+	// the current run memories, including phases started after a chat correction.
+	drv = brief.WithMemories(st, drv)
 
 	planner := NewPlanner(st, clk, client, cfg.Models.Planner, logger)
 

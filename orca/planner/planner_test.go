@@ -906,3 +906,33 @@ func TestPlanReader_ValidationAndConfinement(t *testing.T) {
 		t.Fatalf("expected ErrInvalidArgument when plan exceeds MaxBytes, got %v", err)
 	}
 }
+
+func TestPlanner_MemoryBodiesReachContextAndRebrief(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := seedPlannerStore(t)
+	ctx := t.Context()
+	if _, err := st.Memories().Put(ctx, store.MemoryEntry{ID: "memory-ports", Name: "Ports", Description: "Ports guidance", Body: "Worker tests must use random ports.", Source: "Correction: random ports only.", Scope: "run", RunID: "run-1", Type: "rule", ProposedBy: "owner"}); err != nil {
+		t.Fatal(err)
+	}
+	args, err := json.Marshal(planner.Reconciliation{Summary: "Rebrief worker.", LanesToRebrief: []planner.LaneRebriefSpec{{LaneID: "lane-alpha", Brief: "Implement tests"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := model.NewFakeClient(
+		model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("plan", planner.ToolSubmitReconciliation, args))},
+		model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock("Rebriefed."))},
+	)
+	p := planner.New(planner.Config{}, st, drv, clk, client)
+	if _, err := p.HandleSignal(ctx, planner.Signal{RunID: "run-1", Kind: planner.SignalEmptyBacklog, Reason: "Update test plan"}); err != nil {
+		t.Fatal(err)
+	}
+	context := client.Requests[0].Messages[0].Text()
+	for _, want := range []string{"memory-ports", "Worker tests must use random ports.", "Correction: random ports only."} {
+		if !strings.Contains(context, want) {
+			t.Fatalf("planner context omitted %q: %s", want, context)
+		}
+		if len(drv.Steers) != 1 || !strings.Contains(drv.Steers[0].Message, want) {
+			t.Fatalf("planner rebrief omitted %q: %+v", want, drv.Steers)
+		}
+	}
+}

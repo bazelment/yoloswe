@@ -4,6 +4,7 @@ go_library(
     name = "concierge",
     srcs = [
         "concierge.go",
+        "memory.go",
         "prompt.go",
     ],
     importpath = "github.com/bazelment/yoloswe/orca/concierge",
@@ -23,7 +24,9 @@ go_test(
     data = glob(["testdata/**"]),
     deps = [
         ":concierge",
+        "//orca/brief",
         "//orca/clock",
+        "//orca/dispatcher",
         "//orca/lane",
         "//orca/model",
         "//orca/recipe",

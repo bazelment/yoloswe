@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/clock"
+	memorychat "github.com/bazelment/yoloswe/orca/concierge"
 	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
@@ -67,16 +68,15 @@ type DirectiveSubmitParams struct {
 //
 //nolint:govet
 type Concierge struct {
-	store              store.Store
-	clock              clock.Clock
-	client             model.ModelClient
-	runID              string
-	modelName          string
-	threadID           string
-	history            []model.Message
-	lastMemory         *store.MemoryEntry
-	lastMemoryPrevious *store.MemoryEntry
-	mu                 sync.Mutex
+	store        store.Store
+	clock        clock.Clock
+	client       model.ModelClient
+	runID        string
+	modelName    string
+	threadID     string
+	history      []model.Message
+	memoryEditor memorychat.MemoryEditor
+	mu           sync.Mutex
 }
 
 func NewConcierge(
@@ -168,6 +168,18 @@ func (c *Concierge) Ask(ctx context.Context, question string) (string, error) {
 		Content:  question,
 	})
 
+	if strings.EqualFold(question, "undo") || strings.EqualFold(question, "forget") {
+		answer, undoErr := c.memoryEditor.Undo(ctx, c.store)
+		status, errText := store.TurnStatusCompleted, ""
+		if undoErr != nil {
+			status, errText = store.TurnStatusFailed, undoErr.Error()
+		}
+		_, _ = c.store.Threads().AppendItem(cleanupCtx, store.Item{ThreadID: threadID, TurnID: turnID, Kind: store.ItemKindAssistantMessage, Content: answer})
+		if err := c.store.Threads().CompleteTurn(cleanupCtx, threadID, turnID, status, model.Usage{}, errText); err != nil {
+			return "", err
+		}
+		return answer, undoErr
+	}
 	if c.client == nil {
 		report, repErr := c.FormatStatusReport(ctx)
 		if repErr != nil {
@@ -188,10 +200,15 @@ func (c *Concierge) Ask(ctx context.Context, question string) (string, error) {
 	msgs := append(slices.Clone(c.history), model.NewUserMessage(question))
 	c.mu.Unlock()
 
-	reg := c.buildToolRegistry(threadID, turnID)
+	memoryEcho := ""
+	reg := c.buildToolRegistry(threadID, turnID, question, &memoryEcho)
+	systemPrompt := ConciergeSystemPrompt
+	if memories, memErr := c.store.Memories().List(ctx, store.MemoryFilter{RunID: c.runID}); memErr == nil {
+		systemPrompt += "\n\n## Canonical Memory Index\n" + store.MemoryIndex(memories)
+	}
 	req := model.Request{
 		Model:     c.modelName,
-		System:    ConciergeSystemPrompt,
+		System:    systemPrompt,
 		Messages:  msgs,
 		Tools:     reg.Definitions(),
 		MaxTokens: model.DefaultMaxTokens,
@@ -205,6 +222,9 @@ func (c *Concierge) Ask(ctx context.Context, question string) (string, error) {
 		model.WithMaxTurns(DefaultConciergeMaxTurn),
 		model.WithOnTurn(func(_ int, resp model.Response) {
 			if txt := strings.TrimSpace(resp.Text()); txt != "" {
+				if memoryEcho != "" {
+					txt = memoryEcho
+				}
 				_, _ = c.store.Threads().AppendItem(cleanupCtx, store.Item{
 					ThreadID: threadID,
 					TurnID:   turnID,
@@ -246,6 +266,9 @@ func (c *Concierge) Ask(ctx context.Context, question string) (string, error) {
 		c.mu.Unlock()
 	}
 
+	if memoryEcho != "" {
+		answer = memoryEcho
+	}
 	if loopErr != nil {
 		_ = c.store.Threads().CompleteTurn(cleanupCtx, threadID, turnID, store.TurnStatusFailed, usage, loopErr.Error())
 		return answer, loopErr
@@ -283,7 +306,7 @@ func (c *Concierge) RunInteractive(ctx context.Context, in io.Reader, out io.Wri
 	return scanner.Err()
 }
 
-func (c *Concierge) buildToolRegistry(threadID, turnID string) *model.ToolRegistry {
+func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho *string) *model.ToolRegistry {
 	reg := model.NewToolRegistry()
 
 	model.AddTool[ConciergeStatusParams](reg, ToolConciergeStatus,
@@ -315,11 +338,23 @@ func (c *Concierge) buildToolRegistry(threadID, turnID string) *model.ToolRegist
 	model.AddTool[DirectiveSubmitParams](reg, ToolDirectiveSubmit,
 		"Submit a typed owner directive (standing, instruction, recipe_edit, plan_import) for the Controller/Dispatcher/Planner",
 		func(ctx context.Context, p DirectiveSubmitParams) (string, error) {
-			return c.handleDirectiveSubmit(ctx, threadID, turnID, p)
+			return c.handleDirectiveSubmit(ctx, threadID, turnID, quote, p)
 		},
 	)
-	model.AddTool[MemorySubmitParams](reg, ToolMemorySubmit, "Save an owner correction as memory", func(ctx context.Context, p MemorySubmitParams) (string, error) { return c.handleMemorySubmit(ctx, p) })
-	model.AddTool[MemoryUndoParams](reg, ToolMemoryUndo, "Undo last memory change", func(ctx context.Context, _ MemoryUndoParams) (string, error) { return c.handleMemoryUndo(ctx) })
+	model.AddTool[MemorySubmitParams](reg, ToolMemorySubmit, "Save an owner correction as memory", func(ctx context.Context, p MemorySubmitParams) (string, error) {
+		echo, err := c.memoryEditor.Submit(ctx, c.store, c.runID, c.nextID("memory"), quote, p)
+		if err == nil {
+			*memoryEcho = echo
+		}
+		return echo, err
+	})
+	model.AddTool[MemoryUndoParams](reg, ToolMemoryUndo, "Undo last memory change", func(ctx context.Context, _ MemoryUndoParams) (string, error) {
+		echo, err := c.memoryEditor.Undo(ctx, c.store)
+		if err == nil {
+			*memoryEcho = echo
+		}
+		return echo, err
+	})
 	model.AddTool[MemoryReadParams](reg, ToolMemoryRead, "Read memory body", func(ctx context.Context, p MemoryReadParams) (string, error) {
 		m, e := c.store.Memories().Get(ctx, "", p.ID)
 		if e != nil {
@@ -334,109 +369,10 @@ func (c *Concierge) buildToolRegistry(threadID, turnID string) *model.ToolRegist
 	return reg
 }
 
-type MemorySubmitParams struct {
-	Action      string `json:"action"`
-	ID          string `json:"id,omitempty"`
-	Name        string `json:"name,omitempty"`
-	Description string `json:"description,omitempty"`
-	Type        string `json:"type,omitempty"`
-	Scope       string `json:"scope,omitempty"`
-	Source      string `json:"source"`
-	Body        string `json:"body,omitempty"`
-	ProposedBy  string `json:"proposed_by,omitempty"`
-}
-type MemoryUndoParams struct{}
+type MemorySubmitParams = memorychat.MemorySubmitParams
+type MemoryUndoParams = memorychat.MemoryUndoParams
 type MemoryReadParams struct {
 	ID string `json:"id"`
-}
-
-func (c *Concierge) handleMemorySubmit(ctx context.Context, p MemorySubmitParams) (string, error) {
-	id := strings.TrimSpace(p.ID)
-	if id == "" {
-		id = c.nextID("memory")
-	}
-	var prev *store.MemoryEntry
-	if o, e := c.store.Memories().Get(ctx, "", id); e == nil {
-		if o.RunID != "" && o.RunID != c.runID {
-			return "", store.ErrNotFound
-		}
-		cp := *o
-		prev = &cp
-	}
-	if strings.EqualFold(p.Action, "delete") {
-		if prev == nil {
-			return "", store.ErrNotFound
-		}
-		if e := c.store.Memories().Delete(ctx, prev.Scope, id); e != nil {
-			return "", e
-		}
-		c.mu.Lock()
-		c.lastMemory = prev
-		c.lastMemoryPrevious = prev
-		c.mu.Unlock()
-		return "memory " + id + " deleted", nil
-	}
-	m := store.MemoryEntry{ID: id, Name: p.Name, Description: p.Description, Type: p.Type, Scope: p.Scope, Source: p.Source, Body: p.Body, ProposedBy: p.ProposedBy, RunID: c.runID}
-	if m.Scope == "" {
-		m.Scope = "run"
-	}
-	if m.Type == "" {
-		m.Type = "rule"
-	}
-	if m.ProposedBy == "" {
-		m.ProposedBy = "owner"
-	}
-	if m.Scope != "run" {
-		m.RunID = ""
-	}
-	if prev != nil {
-		if p.Type == "" {
-			m.Type = prev.Type
-		}
-		if p.Scope == "" {
-			m.Scope, m.RunID = prev.Scope, prev.RunID
-		}
-		if p.ProposedBy == "" {
-			m.ProposedBy = prev.ProposedBy
-		}
-		if m.Name == "" {
-			m.Name = prev.Name
-		}
-		if m.Description == "" {
-			m.Description = prev.Description
-		}
-		if m.Body == "" {
-			m.Body = prev.Body
-		}
-		if m.Source == "" {
-			m.Source = prev.Source
-		}
-	}
-	v, e := c.store.Memories().Put(ctx, m)
-	if e != nil {
-		return "", e
-	}
-	cp := v
-	c.mu.Lock()
-	c.lastMemory = &cp
-	c.lastMemoryPrevious = prev
-	c.mu.Unlock()
-	return "memory " + v.ID + " saved: " + v.Name, nil
-}
-func (c *Concierge) handleMemoryUndo(ctx context.Context) (string, error) {
-	c.mu.Lock()
-	m, p := c.lastMemory, c.lastMemoryPrevious
-	c.lastMemory = nil
-	c.mu.Unlock()
-	if m == nil {
-		return "nothing to undo", nil
-	}
-	if p != nil {
-		_, e := c.store.Memories().Put(ctx, *p)
-		return "memory change undone", e
-	}
-	e := c.store.Memories().Delete(ctx, m.Scope, m.ID)
-	return "memory change undone", e
 }
 
 // FormatStatusReport renders a structured status summary of the run from Store state and DecisionStore metrics.
@@ -610,7 +546,7 @@ func (c *Concierge) handlePRCI(ctx context.Context, laneID string) (string, erro
 
 func (c *Concierge) handleDirectiveSubmit(
 	ctx context.Context,
-	threadID, turnID string,
+	threadID, turnID, quote string,
 	p DirectiveSubmitParams,
 ) (string, error) {
 	text := strings.TrimSpace(p.Text)
@@ -655,6 +591,19 @@ func (c *Concierge) handleDirectiveSubmit(
 	if err := c.store.Directives().Add(ctx, dir); err != nil {
 		return "", err
 	}
+	echo := "directive is time-limited"
+	if expiresAt == nil {
+		var err error
+		memoryScope := dir.Scope
+		if memoryScope != "owner" && memoryScope != "repo" && memoryScope != "run" {
+			memoryScope = "run"
+		}
+		echo, err = c.memoryEditor.Submit(ctx, c.store, c.runID, dir.ID, quote, MemorySubmitParams{Action: "create", ID: dir.ID, Name: "Directive: " + text, Description: text, Body: text, Scope: memoryScope})
+		if err != nil {
+			_ = c.store.Directives().UpdateStatus(context.WithoutCancel(ctx), c.runID, dir.ID, store.DirectiveRevoked)
+			return "", err
+		}
+	}
 
 	payloadBytes, _ := json.Marshal(dir)
 	if _, err := c.store.Events().Append(ctx, store.Event{
@@ -685,5 +634,5 @@ func (c *Concierge) handleDirectiveSubmit(
 		Vetted:   true,
 	})
 
-	return fmt.Sprintf("submitted directive %s (kind=%s)", dir.ID, dir.Kind), nil
+	return fmt.Sprintf("Submitted directive %s (kind=%s); %s", dir.ID, dir.Kind, echo), nil
 }
