@@ -120,10 +120,14 @@ func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnRe
 	}
 	baseRef := "HEAD"
 	if req.Worktree == "" && strings.TrimSpace(req.BaseBranch) != "" {
-		baseRef = req.BaseBranch
+		baseRef = "origin/" + req.BaseBranch
 	}
 	if out, err := exec.CommandContext(ctx, "git", "-C", baseDir, "rev-parse", baseRef).Output(); err == nil {
 		baseCommit = strings.TrimSpace(string(out))
+	} else if baseRef != "HEAD" {
+		if out, err := exec.CommandContext(ctx, "git", "-C", baseDir, "rev-parse", req.BaseBranch).Output(); err == nil {
+			baseCommit = strings.TrimSpace(string(out))
+		}
 	}
 	prompt := req.Brief + "\n[orca run:" + req.RunID + " lane:" + req.LaneID + "]"
 	r, err := d.c.NewSession(ctx, br.SpawnRequest{Worktree: req.Worktree, Repo: d.repo, Parent: d.parent, Model: req.Model, Backend: req.Harness, Effort: req.Effort, Prompt: prompt, CreateWorktree: req.Worktree == "", Branch: req.Branch, From: req.BaseBranch})
