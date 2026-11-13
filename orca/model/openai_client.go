@@ -150,6 +150,10 @@ type responsesItem struct {
 }
 
 func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Response, error) {
+	codec, err := newToolNameCodec(req)
+	if err != nil {
+		return nil, err
+	}
 	p := responsesRequest{Model: req.Model, Instructions: req.System, MaxOutputTokens: req.MaxTokens, Temperature: req.Temperature}
 	if req.ReasoningEffort != "" {
 		p.Reasoning = &reasoningConfig{Effort: req.ReasoningEffort}
@@ -162,10 +166,10 @@ func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Respons
 		p.MaxOutputTokens = DefaultMaxTokens
 	}
 	for _, m := range req.Messages {
-		p.Input = append(p.Input, openAIInput(m)...)
+		p.Input = append(p.Input, openAIInput(m, codec)...)
 	}
 	for _, t := range req.Tools {
-		p.Tools = append(p.Tools, responsesTool{Type: "function", Name: t.Name, Description: t.Description, Parameters: t.InputSchema})
+		p.Tools = append(p.Tools, responsesTool{Type: "function", Name: codec.wire(t.Name), Description: t.Description, Parameters: t.InputSchema})
 	}
 	body, err := json.Marshal(p)
 	if err != nil {
@@ -233,7 +237,7 @@ func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Respons
 			return nil, fmt.Errorf("orca/model: OpenAI stream failed after %d attempts: %w", attempt, readErr)
 		}
 		if hresp.StatusCode >= 200 && hresp.StatusCode < 300 {
-			resp, err := decodeResponses(data, req.Model)
+			resp, err := decodeResponses(data, req.Model, codec)
 			if err != nil {
 				return nil, err
 			}
@@ -306,7 +310,7 @@ func readResponsesStream(r io.ReadCloser, idle time.Duration) ([]byte, error) {
 	}
 }
 
-func openAIInput(m Message) []responsesItem {
+func openAIInput(m Message, codec *toolNameCodec) []responsesItem {
 	var out []responsesItem
 	var text strings.Builder
 	for i := range m.Content {
@@ -326,7 +330,7 @@ func openAIInput(m Message) []responsesItem {
 			if id == "" {
 				id = b.ID
 			}
-			out = append(out, responsesItem{Type: "function_call", ID: id, CallID: b.ID, Name: b.Name, Arguments: string(b.Input)})
+			out = append(out, responsesItem{Type: "function_call", ID: id, CallID: b.ID, Name: codec.wire(b.Name), Arguments: string(b.Input)})
 		case BlockTypeToolResult:
 			output := b.Content
 			out = append(out, responsesItem{Type: "function_call_output", CallID: b.ToolUseID, Output: &output})
@@ -335,7 +339,7 @@ func openAIInput(m Message) []responsesItem {
 	return out
 }
 
-func decodeResponses(data []byte, requestedModel string) (*Response, error) {
+func decodeResponses(data []byte, requestedModel string, codec *toolNameCodec) (*Response, error) {
 	if bytes.Contains(data, []byte("data:")) {
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
@@ -409,7 +413,7 @@ func decodeResponses(data []byte, requestedModel string) (*Response, error) {
 			if args == "" {
 				args = "{}"
 			}
-			block := NewToolUseBlock(item.CallID, item.Name, json.RawMessage(args))
+			block := NewToolUseBlock(item.CallID, codec.original(item.Name), json.RawMessage(args))
 			block.Signature = item.ID
 			blocks = append(blocks, block)
 			stop = StopReasonToolUse

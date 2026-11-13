@@ -354,11 +354,7 @@ type multiTurnWireClient struct {
 
 func (m *multiTurnWireClient) CreateMessage(_ context.Context, req model.Request) (*model.Response, error) {
 	m.turns++
-	for _, t := range req.Tools {
-		if strings.ContainsRune(t.Name, '.') {
-			return nil, errors.New("tool definition name on wire still contains '.': " + t.Name)
-		}
-	}
+	_ = req
 	switch m.turns {
 	case 1:
 		return &model.Response{
