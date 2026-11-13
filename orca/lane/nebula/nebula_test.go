@@ -447,6 +447,19 @@ func TestEnsureRunAcceptsAlreadyExists(t *testing.T) {
 	}
 }
 
+func TestEnsureRunRejectsUnrelatedConflict(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"code":"SESSION_NOT_READY","message":"session is transitioning"}`)
+	}))
+	defer srv.Close()
+	drv, _, _ := newTestDriver(t, &fakeNebulaServer{srv: srv}, nebula.WithAPIURL(srv.URL))
+	if err := drv.EnsureRun(context.Background(), "conflict"); err == nil {
+		t.Fatal("EnsureRun accepted unrelated conflict")
+	}
+}
+
 func TestEnsureRunStopsOnOtherErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -454,8 +467,13 @@ func TestEnsureRunStopsOnOtherErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 	drv, _, _ := newTestDriver(t, &fakeNebulaServer{srv: srv}, nebula.WithAPIURL(srv.URL))
-	if err := drv.EnsureRun(context.Background(), "denied"); err == nil || !strings.Contains(err.Error(), "unable to") && !strings.Contains(err.Error(), "FORBIDDEN") {
-		t.Fatalf("EnsureRun error = %v, want failure", err)
+	err := drv.EnsureRun(context.Background(), "denied")
+	if err == nil {
+		t.Fatal("EnsureRun returned nil for forbidden response")
+	}
+	var apiErr *nebula.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("EnsureRun error = %v, want APIError status %d", err, http.StatusForbidden)
 	}
 }
 
