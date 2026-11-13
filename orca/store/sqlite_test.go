@@ -1,8 +1,11 @@
 package store_test
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"sync"
@@ -370,8 +373,8 @@ func TestSQLiteStoreReopenIdenticalState(t *testing.T) {
 	if before.ControllerCursor.Seq != 2 {
 		t.Fatalf("ControllerCursor.Seq = %d, want 2 (monotonic)", before.ControllerCursor.Seq)
 	}
-	if !slices.Equal(before.AppliedMigrations, []string{"0001_init.sql"}) {
-		t.Fatalf("AppliedMigrations = %v, want [0001_init.sql]", before.AppliedMigrations)
+	if !slices.Equal(before.AppliedMigrations, []string{"0001_init.sql", "0002_memory_notes.sql"}) {
+		t.Fatalf("AppliedMigrations = %v, want [0001_init.sql 0002_memory_notes.sql]", before.AppliedMigrations)
 	}
 
 	if err := st1.Close(); err != nil {
@@ -506,5 +509,65 @@ func TestSQLiteStorePerRunFiles(t *testing.T) {
 	}
 	if evA.Seq != 1 || evB.Seq != 1 {
 		t.Fatalf("seqs = (%d, %d), want (1, 1)", evA.Seq, evB.Seq)
+	}
+}
+
+func TestMemoryUpgradeAndDurability(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "store.db")
+	st, err := store.OpenSQLite(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a database from before memory existed, with 0001 already applied.
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(ctx, `DROP TABLE memories; DROP TABLE run_notes; DROP TABLE memory_seed_state; DELETE FROM schema_migrations WHERE version='0002_memory_notes.sql';`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err = store.OpenSQLite(path, nil)
+	if err != nil {
+		t.Fatalf("upgrade legacy database: %v", err)
+	}
+	starters := store.StarterMemories()
+	changed := starters[0]
+	changed.Body = "Owner correction must persist"
+	if _, err := st.Memories().Put(ctx, changed); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Memories().Delete(ctx, "", starters[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Notes().Append(ctx, store.RunNote{RunID: "run-1", Text: "upgrade works"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err = store.OpenSQLite(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	got, err := st.Memories().Get(ctx, "", changed.ID)
+	if err != nil || got.Body != changed.Body {
+		t.Fatalf("owner edit after reopen = %+v, %v", got, err)
+	}
+	if _, err := st.Memories().Get(ctx, "", starters[1].ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("deleted starter resurrected: %v", err)
+	}
+	notes, err := st.Notes().List(ctx, store.NoteFilter{RunID: "run-1"})
+	if err != nil || len(notes) != 1 {
+		t.Fatalf("notes after reopen = %+v, %v", notes, err)
 	}
 }

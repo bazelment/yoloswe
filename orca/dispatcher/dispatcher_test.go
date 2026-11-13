@@ -1446,3 +1446,39 @@ type clientFunc func(context.Context, model.Request) (*model.Response, error)
 func (f clientFunc) CreateMessage(ctx context.Context, req model.Request) (*model.Response, error) {
 	return f(ctx, req)
 }
+
+func TestSnapshotMemoryIndexBudget(t *testing.T) {
+	t.Parallel()
+	clk, st, _ := setupTestEnv(t)
+	ctx := t.Context()
+	for i := 0; i < 500; i++ {
+		_, err := st.Memories().Put(ctx, store.MemoryEntry{
+			ID: fmt.Sprintf("memory-%03d", i), Name: "owner\ncorrection", Description: strings.Repeat("guidance ", 50),
+			Type: "rule", Scope: "run", RunID: "run-1", Source: "owner correction", Body: "Why: clarity. How: scoped tests.", ProposedBy: "owner",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := dispatcher.SnapshotConfig{MaxSnapshotTokens: 1000}
+	first, err := dispatcher.BuildSnapshot(ctx, st, clk, "run-1", nil, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := dispatcher.BuildSnapshot(ctx, st, clk, "run-1", nil, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Text != second.Text {
+		t.Fatal("memory index not deterministic")
+	}
+	if first.EstimatedTokens > cfg.MaxSnapshotTokens || !first.Truncated {
+		t.Fatalf("snapshot tokens=%d truncated=%t", first.EstimatedTokens, first.Truncated)
+	}
+	if !strings.Contains(first.Text, "memories omitted for token budget") || strings.Contains(first.Text, "owner\ncorrection") {
+		t.Fatal("memory index must be bounded and single-line")
+	}
+	if !strings.Contains(first.Text, "## Judgment Event Batch") {
+		t.Fatal("event section lost")
+	}
+}

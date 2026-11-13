@@ -3,6 +3,7 @@ package store
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"slices"
 	"strings"
@@ -99,8 +100,8 @@ type memMemoryStore MemoryStore
 func (m *memMemoryStore) s() *MemoryStore { return (*MemoryStore)(m) }
 func (m *memMemoryStore) Put(_ context.Context, v MemoryEntry) (MemoryEntry, error) {
 	s := m.s()
-	if strings.TrimSpace(v.ID) == "" || strings.TrimSpace(v.Name) == "" || strings.TrimSpace(v.Body) == "" {
-		return MemoryEntry{}, fmt.Errorf("%w: memory id, name and body required", ErrInvalidArgument)
+	if err := v.validate(); err != nil {
+		return MemoryEntry{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -144,11 +145,11 @@ func (m *memMemoryStore) List(_ context.Context, f MemoryFilter) ([]MemoryEntry,
 	slices.SortFunc(out, func(a, b MemoryEntry) int { return cmp.Compare(a.ID, b.ID) })
 	return out, nil
 }
-func (m *memMemoryStore) Delete(_ context.Context, _, id string) error {
+func (m *memMemoryStore) Delete(_ context.Context, scope, id string) error {
 	s := m.s()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.memories[id]; !ok {
+	if v, ok := s.memories[id]; !ok || (scope != "" && v.Scope != scope) {
 		return fmt.Errorf("%w: memory %q", ErrNotFound, id)
 	}
 	delete(s.memories, id)
@@ -166,7 +167,14 @@ func (m *memNoteStore) Append(_ context.Context, n RunNote) (RunNote, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if n.ID == "" {
-		n.ID = fmt.Sprintf("note-%d", len(s.notes[n.RunID])+1)
+		n.ID = "note-" + rand.Text()
+	}
+	for _, notes := range s.notes {
+		for _, existing := range notes {
+			if existing.ID == n.ID {
+				return RunNote{}, fmt.Errorf("%w: note %q", ErrAlreadyExists, n.ID)
+			}
+		}
 	}
 	if n.CreatedAt.IsZero() {
 		n.CreatedAt = s.now()

@@ -3,6 +3,7 @@ package store
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -120,14 +121,30 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 	if err := s.applyMigrations(ctx); err != nil {
 		return err
 	}
-	starter := StarterMemories()
-	for i := range starter {
-		v := starter[i]
-		if _, err := (*sqliteMemoryStore)(s).Put(ctx, v); err != nil {
-			return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // Seed and marker commit together, including across concurrent openers.
+	result, err := tx.ExecContext(ctx, `INSERT INTO memory_seed_state(id) VALUES(1) ON CONFLICT(id) DO NOTHING`)
+	if err != nil {
+		return err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if inserted != 0 {
+		starter := StarterMemories()
+		for i := range starter {
+			v := &starter[i]
+			_, err := tx.ExecContext(ctx, `INSERT INTO memories(id,name,description,type,scope,run_id,source,body,proposed_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, v.ID, v.Name, v.Description, v.Type, v.Scope, v.RunID, v.Source, v.Body, v.ProposedBy, formatTime(s.now()), formatTime(s.now()))
+			if err != nil {
+				return err
+			}
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) applyMigrations(ctx context.Context) error {
@@ -256,8 +273,8 @@ type sqliteMemoryStore SQLiteStore
 func (m *sqliteMemoryStore) s() *SQLiteStore { return (*SQLiteStore)(m) }
 func (m *sqliteMemoryStore) Put(ctx context.Context, v MemoryEntry) (MemoryEntry, error) {
 	s := m.s()
-	if strings.TrimSpace(v.ID) == "" || strings.TrimSpace(v.Name) == "" || strings.TrimSpace(v.Body) == "" {
-		return MemoryEntry{}, fmt.Errorf("%w: memory id, name and body required", ErrInvalidArgument)
+	if err := v.validate(); err != nil {
+		return MemoryEntry{}, err
 	}
 	now := s.now()
 	if v.CreatedAt.IsZero() {
@@ -267,11 +284,11 @@ func (m *sqliteMemoryStore) Put(ctx context.Context, v MemoryEntry) (MemoryEntry
 	_, err := s.db.ExecContext(ctx, `INSERT INTO memories(id,name,description,type,scope,run_id,source,body,proposed_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,type=excluded.type,scope=excluded.scope,run_id=excluded.run_id,source=excluded.source,body=excluded.body,proposed_by=excluded.proposed_by,updated_at=excluded.updated_at`, v.ID, v.Name, v.Description, v.Type, v.Scope, v.RunID, v.Source, v.Body, v.ProposedBy, formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
 	return v, err
 }
-func (m *sqliteMemoryStore) Get(ctx context.Context, _, id string) (*MemoryEntry, error) {
+func (m *sqliteMemoryStore) Get(ctx context.Context, scope, id string) (*MemoryEntry, error) {
 	s := m.s()
 	var v MemoryEntry
 	var ca, ua string
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,description,type,scope,run_id,source,body,proposed_by,created_at,updated_at FROM memories WHERE id=?`, id).Scan(&v.ID, &v.Name, &v.Description, &v.Type, &v.Scope, &v.RunID, &v.Source, &v.Body, &v.ProposedBy, &ca, &ua)
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,description,type,scope,run_id,source,body,proposed_by,created_at,updated_at FROM memories WHERE id=? AND (?='' OR scope=?)`, id, scope, scope).Scan(&v.ID, &v.Name, &v.Description, &v.Type, &v.Scope, &v.RunID, &v.Source, &v.Body, &v.ProposedBy, &ca, &ua)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: memory %q", ErrNotFound, id)
 	}
@@ -303,8 +320,8 @@ func (m *sqliteMemoryStore) List(ctx context.Context, f MemoryFilter) ([]MemoryE
 	}
 	return out, rows.Err()
 }
-func (m *sqliteMemoryStore) Delete(ctx context.Context, _, id string) error {
-	r, err := m.s().db.ExecContext(ctx, `DELETE FROM memories WHERE id=?`, id)
+func (m *sqliteMemoryStore) Delete(ctx context.Context, scope, id string) error {
+	r, err := m.s().db.ExecContext(ctx, `DELETE FROM memories WHERE id=? AND (?='' OR scope=?)`, id, scope, scope)
 	if err != nil {
 		return err
 	}
@@ -324,16 +341,19 @@ func (n *sqliteNoteStore) Append(ctx context.Context, v RunNote) (RunNote, error
 		return RunNote{}, fmt.Errorf("%w: note run_id and text required", ErrInvalidArgument)
 	}
 	if v.ID == "" {
-		v.ID = fmt.Sprintf("note-%d", s.now().UnixNano())
+		v.ID = "note-" + rand.Text()
 	}
 	if v.CreatedAt.IsZero() {
 		v.CreatedAt = s.now()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO run_notes(id,run_id,task_id,phase,text,created_at) VALUES(?,?,?,?,?,?)`, v.ID, v.RunID, v.TaskID, v.Phase, v.Text, formatTime(v.CreatedAt))
-	return v, err
+	err := execInsertNew(ctx, s.db, fmt.Errorf("%w: note %q", ErrAlreadyExists, v.ID), `INSERT INTO run_notes(id,run_id,task_id,phase,text,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, v.ID, v.RunID, v.TaskID, v.Phase, v.Text, formatTime(v.CreatedAt))
+	if err != nil {
+		return RunNote{}, err
+	}
+	return v, nil
 }
 func (n *sqliteNoteStore) List(ctx context.Context, f NoteFilter) ([]RunNote, error) {
-	rows, err := n.s().db.QueryContext(ctx, `SELECT id,run_id,task_id,phase,text,created_at FROM run_notes WHERE run_id=? AND (?='' OR task_id=?) ORDER BY created_at,id`, f.RunID, f.TaskID, f.TaskID)
+	rows, err := n.s().db.QueryContext(ctx, `SELECT id,run_id,task_id,phase,text,created_at FROM run_notes WHERE run_id=? AND (?='' OR task_id=?) ORDER BY rowid`, f.RunID, f.TaskID, f.TaskID)
 	if err != nil {
 		return nil, err
 	}

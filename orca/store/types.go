@@ -5,7 +5,9 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/lane"
@@ -44,6 +46,21 @@ type MemoryEntry struct {
 }
 
 func (m MemoryEntry) Clone() MemoryEntry { return m }
+
+func (m MemoryEntry) validate() error {
+	if strings.TrimSpace(m.ID) == "" || strings.TrimSpace(m.Name) == "" || strings.TrimSpace(m.Body) == "" {
+		return fmt.Errorf("%w: memory id, name and body required", ErrInvalidArgument)
+	}
+	if !slices.Contains([]string{"rule", "preference", "fact", "reference"}, m.Type) ||
+		!slices.Contains([]string{"owner", "repo", "run"}, m.Scope) ||
+		!slices.Contains([]string{"owner", "model"}, m.ProposedBy) {
+		return fmt.Errorf("%w: invalid memory type, scope or proposed_by", ErrInvalidArgument)
+	}
+	if m.Scope == "run" && strings.TrimSpace(m.RunID) == "" {
+		return fmt.Errorf("%w: run memory requires run_id", ErrInvalidArgument)
+	}
+	return nil
+}
 
 // RunNote is an append-only note attached to a run or task.
 type RunNote struct {

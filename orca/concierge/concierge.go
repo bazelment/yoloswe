@@ -601,6 +601,9 @@ func (c *Concierge) handleRawToolCall(
 		if err != nil {
 			return "", err
 		}
+		if m.RunID != "" && m.RunID != runID {
+			return "", fmt.Errorf("%w: memory %q", store.ErrNotFound, p.ID)
+		}
 		return fmt.Sprintf("[%s] %s\n%s\nsource: %s", m.ID, m.Name, m.Body, m.Source), nil
 
 	default:
