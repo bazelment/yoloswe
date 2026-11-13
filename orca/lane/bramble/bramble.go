@@ -45,7 +45,7 @@ type Driver struct { //nolint:govet // compact driver configuration
 
 var _ lane.LaneDriver = (*Driver)(nil)
 
-func (d *Driver) ReportInstructions(runID, laneID, phase string, round int, terminal string) string {
+func (d *Driver) ReportInstructions(runID, laneID, phase string, round int) string {
 	d.mu.RLock()
 	runDir := d.runDir
 	d.mu.RUnlock()

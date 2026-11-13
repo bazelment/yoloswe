@@ -2073,7 +2073,7 @@ func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Re
 	if extraNote != "" {
 		parts = append(parts, extraNote)
 	}
-	reportInstructions := c.driver.ReportInstructions(c.cfg.RunID, ln.ID, phase.Name, round, ln.TerminalID)
+	reportInstructions := c.driver.ReportInstructions(c.cfg.RunID, ln.ID, phase.Name, round)
 	brief := strings.Join(parts, "\n\n")
 	if r.Limits.MaxBriefBytes > 0 {
 		separator := "\n\n"
