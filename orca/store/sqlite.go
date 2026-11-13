@@ -284,7 +284,7 @@ func (m *sqliteMemoryStore) Get(ctx context.Context, _, id string) (*MemoryEntry
 }
 func (m *sqliteMemoryStore) List(ctx context.Context, f MemoryFilter) ([]MemoryEntry, error) {
 	s := m.s()
-	q := `SELECT id,name,description,type,scope,run_id,source,body,proposed_by,created_at,updated_at FROM memories WHERE (?='' OR run_id=?) AND (?='' OR scope=?) AND (?='' OR type=?) ORDER BY id`
+	q := `SELECT id,name,description,type,scope,run_id,source,body,proposed_by,created_at,updated_at FROM memories WHERE (?='' OR run_id='' OR run_id=?) AND (?='' OR scope=?) AND (?='' OR type=?) ORDER BY id`
 	rows, err := s.db.QueryContext(ctx, q, f.RunID, f.RunID, f.Scope, f.Scope, f.Type, f.Type)
 	if err != nil {
 		return nil, err

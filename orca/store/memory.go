@@ -56,7 +56,8 @@ func NewMemoryStore(clk clock.Clock) *MemoryStore {
 		turns:        make(map[string][]Turn),
 		items:        make(map[string][]Item),
 		recipes:      make(map[string]map[string][]Recipe),
-		memories:     make(map[string]*MemoryEntry), notes: make(map[string][]RunNote),
+		memories:     make(map[string]*MemoryEntry),
+		notes:        make(map[string][]RunNote),
 	}
 	starter := StarterMemories()
 	for i := range starter {
@@ -129,7 +130,7 @@ func (m *memMemoryStore) List(_ context.Context, f MemoryFilter) ([]MemoryEntry,
 	defer s.mu.RUnlock()
 	out := []MemoryEntry{}
 	for _, v := range s.memories {
-		if f.RunID != "" && v.RunID != f.RunID {
+		if f.RunID != "" && v.RunID != "" && v.RunID != f.RunID {
 			continue
 		}
 		if f.Scope != "" && v.Scope != f.Scope {
