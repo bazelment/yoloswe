@@ -201,7 +201,8 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 							continue
 						}
 						started[tm.ID] = true
-						go d.StreamEvents(ctx, StreamRequest{Events: d.events, RunID: runID, SessionID: sess.ID, TerminalID: tm.ID})
+						laneID := sess.Metadata["laneID"]
+						go d.StreamEvents(ctx, StreamRequest{Events: d.events, RunID: runID, LaneID: laneID, SessionID: sess.ID, TerminalID: tm.ID})
 					}
 				}
 			}
@@ -216,7 +217,11 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				}
 				seen[ev.Seq] = true
 				if e, ok := uniformEvent(*ev, runID); ok {
-					out <- e
+					select {
+					case out <- e:
+					case <-ctx.Done():
+						return
+					}
 					last = d.clock.Now()
 				}
 			}
@@ -235,7 +240,9 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 	e := lane.Event{RunID: runID, LaneID: ev.LaneID, At: ev.CreatedAt, Text: ev.Summary, TerminalID: p.TerminalID}
 	if p.TerminalEvent != nil {
 		e.TerminalID = p.TerminalEvent.TerminalID
-		e.Text = p.TerminalEvent.Text
+		if p.TerminalEvent.Text != "" {
+			e.Text = p.TerminalEvent.Text
+		}
 	}
 	switch ev.Kind {
 	case store.EventLaneReport:
@@ -244,6 +251,10 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 	case store.EventPhaseExit:
 		if p.TerminalEvent != nil && strings.Contains(strings.ToLower(p.TerminalEvent.Outcome), "auth") {
 			e.Kind = lane.EventAuthFailure
+		} else if p.TerminalEvent != nil && (strings.Contains(strings.ToLower(p.TerminalEvent.Outcome), "usage_limit") || strings.Contains(strings.ToLower(p.TerminalEvent.Outcome), "capacity")) {
+			e.Kind = lane.EventQuotaFailure
+		} else if p.TerminalEvent != nil && (p.TerminalEvent.Type == "turn.ended" || p.TerminalEvent.Type == "api_error") {
+			e.Kind = lane.EventTurnEndedNoReport
 		} else {
 			e.Kind = lane.EventExited
 		}
@@ -257,8 +268,10 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 			default:
 				e.Kind = lane.EventTurnEndedNoReport
 			}
-		} else {
+		} else if p.TerminalEvent != nil {
 			e.Kind = lane.EventQuotaFailure
+		} else {
+			return lane.Event{}, false
 		}
 	default:
 		return lane.Event{}, false

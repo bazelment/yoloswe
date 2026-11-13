@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/lane"
@@ -22,14 +23,20 @@ type Client interface {
 type Config struct {
 	Client       Client
 	RunDir       string
+	Repo         string
+	Parent       string
 	PollInterval time.Duration
 }
 type Driver struct { //nolint:govet // compact driver configuration
 	c      Client
 	runDir string
 	poll   time.Duration
+	repo   string
+	parent string
 	phases map[string]string
 	lanes  map[string]string
+	runs   map[string]string
+	mu     sync.RWMutex
 }
 
 var _ lane.LaneDriver = (*Driver)(nil)
@@ -41,7 +48,7 @@ func New(cfg Config) (*Driver, error) {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 250 * time.Millisecond
 	}
-	return &Driver{c: cfg.Client, runDir: cfg.RunDir, poll: cfg.PollInterval, phases: map[string]string{}, lanes: map[string]string{}}, nil
+	return &Driver{c: cfg.Client, runDir: cfg.RunDir, repo: cfg.Repo, parent: cfg.Parent, poll: cfg.PollInterval, phases: map[string]string{}, lanes: map[string]string{}, runs: map[string]string{}}, nil
 }
 func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
 	return d.start(ctx, req)
@@ -51,22 +58,34 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 	return lane.StartPhaseResult{SessionID: r.SessionID, TerminalID: r.TerminalID, StartedAt: r.StartedAt}, err
 }
 func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
-	r, err := d.c.NewSession(ctx, br.SpawnRequest{Worktree: req.Worktree, Repo: "", Model: req.Model, Backend: req.Harness, Effort: req.Effort, Prompt: req.Brief, CreateWorktree: req.Worktree == "", Branch: req.Branch, From: req.BaseBranch})
+	prompt := req.Brief + "\n[orca run:" + req.RunID + " lane:" + req.LaneID + "]"
+	r, err := d.c.NewSession(ctx, br.SpawnRequest{Worktree: req.Worktree, Repo: d.repo, Parent: d.parent, Model: req.Model, Backend: req.Harness, Effort: req.Effort, Prompt: prompt, CreateWorktree: req.Worktree == "", Branch: req.Branch, From: req.BaseBranch})
 	if err != nil {
 		return lane.SpawnResult{}, err
 	}
+	d.mu.Lock()
 	d.phases[r.SessionID] = req.Phase
 	d.lanes[r.SessionID] = req.LaneID
+	d.runs[r.SessionID] = req.RunID
+	d.mu.Unlock()
 	return lane.SpawnResult{SessionID: r.SessionID, TerminalID: r.SessionID, StartedAt: time.Now().UTC()}, nil
 }
 func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
-	if err := d.c.SendInput(ctx, req.SessionID, req.Message); err != nil {
+	id := req.SessionID
+	if id == "" {
+		id = req.TerminalID
+	}
+	if err := d.c.SendInput(ctx, id, req.Message); err != nil {
 		return err
 	}
 	return d.c.SendKey(ctx, req.SessionID, "Enter")
 }
 func (d *Driver) Stop(ctx context.Context, req lane.StopRequest) error {
-	return d.c.SendKey(ctx, req.SessionID, "C-c")
+	id := req.SessionID
+	if id == "" {
+		id = req.TerminalID
+	}
+	return d.c.SendKey(ctx, id, "C-c")
 }
 func (d *Driver) reportPath(runID, laneID, phase string) string {
 	dir := d.runDir
@@ -76,7 +95,13 @@ func (d *Driver) reportPath(runID, laneID, phase string) string {
 	return filepath.Join(dir, laneID+"."+phase+".report.md")
 }
 func (d *Driver) ReadReport(_ context.Context, runID, laneID, terminalID string) (*lane.PhaseReport, error) {
-	b, err := os.ReadFile(d.reportPath(runID, laneID, d.phases[terminalID]))
+	d.mu.RLock()
+	phase := d.phases[terminalID]
+	d.mu.RUnlock()
+	if phase == "" {
+		return nil, errors.New("unknown bramble terminal")
+	}
+	b, err := os.ReadFile(d.reportPath(runID, laneID, phase))
 	if err != nil {
 		return nil, err
 	}
@@ -104,13 +129,40 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				if seen[s.ID] {
 					continue
 				}
-				p := strings.TrimSpace(s.Prompt)
-				if strings.Contains(p, runID) {
-					if strings.EqualFold(s.Status, "failed") {
-						out <- lane.Event{Kind: lane.EventExited, RunID: runID, SessionID: s.ID, Text: s.Status}
-						seen[s.ID] = true
-					}
+				d.mu.RLock()
+				owned := d.runs[s.ID] == runID
+				phase := d.phases[s.ID]
+				laneID := d.lanes[s.ID]
+				d.mu.RUnlock()
+				if !owned {
+					continue
 				}
+				if rep, err := d.ReadReport(ctx, runID, laneID, s.ID); err == nil {
+					select {
+					case out <- lane.Event{Kind: lane.EventPhaseReported, RunID: runID, LaneID: laneID, SessionID: s.ID, Phase: phase, Report: rep}:
+					case <-ctx.Done():
+						return
+					}
+					seen[s.ID] = true
+					continue
+				}
+				kind := lane.EventExited
+				status := strings.ToLower(s.Status)
+				if strings.Contains(status, "wait") {
+					kind = lane.EventWaitingForInput
+				}
+				if strings.Contains(status, "quota") || strings.Contains(status, "limit") {
+					kind = lane.EventQuotaFailure
+				}
+				if strings.Contains(status, "auth") {
+					kind = lane.EventAuthFailure
+				}
+				select {
+				case out <- lane.Event{Kind: kind, RunID: runID, LaneID: laneID, SessionID: s.ID, Phase: phase, Text: s.Status}:
+				case <-ctx.Done():
+					return
+				}
+				seen[s.ID] = true
 			}
 		}
 	}()
