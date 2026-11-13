@@ -33,7 +33,7 @@ func OwnerChatCases() ([]EvalCase, error) {
 	return cases, err
 }
 
-// EvalResult counts one whole message, including all its independent requests.
+// EvalResult records a whole-message routing result.
 //
 //nolint:govet // score rows mirror the report schema.
 type EvalResult struct {
@@ -121,7 +121,7 @@ func decisionDestinations(d Decision) []Destination {
 	return canonicalDestinations(ds)
 }
 
-// MeetsTargets applies the requested >=90% accuracy and <10% needless-ask bars.
+// MeetsTargets requires >=90% accuracy, <10% needless asks, and no errors.
 func (s EvalScorecard) MeetsTargets() bool {
 	return len(s.Results) > 0 && s.ClearCases > 0 && s.Correct*100 >= 90*len(s.Results) && s.UnnecessaryClarifications*100 < 10*s.ClearCases && s.Errors == 0
 }
