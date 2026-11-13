@@ -100,7 +100,7 @@ func (r FallbackRouter) routeOne(ctx context.Context, text string) (Decision, er
 	if len(d.Parts) == 0 && !validDestination(d.Destination) {
 		return Decision{}, fmt.Errorf("orca/router: invalid destination %q", d.Destination)
 	}
-	d = normalize(d, text, r.ConfidenceThreshold)
+	d = normalize(d, text, r.ConfidenceThreshold, hasOpenQuestionContext(text))
 	if r.Logger != nil {
 		if err := r.Logger.LogRouting(ctx, text, d); err != nil {
 			return Decision{}, err
@@ -110,9 +110,17 @@ func (r FallbackRouter) routeOne(ctx context.Context, text string) (Decision, er
 }
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
-func normalize(d Decision, text string, threshold float64) Decision {
+func normalize(d Decision, text string, threshold float64, openQuestion bool) Decision {
 	if threshold == 0 {
 		threshold = .75
+	}
+	// A reply can only answer a question that is present in the supplied
+	// thread context. This is enforced after the model response as well as in
+	// the prompt so an over-eager model cannot invent an open question.
+	if !openQuestion && d.Destination == AnswerOpenQuestion {
+		d.Destination = Concierge
+		d.AnswersOpenQuestion = false
+		d.QuestionID = ""
 	}
 	if len(d.Parts) > 0 {
 		d.Confidence = 1
@@ -135,7 +143,7 @@ func normalize(d Decision, text string, threshold float64) Decision {
 		d.Echo = oneLine(text)
 	}
 	for i := range d.Parts {
-		d.Parts[i] = normalize(d.Parts[i], d.Parts[i].Text, threshold)
+		d.Parts[i] = normalize(d.Parts[i], d.Parts[i].Text, threshold, openQuestion)
 		if !validDestination(d.Parts[i].Destination) || d.Parts[i].Text == "" {
 			d.Parts[i].NeedsClarification = true
 			d.Parts[i].ClarifyingQuestion = "What should I do with this part?"
@@ -147,6 +155,12 @@ func normalize(d Decision, text string, threshold float64) Decision {
 	}
 	return d
 }
+
+func hasOpenQuestionContext(text string) bool {
+	const marker = "Open questions:"
+	i := strings.Index(text, marker)
+	return i >= 0 && strings.TrimSpace(text[i+len(marker):]) != ""
+}
 func validDestination(d Destination) bool {
 	for _, x := range destinations {
 		if d == x {
@@ -156,7 +170,7 @@ func validDestination(d Destination) bool {
 	return false
 }
 
-const routingPrompt = `Classify the owner message. Return JSON only with destination (one of concierge, answer-open-question, planner, memory, dispatcher, controller), confidence (0 to 1), needs_clarification, is_standing_rule, answers_open_question, and optional clarifying_question. Ask one short question when intent is ambiguous. For multiple independent requests return parts, each containing its exact text and all routing fields; do not split code or prose just because it contains punctuation. Include question_id when answering a specific open question. Never invent a question ID. A trailing Open questions section is context, not a request to split or dispatch.`
+const routingPrompt = `Classify the owner message. Return JSON only with destination (one of concierge, answer-open-question, planner, memory, dispatcher, controller), confidence (0 to 1), needs_clarification, is_standing_rule, answers_open_question, and optional clarifying_question. The input may include a trailing Open questions section containing recent thread context. answer-open-question is allowed only when that section contains an actual open question and the owner names or clearly replies to it; when the section is absent or empty, answer-open-question is not a candidate. Do not infer or invent an open question. Apply this priority rubric: direct questions about run policy or current state are concierge; a change to an existing goal, plan, order, timing, or scope is planner; a standing rule or durable fact for future work is memory; a command to assign, fund, retry, merge, or steer work is dispatcher; only an explicit pause, resume, stop, hold, or release of execution is controller. Do not use controller for ordinary plan edits, and do not use memory for a one-time decision or plan update. Set needs_clarification only when the requested destination or action is genuinely ambiguous, not merely because the message is short. For multiple independent requests return parts, each containing its exact text and all routing fields; do not split code or prose just because it contains punctuation. Include question_id only when answering a specific supplied open question. A trailing Open questions section is context, not a request to split or dispatch.`
 
 // GeminiClient calls Gemini Decisions API (v1beta) and translates its choice response.
 //
@@ -193,7 +207,7 @@ func (c GeminiClient) Route(ctx context.Context, text string) (Decision, error) 
 			d.QuestionID = part.QuestionID
 			out.Parts = append(out.Parts, d)
 		}
-		out = normalize(out, text, c.ConfidenceThreshold)
+		out = normalize(out, text, c.ConfidenceThreshold, hasOpenQuestionContext(text))
 	} else {
 		d, err := c.routeOne(ctx, text)
 		if err != nil {
@@ -285,7 +299,7 @@ func (c GeminiClient) routeOne(ctx context.Context, text string) (Decision, erro
 			d.AnswersOpenQuestion = yes
 		}
 	}
-	return normalize(d, text, c.ConfidenceThreshold), nil
+	return normalize(d, text, c.ConfidenceThreshold, hasOpenQuestionContext(text)), nil
 }
 
 // Select uses Decisions when configured and otherwise the concierge model.

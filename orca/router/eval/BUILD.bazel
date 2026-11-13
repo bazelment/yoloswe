@@ -6,7 +6,10 @@ go_library(
     embedsrcs = ["testdata/owner_chat.json"],
     importpath = "github.com/bazelment/yoloswe/orca/router/eval",
     visibility = ["//visibility:public"],
-    deps = ["//orca/router"],
+    deps = [
+        "//orca/replay",
+        "//orca/router",
+    ],
 )
 
 go_test(

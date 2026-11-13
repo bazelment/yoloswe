@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/replay"
 	"github.com/bazelment/yoloswe/orca/router"
 )
 
@@ -33,6 +34,35 @@ func OwnerChatCases() ([]EvalCase, error) {
 	var cases []EvalCase
 	err := json.Unmarshal(ownerChatData, &cases)
 	return cases, err
+}
+
+// OwnerChatCasesSplit applies the same stable SHA-256 half split used by
+// orca/replay. Tune cases may be iterated on; holdout cases are reserved for
+// the final measurement.
+func OwnerChatCasesSplit(split replay.Split) ([]EvalCase, error) {
+	cases, err := OwnerChatCases()
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(cases))
+	byID := make(map[string]EvalCase, len(cases))
+	for i := range cases {
+		ids[i] = cases[i].ID
+		byID[cases[i].ID] = cases[i]
+	}
+	tune, holdout := replay.SplitMomentIDs(ids)
+	keep := tune
+	if split == replay.SplitHoldout {
+		keep = holdout
+	}
+	if split != replay.SplitTune && split != replay.SplitHoldout {
+		return nil, fmt.Errorf("orca/router/eval: unknown split %q", split)
+	}
+	out := make([]EvalCase, 0, len(keep))
+	for _, id := range keep {
+		out = append(out, byID[id])
+	}
+	return out, nil
 }
 
 // EvalResult records a whole-message routing result.

@@ -13,6 +13,7 @@ go_test(
         "LLM_GATEWAY_URL",
         "ORCH_MODEL",
         "ORCA_ROUTER_INNER_LOOP",
+        "ORCA_ROUTER_SPLIT",
     ],
     gotags = ["integration"],
     tags = [
@@ -21,6 +22,7 @@ go_test(
     ],
     deps = [
         "//orca/model",
+        "//orca/replay",
         "//orca/router",
         "//orca/router/eval",
     ],

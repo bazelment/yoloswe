@@ -643,8 +643,8 @@
     "destinations": [
       "answer-open-question"
     ],
-    "needs_clarification": true,
-    "rationale": "Bare option without a resolvable open question needs clarification.",
+    "needs_clarification": false,
+    "rationale": "Independent source-first audit (router-audit.final.md): linked source identifies the question or work item; reply is unambiguous.",
     "excerpt": false
   },
   {
@@ -655,8 +655,8 @@
     "destinations": [
       "answer-open-question"
     ],
-    "needs_clarification": true,
-    "rationale": "Bare option without context needs clarification.",
+    "needs_clarification": false,
+    "rationale": "Independent source-first audit (router-audit.final.md): linked source identifies the question or work item; reply is unambiguous.",
     "excerpt": false
   },
   {
@@ -667,8 +667,8 @@
     "destinations": [
       "dispatcher"
     ],
-    "needs_clarification": true,
-    "rationale": "Merge request has no named target or open question.",
+    "needs_clarification": false,
+    "rationale": "Independent source-first audit (router-audit.final.md): linked source identifies the question or work item; reply is unambiguous.",
     "excerpt": false
   },
   {
@@ -679,8 +679,8 @@
     "destinations": [
       "dispatcher"
     ],
-    "needs_clarification": true,
-    "rationale": "Merge request cannot identify a target in isolation.",
+    "needs_clarification": false,
+    "rationale": "Independent source-first audit (router-audit.final.md): linked source identifies the question or work item; reply is unambiguous.",
     "excerpt": false
   },
   {
@@ -691,8 +691,8 @@
     "destinations": [
       "answer-open-question"
     ],
-    "needs_clarification": true,
-    "rationale": "Approval lacks the referenced scope or question.",
+    "needs_clarification": false,
+    "rationale": "Independent source-first audit (router-audit.final.md): linked source identifies the question or work item; reply is unambiguous.",
     "excerpt": false
   },
   {

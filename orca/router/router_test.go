@@ -24,12 +24,34 @@ func TestFallbackRoutesFiveLabels(t *testing.T) {
 	for _, x := range []struct {
 		in string
 		d  Destination
-	}{{"show status", Controller}, {"plan this", Planner}, {"remember use tabs", Memory}, {"dispatch item", Dispatcher}, {"answer the open question", AnswerOpenQuestion}} {
+	}{{"show status", Controller}, {"plan this", Planner}, {"remember use tabs", Memory}, {"dispatch item", Dispatcher}, {FormatInput("answer the open question", "What should I do?"), AnswerOpenQuestion}} {
 		r := FallbackRouter{Client: fake{`{"destination":"` + string(x.d) + `","confidence":0.99}`}}
 		got, e := r.Route(context.Background(), x.in)
 		if e != nil || got.Destination != x.d {
 			t.Fatalf("%q: %+v %v", x.in, got, e)
 		}
+	}
+}
+
+func TestFallbackNeverAnswersWithoutOpenQuestion(t *testing.T) {
+	r := FallbackRouter{Client: fake{`{"destination":"answer-open-question","confidence":0.99,"answers_open_question":true,"question_id":"invented"}`}}
+	d, err := r.Route(context.Background(), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Destination == AnswerOpenQuestion || d.AnswersOpenQuestion || d.QuestionID != "" {
+		t.Fatalf("answer-open-question selected without context: %+v", d)
+	}
+}
+
+func TestFallbackMultipartAnswerRequiresOpenQuestionContext(t *testing.T) {
+	r := FallbackRouter{Client: fake{`{"parts":[{"text":"a","destination":"answer-open-question","confidence":0.99},{"text":"remember this","destination":"memory","confidence":0.99}]}`}}
+	d, err := r.Route(context.Background(), "a and remember this")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Parts) != 2 || d.Parts[0].Destination == AnswerOpenQuestion || d.Parts[1].Destination != Memory {
+		t.Fatalf("multipart normalization: %+v", d)
 	}
 }
 func TestFallbackClarifies(t *testing.T) {
@@ -227,7 +249,7 @@ func TestGeminiPreservesSelectedOpenQuestion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(raw) }))
 	defer server.Close()
 	r := Select(fake{`{"destination":"answer-open-question","confidence":0.99,"question_id":"ask-2"}`}, "concierge", "dummy", server.URL, nil)
-	d, err := r.Route(context.Background(), "yes to ask-2")
+	d, err := r.Route(context.Background(), FormatInput("yes to ask-2", "ask-2: choose a rollout"))
 	if err != nil {
 		t.Fatal(err)
 	}
