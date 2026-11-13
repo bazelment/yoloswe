@@ -40,8 +40,8 @@ func TestWatchEmitsLifecycleKinds(t *testing.T) {
 	ch := d.Watch(ctx, "r")
 	select {
 	case ev := <-ch:
-		if ev.Kind != lane.EventPhaseReported && ev.Kind != lane.EventWaitingForInput {
-			t.Fatalf("kind=%q", ev.Kind)
+		if ev.Kind != lane.EventPhaseReported {
+			t.Fatalf("kind=%q, want %q", ev.Kind, lane.EventPhaseReported)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout")

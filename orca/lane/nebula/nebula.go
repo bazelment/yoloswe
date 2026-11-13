@@ -333,7 +333,7 @@ func isQuotaPayload(p StreamEventPayload) bool {
 	}
 	if p.Capacity != nil {
 		for _, b := range p.Capacity.Backends {
-			if b.Full || b.PoolAtMax || b.Waiting > 0 || b.PendingPods > 0 {
+			if b.Full || b.PoolAtMax || b.Waiting > 0 {
 				return true
 			}
 		}

@@ -1079,6 +1079,11 @@ func TestWatchUniformEventKinds(t *testing.T) {
 		{"waiting", nebula.StreamEventPayload{TerminalEvent: &nebula.TerminalEvent{Type: "input.waiting"}}, store.EventStall, lane.EventWaitingForInput},
 		{"exited", nebula.StreamEventPayload{TerminalEvent: &nebula.TerminalEvent{Type: "terminal.exited"}}, store.EventPhaseExit, lane.EventExited},
 		{"quota", nebula.StreamEventPayload{TerminalEvent: &nebula.TerminalEvent{Type: "turn.capacity"}}, store.EventStall, lane.EventQuotaFailure},
+		{"phase usage limit outcome", nebula.StreamEventPayload{TerminalEvent: &nebula.TerminalEvent{Outcome: "usage_limit"}}, store.EventPhaseExit, lane.EventQuotaFailure},
+		{"stall capacity outcome", nebula.StreamEventPayload{TerminalEvent: &nebula.TerminalEvent{Type: "input.waiting", Outcome: "capacity"}}, store.EventStall, lane.EventQuotaFailure},
+		{"usage limit payload", nebula.StreamEventPayload{UsageLimit: &nebula.UsageLimitInfo{}}, store.EventStall, lane.EventQuotaFailure},
+		{"agent usage limited", nebula.StreamEventPayload{AgentSignal: "usage_limited"}, store.EventStall, lane.EventQuotaFailure},
+		{"full capacity payload", nebula.StreamEventPayload{Capacity: &nebula.CapacityStatus{Backends: []nebula.BackendCapacity{{Full: true}}}}, store.EventStall, lane.EventQuotaFailure},
 		{"auth", nebula.StreamEventPayload{TerminalEvent: &nebula.TerminalEvent{Type: "terminal.failed", Outcome: "auth_failed"}}, store.EventPhaseExit, lane.EventAuthFailure},
 	}
 	for _, tc := range cases {
