@@ -151,6 +151,65 @@ func TestReportInstructionsPathIsReadPath(t *testing.T) {
 	}
 }
 
+func TestReportOnlyNoWorkUsesCreationBase(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init", "-q"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "test"}, {"commit", "--allow-empty", "-m", "base", "-q"}} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	base := strings.TrimSpace(string(mustGit(t, dir, "rev-parse", "HEAD")))
+	if out, err := exec.Command("git", "-C", dir, "branch", "lane").CombinedOutput(); err != nil {
+		t.Fatal(string(out))
+	}
+	d, err := bramble.New(bramble.Config{Client: &fakeClient{}, Repo: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		commits int
+		want    bool
+	}{{"zero commits", 0, true}, {"one commit", 1, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.commits == 1 {
+				if out, err := exec.Command("git", "-C", dir, "commit", "--allow-empty", "-m", "worker", "-q").CombinedOutput(); err != nil {
+					t.Fatal(string(out))
+				}
+				if out, err := exec.Command("git", "-C", dir, "branch", "-f", "lane").CombinedOutput(); err != nil {
+					t.Fatal(string(out))
+				}
+			}
+			got, err := d.ReportOnlyNoWork(t.Context(), lane.Lane{BaseCommit: base, Branch: "lane", Worktree: dir})
+			if err != nil || got != tc.want {
+				t.Fatalf("result=(%v,%v), want %v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestReadReportNoChangeOutcome(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "l.swe.report.md")
+	if err := os.WriteFile(path, []byte("Outcome: no-change\nHEAD: abc\nReason: unchanged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := bramble.New(bramble.Config{Client: &fakeClient{}, RunDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.StartPhaseTerminal(t.Context(), lane.StartPhaseRequest{RunID: "r", LaneID: "l", SessionID: "s", Phase: "swe", Round: 1}); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := d.ReadReport(t.Context(), "r", "l", "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Outcome != lane.OutcomeNoChange {
+		t.Fatalf("outcome=%q", rep.Outcome)
+	}
+}
+
 func TestWatchEmitsEachEventKind(t *testing.T) {
 	cases := []struct {
 		name, status string

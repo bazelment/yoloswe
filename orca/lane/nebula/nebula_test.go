@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,84 @@ import (
 	"github.com/bazelment/yoloswe/orca/lane/nebula"
 	"github.com/bazelment/yoloswe/orca/store"
 )
+
+func githubTestDriver(t *testing.T, status int, body string, token string) (*nebula.Driver, *httptest.Server, *[]string) {
+	t.Helper()
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		r2 := r.Clone(r.Context())
+		u, _ := url.Parse(srv.URL + r.URL.Path)
+		r2.URL = u
+		r2.Host = u.Host
+		return http.DefaultTransport.RoundTrip(r2)
+	})}
+	d, err := nebula.New(nebula.Config{APIURL: "http://nebula.test", Token: token}, nebula.WithRepositoryFullName("acme/repo"), nebula.WithHTTPClient(client))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d, srv, &paths
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestReportOnlyNoWork404WithoutConfirmedAuthContinues(t *testing.T) {
+	d, _, paths := githubTestDriver(t, http.StatusNotFound, `{"message":"Not Found"}`, "token")
+	noWork, err := d.ReportOnlyNoWork(t.Context(), lane.Lane{BaseBranch: "main", Branch: "lane-x"})
+	if err == nil || noWork {
+		t.Fatalf("result=(%v, %v), want error and no completion", noWork, err)
+	}
+	if len(*paths) != 2 {
+		t.Fatalf("requests=%v, want compare plus access confirmation", *paths)
+	}
+}
+
+func TestReportOnlyNoWorkTimeoutContinues(t *testing.T) {
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, context.DeadlineExceeded
+	})}
+	d, err := nebula.New(nebula.Config{APIURL: "http://nebula.test", Token: "token"}, nebula.WithRepositoryFullName("acme/repo"), nebula.WithHTTPClient(client))
+	if err != nil {
+		t.Fatal(err)
+	}
+	noWork, err := d.ReportOnlyNoWork(t.Context(), lane.Lane{BaseBranch: "main", Branch: "lane-x"})
+	if err == nil || noWork {
+		t.Fatalf("result=(%v, %v), want timeout error", noWork, err)
+	}
+}
+
+func TestReportOnlyNoWorkRateLimitContinues(t *testing.T) {
+	d, _, _ := githubTestDriver(t, http.StatusTooManyRequests, `{"message":"rate limit"}`, "token")
+	noWork, err := d.ReportOnlyNoWork(t.Context(), lane.Lane{BaseBranch: "main", Branch: "lane-x"})
+	if err == nil || noWork || !strings.Contains(err.Error(), "status 429") {
+		t.Fatalf("result=(%v, %v), want rate limit error", noWork, err)
+	}
+}
+
+func TestReportOnlyNoWorkCompareOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"branch one commit ahead", `{"ahead_by":1}`, false},
+		{"explicit no change", `{"ahead_by":0}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _, _ := githubTestDriver(t, http.StatusOK, tc.body, "token")
+			got, err := d.ReportOnlyNoWork(t.Context(), lane.Lane{BaseBranch: "main", Branch: "lane-x"})
+			if err != nil || got != tc.want {
+				t.Fatalf("result=(%v, %v), want %v", got, err, tc.want)
+			}
+		})
+	}
+}
 
 type autoAdvanceClock struct {
 	*clock.FakeClock

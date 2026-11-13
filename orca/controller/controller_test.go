@@ -37,6 +37,28 @@ func setupTestEnv(t *testing.T) (*clock.FakeClock, *store.MemoryStore, *lane.Fak
 	return clk, st, drv, judge
 }
 
+type lifecycleFailDriver struct {
+	*lane.FakeDriver
+	releaseFailures int
+	stopFailures    int
+}
+
+func (d *lifecycleFailDriver) ReleaseSession(ctx context.Context, id string, force ...bool) error {
+	if d.releaseFailures > 0 {
+		d.releaseFailures--
+		return errors.New("release failed")
+	}
+	return d.FakeDriver.ReleaseSession(ctx, id, force...)
+}
+func (d *lifecycleFailDriver) Stop(ctx context.Context, req lane.StopRequest) error {
+	if d.stopFailures > 0 {
+		d.stopFailures--
+		d.FakeDriver.Stops = append(d.FakeDriver.Stops, req)
+		return errors.New("stop failed")
+	}
+	return d.FakeDriver.Stop(ctx, req)
+}
+
 func appendReportEvent(t *testing.T, st store.Store, laneID string, rep lane.PhaseReport) store.Event {
 	t.Helper()
 	raw, err := json.Marshal(rep)
@@ -847,6 +869,74 @@ func TestControllerReportOnlyCompletionSignals(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestControllerReleaseFailureKeepsLaneCompleteAndRetries(t *testing.T) {
+	clk, st, base, judge := setupTestEnv(t)
+	drv := &lifecycleFailDriver{FakeDriver: base, releaseFailures: 1}
+	ctx := t.Context()
+	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-release", RunID: "run-1", Status: lane.StatusPlanned, Branch: "lane-release"}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	appendReportEvent(t, st, "lane-release", lane.PhaseReport{Phase: recipe.PhaseSWE, Outcome: lane.OutcomeNoChange})
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ln, _ := st.Lanes().Get(ctx, "run-1", "lane-release")
+	if ln.Status != lane.StatusDone || len(base.Releases) != 0 {
+		t.Fatalf("lane=%+v releases=%v", ln, base.Releases)
+	}
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(base.Releases) != 1 {
+		t.Fatalf("releases=%v, want retry success", base.Releases)
+	}
+	decs, _ := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1", LaneID: "lane-release"})
+	found := false
+	for _, d := range decs {
+		if strings.Contains(d.Result, "release retry") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("decision log lacks release failure: %+v", decs)
+	}
+}
+
+func TestControllerStopFailureWithholdsReplacementAndEscalates(t *testing.T) {
+	clk, st, base, judge := setupTestEnv(t)
+	drv := &lifecycleFailDriver{FakeDriver: base, stopFailures: 3}
+	ctx := t.Context()
+	saveRecipeWithTimeout(t, st, 20*time.Minute)
+	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-stop", RunID: "run-1", RecipeName: "stall-test", Status: lane.StatusPlanned}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ln, _ := st.Lanes().Get(ctx, "run-1", "lane-stop")
+	old := ln.TerminalID
+	base.AgentStates[old] = "working"
+	for i := 0; i < 3; i++ {
+		appendLaneWatchEvent(t, st, ln.ID, old, lane.EventTurnEndedNoReport)
+		_ = ctrl.Step(ctx)
+		if len(base.PhaseStarts) != 0 {
+			t.Fatalf("replacement started after stop failure: %+v", base.PhaseStarts)
+		}
+		ln, _ = st.Lanes().Get(ctx, "run-1", ln.ID)
+	}
+	if ln.Status != lane.StatusBlocked {
+		t.Fatalf("status=%q, want blocked after repeated stop failures", ln.Status)
+	}
+	if len(base.PhaseStarts) != 0 {
+		t.Fatalf("phase starts=%v, want none", base.PhaseStarts)
 	}
 }
 
