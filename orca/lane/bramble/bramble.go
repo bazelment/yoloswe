@@ -43,6 +43,13 @@ type Driver struct { //nolint:govet // compact driver configuration
 	mu              sync.RWMutex
 }
 
+func reportPath(runDir, runID, laneID, phase string, round int) string {
+	if strings.TrimSpace(runDir) == "" {
+		runDir = runID
+	}
+	return filepath.Join(runDir, laneID+"."+lane.PhaseRoundKey(phase, round)+".report.md")
+}
+
 var _ lane.LaneDriver = (*Driver)(nil)
 
 func (d *Driver) ReportInstructions(runID, laneID, phase string, round int) string {
@@ -50,12 +57,9 @@ func (d *Driver) ReportInstructions(runID, laneID, phase string, round int) stri
 	runDir := d.runDir
 	d.mu.RUnlock()
 	if runDir == "" {
-		runDir = d.runDir
-	}
-	if runDir == "" {
 		runDir = runID
 	}
-	path := filepath.Join(runDir, laneID+"."+lane.PhaseRoundKey(phase, round)+".report.md")
+	path := reportPath(runDir, runID, laneID, phase, round)
 	return "Write the phase report to " + path + "; the phase is not finished until that file is written. Start it with Outcome: done|needs-swe|blocked|needs-input, include HEAD and PR lines, then include the report details."
 }
 
@@ -136,14 +140,18 @@ func (d *Driver) ReadReport(_ context.Context, runID, laneID, terminalID string)
 	if phase == "" {
 		return nil, errors.New("unknown bramble terminal")
 	}
-	if runDir == "" {
-		runDir = d.runDir
+	// Config.RunDir is the shared absolute report directory. Per-request
+	// RunDir is retained for drivers without a configured shared directory.
+	d.mu.RLock()
+	configuredRunDir := d.runDir
+	d.mu.RUnlock()
+	if configuredRunDir != "" {
+		runDir = configuredRunDir
 	}
 	if runDir == "" {
 		runDir = runID
 	}
-	key := lane.PhaseRoundKey(phase, round)
-	b, err := os.ReadFile(filepath.Join(runDir, laneID+"."+key+".report.md"))
+	b, err := os.ReadFile(reportPath(runDir, runID, laneID, phase, round))
 	if err != nil {
 		return nil, err
 	}

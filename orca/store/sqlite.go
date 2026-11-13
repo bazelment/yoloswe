@@ -1042,7 +1042,7 @@ type sqliteLaneStore SQLiteStore
 func (l *sqliteLaneStore) s() *SQLiteStore { return (*SQLiteStore)(l) }
 
 const selectLaneColumns = `
-SELECT run_id, id, item_id, title, branch, base_branch, worktree, status, phase,
+SELECT run_id, id, item_id, title, branch, base_branch, base_commit, worktree, status, phase,
        round, attempt, recipe_name, recipe_version, session_id, terminal_id,
        sessions_json, terminals_json, pr, pr_head, approval_sha, merge_sha,
        checks, last_event_id, last_event_at, created_at, updated_at
@@ -1056,7 +1056,7 @@ func scanLane(scanner rowScanner) (*Lane, error) {
 		lastEventStr, createdStr, updatedStr string
 	)
 	err := scanner.Scan(
-		&ln.RunID, &ln.ID, &ln.ItemID, &ln.Title, &ln.Branch, &ln.BaseBranch, &ln.Worktree,
+		&ln.RunID, &ln.ID, &ln.ItemID, &ln.Title, &ln.Branch, &ln.BaseBranch, &ln.BaseCommit, &ln.Worktree,
 		&statusStr, &ln.Phase, &ln.Round, &ln.Attempt, &ln.RecipeName, &ln.RecipeVersion,
 		&ln.SessionID, &ln.TerminalID, &sessionsJSON, &terminalsJSON,
 		&ln.PR, &ln.PRHead, &ln.ApprovalSHA, &ln.MergeSHA, &ln.Checks,
@@ -1130,16 +1130,17 @@ func (l *sqliteLaneStore) Upsert(ctx context.Context, ln Lane) error {
 
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO lanes (
-    run_id, id, item_id, title, branch, base_branch, worktree, status, phase,
+    run_id, id, item_id, title, branch, base_branch, base_commit, worktree, status, phase,
     round, attempt, recipe_name, recipe_version, session_id, terminal_id,
     sessions_json, terminals_json, pr, pr_head, approval_sha, merge_sha,
     checks, last_event_id, last_event_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (run_id, id) DO UPDATE SET
     item_id = excluded.item_id,
     title = excluded.title,
     branch = excluded.branch,
     base_branch = excluded.base_branch,
+    base_commit = excluded.base_commit,
     worktree = excluded.worktree,
     status = excluded.status,
     phase = excluded.phase,
@@ -1160,7 +1161,7 @@ ON CONFLICT (run_id, id) DO UPDATE SET
     last_event_at = excluded.last_event_at,
     created_at = excluded.created_at,
     updated_at = excluded.updated_at`,
-		cp.RunID, cp.ID, cp.ItemID, cp.Title, cp.Branch, cp.BaseBranch, cp.Worktree,
+		cp.RunID, cp.ID, cp.ItemID, cp.Title, cp.Branch, cp.BaseBranch, cp.BaseCommit, cp.Worktree,
 		string(cp.Status), cp.Phase, cp.Round, cp.Attempt, cp.RecipeName, cp.RecipeVersion,
 		cp.SessionID, cp.TerminalID, sessionsJSON, terminalsJSON,
 		cp.PR, cp.PRHead, cp.ApprovalSHA, cp.MergeSHA, cp.Checks,

@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -1405,7 +1404,7 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		}
 	}
 
-	if rep.Outcome == lane.OutcomeDone && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && rep.HeadSHA != "" && c.reportHeadIsBase(ctx, ln, rep.HeadSHA) {
+	if rep.Outcome == lane.OutcomeDone && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && (strings.EqualFold(strings.TrimSpace(rep.Change), "none") || (rep.HeadSHA != "" && c.reportHeadIsBase(ctx, ln, rep.HeadSHA))) {
 		return c.completeReportOnlyLane(ctx, ln, ev)
 	}
 
@@ -1420,18 +1419,13 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 // the worker's reported commit. Older synthetic lanes may store a SHA directly,
 // so retain that fast path for persisted/test data.
 func (c *Controller) reportHeadIsBase(ctx context.Context, ln *lane.Lane, head string) bool {
-	if head == ln.BaseBranch {
-		return true
+	if strings.TrimSpace(ln.BaseCommit) != "" {
+		return strings.TrimSpace(ln.BaseCommit) == strings.TrimSpace(head)
 	}
-	if strings.TrimSpace(ln.BaseBranch) == "" {
-		return false
-	}
-	dir := strings.TrimSpace(ln.Worktree)
-	if dir == "" {
-		dir = "."
-	}
-	resolved, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--verify", ln.BaseBranch+"^{commit}").Output()
-	return err == nil && strings.TrimSpace(string(resolved)) == head
+	// Legacy lanes recorded a SHA directly in BaseBranch. Never resolve a
+	// branch ref here: refs can move after the lane was spawned.
+	base := strings.TrimSpace(ln.BaseBranch)
+	return len(base) == 40 && base == strings.TrimSpace(head)
 }
 
 func (c *Controller) completeReportOnlyLane(ctx context.Context, ln *lane.Lane, ev *store.Event) (store.EventClass, error) {

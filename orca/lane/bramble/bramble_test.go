@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +46,28 @@ func TestWatchEmitsLifecycleKinds(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
+	}
+}
+
+func TestReportInstructionsPathIsReadPath(t *testing.T) {
+	dir := t.TempDir()
+	d, err := bramble.New(bramble.Config{Client: &fakeClient{}, RunDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "lane.swe.report.md")
+	if got := d.ReportInstructions("run", "lane", "swe", 1); !strings.Contains(got, path) {
+		t.Fatalf("instructions=%q, want path %q", got, path)
+	}
+	raw := "Outcome: done\nHEAD: abc\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.StartPhaseTerminal(t.Context(), lane.StartPhaseRequest{RunID: "run", LaneID: "lane", SessionID: "s1", Phase: "swe", Round: 1, RunDir: filepath.Join(dir, "wrong")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ReadReport(t.Context(), "run", "lane", "s1"); err != nil {
+		t.Fatalf("ReadReport did not read advertised path: %v", err)
 	}
 }
 

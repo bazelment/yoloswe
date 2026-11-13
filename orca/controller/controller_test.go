@@ -280,7 +280,7 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 func TestControllerReportOnlySweCompletesLane(t *testing.T) {
 	clk, st, drv, judge := setupTestEnv(t)
 	ctx := t.Context()
-	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-empty", RunID: "run-1", Status: lane.StatusPlanned, BaseBranch: "base-sha"}); err != nil {
+	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-empty", RunID: "run-1", Status: lane.StatusPlanned, BaseCommit: "base-sha"}); err != nil {
 		t.Fatal(err)
 	}
 	ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)

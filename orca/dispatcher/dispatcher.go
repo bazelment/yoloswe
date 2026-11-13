@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
@@ -944,6 +945,12 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	}
 
 	now := d.clock.Now().UTC()
+	baseCommit := ""
+	if base := strings.TrimSpace(p.BaseBranch); base != "" {
+		if out, err := exec.CommandContext(ctx, "git", "-C", ".", "rev-parse", "--verify", base+"^{commit}").Output(); err == nil {
+			baseCommit = strings.TrimSpace(string(out))
+		}
+	}
 	ln := lane.Lane{
 		ID:            laneID,
 		RunID:         runID,
@@ -951,6 +958,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		Title:         item.Title,
 		Branch:        strings.TrimSpace(p.Branch),
 		BaseBranch:    strings.TrimSpace(p.BaseBranch),
+		BaseCommit:    baseCommit,
 		Status:        lane.StatusPlanned,
 		Phase:         firstPhase.Name,
 		Round:         1,

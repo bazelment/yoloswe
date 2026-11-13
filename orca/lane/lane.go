@@ -50,6 +50,7 @@ type Lane struct {
 	Title         string            `json:"title,omitempty"`
 	Branch        string            `json:"branch,omitempty"`
 	BaseBranch    string            `json:"base_branch,omitempty"`
+	BaseCommit    string            `json:"base_commit,omitempty"`
 	Worktree      string            `json:"worktree,omitempty"`
 	Status        Status            `json:"status"`
 	Phase         string            `json:"phase,omitempty"`
@@ -225,6 +226,7 @@ type PhaseReport struct {
 	Verdict       string        `json:"verdict,omitempty"`
 	Reach         string        `json:"reach,omitempty"`
 	ReachObserved string        `json:"reach_observed,omitempty"`
+	Change        string        `json:"change,omitempty"`
 	Raw           string        `json:"raw,omitempty"`
 	Round         int           `json:"round,omitempty"`
 	PR            int           `json:"pr,omitempty"`
@@ -279,6 +281,8 @@ func applyReportHeader(rep *PhaseReport, key, val string) bool {
 		rep.Reach = val
 	case "reach observed":
 		rep.ReachObserved = val
+	case "change":
+		rep.Change = val
 	default:
 		return false
 	}
