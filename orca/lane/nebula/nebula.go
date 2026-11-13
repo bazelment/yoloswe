@@ -274,6 +274,7 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 			e.Text = p.TerminalEvent.Text
 		}
 	}
+	quota := isQuotaPayload(p)
 	switch ev.Kind {
 	case store.EventLaneReport:
 		e.Kind = lane.EventPhaseReported
@@ -285,7 +286,7 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 		}
 		if strings.Contains(outcome, "auth") {
 			e.Kind = lane.EventAuthFailure
-		} else if strings.Contains(outcome, "usage_limit") || strings.Contains(outcome, "usage_limited") || strings.Contains(outcome, "capacity") || p.UsageLimit != nil || p.Capacity != nil {
+		} else if quota || isQuotaOutcome(outcome) {
 			e.Kind = lane.EventQuotaFailure
 		} else if p.TerminalEvent != nil && (p.TerminalEvent.Type == "turn.ended" || p.TerminalEvent.Type == "api_error") {
 			e.Kind = lane.EventTurnEndedNoReport
@@ -301,7 +302,7 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 			case "turn.capacity", "terminal.usage_limited":
 				e.Kind = lane.EventQuotaFailure
 			default:
-				if strings.Contains(outcome, "usage_limit") || strings.Contains(outcome, "usage_limited") || strings.Contains(outcome, "capacity") {
+				if quota || isQuotaOutcome(outcome) {
 					e.Kind = lane.EventQuotaFailure
 				} else {
 					e.Kind = lane.EventTurnEndedNoReport
@@ -316,6 +317,14 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 		return lane.Event{}, false
 	}
 	return e, true
+}
+
+func isQuotaOutcome(outcome string) bool {
+	return strings.Contains(outcome, "usage_limit") || strings.Contains(outcome, "usage_limited") || strings.Contains(outcome, "capacity")
+}
+
+func isQuotaPayload(p StreamEventPayload) bool {
+	return p.UsageLimit != nil || p.Capacity != nil || p.Usage != nil
 }
 
 // New constructs a Driver from cfg and options.

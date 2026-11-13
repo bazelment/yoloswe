@@ -57,6 +57,13 @@ func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.
 }
 func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (lane.StartPhaseResult, error) {
 	if req.SessionID != "" {
+		prompt := req.Brief + "\n[orca run:" + req.RunID + " lane:" + req.LaneID + "]"
+		if err := d.c.SendInput(ctx, req.SessionID, prompt); err != nil {
+			return lane.StartPhaseResult{}, err
+		}
+		if err := d.c.SendKey(ctx, req.SessionID, "Enter"); err != nil {
+			return lane.StartPhaseResult{}, err
+		}
 		d.mu.Lock()
 		d.phases[req.SessionID] = req.Phase
 		d.rounds[req.SessionID] = req.Round
@@ -118,7 +125,7 @@ func (d *Driver) ReadReport(_ context.Context, runID, laneID, terminalID string)
 	}
 	key := lane.PhaseRoundKey(phase, round)
 	b, err := os.ReadFile(filepath.Join(runDir, laneID+"."+key+".report.md"))
-	if err != nil && key != phase {
+	if err != nil && key != phase && round <= 1 {
 		b, err = os.ReadFile(filepath.Join(runDir, laneID+"."+phase+".report.md"))
 	}
 	if err != nil {
@@ -131,7 +138,7 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 	go func() {
 		defer close(out)
 		reported := map[string]string{}
-		exited := map[string]bool{}
+		lastStatus := map[string]string{}
 		lastActivity := time.Now()
 		t := time.NewTicker(d.poll)
 		defer t.Stop()
@@ -150,22 +157,21 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				d.mu.RLock()
 				owned := d.runs[s.ID] == runID
 				phase := d.phases[s.ID]
+				round := d.rounds[s.ID]
 				laneID := d.lanes[s.ID]
 				d.mu.RUnlock()
 				if !owned {
 					continue
 				}
-				if rep, err := d.ReadReport(ctx, runID, laneID, s.ID); err == nil && rep.Raw != reported[s.ID] {
+				reportKey := s.ID + ":" + lane.PhaseRoundKey(phase, round)
+				if rep, err := d.ReadReport(ctx, runID, laneID, s.ID); err == nil && rep.Raw != reported[reportKey] {
 					select {
 					case out <- lane.Event{Kind: lane.EventPhaseReported, RunID: runID, LaneID: laneID, SessionID: s.ID, Phase: phase, Report: rep}:
 					case <-ctx.Done():
 						return
 					}
-					reported[s.ID] = rep.Raw
+					reported[reportKey] = rep.Raw
 					lastActivity = time.Now()
-				}
-				if exited[s.ID] {
-					continue
 				}
 				kind := lane.EventExited
 				status := strings.ToLower(s.Status)
@@ -182,12 +188,15 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				default:
 					continue
 				}
+				if lastStatus[s.ID] == status {
+					continue
+				}
 				select {
 				case out <- lane.Event{Kind: kind, RunID: runID, LaneID: laneID, SessionID: s.ID, Phase: phase, Text: s.Status}:
 				case <-ctx.Done():
 					return
 				}
-				exited[s.ID] = true
+				lastStatus[s.ID] = status
 				lastActivity = time.Now()
 			}
 			if time.Since(lastActivity) >= time.Minute {
