@@ -285,7 +285,7 @@ func TestControllerReportOnlySweCompletesLane(t *testing.T) {
 	}{
 		{"recorded base after branch moves", "base-sha", "", true},
 		{"one new commit", "new-sha", "", false},
-		{"explicit no change", "", "none", true},
+		{"explicit no change", "base-sha", "none", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

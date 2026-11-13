@@ -168,7 +168,10 @@ type Config struct {
 	FakeAutoComplete  bool          `json:"fake_auto_complete,omitempty"`
 	onceSet           bool
 	fakeAutoSet       bool
+	stallTimeoutSet   bool
 }
+
+func (c Config) HasExplicitStallTimeout() bool { return c.stallTimeoutSet }
 
 func (c Config) withDefaults() Config {
 	c.Objective = cmp.Or(c.Goal, c.Objective)
@@ -449,6 +452,8 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 			cfg.onceSet = true
 		case "fake-auto":
 			cfg.fakeAutoSet = true
+		case "stall-timeout":
+			cfg.stallTimeoutSet = true
 		}
 	})
 

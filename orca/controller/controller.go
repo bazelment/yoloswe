@@ -127,6 +127,8 @@ type Config struct {
 	PollInterval      time.Duration
 	JudgmentDebounce  time.Duration
 	StallTimeout      time.Duration
+	// StallTimeoutSet distinguishes an explicit timeout from the default.
+	StallTimeoutSet bool
 }
 
 func (c Config) withDefaults() Config {
@@ -275,7 +277,7 @@ func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge
 	if clk == nil {
 		clk = clock.NewRealClock()
 	}
-	stallTimeoutSet := cfg.StallTimeout > 0
+	stallTimeoutSet := cfg.StallTimeoutSet || cfg.StallTimeout > 0
 	c := &Controller{
 		cfg:                cfg.withDefaults(),
 		store:              st,
@@ -1410,7 +1412,7 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		}
 	}
 
-	if (rep.Outcome == lane.OutcomeDone || rep.Outcome == lane.OutcomeNoChange) && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && (strings.EqualFold(strings.TrimSpace(rep.Change), "none") || (rep.HeadSHA != "" && c.reportHeadIsBase(ctx, ln, rep.HeadSHA))) {
+	if (rep.Outcome == lane.OutcomeDone || rep.Outcome == lane.OutcomeNoChange) && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && rep.HeadSHA != "" && c.reportHeadIsBase(ctx, ln, rep.HeadSHA) {
 		return c.completeReportOnlyLane(ctx, ln, ev)
 	}
 
@@ -2074,7 +2076,10 @@ func (c *Controller) stopCurrentTerminal(ctx context.Context, ln *lane.Lane, rea
 	if ln == nil || (strings.TrimSpace(ln.TerminalID) == "" && strings.TrimSpace(ln.SessionID) == "") {
 		return nil
 	}
-	return c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: reason})
+	// Stopping is best effort: an exited or already-replaced terminal may
+	// legitimately return not-found, and must not prevent its replacement.
+	_ = c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: reason})
+	return nil
 }
 
 func (c *Controller) terminalIsWorking(ctx context.Context, terminalID string) bool {
@@ -2086,7 +2091,9 @@ func (c *Controller) terminalIsWorking(ctx context.Context, terminalID string) b
 		return false
 	}
 	state, err := reader.TerminalAgentState(ctx, terminalID)
-	return err == nil && strings.EqualFold(strings.TrimSpace(state), "working")
+	// Unknown state is treated as working for restart safety: an API failure
+	// must never trigger a destructive replacement.
+	return err != nil || strings.EqualFold(strings.TrimSpace(state), "working")
 }
 
 func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Recipe, phase recipe.Phase, round int, extraNote string) string {
