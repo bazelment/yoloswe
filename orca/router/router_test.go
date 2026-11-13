@@ -235,3 +235,17 @@ func TestGeminiPreservesSelectedOpenQuestion(t *testing.T) {
 		t.Fatal(d)
 	}
 }
+
+func TestRecordedFallbackLiveResponse(t *testing.T) {
+	raw, err := os.ReadFile("testdata/fallback-live.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := (FallbackRouter{Client: fake{string(raw)}, Model: "gpt-6.1-sol"}).Route(context.Background(), "Change the plan to ship chat first.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Destination != Planner || d.Confidence != .99 || d.NeedsClarification {
+		t.Fatalf("recorded response: %+v", d)
+	}
+}
