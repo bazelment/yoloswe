@@ -203,8 +203,9 @@ func executeChat(
 		return err
 	}
 
-	routingLog := router.StoreLogger{Store: st, RunID: cfg.RunID, Model: cfg.Models.Concierge, Provider: cfg.ModelProvider}
-	r := router.Select(client, cfg.Models.Concierge, cmp.Or(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")), os.Getenv("GEMINI_DECISIONS_BASE_URL"), routingLog)
+	routerSel := cfg.Models.Roles["router"]
+	routingLog := router.StoreLogger{Store: st, RunID: cfg.RunID, Model: routerSel.Model, Provider: routerSel.Provider}
+	r := router.Select(roleClient(client, cfg, "router"), routerSel.Model, cmp.Or(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")), os.Getenv("GEMINI_DECISIONS_BASE_URL"), routingLog)
 	backend := &chatui.StoreBackend{Store: st, RunID: cfg.RunID, Stream: concierge.AskStream}
 	ui := chatui.New(ctx, cfg.RunID, concierge.Ask, r)
 	ui.Backend = backend

@@ -89,6 +89,12 @@ func (m RoleModels) withDefaults(provider string) RoleModels {
 	// critic fallback. This keeps the different-provider invariant correct for
 	// config files that use values such as "Anthropic".
 	plannerProvider := strings.ToLower(strings.TrimSpace(m.Roles["planner"].Provider))
+	if plannerProvider == "" {
+		plannerProvider = strings.ToLower(strings.TrimSpace(provider))
+		if plannerProvider == "" {
+			plannerProvider = "openai"
+		}
+	}
 	legacy := map[string]string{"dispatcher": m.Dispatcher, "planner": m.Planner, "concierge": m.Concierge}
 	for _, role := range []string{"planner", "dispatcher", "concierge", "router", "critic"} {
 		sel := m.Roles[role]

@@ -6,6 +6,31 @@
         "messages": []
       },
       "response": {
+        "id": "router-1",
+        "model": "claude-haiku-4-5-20251001",
+        "stop_reason": "end_turn",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"destination\":\"concierge\",\"confidence\":1.0,\"needs_clarification\":false,\"is_standing_rule\":false,\"answers_open_question\":false}"
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cost_usd": 0
+        }
+      }
+    },
+    {
+      "request": {
+        "model": "claude-haiku-4-5-20251001",
+        "messages": []
+      },
+      "response": {
         "id": "msg-chat-1",
         "model": "claude-haiku-4-5-20251001",
         "stop_reason": "tool_use",
