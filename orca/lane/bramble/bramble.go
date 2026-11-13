@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -146,8 +148,37 @@ func (d *Driver) ReleaseSession(ctx context.Context, sessionID string, _ ...bool
 	return d.c.SendKey(ctx, strings.TrimSpace(sessionID), "C-c")
 }
 
-func (d *Driver) ReportOnlyNoWork(context.Context, lane.Lane) (bool, error) {
-	return false, nil
+func (d *Driver) ReportOnlyNoWork(ctx context.Context, ln lane.Lane) (bool, error) {
+	base := strings.TrimSpace(ln.BaseCommit)
+	if base == "" {
+		base = strings.TrimSpace(ln.BaseBranch)
+	}
+	branch := strings.TrimSpace(ln.Branch)
+	if branch == "" || base == "" {
+		return false, nil
+	}
+	worktree := strings.TrimSpace(ln.Worktree)
+	d.mu.RLock()
+	if worktree == "" {
+		worktree = strings.TrimSpace(d.runDirs[ln.SessionID])
+	}
+	if worktree == "" {
+		worktree = d.runDir
+	}
+	d.mu.RUnlock()
+	if worktree == "" {
+		worktree = "."
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "rev-list", "--count", base+".."+branch)
+	out, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return false, err
+	}
+	return n == 0, nil
 }
 func (d *Driver) ReadReport(_ context.Context, runID, laneID, terminalID string) (*lane.PhaseReport, error) {
 	d.mu.RLock()

@@ -979,6 +979,23 @@ func (d *Driver) ReportOnlyNoWork(ctx context.Context, ln lane.Lane) (bool, erro
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
+		// A compare 404 is ambiguous: GitHub returns it both for an absent
+		// branch and for an unauthenticated/inaccessible repository. Confirm
+		// authentication before treating it as proof of no work.
+		authReq, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user", http.NoBody)
+		if err != nil {
+			return false, err
+		}
+		authReq.Header.Set("Accept", "application/vnd.github+json")
+		authReq.Header.Set("Authorization", "Bearer "+d.token)
+		authResp, err := d.httpClient.Do(authReq)
+		if err != nil {
+			return false, err
+		}
+		defer authResp.Body.Close()
+		if authResp.StatusCode < 200 || authResp.StatusCode >= 300 {
+			return false, fmt.Errorf("github authentication check: status %d", authResp.StatusCode)
+		}
 		return true, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
