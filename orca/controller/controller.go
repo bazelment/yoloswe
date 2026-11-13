@@ -883,15 +883,17 @@ func (c *Controller) recordDecision(ctx context.Context, tool, laneID, reason, r
 		return store.Decision{}, false, err
 	}
 	dec, err := c.store.Decisions().Append(ctx, store.Decision{
-		RunID:    c.cfg.RunID,
-		Category: store.DecisionAuto,
-		Actor:    ActorController,
-		LaneID:   laneID,
-		Tool:     tool,
-		Reason:   reason,
-		Result:   result,
-		Args:     rawArgs,
-		Vetted:   true,
+		RunID:        c.cfg.RunID,
+		Category:     store.DecisionAuto,
+		Actor:        ActorController,
+		LaneID:       laneID,
+		Tool:         tool,
+		Reason:       reason,
+		Result:       result,
+		Args:         rawArgs,
+		Vetted:       true,
+		TraceID:      args.EventID,
+		OutcomeLabel: controllerOutcomeLabel(result),
 	})
 	if err != nil {
 		return store.Decision{}, false, err
@@ -901,6 +903,22 @@ func (c *Controller) recordDecision(ctx context.Context, tool, laneID, reason, r
 	}
 	c.indexDecision(dec)
 	return dec, false, nil
+}
+
+func controllerOutcomeLabel(result string) string {
+	s := strings.ToLower(result)
+	switch {
+	case strings.Contains(s, "merged"):
+		return "merged"
+	case strings.Contains(s, "retry"), strings.Contains(s, "rework"):
+		return "reworked"
+	case strings.Contains(s, "drop"), strings.Contains(s, "abandon"):
+		return "abandoned"
+	case strings.Contains(s, "correct"):
+		return "owner corrected"
+	default:
+		return ""
+	}
 }
 
 // recoverPendingState reconstructs pending judgment events and CI-gated verdicts on startup.

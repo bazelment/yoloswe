@@ -52,7 +52,7 @@ func Execute(
 	subcmd := "run"
 	rest := args
 	switch args[0] {
-	case "run", "chat":
+	case "run", "chat", "report", "export":
 		subcmd = args[0]
 		rest = args[1:]
 	case "-h", "--help", "help":
@@ -78,6 +78,30 @@ func Execute(
 			return err
 		}
 		return executeChat(ctx, cfg, posArgs, stdin, stdout, logger)
+	case "report":
+		if err := cfg.Validate(false); err != nil {
+			return err
+		}
+		st, err := openReportStore(cfg)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		day := cfg.ReportDay
+		if day == "" && len(posArgs) > 0 {
+			day = posArgs[0]
+		}
+		return reportRun(ctx, st, cfg.RunID, day, stdout)
+	case "export":
+		if err := cfg.Validate(false); err != nil {
+			return err
+		}
+		st, err := openReportStore(cfg)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		return exportRun(ctx, st, cfg.RunID, stdout)
 	default:
 		return fmt.Errorf("unknown subcommand %q", subcmd)
 	}
@@ -238,4 +262,5 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, `Usage:
   orca run --run <id> [--store sqlite:<path>|nebula] [--driver nebula|fake] [flags]
   orca chat --run <id> [--store sqlite:<path>|nebula] [--prompt "<question>"] [flags]`)
+	_, _ = fmt.Fprintln(w, "  orca report --run <id> [--day YYYY-MM-DD] [flags]\n  orca export --run <id> [flags]")
 }

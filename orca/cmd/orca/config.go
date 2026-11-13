@@ -107,6 +107,7 @@ type Config struct {
 	LogLevel          string        `json:"log_level,omitempty"`
 	LogFormat         string        `json:"log_format,omitempty"`
 	Prompt            string        `json:"prompt,omitempty"`
+	ReportDay         string        `json:"report_day,omitempty"`
 	RecipeFiles       []string      `json:"recipe_files,omitempty"`
 	LeaseTTL          time.Duration `json:"lease_ttl,omitempty"`
 	HeartbeatInterval time.Duration `json:"heartbeat_interval,omitempty"`
@@ -236,6 +237,7 @@ func mergeConfig(lower, higher Config) Config {
 	out.LogLevel = cmp.Or(higher.LogLevel, lower.LogLevel)
 	out.LogFormat = cmp.Or(higher.LogFormat, lower.LogFormat)
 	out.Prompt = cmp.Or(higher.Prompt, lower.Prompt)
+	out.ReportDay = cmp.Or(higher.ReportDay, lower.ReportDay)
 	out.Models.Dispatcher = cmp.Or(higher.Models.Dispatcher, lower.Models.Dispatcher)
 	out.Models.DispatcherHard = cmp.Or(higher.Models.DispatcherHard, lower.Models.DispatcherHard)
 	out.Models.Concierge = cmp.Or(higher.Models.Concierge, lower.Models.Concierge)
@@ -334,6 +336,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.StringVar(&cfg.LogLevel, "log-level", "", "Structured log level: debug, info, warn, error (default info)")
 	fs.StringVar(&cfg.LogFormat, "log-format", "", "Structured log format: json or text (default json)")
 	fs.StringVar(&cfg.Prompt, "prompt", "", "Single prompt for `chat` subcommand")
+	fs.StringVar(&cfg.ReportDay, "day", "", "Report day (YYYY-MM-DD)")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, nil, err

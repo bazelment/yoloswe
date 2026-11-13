@@ -8,6 +8,7 @@ go_library(
         "main.go",
         "metrics.go",
         "planner.go",
+        "report_export.go",
         "runner.go",
     ],
     importpath = "github.com/bazelment/yoloswe/orca/cmd/orca",
@@ -22,6 +23,7 @@ go_library(
         "//orca/mailbox/nebula",
         "//orca/model",
         "//orca/recipe",
+        "//orca/replay",
         "//orca/store",
     ],
 )

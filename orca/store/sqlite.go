@@ -1387,11 +1387,13 @@ func (d *sqliteDecisionStore) Append(ctx context.Context, dec Decision) (Decisio
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO decisions (
     run_id, seq, id, category, actor, thread_id, turn_id, lane_id, tool,
-    args_json, reason, result, vetted, input_tokens, output_tokens, cost_usd, latency_ms, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args_json, reason, result, vetted, input_tokens, output_tokens, cost_usd, latency_ms, created_at,
+    trace_id, outcome_label, provider, model, prompt_version, input, output
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		cp.RunID, cp.Seq, cp.ID, string(cp.Category), cp.Actor, cp.ThreadID, cp.TurnID, cp.LaneID, cp.Tool,
 		string(cp.Args), cp.Reason, cp.Result, boolToInt(cp.Vetted),
 		cp.InputTokens, cp.OutputTokens, cp.CostUSD, cp.LatencyMs, formatTime(cp.CreatedAt),
+		cp.TraceID, cp.OutcomeLabel, cp.Provider, cp.Model, cp.PromptVersion, cp.Input, cp.Output,
 	)
 	if err != nil {
 		return Decision{}, err
@@ -1409,7 +1411,8 @@ func (d *sqliteDecisionStore) List(ctx context.Context, filter DecisionFilter) (
 
 	rows, err := s.db.QueryContext(ctx, `
 SELECT run_id, seq, id, category, actor, thread_id, turn_id, lane_id, tool,
-       args_json, reason, result, vetted, input_tokens, output_tokens, cost_usd, latency_ms, created_at
+       args_json, reason, result, vetted, input_tokens, output_tokens, cost_usd, latency_ms, created_at,
+       trace_id, outcome_label, provider, model, prompt_version, input, output
 FROM decisions
 WHERE run_id = ? AND seq > ?
 ORDER BY seq ASC`, filter.RunID, filter.SinceSeq)
@@ -1428,6 +1431,7 @@ ORDER BY seq ASC`, filter.RunID, filter.SinceSeq)
 		if err := rows.Scan(
 			&dec.RunID, &dec.Seq, &dec.ID, &catStr, &dec.Actor, &dec.ThreadID, &dec.TurnID, &dec.LaneID, &dec.Tool,
 			&argsStr, &dec.Reason, &dec.Result, &vettedInt, &dec.InputTokens, &dec.OutputTokens, &dec.CostUSD, &dec.LatencyMs, &timeStr,
+			&dec.TraceID, &dec.OutcomeLabel, &dec.Provider, &dec.Model, &dec.PromptVersion, &dec.Input, &dec.Output,
 		); err != nil {
 			return nil, err
 		}

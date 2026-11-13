@@ -326,6 +326,8 @@ const (
 )
 
 // Decision is an append-only audit record of a controller or LLM tool action.
+//
+//nolint:govet // field order follows the durable JSON/SQL audit contract.
 type Decision struct {
 	CreatedAt    time.Time        `json:"created_at"`
 	ID           string           `json:"id"`
@@ -345,6 +347,14 @@ type Decision struct {
 	CostUSD      float64          `json:"cost_usd,omitempty"`
 	LatencyMs    int64            `json:"latency_ms,omitempty"`
 	Vetted       bool             `json:"vetted"`
+	// TraceID identifies the causal event chain.
+	TraceID       string `json:"trace_id,omitempty"`
+	OutcomeLabel  string `json:"outcome_label,omitempty"`
+	Provider      string `json:"provider,omitempty"`
+	Model         string `json:"model,omitempty"`
+	PromptVersion string `json:"prompt_version,omitempty"`
+	Input         string `json:"input,omitempty"`
+	Output        string `json:"output,omitempty"`
 }
 
 func (d Decision) Clone() Decision {

@@ -309,6 +309,8 @@ func NewRunner(
 
 	disp := dispatcher.New(dispatcher.Config{
 		Model:            cfg.Models.Dispatcher,
+		Provider:         cfg.ModelProvider,
+		PromptVersion:    dispatcher.SystemPromptVersion,
 		HardBatchModel:   cfg.Models.DispatcherHard,
 		RecipeCompiler:   planner,
 		OnPlannerRequest: planner.HandlePlannerRequest,
