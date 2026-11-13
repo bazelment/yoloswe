@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -569,8 +570,11 @@ func openModelClient(cfg Config, clk clock.Clock) (model.ModelClient, error) {
 	if strings.TrimSpace(cfg.ReplayPath) != "" {
 		return model.LoadFakeClient(cfg.ReplayPath)
 	}
+	chatHTTP := &http.Client{Transport: chatTransport{base: http.DefaultTransport}, Timeout: model.DefaultHTTPTimeout}
 	var openOpts []model.OpenAIClientOption
+	openOpts = append(openOpts, model.WithOpenAIHTTPClient(chatHTTP))
 	var anthropicOpts []model.ClientOption
+	anthropicOpts = append(anthropicOpts, model.WithHTTPClient(chatHTTP))
 	if gateway := strings.TrimSpace(os.Getenv("LLM_GATEWAY_URL")); gateway != "" && strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")) == "" {
 		anthropicOpts = append(anthropicOpts, model.WithBaseURL(gateway))
 	}
