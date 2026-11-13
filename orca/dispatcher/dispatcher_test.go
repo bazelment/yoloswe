@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
@@ -258,6 +259,10 @@ func TestInnerLoop_StalledLaneProducesLaneRetry(t *testing.T) {
 		}
 		if len(drv.PhaseStarts) != 1 || drv.PhaseStarts[0].Round != 2 {
 			t.Fatalf("PhaseStarts = %+v, want round 2 started by dispatcher", drv.PhaseStarts)
+		}
+		req := drv.PhaseStarts[0]
+		if want := drv.ReportInstructions(req.RunID, req.LaneID, req.Phase, req.Round); !strings.Contains(req.Brief, want) {
+			t.Fatalf("retry brief=%q, missing %q", req.Brief, want)
 		}
 
 		gotLane, err := st.Lanes().Get(ctx, "run-1", "lane-alpha")
@@ -1567,5 +1572,46 @@ func TestFailedPlannerRequestRevokesInstruction(t *testing.T) {
 	}
 	if len(dirs) != 1 || dirs[0].Status != store.DirectiveRevoked {
 		t.Fatalf("failed planner instruction must be revoked: %+v", dirs)
+	}
+}
+
+func TestSpawnReportContractAndBase(t *testing.T) {
+	t.Parallel()
+	for _, capBytes := range []int{0, 400} {
+		t.Run(fmt.Sprint(capBytes), func(t *testing.T) {
+			t.Parallel()
+			clk, st, drv := setupTestEnv(t)
+			drv.SpawnBaseCommit = strings.Repeat("a", 40)
+			ctx := t.Context()
+			if err := st.Backlog().Add(ctx, store.BacklogItem{ID: "item", RunID: "run-1", Title: "Task", Description: strings.Repeat("文", 500), Status: store.BacklogOpen}); err != nil {
+				t.Fatal(err)
+			}
+			client := model.NewFakeClient(toolUseResponse(model.ToolCall{ID: "spawn", Name: dispatcher.ToolLaneSpawn, Input: json.RawMessage(`{"item_id":"item","brief":"Do the task"}`)}), endTurnResponse("done"))
+			d := dispatcher.New(dispatcher.Config{MaxBriefBytes: capBytes}, st, drv, clk, client)
+			if _, err := d.Dispatch(ctx, "run-1", nil); err != nil {
+				t.Fatal(err)
+			}
+			if len(drv.Spawns) != 1 {
+				t.Fatalf("spawns=%+v", drv.Spawns)
+			}
+			req := drv.Spawns[0]
+			want := drv.ReportInstructions(req.RunID, req.LaneID, req.Phase, req.Round)
+			if !strings.HasSuffix(req.Brief, want) {
+				t.Fatalf("brief=%q, missing %q", req.Brief, want)
+			}
+			if !utf8.ValidString(req.Brief) {
+				t.Fatal("brief is not valid UTF-8")
+			}
+			if capBytes > 0 && len(req.Brief) > capBytes {
+				t.Fatalf("brief is %d bytes, cap %d", len(req.Brief), capBytes)
+			}
+			ln, err := st.Lanes().Get(ctx, "run-1", "item")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ln.BaseCommit != drv.SpawnBaseCommit {
+				t.Fatalf("base=%q", ln.BaseCommit)
+			}
+		})
 	}
 }

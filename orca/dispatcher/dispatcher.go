@@ -938,10 +938,6 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	if !hasFirst {
 		return "", fmt.Errorf("recipe %q has no phases", r.Name)
 	}
-	workerBrief, err := d.buildWorkerBrief(view, lane.Lane{ID: laneID, RunID: runID, ItemID: item.ID, Title: item.Title}, r, firstPhase, 1, p.Brief)
-	if err != nil {
-		return "", err
-	}
 
 	now := d.clock.Now().UTC()
 	ln := lane.Lane{
@@ -973,6 +969,11 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		ln.Round = ln.MaxRound(firstPhase.Name) + 1
 		ln.Attempt = 1
 		ln.LastEventAt = now
+	}
+
+	workerBrief, err := d.buildWorkerBrief(view, ln, r, firstPhase, ln.Round, p.Brief)
+	if err != nil {
+		return "", err
 	}
 
 	if d.driver != nil && len(firstPhase.Agents) > 0 {
@@ -1135,11 +1136,11 @@ func (d *Dispatcher) buildWorkerBrief(view *StateView, ln lane.Lane, r recipe.Re
 	if d.driver != nil {
 		instructions = d.driver.ReportInstructions(ln.RunID, ln.ID, phase.Name, round)
 	}
-	text := raw
-	if strings.TrimSpace(instructions) != "" {
-		text += "\n\n" + instructions
+	text, err := brief.Render(raw, view.Memories, 0)
+	if err != nil {
+		return "", err
 	}
-	return brief.Render(text, view.Memories, view.EffectiveMaxBriefBytes(r))
+	return lane.AppendReportInstructions(text, instructions, view.EffectiveMaxBriefBytes(r)), nil
 }
 
 func (d *Dispatcher) buildRetryBriefText(view *StateView, ln lane.Lane, phase recipe.Phase, note string) string {

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Status represents where a lane is in its lifecycle.
@@ -540,4 +541,26 @@ func (f *FakeDriver) Watch(ctx context.Context, runID string) <-chan Event {
 		}
 	}()
 	return out
+}
+
+// AppendReportInstructions preserves the mandatory handback contract while
+// fitting ordinary brief text into the remaining byte budget.
+func AppendReportInstructions(text, instructions string, maxBytes int) string {
+	separator := ""
+	if text != "" && instructions != "" {
+		separator = "\n\n"
+	}
+	if maxBytes > 0 {
+		available := max(0, maxBytes-len(instructions)-len(separator))
+		if len(text) > available {
+			text = text[:available]
+			for text != "" && !utf8.ValidString(text) {
+				text = text[:len(text)-1]
+			}
+		}
+	}
+	if text == "" {
+		return instructions
+	}
+	return text + separator + instructions
 }

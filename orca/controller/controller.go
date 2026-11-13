@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
@@ -2069,39 +2068,7 @@ func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Re
 		parts = append(parts, extraNote)
 	}
 	reportInstructions := c.driver.ReportInstructions(c.cfg.RunID, ln.ID, phase.Name, round)
-	brief := strings.Join(parts, "\n\n")
-	if r.Limits.MaxBriefBytes > 0 {
-		separator := "\n\n"
-		available := r.Limits.MaxBriefBytes - len(reportInstructions) - len(separator)
-		if available < 0 {
-			available = 0
-		}
-		if len(brief) > available {
-			brief = truncateUTF8(brief, available)
-		}
-		if brief == "" {
-			return reportInstructions
-		}
-	}
-	return brief + "\n\n" + reportInstructions
-}
-
-func truncateUTF8(s string, maxBytes int) string {
-	if maxBytes <= 0 {
-		return ""
-	}
-	if len(s) <= maxBytes {
-		return s
-	}
-	s = s[:maxBytes]
-	for s != "" && !utf8.ValidString(s) {
-		_, size := utf8.DecodeLastRuneInString(s)
-		if size == 0 {
-			return ""
-		}
-		s = s[:len(s)-size]
-	}
-	return s
+	return lane.AppendReportInstructions(strings.Join(parts, "\n\n"), reportInstructions, r.Limits.MaxBriefBytes)
 }
 
 func (c *Controller) resolveRecipe(ctx context.Context, ln *lane.Lane) (*recipe.Recipe, error) {
