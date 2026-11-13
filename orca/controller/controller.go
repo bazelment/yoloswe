@@ -1106,6 +1106,13 @@ func (c *Controller) detectStalls(ctx context.Context) error {
 		if c.hasActionDecision(actionKey) || c.emittedStalls[actionKey] {
 			continue
 		}
+		if c.terminalIsWorking(ctx, ln.TerminalID) {
+			payload, _ := json.Marshal(PhaseExitPayload{Kind: lane.EventNoActivity, TerminalID: ln.TerminalID, Phase: ln.Phase})
+			if _, err := c.store.Events().Append(ctx, store.Event{RunID: c.cfg.RunID, Kind: store.EventPhaseExit, LaneID: ln.ID, Source: "lane.watch", Payload: payload}); err != nil {
+				return err
+			}
+			continue
+		}
 		c.emittedStalls[actionKey] = true
 
 		_, err = c.store.Events().Append(ctx, store.Event{
@@ -1681,9 +1688,19 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 	curAttempt := max(ln.Attempt, 1)
 	ln.LastEventID = ev.ID
 	// A quiet pulse is controller bookkeeping, not worker activity.
-	quiet := ev.Source == "lane.watch" && payload.Kind == lane.EventNoActivity
-	if quiet && c.terminalIsWorking(ctx, ln.TerminalID) {
-		return store.EventClassAuto, nil
+	quiet := ev.Source == "lane.watch" && (payload.Kind == lane.EventNoActivity || payload.Kind == lane.EventTurnEndedNoReport)
+	if quiet && payload.Kind == lane.EventNoActivity && c.terminalIsWorking(ctx, ln.TerminalID) {
+		timeout := r.Limits.PhaseTimeout
+		if c.stallTimeoutSet {
+			timeout = c.cfg.StallTimeout
+		}
+		lastActive := ln.LastEventAt
+		if lastActive.IsZero() {
+			lastActive = ln.UpdatedAt
+		}
+		if timeout > 0 && !lastActive.IsZero() && c.clock.Now().Before(lastActive.Add(timeout)) {
+			return store.EventClassAuto, nil
+		}
 	}
 	if !quiet {
 		ln.LastEventAt = c.clock.Now().UTC()

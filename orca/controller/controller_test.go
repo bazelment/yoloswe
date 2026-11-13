@@ -76,6 +76,29 @@ func appendCIEvent(t *testing.T, st store.Store, laneID, status, headSHA string)
 	return ev
 }
 
+func appendLaneWatchEvent(t *testing.T, st store.Store, laneID, terminalID string, kind lane.EventKind) store.Event {
+	t.Helper()
+	payload, err := json.Marshal(controller.PhaseExitPayload{Kind: kind, TerminalID: terminalID})
+	if err != nil {
+		t.Fatalf("Marshal phase exit: %v", err)
+	}
+	ev, err := st.Events().Append(t.Context(), store.Event{RunID: "run-1", LaneID: laneID, Kind: store.EventPhaseExit, Source: "lane.watch", Payload: payload})
+	if err != nil {
+		t.Fatalf("Append lane watch event: %v", err)
+	}
+	return ev
+}
+
+func saveRecipeWithTimeout(t *testing.T, st store.Store, timeout time.Duration) {
+	t.Helper()
+	r := recipe.Default().Clone()
+	r.RunID, r.Name = "run-1", "stall-test"
+	r.Limits.PhaseTimeout = timeout
+	if _, err := st.Recipes().Save(t.Context(), r); err != nil {
+		t.Fatalf("Save recipe: %v", err)
+	}
+}
+
 func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 	t.Parallel()
 
@@ -649,6 +672,165 @@ func TestControllerStallDetection(t *testing.T) {
 	}
 	if judge.BatchCount() != 1 || len(judge.Batches[0]) != 1 || judge.Batches[0][0].Kind != store.EventStall {
 		t.Fatalf("judge batches = %+v, want 1 batch with EventStall", judge.Batches)
+	}
+}
+
+func TestControllerQuietWorkingBeforePhaseLimitDoesNotRestart(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+	saveRecipeWithTimeout(t, st, 20*time.Minute)
+	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-quiet", RunID: "run-1", RecipeName: "stall-test", Status: lane.StatusPlanned}); err != nil {
+		t.Fatalf("Upsert lane: %v", err)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1", JudgmentDebounce: time.Minute}, st, drv, clk, judge)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	ln, err := st.Lanes().Get(ctx, "run-1", "lane-quiet")
+	if err != nil {
+		t.Fatalf("Get lane: %v", err)
+	}
+	drv.AgentStates[ln.TerminalID] = "working"
+	for _, advance := range []time.Duration{3 * time.Minute, 16 * time.Minute} {
+		clk.Advance(advance)
+		appendLaneWatchEvent(t, st, ln.ID, ln.TerminalID, lane.EventNoActivity)
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatalf("quiet step at %s: %v", clk.Now().Sub(ln.LastEventAt), err)
+		}
+	}
+	if len(drv.Steers) != 0 || len(drv.PhaseStarts) != 0 || len(drv.Spawns) != 1 {
+		t.Fatalf("before phase limit: steers=%d phase starts=%d spawns=%d, want 0, 0, 1", len(drv.Steers), len(drv.PhaseStarts), len(drv.Spawns))
+	}
+	clk.Advance(2 * time.Minute)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("timeout nudge: %v", err)
+	}
+	if len(drv.Steers) != 1 || len(drv.PhaseStarts) != 0 {
+		t.Fatalf("at phase limit: steers=%d starts=%d", len(drv.Steers), len(drv.PhaseStarts))
+	}
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("timeout fresh terminal: %v", err)
+	}
+	if len(drv.PhaseStarts) != 1 || len(drv.Stops) != 1 {
+		t.Fatalf("after phase limit: starts=%d stops=%d", len(drv.PhaseStarts), len(drv.Stops))
+	}
+}
+
+func TestControllerTurnEndedRestartLadderStopsOldTerminals(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+	saveRecipeWithTimeout(t, st, 20*time.Minute)
+	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-ladder", RunID: "run-1", RecipeName: "stall-test", Status: lane.StatusPlanned}); err != nil {
+		t.Fatalf("Upsert lane: %v", err)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	ln, err := st.Lanes().Get(ctx, "run-1", "lane-ladder")
+	if err != nil {
+		t.Fatalf("Get lane: %v", err)
+	}
+	old := ln.TerminalID
+	drv.AgentStates[old] = "working"
+	appendLaneWatchEvent(t, st, ln.ID, old, lane.EventTurnEndedNoReport)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("first ended turn: %v", err)
+	}
+	if len(drv.Steers) != 1 || len(drv.PhaseStarts) != 0 {
+		t.Fatalf("first rung: steers=%d starts=%d", len(drv.Steers), len(drv.PhaseStarts))
+	}
+	appendLaneWatchEvent(t, st, ln.ID, old, lane.EventTurnEndedNoReport)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("second ended turn: %v", err)
+	}
+	if len(drv.PhaseStarts) != 1 || len(drv.Stops) != 1 || drv.Stops[0].TerminalID != old {
+		t.Fatalf("fresh rung: starts=%d stops=%+v", len(drv.PhaseStarts), drv.Stops)
+	}
+	if _, err := st.Lanes().Get(ctx, "run-1", ln.ID); err != nil {
+		t.Fatalf("lane after fresh terminal: %v", err)
+	}
+
+	// Exhausting the fallback chain still stops the replacement terminal.
+	cur, _ := st.Lanes().Get(ctx, "run-1", ln.ID)
+	appendLaneWatchEvent(t, st, ln.ID, cur.TerminalID, lane.EventTurnEndedNoReport)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("fallback ended turn: %v", err)
+	}
+	if len(drv.Stops) < 2 || drv.Stops[1].TerminalID != cur.TerminalID {
+		t.Fatalf("fallback stops=%+v, want replacement terminal stopped", drv.Stops)
+	}
+}
+
+func TestControllerStallTimeoutOverridesRecipe(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		cfg, recipe time.Duration
+		stalled     bool
+	}{
+		{name: "shorter", cfg: 5 * time.Minute, recipe: 20 * time.Minute, stalled: true},
+		{name: "longer", cfg: 30 * time.Minute, recipe: 20 * time.Minute, stalled: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clk, st, drv, judge := setupTestEnv(t)
+			ctx := t.Context()
+			saveRecipeWithTimeout(t, st, tc.recipe)
+			if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-override", RunID: "run-1", RecipeName: "stall-test", Status: lane.StatusPlanned}); err != nil {
+				t.Fatal(err)
+			}
+			ctrl := controller.New(controller.Config{RunID: "run-1", StallTimeout: tc.cfg}, st, drv, clk, judge)
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			clk.Advance(6 * time.Minute)
+			if tc.stalled == false {
+				clk.Advance(20 * time.Minute)
+			}
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if (len(drv.Stops) > 0) != tc.stalled {
+				t.Fatalf("stops=%d, stalled=%v", len(drv.Stops), tc.stalled)
+			}
+		})
+	}
+}
+
+func TestControllerReportOnlyUsesStoredBase(t *testing.T) {
+	for _, same := range []bool{true, false} {
+		t.Run(map[bool]string{true: "same", false: "changed"}[same], func(t *testing.T) {
+			clk, st, drv, judge := setupTestEnv(t)
+			ctx := t.Context()
+			base := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			drv.SpawnBaseCommit = base
+			if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-report", RunID: "run-1", Status: lane.StatusPlanned}); err != nil {
+				t.Fatal(err)
+			}
+			ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			head := base
+			if !same {
+				head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			}
+			appendReportEvent(t, st, "lane-report", lane.PhaseReport{Phase: recipe.PhaseSWE, Outcome: lane.OutcomeDone, HeadSHA: head})
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			ln, err := st.Lanes().Get(ctx, "run-1", "lane-report")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if same && (ln.Status != lane.StatusDone || len(drv.PhaseStarts) != 0) {
+				t.Fatalf("same-base lane=%+v starts=%d", ln, len(drv.PhaseStarts))
+			}
+			if !same && len(drv.PhaseStarts) != 1 {
+				t.Fatalf("changed-base starts=%d, want clean", len(drv.PhaseStarts))
+			}
+		})
 	}
 }
 

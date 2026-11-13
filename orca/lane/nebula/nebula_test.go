@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -37,7 +38,7 @@ type recordedCall struct {
 	Body    string
 }
 
-type fakeNebulaServer struct {
+type fakeNebulaServer struct { //nolint:govet // test double state is intentionally grouped
 	srv              *httptest.Server
 	sessions         map[string]*nebula.SessionInfo
 	terminals        map[string]*nebula.TerminalInfo
@@ -51,6 +52,7 @@ type fakeNebulaServer struct {
 	startTerm409s    int
 	steer409s        int
 	stayProvisioning bool
+	spawnBaseCommit  string
 	mu               sync.Mutex
 }
 
@@ -162,6 +164,7 @@ func (f *fakeNebulaServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			WorkBranch:   req.WorkBranch,
 			SharedHome:   req.SharedHome,
 			Metadata:     req.Metadata,
+			BaseCommit:   f.spawnBaseCommit,
 		}
 		f.sessions[id] = s
 		cp := *s
@@ -627,6 +630,56 @@ func TestSpawnReuseWakeAndSettleTimeout(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "did not become ready") {
 		t.Fatalf("expected settle timeout error, got %v", err)
 	}
+}
+
+func TestSpawnStoresAPIOrResolvedBaseCommit(t *testing.T) {
+	t.Run("api base wins", func(t *testing.T) {
+		srv := newFakeNebulaServer(t)
+		srv.spawnBaseCommit = strings.Repeat("a", 40)
+		drv, _, _ := newTestDriver(t, srv)
+		res, err := drv.SpawnSession(context.Background(), lane.SpawnRequest{RunID: "base", LaneID: "api", BaseBranch: "main"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.BaseCommit != srv.spawnBaseCommit {
+			t.Fatalf("BaseCommit=%q, want API commit", res.BaseCommit)
+		}
+	})
+	t.Run("fallback is captured once", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, args := range [][]string{{"init", dir}, {"-C", dir, "config", "user.email", "test@example.com"}, {"-C", dir, "config", "user.name", "Test"}} {
+			if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v (%s)", args, err, out)
+			}
+		}
+		if out, err := exec.Command("git", "-C", dir, "commit", "--allow-empty", "-m", "base").CombinedOutput(); err != nil {
+			t.Fatal(err, string(out))
+		}
+		shaBytes, _ := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+		sha := strings.TrimSpace(string(shaBytes))
+		if out, err := exec.Command("git", "-C", dir, "update-ref", "refs/remotes/origin/main", sha).CombinedOutput(); err != nil {
+			t.Fatal(err, string(out))
+		}
+		srv := newFakeNebulaServer(t)
+		drv, _, _ := newTestDriver(t, srv)
+		res, err := drv.SpawnSession(context.Background(), lane.SpawnRequest{RunID: "base", LaneID: "git", BaseBranch: "main", Worktree: dir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.BaseCommit != sha {
+			t.Fatalf("BaseCommit=%q, want %q", res.BaseCommit, sha)
+		}
+		if out, err := exec.Command("git", "-C", dir, "commit", "--allow-empty", "-m", "moved").CombinedOutput(); err != nil {
+			t.Fatal(err, string(out))
+		}
+		movedBytes, _ := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+		if out, err := exec.Command("git", "-C", dir, "update-ref", "refs/remotes/origin/main", strings.TrimSpace(string(movedBytes))).CombinedOutput(); err != nil {
+			t.Fatal(err, string(out))
+		}
+		if res.BaseCommit != sha {
+			t.Fatalf("stored base changed after origin move: %q", res.BaseCommit)
+		}
+	})
 }
 
 func TestStartPhaseTerminalSteerStopAndRelease(t *testing.T) {
