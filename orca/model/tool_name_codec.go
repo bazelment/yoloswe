@@ -6,8 +6,7 @@ import (
 	"unicode"
 )
 
-// toolNameCodec translates canonical tool names to the restricted names
-// accepted by model APIs and restores them in model responses.
+// toolNameCodec maps canonical names to the restricted model wire names.
 type toolNameCodec struct {
 	wireToOriginal map[string]string
 }
