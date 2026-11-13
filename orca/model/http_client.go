@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"maps"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -496,13 +497,23 @@ func parseRetryAfter(hdr http.Header) (time.Duration, bool) {
 		return 0, false
 	}
 	if msStr := strings.TrimSpace(hdr.Get("retry-after-ms")); msStr != "" {
-		if ms, err := strconv.ParseInt(msStr, 10, 64); err == nil && ms >= 0 {
-			return time.Duration(ms) * time.Millisecond, true
+		if ms, err := strconv.ParseFloat(msStr, 64); err == nil && ms >= 0 && !math.IsInf(ms, 0) && ms <= float64(DefaultRetryAfterCeiling/time.Millisecond) {
+			return time.Duration(ms * float64(time.Millisecond)), true
 		}
 	}
 	if secStr := strings.TrimSpace(hdr.Get("Retry-After")); secStr != "" {
-		if secs, err := strconv.ParseFloat(secStr, 64); err == nil && secs >= 0 {
+		if secs, err := strconv.ParseFloat(secStr, 64); err == nil && secs >= 0 && !math.IsInf(secs, 0) && !math.IsNaN(secs) && secs <= DefaultRetryAfterCeiling.Seconds() {
 			return time.Duration(secs * float64(time.Second)), true
+		}
+		if when, err := http.ParseTime(secStr); err == nil {
+			d := time.Until(when)
+			if d < 0 {
+				d = 0
+			}
+			if d > DefaultRetryAfterCeiling {
+				d = DefaultRetryAfterCeiling
+			}
+			return d, true
 		}
 	}
 	return 0, false
