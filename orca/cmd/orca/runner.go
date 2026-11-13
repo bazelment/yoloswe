@@ -350,6 +350,12 @@ func NewRunner(
 	}, st, drv, clk, controller.JudgeFunc(r.judgeBatch), boxes...)
 
 	r.controller = ctrl
+	disp.SetOwnerAnswer(func(ctx context.Context, runID, askID, answer string) error {
+		if runID != r.cfg.RunID {
+			return fmt.Errorf("owner answer run %q does not match controller run %q", runID, r.cfg.RunID)
+		}
+		return ctrl.AnswerOwnerAskText(ctx, askID, answer)
+	})
 	return r
 }
 

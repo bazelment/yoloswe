@@ -718,6 +718,18 @@ func (c *Controller) AnswerOwnerAsk(ctx context.Context, askID, chosenOption str
 	return c.answerOwnerAsk(ctx, askID, chosenOption, false)
 }
 
+// AnswerOwnerAskText resolves an open ask with free-form owner text. It uses
+// the same resolution path as mailbox replies, while allowing answers that are
+// not one of the ask's listed options.
+func (c *Controller) AnswerOwnerAskText(ctx context.Context, askID, answer string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.killed {
+		return ErrControllerStopped
+	}
+	return c.answerOwnerAsk(ctx, askID, answer, true)
+}
+
 func (c *Controller) answerOwnerAsk(ctx context.Context, askID, chosenOption string, freeText bool) error {
 	dir, err := c.store.Directives().Get(ctx, c.cfg.RunID, ownerAskDirectiveID(askID))
 	if err != nil {

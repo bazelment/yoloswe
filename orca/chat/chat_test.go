@@ -254,11 +254,11 @@ func TestOpenQuestionReplyReachesDispatcherSnapshot(t *testing.T) {
 	if err := json.Unmarshal(events[0].Payload, &msg); err != nil {
 		t.Fatal(err)
 	}
-	if msg.InReplyTo != "ask-1" {
-		t.Fatalf("reply=%+v", msg)
+	if msg.InReplyTo != "" {
+		t.Fatalf("reply=%+v, want no inferred identity", msg)
 	}
 	dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: "run", ActiveOnly: true})
-	if err != nil || len(dirs) != 1 {
+	if err != nil || len(dirs) != 2 {
 		t.Fatalf("directives=%+v err=%v", dirs, err)
 	}
 }

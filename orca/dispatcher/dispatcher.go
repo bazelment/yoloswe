@@ -53,6 +53,7 @@ func (f RecipeCompilerFunc) CompileOverride(ctx context.Context, base recipe.Rec
 type Config struct {
 	RecipeCompiler   RecipeCompiler
 	OnPlannerRequest func(ctx context.Context, runID, reason, planRef string) error
+	OnOwnerAnswer    func(ctx context.Context, runID, askID, answer string) error
 	// Temperature is the sampling temperature for judgment turns. Nil omits it
 	// from the request: newer models reject the parameter outright.
 	Temperature    *float64
@@ -143,6 +144,13 @@ func New(
 		clock:  clk,
 		client: client,
 	}
+}
+
+// SetOwnerAnswer installs the controller-owned resolution path for owner.answer.
+func (d *Dispatcher) SetOwnerAnswer(fn func(context.Context, string, string, string) error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cfg.OnOwnerAnswer = fn
 }
 
 // Judge implements controller.Judge by executing a fresh Dispatcher turn for events.
@@ -517,6 +525,7 @@ var dispatcherToolDefs = []model.ToolDefinition{
 	{Name: ToolLaneRetry, Description: "Retry a stalled, blocked, or failed lane on a fresh round", InputSchema: model.SchemaFor[LaneRetryParams]()},
 	{Name: ToolLaneStop, Description: "Stop a non-terminal lane and mark it failed", InputSchema: model.SchemaFor[LaneStopParams]()},
 	{Name: ToolOwnerAsk, Description: "Pose a decision to the owner that only the owner can make (product scope, spend, credentials, one-way/destructive policy) and that the batch presents as still open, with options, a mandatory default, and a deadline. Never use it for engineering, ordering or retry choices, or for work the owner already ordered", InputSchema: model.SchemaFor[OwnerAskParams]()},
+	{Name: ToolOwnerAnswer, Description: "If the owner's message answers one of the listed open owner asks, resolve it with that ask's id; otherwise treat the message as work", InputSchema: model.SchemaFor[OwnerAnswerParams]()},
 	{Name: ToolDirectiveNote, Description: "Persist a standing rule, preference or decision that later batches need and that no backlog item, lane or other call in this batch carries. At most one per batch, holding every point in its fact. Not a log of your own actions or questions", InputSchema: model.SchemaFor[DirectiveNoteParams]()},
 	{Name: ToolPlannerRequest, Description: "Request a Planner turn to replan or import a plan. The reason is delivered to the Planner and also stored as an active directive, so it carries any standing rule given with the request", InputSchema: model.SchemaFor[PlannerRequestParams]()},
 	{Name: ToolReadLaneReport, Description: "Read a bounded phase report for a lane", InputSchema: model.SchemaFor[ReadLaneReportParams]()},
@@ -781,6 +790,11 @@ func (d *Dispatcher) applyVettedAction(
 		return d.applyLaneStop(ctx, runID, view, *act.LaneStop)
 	case ToolOwnerAsk:
 		return d.applyOwnerAsk(ctx, runID, view, *act.OwnerAsk)
+	case ToolOwnerAnswer:
+		if d.cfg.OnOwnerAnswer == nil {
+			return "", errors.New("owner answer handler is not configured")
+		}
+		return fmt.Sprintf("resolved owner ask %s", act.OwnerAnswer.AskID), d.cfg.OnOwnerAnswer(ctx, runID, act.OwnerAnswer.AskID, act.OwnerAnswer.Answer)
 	case ToolDirectiveNote:
 		return d.applyDirectiveNote(ctx, runID, view, *act.DirectiveNote)
 	case ToolPlannerRequest:
