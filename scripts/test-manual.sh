@@ -10,7 +10,7 @@ cd "${WORKSPACE_ROOT}"
 echo "=== Discovering manual tests ==="
 
 REGISTERED_MANUAL_TESTS=(
-    "//orch/replay/integration:eval_test"
+    "//orca/replay/integration:eval_test"
 )
 
 # Find all test targets with the "manual" tag

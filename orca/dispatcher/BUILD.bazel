@@ -1,0 +1,40 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "dispatcher",
+    srcs = [
+        "dispatcher.go",
+        "prompt.go",
+        "snapshot.go",
+        "truncation.go",
+        "vet.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/orca/dispatcher",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//orca/clock",
+        "//orca/controller",
+        "//orca/lane",
+        "//orca/model",
+        "//orca/recipe",
+        "//orca/store",
+    ],
+)
+
+go_test(
+    name = "dispatcher_test",
+    srcs = [
+        "dispatcher_test.go",
+        "judgment_contract_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    deps = [
+        ":dispatcher",
+        "//orca/clock",
+        "//orca/controller",
+        "//orca/lane",
+        "//orca/model",
+        "//orca/recipe",
+        "//orca/store",
+    ],
+)

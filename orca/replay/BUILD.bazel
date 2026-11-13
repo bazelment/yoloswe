@@ -1,0 +1,46 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "replay",
+    srcs = [
+        "concierge.go",
+        "dataset.go",
+        "eval.go",
+        "source.go",
+        "split.go",
+    ],
+    embedsrcs = [
+        "testdata/gate2_dataset.json",
+        "testdata/inner_loop_10.json",
+        "testdata/source_excerpt.json",
+    ],
+    importpath = "github.com/bazelment/yoloswe/orca/replay",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//orca/clock",
+        "//orca/dispatcher",
+        "//orca/lane",
+        "//orca/model",
+        "//orca/recipe",
+        "//orca/store",
+    ],
+)
+
+go_test(
+    name = "replay_test",
+    srcs = [
+        "adversarial_test.go",
+        "judgment_patterns_test.go",
+        "replay_test.go",
+        "source_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    deps = [
+        ":replay",
+        "//orca/clock",
+        "//orca/dispatcher",
+        "//orca/lane",
+        "//orca/model",
+        "//orca/store",
+    ],
+)

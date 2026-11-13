@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "clock",
+    srcs = ["clock.go"],
+    importpath = "github.com/bazelment/yoloswe/orca/clock",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "clock_test",
+    srcs = ["clock_test.go"],
+    deps = [":clock"],
+)

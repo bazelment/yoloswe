@@ -1,0 +1,45 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "orca_lib",
+    srcs = [
+        "concierge.go",
+        "config.go",
+        "main.go",
+        "metrics.go",
+        "planner.go",
+        "runner.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/orca/cmd/orca",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//orca/clock",
+        "//orca/controller",
+        "//orca/dispatcher",
+        "//orca/lane",
+        "//orca/lane/nebula",
+        "//orca/model",
+        "//orca/recipe",
+        "//orca/store",
+    ],
+)
+
+go_binary(
+    name = "orca",
+    embed = [":orca_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "orca_test",
+    srcs = ["main_test.go"],
+    data = glob(["testdata/**"]),
+    embed = [":orca_lib"],
+    deps = [
+        "//orca/clock",
+        "//orca/lane",
+        "//orca/model",
+        "//orca/recipe",
+        "//orca/store",
+    ],
+)

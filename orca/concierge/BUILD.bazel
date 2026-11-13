@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "concierge",
+    srcs = [
+        "concierge.go",
+        "prompt.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/orca/concierge",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//orca/clock",
+        "//orca/lane",
+        "//orca/model",
+        "//orca/recipe",
+        "//orca/store",
+    ],
+)
+
+go_test(
+    name = "concierge_test",
+    srcs = ["concierge_test.go"],
+    data = glob(["testdata/**"]),
+    deps = [
+        ":concierge",
+        "//orca/clock",
+        "//orca/lane",
+        "//orca/model",
+        "//orca/recipe",
+        "//orca/store",
+    ],
+)

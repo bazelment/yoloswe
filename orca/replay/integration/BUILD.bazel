@@ -1,0 +1,36 @@
+# gazelle:ignore
+load("@rules_go//go:def.bzl", "go_test")
+
+# Manual Validation Gate 2 live evaluation target.
+go_test(
+    name = "eval_test",
+    size = "large",
+    srcs = ["eval_test.go"],
+    env_inherit = [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "ANTHROPIC_MODEL",
+        "ORCH_MODEL_PROVIDER",
+        "ORCH_MODEL",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "NEBULA_LLM_KEY",
+        "ORCH_REPLAY_CONCURRENCY",
+        "ORCH_REPLAY_INNER_LOOP_ONLY",
+        "ORCH_REPLAY_MOMENTS",
+        "ORCH_REPLAY_SPLIT",
+    ],
+    gotags = ["integration"],
+    tags = [
+        "integration",
+        "local",
+        "manual",
+    ],
+    deps = [
+        "//orca/dispatcher",
+        "//orca/model",
+        "//orca/replay",
+    ],
+)

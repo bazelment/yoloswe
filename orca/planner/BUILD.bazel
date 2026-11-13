@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "planner",
+    srcs = [
+        "plan_reader.go",
+        "planner.go",
+        "prompt.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/orca/planner",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//orca/clock",
+        "//orca/controller",
+        "//orca/lane",
+        "//orca/model",
+        "//orca/recipe",
+        "//orca/store",
+    ],
+)
+
+go_test(
+    name = "planner_test",
+    srcs = ["planner_test.go"],
+    data = glob(["testdata/**"]),
+    deps = [
+        ":planner",
+        "//orca/clock",
+        "//orca/concierge",
+        "//orca/controller",
+        "//orca/lane",
+        "//orca/model",
+        "//orca/recipe",
+        "//orca/store",
+    ],
+)

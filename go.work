@@ -10,7 +10,7 @@ use (
 	./medivac
 	./multiagent
 	./notify
-	./orch
+	./orca
 	./prdozer
 	./swarm-queen
 	./symphony
