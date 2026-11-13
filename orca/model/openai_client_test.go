@@ -98,3 +98,57 @@ func TestOpenAIStreamFailureRetries(t *testing.T) {
 		})
 	}
 }
+
+func TestPlannerEffortOnProviderWire(t *testing.T) {
+	t.Parallel()
+	for _, provider := range []string{"openai", "anthropic"} {
+		t.Run(provider, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]json.RawMessage
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				field := "reasoning"
+				if provider == "anthropic" {
+					field = "output_config"
+				}
+				var effort struct {
+					Effort string `json:"effort"`
+				}
+				if err := json.Unmarshal(body[field], &effort); err != nil {
+					t.Error(err)
+				}
+				if effort.Effort != "high" {
+					t.Errorf("effort=%q", effort.Effort)
+				}
+				var metadata map[string]string
+				if len(body["metadata"]) > 0 {
+					if err := json.Unmarshal(body["metadata"], &metadata); err != nil {
+						t.Error(err)
+					}
+				}
+				if metadata["provider"] != "" || metadata["role"] != "" {
+					t.Errorf("internal metadata leaked: %v", metadata)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if provider == "openai" {
+					_, _ = w.Write([]byte(`{"id":"r","output":[{"type":"message","text":"ok"}]}`))
+				} else {
+					_, _ = w.Write([]byte(`{"id":"r","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+				}
+			}))
+			defer server.Close()
+			var client model.ModelClient
+			if provider == "openai" {
+				client = model.NewOpenAIClient(model.WithOpenAIBaseURL(server.URL), model.WithOpenAIAPIKey("test"), model.WithOpenAIMaxRetries(0))
+			} else {
+				client = model.NewHTTPClient(model.WithBaseURL(server.URL), model.WithAPIKey("test"), model.WithMaxRetries(0))
+			}
+			_, err := client.CreateMessage(t.Context(), model.Request{Model: "planner", ReasoningEffort: "high", Metadata: map[string]string{"role": "planner", "provider": provider}, Messages: []model.Message{model.NewUserMessage("Plan")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

@@ -894,7 +894,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 					return "", err
 				}
 			} else {
-				compiled = resolved
+				return "", fmt.Errorf("natural-language recipe override %q requires a recipe compiler", override)
 			}
 			compiled.RunID = runID
 			compiled.Name = fmt.Sprintf("override-%s", laneID)
@@ -1293,6 +1293,7 @@ func (d *Dispatcher) applyPlannerRequest(ctx context.Context, runID string, p Pl
 	}
 	if d.cfg.OnPlannerRequest != nil {
 		if err := d.cfg.OnPlannerRequest(ctx, runID, p.Reason, p.PlanRef); err != nil {
+			_ = d.store.Directives().UpdateStatus(context.WithoutCancel(ctx), runID, dir.ID, store.DirectiveRevoked)
 			return "", err
 		}
 	}

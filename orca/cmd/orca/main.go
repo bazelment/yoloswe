@@ -187,7 +187,7 @@ func executeChat(
 		"model", cfg.Models.Concierge,
 	)
 
-	concierge := NewConcierge(cfg.RunID, st, clk, client, cfg.Models.Concierge)
+	concierge := NewConcierge(cfg.RunID, st, clk, roleClient(client, cfg, "concierge"), cfg.Models.Concierge)
 	defer func() { _ = concierge.Close(context.WithoutCancel(ctx)) }()
 
 	question := strings.TrimSpace(cfg.Prompt)
@@ -203,8 +203,9 @@ func executeChat(
 		return err
 	}
 
-	routingLog := router.StoreLogger{Store: st, RunID: cfg.RunID, Model: cfg.Models.Concierge, Provider: cfg.ModelProvider}
-	r := router.Select(client, cfg.Models.Concierge, cmp.Or(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")), os.Getenv("GEMINI_DECISIONS_BASE_URL"), routingLog)
+	routerSel := cfg.Models.Roles["router"]
+	routingLog := router.StoreLogger{Store: st, RunID: cfg.RunID, Model: routerSel.Model, Provider: routerSel.Provider}
+	r := router.Select(roleClient(client, cfg, "router"), routerSel.Model, cmp.Or(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")), os.Getenv("GEMINI_DECISIONS_BASE_URL"), routingLog)
 	backend := &chatui.StoreBackend{Store: st, RunID: cfg.RunID, Stream: concierge.AskStream}
 	ui := chatui.New(ctx, cfg.RunID, concierge.Ask, r)
 	ui.Backend = backend
@@ -268,7 +269,7 @@ func notifySignalContext(parent context.Context, forceExit func()) (context.Cont
 
 func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, `Usage:
-  orca run --run <id> [--store sqlite:<path>|nebula] [--driver nebula|fake] [flags]
+  orca run --goal "<text>" [--plan <file|post-id>] [--repo <owner/name>] [--run <id>] [--store sqlite:<path>|nebula] [--driver nebula|fake] [flags]
   orca chat --run <id> [--store sqlite:<path>|nebula] [--prompt "<question>"] [flags]`)
 	_, _ = fmt.Fprintln(w, "  orca report --run <id> [--day YYYY-MM-DD] [flags]\n  orca export --run <id> [flags]")
 }

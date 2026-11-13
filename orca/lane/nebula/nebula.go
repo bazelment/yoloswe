@@ -547,6 +547,11 @@ func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*Ses
 	}
 	baseBranch := cmp.Or(strings.TrimSpace(req.BaseBranch), d.baseBranch)
 
+	if d.repoFullName != "" {
+		if _, err := d.resolveRepositoryID(ctx); err != nil {
+			return nil, err
+		}
+	}
 	existing, err := d.findReusableSession(ctx, req.RunID, req.LaneID, workBranch, baseBranch)
 	if err != nil {
 		return nil, err
@@ -634,6 +639,12 @@ func (d *Driver) findReusableSession(ctx context.Context, runID, laneID, workBra
 
 func (d *Driver) matchesLaneSession(s *SessionInfo, runID, laneID, workBranch, baseBranch string) bool {
 	if s == nil || s.ID == "" || !isSessionReusableStatus(s.Status) {
+		return false
+	}
+	d.mu.Lock()
+	repoID := d.repoID
+	d.mu.Unlock()
+	if d.repoFullName != "" && s.RepositoryID != repoID {
 		return false
 	}
 	if d.currSessID != "" && s.ID == d.currSessID {
@@ -1509,7 +1520,7 @@ func (d *Driver) resolveRepositoryID(ctx context.Context) (string, error) {
 	repoFullName := d.repoFullName
 	d.mu.Unlock()
 
-	if currSessID != "" {
+	if currSessID != "" && repoFullName == "" {
 		if detail, err := d.GetSession(ctx, currSessID); err == nil && detail.Session.RepositoryID != "" {
 			d.mu.Lock()
 			d.repoID = detail.Session.RepositoryID
@@ -1533,12 +1544,12 @@ func (d *Driver) resolveRepositoryID(ctx context.Context) (string, error) {
 			chosen = r.ID
 			break
 		}
-		if chosen == "" && r.ID != "" {
+		if repoFullName == "" && chosen == "" && r.ID != "" {
 			chosen = r.ID
 		}
 	}
 	if chosen == "" {
-		return "", fmt.Errorf("nebula resolve repository id: no repositories found")
+		return "", fmt.Errorf("nebula resolve repository id: no matching repository found for %q", repoFullName)
 	}
 	d.mu.Lock()
 	d.repoID = chosen

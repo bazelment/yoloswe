@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -54,7 +55,7 @@ const (
 	DefaultPlannerModel          = recipe.DefaultCompilerModel
 	DefaultOpenAIDispatcherModel = "gpt-6.1-sol"
 	DefaultOpenAIConciergeModel  = "gpt-6.1-sol"
-	DefaultOpenAIPlannerModel    = "gpt-6.1-sol"
+	DefaultOpenAIPlannerModel    = "gpt-6-astra"
 	DefaultConcurrencyCap        = 4
 	DefaultStoreSpec             = "sqlite"
 	DefaultDriverKind            = "nebula"
@@ -67,24 +68,67 @@ var (
 
 // RoleModels configures the model identifier used by each orchestrator role.
 type RoleModels struct {
-	Dispatcher     string `json:"dispatcher,omitempty"`
-	DispatcherHard string `json:"dispatcher_hard,omitempty"`
-	Concierge      string `json:"concierge,omitempty"`
-	Planner        string `json:"planner,omitempty"`
+	Roles          map[string]RoleSelection `json:"roles,omitempty"`
+	Dispatcher     string                   `json:"dispatcher,omitempty"`
+	DispatcherHard string                   `json:"dispatcher_hard,omitempty"`
+	Concierge      string                   `json:"concierge,omitempty"`
+	Planner        string                   `json:"planner,omitempty"`
+}
+
+type RoleSelection struct {
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Effort   string `json:"effort,omitempty"`
 }
 
 func (m RoleModels) withDefaults(provider string) RoleModels {
-	if strings.EqualFold(provider, "openai") {
-		m.Dispatcher = cmp.Or(strings.TrimSpace(m.Dispatcher), DefaultOpenAIDispatcherModel)
-		m.DispatcherHard = cmp.Or(strings.TrimSpace(m.DispatcherHard), DefaultOpenAIDispatcherModel)
-		m.Concierge = cmp.Or(strings.TrimSpace(m.Concierge), DefaultOpenAIConciergeModel)
-		m.Planner = cmp.Or(strings.TrimSpace(m.Planner), DefaultOpenAIPlannerModel)
-		return m
+	m.Roles = maps.Clone(m.Roles)
+	if m.Roles == nil {
+		m.Roles = map[string]RoleSelection{}
 	}
-	m.Dispatcher = cmp.Or(strings.TrimSpace(m.Dispatcher), DefaultDispatcherModel)
-	m.DispatcherHard = cmp.Or(strings.TrimSpace(m.DispatcherHard), DefaultDispatcherHardModel)
-	m.Concierge = cmp.Or(strings.TrimSpace(m.Concierge), DefaultConciergeModel)
-	m.Planner = cmp.Or(strings.TrimSpace(m.Planner), DefaultPlannerModel)
+	// Normalize an explicitly configured planner provider before selecting the
+	// critic fallback. This keeps the different-provider invariant correct for
+	// config files that use values such as "Anthropic".
+	plannerProvider := strings.ToLower(strings.TrimSpace(m.Roles["planner"].Provider))
+	if plannerProvider == "" {
+		plannerProvider = strings.ToLower(strings.TrimSpace(provider))
+		if plannerProvider == "" {
+			plannerProvider = "openai"
+		}
+	}
+	legacy := map[string]string{"dispatcher": m.Dispatcher, "planner": m.Planner, "concierge": m.Concierge}
+	for _, role := range []string{"planner", "dispatcher", "concierge", "router", "critic"} {
+		sel := m.Roles[role]
+		fallbackProvider := cmp.Or(strings.ToLower(strings.TrimSpace(provider)), "openai")
+		if role == "critic" {
+			fallbackProvider = "anthropic"
+			if plannerProvider == "anthropic" {
+				fallbackProvider = "openai"
+			}
+		}
+		sel.Provider = strings.ToLower(cmp.Or(strings.TrimSpace(sel.Provider), fallbackProvider))
+		defaultModel := DefaultOpenAIDispatcherModel
+		if sel.Provider == "anthropic" {
+			defaultModel = DefaultDispatcherModel
+			if role == "planner" {
+				defaultModel = DefaultPlannerModel
+			}
+			if role == "concierge" || role == "router" {
+				defaultModel = DefaultConciergeModel
+			}
+		} else if role == "planner" {
+			defaultModel = DefaultOpenAIPlannerModel
+		}
+		sel.Model = cmp.Or(strings.TrimSpace(sel.Model), strings.TrimSpace(legacy[role]), defaultModel)
+		if role == "planner" {
+			sel.Effort = cmp.Or(strings.TrimSpace(sel.Effort), "high")
+		}
+		m.Roles[role] = sel
+	}
+	m.Dispatcher = m.Roles["dispatcher"].Model
+	m.Planner = m.Roles["planner"].Model
+	m.Concierge = m.Roles["concierge"].Model
+	m.DispatcherHard = cmp.Or(m.DispatcherHard, m.Dispatcher)
 	return m
 }
 
@@ -93,8 +137,11 @@ type Config struct {
 	ModelProvider     string        `json:"model_provider,omitempty"`
 	Models            RoleModels    `json:"models"`
 	RunID             string        `json:"run_id,omitempty"`
+	Goal              string        `json:"goal,omitempty"`
 	Objective         string        `json:"objective,omitempty"`
 	PlanRef           string        `json:"plan_ref,omitempty"`
+	Plan              string        `json:"plan,omitempty"`
+	Repository        string        `json:"repository,omitempty"`
 	StoreSpec         string        `json:"store,omitempty"`
 	StoreBaseDir      string        `json:"store_base_dir,omitempty"`
 	DriverKind        string        `json:"driver,omitempty"`
@@ -124,15 +171,12 @@ type Config struct {
 }
 
 func (c Config) withDefaults() Config {
-	c.ModelProvider = cmp.Or(strings.TrimSpace(c.ModelProvider), strings.TrimSpace(os.Getenv("ORCH_MODEL_PROVIDER")))
+	c.Objective = cmp.Or(c.Goal, c.Objective)
+	c.ModelProvider = strings.ToLower(cmp.Or(strings.TrimSpace(c.ModelProvider), strings.TrimSpace(os.Getenv("ORCH_MODEL_PROVIDER"))))
 	c.Models = c.Models.withDefaults(c.ModelProvider)
 	c.StoreSpec = cmp.Or(strings.TrimSpace(c.StoreSpec), DefaultStoreSpec)
 	c.DriverKind = cmp.Or(strings.ToLower(strings.TrimSpace(c.DriverKind)), DefaultDriverKind)
-	if strings.EqualFold(c.ModelProvider, "openai") {
-		c.LLMGatewayURL = cmp.Or(strings.TrimSpace(c.LLMGatewayURL), strings.TrimSpace(os.Getenv("OPENAI_BASE_URL")), strings.TrimSpace(os.Getenv("LLM_GATEWAY_URL")))
-	} else {
-		c.LLMGatewayURL = cmp.Or(strings.TrimSpace(c.LLMGatewayURL), strings.TrimSpace(os.Getenv("LLM_GATEWAY_URL")), strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")))
-	}
+	c.LLMGatewayURL = strings.TrimSpace(c.LLMGatewayURL)
 	if c.ConcurrencyCap == 0 {
 		c.ConcurrencyCap = DefaultConcurrencyCap
 	}
@@ -178,6 +222,22 @@ func (c Config) Validate(requireDriver bool) error {
 	if provider != "" && provider != "anthropic" && provider != "openai" {
 		return fmt.Errorf("orca: unsupported model provider %q (want anthropic or openai)", c.ModelProvider)
 	}
+	for role, sel := range c.Models.Roles {
+		if sel.Provider != "openai" && sel.Provider != "anthropic" {
+			return fmt.Errorf("orca: unsupported provider %q for role %s", sel.Provider, role)
+		}
+		switch sel.Effort {
+		case "", "low", "medium", "high":
+		default:
+			return fmt.Errorf("orca: unsupported effort %q for role %s", sel.Effort, role)
+		}
+	}
+	if c.Models.Roles["planner"].Provider != "" && c.Models.Roles["planner"].Provider == c.Models.Roles["critic"].Provider {
+		return errors.New("orca: critic and planner must use different providers")
+	}
+	if c.Repository != "" && (len(strings.Split(c.Repository, "/")) != 2 || strings.ContainsAny(c.Repository, " \t\n") || strings.HasPrefix(c.Repository, "/") || strings.HasSuffix(c.Repository, "/")) {
+		return fmt.Errorf("orca: --repo must be owner/name, got %q", c.Repository)
+	}
 	if strings.TrimSpace(c.RunID) == "" {
 		return ErrRunIDRequired
 	}
@@ -221,10 +281,14 @@ func LoadConfigFile(path string, base Config) (Config, error) {
 
 func mergeConfig(lower, higher Config) Config {
 	out := lower
+	out.Models.Roles = maps.Clone(lower.Models.Roles)
 	out.RunID = cmp.Or(higher.RunID, lower.RunID)
 	out.ModelProvider = cmp.Or(higher.ModelProvider, lower.ModelProvider)
+	out.Goal = cmp.Or(higher.Goal, lower.Goal)
 	out.Objective = cmp.Or(higher.Objective, lower.Objective)
 	out.PlanRef = cmp.Or(higher.PlanRef, lower.PlanRef)
+	out.Plan = cmp.Or(higher.Plan, lower.Plan)
+	out.Repository = cmp.Or(higher.Repository, lower.Repository)
 	out.StoreSpec = cmp.Or(higher.StoreSpec, lower.StoreSpec)
 	out.StoreBaseDir = cmp.Or(higher.StoreBaseDir, lower.StoreBaseDir)
 	out.DriverKind = cmp.Or(higher.DriverKind, lower.DriverKind)
@@ -243,6 +307,15 @@ func mergeConfig(lower, higher Config) Config {
 	out.Models.DispatcherHard = cmp.Or(higher.Models.DispatcherHard, lower.Models.DispatcherHard)
 	out.Models.Concierge = cmp.Or(higher.Models.Concierge, lower.Models.Concierge)
 	out.Models.Planner = cmp.Or(higher.Models.Planner, lower.Models.Planner)
+	if len(higher.Models.Roles) > 0 {
+		if out.Models.Roles == nil {
+			out.Models.Roles = map[string]RoleSelection{}
+		}
+		for role, sel := range higher.Models.Roles {
+			prev := out.Models.Roles[role]
+			out.Models.Roles[role] = RoleSelection{Provider: cmp.Or(sel.Provider, prev.Provider), Model: cmp.Or(sel.Model, prev.Model), Effort: cmp.Or(sel.Effort, prev.Effort)}
+		}
+	}
 	if len(higher.RecipeFiles) > 0 {
 		out.RecipeFiles = append(append([]string(nil), lower.RecipeFiles...), higher.RecipeFiles...)
 	}
@@ -308,9 +381,12 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	)
 
 	fs.StringVar(&configPath, "config", "", "Optional path to JSON config file")
-	fs.StringVar(&cfg.RunID, "run", "", "Swarm run ID (required)")
+	fs.StringVar(&cfg.RunID, "run", "", "Swarm run ID (optional with --goal)")
 	fs.StringVar(&cfg.Objective, "objective", "", "Run objective when creating or updating the run")
+	fs.StringVar(&cfg.Goal, "goal", "", "Run goal to plan at startup (generates a run ID if omitted)")
 	fs.StringVar(&cfg.PlanRef, "plan-ref", "", "Optional plan reference (post ID, URL, or path)")
+	fs.StringVar(&cfg.Plan, "plan", "", "Plan file or post ID to load through the Planner at startup")
+	fs.StringVar(&cfg.Repository, "repo", "", "Repository owner/name for worker drivers")
 	fs.StringVar(&cfg.StoreSpec, "store", "", "Store backend: sqlite:<path>, sqlite, memory, or nebula")
 	fs.StringVar(&cfg.StoreBaseDir, "store-dir", "", "Base directory for default per-run SQLite store (~/.swarm)")
 	fs.StringVar(&cfg.DriverKind, "driver", "", "Worker lane driver: nebula or fake (default nebula)")
@@ -320,6 +396,30 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.StringVar(&cfg.Models.DispatcherHard, "dispatcher-hard-model", "", "Escalation model for hard Dispatcher batches")
 	fs.StringVar(&cfg.Models.Concierge, "concierge-model", "", "Model for Concierge chat turns")
 	fs.StringVar(&cfg.Models.Planner, "planner-model", "", "Model for Planner compilation and replanning turns")
+	for _, role := range []string{"planner", "critic", "dispatcher", "concierge", "router"} {
+		for _, field := range []string{"provider", "model", "effort"} {
+			if field == "model" && (role == "planner" || role == "dispatcher" || role == "concierge") {
+				continue
+			}
+			fs.Func(role+"-"+field, field+" for "+role+" turns", func(value string) error {
+				if cfg.Models.Roles == nil {
+					cfg.Models.Roles = map[string]RoleSelection{}
+				}
+				sel := cfg.Models.Roles[role]
+				switch field {
+				case "provider":
+					sel.Provider = value
+				case "model":
+					sel.Model = value
+				case "effort":
+					sel.Effort = value
+				}
+				cfg.Models.Roles[role] = sel
+				return nil
+			})
+		}
+	}
+
 	fs.IntVar(&cfg.ConcurrencyCap, "concurrency-cap", 0, "Maximum concurrent active lanes")
 	fs.Var(&recipes, "recipe-file", "Recipe file path (.json compiled recipe or plain-text NL source; repeatable)")
 	fs.StringVar(&cfg.ReplayPath, "replay", "", "Recorded model replay JSON path for deterministic execution")
@@ -352,12 +452,46 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 		}
 	})
 
+	cliCfg := cfg
 	if strings.TrimSpace(configPath) != "" {
 		merged, err := LoadConfigFile(configPath, cfg)
 		if err != nil {
 			return Config{}, nil, err
 		}
 		cfg = merged
+	}
+	if cliCfg.Goal != "" {
+		cfg.Objective = cliCfg.Goal
+	} else if cliCfg.Objective != "" {
+		cfg.Goal = ""
+	}
+	if cliCfg.Plan != "" {
+		cfg.PlanRef = ""
+	} else if cliCfg.PlanRef != "" {
+		cfg.Plan = ""
+	}
+	fs.Visit(func(f *flag.Flag) {
+		var value string
+		switch f.Name {
+		case "planner-model":
+			value = cfg.Models.Planner
+		case "dispatcher-model":
+			value = cfg.Models.Dispatcher
+		case "concierge-model":
+			value = cfg.Models.Concierge
+		}
+		if value != "" {
+			if cfg.Models.Roles == nil {
+				cfg.Models.Roles = map[string]RoleSelection{}
+			}
+			role := strings.TrimSuffix(f.Name, "-model")
+			sel := cfg.Models.Roles[role]
+			sel.Model = value
+			cfg.Models.Roles[role] = sel
+		}
+	})
+	if cmdName == "run" && cfg.RunID == "" && strings.TrimSpace(cmp.Or(cfg.Goal, cfg.Objective)) != "" {
+		cfg.RunID = nextUniqueID("run", clock.NewRealClock())
 	}
 	return cfg.withDefaults(), fs.Args(), nil
 }
@@ -406,44 +540,77 @@ func openStore(cfg Config, clk clock.Clock) (store.Store, string, error) {
 	}
 }
 
+func roleClient(client model.ModelClient, cfg Config, role string) model.ModelClient {
+	if client == nil {
+		return nil
+	}
+	sel := cfg.Models.Roles[role]
+	return modelClientFunc(func(ctx context.Context, req model.Request) (*model.Response, error) {
+		req = req.Clone()
+		if req.Metadata == nil {
+			req.Metadata = map[string]string{}
+		}
+		req.Metadata["role"] = role
+		req.Metadata["provider"] = sel.Provider
+		req.ReasoningEffort = sel.Effort
+		if role != "dispatcher" || req.Model == "" {
+			req.Model = sel.Model
+		}
+		return client.CreateMessage(ctx, req)
+	})
+}
+
+type modelClientFunc func(context.Context, model.Request) (*model.Response, error)
+
+func (f modelClientFunc) CreateMessage(ctx context.Context, req model.Request) (*model.Response, error) {
+	return f(ctx, req)
+}
+
 func openModelClient(cfg Config, clk clock.Clock) (model.ModelClient, error) {
 	if strings.TrimSpace(cfg.ReplayPath) != "" {
 		return model.LoadFakeClient(cfg.ReplayPath)
 	}
-	if strings.EqualFold(strings.TrimSpace(cfg.ModelProvider), "openai") {
-		opts := []model.OpenAIClientOption{model.WithOpenAIHTTPClient(&http.Client{Transport: chatTransport{base: http.DefaultTransport}, Timeout: model.DefaultHTTPTimeout})}
-		if clk != nil {
-			opts = append(opts, model.WithOpenAIClock(clk))
-		}
-		if strings.TrimSpace(cfg.LLMGatewayURL) != "" {
-			opts = append(opts, model.WithOpenAIBaseURL(cfg.LLMGatewayURL))
-		}
-		client := model.NewOpenAIClient(opts...)
-		if strings.TrimSpace(cfg.RecordPath) != "" {
-			return model.NewRecordingFakeClient(cfg.RecordPath, client), nil
-		}
-		return client, nil
+	chatHTTP := &http.Client{Transport: chatTransport{base: http.DefaultTransport}, Timeout: model.DefaultHTTPTimeout}
+	var openOpts []model.OpenAIClientOption
+	openOpts = append(openOpts, model.WithOpenAIHTTPClient(chatHTTP))
+	var anthropicOpts []model.ClientOption
+	anthropicOpts = append(anthropicOpts, model.WithHTTPClient(chatHTTP))
+	if gateway := strings.TrimSpace(os.Getenv("LLM_GATEWAY_URL")); gateway != "" && strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")) == "" {
+		anthropicOpts = append(anthropicOpts, model.WithBaseURL(gateway))
 	}
-	opts := []model.ClientOption{model.WithHTTPClient(&http.Client{Transport: chatTransport{base: http.DefaultTransport}, Timeout: model.DefaultHTTPTimeout})}
 	if clk != nil {
-		opts = append(opts, model.WithClock(clk))
+		openOpts = append(openOpts, model.WithOpenAIClock(clk))
+		anthropicOpts = append(anthropicOpts, model.WithClock(clk))
 	}
-	if strings.TrimSpace(cfg.LLMGatewayURL) != "" {
-		opts = append(opts, model.WithBaseURL(cfg.LLMGatewayURL))
+	if cfg.LLMGatewayURL != "" {
+		if cmp.Or(cfg.ModelProvider, "openai") == "openai" {
+			openOpts = append(openOpts, model.WithOpenAIBaseURL(cfg.LLMGatewayURL))
+		} else {
+			anthropicOpts = append(anthropicOpts, model.WithBaseURL(cfg.LLMGatewayURL))
+		}
 	}
-	httpClient := model.NewHTTPClient(opts...)
-	if strings.TrimSpace(cfg.RecordPath) != "" {
-		return model.NewRecordingFakeClient(cfg.RecordPath, httpClient), nil
+	clients := map[string]model.ModelClient{"openai": model.NewOpenAIClient(openOpts...), "anthropic": model.NewHTTPClient(anthropicOpts...)}
+	var client model.ModelClient = modelClientFunc(func(ctx context.Context, req model.Request) (*model.Response, error) {
+		provider := cmp.Or(req.Metadata["provider"], cfg.ModelProvider, "openai")
+		selected, ok := clients[provider]
+		if !ok {
+			return nil, fmt.Errorf("orca: unsupported provider %q", provider)
+		}
+		return selected.CreateMessage(ctx, req)
+	})
+	if cfg.RecordPath != "" {
+		client = model.NewRecordingFakeClient(cfg.RecordPath, client)
 	}
-	return httpClient, nil
+	return client, nil
 }
 
 func openNebulaDriver(cfg Config, st store.Store, clk clock.Clock) (*nebula.Driver, error) {
 	return nebula.New(nebula.Config{
-		Clock:  clk,
-		Events: driverEventStore{st.Events()},
-		APIURL: cfg.NebulaAPIURL,
-		Token:  cfg.NebulaToken,
+		Clock:              clk,
+		Events:             driverEventStore{st.Events()},
+		APIURL:             cfg.NebulaAPIURL,
+		Token:              cfg.NebulaToken,
+		RepositoryFullName: cfg.Repository,
 	})
 }
 

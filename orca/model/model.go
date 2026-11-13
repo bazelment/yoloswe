@@ -470,16 +470,17 @@ func lookupModelPricing(modelName string, pricing map[string]ModelPricing) (Mode
 
 // Request is a Messages API call payload.
 type Request struct {
-	Metadata      map[string]string `json:"metadata,omitempty"`
-	Temperature   *float64          `json:"temperature,omitempty"`
-	ToolRegistry  *ToolRegistry     `json:"-"`
-	Model         string            `json:"model"`
-	System        string            `json:"system,omitempty"`
-	Messages      []Message         `json:"messages"`
-	Tools         []ToolDefinition  `json:"tools,omitempty"`
-	StopSequences []string          `json:"stop_sequences,omitempty"`
-	MaxTokens     int               `json:"max_tokens"`
-	MaxTurns      int               `json:"-"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+	Temperature     *float64          `json:"temperature,omitempty"`
+	ToolRegistry    *ToolRegistry     `json:"-"`
+	Model           string            `json:"model"`
+	System          string            `json:"system,omitempty"`
+	Messages        []Message         `json:"messages"`
+	Tools           []ToolDefinition  `json:"tools,omitempty"`
+	StopSequences   []string          `json:"stop_sequences,omitempty"`
+	MaxTokens       int               `json:"max_tokens"`
+	MaxTurns        int               `json:"-"`
 }
 
 func cloneMessages(msgs []Message) []Message {

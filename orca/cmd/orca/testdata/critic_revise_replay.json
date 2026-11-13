@@ -1,0 +1,92 @@
+{
+  "exchanges": [
+    {
+      "request": {
+        "model": "gpt-6-astra",
+        "messages": []
+      },
+      "response": {
+        "model": "gpt-6-astra",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call-0",
+              "name": "submit_open_plan",
+              "input": {
+                "summary": "Reuse the existing whole-system test and roll out first.",
+                "add_items": [
+                  {
+                    "id": "broad",
+                    "title": "Roll out the change"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 50
+        }
+      }
+    },
+    {
+      "request": {
+        "model": "claude-sonnet-5-5",
+        "messages": []
+      },
+      "response": {
+        "model": "claude-sonnet-5-5",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "The existing pattern assumes the failure is in the service. First run a small role resolution test that can disprove that assumption before a rollout."
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 50
+        }
+      }
+    },
+    {
+      "request": {
+        "model": "gpt-6-astra",
+        "messages": []
+      },
+      "response": {
+        "model": "gpt-6-astra",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call-2",
+              "name": "submit_plan_reconciliation",
+              "input": {
+                "summary": "Validate role resolution at the smallest scope before broader work.",
+                "add_items": [
+                  {
+                    "id": "small",
+                    "title": "Test role resolution locally",
+                    "description": "Disprove the provider-resolution assumption with a unit test.",
+                    "acceptance": "Recorded role output selects the intended provider."
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 50
+        }
+      }
+    }
+  ]
+}

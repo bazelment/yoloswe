@@ -338,6 +338,9 @@ func TestDispatcher_FullToolKitReplay(t *testing.T) {
 	var plannerReason, plannerRef string
 	disp := dispatcher.New(dispatcher.Config{
 		AllowMultiAction: true, // scripts every tool of the kit into one batch
+		RecipeCompiler: dispatcher.RecipeCompilerFunc(func(_ context.Context, base recipe.Recipe, override string) (recipe.Recipe, error) {
+			return dispatcher.CompileRecipeOverride(base, override), nil
+		}),
 		OnPlannerRequest: func(_ context.Context, _, reason, planRef string) error {
 			plannerReason = reason
 			plannerRef = planRef
@@ -1482,5 +1485,28 @@ func TestSnapshotMemoryIndexBudget(t *testing.T) {
 	}
 	if !strings.Contains(first.Text, "## Judgment Event Batch") {
 		t.Fatal("event section lost")
+	}
+}
+
+func TestFailedPlannerRequestRevokesInstruction(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	client := model.NewFakeClient(model.Response{StopReason: model.StopReasonToolUse, Message: model.Message{
+		Role: model.RoleAssistant,
+		Content: []model.ContentBlock{model.NewToolUseBlock("plan", dispatcher.ToolPlannerRequest,
+			json.RawMessage(`{"reason":"Reconcile","plan_ref":"file:///etc/passwd"}`))},
+	}}, model.Response{Message: model.NewAssistantMessage(model.NewTextBlock("Request rejected."))})
+	disp := dispatcher.New(dispatcher.Config{OnPlannerRequest: func(context.Context, string, string, string) error {
+		return errors.New("planner request requires a post reference")
+	}}, st, drv, clk, client)
+	if _, err := disp.Dispatch(t.Context(), "run-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: "run-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 1 || dirs[0].Status != store.DirectiveRevoked {
+		t.Fatalf("failed planner instruction must be revoked: %+v", dirs)
 	}
 }
