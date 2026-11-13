@@ -281,8 +281,16 @@ func (m *sqliteMemoryStore) Put(ctx context.Context, v MemoryEntry) (MemoryEntry
 		v.CreatedAt = now
 	}
 	v.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx, `INSERT INTO memories(id,name,description,type,scope,run_id,source,body,proposed_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,type=excluded.type,scope=excluded.scope,run_id=excluded.run_id,source=excluded.source,body=excluded.body,proposed_by=excluded.proposed_by,updated_at=excluded.updated_at`, v.ID, v.Name, v.Description, v.Type, v.Scope, v.RunID, v.Source, v.Body, v.ProposedBy, formatTime(v.CreatedAt), formatTime(v.UpdatedAt))
-	return v, err
+	var createdAt string
+	err := s.db.QueryRowContext(ctx, `INSERT INTO memories(id,name,description,type,scope,run_id,source,body,proposed_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,type=excluded.type,scope=excluded.scope,run_id=excluded.run_id,source=excluded.source,body=excluded.body,proposed_by=excluded.proposed_by,updated_at=excluded.updated_at RETURNING created_at`, v.ID, v.Name, v.Description, v.Type, v.Scope, v.RunID, v.Source, v.Body, v.ProposedBy, formatTime(v.CreatedAt), formatTime(v.UpdatedAt)).Scan(&createdAt)
+	if err != nil {
+		return MemoryEntry{}, err
+	}
+	v.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return MemoryEntry{}, err
+	}
+	return v, nil
 }
 func (m *sqliteMemoryStore) Get(ctx context.Context, scope, id string) (*MemoryEntry, error) {
 	s := m.s()

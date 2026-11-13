@@ -56,6 +56,9 @@ func (m MemoryEntry) validate() error {
 		!slices.Contains([]string{"owner", "model"}, m.ProposedBy) {
 		return fmt.Errorf("%w: invalid memory type, scope or proposed_by", ErrInvalidArgument)
 	}
+	if m.Scope != "run" && m.RunID != "" {
+		return fmt.Errorf("%w: only run memories may have run_id", ErrInvalidArgument)
+	}
 	if m.Scope == "run" && strings.TrimSpace(m.RunID) == "" {
 		return fmt.Errorf("%w: run memory requires run_id", ErrInvalidArgument)
 	}

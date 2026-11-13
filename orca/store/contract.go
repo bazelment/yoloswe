@@ -717,13 +717,23 @@ func testMemoriesAndNotes(t *testing.T, factory Factory) {
 		t.Fatalf("run memory without run_id = %v", err)
 	}
 	invalid = m
+	invalid.Scope = "owner"
+	if _, err := st.Memories().Put(ctx, invalid); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("owner memory with run_id = %v", err)
+	}
+	invalid = m
 	invalid.Type = "unknown"
 	if _, err := st.Memories().Put(ctx, invalid); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("invalid memory type = %v", err)
 	}
+	clk.Advance(time.Second)
 	m.Body = "Why: fast feedback. How: start with the smallest case."
-	if _, err := st.Memories().Put(ctx, m); err != nil {
+	updated, err := st.Memories().Put(ctx, m)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !updated.CreatedAt.Equal(clk.Now().Add(-time.Second)) || !updated.UpdatedAt.Equal(clk.Now()) {
+		t.Fatalf("updated timestamps = %v/%v", updated.CreatedAt, updated.UpdatedAt)
 	}
 	got, err := st.Memories().Get(ctx, "run", m.ID)
 	if err != nil || got.Body != m.Body || got.Source != m.Source {

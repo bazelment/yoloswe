@@ -106,7 +106,9 @@ func (m *memMemoryStore) Put(_ context.Context, v MemoryEntry) (MemoryEntry, err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	if v.CreatedAt.IsZero() {
+	if existing, ok := s.memories[v.ID]; ok {
+		v.CreatedAt = existing.CreatedAt
+	} else if v.CreatedAt.IsZero() {
 		v.CreatedAt = now
 	}
 	v.UpdatedAt = now
