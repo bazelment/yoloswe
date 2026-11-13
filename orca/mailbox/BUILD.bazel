@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "mailbox",
+    srcs = ["mailbox.go"],
+    importpath = "github.com/bazelment/yoloswe/orca/mailbox",
+    visibility = ["//visibility:public"],
+    deps = ["//orca/store"],
+)
