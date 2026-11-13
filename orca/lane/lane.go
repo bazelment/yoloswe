@@ -324,6 +324,7 @@ type SpawnResult struct {
 
 // StartPhaseRequest starts a phase terminal on an existing or new worker session.
 type StartPhaseRequest struct {
+	RunDir    string            `json:"run_dir,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
 	RunID     string            `json:"run_id"`
 	LaneID    string            `json:"lane_id"`

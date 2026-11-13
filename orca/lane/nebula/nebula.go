@@ -201,8 +201,8 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 							continue
 						}
 						started[tm.ID] = true
-						laneID := sess.Metadata["laneID"]
-						go d.StreamEvents(ctx, StreamRequest{Events: d.events, RunID: runID, LaneID: laneID, SessionID: sess.ID, TerminalID: tm.ID})
+						laneID := sess.Metadata["swarmLane"]
+						go d.watchStream(ctx, StreamRequest{Events: d.events, RunID: runID, LaneID: laneID, SessionID: sess.ID, TerminalID: tm.ID, StopOnExit: true})
 					}
 				}
 			}
@@ -226,12 +226,39 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				}
 			}
 			if d.clock.Now().Sub(last) >= time.Minute {
-				out <- lane.Event{Kind: lane.EventNoActivity, RunID: runID, Since: last}
+				select {
+				case out <- lane.Event{Kind: lane.EventNoActivity, RunID: runID, Since: last}:
+				case <-ctx.Done():
+					return
+				}
 				last = d.clock.Now()
 			}
 		}
 	}()
 	return out
+}
+
+func (d *Driver) watchStream(ctx context.Context, req StreamRequest) {
+	backoff := 50 * time.Millisecond
+	for {
+		err := d.StreamEvents(ctx, req)
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			return
+		}
+		t := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+		if backoff < 2*time.Second {
+			backoff *= 2
+		}
+	}
 }
 
 func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
@@ -759,6 +786,11 @@ func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
 	}
 	terminalID := strings.TrimSpace(req.TerminalID)
 	sessionID := strings.TrimSpace(req.SessionID)
+	if terminalID != "" && sessionID == "" {
+		if term, err := d.GetTerminal(ctx, terminalID); err == nil {
+			sessionID = term.CodeSessionID
+		}
+	}
 	if terminalID == "" && sessionID != "" {
 		detail, err := d.GetSession(ctx, sessionID)
 		if err != nil {
