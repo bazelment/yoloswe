@@ -620,6 +620,7 @@ func openNebulaDriver(cfg Config, st store.Store, clk clock.Clock) (*nebula.Driv
 		Events:             driverEventStore{st.Events()},
 		APIURL:             cfg.NebulaAPIURL,
 		Token:              cfg.NebulaToken,
+		GitHubToken:        cmp.Or(os.Getenv("GITHUB_TOKEN"), os.Getenv("GH_TOKEN")),
 		RepositoryFullName: cfg.Repository,
 	})
 }

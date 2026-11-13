@@ -1915,10 +1915,6 @@ func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.Ev
 			return store.EventClassUnclassified, err
 		}
 	}
-	if err := c.releaseLaneSession(ctx, ln); err != nil {
-		return store.EventClassUnclassified, err
-	}
-
 	_, already, err := c.recordDecision(ctx, ToolLaneStall, ln.ID,
 		fmt.Sprintf("lane %s stalled in phase %s (round %d, attempt %d)", ln.ID, ln.Phase, round, attempt),
 		"stopped stalled terminal",
