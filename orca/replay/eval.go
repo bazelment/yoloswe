@@ -332,7 +332,7 @@ func NewWireToolClient(inner model.ModelClient) model.ModelClient {
 
 type wireToolClient struct{ inner model.ModelClient }
 
-func (w *wireToolClient) CreateMessage(ctx context.Context, req model.Request) (*model.Response, error) {
+func (w *wireToolClient) CreateMessage(ctx context.Context, _ model.Request) (*model.Response, error) {
 	resp, err := w.inner.CreateMessage(ctx, req)
 	if err != nil || resp == nil {
 		return resp, err

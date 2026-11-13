@@ -352,9 +352,8 @@ type multiTurnWireClient struct {
 	turns  int
 }
 
-func (m *multiTurnWireClient) CreateMessage(_ context.Context, req model.Request) (*model.Response, error) {
+func (m *multiTurnWireClient) CreateMessage(_ context.Context, _ model.Request) (*model.Response, error) {
 	m.turns++
-	_ = req
 	switch m.turns {
 	case 1:
 		return &model.Response{
