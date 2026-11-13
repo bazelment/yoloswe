@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +46,45 @@ func TestWatchEmitsLifecycleKinds(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
+	}
+}
+
+func TestReportInstructionsPathIsReadPath(t *testing.T) {
+	t.Parallel()
+	for _, round := range []int{1, 2} {
+		t.Run(lane.PhaseRoundKey("swe", round), func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			f := &fakeClient{sessions: []br.Session{{ID: "s1", Status: "waiting"}}}
+			d, err := bramble.New(bramble.Config{Client: f, RunDir: dir, PollInterval: time.Millisecond})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "lane."+lane.PhaseRoundKey("swe", round)+".report.md")
+			if got := d.ReportInstructions("run", "lane", "swe", round); !strings.Contains(got, path) {
+				t.Fatalf("instructions=%q, want path %q", got, path)
+			}
+			raw := "Outcome: done\nHEAD: abc\n"
+			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.StartPhaseTerminal(t.Context(), lane.StartPhaseRequest{RunID: "run", LaneID: "lane", SessionID: "s1", Phase: "swe", Round: round, RunDir: filepath.Join(dir, "wrong")}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.ReadReport(t.Context(), "run", "lane", "s1"); err != nil {
+				t.Fatalf("ReadReport did not read advertised path: %v", err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			select {
+			case ev := <-d.Watch(ctx, "run"):
+				if ev.Kind != lane.EventPhaseReported || ev.Phase != "swe" {
+					t.Fatalf("event = %+v, want report for round %d", ev, round)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Watch did not read advertised path")
+			}
+		})
 	}
 }
 

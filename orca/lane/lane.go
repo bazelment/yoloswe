@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Status represents where a lane is in its lifecycle.
@@ -50,6 +51,7 @@ type Lane struct {
 	Title         string            `json:"title,omitempty"`
 	Branch        string            `json:"branch,omitempty"`
 	BaseBranch    string            `json:"base_branch,omitempty"`
+	BaseCommit    string            `json:"base_commit,omitempty"`
 	Worktree      string            `json:"worktree,omitempty"`
 	Status        Status            `json:"status"`
 	Phase         string            `json:"phase,omitempty"`
@@ -225,6 +227,7 @@ type PhaseReport struct {
 	Verdict       string        `json:"verdict,omitempty"`
 	Reach         string        `json:"reach,omitempty"`
 	ReachObserved string        `json:"reach_observed,omitempty"`
+	Change        string        `json:"change,omitempty"`
 	Raw           string        `json:"raw,omitempty"`
 	Round         int           `json:"round,omitempty"`
 	PR            int           `json:"pr,omitempty"`
@@ -279,6 +282,8 @@ func applyReportHeader(rep *PhaseReport, key, val string) bool {
 		rep.Reach = val
 	case "reach observed":
 		rep.ReachObserved = val
+	case "change":
+		rep.Change = val
 	default:
 		return false
 	}
@@ -320,6 +325,9 @@ type SpawnResult struct {
 	StartedAt  time.Time `json:"started_at"`
 	SessionID  string    `json:"session_id"`
 	TerminalID string    `json:"terminal_id"`
+	// BaseCommit is the immutable commit the backend actually started from.
+	// Drivers should populate this from the created checkout/backend response.
+	BaseCommit string `json:"base_commit,omitempty"`
 }
 
 // StartPhaseRequest starts a phase terminal on an existing or new worker session.
@@ -387,6 +395,9 @@ type Event struct { //nolint:govet // wire-shaped event prioritizes readable fie
 
 // LaneDriver abstracts worker session lifecycle operations across backends.
 type LaneDriver interface {
+	// ReportInstructions returns the backend-specific contract a terminal must
+	// follow before it considers a phase complete.
+	ReportInstructions(runID, laneID, phase string, round int) string
 	SpawnSession(ctx context.Context, req SpawnRequest) (SpawnResult, error)
 	StartPhaseTerminal(ctx context.Context, req StartPhaseRequest) (StartPhaseResult, error)
 	Steer(ctx context.Context, req SteerRequest) error
@@ -399,15 +410,16 @@ type Driver = LaneDriver
 
 // FakeDriver is an in-memory LaneDriver implementation for deterministic unit tests.
 type FakeDriver struct { //nolint:govet // test double state is intentionally grouped
-	reports     map[string]*PhaseReport
-	Spawns      []SpawnRequest
-	PhaseStarts []StartPhaseRequest
-	Steers      []SteerRequest
-	Stops       []StopRequest
-	nextSeq     int
-	subs        map[int]chan Event
-	nextSub     int
-	mu          sync.Mutex
+	reports         map[string]*PhaseReport
+	Spawns          []SpawnRequest
+	PhaseStarts     []StartPhaseRequest
+	Steers          []SteerRequest
+	Stops           []StopRequest
+	SpawnBaseCommit string
+	nextSeq         int
+	subs            map[int]chan Event
+	nextSub         int
+	mu              sync.Mutex
 }
 
 func NewFakeDriver() *FakeDriver {
@@ -415,6 +427,10 @@ func NewFakeDriver() *FakeDriver {
 		reports: make(map[string]*PhaseReport),
 		subs:    make(map[int]chan Event),
 	}
+}
+
+func (f *FakeDriver) ReportInstructions(_, laneID, phase string, round int) string {
+	return fmt.Sprintf("File the phase report for lane %s phase %s round %d using the fake driver's report input; the phase is not finished until the report is filed. Report outcome done, needs-swe, blocked, or needs-input, with HEAD and PR lines.", laneID, phase, round)
 }
 
 func (f *FakeDriver) SpawnSession(_ context.Context, req SpawnRequest) (SpawnResult, error) {
@@ -430,6 +446,7 @@ func (f *FakeDriver) SpawnSession(_ context.Context, req SpawnRequest) (SpawnRes
 		SessionID:  fmt.Sprintf("sess-%s-%d", req.LaneID, f.nextSeq),
 		TerminalID: fmt.Sprintf("term-%s-%s-%d", req.LaneID, PhaseRoundKey(req.Phase, req.Round), f.nextSeq),
 		StartedAt:  time.Now().UTC(),
+		BaseCommit: f.SpawnBaseCommit,
 	}, nil
 }
 
@@ -524,4 +541,26 @@ func (f *FakeDriver) Watch(ctx context.Context, runID string) <-chan Event {
 		}
 	}()
 	return out
+}
+
+// AppendReportInstructions preserves the mandatory handback contract while
+// fitting ordinary brief text into the remaining byte budget.
+func AppendReportInstructions(text, instructions string, maxBytes int) string {
+	separator := ""
+	if text != "" && instructions != "" {
+		separator = "\n\n"
+	}
+	if maxBytes > 0 {
+		available := max(0, maxBytes-len(instructions)-len(separator))
+		if len(text) > available {
+			text = text[:available]
+			for text != "" && !utf8.ValidString(text) {
+				text = text[:len(text)-1]
+			}
+		}
+	}
+	if text == "" {
+		return instructions
+	}
+	return text + separator + instructions
 }

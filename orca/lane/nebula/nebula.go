@@ -159,6 +159,10 @@ type Driver struct {
 
 var _ lane.LaneDriver = (*Driver)(nil)
 
+func (d *Driver) ReportInstructions(runID, laneID, phase string, round int) string {
+	return fmt.Sprintf("File the phase report in this terminal with `nebula phase report --outcome <done|needs-swe|blocked|needs-input> --stdin [--head <sha>] [--pr <n>]` (run %s, lane %s, phase %s, round %d). Pipe the report body to stdin; it must include exact `Outcome:`, `HEAD:`, and `PR:` lines. The phase is not finished until the report is filed.", runID, laneID, phase, round)
+}
+
 // Watch streams all terminals belonging to runID as uniform lane events.
 func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 	out := make(chan lane.Event, 32)
@@ -411,6 +415,7 @@ type SessionInfo struct {
 	URL          string            `json:"url,omitempty"`
 	RepositoryID string            `json:"repositoryId,omitempty"`
 	BaseBranch   string            `json:"baseBranch,omitempty"`
+	BaseCommit   string            `json:"baseCommit,omitempty"`
 	WorkBranch   string            `json:"workBranch,omitempty"`
 	SharedHome   bool              `json:"sharedHome,omitempty"`
 }
@@ -487,8 +492,9 @@ func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.
 		return lane.SpawnResult{}, err
 	}
 	res := lane.SpawnResult{
-		SessionID: sess.ID,
-		StartedAt: d.clock.Now().UTC(),
+		SessionID:  sess.ID,
+		BaseCommit: sess.BaseCommit,
+		StartedAt:  d.clock.Now().UTC(),
 	}
 	if req.Phase == "" && req.Harness == "" && req.Brief == "" {
 		return res, nil

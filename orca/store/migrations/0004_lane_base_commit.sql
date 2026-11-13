@@ -1,0 +1,1 @@
+ALTER TABLE lanes ADD COLUMN base_commit TEXT NOT NULL DEFAULT '';

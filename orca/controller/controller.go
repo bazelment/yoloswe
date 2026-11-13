@@ -1403,11 +1403,51 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		}
 	}
 
+	if rep.Outcome == lane.OutcomeDone && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && (strings.EqualFold(strings.TrimSpace(rep.Change), "none") || (rep.HeadSHA != "" && c.reportHeadIsBase(ctx, ln, rep.HeadSHA))) {
+		return c.completeReportOnlyLane(ctx, ln, ev)
+	}
+
 	if rep.Outcome == lane.OutcomeDone && isReviewPhase(curPhase) {
 		ln.ApprovalSHA = cmp.Or(rep.HeadSHA, ln.PRHead, ln.ApprovalSHA)
 	}
 
 	return c.advanceByRecipe(ctx, ln, r, string(rep.Outcome), rep.Reason, rep.Breaks, ev)
+}
+
+// reportHeadIsBase compares against the immutable spawn commit.
+func (c *Controller) reportHeadIsBase(ctx context.Context, ln *lane.Lane, head string) bool {
+	if strings.TrimSpace(ln.BaseCommit) != "" {
+		return strings.TrimSpace(ln.BaseCommit) == strings.TrimSpace(head)
+	}
+	// Legacy lanes recorded a SHA directly in BaseBranch. Never resolve a
+	// branch ref here: refs can move after the lane was spawned.
+	base := strings.TrimSpace(ln.BaseBranch)
+	return len(base) == 40 && base == strings.TrimSpace(head)
+}
+
+func (c *Controller) completeReportOnlyLane(ctx context.Context, ln *lane.Lane, ev *store.Event) (store.EventClass, error) {
+	_, already, err := c.recordDecision(ctx, ToolLaneComplete, ln.ID,
+		"SWE reported done with HEAD equal to base and no PR", "lane done (report-only)",
+		DecisionArgs{ActionKey: "report-only-complete:" + ln.ID + ":" + ln.AttemptKey(), EventID: ev.ID, FromPhase: ln.Phase, ToPhase: recipe.TargetComplete, Verdict: string(lane.OutcomeDone), Round: max(ln.Round, 1)})
+	if err != nil {
+		return store.EventClassUnclassified, err
+	}
+	if !already {
+		ln.Status = lane.StatusDone
+		ln.LastEventID = ev.ID
+		ln.LastEventAt = c.clock.Now().UTC()
+		if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+			return store.EventClassUnclassified, err
+		}
+		if ln.ItemID != "" {
+			if item, err := c.store.Backlog().Get(ctx, c.cfg.RunID, ln.ItemID); err == nil && !item.Status.Terminal() {
+				if err := c.store.Backlog().Close(ctx, c.cfg.RunID, ln.ItemID, store.BacklogDone, ActorController, "lane completed report-only"); err != nil {
+					return store.EventClassUnclassified, err
+				}
+			}
+		}
+	}
+	return store.EventClassAuto, nil
 }
 
 func (c *Controller) blockLaneForJudgment(ctx context.Context, ln *lane.Lane) (store.EventClass, error) {
@@ -1659,7 +1699,7 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 			}
 
 			agent := curPhase.Agents[min(curAttempt-1, len(curPhase.Agents)-1)]
-			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: agent.Harness, Model: agent.Model, Effort: agent.Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, "fresh terminal after nudge")})
+			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: agent.Harness, Model: agent.Model, Effort: agent.Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, max(ln.Round, 1), "fresh terminal after nudge")})
 			if err != nil {
 				return store.EventClassUnclassified, err
 			}
@@ -1892,7 +1932,7 @@ func (c *Controller) startLanePhase(
 	agent := phase.Agents[agentIdx]
 
 	fromPhase := ln.Phase
-	brief := c.buildBrief(ctx, ln, r, phase, extraNote)
+	brief := c.buildBrief(ctx, ln, r, phase, round, extraNote)
 	actionKey := phaseActionKey(tool, ln.ID, phase.Name, round, attempt)
 
 	if phase.Name == recipe.PhaseIntegrate {
@@ -1938,6 +1978,9 @@ func (c *Controller) startLanePhase(
 		}
 		sessionID = res.SessionID
 		terminalID = res.TerminalID
+		if strings.TrimSpace(res.BaseCommit) != "" {
+			ln.BaseCommit = strings.TrimSpace(res.BaseCommit)
+		}
 	} else {
 		res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
 			RunID:     c.cfg.RunID,
@@ -2003,7 +2046,7 @@ func (c *Controller) startLanePhase(
 	return nil
 }
 
-func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Recipe, phase recipe.Phase, extraNote string) string {
+func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Recipe, phase recipe.Phase, round int, extraNote string) string {
 	var parts []string
 	if ln.Title != "" {
 		parts = append(parts, ln.Title)
@@ -2024,11 +2067,8 @@ func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Re
 	if extraNote != "" {
 		parts = append(parts, extraNote)
 	}
-	brief := strings.Join(parts, "\n\n")
-	if r.Limits.MaxBriefBytes > 0 && len(brief) > r.Limits.MaxBriefBytes {
-		brief = brief[:r.Limits.MaxBriefBytes]
-	}
-	return brief
+	reportInstructions := c.driver.ReportInstructions(c.cfg.RunID, ln.ID, phase.Name, round)
+	return lane.AppendReportInstructions(strings.Join(parts, "\n\n"), reportInstructions, r.Limits.MaxBriefBytes)
 }
 
 func (c *Controller) resolveRecipe(ctx context.Context, ln *lane.Lane) (*recipe.Recipe, error) {
@@ -2071,6 +2111,7 @@ func (c *Controller) extractReport(ctx context.Context, ln *lane.Lane, ev store.
 	if termID != "" && c.driver != nil {
 		if drvRep, err := c.driver.ReadReport(ctx, c.cfg.RunID, ln.ID, termID); err == nil && drvRep != nil {
 			payload.Outcome = cmp.Or(payload.Outcome, drvRep.Outcome)
+			payload.Change = cmp.Or(payload.Change, drvRep.Change)
 			payload.HeadSHA = cmp.Or(payload.HeadSHA, drvRep.HeadSHA)
 			payload.PR = cmp.Or(payload.PR, drvRep.PR)
 			payload.Phase = cmp.Or(payload.Phase, drvRep.Phase)

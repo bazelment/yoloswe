@@ -61,7 +61,7 @@ func (m MergeMode) Valid() bool {
 // AgentSpec describes one entry in a phase's agent/model fallback chain.
 type AgentSpec struct {
 	Harness string `json:"harness" jsonschema:"required,description=CLI harness name (claude or codex)"`
-	Model   string `json:"model" jsonschema:"required,description=Model identifier (e.g. opus, sonnet, haiku, gpt-5.4, gpt-5.4-mini)"`
+	Model   string `json:"model" jsonschema:"required,description=Model identifier (e.g. opus, sonnet, haiku, gpt-6.1-sol)"`
 	Effort  string `json:"effort,omitempty" jsonschema:"description=Reasoning effort level (low, medium, high)"`
 }
 
@@ -449,7 +449,7 @@ func Default() Recipe {
 				Name: PhaseSWE,
 				Agents: []AgentSpec{
 					{Harness: "claude", Model: "opus", Effort: "high"},
-					{Harness: "codex", Model: "gpt-5.4", Effort: "high"},
+					{Harness: "codex", Model: "gpt-6.1-sol", Effort: "high"},
 				},
 				BriefTemplate: "Implement the backlog item, pass lint and scoped tests, push branch, and open a ready PR.",
 				ExitContract: ExitContract{
@@ -468,7 +468,7 @@ func Default() Recipe {
 				Name: PhaseClean,
 				Agents: []AgentSpec{
 					{Harness: "claude", Model: "sonnet", Effort: "medium"},
-					{Harness: "codex", Model: "gpt-5.4-mini", Effort: "medium"},
+					{Harness: "codex", Model: "gpt-6.1-sol", Effort: "medium"},
 				},
 				BriefTemplate: "Trim redundant comments, polish the diff, verify lint and scoped tests remain green, and push.",
 				ExitContract: ExitContract{
@@ -486,7 +486,7 @@ func Default() Recipe {
 				Name: PhaseReview,
 				Agents: []AgentSpec{
 					{Harness: "claude", Model: "sonnet", Effort: "high"},
-					{Harness: "codex", Model: "gpt-5.4", Effort: "high"},
+					{Harness: "codex", Model: "gpt-6.1-sol", Effort: "high"},
 				},
 				BriefTemplate: "Review the PR against the brief and verify the repository's documented gates on the exact reviewed HEAD.",
 				ExitContract: ExitContract{

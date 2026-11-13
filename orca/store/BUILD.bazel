@@ -13,6 +13,7 @@ go_library(
         "migrations/0001_init.sql",
         "migrations/0002_memory_notes.sql",
         "migrations/0003_decision_trace.sql",
+        "migrations/0004_lane_base_commit.sql",
     ],
     importpath = "github.com/bazelment/yoloswe/orca/store",
     visibility = ["//visibility:public"],

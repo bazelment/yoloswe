@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -43,7 +44,25 @@ type Driver struct { //nolint:govet // compact driver configuration
 	mu              sync.RWMutex
 }
 
+func reportPath(runDir, runID, laneID, phase string, round int) string {
+	if strings.TrimSpace(runDir) == "" {
+		runDir = runID
+	}
+	return filepath.Join(runDir, laneID+"."+lane.PhaseRoundKey(phase, round)+".report.md")
+}
+
 var _ lane.LaneDriver = (*Driver)(nil)
+
+func (d *Driver) ReportInstructions(runID, laneID, phase string, round int) string {
+	d.mu.RLock()
+	runDir := d.runDir
+	d.mu.RUnlock()
+	if runDir == "" {
+		runDir = runID
+	}
+	path := reportPath(runDir, runID, laneID, phase, round)
+	return "Write the phase report to " + path + "; the phase is not finished until that file is written. Start it with Outcome: done|needs-swe|blocked|needs-input, include HEAD and PR lines, then include the report details."
+}
 
 func New(cfg Config) (*Driver, error) {
 	if cfg.Client == nil {
@@ -94,7 +113,13 @@ func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnRe
 	d.runs[r.SessionID] = req.RunID
 	d.runDirs[r.SessionID] = req.RunDir
 	d.mu.Unlock()
-	return lane.SpawnResult{SessionID: r.SessionID, TerminalID: r.SessionID, StartedAt: time.Now().UTC()}, nil
+	baseCommit := ""
+	if r.WorktreePath != "" {
+		if out, err := exec.CommandContext(ctx, "git", "-C", r.WorktreePath, "rev-parse", "HEAD").Output(); err == nil {
+			baseCommit = strings.TrimSpace(string(out))
+		}
+	}
+	return lane.SpawnResult{SessionID: r.SessionID, TerminalID: r.SessionID, StartedAt: time.Now().UTC(), BaseCommit: baseCommit}, nil
 }
 func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
 	id := req.SessionID
@@ -122,14 +147,18 @@ func (d *Driver) ReadReport(_ context.Context, runID, laneID, terminalID string)
 	if phase == "" {
 		return nil, errors.New("unknown bramble terminal")
 	}
-	if runDir == "" {
-		runDir = d.runDir
+	// Config.RunDir is the shared absolute report directory. Per-request
+	// RunDir is retained for drivers without a configured shared directory.
+	d.mu.RLock()
+	configuredRunDir := d.runDir
+	d.mu.RUnlock()
+	if configuredRunDir != "" {
+		runDir = configuredRunDir
 	}
 	if runDir == "" {
 		runDir = runID
 	}
-	key := lane.PhaseRoundKey(phase, round)
-	b, err := os.ReadFile(filepath.Join(runDir, laneID+"."+key+".report.md"))
+	b, err := os.ReadFile(reportPath(runDir, runID, laneID, phase, round))
 	if err != nil {
 		return nil, err
 	}

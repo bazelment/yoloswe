@@ -938,10 +938,6 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	if !hasFirst {
 		return "", fmt.Errorf("recipe %q has no phases", r.Name)
 	}
-	workerBrief, err := brief.Render(p.Brief, view.Memories, view.EffectiveMaxBriefBytes(r))
-	if err != nil {
-		return "", err
-	}
 
 	now := d.clock.Now().UTC()
 	ln := lane.Lane{
@@ -975,12 +971,20 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		ln.LastEventAt = now
 	}
 
+	workerBrief, err := d.buildWorkerBrief(view, ln, r, firstPhase, ln.Round, p.Brief)
+	if err != nil {
+		return "", err
+	}
+
 	if d.driver != nil && len(firstPhase.Agents) > 0 {
 		spawnRes, err := d.spawnLaneSession(ctx, runID, ln, firstPhase.Name, ln.Round, firstPhase.Agents[0], workerBrief)
 		if err != nil {
 			return "", err
 		}
 		ln.Status = lane.StatusRunning
+		if strings.TrimSpace(spawnRes.BaseCommit) != "" {
+			ln.BaseCommit = strings.TrimSpace(spawnRes.BaseCommit)
+		}
 		ln.RecordAttempt(firstPhase.Name, ln.Round, spawnRes.SessionID, spawnRes.TerminalID)
 	}
 
@@ -1048,7 +1052,7 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 		round = ln.MaxRound(targetPhase.Name) + 1
 	}
 
-	workerBrief, err := d.buildRetryBrief(view, ln, r, targetPhase, p.Note)
+	workerBrief, err := d.buildWorkerBrief(view, ln, r, targetPhase, round, p.Note)
 	if err != nil {
 		return "", err
 	}
@@ -1063,6 +1067,9 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 			}
 			sessionID = res.SessionID
 			terminalID = res.TerminalID
+			if strings.TrimSpace(res.BaseCommit) != "" {
+				ln.BaseCommit = strings.TrimSpace(res.BaseCommit)
+			}
 		} else {
 			res, err := d.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
 				RunID:     runID,
@@ -1120,7 +1127,23 @@ func (d *Dispatcher) spawnLaneSession(
 	})
 }
 
-func (d *Dispatcher) buildRetryBrief(view *StateView, ln lane.Lane, r recipe.Recipe, phase recipe.Phase, note string) (string, error) {
+// buildWorkerBrief is the single dispatcher path for briefs sent to a driver.
+// Keeping the report contract here ensures initial spawns and retries have the
+// same handback instructions as controller-started phase terminals.
+func (d *Dispatcher) buildWorkerBrief(view *StateView, ln lane.Lane, r recipe.Recipe, phase recipe.Phase, round int, extra string) (string, error) {
+	raw := d.buildRetryBriefText(view, ln, phase, extra)
+	instructions := ""
+	if d.driver != nil {
+		instructions = d.driver.ReportInstructions(ln.RunID, ln.ID, phase.Name, round)
+	}
+	text, err := brief.Render(raw, view.Memories, 0)
+	if err != nil {
+		return "", err
+	}
+	return lane.AppendReportInstructions(text, instructions, view.EffectiveMaxBriefBytes(r)), nil
+}
+
+func (d *Dispatcher) buildRetryBriefText(view *StateView, ln lane.Lane, phase recipe.Phase, note string) string {
 	var parts []string
 	if ln.Title != "" {
 		parts = append(parts, ln.Title)
@@ -1141,7 +1164,7 @@ func (d *Dispatcher) buildRetryBrief(view *StateView, ln lane.Lane, r recipe.Rec
 	if strings.TrimSpace(note) != "" {
 		parts = append(parts, strings.TrimSpace(note))
 	}
-	return brief.Render(strings.Join(parts, "\n\n"), view.Memories, view.EffectiveMaxBriefBytes(r))
+	return strings.Join(parts, "\n\n")
 }
 
 func (d *Dispatcher) applyLaneStop(ctx context.Context, runID string, view *StateView, p LaneStopParams) (string, error) {

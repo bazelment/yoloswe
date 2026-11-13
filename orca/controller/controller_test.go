@@ -219,6 +219,15 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 			if ln.Phase != phase {
 				t.Fatalf("lane.Phase = %q, want %q", ln.Phase, phase)
 			}
+			var brief string
+			if len(drv.Spawns) > 0 && len(drv.PhaseStarts) == 0 {
+				brief = drv.Spawns[0].Brief
+			} else if len(drv.PhaseStarts) > 0 {
+				brief = drv.PhaseStarts[len(drv.PhaseStarts)-1].Brief
+			}
+			if !strings.Contains(brief, "phase report") {
+				t.Fatalf("%s brief lacks fake-driver report contract: %q", phase, brief)
+			}
 			drv.SetReport(ln.TerminalID, lane.PhaseReport{
 				Phase:   phase,
 				Outcome: lane.OutcomeDone,
@@ -266,6 +275,54 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 			t.Fatalf("decision tools = %v, want %v", tools, wantTools)
 		}
 	})
+}
+
+func TestControllerReportOnlySweCompletesLane(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, head, change string
+		wantDone           bool
+	}{
+		{"recorded base after branch moves", "base-sha", "", true},
+		{"one new commit", "new-sha", "", false},
+		{"explicit no change", "", "none", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clk, st, drv, judge := setupTestEnv(t)
+			ctx := t.Context()
+			if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-empty", RunID: "run-1", Status: lane.StatusPlanned, BaseBranch: "main", BaseCommit: "base-sha"}); err != nil {
+				t.Fatal(err)
+			}
+			ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			ln, err := st.Lanes().Get(ctx, "run-1", "lane-empty")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Move the mutable base while retaining the immutable spawn commit.
+			ln.BaseBranch = "moved-base"
+			if err := st.Lanes().Upsert(ctx, *ln); err != nil {
+				t.Fatal(err)
+			}
+			drv.SetReport(ln.TerminalID, lane.PhaseReport{Phase: recipe.PhaseSWE, Outcome: lane.OutcomeDone, HeadSHA: tc.head, Change: tc.change})
+			if _, err := st.Events().Append(ctx, store.Event{RunID: "run-1", Kind: store.EventLaneReport, LaneID: "lane-empty"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			ln, err = st.Lanes().Get(ctx, "run-1", "lane-empty")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := ln.Status == lane.StatusDone; got != tc.wantDone {
+				t.Fatalf("status = %q, wantDone = %v", ln.Status, tc.wantDone)
+			}
+		})
+	}
 }
 
 func TestControllerReworkAndRoundLimits(t *testing.T) {
@@ -433,8 +490,8 @@ func TestControllerJudgmentRuleAndPhaseExitFallback(t *testing.T) {
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("Step (phase_exit fallback): %v", err)
 	}
-	if len(drv.PhaseStarts) != 1 || drv.PhaseStarts[0].Harness != "codex" || drv.PhaseStarts[0].Model != "gpt-5.4" {
-		t.Fatalf("fallback PhaseStarts = %+v, want codex:gpt-5.4", drv.PhaseStarts)
+	if len(drv.PhaseStarts) != 1 || drv.PhaseStarts[0].Harness != "codex" || drv.PhaseStarts[0].Model != "gpt-6.1-sol" {
+		t.Fatalf("fallback PhaseStarts = %+v, want codex:gpt-6.1-sol", drv.PhaseStarts)
 	}
 	if judge.BatchCount() != 0 {
 		t.Fatalf("expected fallback retry to be auto (0 judgment batches), got %d", judge.BatchCount())
@@ -506,8 +563,8 @@ func TestControllerWatchRestartLadder(t *testing.T) {
 					t.Fatalf("step %d: steers=%d starts=%d, want 1 and %d", step, len(drv.Steers), len(drv.PhaseStarts), wantStarts)
 				}
 			}
-			if drv.PhaseStarts[0].Model != "opus" || drv.PhaseStarts[1].Model != "gpt-5.4" {
-				t.Fatalf("starts = %+v, want fresh opus then fallback gpt-5.4", drv.PhaseStarts)
+			if drv.PhaseStarts[0].Model != "opus" || drv.PhaseStarts[1].Model != "gpt-6.1-sol" {
+				t.Fatalf("starts = %+v, want fresh opus then fallback gpt-6.1-sol", drv.PhaseStarts)
 			}
 			ln, err := st.Lanes().Get(ctx, "run-1", "lane-quiet")
 			if err != nil {
@@ -1678,7 +1735,7 @@ func TestWatchFailuresSkipQuietNudge(t *testing.T) {
 				return len(events) == 1
 			})
 			mustStep(t, ctrl)
-			if len(drv.Steers) != 0 || len(drv.PhaseStarts) != 1 || drv.PhaseStarts[0].Model != "gpt-5.4" {
+			if len(drv.Steers) != 0 || len(drv.PhaseStarts) != 1 || drv.PhaseStarts[0].Model != "gpt-6.1-sol" {
 				t.Fatalf("failed terminal entered quiet ladder: steers=%+v starts=%+v", drv.Steers, drv.PhaseStarts)
 			}
 		})

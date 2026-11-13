@@ -30,7 +30,7 @@ Turn the owner's plain-language lane/phase workflow description (or a per-lane d
 Rules:
 1. Phases:
    - Each phase has a lowercase slug name without trailing digits (e.g. "swe", "clean", "review", "security-review", "integrate", "analyze", "propose", "critique", "synthesize", "prove", "verify", "visual-review", "benchmark"). Never use "complete" or "escalate" as phase names.
-   - Populate "agents" as an ordered fallback chain of AgentSpec{harness, model, effort} (harnesses: "claude", "codex"; models: "opus", "sonnet", "haiku", "gpt-5.4", "gpt-5.4-mini"; effort: "low", "medium", "high").
+   - Populate "agents" as an ordered fallback chain of AgentSpec{harness, model, effort} (harnesses: "claude", "codex"; models: "opus", "sonnet", "haiku", "gpt-6.1-sol"; effort: "low", "medium", "high").
    - Set "mutating": true for phases that write code, commits, branches, or merges; false for read-only analysis, critique, or review phases.
    - Set "exit_contract" with "allowed_outcomes" (subset of ["done", "needs-swe", "blocked", "needs-input"]), "requires_pr", and "requires_report": true.
    - Include appropriate verification "gates" (e.g. "lint" with command "scripts/lint.sh", "scoped_tests", "pr_open", "ci_green", "review_head_pinned", "review_approved", "security_check", "flake_repeat", "screenshots", "bench_compare").
