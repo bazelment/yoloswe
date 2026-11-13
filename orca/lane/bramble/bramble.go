@@ -111,7 +111,9 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 	out := make(chan lane.Event, 16)
 	go func() {
 		defer close(out)
-		seen := map[string]bool{}
+		reported := map[string]bool{}
+		exited := map[string]bool{}
+		lastActivity := time.Now()
 		t := time.NewTicker(d.poll)
 		defer t.Stop()
 		for {
@@ -126,9 +128,6 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 			}
 			for i := range ss {
 				s := &ss[i]
-				if seen[s.ID] {
-					continue
-				}
 				d.mu.RLock()
 				owned := d.runs[s.ID] == runID
 				phase := d.phases[s.ID]
@@ -137,17 +136,27 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				if !owned {
 					continue
 				}
-				if rep, err := d.ReadReport(ctx, runID, laneID, s.ID); err == nil {
-					select {
-					case out <- lane.Event{Kind: lane.EventPhaseReported, RunID: runID, LaneID: laneID, SessionID: s.ID, Phase: phase, Report: rep}:
-					case <-ctx.Done():
-						return
+				if !reported[s.ID] {
+					if rep, err := d.ReadReport(ctx, runID, laneID, s.ID); err == nil {
+						select {
+						case out <- lane.Event{Kind: lane.EventPhaseReported, RunID: runID, LaneID: laneID, SessionID: s.ID, Phase: phase, Report: rep}:
+						case <-ctx.Done():
+							return
+						}
+						reported[s.ID] = true
+						lastActivity = time.Now()
+						continue
 					}
-					seen[s.ID] = true
+				}
+				if exited[s.ID] {
 					continue
 				}
 				kind := lane.EventExited
 				status := strings.ToLower(s.Status)
+				terminal := strings.Contains(status, "exit") || strings.Contains(status, "dead") || strings.Contains(status, "failed") || strings.Contains(status, "done") || strings.Contains(status, "complete")
+				if !terminal && (strings.Contains(status, "run") || strings.Contains(status, "active") || status == "") {
+					continue
+				}
 				if strings.Contains(status, "wait") {
 					kind = lane.EventWaitingForInput
 				}
@@ -162,7 +171,16 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				case <-ctx.Done():
 					return
 				}
-				seen[s.ID] = true
+				exited[s.ID] = true
+				lastActivity = time.Now()
+			}
+			if time.Since(lastActivity) >= time.Minute {
+				select {
+				case out <- lane.Event{Kind: lane.EventNoActivity, RunID: runID, Since: lastActivity}:
+				case <-ctx.Done():
+					return
+				}
+				lastActivity = time.Now()
 			}
 		}
 	}()

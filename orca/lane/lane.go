@@ -404,14 +404,15 @@ type FakeDriver struct { //nolint:govet // test double state is intentionally gr
 	Steers      []SteerRequest
 	Stops       []StopRequest
 	nextSeq     int
-	events      chan Event
+	subs        map[int]chan Event
+	nextSub     int
 	mu          sync.Mutex
 }
 
 func NewFakeDriver() *FakeDriver {
 	return &FakeDriver{
 		reports: make(map[string]*PhaseReport),
-		events:  make(chan Event, 64),
+		subs:    make(map[int]chan Event),
 	}
 }
 
@@ -486,23 +487,37 @@ func (f *FakeDriver) ReadReport(_ context.Context, _, _, terminalID string) (*Ph
 
 // Emit publishes an event to watchers.
 func (f *FakeDriver) Emit(ev Event) {
-	select {
-	case f.events <- ev:
-	default:
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, ch := range f.subs {
+		select {
+		case ch <- ev:
+		default:
+		}
 	}
 }
 
 func (f *FakeDriver) Watch(ctx context.Context, runID string) <-chan Event {
+	raw := make(chan Event, 64)
 	out := make(chan Event, 16)
+	f.mu.Lock()
+	f.nextSub++
+	id := f.nextSub
+	f.subs[id] = raw
+	f.mu.Unlock()
 	go func() {
-		defer close(out)
+		defer func() { f.mu.Lock(); delete(f.subs, id); f.mu.Unlock(); close(out) }()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case ev := <-f.events:
+			case ev := <-raw:
 				if runID == "" || ev.RunID == "" || ev.RunID == runID {
-					out <- ev
+					select {
+					case out <- ev:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}

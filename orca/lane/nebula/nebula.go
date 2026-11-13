@@ -238,6 +238,9 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 	var p StreamEventPayload
 	_ = json.Unmarshal(ev.Payload, &p)
 	e := lane.Event{RunID: runID, LaneID: ev.LaneID, At: ev.CreatedAt, Text: ev.Summary, TerminalID: p.TerminalID}
+	if p.Report != nil {
+		e.Phase = p.Report.Phase
+	}
 	if p.TerminalEvent != nil {
 		e.TerminalID = p.TerminalEvent.TerminalID
 		if p.TerminalEvent.Text != "" {
@@ -268,7 +271,7 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 			default:
 				e.Kind = lane.EventTurnEndedNoReport
 			}
-		} else if p.TerminalEvent != nil {
+		} else if p.UsageLimit != nil || p.Capacity != nil || p.Usage != nil {
 			e.Kind = lane.EventQuotaFailure
 		} else {
 			return lane.Event{}, false
