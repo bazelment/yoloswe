@@ -120,7 +120,9 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 	if err := s.applyMigrations(ctx); err != nil {
 		return err
 	}
-	for _, v := range StarterMemories() {
+	starter := StarterMemories()
+	for i := range starter {
+		v := starter[i]
 		if _, err := (*sqliteMemoryStore)(s).Put(ctx, v); err != nil {
 			return err
 		}

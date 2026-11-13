@@ -58,7 +58,9 @@ func NewMemoryStore(clk clock.Clock) *MemoryStore {
 		recipes:      make(map[string]map[string][]Recipe),
 		memories:     make(map[string]*MemoryEntry), notes: make(map[string][]RunNote),
 	}
-	for _, v := range StarterMemories() {
+	starter := StarterMemories()
+	for i := range starter {
+		v := starter[i]
 		cp := v
 		s.memories[v.ID] = &cp
 	}
