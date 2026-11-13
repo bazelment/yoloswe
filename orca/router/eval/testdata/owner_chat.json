@@ -639,7 +639,7 @@
     "id": "owner-54",
     "source_mail_id": "s:06a786c6",
     "text": "a",
-    "context": "",
+    "context": "Open question: refresh the mounted gcloud login (a) the host refreshes it (b) leave it",
     "destinations": [
       "answer-open-question"
     ],
@@ -651,7 +651,7 @@
     "id": "owner-55",
     "source_mail_id": "s:ab35d416",
     "text": "a",
-    "context": "",
+    "context": "Open question: keep 120 s, raise the default to 10 min, or keep as is",
     "destinations": [
       "answer-open-question"
     ],
@@ -687,7 +687,7 @@
     "id": "owner-58",
     "source_mail_id": "s:7929c93e",
     "text": "files cost approved",
-    "context": "",
+    "context": "Open question: reply files cost approved or files cost declined",
     "destinations": [
       "answer-open-question"
     ],

@@ -17,6 +17,10 @@ import (
 
 type fake struct{ text string }
 
+type staticRouter struct{ decision Decision }
+
+func (r staticRouter) Route(context.Context, string) (Decision, error) { return r.decision, nil }
+
 func (f fake) CreateMessage(context.Context, model.Request) (*model.Response, error) {
 	return &model.Response{Message: model.Message{Content: []model.ContentBlock{model.NewTextBlock(f.text)}}}, nil
 }
@@ -255,6 +259,30 @@ func TestGeminiPreservesSelectedOpenQuestion(t *testing.T) {
 	}
 	if d.Destination != AnswerOpenQuestion || d.QuestionID != "ask-2" {
 		t.Fatal(d)
+	}
+}
+
+func TestGeminiMultipartPreservesOpenQuestionContext(t *testing.T) {
+	raw, err := os.ReadFile("testdata/gemini.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		var wire map[string]any
+		if err := json.Unmarshal(raw, &wire); err != nil {
+			t.Fatal(err)
+		}
+		wire["answers"].(map[string]any)["destination"].(map[string]any)["choice"] = "answer-open-question"
+		_ = json.NewEncoder(w).Encode(wire)
+	}))
+	defer server.Close()
+	c := GeminiClient{APIKey: "dummy", BaseURL: server.URL, Segmenter: staticRouter{decision: Decision{Parts: []Decision{{Text: "yes to ask-2", QuestionID: "ask-2"}}}}}
+	d, err := c.Route(context.Background(), FormatInput("yes to ask-2", "ask-2: choose a rollout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Parts) != 1 || d.Parts[0].Destination != AnswerOpenQuestion || d.Parts[0].QuestionID != "ask-2" {
+		t.Fatalf("multipart decision lost supplied context: %+v", d)
 	}
 }
 

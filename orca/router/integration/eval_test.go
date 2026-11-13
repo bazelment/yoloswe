@@ -23,11 +23,8 @@ func TestOwnerChatRouterEval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	switch os.Getenv("ORCA_ROUTER_SPLIT") {
-	case "tune":
-		cases, err = eval.OwnerChatCasesSplit(replay.SplitTune)
-	case "holdout":
-		cases, err = eval.OwnerChatCasesSplit(replay.SplitHoldout)
+	if split := os.Getenv("ORCA_ROUTER_SPLIT"); split != "" {
+		cases, err = eval.OwnerChatCasesSplit(replay.Split(split))
 	}
 	if err != nil {
 		t.Fatal(err)

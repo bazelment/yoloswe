@@ -184,6 +184,7 @@ type GeminiClient struct {
 }
 
 func (c GeminiClient) Route(ctx context.Context, text string) (Decision, error) {
+	openQuestion := hasOpenQuestionContext(text)
 	var parts []Decision
 	questionID := ""
 	if c.Segmenter != nil {
@@ -199,12 +200,16 @@ func (c GeminiClient) Route(ctx context.Context, text string) (Decision, error) 
 		out = Decision{Destination: Concierge, Confidence: 1}
 		for i := range parts {
 			part := parts[i]
-			d, err := c.routeOne(ctx, part.Text)
+			d, err := c.routeOneWithContext(ctx, part.Text, openQuestion)
 			if err != nil {
 				return Decision{}, err
 			}
 			d.Text = part.Text
-			d.QuestionID = part.QuestionID
+			if d.Destination == AnswerOpenQuestion {
+				d.QuestionID = part.QuestionID
+			} else {
+				d.QuestionID = ""
+			}
 			out.Parts = append(out.Parts, d)
 		}
 		out = normalize(out, text, c.ConfidenceThreshold, hasOpenQuestionContext(text))
@@ -227,6 +232,10 @@ func (c GeminiClient) Route(ctx context.Context, text string) (Decision, error) 
 // The wire schema follows google-genai's generated decisions types:
 // https://github.com/googleapis/python-genai/tree/main/google/genai/_gaos/types/decisions
 func (c GeminiClient) routeOne(ctx context.Context, text string) (Decision, error) {
+	return c.routeOneWithContext(ctx, text, hasOpenQuestionContext(text))
+}
+
+func (c GeminiClient) routeOneWithContext(ctx context.Context, text string, openQuestion bool) (Decision, error) {
 	if c.HTTPClient == nil {
 		c.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -299,7 +308,7 @@ func (c GeminiClient) routeOne(ctx context.Context, text string) (Decision, erro
 			d.AnswersOpenQuestion = yes
 		}
 	}
-	return normalize(d, text, c.ConfidenceThreshold, hasOpenQuestionContext(text)), nil
+	return normalize(d, text, c.ConfidenceThreshold, openQuestion), nil
 }
 
 // Select uses Decisions when configured and otherwise the concierge model.
