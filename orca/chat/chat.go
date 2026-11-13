@@ -90,8 +90,18 @@ func (m Model) Init() tea.Cmd {
 	}
 	return m.refresh()
 }
-func poll() tea.Cmd                       { return tea.Tick(time.Second, func(time.Time) tea.Msg { return pollMsg{} }) }
-func receive(ch <-chan streamMsg) tea.Cmd { return func() tea.Msg { x := <-ch; x.ch = ch; return x } }
+func poll() tea.Cmd { return tea.Tick(time.Second, func(time.Time) tea.Msg { return pollMsg{} }) }
+func receive(ctx context.Context, ch <-chan streamMsg) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case x := <-ch:
+			x.ch = ch
+			return x
+		case <-ctx.Done():
+			return streamMsg{done: true, err: context.Canceled, ch: ch}
+		}
+	}
+}
 func (m Model) route(text string) tea.Cmd {
 	return func() tea.Msg {
 		if m.router == nil {
@@ -135,7 +145,7 @@ func (m Model) dispatch(d router.Decision, text string) tea.Cmd {
 		case <-m.ctx.Done():
 		}
 	}()
-	return receive(ch)
+	return receive(m.ctx, ch)
 }
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch x := msg.(type) {
@@ -193,7 +203,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.refresh()
 		}
-		return m, receive(x.ch)
+		return m, receive(m.ctx, x.ch)
 	case tea.KeyPressMsg:
 		if (x.Code == 'c' && x.Mod == tea.ModCtrl) || x.Code == tea.KeyEscape {
 			return m, tea.Quit
@@ -237,6 +247,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.waiting = ""
 		}
 		return m, m.route(text)
+	case tea.PasteMsg:
+		if !m.busy {
+			m.input += x.Content
+		}
+		return m, nil
 	}
 	return m, nil
 }

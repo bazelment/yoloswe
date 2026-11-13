@@ -151,6 +151,9 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 		}
 		echo, err := b.memory.Submit(ctx, b.Store, b.RunID, "chat-memory-"+rand.Text(), text, concierge.MemorySubmitParams{Action: "create", Name: text, Description: text, Body: text, Scope: "run", Type: typ})
 		if err == nil {
+			// Memory maintains its own undo journal; make /undo target this
+			// mutation rather than an older directive from another destination.
+			b.lastDirective = ""
 			emit(echo)
 		}
 		return err

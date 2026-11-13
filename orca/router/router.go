@@ -281,7 +281,9 @@ func (c GeminiClient) routeOne(ctx context.Context, text string) (Decision, erro
 
 // Select uses Decisions when configured and otherwise the concierge model.
 func Select(client model.ModelClient, modelName, key, baseURL string, logger Logger) Router {
-	if key != "" || baseURL != "" {
+	// Decisions is selected only when credentials are present. A base URL alone
+	// must not redirect owner messages to an unauthenticated third party.
+	if key != "" {
 		var segmenter Router
 		if client != nil {
 			segmentLog := logger
