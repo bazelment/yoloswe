@@ -71,7 +71,7 @@ func Evaluate(ctx context.Context, backend router.Router, cases []EvalCase) Eval
 		c := &cases[i]
 		input := c.Text
 		if c.Context != "" {
-			input += "\n\nOpen questions:\n" + c.Context
+			input += "\nOpen questions:\n" + c.Context
 		}
 		start := time.Now()
 		d, err := backend.Route(ctx, input)
