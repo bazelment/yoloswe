@@ -176,9 +176,6 @@ func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Respons
 	}
 	for _, t := range req.Tools {
 		p.Tools = append(p.Tools, responsesTool{Type: "function", Name: codec.wire(t.Name), Description: t.Description, Parameters: t.InputSchema})
-=======
-		p.Tools = append(p.Tools, responsesTool{Type: "function", Name: openAIToolName(t.Name), Description: t.Description, Parameters: t.InputSchema})
->>>>>>> theirs
 	}
 	body, err := json.Marshal(p)
 	if err != nil {
