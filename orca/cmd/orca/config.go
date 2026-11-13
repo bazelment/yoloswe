@@ -529,7 +529,6 @@ func openStore(cfg Config, clk clock.Clock) (store.Store, string, error) {
 	}
 }
 
-// roleClient stamps the resolved selection before recording or routing a call.
 func roleClient(client model.ModelClient, cfg Config, role string) model.ModelClient {
 	if client == nil {
 		return nil

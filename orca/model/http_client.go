@@ -297,7 +297,6 @@ func (c *HTTPClient) CreateMessage(ctx context.Context, req Request) (*Response,
 		Temperature:   req.Temperature,
 		Metadata:      maps.Clone(req.Metadata),
 	}
-	// Role routing metadata belongs to the recording, not Anthropic's wire schema.
 	delete(payload.Metadata, "role")
 	delete(payload.Metadata, "provider")
 	if req.ReasoningEffort != "" {

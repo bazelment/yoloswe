@@ -1223,7 +1223,6 @@ func TestCLIOverridesOppositeConfigAlias(t *testing.T) {
 }
 
 func TestRoleProviderRoutingAndExplicitGateway(t *testing.T) {
-	// This serial test isolates the provider URLs from the session's real gateways.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
