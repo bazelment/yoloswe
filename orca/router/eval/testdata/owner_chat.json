@@ -712,7 +712,7 @@
     "id": "owner-60",
     "source_mail_id": "s:b050519d",
     "text": "Host: yes to both: recover-workspace 5b0fe5d2 and 481f35b9 (your own lane sessions; it backs up to refs, non-destructive), then release --backup. Standing rule for your run from now: recover-workspace then release for your own finished lanes needs no ask; just log the backup ref.",
-    "context": "",
+    "context": "Open question: recover-workspace 5b0fe5d2 and 481f35b9, then release --backup",
     "destinations": [
       "answer-open-question",
       "memory"

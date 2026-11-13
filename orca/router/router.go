@@ -157,9 +157,16 @@ func normalize(d Decision, text string, threshold float64, openQuestion bool) De
 }
 
 func hasOpenQuestionContext(text string) bool {
+	return extractOpenQuestionContext(text) != ""
+}
+
+func extractOpenQuestionContext(text string) string {
 	const marker = "Open questions:"
 	i := strings.Index(text, marker)
-	return i >= 0 && strings.TrimSpace(text[i+len(marker):]) != ""
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(text[i+len(marker):])
 }
 func validDestination(d Destination) bool {
 	for _, x := range destinations {
@@ -185,6 +192,7 @@ type GeminiClient struct {
 
 func (c GeminiClient) Route(ctx context.Context, text string) (Decision, error) {
 	openQuestion := hasOpenQuestionContext(text)
+	openQuestionText := extractOpenQuestionContext(text)
 	var parts []Decision
 	questionID := ""
 	if c.Segmenter != nil {
@@ -200,7 +208,11 @@ func (c GeminiClient) Route(ctx context.Context, text string) (Decision, error) 
 		out = Decision{Destination: Concierge, Confidence: 1}
 		for i := range parts {
 			part := parts[i]
-			d, err := c.routeOneWithContext(ctx, part.Text, openQuestion)
+			partInput := part.Text
+			if openQuestion {
+				partInput = FormatInput(part.Text, openQuestionText)
+			}
+			d, err := c.routeOneWithContext(ctx, partInput, openQuestion)
 			if err != nil {
 				return Decision{}, err
 			}
@@ -212,14 +224,16 @@ func (c GeminiClient) Route(ctx context.Context, text string) (Decision, error) 
 			}
 			out.Parts = append(out.Parts, d)
 		}
-		out = normalize(out, text, c.ConfidenceThreshold, hasOpenQuestionContext(text))
+		out = normalize(out, text, c.ConfidenceThreshold, openQuestion)
 	} else {
-		d, err := c.routeOne(ctx, text)
+		d, err := c.routeOneWithContext(ctx, text, openQuestion)
 		if err != nil {
 			return Decision{}, err
 		}
 		out = d
-		out.QuestionID = questionID
+		if out.Destination == AnswerOpenQuestion {
+			out.QuestionID = questionID
+		}
 	}
 	if c.Logger != nil {
 		if err := c.Logger.LogRouting(ctx, text, out); err != nil {
@@ -231,10 +245,6 @@ func (c GeminiClient) Route(ctx context.Context, text string) (Decision, error) 
 
 // The wire schema follows google-genai's generated decisions types:
 // https://github.com/googleapis/python-genai/tree/main/google/genai/_gaos/types/decisions
-func (c GeminiClient) routeOne(ctx context.Context, text string) (Decision, error) {
-	return c.routeOneWithContext(ctx, text, hasOpenQuestionContext(text))
-}
-
 func (c GeminiClient) routeOneWithContext(ctx context.Context, text string, openQuestion bool) (Decision, error) {
 	if c.HTTPClient == nil {
 		c.HTTPClient = &http.Client{Timeout: 30 * time.Second}

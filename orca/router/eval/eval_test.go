@@ -103,6 +103,20 @@ func TestOwnerChatSplitMatchesReplayHashSplit(t *testing.T) {
 	}
 }
 
+func TestAnswerOpenQuestionCasesIncludeContext(t *testing.T) {
+	cases, err := OwnerChatCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		for _, d := range c.Destinations {
+			if d == router.AnswerOpenQuestion && c.Context == "" {
+				t.Errorf("%s expects answer-open-question without context", c.ID)
+			}
+		}
+	}
+}
+
 func validEvalDestination(d router.Destination) bool {
 	switch d {
 	case router.Concierge, router.AnswerOpenQuestion, router.Planner, router.Memory, router.Dispatcher, router.Controller:
