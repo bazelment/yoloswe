@@ -434,9 +434,9 @@ func (r *Recipe) FormatTable() string {
 const DefaultSource = "Each task runs swe -> clean -> review -> integrate. " +
 	"SWE implements the change, runs lint and scoped tests, and opens a ready PR. " +
 	"Clean trims redundant comments and polishes the PR without changing behavior. " +
-	"Review checks the PR against the brief and requires green CI on the reviewed HEAD; " +
+	"Review checks the PR against the brief and the repository's documented gates; " +
 	"if review reports needs-swe, return to swe on the next round (up to 3 rounds, then escalate). " +
-	"Integrate merges the PR once review passes and CI is green on the pinned HEAD."
+	"Integrate uses the repository's documented merge path once review passes on the pinned HEAD."
 
 // Default returns a fresh copy of the shipped default recipe (swe -> clean -> review -> integrate).
 func Default() Recipe {
@@ -488,14 +488,13 @@ func Default() Recipe {
 					{Harness: "claude", Model: "sonnet", Effort: "high"},
 					{Harness: "codex", Model: "gpt-5.4", Effort: "high"},
 				},
-				BriefTemplate: "Review the PR against the brief and verify required CI checks are green on the exact reviewed HEAD.",
+				BriefTemplate: "Review the PR against the brief and verify the repository's documented gates on the exact reviewed HEAD.",
 				ExitContract: ExitContract{
 					AllowedOutcomes: []string{OutcomeDone, OutcomeNeedsSWE, OutcomeBlocked, OutcomeNeedsInput},
 					RequiresPR:      true,
 					RequiresReport:  true,
 				},
 				Gates: []Gate{
-					{Name: "ci_green", Required: true},
 					{Name: "review_head_pinned", Required: true},
 				},
 				Mutating: false,
@@ -505,14 +504,13 @@ func Default() Recipe {
 				Agents: []AgentSpec{
 					{Harness: "claude", Model: "sonnet", Effort: "medium"},
 				},
-				BriefTemplate: "Verify pinned review approval and green CI checks on HEAD, then integrate the PR into the target branch.",
+				BriefTemplate: "Use the repository's documented merge path to integrate the reviewed PR. Verify the reviewed head, perform the merge once, and report the resulting head.",
 				ExitContract: ExitContract{
 					AllowedOutcomes: []string{OutcomeDone, OutcomeNeedsSWE, OutcomeBlocked, OutcomeNeedsInput},
 					RequiresPR:      true,
 					RequiresReport:  true,
 				},
 				Gates: []Gate{
-					{Name: "ci_green", Required: true},
 					{Name: "review_approved", Required: true},
 				},
 				Mutating: true,
@@ -531,7 +529,7 @@ func Default() Recipe {
 			},
 			{
 				From: PhaseReview,
-				On:   Condition{Verdict: OutcomeDone, CIGreen: true},
+				On:   Condition{Verdict: OutcomeDone},
 				To:   PhaseIntegrate,
 			},
 			{
@@ -547,7 +545,7 @@ func Default() Recipe {
 			},
 			{
 				From: PhaseIntegrate,
-				On:   Condition{Verdict: OutcomeDone, CIGreen: true},
+				On:   Condition{Verdict: OutcomeDone},
 				To:   TargetComplete,
 			},
 			{
@@ -569,7 +567,7 @@ func Default() Recipe {
 			Script:            "pr_arm.sh",
 			TargetBranch:      "main",
 			RequireReviewPass: true,
-			RequireCIGreen:    true,
+			RequireCIGreen:    false,
 		},
 	}
 }

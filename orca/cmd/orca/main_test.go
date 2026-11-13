@@ -7,12 +7,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
+	"github.com/bazelment/yoloswe/orca/mailbox"
+	mailboxfake "github.com/bazelment/yoloswe/orca/mailbox/fake"
 	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
@@ -737,5 +740,144 @@ func TestConfig_BoolMergePrecedenceAndNegativeCapValidation(t *testing.T) {
 	}
 	if err := cfg.Validate(true); err == nil {
 		t.Fatalf("expected Validate to reject negative concurrency cap %d", cfg.ConcurrencyCap)
+	}
+}
+
+type watchedDriver struct {
+	*lane.FakeDriver
+	watches int
+}
+
+func (d *watchedDriver) Watch(ctx context.Context, runID string) <-chan lane.Event {
+	d.watches++
+	return d.FakeDriver.Watch(ctx, runID)
+}
+
+func TestRunnerStartsLiveWatches(t *testing.T) {
+	clk := clock.NewFakeClock(time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := &watchedDriver{FakeDriver: lane.NewFakeDriver()}
+	box := mailboxfake.New(st.Events(), "watch-run")
+	r := NewRunner(Config{RunID: "watch-run"}, st, drv, clk, nil, nil, box)
+	if err := r.Bootstrap(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	rec := recipe.Default()
+	rec.RunID = "watch-run"
+	rec.Name = "watch-three"
+	rec.Phases = []recipe.Phase{rec.Phases[0], rec.Phases[2], rec.Phases[3]}
+	rec.Transitions = []recipe.Transition{
+		{From: "swe", On: recipe.Condition{Verdict: "done"}, To: "review"},
+		{From: "review", On: recipe.Condition{Verdict: "done"}, To: "integrate"},
+		{From: "integrate", On: recipe.Condition{Verdict: "done"}, To: recipe.TargetComplete},
+	}
+	if _, err := st.Recipes().Save(t.Context(), rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{ID: "worker", RunID: "watch-run", Status: lane.StatusPlanned, RecipeName: rec.Name}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []string{"swe", "review", "integrate"} {
+		before, _ := st.Events().List(t.Context(), store.EventFilter{RunID: "watch-run"})
+		drv.Emit(lane.Event{RunID: "watch-run", LaneID: "worker", Kind: lane.EventPhaseReported, Report: &lane.PhaseReport{Phase: phase, Outcome: lane.OutcomeDone, HeadSHA: "head", Summary: "phase rationale"}})
+		runnerWaitFor(t, func() bool {
+			events, _ := st.Events().List(t.Context(), store.EventFilter{RunID: "watch-run"})
+			return len(events) > len(before)
+		})
+		if err := r.Step(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ln, err := st.Lanes().Get(t.Context(), "watch-run", "worker")
+	if err != nil || ln.Status != lane.StatusDone {
+		t.Fatalf("Watch progression: %+v %v", ln, err)
+	}
+	before, _ := st.Events().List(t.Context(), store.EventFilter{RunID: "watch-run"})
+	box.Inject(mailbox.Message{LaneID: "worker", Body: "mailbox inbound"})
+	runnerWaitFor(t, func() bool {
+		events, _ := st.Events().List(t.Context(), store.EventFilter{RunID: "watch-run"})
+		return len(events) > len(before)
+	})
+	if err := r.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	cur, err := st.Events().GetCursor(t.Context(), "watch-run", "controller")
+	events, _ := st.Events().List(t.Context(), store.EventFilter{RunID: "watch-run"})
+	if err != nil || cur.Seq != events[len(events)-1].Seq {
+		t.Fatalf("mailbox not consumed: %+v %v", cur, err)
+	}
+
+	if drv.watches != 1 {
+		t.Fatalf("Watch calls = %d, want 1", drv.watches)
+	}
+}
+
+func runnerWaitFor(t *testing.T, condition func() bool) {
+	t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for !condition() {
+		select {
+		case <-timer.C:
+			t.Fatal("condition timed out")
+		default:
+			runtime.Gosched()
+		}
+	}
+}
+
+func TestDriverWatchDoesNotReplayForwardedEvents(t *testing.T) {
+	clk := clock.NewFakeClock(time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	for _, source := range []string{"nebula:terminal:worker", "lane.watch"} {
+		if _, err := st.Events().Append(t.Context(), store.Event{RunID: "run", Kind: store.EventPhaseExit, Source: source}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := (driverEventStore{st.Events()}).List(t.Context(), store.EventFilter{RunID: "run"})
+	if err != nil || len(events) != 1 || events[0].Source != "nebula:terminal:worker" {
+		t.Fatalf("driver sees controller feedback: %+v %v", events, err)
+	}
+}
+
+func TestRunnerWorkerQuestionUsesDispatcherModel(t *testing.T) {
+	clk := clock.NewFakeClock(time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+	box := mailboxfake.New(st.Events(), "question-run")
+	client := model.NewFakeClient(model.Response{Message: model.Message{Role: model.RoleAssistant, Content: []model.ContentBlock{model.NewTextBlock("Use the repository merge queue.")}}})
+	r := NewRunner(Config{RunID: "question-run", Models: RoleModels{Dispatcher: "question-model"}}, st, drv, clk, client, nil, box)
+	if err := r.Bootstrap(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{ID: "worker", RunID: "question-run", Status: lane.StatusPlanned}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Notes().Append(t.Context(), store.RunNote{RunID: "question-run", TaskID: "worker", Text: "Use the repository merge queue."}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mailbox.AppendEvent(t.Context(), st.Events(), "question-run", mailbox.Message{LaneID: "worker", Question: true, Body: "Which merge path?"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(box.Sent()) != 0 || len(drv.Steers) != 1 || drv.Steers[0].Message != "Use the task text and notes:\nUse the repository merge queue." {
+		t.Fatalf("owner=%+v steers=%+v", box.Sent(), drv.Steers)
+	}
+	if len(client.Requests) != 1 || client.Requests[0].Model != "question-model" || !strings.Contains(client.Requests[0].Messages[0].Text(), "repository merge queue") {
+		t.Fatalf("dispatcher requests: %+v", client.Requests)
 	}
 }

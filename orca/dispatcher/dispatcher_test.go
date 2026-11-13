@@ -1313,7 +1313,9 @@ func TestDispatcher_RestartOnPersistedStoreDoesNotCollideIDs(t *testing.T) {
 func TestCompileRecipeOverride_WordBoundaries(t *testing.T) {
 	t.Parallel()
 
-	rec := dispatcher.CompileRecipeOverride(recipe.Default(), "expect no merge conflicts, no reviewers needed, no cleanup required")
+	base := recipe.Default()
+	base.MergePolicy.RequireCIGreen = true
+	rec := dispatcher.CompileRecipeOverride(base, "expect no merge conflicts, no reviewers needed, no cleanup required")
 	wantPhases := []string{recipe.PhaseSWE, recipe.PhaseClean, recipe.PhaseReview, recipe.PhaseIntegrate}
 	if got := rec.PhaseNames(); fmt.Sprint(got) != fmt.Sprint(wantPhases) {
 		t.Fatalf("PhaseNames() = %v, want %v (false-positive substring match stripped phases)", got, wantPhases)

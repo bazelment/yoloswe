@@ -1,13 +1,15 @@
 // Package controller implements the deterministic swarm orchestrator state machine.
-// Every action is recorded in store.DecisionStore before execution so a crash and restart never repeats it.
+// Launch intents and completed effects are persisted separately for crash recovery.
 package controller
 
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
+	"github.com/bazelment/yoloswe/orca/mailbox"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -113,6 +116,9 @@ func (f *FakeJudge) AllEvents() []store.Event {
 
 // Config configures a Controller instance for a single Run.
 type Config struct {
+	// AnswerQuestion delegates interpretation of task text and notes to the
+	// dispatcher. An empty answer requests owner escalation.
+	AnswerQuestion    func(context.Context, string, string) (string, error)
 	RunID             string
 	HolderID          string
 	Consumer          string
@@ -147,14 +153,15 @@ func (c Config) withDefaults() Config {
 // OwnerAsk represents a decision question posed to the owner with a mandatory
 // default option and deadline ("decide, don't ask").
 type OwnerAsk struct {
-	Deadline  time.Time `json:"deadline"`
-	ID        string    `json:"id"`
-	RunID     string    `json:"run_id,omitempty"`
-	LaneID    string    `json:"lane_id,omitempty"`
-	Question  string    `json:"question"`
-	Default   string    `json:"default"`
-	SteerNote string    `json:"steer_note,omitempty"`
-	Options   []string  `json:"options"`
+	Deadline      time.Time `json:"deadline"`
+	ID            string    `json:"id"`
+	RunID         string    `json:"run_id,omitempty"`
+	LaneID        string    `json:"lane_id,omitempty"`
+	Question      string    `json:"question"`
+	Default       string    `json:"default"`
+	SteerNote     string    `json:"steer_note,omitempty"`
+	SourceEventID string    `json:"source_event_id,omitempty"`
+	Options       []string  `json:"options"`
 }
 
 // Validate checks that the OwnerAsk satisfies the "decide, don't ask" policy.
@@ -191,11 +198,12 @@ type CIPayload struct {
 
 // PhaseExitPayload is the JSON payload for store.EventPhaseExit events.
 type PhaseExitPayload struct {
-	TerminalID string `json:"terminal_id,omitempty"`
-	Phase      string `json:"phase,omitempty"`
-	Error      string `json:"error,omitempty"`
-	Round      int    `json:"round,omitempty"`
-	ExitCode   int    `json:"exit_code,omitempty"`
+	Kind       lane.EventKind `json:"kind,omitempty"`
+	TerminalID string         `json:"terminal_id,omitempty"`
+	Phase      string         `json:"phase,omitempty"`
+	Error      string         `json:"error,omitempty"`
+	Round      int            `json:"round,omitempty"`
+	ExitCode   int            `json:"exit_code,omitempty"`
 }
 
 // LaneReportPayload is the JSON payload for store.EventLaneReport events.
@@ -240,14 +248,17 @@ type Controller struct {
 	driver             lane.LaneDriver
 	clock              clock.Clock
 	judge              Judge
+	mailbox            mailbox.Mailbox
 	decidedActions     map[string]store.Decision
 	decidedEvents      map[string]store.Decision
 	dispatchedEvents   map[string]store.Decision
 	pendingVerdicts    map[string]pendingVerdict
 	emittedStalls      map[string]bool
 	emittedAskExpiries map[string]bool
+	watchErrors        chan error
 	wakeCh             chan struct{}
 	cancelRun          context.CancelFunc
+	cancelWatches      context.CancelFunc
 	pendingJudgment    []store.Event
 	cfg                Config
 	lastDecisionSeq    int64
@@ -255,14 +266,15 @@ type Controller struct {
 	leaseHeld          bool
 	initialized        bool
 	killed             bool
+	watchStarted       bool
 }
 
 // New constructs a new deterministic Controller for cfg.RunID.
-func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge Judge) *Controller {
+func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge Judge, boxes ...mailbox.Mailbox) *Controller {
 	if clk == nil {
 		clk = clock.NewRealClock()
 	}
-	return &Controller{
+	c := &Controller{
 		cfg:                cfg.withDefaults(),
 		store:              st,
 		driver:             drv,
@@ -275,6 +287,176 @@ func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge
 		emittedStalls:      make(map[string]bool),
 		emittedAskExpiries: make(map[string]bool),
 		wakeCh:             make(chan struct{}, 1),
+		watchErrors:        make(chan error, 16),
+	}
+	if len(boxes) > 0 {
+		c.mailbox = boxes[0]
+	}
+	return c
+}
+
+// StartWatches connects worker and mailbox streams to the controller.
+func (c *Controller) StartWatches(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.killed {
+		return ErrControllerStopped
+	}
+	if c.watchStarted {
+		return nil
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	c.cancelWatches = cancel
+	if c.mailbox != nil {
+		ch, err := c.mailbox.Watch(ctx)
+		// Connection failures retry in the forwarder, so lane Watch can start
+		// even before the mailbox becomes available. Cancellation stops retries.
+		if err != nil {
+			c.reportWatchError(err)
+			ch = nil
+		}
+		go func() {
+			for {
+				if ch == nil {
+					if !c.watchRetry(ctx) {
+						return
+					}
+					var err error
+					ch, err = c.mailbox.Watch(ctx)
+					if err != nil {
+						c.reportWatchError(err)
+						ch = nil
+						continue
+					}
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case _, ok := <-ch:
+					if !ok {
+						c.reportWatchError(errors.New("mailbox Watch closed; reconnecting"))
+						ch = nil
+						continue
+					}
+					c.Wake()
+				}
+			}
+		}()
+	}
+	if c.driver != nil {
+		ch := c.driver.Watch(ctx, c.cfg.RunID)
+		go func() {
+			for {
+				c.forwardLaneEvents(ctx, ch)
+				if ctx.Err() != nil {
+					return
+				}
+				c.reportWatchError(errors.New("lane Watch closed; reconnecting"))
+				if !c.watchRetry(ctx) {
+					return
+				}
+				ch = c.driver.Watch(ctx, c.cfg.RunID)
+			}
+		}()
+	}
+	c.watchStarted = true
+	go func() { <-ctx.Done(); c.mu.Lock(); c.watchStarted = false; c.mu.Unlock() }()
+	return nil
+}
+
+func (c *Controller) forwardLaneEvents(ctx context.Context, ch <-chan lane.Event) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-ch:
+			if !ok || !c.forwardLaneEvent(ctx, ev) {
+				return
+			}
+		}
+	}
+}
+
+func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
+	// Drivers may report run-wide silence. Apply it only to lanes that were
+	// already quiet at Since, retaining each terminal's identity for stale checks.
+	if ev.Kind == lane.EventNoActivity && ev.LaneID == "" {
+		var lanes []lane.Lane
+		for {
+			var err error
+			lanes, err = c.store.Lanes().List(ctx, store.LaneFilter{RunID: c.cfg.RunID, Statuses: []lane.Status{lane.StatusRunning}})
+			if err == nil {
+				break
+			}
+			c.reportWatchError(err)
+			if !c.watchRetry(ctx) {
+				return false
+			}
+		}
+		for i := range lanes {
+			ln := &lanes[i]
+			if !ev.Since.IsZero() && ln.LastEventAt.After(ev.Since) {
+				continue
+			}
+			child := ev
+			child.LaneID, child.TerminalID, child.Phase = ln.ID, ln.TerminalID, ln.Phase
+			if !c.forwardLaneEvent(ctx, child) {
+				return false
+			}
+		}
+		return true
+	}
+	kind := store.EventPhaseExit
+	var payload any
+	switch ev.Kind {
+	case lane.EventPhaseReported:
+		kind, payload = store.EventLaneReport, ev.Report
+	case lane.EventTurnEndedNoReport, lane.EventWaitingForInput, lane.EventExited, lane.EventQuotaFailure, lane.EventAuthFailure, lane.EventNoActivity:
+		payload = PhaseExitPayload{Kind: ev.Kind, TerminalID: ev.TerminalID, Phase: ev.Phase, Error: ev.Text}
+	default:
+		return true
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		c.reportWatchError(err)
+		return true
+	}
+	// Producer timestamps and terminal identity must be retained on replay.
+	// A stable event ID prevents a replayed pulse from consuming another rung.
+	identity, _ := json.Marshal(ev)
+	event := store.Event{ID: fmt.Sprintf("lane-watch-%x", sha256.Sum256(identity)), RunID: c.cfg.RunID, LaneID: ev.LaneID, Kind: kind, Source: "lane.watch", Payload: raw, Summary: ev.Text}
+	for {
+		if _, err := c.store.Events().Append(ctx, event); err == nil || errors.Is(err, store.ErrAlreadyExists) {
+			break
+		} else {
+			c.reportWatchError(fmt.Errorf("persist lane Watch event: %w", err))
+		}
+		if !c.watchRetry(ctx) {
+			return false
+		}
+	}
+	c.Wake()
+	return true
+}
+
+// WatchErrors exposes stream and persistence failures while the forwarder retries.
+func (c *Controller) WatchErrors() <-chan error { return c.watchErrors }
+
+func (c *Controller) reportWatchError(err error) {
+	slog.Error("orca Watch failed; retrying", "error", err)
+	select {
+	case c.watchErrors <- err:
+	default:
+	}
+}
+func (c *Controller) watchRetry(ctx context.Context) bool {
+	timer := c.clock.NewTimer(c.cfg.PollInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C():
+		return true
 	}
 }
 
@@ -293,6 +475,9 @@ func (c *Controller) Kill() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.killed = true
+	if c.cancelWatches != nil {
+		c.cancelWatches()
+	}
 	if c.cancelRun != nil {
 		c.cancelRun()
 	}
@@ -320,6 +505,9 @@ func (c *Controller) Run(ctx context.Context) error {
 	c.cancelRun = cancel
 	c.mu.Unlock()
 	defer cancel()
+	if err := c.StartWatches(runCtx); err != nil {
+		return err
+	}
 
 	if err := c.Step(runCtx); err != nil && !errors.Is(err, store.ErrLeaseHeld) {
 		return err
@@ -377,6 +565,9 @@ func (c *Controller) Step(ctx context.Context) error {
 		return err
 	}
 
+	if err := c.checkNamedWaits(ctx); err != nil {
+		return err
+	}
 	if err := c.checkOwnerAsks(ctx); err != nil {
 		return err
 	}
@@ -386,6 +577,50 @@ func (c *Controller) Step(ctx context.Context) error {
 	}
 
 	return c.flushJudgmentIfDue(ctx)
+}
+
+// Wait registers a durable named condition. Its producer calls CompleteWait;
+// an unresolved deadline emits a judgment event.
+func (c *Controller) Wait(ctx context.Context, name, laneID string, deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if strings.TrimSpace(name) == "" || deadline.IsZero() {
+		return fmt.Errorf("%w: wait requires name and deadline", store.ErrInvalidArgument)
+	}
+	if err := c.ensureLease(ctx); err != nil {
+		return err
+	}
+	return c.store.Directives().Add(ctx, store.Directive{ID: "wait-" + name, RunID: c.cfg.RunID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Scope: laneID, Ref: "named-wait:" + name, Text: name, ExpiresAt: &deadline, Status: store.DirectiveActive})
+}
+
+func (c *Controller) CompleteWait(ctx context.Context, name string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureLease(ctx); err != nil {
+		return err
+	}
+	return c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, "wait-"+name, store.DirectiveHandled)
+}
+
+func (c *Controller) checkNamedWaits(ctx context.Context) error {
+	dirs, err := c.store.Directives().List(ctx, store.DirectiveFilter{RunID: c.cfg.RunID, ActiveOnly: false})
+	if err != nil {
+		return err
+	}
+	for i := range dirs {
+		dir := &dirs[i]
+		if dir.Status != store.DirectiveActive || !strings.HasPrefix(dir.Ref, "named-wait:") || dir.ExpiresAt == nil || c.clock.Now().Before(*dir.ExpiresAt) {
+			continue
+		}
+		_, err := c.store.Events().Append(ctx, store.Event{ID: "expired-" + dir.ID, RunID: c.cfg.RunID, LaneID: dir.Scope, Kind: store.EventTimer, Class: store.EventClassJudgment, Urgent: true, Summary: "wait deadline: " + dir.Text})
+		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return err
+		}
+		if err := c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dir.ID, store.DirectiveHandled); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // StartLane spawns a planned lane on its recipe's first phase.
@@ -428,6 +663,10 @@ func (c *Controller) AskOwner(ctx context.Context, ask OwnerAsk) error {
 	if c.killed {
 		return ErrControllerStopped
 	}
+	return c.registerOwnerAsk(ctx, ask, true)
+}
+
+func (c *Controller) registerOwnerAsk(ctx context.Context, ask OwnerAsk, block bool) error {
 	ask.RunID = cmp.Or(ask.RunID, c.cfg.RunID)
 	if err := ask.Validate(); err != nil {
 		return err
@@ -456,7 +695,7 @@ func (c *Controller) AskOwner(ctx context.Context, ask OwnerAsk) error {
 		return err
 	}
 
-	if ask.LaneID != "" {
+	if block && ask.LaneID != "" {
 		if ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ask.LaneID); err == nil && ln.Status == lane.StatusRunning {
 			ln.Status = lane.StatusBlocked
 			ln.LastEventAt = c.clock.Now().UTC()
@@ -476,6 +715,10 @@ func (c *Controller) AnswerOwnerAsk(ctx context.Context, askID, chosenOption str
 	if c.killed {
 		return ErrControllerStopped
 	}
+	return c.answerOwnerAsk(ctx, askID, chosenOption, false)
+}
+
+func (c *Controller) answerOwnerAsk(ctx context.Context, askID, chosenOption string, freeText bool) error {
 	dir, err := c.store.Directives().Get(ctx, c.cfg.RunID, ownerAskDirectiveID(askID))
 	if err != nil {
 		return err
@@ -484,14 +727,17 @@ func (c *Controller) AnswerOwnerAsk(ctx context.Context, askID, chosenOption str
 	if err := json.Unmarshal([]byte(dir.Text), &ask); err != nil {
 		return fmt.Errorf("orca/controller: invalid owner ask directive %q: %w", askID, err)
 	}
-	if !slices.Contains(ask.Options, chosenOption) {
+	if strings.TrimSpace(chosenOption) == "" || (!freeText && !slices.Contains(ask.Options, chosenOption)) {
 		return fmt.Errorf("%w: option %q not in ask %q options %v", store.ErrInvalidArgument, chosenOption, askID, ask.Options)
 	}
 
-	if err := c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dir.ID, store.DirectiveHandled); err != nil {
+	if dir.Status != store.DirectiveActive || !c.clock.Now().Before(ask.Deadline) {
+		return nil
+	}
+	if err := c.applyOwnerAskResolution(ctx, ask, "ask-answer-"+ask.ID, chosenOption, chosenOption, ""); err != nil {
 		return err
 	}
-	return c.applyOwnerAskResolution(ctx, ask, "ask-answer-"+ask.ID, chosenOption, chosenOption, "")
+	return c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dir.ID, store.DirectiveHandled)
 }
 
 func (c *Controller) applyOwnerAskResolution(ctx context.Context, ask OwnerAsk, directiveID, chosenOption, steerMsg, eventID string) error {
@@ -508,6 +754,9 @@ func (c *Controller) applyOwnerAskResolution(ctx context.Context, ask OwnerAsk, 
 	if err := c.store.Directives().Add(ctx, resDir); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		return err
 	}
+	if _, err := c.store.Notes().Append(ctx, store.RunNote{ID: "answer-" + ask.ID, RunID: c.cfg.RunID, TaskID: ask.LaneID, Text: "Question: " + ask.Question + "\nAnswer: " + chosenOption}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		return err
+	}
 	if ask.LaneID == "" {
 		return nil
 	}
@@ -515,7 +764,7 @@ func (c *Controller) applyOwnerAskResolution(ctx context.Context, ask OwnerAsk, 
 	if err != nil {
 		return nil
 	}
-	if ln.SessionID != "" || ln.TerminalID != "" {
+	if !ln.Status.Terminal() && (ln.SessionID != "" || ln.TerminalID != "") {
 		if err := c.driver.Steer(ctx, lane.SteerRequest{
 			RunID:      c.cfg.RunID,
 			LaneID:     ln.ID,
@@ -854,8 +1103,6 @@ func (c *Controller) checkOwnerAsks(ctx context.Context) error {
 		if c.hasActionDecision(actionKey) || c.emittedAskExpiries[ask.ID] {
 			continue
 		}
-		c.emittedAskExpiries[ask.ID] = true
-
 		_, err := c.store.Events().Append(ctx, store.Event{
 			RunID:   c.cfg.RunID,
 			Kind:    store.EventOwnerAskExpired,
@@ -868,6 +1115,7 @@ func (c *Controller) checkOwnerAsks(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		c.emittedAskExpiries[ask.ID] = true
 	}
 	return nil
 }
@@ -918,6 +1166,17 @@ func (c *Controller) consumeEvents(ctx context.Context) error {
 }
 
 func (c *Controller) handleEvent(ctx context.Context, ev *store.Event) (store.EventClass, error) {
+	// Transport envelopes are retained for the driver. Watch supplies the
+	// canonical lifecycle event; consuming both would advance the ladder twice.
+	if ev.Kind == store.EventLaneReport || ev.Kind == store.EventPhaseExit || ev.Kind == store.EventStall {
+		var envelope struct {
+			Report        json.RawMessage `json:"report"`
+			TerminalEvent json.RawMessage `json:"terminal_event"`
+		}
+		if json.Unmarshal(ev.Payload, &envelope) == nil && (len(envelope.Report) > 0 || len(envelope.TerminalEvent) > 0) {
+			return store.EventClassAuto, nil
+		}
+	}
 	switch ev.Kind {
 	case store.EventLaneReport:
 		return c.handleLaneReport(ctx, ev)
@@ -930,6 +1189,25 @@ func (c *Controller) handleEvent(ctx context.Context, ev *store.Event) (store.Ev
 	case store.EventOwnerAskExpired:
 		return c.handleOwnerAskExpired(ctx, ev)
 	case store.EventOwnerMessage, store.EventMail:
+		if ev.Kind == store.EventOwnerMessage && len(ev.Payload) > 0 {
+			var msg mailbox.Message
+			if json.Unmarshal(ev.Payload, &msg) == nil && msg.InReplyTo != "" {
+				err := c.answerOwnerAsk(ctx, msg.InReplyTo, msg.Body, true)
+				if errors.Is(err, store.ErrNotFound) {
+					return store.EventClassJudgment, nil
+				}
+				return store.EventClassAuto, err
+			}
+		}
+		if ev.Kind == store.EventMail {
+			handled, err := c.routeWorkerQuestion(ctx, ev)
+			if err != nil {
+				return store.EventClassUnclassified, err
+			}
+			if handled {
+				return store.EventClassAuto, nil
+			}
+		}
 		return store.EventClassJudgment, nil
 	case store.EventTimer:
 		if ev.Class == store.EventClassJudgment {
@@ -939,6 +1217,88 @@ func (c *Controller) handleEvent(ctx context.Context, ev *store.Event) (store.Ev
 	default:
 		return store.EventClassJudgment, nil
 	}
+}
+
+func (c *Controller) routeWorkerQuestion(ctx context.Context, ev *store.Event) (bool, error) {
+	var msg mailbox.Message
+	if len(ev.Payload) == 0 || json.Unmarshal(ev.Payload, &msg) != nil || !msg.Question || ev.LaneID == "" {
+		return false, nil
+	}
+	ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ev.LaneID)
+	if err != nil {
+		return false, nil
+	}
+	if ln.Status.Terminal() {
+		return true, nil
+	}
+	notes, err := c.store.Notes().List(ctx, store.NoteFilter{RunID: c.cfg.RunID})
+	if err != nil {
+		return false, err
+	}
+	var contextParts []string
+	for _, note := range notes {
+		if note.TaskID == "" || note.TaskID == ln.ID || (ln.ItemID != "" && note.TaskID == ln.ItemID) {
+			contextParts = append(contextParts, note.Text)
+		}
+	}
+	if ln.ItemID != "" {
+		item, e := c.store.Backlog().Get(ctx, c.cfg.RunID, ln.ItemID)
+		if e != nil {
+			return false, e
+		}
+		contextParts = append(contextParts, item.Description, item.Acceptance)
+	}
+	questionKey := "worker-answer:" + ev.ID
+	var answer string
+	if c.cfg.AnswerQuestion != nil && !c.hasActionDecision(questionKey) {
+		answer, err = c.cfg.AnswerQuestion(ctx, msg.Body, strings.Join(contextParts, "\n"))
+		if err != nil {
+			return false, err
+		}
+		answer = strings.TrimSpace(answer)
+	}
+	if answer != "" {
+		if err := c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Use the task text and notes:\n" + answer}); err != nil {
+			return false, err
+		}
+		if _, err := c.store.Notes().Append(ctx, store.RunNote{ID: "worker-answer-" + ev.ID, RunID: c.cfg.RunID, TaskID: cmp.Or(ln.ItemID, ln.ID), Text: "Question: " + msg.Body + "\nAnswer: " + answer}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return false, err
+		}
+		_, _, err := c.recordDecision(ctx, "worker.question.answer", ln.ID, msg.Body, answer, DecisionArgs{ActionKey: questionKey, EventID: ev.ID})
+		return true, err
+	}
+	if c.mailbox == nil {
+		return false, nil
+	}
+	// Reuse the durable ask on event retry, including a failed default Steer.
+	dirs, err := c.store.Directives().List(ctx, store.DirectiveFilter{RunID: c.cfg.RunID})
+	if err != nil {
+		return false, err
+	}
+	var ask OwnerAsk
+	for i := range dirs {
+		dir := &dirs[i]
+		var candidate OwnerAsk
+		if strings.HasPrefix(dir.Ref, ownerAskRefPrefix) && json.Unmarshal([]byte(dir.Text), &candidate) == nil && candidate.SourceEventID == ev.ID {
+			ask = candidate
+			break
+		}
+	}
+	if ask.ID == "" {
+		q := mailbox.Question{Ask: msg.Body, Options: []string{"continue with task notes", "pause"}, Default: "continue with task notes", Deadline: c.clock.Now().UTC().Add(c.cfg.StallTimeout)}
+		id, err := c.mailbox.AskOwner(ctx, q)
+		if err != nil {
+			return false, err
+		}
+		if id == "" {
+			return false, errors.New("mailbox returned empty owner ask ID")
+		}
+		ask = OwnerAsk{ID: id, LaneID: ln.ID, Question: q.Ask, Options: q.Options, Default: q.Default, Deadline: q.Deadline, SourceEventID: ev.ID}
+		if err := c.registerOwnerAsk(ctx, ask, false); err != nil {
+			return false, err
+		}
+	}
+	return true, c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Continue with the default: " + ask.Default + ". The owner question is pending."})
 }
 
 func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (store.EventClass, error) {
@@ -952,13 +1312,19 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		}
 		return store.EventClassUnclassified, err
 	}
+	if ln.Status.Terminal() {
+		return store.EventClassAuto, nil
+	}
 
 	rep, err := c.extractReport(ctx, ln, *ev)
 	if err != nil {
 		return store.EventClassJudgment, nil
 	}
 	if strings.TrimSpace(rep.Summary) != "" {
-		_, _ = c.store.Notes().Append(ctx, store.RunNote{RunID: c.cfg.RunID, TaskID: ev.LaneID, Phase: rep.Phase, Text: rep.Summary})
+		_, err := c.store.Notes().Append(ctx, store.RunNote{ID: "report-" + ev.ID, RunID: c.cfg.RunID, TaskID: cmp.Or(ln.ItemID, ln.ID), Phase: rep.Phase, Text: rep.Summary})
+		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return store.EventClassUnclassified, err
+		}
 	}
 
 	if rep.Phase != "" && ln.Phase != "" {
@@ -1077,7 +1443,7 @@ func (c *Controller) advanceByRecipe(
 			return c.blockLaneForJudgment(ctx, ln)
 		}
 
-		actionKey := completeActionKey(ln.ID, ln.Phase, round)
+		actionKey := integrateOnceActionKey(ln.ID, ln.Phase, round, ln.PRHead)
 		_, already, err := c.recordDecision(ctx, ToolLaneComplete, ln.ID,
 			fmt.Sprintf("phase %s completed with verdict %s", ln.Phase, verdict),
 			"lane done",
@@ -1220,7 +1586,55 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 	}
 	curAttempt := max(ln.Attempt, 1)
 	ln.LastEventID = ev.ID
-	ln.LastEventAt = c.clock.Now().UTC()
+	// A quiet pulse is controller bookkeeping, not worker activity.
+	quiet := ev.Source == "lane.watch" && payload.Kind == lane.EventNoActivity
+	if !quiet {
+		ln.LastEventAt = c.clock.Now().UTC()
+	}
+	if quiet {
+		key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
+		switch {
+		case !c.hasActionDecision("restart:nudge:" + key):
+			if _, _, err := c.recordDecision(ctx, ToolPhaseRetry+".intent", ln.ID, "quiet lane: nudge before restart", "effect pending", DecisionArgs{ActionKey: "intent:restart:nudge:" + key, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt}); err != nil {
+				return store.EventClassUnclassified, err
+			}
+
+			if err := c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Continue and file the required phase report."}); err != nil {
+				return store.EventClassUnclassified, err
+			}
+			if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+				return store.EventClassUnclassified, err
+			}
+			_, _, err := c.recordDecision(ctx, ToolPhaseRetry, ln.ID, "quiet lane: nudge before restart", "nudged terminal", DecisionArgs{ActionKey: "restart:nudge:" + key, EventID: ev.ID, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt})
+			if err != nil {
+				return store.EventClassUnclassified, err
+			}
+			return store.EventClassAuto, nil
+		case !c.hasActionDecision("restart:fresh:" + key):
+			if _, _, err := c.recordDecision(ctx, ToolPhaseRetry+".intent", ln.ID, "quiet lane: fresh terminal same round", "effect pending", DecisionArgs{ActionKey: "intent:restart:fresh:" + key, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt}); err != nil {
+				return store.EventClassUnclassified, err
+			}
+
+			if len(curPhase.Agents) == 0 {
+				return store.EventClassUnclassified, fmt.Errorf("orca/controller: phase %q in recipe %q has no agents", curPhase.Name, r.Name)
+			}
+
+			agent := curPhase.Agents[min(curAttempt-1, len(curPhase.Agents)-1)]
+			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: agent.Harness, Model: agent.Model, Effort: agent.Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, "fresh terminal after nudge")})
+			if err != nil {
+				return store.EventClassUnclassified, err
+			}
+			ln.SessionID, ln.TerminalID = res.SessionID, res.TerminalID
+			if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+				return store.EventClassUnclassified, err
+			}
+			_, _, err = c.recordDecision(ctx, ToolPhaseRetry, ln.ID, "quiet lane: fresh terminal same round", "fresh terminal", DecisionArgs{ActionKey: "restart:fresh:" + key, EventID: ev.ID, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt})
+			if err != nil {
+				return store.EventClassUnclassified, err
+			}
+			return store.EventClassAuto, nil
+		}
+	}
 
 	if curAttempt < maxAttempts {
 		nextAttempt := curAttempt + 1
@@ -1395,7 +1809,17 @@ func (c *Controller) handleOwnerAskExpired(ctx context.Context, ev *store.Event)
 	actionKey := askDefaultActionKey(ask.ID)
 	c.emittedAskExpiries[ask.ID] = true
 
-	_, already, err := c.recordDecision(ctx, ToolOwnerAskDefault, ask.LaneID,
+	if _, _, err := c.recordDecision(ctx, ToolOwnerAskDefault+".intent", ask.LaneID, "deadline default pending", ask.Default, DecisionArgs{ActionKey: "intent:" + actionKey, AskID: ask.ID}); err != nil {
+		return store.EventClassUnclassified, err
+	}
+
+	if err := c.applyOwnerAskResolution(ctx, ask, "ask-default-"+ask.ID, ask.Default, cmp.Or(ask.SteerNote, ask.Default), ev.ID); err != nil {
+		return store.EventClassUnclassified, err
+	}
+	if err := c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dirID, store.DirectiveHandled); err != nil {
+		return store.EventClassUnclassified, err
+	}
+	_, _, err := c.recordDecision(ctx, ToolOwnerAskDefault, ask.LaneID,
 		fmt.Sprintf("owner ask %q expired at deadline; applying default %q", ask.ID, ask.Default),
 		ask.Default,
 		DecisionArgs{
@@ -1405,19 +1829,7 @@ func (c *Controller) handleOwnerAskExpired(ctx context.Context, ev *store.Event)
 			Default:   ask.Default,
 		},
 	)
-	if err != nil {
-		return store.EventClassUnclassified, err
-	}
-	if already {
-		return store.EventClassAuto, nil
-	}
-
-	_ = c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dirID, store.DirectiveHandled)
-
-	if err := c.applyOwnerAskResolution(ctx, ask, "ask-default-"+ask.ID, ask.Default, cmp.Or(ask.SteerNote, ask.Default), ev.ID); err != nil {
-		return store.EventClassUnclassified, err
-	}
-	return store.EventClassAuto, nil
+	return store.EventClassAuto, err
 }
 
 func (c *Controller) startLanePhase(
@@ -1440,29 +1852,31 @@ func (c *Controller) startLanePhase(
 	agentIdx := min(attempt-1, len(phase.Agents)-1)
 	agent := phase.Agents[agentIdx]
 
+	fromPhase := ln.Phase
 	brief := c.buildBrief(ctx, ln, r, phase, extraNote)
 	actionKey := phaseActionKey(tool, ln.ID, phase.Name, round, attempt)
 
-	_, already, err := c.recordDecision(ctx, tool, ln.ID, reason,
-		fmt.Sprintf("%s round %d attempt %d (%s:%s)", phase.Name, round, attempt, agent.Harness, agent.Model),
-		DecisionArgs{
-			ActionKey: actionKey,
-			EventID:   eventID,
-			FromPhase: ln.Phase,
-			ToPhase:   phase.Name,
-			Phase:     phase.Name,
-			Round:     round,
-			Attempt:   attempt,
-			Harness:   agent.Harness,
-			Model:     agent.Model,
-			Effort:    agent.Effort,
-		},
-	)
-	if err != nil {
-		return err
+	if phase.Name == recipe.PhaseIntegrate {
+		actionKey = "integrate-launch:" + ln.ID + ":" + ln.ApprovalSHA
 	}
-	if already {
+	if c.hasActionDecision(actionKey) {
 		return nil
+	}
+	if phase.Name == recipe.PhaseIntegrate {
+		intentKey := "intent:" + actionKey
+		if c.hasActionDecision(intentKey) {
+			_, err := c.escalateLane(ctx, ln, "integrate launch outcome uncertain; reconcile the existing terminal before proceeding", "integrate intent recovered", DecisionArgs{ActionKey: "uncertain:" + actionKey})
+			return err
+		}
+		if _, _, err := c.recordDecision(ctx, "phase.launch.intent", ln.ID, reason, "integrate launch reserved", DecisionArgs{ActionKey: intentKey, Phase: phase.Name, Round: round, Attempt: attempt}); err != nil {
+			return err
+		}
+	}
+
+	if phase.Name != recipe.PhaseIntegrate {
+		if _, _, err := c.recordDecision(ctx, tool+".intent", ln.ID, reason, "launch pending", DecisionArgs{ActionKey: "intent:" + actionKey, Phase: phase.Name, Round: round, Attempt: attempt}); err != nil {
+			return err
+		}
 	}
 
 	var sessionID, terminalID string
@@ -1518,6 +1932,25 @@ func (c *Controller) startLanePhase(
 	ln.LastEventAt = now
 
 	if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+		return err
+	}
+
+	_, _, err := c.recordDecision(ctx, tool, ln.ID, reason,
+		fmt.Sprintf("%s round %d attempt %d (%s:%s)", phase.Name, round, attempt, agent.Harness, agent.Model),
+		DecisionArgs{
+			ActionKey: actionKey,
+			EventID:   eventID,
+			FromPhase: fromPhase,
+			ToPhase:   phase.Name,
+			Phase:     phase.Name,
+			Round:     round,
+			Attempt:   attempt,
+			Harness:   agent.Harness,
+			Model:     agent.Model,
+			Effort:    agent.Effort,
+		},
+	)
+	if err != nil {
 		return err
 	}
 
@@ -1749,6 +2182,10 @@ func phaseActionKey(tool, laneID, phase string, round, attempt int) string {
 
 func completeActionKey(laneID, fromPhase string, round int) string {
 	return fmt.Sprintf("%s:%s:%s", ToolLaneComplete, laneID, lane.PhaseRoundKey(fromPhase, round))
+}
+
+func integrateOnceActionKey(laneID, fromPhase string, round int, head string) string {
+	return completeActionKey(laneID, fromPhase, round) + ":reviewed-head:" + head
 }
 
 func escalateActionKey(laneID, fromPhase string, round int, eventID string) string {
