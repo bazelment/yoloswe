@@ -730,6 +730,15 @@ func (c *Controller) AnswerOwnerAskText(ctx context.Context, askID, answer strin
 	return c.answerOwnerAsk(ctx, askID, answer, true)
 }
 
+// AnswerOwnerAskTextFromJudge resolves an owner answer while the controller's
+// judgment callback is running inside Step and already holds c.mu.
+func (c *Controller) AnswerOwnerAskTextFromJudge(ctx context.Context, askID, answer string) error {
+	if c.killed {
+		return ErrControllerStopped
+	}
+	return c.answerOwnerAsk(ctx, askID, answer, true)
+}
+
 func (c *Controller) answerOwnerAsk(ctx context.Context, askID, chosenOption string, freeText bool) error {
 	dir, err := c.store.Directives().Get(ctx, c.cfg.RunID, ownerAskDirectiveID(askID))
 	if err != nil {

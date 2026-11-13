@@ -354,7 +354,7 @@ func NewRunner(
 		if runID != r.cfg.RunID {
 			return fmt.Errorf("owner answer run %q does not match controller run %q", runID, r.cfg.RunID)
 		}
-		return ctrl.AnswerOwnerAskText(ctx, askID, answer)
+		return ctrl.AnswerOwnerAskTextFromJudge(ctx, askID, answer)
 	})
 	return r
 }
