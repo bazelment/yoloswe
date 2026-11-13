@@ -190,13 +190,25 @@ func TestRecordedGeminiMultipartAndConfidences(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	r := Select(fake{string(fallback)}, "concierge", "dummy", server.URL, nil)
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(context.Background(), store.Run{ID: "run"}); err != nil {
+		t.Fatal(err)
+	}
+	r := Select(fake{string(fallback)}, "concierge", "dummy", server.URL, StoreLogger{Store: st, RunID: "run", Provider: "openai", Model: "concierge"})
 	d, err := r.Route(context.Background(), "change the plan to ship chat first and remember to use Bazel")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(d.Parts) != 2 || d.Parts[0].Destination != Planner || d.Parts[1].Destination != Memory || !d.Parts[1].IsStandingRule || d.Parts[1].Confidences["is_standing_rule"] != .99 {
 		t.Fatalf("decision: %+v", d)
+	}
+	logs, err := st.Decisions().List(context.Background(), store.DecisionFilter{RunID: "run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 2 || logs[0].Tool != "routing.segment" || logs[0].Provider != "openai" || logs[1].Provider != "gemini" || logs[1].Tool != "routing" {
+		t.Fatalf("routing logs: %+v", logs)
 	}
 	if got := <-inputs; got != "change the plan to ship chat first" {
 		t.Fatal(got)

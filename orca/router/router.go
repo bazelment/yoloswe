@@ -284,7 +284,12 @@ func Select(client model.ModelClient, modelName, key, baseURL string, logger Log
 	if key != "" || baseURL != "" {
 		var segmenter Router
 		if client != nil {
-			segmenter = FallbackRouter{Client: client, Model: modelName}
+			segmentLog := logger
+			if log, ok := logger.(StoreLogger); ok {
+				log.Tool = "routing.segment"
+				segmentLog = log
+			}
+			segmenter = FallbackRouter{Client: client, Model: modelName, Logger: segmentLog}
 		}
 		if log, ok := logger.(StoreLogger); ok {
 			log.Provider = "gemini"
@@ -298,6 +303,7 @@ func Select(client model.ModelClient, modelName, key, baseURL string, logger Log
 
 // StoreLogger writes routing records through the shared causal decision log.
 type StoreLogger struct {
+	Tool     string
 	Store    store.Store
 	RunID    string
 	Provider string
@@ -317,6 +323,10 @@ func (l StoreLogger) LogRouting(ctx context.Context, text string, d Decision) er
 	if err != nil {
 		return err
 	}
-	_, err = l.Store.Decisions().Append(ctx, store.Decision{RunID: l.RunID, Actor: "router", Category: store.DecisionJudgment, Tool: "routing", TraceID: ev.ID, Input: text, Output: string(raw), Args: args, Result: string(d.Destination), Provider: l.Provider, Model: l.Model, PromptVersion: "router-v2"})
+	tool := l.Tool
+	if tool == "" {
+		tool = "routing"
+	}
+	_, err = l.Store.Decisions().Append(ctx, store.Decision{RunID: l.RunID, Actor: "router", Category: store.DecisionJudgment, Tool: tool, TraceID: ev.ID, Input: text, Output: string(raw), Args: args, Result: string(d.Destination), Provider: l.Provider, Model: l.Model, PromptVersion: "router-v2"})
 	return err
 }
