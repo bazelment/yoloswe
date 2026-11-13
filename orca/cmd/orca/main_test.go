@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	chatui "github.com/bazelment/yoloswe/orca/chat"
+	"github.com/bazelment/yoloswe/orca/controller"
+
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/mailbox"
@@ -275,7 +278,7 @@ func TestSmoke_ThreeLaneScenarioAndConciergeChat(t *testing.T) {
 		"chat",
 		"--run", "run-3lane",
 		"--store", "sqlite:" + dbPath,
-		"--replay", "testdata/concierge_status_replay.json",
+		"--replay", "testdata/routed_status_replay.json",
 	}, strings.NewReader("Where are we on run-3lane?\n"), &chatOut, &chatErr); err != nil {
 		t.Fatalf("Execute chat: %v\nstderr:\n%s", err, chatErr.String())
 	}
@@ -879,5 +882,51 @@ func TestRunnerWorkerQuestionUsesDispatcherModel(t *testing.T) {
 	}
 	if len(client.Requests) != 1 || client.Requests[0].Model != "question-model" || !strings.Contains(client.Requests[0].Messages[0].Text(), "repository merge queue") {
 		t.Fatalf("dispatcher requests: %+v", client.Requests)
+	}
+}
+
+func TestChatPauseResumeStopControlsRunner(t *testing.T) {
+	ctx := t.Context()
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(ctx, store.Run{ID: "control"}); err != nil {
+		t.Fatal(err)
+	}
+	b := &chatui.StoreBackend{Store: st, RunID: "control"}
+	if _, err := b.Command(ctx, "/pause"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Directives().Add(ctx, store.Directive{ID: "invalid-plan", RunID: "control", Ref: "invalid-plan", Kind: store.DirectivePlanImport, Source: store.DirectiveSourceOwner, Status: store.DirectiveActive}); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner((Config{RunID: "control", HolderID: "holder", DriverKind: "fake"}).withDefaults(), st, lane.NewFakeDriver(), clock.NewRealClock(), nil, nil)
+	if err := runner.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := st.Directives().Get(ctx, "control", "invalid-plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir.Status != store.DirectiveActive {
+		t.Fatal("paused runner processed planner work")
+	}
+	if _, err := b.Command(ctx, "/resume"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	dir, err = st.Directives().Get(ctx, "control", "invalid-plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir.Status != store.DirectiveRevoked {
+		t.Fatal("resumed runner did not process planner work")
+	}
+	if _, err := b.Command(ctx, "/stop"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Step(ctx); !errors.Is(err, controller.ErrControllerStopped) {
+		t.Fatalf("stop: %v", err)
 	}
 }

@@ -1,12 +1,32 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "chat",
-    srcs = ["chat.go"],
+    srcs = [
+        "chat.go",
+        "store.go",
+    ],
     importpath = "github.com/bazelment/yoloswe/orca/chat",
     visibility = ["//visibility:public"],
     deps = [
+        "//orca/concierge",
+        "//orca/mailbox",
         "//orca/router",
+        "//orca/store",
+        "@land_charm_bubbletea_v2//:bubbletea",
+        "@org_golang_x_term//:term",
+    ],
+)
+
+go_test(
+    name = "chat_test",
+    srcs = ["chat_test.go"],
+    embed = [":chat"],
+    deps = [
+        "//orca/mailbox",
+        "//orca/router",
+        "//orca/store",
+        "@com_github_charmbracelet_x_exp_teatest_v2//:teatest",
         "@land_charm_bubbletea_v2//:bubbletea",
     ],
 )

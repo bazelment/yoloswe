@@ -54,6 +54,7 @@ use_repo(
     "com_github_bazelment_yoloswe_wt",
     "com_github_bazelment_yoloswe_yoloswe",
     "com_github_charmbracelet_glamour",
+    "com_github_charmbracelet_x_exp_teatest_v2",
     "com_github_deepgram_deepgram_go_sdk_v3",
     "com_github_ergochat_readline",
     "com_github_fsnotify_fsnotify",

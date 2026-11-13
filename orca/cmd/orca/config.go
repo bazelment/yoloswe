@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -410,7 +411,7 @@ func openModelClient(cfg Config, clk clock.Clock) (model.ModelClient, error) {
 		return model.LoadFakeClient(cfg.ReplayPath)
 	}
 	if strings.EqualFold(strings.TrimSpace(cfg.ModelProvider), "openai") {
-		var opts []model.OpenAIClientOption
+		opts := []model.OpenAIClientOption{model.WithOpenAIHTTPClient(&http.Client{Transport: chatTransport{base: http.DefaultTransport}, Timeout: model.DefaultHTTPTimeout})}
 		if clk != nil {
 			opts = append(opts, model.WithOpenAIClock(clk))
 		}
@@ -423,7 +424,7 @@ func openModelClient(cfg Config, clk clock.Clock) (model.ModelClient, error) {
 		}
 		return client, nil
 	}
-	var opts []model.ClientOption
+	opts := []model.ClientOption{model.WithHTTPClient(&http.Client{Transport: chatTransport{base: http.DefaultTransport}, Timeout: model.DefaultHTTPTimeout})}
 	if clk != nil {
 		opts = append(opts, model.WithClock(clk))
 	}

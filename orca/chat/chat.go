@@ -1,4 +1,4 @@
-// Package chat provides the small owner-facing Bubble Tea model used by orca chat.
+// Package chat provides the owner-facing Bubble Tea conversation.
 package chat
 
 import (
@@ -8,169 +8,288 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"golang.org/x/term"
 
 	"github.com/bazelment/yoloswe/orca/router"
 )
 
 type AskFunc func(context.Context, string) (string, error)
+type DispatchFunc func(context.Context, router.Decision, string, func(string)) error
+type Snapshot struct {
+	Status    string
+	Questions []string
+}
+type Backend interface {
+	Snapshot(context.Context) (Snapshot, error)
+	Command(context.Context, string) (string, error)
+}
 
-//nolint:govet // keep related model fields together.
+//nolint:govet
 type Model struct {
-	ctx           context.Context
-	ask           AskFunc
-	router        router.Router
-	runID         string
-	input         string
-	lines         []string
-	status        string
-	waiting       string
-	width, height int
+	poll                          bool
+	questions                     []string
+	ctx                           context.Context
+	ask                           AskFunc
+	router                        router.Router
+	Dispatch                      DispatchFunc
+	Backend                       Backend
+	runID, input, status, waiting string
+	lines                         []string
+	busy                          bool
+	width, height                 int
+	streamLine                    int
 }
 
 func New(ctx context.Context, runID string, ask AskFunc, r router.Router) Model {
-	return Model{ctx: ctx, runID: runID, ask: ask, router: r, status: "goal: loading | lanes: 0 | open questions: 0 | cost today: $0.00"}
+	return Model{ctx: ctx, runID: runID, ask: ask, router: r}
 }
-func (m Model) Init() tea.Cmd { return nil }
 
-//nolint:govet // keep the message payload compact.
-type replyMsg struct {
+//nolint:govet // message payload grouping
+type pollMsg struct{}
+
+//nolint:govet // message payload grouping
+type snapshotMsg struct {
+	snapshot Snapshot
+	err      error
+}
+
+//nolint:govet // message payload grouping
+type routeMsg struct {
+	text     string
+	decision router.Decision
+	err      error
+}
+
+//nolint:govet // message payload grouping
+type commandMsg struct {
 	text string
 	err  error
 }
 
+//nolint:govet // message payload grouping
+type streamMsg struct {
+	text string
+	err  error
+	done bool
+	ch   <-chan streamMsg
+}
+
+func (m Model) refresh() tea.Cmd {
+	if m.Backend == nil {
+		return nil
+	}
+	return func() tea.Msg { s, e := m.Backend.Snapshot(m.ctx); return snapshotMsg{s, e} }
+}
+func (m Model) Init() tea.Cmd {
+	if m.poll {
+		return tea.Batch(m.refresh(), poll())
+	}
+	return m.refresh()
+}
+func poll() tea.Cmd                       { return tea.Tick(time.Second, func(time.Time) tea.Msg { return pollMsg{} }) }
+func receive(ch <-chan streamMsg) tea.Cmd { return func() tea.Msg { x := <-ch; x.ch = ch; return x } }
+func (m Model) route(text string) tea.Cmd {
+	return func() tea.Msg {
+		if m.router == nil {
+			return routeMsg{text: text, decision: router.Decision{Destination: router.Concierge, Confidence: 1}}
+		}
+		input := text
+		if m.Backend != nil {
+			s, err := m.Backend.Snapshot(m.ctx)
+			if err != nil {
+				return routeMsg{text: text, err: err}
+			}
+			if len(s.Questions) > 0 {
+				input += "\nOpen questions:\n" + strings.Join(s.Questions, "\n")
+			}
+		}
+		d, e := m.router.Route(m.ctx, input)
+		return routeMsg{text, d, e}
+	}
+}
+func (m Model) dispatch(d router.Decision, text string) tea.Cmd {
+	ch := make(chan streamMsg)
+	go func() {
+		emit := func(s string) {
+			select {
+			case ch <- streamMsg{text: s}:
+			case <-m.ctx.Done():
+			}
+		}
+		var err error
+		if m.Dispatch != nil {
+			err = m.Dispatch(m.ctx, d, text, emit)
+		} else if d.Destination == router.Concierge && m.ask != nil {
+			var s string
+			s, err = m.ask(m.ctx, text)
+			emit(s)
+		} else {
+			err = fmt.Errorf("no handler for %s", d.Destination)
+		}
+		select {
+		case ch <- streamMsg{done: true, err: err}:
+		case <-m.ctx.Done():
+		}
+	}()
+	return receive(ch)
+}
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch x := msg.(type) {
+	case pollMsg:
+		return m, tea.Batch(m.refresh(), poll())
 	case tea.WindowSizeMsg:
 		m.width, m.height = x.Width, x.Height
+	case snapshotMsg:
+		if x.err != nil {
+			m.lines = append(m.lines, "error: "+x.err.Error())
+		} else {
+			m.status = x.snapshot.Status
+			m.questions = x.snapshot.Questions
+		}
+	case commandMsg:
+		m.busy = false
+		if x.err != nil {
+			m.lines = append(m.lines, "error: "+x.err.Error())
+		} else {
+			m.lines = append(m.lines, x.text)
+		}
+		return m, m.refresh()
+	case routeMsg:
+		if x.err != nil {
+			m.busy = false
+			m.lines = append(m.lines, "error: "+x.err.Error())
+			return m, nil
+		}
+		if x.decision.NeedsClarification {
+			m.busy = false
+			m.waiting = x.text
+			m.lines = append(m.lines, "owner question> "+x.decision.ClarifyingQuestion)
+			return m, nil
+		}
+		echo := string(x.decision.Destination) + " — " + x.decision.Echo
+		if len(x.decision.Parts) > 0 {
+			dest := []string{}
+			for i := range x.decision.Parts {
+				part := x.decision.Parts[i]
+				dest = append(dest, string(part.Destination))
+			}
+			echo = strings.Join(dest, ", ")
+		}
+		m.lines = append(m.lines, "route> "+echo+" (/undo)", "orca> ")
+		m.streamLine = len(m.lines) - 1
+		return m, m.dispatch(x.decision, x.text)
+	case streamMsg:
+		if x.text != "" {
+			m.lines[m.streamLine] += x.text
+		}
+		if x.done {
+			m.busy = false
+			if x.err != nil {
+				m.lines = append(m.lines, "error: "+x.err.Error())
+			}
+			return m, m.refresh()
+		}
+		return m, receive(x.ch)
 	case tea.KeyPressMsg:
 		if (x.Code == 'c' && x.Mod == tea.ModCtrl) || x.Code == tea.KeyEscape {
 			return m, tea.Quit
 		}
-		if x.Code == tea.KeyEnter {
-			text := strings.TrimSpace(m.input)
-			m.input = ""
-			if text == "" {
-				return m, nil
-			}
-			if strings.HasPrefix(text, "/") {
-				m.applySlash(text)
-				return m, nil
-			}
-			m.lines = append(m.lines, "you> "+text)
-			if m.waiting != "" {
-				m.lines = append(m.lines, "answer> "+text)
-				m.waiting = ""
-				return m, nil
-			}
-			if m.router != nil {
-				d, e := m.router.Route(m.ctx, text)
-				if e != nil {
-					m.lines = append(m.lines, "error: "+e.Error())
-				} else if d.NeedsClarification {
-					m.waiting = d.ClarifyingQuestion
-					m.lines = append(m.lines, "owner question> "+m.waiting)
-				} else {
-					m.lines = append(m.lines, "route> "+string(d.Destination)+" — "+d.Echo)
-				}
-			}
-			if m.ask != nil {
-				return m, func() tea.Msg { t, e := m.ask(m.ctx, text); return replyMsg{t, e} }
-			}
-			return m, nil
-		}
 		if x.Code == tea.KeyBackspace {
 			if m.input != "" {
-				m.input = m.input[:len(m.input)-1]
+				_, n := utf8.DecodeLastRuneInString(m.input)
+				m.input = m.input[:len(m.input)-n]
 			}
 			return m, nil
 		}
-		if x.Text != "" {
+		if x.Code != tea.KeyEnter {
 			m.input += x.Text
+			return m, nil
 		}
-	case replyMsg:
-		if x.err != nil {
-			m.lines = append(m.lines, "error: "+x.err.Error())
-		} else {
-			m.lines = append(m.lines, "orca> "+x.text)
+		if m.busy {
+			return m, nil
 		}
+		text := strings.TrimSpace(m.input)
+		m.input = ""
+		if text == "" {
+			return m, nil
+		}
+		switch strings.ToLower(text) {
+		case "exit", "quit", "/exit", "/quit":
+			return m, tea.Quit
+		}
+		m.lines = append(m.lines, "you> "+text)
+		m.busy = true
+		if strings.HasPrefix(text, "/") {
+			return m, func() tea.Msg {
+				if m.Backend == nil {
+					return commandMsg{err: fmt.Errorf("no run attached")}
+				}
+				s, e := m.Backend.Command(m.ctx, text)
+				return commandMsg{s, e}
+			}
+		}
+		if m.waiting != "" {
+			text = m.waiting + "\nClarification: " + text
+			m.waiting = ""
+		}
+		return m, m.route(text)
 	}
 	return m, nil
 }
-func (m *Model) applySlash(s string) {
-	p := strings.Fields(s)
-	if len(p) == 0 {
-		return
-	}
-	switch p[0] {
-	case "/status":
-		m.lines = append(m.lines, m.status)
-	case "/lanes":
-		m.lines = append(m.lines, "lanes by phase: unavailable")
-	case "/asks":
-		if m.waiting != "" {
-			m.lines = append(m.lines, "owner question> "+m.waiting)
-		} else {
-			m.lines = append(m.lines, "no open questions")
-		}
-	case "/memory":
-		m.lines = append(m.lines, "memory: attached to run "+m.runID)
-	case "/plan":
-		m.lines = append(m.lines, "plan: attached to run "+m.runID)
-	case "/log":
-		m.lines = append(m.lines, "log: "+strings.TrimSpace(strings.TrimPrefix(s, "/log")))
-	case "/pause":
-		m.lines = append(m.lines, "run paused")
-	case "/resume":
-		m.lines = append(m.lines, "run resumed")
-	default:
-		m.lines = append(m.lines, "commands: /status /lanes /asks /memory /plan /log <trace> /pause /resume")
-	}
-}
 func (m Model) View() tea.View {
-	var b strings.Builder
-	b.WriteString("orca chat — run " + m.runID + "\n")
-	for _, l := range m.lines {
-		b.WriteString(l + "\n")
+	lines := m.lines
+	if m.height > 5 && len(lines) > m.height-5 {
+		lines = lines[len(lines)-(m.height-5):]
 	}
-	b.WriteString("\n" + m.status + "\n> " + m.input)
-	return tea.NewView(b.String())
+	questions := ""
+	for _, q := range m.questions {
+		questions += "\nowner question> " + q
+	}
+	return tea.NewView("orca chat — run " + m.runID + "\n" + strings.Join(lines, "\n") + questions + "\n\n" + m.status + "\n> " + m.input)
 }
+func isTerminal(in io.Reader) bool { f, ok := in.(*os.File); return ok && term.IsTerminal(int(f.Fd())) }
 func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {
-	if in != os.Stdin {
-		scanner := bufio.NewScanner(in)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
-				continue
-			}
-			if line == "/exit" || line == "/quit" {
-				break
-			}
-			if strings.HasPrefix(line, "/") {
-				m.applySlash(line)
-				for _, v := range m.lines[len(m.lines)-1:] {
-					if _, e := fmt.Fprintln(out, v); e != nil {
-						return e
-					}
-				}
-				continue
-			}
-			if m.ask == nil {
-				continue
-			}
-			ans, e := m.ask(ctx, line)
-			if e != nil {
-				return e
-			}
-			if _, e = fmt.Fprintln(out, ans); e != nil {
-				return e
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	m.ctx = ctx
+	if isTerminal(in) {
+		m.poll = true
+		_, err := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out), tea.WithContext(ctx)).Run()
+		return err
+	}
+	// Scripts use the same update/command path as the terminal.
+	if cmd := m.Init(); cmd != nil {
+		next, _ := m.Update(cmd())
+		m = next.(Model)
+	}
+	scanner := bufio.NewScanner(in)
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		text := strings.TrimSpace(scanner.Text())
+		switch strings.ToLower(text) {
+		case "exit", "quit", "/exit", "/quit":
+			return nil
+		}
+		before := len(m.lines)
+		m.input = text
+		next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		m = next.(Model)
+		for cmd != nil {
+			msg := cmd()
+			next, cmd = m.Update(msg)
+			m = next.(Model)
+		}
+		for _, s := range m.lines[before:] {
+			if _, err := fmt.Fprintln(out, s); err != nil {
+				return err
 			}
 		}
-		return scanner.Err()
 	}
-	p := tea.NewProgram(m)
-	_, err := p.Run()
-	return err
+	return scanner.Err()
 }

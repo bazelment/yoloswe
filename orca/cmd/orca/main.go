@@ -203,8 +203,13 @@ func executeChat(
 		return err
 	}
 
-	r := router.FallbackRouter{Client: client, Model: cfg.Models.Concierge}
-	return chatui.Run(ctx, stdin, stdout, chatui.New(ctx, cfg.RunID, concierge.Ask, r))
+	routingLog := router.StoreLogger{Store: st, RunID: cfg.RunID, Model: cfg.Models.Concierge, Provider: cfg.ModelProvider}
+	r := router.Select(client, cfg.Models.Concierge, cmp.Or(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")), os.Getenv("GEMINI_DECISIONS_BASE_URL"), routingLog)
+	backend := &chatui.StoreBackend{Store: st, RunID: cfg.RunID, Stream: concierge.AskStream}
+	ui := chatui.New(ctx, cfg.RunID, concierge.Ask, r)
+	ui.Backend = backend
+	ui.Dispatch = backend.Dispatch
+	return chatui.Run(ctx, stdin, stdout, ui)
 }
 
 func newLogger(out io.Writer, levelStr, format string) *slog.Logger {

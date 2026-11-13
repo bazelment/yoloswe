@@ -6,8 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/bazelment/yoloswe/orca/store"
 
 	"github.com/bazelment/yoloswe/orca/model"
 )
@@ -30,14 +35,17 @@ var destinations = []Destination{Concierge, AnswerOpenQuestion, Planner, Memory,
 //
 //nolint:govet // preserve the routing contract's field grouping.
 type Decision struct {
-	Destination         Destination `json:"destination"`
-	Confidence          float64     `json:"confidence"`
-	NeedsClarification  bool        `json:"needs_clarification"`
-	IsStandingRule      bool        `json:"is_standing_rule"`
-	AnswersOpenQuestion bool        `json:"answers_open_question"`
-	ClarifyingQuestion  string      `json:"clarifying_question,omitempty"`
-	Echo                string      `json:"echo,omitempty"`
-	Parts               []Decision  `json:"parts,omitempty"`
+	Confidences         map[string]float64 `json:"confidences,omitempty"`
+	Text                string             `json:"text,omitempty"`
+	QuestionID          string             `json:"question_id,omitempty"`
+	Destination         Destination        `json:"destination"`
+	Confidence          float64            `json:"confidence"`
+	NeedsClarification  bool               `json:"needs_clarification"`
+	IsStandingRule      bool               `json:"is_standing_rule"`
+	AnswersOpenQuestion bool               `json:"answers_open_question"`
+	ClarifyingQuestion  string             `json:"clarifying_question,omitempty"`
+	Echo                string             `json:"echo,omitempty"`
+	Parts               []Decision         `json:"parts,omitempty"`
 }
 
 // Router classifies one owner message. Implementations must not mutate input.
@@ -61,30 +69,13 @@ type FallbackRouter struct {
 }
 
 func (r FallbackRouter) Route(ctx context.Context, text string) (Decision, error) {
-	parts := splitParts(text)
-	if len(parts) > 1 {
-		out := Decision{Destination: Concierge, Confidence: 1, Parts: make([]Decision, 0, len(parts))}
-		for _, p := range parts {
-			d, err := r.routeOne(ctx, p)
-			if err != nil {
-				return Decision{}, err
-			}
-			out.Parts = append(out.Parts, d)
-		}
-		if r.Logger != nil {
-			if err := r.Logger.LogRouting(ctx, text, out); err != nil {
-				return Decision{}, err
-			}
-		}
-		return out, nil
-	}
 	return r.routeOne(ctx, text)
 }
 func (r FallbackRouter) routeOne(ctx context.Context, text string) (Decision, error) {
 	if r.Client == nil {
 		return Decision{}, errors.New("orca/router: nil model client")
 	}
-	req := model.Request{Model: r.Model, MaxTokens: 512, System: routingPrompt, Messages: []model.Message{{Role: model.RoleUser, Content: []model.ContentBlock{model.NewTextBlock(text)}}}}
+	req := model.Request{Model: r.Model, MaxTokens: 2048, System: routingPrompt, Messages: []model.Message{{Role: model.RoleUser, Content: []model.ContentBlock{model.NewTextBlock(text)}}}}
 	resp, err := r.Client.CreateMessage(ctx, req)
 	if err != nil {
 		return Decision{}, err
@@ -97,7 +88,7 @@ func (r FallbackRouter) routeOne(ctx context.Context, text string) (Decision, er
 	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &d); err != nil {
 		return Decision{}, fmt.Errorf("orca/router: invalid structured response: %w", err)
 	}
-	if !validDestination(d.Destination) {
+	if len(d.Parts) == 0 && !validDestination(d.Destination) {
 		return Decision{}, fmt.Errorf("orca/router: invalid destination %q", d.Destination)
 	}
 	d = normalize(d, text, r.ConfidenceThreshold)
@@ -108,22 +99,24 @@ func (r FallbackRouter) routeOne(ctx context.Context, text string) (Decision, er
 	}
 	return d, nil
 }
-func splitParts(s string) []string {
-	var out []string
-	for _, p := range strings.FieldsFunc(s, func(r rune) bool { return r == '\n' || r == ';' }) {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 func normalize(d Decision, text string, threshold float64) Decision {
 	if threshold == 0 {
 		threshold = .75
 	}
-	if d.Confidence < threshold {
+	if len(d.Parts) > 0 {
+		d.Confidence = 1
+		for i := range d.Parts {
+			if d.Parts[i].Confidence < d.Confidence {
+				d.Confidence = d.Parts[i].Confidence
+			}
+		}
+	}
+	if math.IsNaN(d.Confidence) || math.IsInf(d.Confidence, 0) || d.Confidence < 0 || d.Confidence > 1 {
+		d.Confidence = 0
+	}
+	if d.NeedsClarification || d.Confidence < threshold {
 		d.NeedsClarification = true
 		if strings.TrimSpace(d.ClarifyingQuestion) == "" {
 			d.ClarifyingQuestion = "Which part should I handle first?"
@@ -131,6 +124,17 @@ func normalize(d Decision, text string, threshold float64) Decision {
 	}
 	if d.Echo == "" && !d.NeedsClarification {
 		d.Echo = oneLine(text)
+	}
+	for i := range d.Parts {
+		d.Parts[i] = normalize(d.Parts[i], d.Parts[i].Text, threshold)
+		if !validDestination(d.Parts[i].Destination) || d.Parts[i].Text == "" {
+			d.Parts[i].NeedsClarification = true
+			d.Parts[i].ClarifyingQuestion = "What should I do with this part?"
+		}
+		if d.Parts[i].NeedsClarification {
+			d.NeedsClarification = true
+			d.ClarifyingQuestion = d.Parts[i].ClarifyingQuestion
+		}
 	}
 	return d
 }
@@ -143,12 +147,13 @@ func validDestination(d Destination) bool {
 	return false
 }
 
-const routingPrompt = `Classify the owner message. Return JSON only with destination (one of concierge, answer-open-question, planner, memory, dispatcher, controller), confidence (0 to 1), needs_clarification, is_standing_rule, answers_open_question, and optional clarifying_question. Ask one short question when intent is ambiguous.`
+const routingPrompt = `Classify the owner message. Return JSON only with destination (one of concierge, answer-open-question, planner, memory, dispatcher, controller), confidence (0 to 1), needs_clarification, is_standing_rule, answers_open_question, and optional clarifying_question. Ask one short question when intent is ambiguous. For multiple independent requests return parts, each containing its exact text and all routing fields; do not split code or prose just because it contains punctuation. Include question_id when answering a specific open question. Never invent a question ID. A trailing Open questions section is context, not a request to split or dispatch.`
 
 // GeminiClient calls Gemini Decisions API (v1beta) and translates its choice response.
 //
 //nolint:govet // keep public client configuration grouped.
 type GeminiClient struct {
+	Segmenter              Router
 	HTTPClient             *http.Client
 	BaseURL, APIKey, Model string
 	Logger                 Logger
@@ -156,8 +161,51 @@ type GeminiClient struct {
 }
 
 func (c GeminiClient) Route(ctx context.Context, text string) (Decision, error) {
+	var parts []Decision
+	questionID := ""
+	if c.Segmenter != nil {
+		seg, err := c.Segmenter.Route(ctx, text)
+		if err != nil {
+			return Decision{}, err
+		}
+		parts = seg.Parts
+		questionID = seg.QuestionID
+	}
+	var out Decision
+	if len(parts) > 0 {
+		out = Decision{Destination: Concierge, Confidence: 1}
+		for i := range parts {
+			part := parts[i]
+			d, err := c.routeOne(ctx, part.Text)
+			if err != nil {
+				return Decision{}, err
+			}
+			d.Text = part.Text
+			d.QuestionID = part.QuestionID
+			out.Parts = append(out.Parts, d)
+		}
+		out = normalize(out, text, c.ConfidenceThreshold)
+	} else {
+		d, err := c.routeOne(ctx, text)
+		if err != nil {
+			return Decision{}, err
+		}
+		out = d
+		out.QuestionID = questionID
+	}
+	if c.Logger != nil {
+		if err := c.Logger.LogRouting(ctx, text, out); err != nil {
+			return Decision{}, err
+		}
+	}
+	return out, nil
+}
+
+// The wire schema follows google-genai's generated decisions types:
+// https://github.com/googleapis/python-genai/tree/main/google/genai/_gaos/types/decisions
+func (c GeminiClient) routeOne(ctx context.Context, text string) (Decision, error) {
 	if c.HTTPClient == nil {
-		c.HTTPClient = http.DefaultClient
+		c.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	base := strings.TrimRight(c.BaseURL, "/")
 	if base == "" {
@@ -167,9 +215,20 @@ func (c GeminiClient) Route(ctx context.Context, text string) (Decision, error) 
 	if modelName == "" {
 		modelName = "gemini-decision-1"
 	}
-	body := map[string]any{"model": modelName, "input": text, "choices": destinations, "questions": []string{"needs clarification?", "standing rule?", "answers an open question?"}}
-	b, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1beta/decisions:create", strings.NewReader(string(b)))
+	if !strings.HasPrefix(modelName, "models/") {
+		modelName = "models/" + modelName
+	}
+	criteria := map[string]string{"concierge": "Answer a question about the run", "answer-open-question": "Answer a question waiting on the owner", "planner": "Change the goal, plan or task descriptions", "memory": "Save a standing rule, correction or fact", "dispatcher": "Add or steer work", "controller": "Pause, resume or stop the run"}
+	questions := map[string]any{"destination": map[string]any{"type": "choice", "instructions": "Choose the destination for the owner's request. Open questions are context, not additional requests.", "criteria": criteria}}
+	for key, instructions := range map[string]string{"needs_clarification": "Does the owner's intent require clarification before taking action?", "is_standing_rule": "Is the request a standing rule that should apply in future?", "answers_open_question": "Does the input answer an open question?"} {
+		questions[key] = map[string]any{"type": "noul", "instructions": instructions}
+	}
+	body := map[string]any{"model": modelName, "input": text, "questions": questions}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return Decision{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1beta/decisions", strings.NewReader(string(raw)))
 	if err != nil {
 		return Decision{}, err
 	}
@@ -183,20 +242,81 @@ func (c GeminiClient) Route(ctx context.Context, text string) (Decision, error) 
 	if res.StatusCode/100 != 2 {
 		return Decision{}, fmt.Errorf("orca/router: gemini status %s", res.Status)
 	}
+	//nolint:govet // response fields follow the wire format
 	var wire struct {
-		Decision `json:"decision"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&wire); err != nil {
-		return Decision{}, err
-	}
-	if !validDestination(wire.Destination) {
-		return Decision{}, fmt.Errorf("orca/router: invalid gemini destination %q", wire.Destination)
-	}
-	d := normalize(wire.Decision, text, c.ConfidenceThreshold)
-	if c.Logger != nil {
-		if err := c.Logger.LogRouting(ctx, text, d); err != nil {
-			return Decision{}, err
+		Answers map[string]struct {
+			Type          string
+			Choice        string
+			Confidence    float64
+			Noul          float64
+			Probabilities map[string]float64
 		}
 	}
-	return d, nil
+	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&wire); err != nil {
+		return Decision{}, err
+	}
+	choice, ok := wire.Answers["destination"]
+	if !ok || choice.Type != "choice" || !validDestination(Destination(choice.Choice)) {
+		return Decision{}, fmt.Errorf("orca/router: invalid Gemini destination answer")
+	}
+	d := Decision{Destination: Destination(choice.Choice), Confidence: choice.Confidence, Confidences: map[string]float64{"destination": choice.Confidence}}
+	for _, key := range []string{"needs_clarification", "is_standing_rule", "answers_open_question"} {
+		a, ok := wire.Answers[key]
+		if !ok || a.Type != "noul" || a.Noul < 0 || a.Noul > 1 || a.Confidence < 0 || a.Confidence > 1 {
+			return Decision{}, fmt.Errorf("orca/router: invalid Gemini %s answer", key)
+		}
+		d.Confidences[key] = a.Confidence
+		yes := a.Noul >= .5
+		switch key {
+		case "needs_clarification":
+			d.NeedsClarification = yes
+		case "is_standing_rule":
+			d.IsStandingRule = yes
+		case "answers_open_question":
+			d.AnswersOpenQuestion = yes
+		}
+	}
+	return normalize(d, text, c.ConfidenceThreshold), nil
+}
+
+// Select uses Decisions when configured and otherwise the concierge model.
+func Select(client model.ModelClient, modelName, key, baseURL string, logger Logger) Router {
+	if key != "" || baseURL != "" {
+		var segmenter Router
+		if client != nil {
+			segmenter = FallbackRouter{Client: client, Model: modelName}
+		}
+		if log, ok := logger.(StoreLogger); ok {
+			log.Provider = "gemini"
+			log.Model = "gemini-decision-1"
+			logger = log
+		}
+		return GeminiClient{APIKey: key, BaseURL: baseURL, Logger: logger, Segmenter: segmenter}
+	}
+	return FallbackRouter{Client: client, Model: modelName, Logger: logger}
+}
+
+// StoreLogger writes routing records through the shared causal decision log.
+type StoreLogger struct {
+	Store    store.Store
+	RunID    string
+	Provider string
+	Model    string
+}
+
+func (l StoreLogger) LogRouting(ctx context.Context, text string, d Decision) error {
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return err
+	}
+	ev, err := l.Store.Events().Append(ctx, store.Event{RunID: l.RunID, Kind: store.EventTimer, Class: store.EventClassAuto, Source: "router.audit", Summary: text})
+	if err != nil {
+		return err
+	}
+	args, err := json.Marshal(map[string]any{"event_id": ev.ID, "routing": d})
+	if err != nil {
+		return err
+	}
+	_, err = l.Store.Decisions().Append(ctx, store.Decision{RunID: l.RunID, Actor: "router", Category: store.DecisionJudgment, Tool: "routing", TraceID: ev.ID, Input: text, Output: string(raw), Args: args, Result: string(d.Destination), Provider: l.Provider, Model: l.Model, PromptVersion: "router-v2"})
+	return err
 }
