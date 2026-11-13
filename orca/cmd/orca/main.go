@@ -187,7 +187,7 @@ func executeChat(
 		"model", cfg.Models.Concierge,
 	)
 
-	concierge := NewConcierge(cfg.RunID, st, clk, client, cfg.Models.Concierge)
+	concierge := NewConcierge(cfg.RunID, st, clk, roleClient(client, cfg, "concierge"), cfg.Models.Concierge)
 	defer func() { _ = concierge.Close(context.WithoutCancel(ctx)) }()
 
 	question := strings.TrimSpace(cfg.Prompt)
@@ -268,7 +268,7 @@ func notifySignalContext(parent context.Context, forceExit func()) (context.Cont
 
 func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, `Usage:
-  orca run --run <id> [--store sqlite:<path>|nebula] [--driver nebula|fake] [flags]
+  orca run --goal "<text>" [--plan <file|post-id>] [--repo <owner/name>] [--run <id>] [--store sqlite:<path>|nebula] [--driver nebula|fake] [flags]
   orca chat --run <id> [--store sqlite:<path>|nebula] [--prompt "<question>"] [flags]`)
 	_, _ = fmt.Fprintln(w, "  orca report --run <id> [--day YYYY-MM-DD] [flags]\n  orca export --run <id> [flags]")
 }

@@ -116,15 +116,20 @@ func (c *OpenAIClient) RunToolLoop(ctx context.Context, req Request, reg *ToolRe
 
 //nolint:govet
 type responsesRequest struct {
-	Store           *bool           `json:"store"`
-	Stream          *bool           `json:"stream"`
-	Input           []responsesItem `json:"input"`
-	Tools           []responsesTool `json:"tools,omitempty"`
-	Temperature     *float64        `json:"temperature,omitempty"`
-	Model           string          `json:"model"`
-	Instructions    string          `json:"instructions,omitempty"`
-	MaxOutputTokens int             `json:"max_output_tokens,omitempty"`
+	Reasoning       *reasoningConfig `json:"reasoning,omitempty"`
+	Store           *bool            `json:"store"`
+	Stream          *bool            `json:"stream"`
+	Input           []responsesItem  `json:"input"`
+	Tools           []responsesTool  `json:"tools,omitempty"`
+	Temperature     *float64         `json:"temperature,omitempty"`
+	Model           string           `json:"model"`
+	Instructions    string           `json:"instructions,omitempty"`
+	MaxOutputTokens int              `json:"max_output_tokens,omitempty"`
 }
+type reasoningConfig struct {
+	Effort string `json:"effort"`
+}
+
 type responsesTool struct {
 	Type        string          `json:"type"`
 	Name        string          `json:"name"`
@@ -146,6 +151,9 @@ type responsesItem struct {
 
 func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Response, error) {
 	p := responsesRequest{Model: req.Model, Instructions: req.System, MaxOutputTokens: req.MaxTokens, Temperature: req.Temperature}
+	if req.ReasoningEffort != "" {
+		p.Reasoning = &reasoningConfig{Effort: req.ReasoningEffort}
+	}
 	store := false
 	p.Store = &store
 	stream := true

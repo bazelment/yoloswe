@@ -1,0 +1,32 @@
+{
+  "exchanges": [
+    {
+      "request": {
+        "model": "gpt-6-astra",
+        "messages": []
+      },
+      "response": {
+        "model": "gpt-6-astra",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "closed",
+              "name": "submit_plan_reconciliation",
+              "input": {
+                "summary": "Known fix",
+                "add_items": [
+                  {
+                    "id": "closed",
+                    "title": "Apply the known fix"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

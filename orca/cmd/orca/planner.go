@@ -16,6 +16,7 @@ import (
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/model"
+	planreader "github.com/bazelment/yoloswe/orca/planner"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -27,13 +28,18 @@ const (
 	ToolPlannerReplan          = "planner.replan"
 	ToolPlannerImport          = "planner.import"
 	SubmitPlanReconcileTool    = "submit_plan_reconciliation"
+	SubmitOpenPlanTool         = "submit_open_plan"
 	DefaultConflictAskDeadline = 30 * time.Minute
 )
 
 // PlannerSystemPrompt is the system prompt for Planner replanning and plan import turns.
 const PlannerSystemPrompt = `You are the Nebula Swarm Planner.
 Reconcile the owner's plan or replanning request against the current Run objective, backlog, and lanes by calling submit_plan_reconciliation.
-Apply non-conflicting objective updates and backlog additions/updates/drops directly. Any unmappable or conflicting points must be listed in conflicts with options and a sensible default.`
+Apply non-conflicting objective updates and backlog additions/updates/drops directly. Any unmappable or conflicting points must be listed in conflicts with options and a sensible default.
+Judge whether the approach is an open problem: uncertainty about what will work, competing approaches, or an untested assumption. For an open problem call submit_open_plan with your proposed approach in summary and proposed backlog. A critic will challenge it before any tasks spawn; you will revise once. For a closed, well-understood request call submit_plan_reconciliation.
+Validate at the smallest scope that can disprove the approach before funding broader work. Reuse existing work only when its assumptions fit this problem.`
+
+const CriticSystemPrompt = `Challenge the planner's approach before tasks spawn. Is there a cheaper, smallest-scope test that could disprove it first? Is an existing pattern wrong for this problem? Identify unsupported assumptions and propose a concrete revision. Read the owner's goal, current state and memories as context. Return a concise free-text critique; do not execute tasks or ask for approval.`
 
 // PlanBacklogSpec describes a backlog item to add or update during plan reconciliation.
 type PlanBacklogSpec struct {
@@ -74,12 +80,17 @@ var (
 // Planner handles recipe compilation, per-lane overrides, recipe_edit directives,
 // plan_import directives, and Dispatcher replanning requests in fresh Planner threads.
 type Planner struct {
-	store     store.Store
-	clock     clock.Clock
-	client    model.ModelClient
-	compiler  *recipe.Compiler
-	logger    *slog.Logger
-	modelName string
+	store          store.Store
+	clock          clock.Clock
+	client         model.ModelClient
+	critic         model.ModelClient
+	criticModel    string
+	providerName   string
+	criticProvider string
+	planReader     planreader.PlanReader
+	compiler       *recipe.Compiler
+	logger         *slog.Logger
+	modelName      string
 }
 
 var _ dispatcher.RecipeCompiler = (*Planner)(nil)
@@ -104,12 +115,13 @@ func NewPlanner(
 		comp = recipe.NewCompiler(client, recipe.WithModel(modelName))
 	}
 	return &Planner{
-		store:     st,
-		clock:     clk,
-		client:    client,
-		compiler:  comp,
-		logger:    logger,
-		modelName: modelName,
+		store:      st,
+		clock:      clk,
+		client:     client,
+		compiler:   comp,
+		logger:     logger,
+		modelName:  modelName,
+		planReader: planreader.NewPlanReader(nil),
 	}
 }
 
@@ -123,17 +135,15 @@ func (p *Planner) CompileOverride(ctx context.Context, base recipe.Recipe, overr
 	runID := base.RunID
 	name := fmt.Sprintf("override-%s", cmp.Or(base.Name, recipe.DefaultName))
 
-	if p.compiler != nil {
-		res, err := p.compiler.CompileOverride(ctx, base, name, override)
-		if err == nil && res != nil {
-			_ = p.recordDecision(ctx, runID, "", "", ToolRecipeCompileOverride, override, res.EchoTable, res.Usage, p.clock.Now().Sub(start))
-			return res.Recipe, nil
-		}
+	if p.compiler == nil {
+		return recipe.Recipe{}, errors.New("orca: recipe compilation requires a model client")
 	}
-
-	compiled := dispatcher.CompileRecipeOverride(base, override)
-	_ = p.recordDecision(ctx, runID, "", "", ToolRecipeCompileOverride, override, compiled.FormatTable(), model.Usage{}, p.clock.Now().Sub(start))
-	return compiled, nil
+	res, err := p.compiler.CompileOverride(ctx, base, name, override)
+	if err != nil {
+		return recipe.Recipe{}, fmt.Errorf("compile recipe override: %w", err)
+	}
+	_ = p.recordDecision(ctx, runID, "", "", ToolRecipeCompileOverride, override, res.EchoTable, res.Usage, p.clock.Now().Sub(start))
+	return res.Recipe, nil
 }
 
 // CompileAndSaveRecipe compiles a natural-language recipe (or override on base)
@@ -150,36 +160,17 @@ func (p *Planner) CompileAndSaveRecipe(
 		return recipe.Recipe{}, err
 	}
 
-	var (
-		compiled recipe.Recipe
-		usage    model.Usage
-	)
-
-	if p.compiler != nil {
-		req := recipe.CompileRequest{
-			RunID:  runID,
-			Name:   name,
-			Source: source,
-			Base:   base,
-		}
-		res, compErr := p.compiler.Compile(ctx, req)
-		if compErr == nil && res != nil {
-			compiled = res.Recipe
-			usage = res.Usage
-		}
+	if p.compiler == nil {
+		err := errors.New("orca: recipe compilation requires a model client")
+		_ = p.completePlannerTurn(ctx, threadID, turnID, store.TurnStatusFailed, model.Usage{}, "", err)
+		return recipe.Recipe{}, err
 	}
-
-	if len(compiled.Phases) == 0 {
-		baseRecipe := recipe.Default()
-		if base != nil {
-			baseRecipe = base.Clone()
-		}
-		compiled = dispatcher.CompileRecipeOverride(baseRecipe, source)
-		compiled.RunID = runID
-		compiled.Name = cmp.Or(strings.TrimSpace(name), baseRecipe.Name, recipe.DefaultName)
-		compiled.Source = source
+	res, err := p.compiler.Compile(ctx, recipe.CompileRequest{RunID: runID, Name: name, Source: source, Base: base})
+	if err != nil {
+		_ = p.completePlannerTurn(ctx, threadID, turnID, store.TurnStatusFailed, model.Usage{}, "", err)
+		return recipe.Recipe{}, fmt.Errorf("compile recipe %q: %w", name, err)
 	}
-
+	compiled, usage := res.Recipe, res.Usage
 	compiled.RunID = runID
 	compiled.Version = 0
 	if concurrencyCap > 0 {
@@ -273,85 +264,127 @@ func (p *Planner) handlePlanImportDirective(ctx context.Context, runID string, d
 // HandlePlannerRequest implements dispatcher.Config.OnPlannerRequest by executing
 // a fresh Planner reconciliation turn.
 func (p *Planner) HandlePlannerRequest(ctx context.Context, runID, reason, planRef string) error {
+	if strings.TrimSpace(planRef) != "" {
+		doc, err := p.planReader.ReadPlan(ctx, planRef)
+		if err != nil {
+			return fmt.Errorf("load plan: %w", err)
+		}
+		if strings.TrimSpace(doc.Content) == "" {
+			return fmt.Errorf("plan %q is empty", planRef)
+		}
+		reason += "\n\nReferenced plan:\n" + doc.Content
+	}
 	return p.runReconciliation(ctx, runID, ToolPlannerReplan, "Replan: "+reason, reason, planRef)
 }
 
 func (p *Planner) runReconciliation(
 	ctx context.Context,
 	runID, toolName, goal, inputText, planRef string,
-) error {
+) (retErr error) {
 	start := p.clock.Now()
 	threadID, turnID, err := p.startPlannerTurn(ctx, runID, goal, inputText)
 	if err != nil {
 		return err
 	}
-
-	var (
-		reconciled PlanReconciliation
-		usage      model.Usage
-		parsedOK   bool
-	)
-
-	if trimmed := strings.TrimSpace(inputText); strings.HasPrefix(trimmed, "{") {
-		if json.Unmarshal([]byte(trimmed), &reconciled) == nil {
-			parsedOK = true
+	usage := model.Usage{}
+	defer func() {
+		if retErr != nil {
+			_ = p.completePlannerTurn(ctx, threadID, turnID, store.TurnStatusFailed, usage, "", retErr)
 		}
-	}
+	}()
+	var reconciled PlanReconciliation
 
-	if !parsedOK && p.client != nil {
-		memories, err := p.store.Memories().List(ctx, store.MemoryFilter{RunID: runID})
+	if p.client == nil {
+		return errors.New("orca: planning requires a model client")
+	}
+	memories, err := p.store.Memories().List(ctx, store.MemoryFilter{RunID: runID})
+	if err != nil {
+		return err
+	}
+	memoryContext, err := brief.Render("", memories, 0)
+	if err != nil {
+		return err
+	}
+	snapshot, err := dispatcher.BuildSnapshot(ctx, p.store, p.clock, runID, nil, dispatcher.SnapshotConfig{})
+	if err != nil {
+		return err
+	}
+	prompt := fmt.Sprintf("%s\nPlan Ref: %s\n\nPlan / Request:\n%s", snapshot.Text, planRef, inputText)
+	req := model.Request{
+		Model: p.modelName, System: PlannerSystemPrompt + memoryContext,
+		Messages:  []model.Message{model.NewUserMessage(prompt)},
+		Tools:     []model.ToolDefinition{planTool(SubmitPlanReconcileTool), planTool(SubmitOpenPlanTool)},
+		MaxTokens: 16384,
+	}
+	draft, open, draftUsage, err := p.proposePlan(ctx, req, true)
+	usage = usage.Add(draftUsage)
+	if err != nil {
+		return err
+	}
+	reconciled = draft
+	if open {
+		if p.critic == nil {
+			return errors.New("orca: open planning requires a critic client")
+		}
+		raw, _ := json.Marshal(draft)
+		criticStart := p.clock.Now()
+		critique, err := p.critic.CreateMessage(ctx, model.Request{
+			Model: p.criticModel, System: CriticSystemPrompt + memoryContext,
+			Messages: []model.Message{model.NewUserMessage(prompt + "\n\nPlanner draft:\n" + string(raw))}, MaxTokens: model.DefaultMaxTokens,
+		})
 		if err != nil {
+			return fmt.Errorf("critic: %w", err)
+		}
+		if critique == nil || strings.TrimSpace(critique.Text()) == "" {
+			return errors.New("orca: critic returned no critique")
+		}
+		if _, err := p.store.Decisions().Append(ctx, store.Decision{
+			RunID: runID, Category: store.DecisionJudgment, Actor: "critic", ThreadID: threadID, TurnID: turnID,
+			Model: p.criticModel, Provider: p.criticProvider,
+			Tool: "planner.critique", Reason: "challenge open approach before spawning", Result: critique.Text(), Vetted: true,
+			InputTokens: critique.Usage.InputTokens, OutputTokens: critique.Usage.OutputTokens, CostUSD: critique.Usage.CostUSD,
+			LatencyMs: max(p.clock.Now().Sub(criticStart).Milliseconds(), 0),
+		}); err != nil {
 			return err
 		}
-		memoryContext, err := brief.Render("", memories, 0)
+		req.Messages = []model.Message{model.NewUserMessage(prompt + "\n\nYour first draft:\n" + string(raw) + "\n\nCritic feedback:\n" + critique.Text() + "\n\nRevise once and submit the final plan using submit_plan_reconciliation.")}
+		req.Tools = []model.ToolDefinition{planTool(SubmitPlanReconcileTool)}
+		revised, _, revisedUsage, err := p.proposePlan(ctx, req, false)
+		usage = usage.Add(revisedUsage)
 		if err != nil {
-			return err
+			return fmt.Errorf("planner revision: %w", err)
 		}
-		req := model.Request{
-			Model:  p.modelName,
-			System: PlannerSystemPrompt + memoryContext,
-			Messages: []model.Message{
-				model.NewUserMessage(fmt.Sprintf("Run ID: %s\nPlan Ref: %s\n\nPlan / Request:\n%s", runID, planRef, inputText)),
-			},
-			Tools: []model.ToolDefinition{{
-				Name:        SubmitPlanReconcileTool,
-				Description: "Submit reconciled objective, backlog diff, and any conflicts",
-				InputSchema: slices.Clone(submitPlanReconcileSchema),
-			}},
-			MaxTokens: model.DefaultMaxTokens,
-		}
-		if resp, callErr := p.client.CreateMessage(ctx, req); callErr == nil && resp != nil {
-			usage = resp.Usage
-			for _, tc := range resp.ToolCalls() {
-				if tc.Name == SubmitPlanReconcileTool {
-					if json.Unmarshal(tc.Input, &reconciled) == nil {
-						parsedOK = true
-						break
-					}
-				}
-			}
-			if !parsedOK && strings.TrimSpace(resp.Text()) != "" {
-				reconciled.Summary = strings.TrimSpace(resp.Text())
-				parsedOK = true
-			}
-		}
+		reconciled = revised
 	}
-
-	if !parsedOK {
-		reconciled.Summary = strings.TrimSpace(inputText)
-		if planRef != "" {
-			reconciled.PlanRef = planRef
-		}
+	appliedSummary, err := p.applyReconciliation(ctx, runID, reconciled, planRef)
+	if err != nil {
+		return err
 	}
-
-	appliedSummary, applyErr := p.applyReconciliation(ctx, runID, reconciled, planRef)
-	if applyErr != nil {
-		_ = p.completePlannerTurn(ctx, threadID, turnID, store.TurnStatusFailed, usage, "", applyErr)
-		return applyErr
-	}
-
 	_ = p.completePlannerTurn(ctx, threadID, turnID, store.TurnStatusCompleted, usage, appliedSummary, nil)
 	return p.recordDecision(ctx, runID, threadID, turnID, toolName, goal, appliedSummary, usage, p.clock.Now().Sub(start))
+}
+
+func planTool(name string) model.ToolDefinition {
+	return model.ToolDefinition{Name: name, Description: "Submit the approach in summary, objective, backlog diff and conflicts", InputSchema: slices.Clone(submitPlanReconcileSchema)}
+}
+
+func (p *Planner) proposePlan(ctx context.Context, req model.Request, allowOpen bool) (PlanReconciliation, bool, model.Usage, error) {
+	resp, err := p.client.CreateMessage(ctx, req)
+	if err != nil {
+		return PlanReconciliation{}, false, model.Usage{}, err
+	}
+	if resp == nil {
+		return PlanReconciliation{}, false, model.Usage{}, errors.New("orca: planner returned no response")
+	}
+	calls := resp.ToolCalls()
+	if len(calls) != 1 || (calls[0].Name != SubmitPlanReconcileTool && !(allowOpen && calls[0].Name == SubmitOpenPlanTool)) {
+		return PlanReconciliation{}, false, resp.Usage, errors.New("orca: planner must submit exactly one plan")
+	}
+	var rec PlanReconciliation
+	if err := json.Unmarshal(calls[0].Input, &rec); err != nil {
+		return rec, false, resp.Usage, fmt.Errorf("decode planner submission: %w", err)
+	}
+	return rec, calls[0].Name == SubmitOpenPlanTool, resp.Usage, nil
 }
 
 func (p *Planner) applyReconciliation(
@@ -543,9 +576,10 @@ func (p *Planner) recordDecision(
 		return nil
 	}
 	_, err := p.store.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
-		RunID:        runID,
-		Category:     store.DecisionJudgment,
-		Actor:        ActorPlanner,
+		RunID:    runID,
+		Category: store.DecisionJudgment,
+		Actor:    ActorPlanner,
+		Model:    p.modelName, Provider: p.providerName,
 		ThreadID:     threadID,
 		TurnID:       turnID,
 		Tool:         tool,

@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,10 +20,12 @@ import (
 	"github.com/bazelment/yoloswe/orca/controller"
 
 	"github.com/bazelment/yoloswe/orca/clock"
+	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/mailbox"
 	mailboxfake "github.com/bazelment/yoloswe/orca/mailbox/fake"
 	"github.com/bazelment/yoloswe/orca/model"
+	planreader "github.com/bazelment/yoloswe/orca/planner"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -353,7 +359,7 @@ func TestConfig_RoleModelsAndRecipeFiles(t *testing.T) {
 	defer func() { _ = st.Close() }()
 
 	drv := NewScriptedFakeDriver(lane.NewFakeDriver(), st.Events(), clk, true)
-	runner := NewRunner(cfg, st, drv, clk, nil, nil)
+	runner := NewRunner(cfg, st, drv, clk, model.NewFakeClient(compiledRecipeResponse(t, "skip clean and skip review; lanes merge themselves")), nil)
 	if err := runner.Bootstrap(ctx); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
@@ -426,7 +432,7 @@ func TestPlannerDirectivesAndConciergeSubmit(t *testing.T) {
 		t.Fatalf("unexpected reply: %q", reply)
 	}
 
-	planner := NewPlanner(st, clk, nil, DefaultPlannerModel, nil)
+	planner := NewPlanner(st, clk, model.NewFakeClient(compiledRecipeResponse(t, "skip clean"), model.Response{Message: model.NewAssistantMessage(model.NewToolUseBlock("plan", SubmitPlanReconcileTool, json.RawMessage(`{"objective":"Updated objective from plan","add_items":[{"id":"item-plan-1","title":"Imported item","priority":"p0"}],"conflicts":[{"id":"conf-1","question":"Keep legacy endpoint?","options":["drop","keep"],"default":"drop"}]}`)))}), DefaultPlannerModel, nil)
 	if err := planner.ReconcileDirectives(ctx, "run-plan", 4); err != nil {
 		t.Fatalf("ReconcileDirectives: %v", err)
 	}
@@ -556,7 +562,7 @@ func TestRestart_UniqueIDsAcrossInstances(t *testing.T) {
 	if _, err := c1.Ask(ctx, "submit first"); err != nil {
 		t.Fatalf("c1.Ask: %v", err)
 	}
-	p1 := NewPlanner(st, clk, nil, DefaultPlannerModel, nil)
+	p1 := NewPlanner(st, clk, model.NewFakeClient(compiledRecipeResponse(t, "skip clean")), DefaultPlannerModel, nil)
 	if _, err := p1.CompileAndSaveRecipe(ctx, "run-restart", "default", "skip clean", nil, 2); err != nil {
 		t.Fatalf("p1.CompileAndSaveRecipe: %v", err)
 	}
@@ -568,7 +574,7 @@ func TestRestart_UniqueIDsAcrossInstances(t *testing.T) {
 	if _, err := c2.Ask(ctx, "submit second"); err != nil {
 		t.Fatalf("c2.Ask: %v", err)
 	}
-	p2 := NewPlanner(st, clk, nil, DefaultPlannerModel, nil)
+	p2 := NewPlanner(st, clk, model.NewFakeClient(compiledRecipeResponse(t, "lanes merge themselves")), DefaultPlannerModel, nil)
 	if _, err := p2.CompileAndSaveRecipe(ctx, "run-restart", "default", "lanes merge themselves", nil, 2); err != nil {
 		t.Fatalf("p2.CompileAndSaveRecipe: %v", err)
 	}
@@ -851,14 +857,14 @@ func TestDriverWatchDoesNotReplayForwardedEvents(t *testing.T) {
 	}
 }
 
-func TestRunnerWorkerQuestionUsesDispatcherModel(t *testing.T) {
+func TestRunnerWorkerQuestionUsesRouterModel(t *testing.T) {
 	clk := clock.NewFakeClock(time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC))
 	st := store.NewMemoryStore(clk)
 	t.Cleanup(func() { _ = st.Close() })
 	drv := lane.NewFakeDriver()
 	box := mailboxfake.New(st.Events(), "question-run")
 	client := model.NewFakeClient(model.Response{Message: model.Message{Role: model.RoleAssistant, Content: []model.ContentBlock{model.NewTextBlock("Use the repository merge queue.")}}})
-	r := NewRunner(Config{RunID: "question-run", Models: RoleModels{Dispatcher: "question-model"}}, st, drv, clk, client, nil, box)
+	r := NewRunner(Config{RunID: "question-run", Models: RoleModels{Roles: map[string]RoleSelection{"router": {Provider: "openai", Model: "question-model"}}}}, st, drv, clk, client, nil, box)
 	if err := r.Bootstrap(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -881,7 +887,397 @@ func TestRunnerWorkerQuestionUsesDispatcherModel(t *testing.T) {
 		t.Fatalf("owner=%+v steers=%+v", box.Sent(), drv.Steers)
 	}
 	if len(client.Requests) != 1 || client.Requests[0].Model != "question-model" || !strings.Contains(client.Requests[0].Messages[0].Text(), "repository merge queue") {
-		t.Fatalf("dispatcher requests: %+v", client.Requests)
+		t.Fatalf("router requests: %+v", client.Requests)
+	}
+}
+
+func TestRoleResolution(t *testing.T) {
+	t.Parallel()
+	cfg, _, err := parseFlags("run", []string{"--store", "memory", "--goal", "resolve roles", "--planner-provider", "anthropic", "--planner-model", "claude-opus-4-6", "--critic-provider", "openai", "--critic-model", "gpt-6.1-sol", "--router-model", "router-test"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RunID == "" || cfg.Models.Dispatcher != "gpt-6.1-sol" || cfg.Models.Roles["planner"].Effort != "high" || cfg.Models.Roles["critic"].Provider != "openai" {
+		t.Fatalf("resolved config: %+v", cfg)
+	}
+	fake := model.NewFakeClient(model.Response{Message: model.NewAssistantMessage(model.NewTextBlock("ok"))})
+	_, err = roleClient(fake, cfg, "planner").CreateMessage(t.Context(), model.Request{Model: "ignored", MaxTokens: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := fake.Requests[0]
+	if got.Model != "claude-opus-4-6" || got.Metadata["provider"] != "anthropic" || got.Metadata["role"] != "planner" || got.ReasoningEffort != "high" {
+		t.Fatalf("request: %+v", got)
+	}
+	defaults := Config{}.withDefaults()
+	if defaults.Models.Roles["planner"].Provider == defaults.Models.Roles["critic"].Provider || defaults.Models.Dispatcher != "gpt-6.1-sol" {
+		t.Fatalf("defaults: %+v", defaults.Models)
+	}
+}
+
+func TestRoleConfigPrecedenceAndValidation(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "roles.json")
+	if err := os.WriteFile(path, []byte(`{"run_id":"roles","models":{"roles":{"planner":{"provider":"anthropic","model":"old","effort":"medium"},"critic":{"provider":"openai"},"router":{"provider":"anthropic","model":"cheap"}}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := parseFlags("run", []string{"--store", "memory", "--config", path, "--planner-model", "new", "--planner-effort", "high"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Models.Roles["planner"] != (RoleSelection{Provider: "anthropic", Model: "new", Effort: "high"}) || cfg.Models.Roles["router"].Model != "cheap" {
+		t.Fatalf("roles: %+v", cfg.Models.Roles)
+	}
+	cfg.Models.Roles["critic"] = RoleSelection{Provider: "anthropic", Model: "same"}
+	if err := cfg.Validate(true); err == nil || !strings.Contains(err.Error(), "different providers") {
+		t.Fatalf("same-provider critic: %v", err)
+	}
+}
+
+func TestRecipeCompileFailureIsHardError(t *testing.T) {
+	t.Parallel()
+	clk := clock.NewRealClock()
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	if err := st.Runs().Create(t.Context(), store.Run{ID: "bad-recipe"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "bad.txt")
+	if err := os.WriteFile(path, []byte("skip clean"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fake := model.NewFakeClient(model.Response{Message: model.NewAssistantMessage(model.NewTextBlock("cannot compile this"))})
+	planner := NewPlanner(st, clk, fake, "test", nil)
+	if _, err := LoadRecipeFile(t.Context(), path, "bad-recipe", 4, st, planner); err == nil {
+		t.Fatal("expected compiler error")
+	}
+	if _, err := st.Recipes().Get(t.Context(), "bad-recipe", "bad", 0); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("recipe saved despite compile failure: %v", err)
+	}
+	fake = model.NewFakeClient(model.Response{Message: model.NewAssistantMessage(model.NewTextBlock("cannot compile this"))})
+	planner = NewPlanner(st, clk, fake, "test", nil)
+	if _, err := planner.CompileOverride(t.Context(), recipe.Default(), "skip clean"); err == nil {
+		t.Fatal("expected override compiler error")
+	}
+	if _, err := LoadRecipeFile(t.Context(), path, "bad-recipe", 4, st, nil); err == nil {
+		t.Fatal("expected missing compiler error")
+	}
+}
+
+func compiledRecipeResponse(t *testing.T, delta string) model.Response {
+	t.Helper()
+	r := dispatcher.CompileRecipeOverride(recipe.Default(), delta)
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return model.Response{Message: model.NewAssistantMessage(model.NewToolUseBlock("compile", recipe.SubmitRecipeToolName, raw))}
+}
+
+func TestCLIRepositoryReachesDriver(t *testing.T) {
+	t.Parallel()
+	var selected atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/code-repositories":
+			_, _ = io.WriteString(w, `{"repositories":[{"id":"wrong","fullName":"other/repo"},{"id":"chosen","fullName":"owner/project"}]}`)
+		case r.URL.Path == "/api/code-sessions" && r.Method == http.MethodPost:
+			var body struct {
+				RepositoryID string `json:"repositoryId"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			selected.Store(body.RepositoryID)
+			_, _ = io.WriteString(w, `{"session":{"id":"new-session","status":"ready"}}`)
+		case r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[{"id":"wrong-reuse","repositoryId":"wrong","status":"ready","metadata":{"swarmRun":"repo-test","swarmLane":"test"}}]}`)
+		default:
+			_, _ = io.WriteString(w, `{"session":{"id":"current","status":"ready","repositoryId":"wrong"}}`)
+		}
+	}))
+	defer server.Close()
+	cfg, _, err := parseFlags("run", []string{"--run", "repo-test", "--repo", "owner/project"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.NebulaAPIURL = server.URL
+	cfg.NebulaToken = "test-token"
+	st := store.NewMemoryStore(clock.NewRealClock())
+	defer st.Close()
+	drv, err := openNebulaDriver(cfg, st, clock.NewRealClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := drv.EnsureSession(t.Context(), lane.SpawnRequest{RunID: cfg.RunID, LaneID: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := selected.Load(); got != "chosen" {
+		t.Fatalf("repositoryId = %v", got)
+	}
+	cfg.Repository = "absent/repo"
+	drv, err = openNebulaDriver(cfg, st, clock.NewRealClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := drv.EnsureSession(t.Context(), lane.SpawnRequest{RunID: cfg.RunID, LaneID: "absent"}); err == nil {
+		t.Fatal("expected missing repository error")
+	}
+}
+
+func TestCLIStartupPlanningRecorded(t *testing.T) {
+	t.Parallel()
+	for _, source := range []string{"goal", "file", "json-file", "post", "plan-ref"} {
+		t.Run(source, func(t *testing.T) {
+			t.Parallel()
+			args := []string{"--run", "startup-" + source, "--store", "memory", "--goal", "Find the smallest test", "--repo", "owner/project", "--driver", "fake"}
+			ref := ""
+			const post = "286c9d4f-9da3-4787-aa66-bd97aa21f947"
+			content := "Investigate the assumption before rolling out."
+			if source == "json-file" {
+				content = `{"goal":"Investigate before rolling out"}`
+			}
+			switch source {
+			case "file", "json-file":
+				ref = filepath.Join(t.TempDir(), "plan.txt")
+				if err := os.WriteFile(ref, []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+				args = append(args, "--plan", ref)
+			case "post":
+				ref = post
+				args = append(args, "--plan", ref)
+			case "plan-ref":
+				ref = "post:" + post
+				args = append(args, "--plan-ref", ref)
+			}
+			cfg, _, err := parseFlags("run", args, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fake, err := model.LoadFakeClient("testdata/critic_revise_replay.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			clk := clock.NewRealClock()
+			st := store.NewMemoryStore(clk)
+			defer st.Close()
+			drv := lane.NewFakeDriver()
+			// Every model call must happen before either the backlog or driver is mutated.
+			guarded := modelClientFunc(func(ctx context.Context, req model.Request) (*model.Response, error) {
+				items, err := st.Backlog().List(ctx, store.BacklogFilter{RunID: cfg.RunID})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(items) != 0 {
+					t.Fatalf("backlog applied before revision: %+v", items)
+				}
+				return fake.CreateMessage(ctx, req)
+			})
+			runner := NewRunner(cfg, st, drv, clk, guarded, nil)
+			runner.planner.planReader = planreader.NewPlanReader(map[string]string{post: content})
+			if err := runner.Bootstrap(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if err := runner.Bootstrap(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if len(fake.Requests) != 3 {
+				t.Fatalf("calls=%d", len(fake.Requests))
+			}
+			for i, role := range []string{"planner", "critic", "planner"} {
+				req := fake.Requests[i]
+				sel := cfg.Models.Roles[role]
+				if req.Model != sel.Model || req.Metadata["provider"] != sel.Provider || req.Metadata["role"] != role {
+					t.Fatalf("request %d: %+v", i, req)
+				}
+			}
+			if !strings.Contains(fake.Requests[2].Messages[0].Text(), "small role resolution test") {
+				t.Fatal("revision missing critique")
+			}
+			if ref != "" && !strings.Contains(fake.Requests[0].Messages[0].Text(), content) {
+				t.Fatal("planner did not receive fetched plan")
+			}
+			if !strings.Contains(fake.Requests[0].Messages[0].Text(), cfg.Goal) {
+				t.Fatal("planner did not receive goal")
+			}
+			items, err := st.Backlog().List(t.Context(), store.BacklogFilter{RunID: cfg.RunID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(items) != 1 || items[0].ID != "small" {
+				t.Fatalf("backlog: %+v", items)
+			}
+			run, err := st.Runs().Get(t.Context(), cfg.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.Objective != cfg.Goal || run.PlanRef != ref {
+				t.Fatalf("run: %+v", run)
+			}
+			decisions, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: cfg.RunID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(decisions) != 2 || decisions[0].Actor != "critic" {
+				t.Fatalf("decisions: %+v", decisions)
+			}
+		})
+	}
+}
+
+func TestClosedPlanSkipsCritic(t *testing.T) {
+	t.Parallel()
+	fake, err := model.LoadFakeClient("testdata/closed_plan_replay.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk := clock.NewRealClock()
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	runner := NewRunner(Config{RunID: "closed", Goal: "Apply a known fix", StoreSpec: "memory"}, st, lane.NewFakeDriver(), clk, fake, nil)
+	if err := runner.Bootstrap(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.Requests) != 1 {
+		t.Fatalf("calls=%d", len(fake.Requests))
+	}
+}
+
+func TestPlanningFailureDoesNotPublishDraft(t *testing.T) {
+	t.Parallel()
+	for _, stage := range []string{"planner", "critic", "revision"} {
+		t.Run(stage, func(t *testing.T) {
+			t.Parallel()
+			fake, err := model.LoadFakeClient("testdata/critic_revise_replay.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			client := modelClientFunc(func(ctx context.Context, req model.Request) (*model.Response, error) {
+				calls++
+				if calls == map[string]int{"planner": 1, "critic": 2, "revision": 3}[stage] {
+					return nil, errors.New("recorded failure")
+				}
+				return fake.CreateMessage(ctx, req)
+			})
+			clk := clock.NewRealClock()
+			st := store.NewMemoryStore(clk)
+			defer st.Close()
+			runner := NewRunner(Config{RunID: "failure", Goal: "Investigate", StoreSpec: "memory"}, st, lane.NewFakeDriver(), clk, client, nil)
+			if err := runner.Bootstrap(t.Context()); err == nil {
+				t.Fatal("expected error")
+			}
+			items, err := st.Backlog().List(t.Context(), store.BacklogFilter{RunID: "failure"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(items) != 0 {
+				t.Fatalf("draft published: %+v", items)
+			}
+		})
+	}
+}
+
+func TestCLIOverridesOppositeConfigAlias(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ config, flag, value string }{
+		{`{"goal":"old"}`, "--objective", "new"},
+		{`{"objective":"old"}`, "--goal", "new"},
+		{`{"plan":"old"}`, "--plan-ref", "new"},
+		{`{"plan_ref":"old"}`, "--plan", "new"},
+	} {
+		t.Run(tc.flag, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(tc.config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, _, err := parseFlags("run", []string{"--run", "alias", "--store", "memory", "--config", path, tc.flag, tc.value}, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch tc.flag {
+			case "--goal", "--objective":
+				if cfg.Objective != "new" {
+					t.Fatalf("objective=%q", cfg.Objective)
+				}
+			case "--plan":
+				if cfg.Plan != "new" || cfg.PlanRef != "" {
+					t.Fatalf("plan=%q ref=%q", cfg.Plan, cfg.PlanRef)
+				}
+			case "--plan-ref":
+				if cfg.PlanRef != "new" || cfg.Plan != "" {
+					t.Fatalf("plan=%q ref=%q", cfg.Plan, cfg.PlanRef)
+				}
+			}
+		})
+	}
+}
+
+func TestRoleProviderRoutingAndExplicitGateway(t *testing.T) {
+	// This serial test isolates the provider URLs from the session's real gateways.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/responses":
+			_, _ = io.WriteString(w, `{"id":"openai","output":[{"type":"message","text":"OpenAI"}]}`)
+		case "/v1/messages":
+			_, _ = io.WriteString(w, `{"id":"anthropic","role":"assistant","content":[{"type":"text","text":"Anthropic"}]}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("ANTHROPIC_BASE_URL", server.URL)
+	t.Setenv("ORCH_MODEL_PROVIDER", "")
+	cfg := Config{LLMGatewayURL: server.URL}.withDefaults()
+	client, err := openModelClient(cfg, clock.NewRealClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []string{"planner", "critic", "dispatcher", "concierge", "router"} {
+		got, err := roleClient(client, cfg, role).CreateMessage(t.Context(), model.Request{Model: cfg.Models.Roles[role].Model, Messages: []model.Message{model.NewUserMessage("test")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "OpenAI"
+		if role == "critic" {
+			want = "Anthropic"
+		}
+		if got.Text() != want {
+			t.Fatalf("role %s got %q want %q", role, got.Text(), want)
+		}
+	}
+}
+
+func TestPlannerRequestFetchesReference(t *testing.T) {
+	t.Parallel()
+	fake, err := model.LoadFakeClient("testdata/closed_plan_replay.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk := clock.NewRealClock()
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	if err := st.Runs().Create(t.Context(), store.Run{ID: "replan"}); err != nil {
+		t.Fatal(err)
+	}
+	planner := NewPlanner(st, clk, fake, "planner", nil)
+	planner.planReader = planreader.NewPlanReader(map[string]string{"post:test": "A new plan from the referenced post"})
+	if err := planner.HandlePlannerRequest(t.Context(), "replan", "Reconcile", "post:test"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fake.Requests[0].Messages[0].Text(), "A new plan from the referenced post") {
+		t.Fatal("reference not fetched")
 	}
 }
 

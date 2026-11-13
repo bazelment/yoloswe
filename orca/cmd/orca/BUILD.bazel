@@ -3,7 +3,6 @@ load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 go_library(
     name = "orca_lib",
     srcs = [
-        "chat_stream.go",
         "concierge.go",
         "config.go",
         "main.go",
@@ -16,7 +15,6 @@ go_library(
     visibility = ["//visibility:private"],
     deps = [
         "//orca/brief",
-        "//orca/chat",
         "//orca/clock",
         "//orca/concierge",
         "//orca/controller",
@@ -26,9 +24,9 @@ go_library(
         "//orca/mailbox",
         "//orca/mailbox/nebula",
         "//orca/model",
+        "//orca/planner",
         "//orca/recipe",
         "//orca/replay",
-        "//orca/router",
         "//orca/store",
     ],
 )
@@ -41,20 +39,17 @@ go_binary(
 
 go_test(
     name = "orca_test",
-    srcs = [
-        "chat_stream_test.go",
-        "main_test.go",
-    ],
+    srcs = ["main_test.go"],
     data = glob(["testdata/**"]),
     embed = [":orca_lib"],
     deps = [
-        "//orca/chat",
         "//orca/clock",
-        "//orca/controller",
+        "//orca/dispatcher",
         "//orca/lane",
         "//orca/mailbox",
         "//orca/mailbox/fake",
         "//orca/model",
+        "//orca/planner",
         "//orca/recipe",
         "//orca/store",
     ],

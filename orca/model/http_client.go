@@ -265,6 +265,7 @@ func (c *HTTPClient) RunToolLoop(
 }
 
 type wireRequest struct {
+	OutputConfig  *reasoningConfig  `json:"output_config,omitempty"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
 	Temperature   *float64          `json:"temperature,omitempty"`
 	Model         string            `json:"model"`
@@ -294,7 +295,13 @@ func (c *HTTPClient) CreateMessage(ctx context.Context, req Request) (*Response,
 		StopSequences: req.StopSequences,
 		MaxTokens:     maxTokens,
 		Temperature:   req.Temperature,
-		Metadata:      req.Metadata,
+		Metadata:      maps.Clone(req.Metadata),
+	}
+	// Role routing metadata belongs to the recording, not Anthropic's wire schema.
+	delete(payload.Metadata, "role")
+	delete(payload.Metadata, "provider")
+	if req.ReasoningEffort != "" {
+		payload.OutputConfig = &reasoningConfig{Effort: req.ReasoningEffort}
 	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
