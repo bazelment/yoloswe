@@ -170,6 +170,7 @@ type Handover struct {
 }
 
 var ErrLeaseHeld = errors.New("run is leased by another orca")
+var ErrLeaseNotHeld = errors.New("run is not leased by this orca")
 
 type lease struct {
 	Holder string `json:"holder"`
@@ -184,10 +185,7 @@ func (h Handover) Adopt(r Run) error {
 		}
 		return e
 	}
-	holder := fmt.Sprintf("%s/%d", h.Host, h.PID)
-	if holder == "/0" {
-		holder = fmt.Sprintf("%s/%d", hostname(), os.Getpid())
-	}
+	holder := h.holder()
 	_ = json.NewEncoder(f).Encode(lease{Holder: holder})
 	_ = f.Close()
 	if h.Labeler != nil {
@@ -215,7 +213,23 @@ func (h Handover) Adopt(r Run) error {
 }
 func (h Handover) Release(r Run) error {
 	p := filepath.Join(r.Dir, ".orca-lease.json")
-	_ = os.Remove(p)
+	b, e := os.ReadFile(p)
+	if e != nil {
+		if errors.Is(e, os.ErrNotExist) {
+			return ErrLeaseNotHeld
+		}
+		return e
+	}
+	var current lease
+	if e := json.Unmarshal(b, &current); e != nil {
+		return e
+	}
+	if current.Holder != h.holder() {
+		return ErrLeaseNotHeld
+	}
+	if e := os.Remove(p); e != nil {
+		return e
+	}
 	if h.Labeler != nil {
 		if e := h.Labeler.SetOrchestrator(r.ID, "claude"); e != nil {
 			return e
@@ -259,6 +273,13 @@ func removeMarker(p string) error {
 	return nil
 }
 func hostname() string { h, _ := os.Hostname(); return h }
+
+func (h Handover) holder() string {
+	if h.Host != "" || h.PID != 0 {
+		return fmt.Sprintf("%s/%d", h.Host, h.PID)
+	}
+	return fmt.Sprintf("%s/%d", hostname(), os.Getpid())
+}
 
 type Service struct {
 	Importer Importer

@@ -51,4 +51,7 @@ func TestDoubleAdopt(t *testing.T) {
 	if e := h.Adopt(r); e != ErrLeaseHeld {
 		t.Fatalf("%v", e)
 	}
+	if e := (Handover{Host: "other", PID: 2}).Release(r); e != ErrLeaseNotHeld {
+		t.Fatalf("release by another holder: %v", e)
+	}
 }
