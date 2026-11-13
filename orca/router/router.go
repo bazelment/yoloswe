@@ -53,6 +53,15 @@ type Router interface {
 	Route(context.Context, string) (Decision, error)
 }
 
+// FormatInput appends the current open-question context in the same shape used
+// by production chat routing and evaluation.
+func FormatInput(text, openQuestions string) string {
+	if openQuestions == "" {
+		return text
+	}
+	return text + "\nOpen questions:\n" + openQuestions
+}
+
 // Logger records every routing decision, including low-confidence decisions.
 type Logger interface {
 	LogRouting(context.Context, string, Decision) error

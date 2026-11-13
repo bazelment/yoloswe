@@ -1,0 +1,8 @@
+Unaudited labels. Measured 2026-11-13 through session OpenAI gateway; production router unchanged.
+CASE owner-01 source=s:5e989814 correct=false expected=[concierge] got=[answer-open-question] clarification=false latency=3.434s error=""
+CASE owner-02 source=s:d812ba85 correct=false expected=[answer-open-question] got=[memory] clarification=false latency=6.859s error=""
+CASE owner-03 source=s:955816ee correct=false expected=[planner] got=[controller] clarification=false latency=7.579s error=""
+CASE owner-04 source=s:e8ed0e15 correct=true expected=[memory] got=[memory] clarification=false latency=3.53s error=""
+CASE owner-05 source=s:cef359c1 correct=true expected=[controller] got=[controller] clarification=false latency=3.605s error=""
+SCORECARD fallback model=gpt-6.1-sol: routing accuracy: 2/5 (40.00%); unnecessary clarifications: 0/5 (0.00%); errors: 0; latency mean=5.001s p50=3.605s p95=7.579s; targets_met=false
+Gemini scoring skipped: no Gemini key exists for this owner. Labels unaudited; orchestrator will fund independent label audit.
