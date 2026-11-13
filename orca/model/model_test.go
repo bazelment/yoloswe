@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/model"
 )
 
@@ -670,5 +671,144 @@ func TestToolRegistryAndFakeClient(t *testing.T) {
 	totalUsage := resp.Usage.Add(model.Usage{InputTokens: 80, OutputTokens: 20, CostUSD: 0.001})
 	if totalUsage.TotalTokens() != 250 {
 		t.Fatalf("TotalTokens() = %d, want 250", totalUsage.TotalTokens())
+	}
+}
+
+// retryTestClock publishes timers only after they are registered, so tests can
+// advance time without racing the retry goroutine.
+type retryTestClock struct {
+	*clock.FakeClock
+	waits chan time.Duration
+}
+
+func (c *retryTestClock) NewTimer(d time.Duration) clock.Timer {
+	timer := c.FakeClock.NewTimer(d)
+	c.waits <- d
+	return timer
+}
+
+type retryTransport func(*http.Request) (*http.Response, error)
+
+func (f retryTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestHTTPClient_RetryAfter48Seconds(t *testing.T) {
+	t.Parallel()
+	testRetryWaits(t, "anthropic", "48", []time.Duration{48 * time.Second}, false, false)
+}
+
+func TestRetryPoliciesDeterministic(t *testing.T) {
+	for _, provider := range []string{"anthropic", "openai"} {
+		t.Run(provider, func(t *testing.T) {
+			t.Run("clamps retry-after", func(t *testing.T) {
+				testRetryWaits(t, provider, "600", []time.Duration{2 * time.Minute}, false, false)
+			})
+			t.Run("uses exponential backoff without header", func(t *testing.T) {
+				testRetryWaits(t, provider, "", []time.Duration{200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond, 1600 * time.Millisecond, 3200 * time.Millisecond, 5 * time.Second, 5 * time.Second}, false, false)
+			})
+			t.Run("stops at total retry budget", func(t *testing.T) {
+				testRetryWaits(t, provider, "600", []time.Duration{2 * time.Minute, 2 * time.Minute, time.Minute}, true, false)
+			})
+			t.Run("cancellation interrupts wait", func(t *testing.T) {
+				testRetryWaits(t, provider, "48", []time.Duration{48 * time.Second}, true, true)
+			})
+		})
+	}
+}
+
+func testRetryWaits(t *testing.T, provider, header string, wantWaits []time.Duration, persistent, cancelWait bool) {
+	t.Helper()
+	clk := &retryTestClock{FakeClock: clock.NewFakeClock(time.Time{}), waits: make(chan time.Duration, 16)}
+	calls := 0
+	hc := &http.Client{Transport: retryTransport(func(_ *http.Request) (*http.Response, error) {
+		calls++
+		hdr := make(http.Header)
+		if header != "" {
+			hdr.Set("Retry-After", header)
+		}
+		status := http.StatusTooManyRequests
+		body := `{"error":{"type":"rate_limit_error","message":"retry later"}}`
+		if !persistent && calls > len(wantWaits) {
+			status = http.StatusOK
+			if provider == "anthropic" {
+				body = `{"id":"ok","role":"assistant","content":[{"type":"text","text":"recovered"}]}`
+			} else {
+				body = `{"id":"ok","output":[{"type":"message","text":"recovered"}]}`
+			}
+		}
+		return &http.Response{StatusCode: status, Header: hdr, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	var client model.ModelClient
+	if provider == "anthropic" {
+		client = model.NewHTTPClient(model.WithClock(clk), model.WithHTTPClient(hc), model.WithMaxRetries(20))
+	} else {
+		client = model.NewOpenAIClient(model.WithOpenAIClock(clk), model.WithOpenAIHTTPClient(hc), model.WithOpenAIMaxRetries(20))
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	type result struct {
+		resp *model.Response
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resp, err := client.CreateMessage(ctx, model.Request{Model: "test", Messages: []model.Message{model.NewUserMessage("hi")}})
+		done <- result{resp, err}
+	}()
+	watchdog := time.NewTimer(5 * time.Second)
+	defer watchdog.Stop()
+	for _, want := range wantWaits {
+		select {
+		case got := <-clk.waits:
+			if got != want {
+				t.Fatalf("wait = %s, want %s", got, want)
+			}
+		case got := <-done:
+			t.Fatalf("returned before wait %s: %+v", want, got)
+		case <-watchdog.C:
+			t.Fatal("retry did not register timer")
+		}
+		if cancelWait {
+			cancel()
+		} else {
+			clk.Advance(want)
+		}
+	}
+	select {
+	case got := <-done:
+		switch {
+		case cancelWait:
+			if got.err != context.Canceled {
+				t.Fatalf("error = %v, want context.Canceled", got.err)
+			}
+		case persistent:
+			var apiErr *model.APIError
+			if !errors.As(got.err, &apiErr) || apiErr.StatusCode != 429 || apiErr.Attempts != calls {
+				t.Fatalf("error = %v, want final 429 after %d attempts", got.err, calls)
+			}
+		default:
+			if got.err != nil {
+				t.Fatalf("CreateMessage: %v", got.err)
+			}
+			if got.resp.Text() != "recovered" {
+				t.Fatalf("response = %+v", got.resp)
+			}
+		}
+	case wait := <-clk.waits:
+		t.Fatalf("unexpected extra wait: %s", wait)
+	case <-watchdog.C:
+		t.Fatal("CreateMessage did not return")
+	}
+	wantCalls := len(wantWaits) + 1
+	if persistent {
+		wantCalls = len(wantWaits)
+	}
+	if cancelWait {
+		wantCalls = 1
+	}
+	if calls != wantCalls {
+		t.Fatalf("requests = %d, want %d", calls, wantCalls)
+	}
+	if clk.Waiters() != 0 {
+		t.Fatalf("active timers = %d, want 0", clk.Waiters())
 	}
 }

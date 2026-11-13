@@ -1189,7 +1189,10 @@ func TestPlanningFailureDoesNotPublishDraft(t *testing.T) {
 			calls := 0
 			client := modelClientFunc(func(ctx context.Context, req model.Request) (*model.Response, error) {
 				calls++
-				if calls == map[string]int{"planner": 1, "critic": 2, "revision": 3}[stage] {
+				if stage == "critic" && req.Metadata["role"] == "critic" {
+					return nil, &model.APIError{StatusCode: http.StatusTooManyRequests, Message: "rate limited", Attempts: 1}
+				}
+				if stage != "critic" && calls == map[string]int{"planner": 1, "revision": 3}[stage] {
 					return nil, errors.New("recorded failure")
 				}
 				return fake.CreateMessage(ctx, req)
@@ -1198,15 +1201,31 @@ func TestPlanningFailureDoesNotPublishDraft(t *testing.T) {
 			st := store.NewMemoryStore(clk)
 			defer st.Close()
 			runner := NewRunner(Config{RunID: "failure", Goal: "Investigate", StoreSpec: "memory"}, st, lane.NewFakeDriver(), clk, client, nil)
-			if err := runner.Bootstrap(t.Context()); err == nil {
+			if err := runner.Bootstrap(t.Context()); stage == "critic" {
+				if err != nil {
+					t.Fatalf("critic failure should fall back to draft: %v", err)
+				}
+			} else if err == nil {
 				t.Fatal("expected error")
 			}
 			items, err := st.Backlog().List(t.Context(), store.BacklogFilter{RunID: "failure"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(items) != 0 {
+			if stage != "critic" && len(items) != 0 {
 				t.Fatalf("draft published: %+v", items)
+			}
+			if stage == "critic" {
+				if calls != 2 || len(items) != 1 || items[0].ID != "broad" || items[0].Title != "Roll out the change" {
+					t.Fatalf("critic failure should publish planner draft without revision: calls=%d items=%+v", calls, items)
+				}
+				decisions, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: "failure"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(decisions) != 2 || decisions[0].Actor != "critic" || decisions[0].Tool != "planner.critique" || decisions[0].Vetted || !strings.Contains(decisions[0].Result, "critic unavailable") || !strings.Contains(decisions[0].Reason, "429") {
+					t.Fatalf("critic fallback decision = %+v", decisions)
+				}
 			}
 		})
 	}

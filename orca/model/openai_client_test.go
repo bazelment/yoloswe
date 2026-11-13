@@ -152,3 +152,8 @@ func TestPlannerEffortOnProviderWire(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenAIClient_RetryAfter48Seconds(t *testing.T) {
+	t.Parallel()
+	testRetryWaits(t, "openai", "48", []time.Duration{48 * time.Second}, false, false)
+}

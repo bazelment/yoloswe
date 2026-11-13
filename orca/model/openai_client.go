@@ -179,6 +179,7 @@ func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Respons
 			endpoint += "/v1/responses"
 		}
 	}
+	retryStart := c.clock.Now()
 	for attempt := 1; attempt <= c.maxRetries+1; attempt++ {
 		attemptCtx := ctx
 		cancel := func() {}
@@ -202,7 +203,7 @@ func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Respons
 			}
 			if attempt <= c.maxRetries {
 				log.Printf("orca/model: OpenAI request stalled model=%s attempt=%d: %v", req.Model, attempt, err)
-				if err := c.wait(ctx, attempt); err != nil {
+				if err := c.wait(ctx, attempt, nil, 0, retryStart); err != nil {
 					return nil, err
 				}
 				continue
@@ -224,7 +225,7 @@ func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Respons
 			}
 			if attempt <= c.maxRetries {
 				log.Printf("orca/model: OpenAI stream stalled model=%s attempt=%d: %v", req.Model, attempt, readErr)
-				if err := c.wait(ctx, attempt); err != nil {
+				if err := c.wait(ctx, attempt, nil, 0, retryStart); err != nil {
 					return nil, err
 				}
 				continue
@@ -244,8 +245,14 @@ func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Respons
 		}
 		apiErr := parseAPIError(hresp.StatusCode, hresp.Header, data, attempt)
 		if apiErr.Retryable() && attempt <= c.maxRetries {
-			if err := c.wait(ctx, attempt); err != nil {
+			if c.clock.Now().Sub(retryStart) >= DefaultRetryTotalCeiling {
+				return nil, apiErr
+			}
+			if err := c.wait(ctx, attempt, hresp.Header, hresp.StatusCode, retryStart); err != nil {
 				return nil, err
+			}
+			if c.clock.Now().Sub(retryStart) >= DefaultRetryTotalCeiling {
+				return nil, apiErr
 			}
 			continue
 		}
@@ -413,14 +420,31 @@ func decodeResponses(data []byte, requestedModel string) (*Response, error) {
 	}
 	return &Response{ID: raw.ID, Model: raw.Model, StopReason: stop, Message: NewAssistantMessage(blocks...), Usage: Usage{InputTokens: raw.Usage.InputTokens, OutputTokens: raw.Usage.OutputTokens}}, nil
 }
-func (c *OpenAIClient) wait(ctx context.Context, attempt int) error {
+func (c *OpenAIClient) wait(ctx context.Context, attempt int, hdr http.Header, status int, retryStart time.Time) error {
 	d := c.retryBaseDelay
-	for i := 1; i < attempt; i++ {
-		d *= 2
-		if d >= c.retryMaxDelay {
-			d = c.retryMaxDelay
-			break
+	if parsed, ok := parseRetryAfter(hdr); ok {
+		d = parsed
+		if d > DefaultRetryAfterCeiling {
+			d = DefaultRetryAfterCeiling
 		}
+	} else {
+		for i := 1; i < attempt; i++ {
+			d *= 2
+			if d >= c.retryMaxDelay {
+				d = c.retryMaxDelay
+				break
+			}
+		}
+	}
+	remaining := DefaultRetryTotalCeiling - c.clock.Now().Sub(retryStart)
+	if remaining <= 0 {
+		return context.DeadlineExceeded
+	}
+	if d > remaining {
+		d = remaining
+	}
+	if d > 0 {
+		log.Printf("orca/model: openai retry wait status=%d wait=%s attempt=%d", status, d, attempt)
 	}
 	if d <= 0 {
 		return nil
