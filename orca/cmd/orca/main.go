@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
+	"github.com/bazelment/yoloswe/orca/mailbox"
+	mailboxnebula "github.com/bazelment/yoloswe/orca/mailbox/nebula"
 )
 
 func main() {
@@ -116,7 +119,19 @@ func executeRun(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		return fmt.Errorf("orca: unsupported --driver %q", cfg.DriverKind)
 	}
 
-	runner := NewRunner(cfg, st, drv, clk, client, logger)
+	var boxes []mailbox.Mailbox
+	if !strings.EqualFold(strings.TrimSpace(cfg.DriverKind), "fake") {
+		box, err := mailboxnebula.New(mailboxnebula.Config{
+			RunID: cfg.RunID, Events: st.Events(),
+			BaseURL: cmp.Or(cfg.NebulaAPIURL, os.Getenv("NEBULA_API_URL")),
+			Token:   cmp.Or(cfg.NebulaToken, os.Getenv("NEBULA_TOKEN")),
+		})
+		if err != nil {
+			return err
+		}
+		boxes = append(boxes, box)
+	}
+	runner := NewRunner(cfg, st, drv, clk, client, logger, boxes...)
 	return runner.Run(ctx)
 }
 

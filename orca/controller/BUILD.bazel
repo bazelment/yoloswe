@@ -21,6 +21,7 @@ go_test(
         ":controller",
         "//orca/clock",
         "//orca/lane",
+        "//orca/mailbox",
         "//orca/recipe",
         "//orca/store",
     ],

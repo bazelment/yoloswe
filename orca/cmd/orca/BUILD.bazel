@@ -18,6 +18,8 @@ go_library(
         "//orca/dispatcher",
         "//orca/lane",
         "//orca/lane/nebula",
+        "//orca/mailbox",
+        "//orca/mailbox/nebula",
         "//orca/model",
         "//orca/recipe",
         "//orca/store",
@@ -38,6 +40,8 @@ go_test(
     deps = [
         "//orca/clock",
         "//orca/lane",
+        "//orca/mailbox",
+        "//orca/mailbox/fake",
         "//orca/model",
         "//orca/recipe",
         "//orca/store",

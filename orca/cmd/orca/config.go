@@ -437,7 +437,7 @@ func openModelClient(cfg Config, clk clock.Clock) (model.ModelClient, error) {
 func openNebulaDriver(cfg Config, st store.Store, clk clock.Clock) (*nebula.Driver, error) {
 	return nebula.New(nebula.Config{
 		Clock:  clk,
-		Events: st.Events(),
+		Events: driverEventStore{st.Events()},
 		APIURL: cfg.NebulaAPIURL,
 		Token:  cfg.NebulaToken,
 	})
