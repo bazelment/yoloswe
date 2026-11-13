@@ -115,10 +115,14 @@ func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnRe
 	baseCommit := ""
 	worktree := strings.TrimSpace(req.Worktree)
 	if worktree == "" {
-		worktree = d.runDir
+		worktree = d.repo
 	}
-	if strings.TrimSpace(req.BaseBranch) != "" && worktree != "" {
-		if out, err := exec.CommandContext(ctx, "git", "-C", worktree, "rev-parse", req.BaseBranch).Output(); err == nil {
+	baseRef := strings.TrimSpace(req.BaseBranch)
+	if baseRef == "" {
+		baseRef = "origin/main"
+	}
+	if worktree != "" {
+		if out, err := exec.CommandContext(ctx, "git", "-C", worktree, "rev-parse", baseRef).Output(); err == nil {
 			baseCommit = strings.TrimSpace(string(out))
 		}
 	}

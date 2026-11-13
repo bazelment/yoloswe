@@ -38,7 +38,7 @@ func githubTestDriver(t *testing.T, status int, body string, token string) (*neb
 		r2.Host = u.Host
 		return http.DefaultTransport.RoundTrip(r2)
 	})}
-	d, err := nebula.New(nebula.Config{APIURL: "http://nebula.test", Token: token}, nebula.WithRepositoryFullName("acme/repo"), nebula.WithHTTPClient(client))
+	d, err := nebula.New(nebula.Config{APIURL: "http://nebula.test", Token: "nebula-token", GitHubToken: token}, nebula.WithRepositoryFullName("acme/repo"), nebula.WithHTTPClient(client))
 	if err != nil {
 		t.Fatal(err)
 	}

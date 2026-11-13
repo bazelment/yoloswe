@@ -90,6 +90,7 @@ type Config struct {
 	HTTPClient         *http.Client
 	APIURL             string
 	Token              string
+	GitHubToken        string
 	RepositoryID       string
 	RepositoryFullName string
 	CurrentSessionID   string
@@ -107,6 +108,10 @@ func WithAPIURL(apiURL string) Option {
 
 func WithToken(token string) Option {
 	return func(c *Config) { c.Token = token }
+}
+
+func WithGitHubToken(token string) Option {
+	return func(c *Config) { c.GitHubToken = token }
 }
 
 func WithRepositoryID(repoID string) Option {
@@ -148,6 +153,7 @@ type Driver struct {
 	lastCapacity map[string]string
 	apiURL       string
 	token        string
+	githubToken  string
 	repoID       string
 	repoFullName string
 	currSessID   string
@@ -420,6 +426,7 @@ func New(cfg Config, opts ...Option) (*Driver, error) {
 		lastCapacity: make(map[string]string),
 		apiURL:       apiURL,
 		token:        token,
+		githubToken:  strings.TrimSpace(cfg.GitHubToken),
 		repoID:       strings.TrimSpace(cfg.RepositoryID),
 		repoFullName: strings.TrimSpace(cfg.RepositoryFullName),
 		currSessID:   currSessID,
@@ -973,8 +980,8 @@ func (d *Driver) ReportOnlyNoWork(ctx context.Context, ln lane.Lane) (bool, erro
 		return false, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	if strings.TrimSpace(d.token) != "" {
-		req.Header.Set("Authorization", "Bearer "+d.token)
+	if d.githubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+d.githubToken)
 	}
 	resp, err := d.httpClient.Do(req)
 	if err != nil {
@@ -982,7 +989,7 @@ func (d *Driver) ReportOnlyNoWork(ctx context.Context, ln lane.Lane) (bool, erro
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		if strings.TrimSpace(d.token) == "" {
+		if d.githubToken == "" {
 			return false, fmt.Errorf("github compare: status 404 without authenticated access")
 		}
 		accessReq, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/"+d.repoFullName, http.NoBody)
@@ -990,7 +997,7 @@ func (d *Driver) ReportOnlyNoWork(ctx context.Context, ln lane.Lane) (bool, erro
 			return false, err
 		}
 		accessReq.Header.Set("Accept", "application/vnd.github+json")
-		accessReq.Header.Set("Authorization", "Bearer "+d.token)
+		accessReq.Header.Set("Authorization", "Bearer "+d.githubToken)
 		accessResp, err := d.httpClient.Do(accessReq)
 		if err != nil {
 			return false, err

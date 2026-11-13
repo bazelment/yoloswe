@@ -2065,7 +2065,8 @@ func (c *Controller) startLanePhase(
 		if tool == ToolPhaseRetry {
 			if err := c.stopCurrentTerminal(ctx, ln, "replace terminal for retry"); err != nil {
 				c.noteStopFailure(ctx, ln, err)
-				return err
+				// Keep the controller alive; retryStops handles this on the next tick.
+				return nil
 			}
 			delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
 		}
