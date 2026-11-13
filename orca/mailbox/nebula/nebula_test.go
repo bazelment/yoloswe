@@ -28,7 +28,9 @@ func TestHTTPMailbox(t *testing.T) {
 	if _, err := m.AskOwner(context.Background(), mailbox.Question{Ask: "pick", Options: []string{"a", "b"}}); err != nil {
 		t.Fatal(err)
 	}
-	ch, _ := m.Watch(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ch, _ := m.Watch(ctx)
 	select {
 	case ev := <-ch:
 		if ev.Kind != store.EventMail {
@@ -36,5 +38,15 @@ func TestHTTPMailbox(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
+	}
+}
+
+func TestInvalidURLReturnsError(t *testing.T) {
+	m, err := nebula.New(nebula.Config{BaseURL: ":invalid", Events: store.NewMemoryStore(nil).Events()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SendLane(context.Background(), "lane", "hello"); err == nil {
+		t.Fatal("expected an invalid URL error")
 	}
 }

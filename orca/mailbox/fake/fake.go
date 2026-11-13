@@ -54,7 +54,7 @@ func (m *Mailbox) Watch(ctx context.Context) (<-chan store.Event, error) {
 			case <-ctx.Done():
 				return
 			case msg := <-m.inbound:
-				ev, err := event(ctx, m.Events, m.RunID, msg)
+				ev, err := mailbox.AppendEvent(ctx, m.Events, m.RunID, msg)
 				if err != nil {
 					return
 				}
@@ -67,7 +67,4 @@ func (m *Mailbox) Watch(ctx context.Context) (<-chan store.Event, error) {
 		}
 	}()
 	return out, nil
-}
-func event(ctx context.Context, es store.EventStore, runID string, msg mailbox.Message) (store.Event, error) {
-	return mailbox.AppendEvent(ctx, es, runID, msg)
 }

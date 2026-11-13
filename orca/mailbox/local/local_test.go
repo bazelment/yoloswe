@@ -19,8 +19,12 @@ func TestLocalInboundAndAsk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ch, _ := m.Watch(context.Background())
-	os.WriteFile(filepath.Join(d, "in-1"), []byte(`{"lane_id":"l","body":"help"}`), 0600)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ch, _ := m.Watch(ctx)
+	if err := os.WriteFile(filepath.Join(d, "in-1"), []byte(`{"lane_id":"l","body":"help"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case ev := <-ch:
 		if ev.Summary != "help" {
