@@ -107,7 +107,7 @@ func TestOpenAIToolNameCodecAndHistory(t *testing.T) {
 			sawCall = item["name"] == "backlog_add"
 		}
 		if item["type"] == "function_call_output" {
-			sawResult = item["call_id"] == "call-1"
+			sawResult = item["call_id"] == "call-1" && item["output"] == "ok"
 		}
 	}
 	if !sawCall || !sawResult {
@@ -215,4 +215,79 @@ func TestPlannerEffortOnProviderWire(t *testing.T) {
 func TestOpenAIClient_RetryAfter48Seconds(t *testing.T) {
 	t.Parallel()
 	testRetryWaits(t, "openai", "48", []time.Duration{48 * time.Second}, false, false)
+}
+
+func TestProviderToolNameCodecHistory(t *testing.T) {
+	t.Parallel()
+	for _, provider := range []string{"openai", "anthropic"} {
+		t.Run(provider, func(t *testing.T) {
+			t.Parallel()
+			var captured map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+					t.Error(err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if provider == "openai" {
+					_, _ = w.Write([]byte(`{"id":"r","output":[{"type":"function_call","call_id":"next","name":"backlog_add","arguments":"{}"}]}`))
+				} else {
+					_, _ = w.Write([]byte(`{"id":"r","role":"assistant","content":[{"type":"tool_use","id":"next","name":"backlog_add","input":{}}]}`))
+				}
+			}))
+			defer server.Close()
+			var client model.ModelClient
+			if provider == "openai" {
+				client = model.NewOpenAIClient(model.WithOpenAIBaseURL(server.URL), model.WithOpenAIMaxRetries(0))
+			} else {
+				client = model.NewHTTPClient(model.WithBaseURL(server.URL), model.WithMaxRetries(0))
+			}
+			req := model.Request{Model: "test", Tools: []model.ToolDefinition{{Name: "backlog.add"}, {Name: "memory.submit"}}, Messages: []model.Message{
+				{Role: model.RoleAssistant, Content: []model.ContentBlock{model.NewToolUseBlock("prior", "backlog.add", json.RawMessage(`{}`))}},
+				{Role: model.RoleUser, Content: []model.ContentBlock{model.NewToolResultBlock("prior", "ok", false)}},
+			}}
+			resp, err := client.CreateMessage(t.Context(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := resp.Message.Content[0].Name; got != "backlog.add" {
+				t.Fatalf("decoded name=%q", got)
+			}
+			tools := captured["tools"].([]any)
+			if tools[0].(map[string]any)["name"] != "backlog_add" || tools[1].(map[string]any)["name"] != "memory_submit" {
+				t.Fatalf("tools=%v", tools)
+			}
+			if provider == "openai" {
+				items := captured["input"].([]any)
+				if items[0].(map[string]any)["name"] != "backlog_add" || items[1].(map[string]any)["call_id"] != "prior" {
+					t.Fatalf("history=%v", items)
+				}
+			} else {
+				messages := captured["messages"].([]any)
+				block := messages[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+				result := messages[1].(map[string]any)["content"].([]any)[0].(map[string]any)
+				if block["name"] != "backlog_add" || result["tool_use_id"] != "prior" {
+					t.Fatalf("history=%v", messages)
+				}
+			}
+			if req.Tools[0].Name != "backlog.add" || req.Messages[0].Content[0].Name != "backlog.add" {
+				t.Fatal("request mutated")
+			}
+			for _, invalid := range []struct {
+				name  string
+				want  string
+				tools []model.ToolDefinition
+			}{
+				{"empty", "tool name length", []model.ToolDefinition{{Name: ""}}},
+				{"long", "tool name length", []model.ToolDefinition{{Name: strings.Repeat("a", 65)}}},
+				{"collision", "tool name collision", []model.ToolDefinition{{Name: "backlog.add"}, {Name: "backlog_add"}}},
+			} {
+				t.Run(invalid.name, func(t *testing.T) {
+					_, err := client.CreateMessage(t.Context(), model.Request{Model: "test", Tools: invalid.tools})
+					if err == nil || !strings.Contains(err.Error(), invalid.want) {
+						t.Fatalf("error=%v, want %s", err, invalid.want)
+					}
+				})
+			}
+		})
+	}
 }

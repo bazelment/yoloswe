@@ -33,6 +33,9 @@ func newToolNameCodec(req Request) (*toolNameCodec, error) {
 
 func (c *toolNameCodec) add(original string) error {
 	wire := encodeToolName(original)
+	if len(wire) < 1 || len(wire) > 64 {
+		return fmt.Errorf("orca/model: tool name length for %q must be 1-64 encoded characters (got %d)", original, len(wire))
+	}
 	if previous, ok := c.wireToOriginal[wire]; ok && previous != original {
 		return fmt.Errorf("orca/model: tool name collision: %q and %q both encode to %q", previous, original, wire)
 	}
