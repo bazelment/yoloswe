@@ -1076,7 +1076,16 @@ func TestCLIStartupPlanningRecorded(t *testing.T) {
 				if len(items) != 0 {
 					t.Fatalf("backlog applied before revision: %+v", items)
 				}
-				return fake.CreateMessage(ctx, req)
+				resp, err := fake.CreateMessage(ctx, req)
+				if err == nil && source == "json-file" && len(fake.Requests) == 3 {
+					var rec PlanReconciliation
+					if err := json.Unmarshal(resp.Message.Content[0].Input, &rec); err != nil {
+						t.Fatal(err)
+					}
+					rec.PlanRef = "post:canonical"
+					resp.Message.Content[0].Input, err = json.Marshal(rec)
+				}
+				return resp, err
 			})
 			runner := NewRunner(cfg, st, drv, clk, guarded, nil)
 			runner.planner.planReader = planreader.NewPlanReader(map[string]string{post: content})
@@ -1124,7 +1133,11 @@ func TestCLIStartupPlanningRecorded(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if run.Objective != cfg.Goal || run.PlanRef != ref {
+			wantRef := ref
+			if source == "json-file" {
+				wantRef = "post:canonical"
+			}
+			if run.Objective != cfg.Goal || run.PlanRef != wantRef {
 				t.Fatalf("run: %+v", run)
 			}
 			decisions, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: cfg.RunID})
@@ -1307,5 +1320,32 @@ func TestPlannerRequestRejectsLocalFiles(t *testing.T) {
 				t.Fatalf("expected post reference restriction, got %v", err)
 			}
 		})
+	}
+}
+
+func TestStartupGoalDoesNotMatchDispatcherReplan(t *testing.T) {
+	t.Parallel()
+	fake, err := model.LoadFakeClient("testdata/closed_plan_replay.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk := clock.NewRealClock()
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	cfg := Config{RunID: "startup-provenance", Goal: "Apply a known fix", StoreSpec: "memory"}
+	if err := st.Runs().Create(t.Context(), store.Run{ID: cfg.RunID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Decisions().Append(t.Context(), store.Decision{
+		RunID: cfg.RunID, Actor: ActorPlanner, Tool: ToolPlannerReplan, Reason: "Replan: " + cfg.Goal,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(cfg, st, lane.NewFakeDriver(), clk, fake, nil)
+	if err := runner.Bootstrap(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.Requests) != 1 {
+		t.Fatalf("startup calls=%d; dispatcher replan is not startup", len(fake.Requests))
 	}
 }

@@ -554,14 +554,11 @@ func (r *Runner) bootstrapMetadataAndRecipes(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	startupIdentity := fmt.Sprintf("Startup goal: %q\nPlan ref: %q", strings.TrimSpace(r.cfg.Goal), planRef)
 	startupApplied := false
 	for i := range decisions {
 		decision := &decisions[i]
-		if planRef != "" {
-			startupApplied = decision.Tool == ToolPlannerImport && decision.Reason == "Import startup plan" && existing.PlanRef == planRef
-		} else {
-			startupApplied = decision.Tool == ToolPlannerReplan && decision.Reason == "Replan: "+r.cfg.Goal
-		}
+		startupApplied = decision.Tool == ToolPlannerStartup && decision.Reason == startupIdentity
 		if startupApplied {
 			break
 		}
@@ -574,11 +571,11 @@ func (r *Runner) bootstrapMetadataAndRecipes(ctx context.Context) error {
 		if strings.TrimSpace(doc.Content) == "" {
 			return fmt.Errorf("startup plan %q is empty", planRef)
 		}
-		if err := r.planner.runReconciliation(ctx, runID, ToolPlannerImport, "Import startup plan", doc.Content, planRef); err != nil {
+		if err := r.planner.runReconciliation(ctx, runID, ToolPlannerStartup, startupIdentity, doc.Content, planRef); err != nil {
 			return err
 		}
 	} else if planRef == "" && strings.TrimSpace(r.cfg.Goal) != "" && !startupApplied {
-		if err := r.planner.HandlePlannerRequest(ctx, runID, r.cfg.Goal, ""); err != nil {
+		if err := r.planner.runReconciliation(ctx, runID, ToolPlannerStartup, startupIdentity, r.cfg.Goal, ""); err != nil {
 			return err
 		}
 	}

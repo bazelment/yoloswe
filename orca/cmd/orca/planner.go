@@ -27,6 +27,7 @@ const (
 	ToolRecipeCompileOverride  = "recipe.compile_override"
 	ToolPlannerReplan          = "planner.replan"
 	ToolPlannerImport          = "planner.import"
+	ToolPlannerStartup         = "planner.startup"
 	SubmitPlanReconcileTool    = "submit_plan_reconciliation"
 	SubmitOpenPlanTool         = "submit_open_plan"
 	DefaultConflictAskDeadline = 30 * time.Minute

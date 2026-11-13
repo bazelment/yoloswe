@@ -139,7 +139,7 @@ type DirectiveNoteParams struct {
 // PlannerRequestParams holds parameters for the planner.request tool.
 type PlannerRequestParams struct {
 	Reason  string `json:"reason" jsonschema:"required,description=Why replanning or plan reconciliation is needed"`
-	PlanRef string `json:"plan_ref,omitempty" jsonschema:"description=Optional plan post/file reference"`
+	PlanRef string `json:"plan_ref,omitempty" jsonschema:"description=Optional Nebula plan post reference"`
 	Urgent  bool   `json:"urgent,omitempty" jsonschema:"description=Whether replanning is urgent"`
 }
 
