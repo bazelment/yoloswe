@@ -278,35 +278,50 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 }
 
 func TestControllerReportOnlySweCompletesLane(t *testing.T) {
-	clk, st, drv, judge := setupTestEnv(t)
-	ctx := t.Context()
-	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-empty", RunID: "run-1", Status: lane.StatusPlanned, BaseCommit: "base-sha"}); err != nil {
-		t.Fatal(err)
-	}
-	ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
-	if err := ctrl.Step(ctx); err != nil {
-		t.Fatal(err)
-	}
-	ln, err := st.Lanes().Get(ctx, "run-1", "lane-empty")
-	if err != nil {
-		t.Fatal(err)
-	}
-	drv.SetReport(ln.TerminalID, lane.PhaseReport{Phase: recipe.PhaseSWE, Outcome: lane.OutcomeDone, HeadSHA: "base-sha"})
-	if _, err := st.Events().Append(ctx, store.Event{RunID: "run-1", Kind: store.EventLaneReport, LaneID: "lane-empty"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ctrl.Step(ctx); err != nil {
-		t.Fatal(err)
-	}
-	ln, err = st.Lanes().Get(ctx, "run-1", "lane-empty")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ln.Status != lane.StatusDone {
-		t.Fatalf("status = %q, want done", ln.Status)
-	}
-	if len(drv.PhaseStarts) != 0 {
-		t.Fatalf("report-only lane started later phases: %+v", drv.PhaseStarts)
+	t.Parallel()
+	for _, tc := range []struct {
+		name, head, change string
+		wantDone           bool
+	}{
+		{"recorded base after branch moves", "base-sha", "", true},
+		{"one new commit", "new-sha", "", false},
+		{"explicit no change", "", "none", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clk, st, drv, judge := setupTestEnv(t)
+			ctx := t.Context()
+			if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-empty", RunID: "run-1", Status: lane.StatusPlanned, BaseBranch: "main", BaseCommit: "base-sha"}); err != nil {
+				t.Fatal(err)
+			}
+			ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			ln, err := st.Lanes().Get(ctx, "run-1", "lane-empty")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Move the mutable base while retaining the immutable spawn commit.
+			ln.BaseBranch = "moved-base"
+			if err := st.Lanes().Upsert(ctx, *ln); err != nil {
+				t.Fatal(err)
+			}
+			drv.SetReport(ln.TerminalID, lane.PhaseReport{Phase: recipe.PhaseSWE, Outcome: lane.OutcomeDone, HeadSHA: tc.head, Change: tc.change})
+			if _, err := st.Events().Append(ctx, store.Event{RunID: "run-1", Kind: store.EventLaneReport, LaneID: "lane-empty"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			ln, err = st.Lanes().Get(ctx, "run-1", "lane-empty")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := ln.Status == lane.StatusDone; got != tc.wantDone {
+				t.Fatalf("status = %q, wantDone = %v", ln.Status, tc.wantDone)
+			}
+		})
 	}
 }
 

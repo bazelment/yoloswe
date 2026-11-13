@@ -1415,9 +1415,7 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 	return c.advanceByRecipe(ctx, ln, r, string(rep.Outcome), rep.Reason, rep.Breaks, ev)
 }
 
-// reportHeadIsBase resolves the configured base ref before comparing it with
-// the worker's reported commit. Older synthetic lanes may store a SHA directly,
-// so retain that fast path for persisted/test data.
+// reportHeadIsBase compares against the immutable spawn commit.
 func (c *Controller) reportHeadIsBase(ctx context.Context, ln *lane.Lane, head string) bool {
 	if strings.TrimSpace(ln.BaseCommit) != "" {
 		return strings.TrimSpace(ln.BaseCommit) == strings.TrimSpace(head)
@@ -2143,6 +2141,7 @@ func (c *Controller) extractReport(ctx context.Context, ln *lane.Lane, ev store.
 	if termID != "" && c.driver != nil {
 		if drvRep, err := c.driver.ReadReport(ctx, c.cfg.RunID, ln.ID, termID); err == nil && drvRep != nil {
 			payload.Outcome = cmp.Or(payload.Outcome, drvRep.Outcome)
+			payload.Change = cmp.Or(payload.Change, drvRep.Change)
 			payload.HeadSHA = cmp.Or(payload.HeadSHA, drvRep.HeadSHA)
 			payload.PR = cmp.Or(payload.PR, drvRep.PR)
 			payload.Phase = cmp.Or(payload.Phase, drvRep.Phase)
