@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//orca/clock",
         "//orca/lane",
+        "//orca/mailbox",
         "//orca/recipe",
         "//orca/store",
     ],

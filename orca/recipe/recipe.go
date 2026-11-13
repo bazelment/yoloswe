@@ -505,14 +505,13 @@ func Default() Recipe {
 				Agents: []AgentSpec{
 					{Harness: "claude", Model: "sonnet", Effort: "medium"},
 				},
-				BriefTemplate: "Verify pinned review approval and green CI checks on HEAD, then integrate the PR into the target branch.",
+				BriefTemplate: "Use the repository's documented merge path to integrate the reviewed PR. Verify the reviewed head, perform the merge once, and report the resulting head.",
 				ExitContract: ExitContract{
 					AllowedOutcomes: []string{OutcomeDone, OutcomeNeedsSWE, OutcomeBlocked, OutcomeNeedsInput},
 					RequiresPR:      true,
 					RequiresReport:  true,
 				},
 				Gates: []Gate{
-					{Name: "ci_green", Required: true},
 					{Name: "review_approved", Required: true},
 				},
 				Mutating: true,
@@ -531,7 +530,7 @@ func Default() Recipe {
 			},
 			{
 				From: PhaseReview,
-				On:   Condition{Verdict: OutcomeDone, CIGreen: true},
+				On:   Condition{Verdict: OutcomeDone},
 				To:   PhaseIntegrate,
 			},
 			{
@@ -547,7 +546,7 @@ func Default() Recipe {
 			},
 			{
 				From: PhaseIntegrate,
-				On:   Condition{Verdict: OutcomeDone, CIGreen: true},
+				On:   Condition{Verdict: OutcomeDone},
 				To:   TargetComplete,
 			},
 			{

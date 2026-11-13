@@ -15,6 +15,7 @@ import (
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
+	"github.com/bazelment/yoloswe/orca/mailbox"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -234,7 +235,7 @@ type pendingVerdict struct {
 }
 
 // Controller is the deterministic orchestration loop for a single Run.
-type Controller struct {
+type Controller struct { //nolint:govet // lifecycle state is intentionally grouped
 	batchFirstAt       time.Time
 	store              store.Store
 	driver             lane.LaneDriver
@@ -255,14 +256,17 @@ type Controller struct {
 	leaseHeld          bool
 	initialized        bool
 	killed             bool
+	mailbox            mailbox.Mailbox
+	watchStarted       bool
+	restartStages      map[string]int
 }
 
 // New constructs a new deterministic Controller for cfg.RunID.
-func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge Judge) *Controller {
+func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge Judge, boxes ...mailbox.Mailbox) *Controller {
 	if clk == nil {
 		clk = clock.NewRealClock()
 	}
-	return &Controller{
+	c := &Controller{
 		cfg:                cfg.withDefaults(),
 		store:              st,
 		driver:             drv,
@@ -275,6 +279,74 @@ func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge
 		emittedStalls:      make(map[string]bool),
 		emittedAskExpiries: make(map[string]bool),
 		wakeCh:             make(chan struct{}, 1),
+		restartStages:      make(map[string]int),
+	}
+	if len(boxes) > 0 {
+		c.mailbox = boxes[0]
+	}
+	return c
+}
+
+// StartWatches connects worker and mailbox streams to the controller.
+func (c *Controller) StartWatches(ctx context.Context) error {
+	c.mu.Lock()
+	if c.watchStarted {
+		c.mu.Unlock()
+		return nil
+	}
+	c.watchStarted = true
+	c.mu.Unlock()
+	if c.driver != nil {
+		go c.forwardLaneEvents(ctx, c.driver.Watch(ctx, c.cfg.RunID))
+	}
+	if c.mailbox != nil {
+		ch, err := c.mailbox.Watch(ctx)
+		if err != nil {
+			return err
+		}
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case _, ok := <-ch:
+					if !ok {
+						return
+					}
+					c.Wake()
+				}
+			}
+		}()
+	}
+	return nil
+}
+
+func (c *Controller) forwardLaneEvents(ctx context.Context, ch <-chan lane.Event) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			kind := store.EventPhaseExit
+			var payload any
+			switch ev.Kind {
+			case lane.EventPhaseReported:
+				kind, payload = store.EventLaneReport, ev.Report
+			case lane.EventTurnEndedNoReport, lane.EventWaitingForInput, lane.EventExited, lane.EventQuotaFailure, lane.EventAuthFailure, lane.EventNoActivity:
+				payload = PhaseExitPayload{TerminalID: ev.TerminalID, Error: ev.Text}
+			default:
+				continue
+			}
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				continue
+			}
+			_, _ = c.store.Events().Append(ctx, store.Event{RunID: c.cfg.RunID, LaneID: ev.LaneID, Kind: kind, Source: "lane.watch", Payload: raw, Summary: ev.Text})
+			c.Wake()
+		}
 	}
 }
 
@@ -320,6 +392,9 @@ func (c *Controller) Run(ctx context.Context) error {
 	c.cancelRun = cancel
 	c.mu.Unlock()
 	defer cancel()
+	if err := c.StartWatches(runCtx); err != nil {
+		return err
+	}
 
 	if err := c.Step(runCtx); err != nil && !errors.Is(err, store.ErrLeaseHeld) {
 		return err
@@ -587,6 +662,12 @@ func (c *Controller) indexDecision(d store.Decision) {
 	}
 	if args.ActionKey != "" {
 		c.decidedActions[args.ActionKey] = d
+		if strings.HasPrefix(args.ActionKey, "restart:nudge:") {
+			c.restartStages[strings.TrimPrefix(args.ActionKey, "restart:nudge:")] = max(c.restartStages[strings.TrimPrefix(args.ActionKey, "restart:nudge:")], 1)
+		}
+		if strings.HasPrefix(args.ActionKey, "restart:fresh:") {
+			c.restartStages[strings.TrimPrefix(args.ActionKey, "restart:fresh:")] = max(c.restartStages[strings.TrimPrefix(args.ActionKey, "restart:fresh:")], 2)
+		}
 	}
 	if args.EventID != "" && d.Tool != ToolLaneStall && d.Tool != ToolLaneEscalate {
 		c.decidedEvents[args.EventID] = d
@@ -930,6 +1011,26 @@ func (c *Controller) handleEvent(ctx context.Context, ev *store.Event) (store.Ev
 	case store.EventOwnerAskExpired:
 		return c.handleOwnerAskExpired(ctx, ev)
 	case store.EventOwnerMessage, store.EventMail:
+		if ev.Kind == store.EventOwnerMessage && len(ev.Payload) > 0 {
+			var msg mailbox.Message
+			if json.Unmarshal(ev.Payload, &msg) == nil && msg.InReplyTo != "" && ev.LaneID != "" {
+				if ln, e := c.store.Lanes().Get(ctx, c.cfg.RunID, ev.LaneID); e == nil {
+					if e := c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: msg.Body}); e != nil {
+						return store.EventClassUnclassified, e
+					}
+					return store.EventClassAuto, nil
+				}
+			}
+		}
+		if ev.Kind == store.EventMail {
+			handled, err := c.routeWorkerQuestion(ctx, ev)
+			if err != nil {
+				return store.EventClassUnclassified, err
+			}
+			if handled {
+				return store.EventClassAuto, nil
+			}
+		}
 		return store.EventClassJudgment, nil
 	case store.EventTimer:
 		if ev.Class == store.EventClassJudgment {
@@ -939,6 +1040,34 @@ func (c *Controller) handleEvent(ctx context.Context, ev *store.Event) (store.Ev
 	default:
 		return store.EventClassJudgment, nil
 	}
+}
+
+func (c *Controller) routeWorkerQuestion(ctx context.Context, ev *store.Event) (bool, error) {
+	var msg mailbox.Message
+	if len(ev.Payload) == 0 || json.Unmarshal(ev.Payload, &msg) != nil || !msg.Question || ev.LaneID == "" {
+		return false, nil
+	}
+	ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ev.LaneID)
+	if err != nil {
+		return false, nil
+	}
+	answer := ""
+	if ln.ItemID != "" {
+		if item, e := c.store.Backlog().Get(ctx, c.cfg.RunID, ln.ItemID); e == nil {
+			answer = strings.TrimSpace(item.Description + "\n" + item.Acceptance)
+		}
+	}
+	if answer != "" {
+		return true, c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Use the task notes and acceptance criteria:\n" + answer})
+	}
+	if c.mailbox == nil {
+		return false, nil
+	}
+	_, err = c.mailbox.AskOwner(ctx, mailbox.Question{Ask: msg.Body, Options: []string{"continue with task notes", "pause"}, Default: "continue with task notes", Deadline: c.clock.Now().UTC().Add(c.cfg.StallTimeout)})
+	if err != nil {
+		return false, err
+	}
+	return true, c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Continue with the default: continue with task notes. The owner question is pending."})
 }
 
 func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (store.EventClass, error) {
@@ -1077,7 +1206,7 @@ func (c *Controller) advanceByRecipe(
 			return c.blockLaneForJudgment(ctx, ln)
 		}
 
-		actionKey := completeActionKey(ln.ID, ln.Phase, round)
+		actionKey := integrateOnceActionKey(ln.ID, ln.Phase, round, ln.PRHead)
 		_, already, err := c.recordDecision(ctx, ToolLaneComplete, ln.ID,
 			fmt.Sprintf("phase %s completed with verdict %s", ln.Phase, verdict),
 			"lane done",
@@ -1221,6 +1350,35 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 	curAttempt := max(ln.Attempt, 1)
 	ln.LastEventID = ev.ID
 	ln.LastEventAt = c.clock.Now().UTC()
+	if ev.Source == "lane.watch" {
+		key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
+		switch c.restartStages[key] {
+		case 0:
+			c.restartStages[key] = 1
+			_, _, err := c.recordDecision(ctx, ToolPhaseRetry, ln.ID, "quiet lane: nudge before restart", "nudged terminal", DecisionArgs{ActionKey: "restart:nudge:" + key, EventID: ev.ID, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt})
+			if err != nil {
+				return store.EventClassUnclassified, err
+			}
+			if err := c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Continue and file the required phase report."}); err != nil {
+				return store.EventClassUnclassified, err
+			}
+			return store.EventClassAuto, c.store.Lanes().Upsert(ctx, *ln)
+		case 1:
+			c.restartStages[key] = 2
+			_, _, err := c.recordDecision(ctx, ToolPhaseRetry, ln.ID, "quiet lane: fresh terminal same round", "fresh terminal", DecisionArgs{ActionKey: "restart:fresh:" + key, EventID: ev.ID, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt})
+			if err != nil {
+				return store.EventClassUnclassified, err
+			}
+			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: curPhase.Agents[0].Harness, Model: curPhase.Agents[0].Model, Effort: curPhase.Agents[0].Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, "fresh terminal after nudge")})
+			if err != nil {
+				return store.EventClassUnclassified, err
+			}
+			ln.SessionID, ln.TerminalID = res.SessionID, res.TerminalID
+			return store.EventClassAuto, c.store.Lanes().Upsert(ctx, *ln)
+		default:
+			delete(c.restartStages, key)
+		}
+	}
 
 	if curAttempt < maxAttempts {
 		nextAttempt := curAttempt + 1
@@ -1749,6 +1907,10 @@ func phaseActionKey(tool, laneID, phase string, round, attempt int) string {
 
 func completeActionKey(laneID, fromPhase string, round int) string {
 	return fmt.Sprintf("%s:%s:%s", ToolLaneComplete, laneID, lane.PhaseRoundKey(fromPhase, round))
+}
+
+func integrateOnceActionKey(laneID, fromPhase string, round int, head string) string {
+	return completeActionKey(laneID, fromPhase, round) + ":reviewed-head:" + head
 }
 
 func escalateActionKey(laneID, fromPhase string, round int, eventID string) string {
