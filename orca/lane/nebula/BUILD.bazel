@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "nebula",
+    srcs = ["nebula.go"],
+    importpath = "github.com/bazelment/yoloswe/orca/lane/nebula",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//orca/clock",
+        "//orca/lane",
+        "//orca/store",
+    ],
+)
+
+go_test(
+    name = "nebula_test",
+    srcs = ["nebula_test.go"],
+    deps = [
+        ":nebula",
+        "//orca/clock",
+        "//orca/lane",
+        "//orca/store",
+    ],
+)

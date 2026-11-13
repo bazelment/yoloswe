@@ -1,0 +1,25 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "recipe",
+    srcs = [
+        "compiler.go",
+        "recipe.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/orca/recipe",
+    visibility = ["//visibility:public"],
+    deps = ["//orca/model"],
+)
+
+go_test(
+    name = "recipe_test",
+    srcs = [
+        "compiler_test.go",
+        "recipe_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    deps = [
+        ":recipe",
+        "//orca/model",
+    ],
+)
