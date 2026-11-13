@@ -1404,7 +1404,7 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		}
 	}
 
-	if (rep.Outcome == lane.OutcomeDone || rep.Outcome == lane.OutcomeNoChange) && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && (rep.Outcome == lane.OutcomeNoChange || strings.EqualFold(strings.TrimSpace(rep.Change), "none") || (rep.HeadSHA != "" && c.reportHeadIsBase(ctx, ln, rep.HeadSHA))) {
+	if rep.Outcome == lane.OutcomeDone && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && (strings.EqualFold(strings.TrimSpace(rep.Change), "none") || (rep.HeadSHA != "" && c.reportHeadIsBase(ctx, ln, rep.HeadSHA))) {
 		return c.completeReportOnlyLane(ctx, ln, ev)
 	}
 
