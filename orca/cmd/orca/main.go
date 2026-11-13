@@ -15,10 +15,12 @@ import (
 	"sync"
 	"syscall"
 
+	chatui "github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/mailbox"
 	mailboxnebula "github.com/bazelment/yoloswe/orca/mailbox/nebula"
+	"github.com/bazelment/yoloswe/orca/router"
 )
 
 func main() {
@@ -201,7 +203,8 @@ func executeChat(
 		return err
 	}
 
-	return concierge.RunInteractive(ctx, stdin, stdout)
+	r := router.FallbackRouter{Client: client, Model: cfg.Models.Concierge}
+	return chatui.Run(ctx, stdin, stdout, chatui.New(ctx, cfg.RunID, concierge.Ask, r))
 }
 
 func newLogger(out io.Writer, levelStr, format string) *slog.Logger {

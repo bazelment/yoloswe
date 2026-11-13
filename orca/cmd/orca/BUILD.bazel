@@ -15,6 +15,7 @@ go_library(
     visibility = ["//visibility:private"],
     deps = [
         "//orca/brief",
+        "//orca/chat",
         "//orca/clock",
         "//orca/concierge",
         "//orca/controller",
@@ -26,6 +27,7 @@ go_library(
         "//orca/model",
         "//orca/recipe",
         "//orca/replay",
+        "//orca/router",
         "//orca/store",
     ],
 )
