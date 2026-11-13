@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "bramble",
@@ -6,6 +6,16 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/orca/lane/bramble",
     visibility = ["//visibility:public"],
     deps = [
+        "//orca/lane",
+        "//swarm-queen/bramble",
+    ],
+)
+
+go_test(
+    name = "bramble_test",
+    srcs = ["bramble_test.go"],
+    deps = [
+        ":bramble",
         "//orca/lane",
         "//swarm-queen/bramble",
     ],

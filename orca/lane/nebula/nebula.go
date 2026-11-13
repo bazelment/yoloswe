@@ -274,14 +274,19 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 			e.Text = p.TerminalEvent.Text
 		}
 	}
+	quota := isQuotaPayload(p)
 	switch ev.Kind {
 	case store.EventLaneReport:
 		e.Kind = lane.EventPhaseReported
 		e.Report = p.Report
 	case store.EventPhaseExit:
-		if p.TerminalEvent != nil && strings.Contains(strings.ToLower(p.TerminalEvent.Outcome), "auth") {
+		outcome := ""
+		if p.TerminalEvent != nil {
+			outcome = strings.ToLower(strings.TrimSpace(p.TerminalEvent.Outcome))
+		}
+		if strings.Contains(outcome, "auth") {
 			e.Kind = lane.EventAuthFailure
-		} else if p.TerminalEvent != nil && (strings.Contains(strings.ToLower(p.TerminalEvent.Outcome), "usage_limit") || strings.Contains(strings.ToLower(p.TerminalEvent.Outcome), "capacity")) {
+		} else if quota || isQuotaOutcome(outcome) {
 			e.Kind = lane.EventQuotaFailure
 		} else if p.TerminalEvent != nil && (p.TerminalEvent.Type == "turn.ended" || p.TerminalEvent.Type == "api_error") {
 			e.Kind = lane.EventTurnEndedNoReport
@@ -290,15 +295,24 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 		}
 	case store.EventStall:
 		if p.TerminalEvent != nil {
+			outcome := strings.ToLower(strings.TrimSpace(p.TerminalEvent.Outcome))
+			if quota || isQuotaOutcome(outcome) {
+				e.Kind = lane.EventQuotaFailure
+				break
+			}
 			switch strings.ToLower(p.TerminalEvent.Type) {
 			case "input.waiting":
 				e.Kind = lane.EventWaitingForInput
 			case "turn.capacity", "terminal.usage_limited":
 				e.Kind = lane.EventQuotaFailure
 			default:
-				e.Kind = lane.EventTurnEndedNoReport
+				if quota || isQuotaOutcome(outcome) {
+					e.Kind = lane.EventQuotaFailure
+				} else {
+					e.Kind = lane.EventTurnEndedNoReport
+				}
 			}
-		} else if p.UsageLimit != nil || p.Capacity != nil || p.Usage != nil {
+		} else if quota {
 			e.Kind = lane.EventQuotaFailure
 		} else {
 			return lane.Event{}, false
@@ -307,6 +321,24 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 		return lane.Event{}, false
 	}
 	return e, true
+}
+
+func isQuotaOutcome(outcome string) bool {
+	return strings.Contains(outcome, "usage_limit") || strings.Contains(outcome, "usage_limited") || strings.Contains(outcome, "capacity")
+}
+
+func isQuotaPayload(p StreamEventPayload) bool {
+	if p.UsageLimit != nil || strings.EqualFold(p.AgentSignal, "usage_limited") {
+		return true
+	}
+	if p.Capacity != nil {
+		for _, b := range p.Capacity.Backends {
+			if b.Full || b.PoolAtMax || b.Waiting > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // New constructs a Driver from cfg and options.

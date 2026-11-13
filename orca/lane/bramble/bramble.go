@@ -21,23 +21,26 @@ type Client interface {
 	ListSessions(context.Context) ([]br.Session, error)
 }
 type Config struct {
-	Client       Client
-	RunDir       string
-	Repo         string
-	Parent       string
-	PollInterval time.Duration
+	Client          Client
+	RunDir          string
+	Repo            string
+	Parent          string
+	PollInterval    time.Duration
+	InactivityAfter time.Duration
 }
 type Driver struct { //nolint:govet // compact driver configuration
-	c       Client
-	runDir  string
-	poll    time.Duration
-	repo    string
-	parent  string
-	phases  map[string]string
-	lanes   map[string]string
-	runs    map[string]string
-	runDirs map[string]string
-	mu      sync.RWMutex
+	c               Client
+	runDir          string
+	poll            time.Duration
+	repo            string
+	parent          string
+	phases          map[string]string
+	rounds          map[string]int
+	lanes           map[string]string
+	runs            map[string]string
+	runDirs         map[string]string
+	inactivityAfter time.Duration
+	mu              sync.RWMutex
 }
 
 var _ lane.LaneDriver = (*Driver)(nil)
@@ -49,12 +52,32 @@ func New(cfg Config) (*Driver, error) {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 250 * time.Millisecond
 	}
-	return &Driver{c: cfg.Client, runDir: cfg.RunDir, repo: cfg.Repo, parent: cfg.Parent, poll: cfg.PollInterval, phases: map[string]string{}, lanes: map[string]string{}, runs: map[string]string{}, runDirs: map[string]string{}}, nil
+	if cfg.InactivityAfter <= 0 {
+		cfg.InactivityAfter = time.Minute
+	}
+	return &Driver{c: cfg.Client, runDir: cfg.RunDir, repo: cfg.Repo, parent: cfg.Parent, poll: cfg.PollInterval, inactivityAfter: cfg.InactivityAfter, phases: map[string]string{}, rounds: map[string]int{}, lanes: map[string]string{}, runs: map[string]string{}, runDirs: map[string]string{}}, nil
 }
 func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
 	return d.start(ctx, req)
 }
 func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (lane.StartPhaseResult, error) {
+	if req.SessionID != "" {
+		prompt := req.Brief + "\n[orca run:" + req.RunID + " lane:" + req.LaneID + "]"
+		if err := d.c.SendInput(ctx, req.SessionID, prompt); err != nil {
+			return lane.StartPhaseResult{}, err
+		}
+		if err := d.c.SendKey(ctx, req.SessionID, "Enter"); err != nil {
+			return lane.StartPhaseResult{}, err
+		}
+		d.mu.Lock()
+		d.phases[req.SessionID] = req.Phase
+		d.rounds[req.SessionID] = req.Round
+		d.lanes[req.SessionID] = req.LaneID
+		d.runs[req.SessionID] = req.RunID
+		d.runDirs[req.SessionID] = req.RunDir
+		d.mu.Unlock()
+		return lane.StartPhaseResult{SessionID: req.SessionID, TerminalID: req.SessionID, StartedAt: time.Now().UTC()}, nil
+	}
 	r, err := d.start(ctx, lane.SpawnRequest{RunID: req.RunID, LaneID: req.LaneID, Phase: req.Phase, Harness: req.Harness, Model: req.Model, Effort: req.Effort, Brief: req.Brief, Round: req.Round, RunDir: req.RunDir})
 	return lane.StartPhaseResult{SessionID: r.SessionID, TerminalID: r.TerminalID, StartedAt: r.StartedAt}, err
 }
@@ -66,6 +89,7 @@ func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnRe
 	}
 	d.mu.Lock()
 	d.phases[r.SessionID] = req.Phase
+	d.rounds[r.SessionID] = req.Round
 	d.lanes[r.SessionID] = req.LaneID
 	d.runs[r.SessionID] = req.RunID
 	d.runDirs[r.SessionID] = req.RunDir
@@ -92,6 +116,7 @@ func (d *Driver) Stop(ctx context.Context, req lane.StopRequest) error {
 func (d *Driver) ReadReport(_ context.Context, runID, laneID, terminalID string) (*lane.PhaseReport, error) {
 	d.mu.RLock()
 	phase := d.phases[terminalID]
+	round := d.rounds[terminalID]
 	runDir := d.runDirs[terminalID]
 	d.mu.RUnlock()
 	if phase == "" {
@@ -103,7 +128,8 @@ func (d *Driver) ReadReport(_ context.Context, runID, laneID, terminalID string)
 	if runDir == "" {
 		runDir = runID
 	}
-	b, err := os.ReadFile(filepath.Join(runDir, laneID+"."+phase+".report.md"))
+	key := lane.PhaseRoundKey(phase, round)
+	b, err := os.ReadFile(filepath.Join(runDir, laneID+"."+key+".report.md"))
 	if err != nil {
 		return nil, err
 	}
@@ -113,8 +139,8 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 	out := make(chan lane.Event, 16)
 	go func() {
 		defer close(out)
-		reported := map[string]bool{}
-		exited := map[string]bool{}
+		reported := map[string]string{}
+		lastStatus := map[string]string{}
 		lastActivity := time.Now()
 		t := time.NewTicker(d.poll)
 		defer t.Stop()
@@ -133,25 +159,25 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				d.mu.RLock()
 				owned := d.runs[s.ID] == runID
 				phase := d.phases[s.ID]
+				round := d.rounds[s.ID]
 				laneID := d.lanes[s.ID]
 				d.mu.RUnlock()
 				if !owned {
 					continue
 				}
-				if !reported[s.ID] {
-					if rep, err := d.ReadReport(ctx, runID, laneID, s.ID); err == nil {
-						select {
-						case out <- lane.Event{Kind: lane.EventPhaseReported, RunID: runID, LaneID: laneID, SessionID: s.ID, Phase: phase, Report: rep}:
-						case <-ctx.Done():
-							return
-						}
-						reported[s.ID] = true
-						lastActivity = time.Now()
-						continue
+				reportKey := s.ID + ":" + lane.PhaseRoundKey(phase, round)
+				if rep, err := d.ReadReport(ctx, runID, laneID, s.ID); err == nil && rep.Raw != reported[reportKey] {
+					select {
+					case out <- lane.Event{Kind: lane.EventPhaseReported, RunID: runID, LaneID: laneID, SessionID: s.ID, Phase: phase, Report: rep}:
+					case <-ctx.Done():
+						return
 					}
-				}
-				if exited[s.ID] {
-					continue
+					reported[reportKey] = rep.Raw
+					// A phase report is a lifecycle transition even when the
+					// backend keeps the same status (for example, waiting across
+					// rounds). Re-arm status emission for the new round.
+					delete(lastStatus, s.ID)
+					lastActivity = time.Now()
 				}
 				kind := lane.EventExited
 				status := strings.ToLower(s.Status)
@@ -166,6 +192,10 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 					kind = lane.EventTurnEndedNoReport
 				case "exited", "exit", "dead", "failed", "done", "complete", "completed", "stopped":
 				default:
+					delete(lastStatus, s.ID)
+					continue
+				}
+				if lastStatus[s.ID] == status {
 					continue
 				}
 				select {
@@ -173,10 +203,10 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				case <-ctx.Done():
 					return
 				}
-				exited[s.ID] = true
+				lastStatus[s.ID] = status
 				lastActivity = time.Now()
 			}
-			if time.Since(lastActivity) >= time.Minute {
+			if time.Since(lastActivity) >= d.inactivityAfter {
 				select {
 				case out <- lane.Event{Kind: lane.EventNoActivity, RunID: runID, Since: lastActivity}:
 				case <-ctx.Done():

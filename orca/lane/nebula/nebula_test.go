@@ -1039,3 +1039,74 @@ func TestSessionMatchingEnvForwardingSteerAndPollDedupe(t *testing.T) {
 		t.Fatalf("retry PollCapacity after failed Append: ev=%+v err=%v", cRetry, err)
 	}
 }
+
+func TestStartPhaseTerminalReusesExistingSessionID(t *testing.T) {
+	t.Parallel()
+	srv := newFakeNebulaServer(t)
+	drv, _, _ := newTestDriver(t, srv, nebula.WithAPIURL(srv.srv.URL))
+	srv.mu.Lock()
+	srv.sessions["existing-session"] = &nebula.SessionInfo{ID: "existing-session", Status: "ready"}
+	srv.mu.Unlock()
+
+	started, err := drv.StartPhaseTerminal(t.Context(), lane.StartPhaseRequest{
+		RunID: "run-existing", LaneID: "lane-existing", SessionID: "existing-session",
+		Phase: "swe", Round: 1, Brief: "continue", Harness: "claude",
+	})
+	if err != nil {
+		t.Fatalf("StartPhaseTerminal: %v", err)
+	}
+	if started.SessionID != "existing-session" {
+		t.Fatalf("SessionID = %q, want existing-session", started.SessionID)
+	}
+	srv.mu.Lock()
+	created := srv.nextSessSeq
+	srv.mu.Unlock()
+	if created != 0 {
+		t.Fatalf("created %d new sessions while reusing existing session", created)
+	}
+}
+
+func TestWatchUniformEventKinds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		ev   nebula.StreamEventPayload
+		kind store.EventKind
+		want lane.EventKind
+	}{
+		{"phase reported", nebula.StreamEventPayload{Report: &lane.PhaseReport{Phase: "swe", Outcome: lane.OutcomeDone}}, store.EventLaneReport, lane.EventPhaseReported},
+		{"turn ended", nebula.StreamEventPayload{TerminalEvent: &nebula.TerminalEvent{Type: "turn.ended"}}, store.EventPhaseExit, lane.EventTurnEndedNoReport},
+		{"waiting", nebula.StreamEventPayload{TerminalEvent: &nebula.TerminalEvent{Type: "input.waiting"}}, store.EventStall, lane.EventWaitingForInput},
+		{"exited", nebula.StreamEventPayload{TerminalEvent: &nebula.TerminalEvent{Type: "terminal.exited"}}, store.EventPhaseExit, lane.EventExited},
+		{"quota", nebula.StreamEventPayload{TerminalEvent: &nebula.TerminalEvent{Type: "turn.capacity"}}, store.EventStall, lane.EventQuotaFailure},
+		{"phase usage limit outcome", nebula.StreamEventPayload{TerminalEvent: &nebula.TerminalEvent{Outcome: "usage_limit"}}, store.EventPhaseExit, lane.EventQuotaFailure},
+		{"stall capacity outcome", nebula.StreamEventPayload{TerminalEvent: &nebula.TerminalEvent{Type: "input.waiting", Outcome: "capacity"}}, store.EventStall, lane.EventQuotaFailure},
+		{"usage limit payload", nebula.StreamEventPayload{UsageLimit: &nebula.UsageLimitInfo{}}, store.EventStall, lane.EventQuotaFailure},
+		{"agent usage limited", nebula.StreamEventPayload{AgentSignal: "usage_limited"}, store.EventStall, lane.EventQuotaFailure},
+		{"full capacity payload", nebula.StreamEventPayload{Capacity: &nebula.CapacityStatus{Backends: []nebula.BackendCapacity{{Full: true}}}}, store.EventStall, lane.EventQuotaFailure},
+		{"auth", nebula.StreamEventPayload{TerminalEvent: &nebula.TerminalEvent{Type: "terminal.failed", Outcome: "auth_failed"}}, store.EventPhaseExit, lane.EventAuthFailure},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFakeNebulaServer(t)
+			drv, _, st := newTestDriver(t, srv, nebula.WithAPIURL(srv.srv.URL))
+			payload, err := json.Marshal(tc.ev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Events().Append(t.Context(), store.Event{RunID: "run-kinds", LaneID: "lane", Kind: tc.kind, Payload: payload, Summary: tc.name}); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			select {
+			case ev := <-drv.Watch(ctx, "run-kinds"):
+				if ev.Kind != tc.want {
+					t.Fatalf("kind=%q, want %q", ev.Kind, tc.want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timeout")
+			}
+		})
+	}
+}
