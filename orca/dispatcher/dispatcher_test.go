@@ -338,6 +338,9 @@ func TestDispatcher_FullToolKitReplay(t *testing.T) {
 	var plannerReason, plannerRef string
 	disp := dispatcher.New(dispatcher.Config{
 		AllowMultiAction: true, // scripts every tool of the kit into one batch
+		RecipeCompiler: dispatcher.RecipeCompilerFunc(func(_ context.Context, base recipe.Recipe, override string) (recipe.Recipe, error) {
+			return dispatcher.CompileRecipeOverride(base, override), nil
+		}),
 		OnPlannerRequest: func(_ context.Context, _, reason, planRef string) error {
 			plannerReason = reason
 			plannerRef = planRef

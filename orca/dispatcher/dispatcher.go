@@ -894,7 +894,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 					return "", err
 				}
 			} else {
-				compiled = resolved
+				return "", fmt.Errorf("natural-language recipe override %q requires a recipe compiler", override)
 			}
 			compiled.RunID = runID
 			compiled.Name = fmt.Sprintf("override-%s", laneID)
