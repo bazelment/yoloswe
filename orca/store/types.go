@@ -28,7 +28,7 @@ type (
 	Recipe     = recipe.Recipe
 )
 
-// MemoryEntry is durable guidance recalled by orchestration roles.
+// MemoryEntry is durable guidance for orchestration roles.
 type MemoryEntry struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
@@ -45,7 +45,7 @@ type MemoryEntry struct {
 
 func (m MemoryEntry) Clone() MemoryEntry { return m }
 
-// RunNote is an append-only free-text note attached to a run/task.
+// RunNote is an append-only note attached to a run or task.
 type RunNote struct {
 	CreatedAt time.Time `json:"created_at"`
 	ID        string    `json:"id"`
@@ -57,7 +57,7 @@ type RunNote struct {
 
 func (n RunNote) Clone() RunNote { return n }
 
-// StarterMemories are the small, durable operating rules used from the first call.
+// StarterMemories returns the default operating rules.
 func StarterMemories() []MemoryEntry {
 	return []MemoryEntry{
 		{ID: "starter-inner-loop", Name: "fast inner loop", Description: "Validate the smallest case first", Type: "rule", Scope: "owner", Source: "orca starter set", Body: "Why: feedback is fastest on the smallest case. How to apply: run the narrowest deterministic check before broad work.", ProposedBy: "owner"},
