@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -521,9 +520,6 @@ func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.
 		return lane.SpawnResult{}, err
 	}
 	baseCommit := strings.TrimSpace(sess.BaseCommit)
-	if baseCommit == "" {
-		baseCommit = resolveBaseCommit(ctx, req.Worktree, cmp.Or(strings.TrimSpace(req.BaseBranch), d.baseBranch))
-	}
 	res := lane.SpawnResult{
 		SessionID:  sess.ID,
 		BaseCommit: baseCommit,
@@ -550,23 +546,6 @@ func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.
 	res.TerminalID = termRes.TerminalID
 	res.StartedAt = termRes.StartedAt
 	return res, nil
-}
-
-func resolveBaseCommit(ctx context.Context, worktree, baseBranch string) string {
-	baseBranch = strings.TrimSpace(baseBranch)
-	if baseBranch == "" {
-		return ""
-	}
-	args := []string{"rev-parse", "origin/" + baseBranch}
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if strings.TrimSpace(worktree) != "" {
-		cmd.Dir = worktree
-	}
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
 }
 
 func (d *Driver) laneLock(runID, laneID string) *sync.Mutex {
@@ -966,19 +945,52 @@ func (d *Driver) Stop(ctx context.Context, req lane.StopRequest) error {
 }
 
 // ReleaseSession releases a code session via POST /api/code-sessions/{id}/release.
-func (d *Driver) ReleaseSession(ctx context.Context, sessionID string, force bool) error {
+func (d *Driver) ReleaseSession(ctx context.Context, sessionID string, forceArg ...bool) error {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return fmt.Errorf("%w: session_id is required for ReleaseSession", store.ErrInvalidArgument)
 	}
 	path := fmt.Sprintf("/api/code-sessions/%s/release", url.PathEscape(sessionID))
 	var body any = struct{}{}
-	if force {
+	if len(forceArg) > 0 && forceArg[0] {
 		body = struct {
 			Force bool `json:"force"`
 		}{Force: true}
 	}
 	return d.doJSON(ctx, http.MethodPost, path, body, nil)
+}
+
+// ReportOnlyNoWork compares the lane branch against the current remote base.
+// A missing branch is the normal no-change result for lanes that created no PR.
+func (d *Driver) ReportOnlyNoWork(ctx context.Context, ln lane.Lane) (bool, error) {
+	if strings.TrimSpace(d.repoFullName) == "" || strings.TrimSpace(ln.Branch) == "" {
+		return false, nil
+	}
+	base := cmp.Or(strings.TrimSpace(ln.BaseBranch), d.baseBranch)
+	path := "https://api.github.com/repos/" + d.repoFullName + "/compare/" + url.PathEscape(base) + "..." + url.PathEscape(strings.TrimSpace(ln.Branch))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, http.NoBody)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := d.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return true, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Errorf("github compare: status %d", resp.StatusCode)
+	}
+	var result struct {
+		AheadBy int `json:"ahead_by"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, err
+	}
+	return result.AheadBy == 0, nil
 }
 
 type phaseReportResponse struct {

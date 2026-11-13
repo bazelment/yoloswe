@@ -49,7 +49,7 @@ func TestSpawnCapturesBaseBeforeClientStartsWorker(t *testing.T) {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
-	before := strings.TrimSpace(string(mustGit(t, dir, "rev-parse", "HEAD")))
+	_ = strings.TrimSpace(string(mustGit(t, dir, "rev-parse", "HEAD")))
 	client := &commitOnStartClient{dir: dir}
 	d, err := bramble.New(bramble.Config{Client: client, Repo: dir})
 	if err != nil {
@@ -59,8 +59,8 @@ func TestSpawnCapturesBaseBeforeClientStartsWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.BaseCommit != before {
-		t.Fatalf("base=%q, want pre-start %q", got.BaseCommit, before)
+	if got.BaseCommit != "" {
+		t.Fatalf("base=%q, want no locally resolved base", got.BaseCommit)
 	}
 }
 

@@ -314,7 +314,9 @@ func TestControllerReportOnlySweCompletesLane(t *testing.T) {
 			t.Parallel()
 			clk, st, drv, judge := setupTestEnv(t)
 			ctx := t.Context()
-			if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-empty", RunID: "run-1", Status: lane.StatusPlanned, BaseBranch: "main", BaseCommit: "base-sha"}); err != nil {
+			drv.ReportOnlyBranchExists = tc.name == "one new commit"
+			drv.ReportOnlyCommitsAhead = map[bool]int{true: 1, false: 0}[drv.ReportOnlyBranchExists]
+			if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-empty", RunID: "run-1", Status: lane.StatusPlanned, BaseBranch: "main", BaseCommit: "base-sha", Branch: "lane-empty"}); err != nil {
 				t.Fatal(err)
 			}
 			ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
@@ -798,7 +800,7 @@ func TestControllerStallTimeoutOverridesRecipe(t *testing.T) {
 	}
 }
 
-func TestControllerReportOnlyUsesStoredBase(t *testing.T) {
+func TestControllerReportOnlyCompletionSignals(t *testing.T) {
 	t.Parallel()
 	for _, outcome := range []lane.ReportOutcome{lane.OutcomeDone, lane.OutcomeNoChange} {
 		for _, same := range []bool{true, false} {
@@ -807,8 +809,9 @@ func TestControllerReportOnlyUsesStoredBase(t *testing.T) {
 				clk, st, drv, judge := setupTestEnv(t)
 				ctx := t.Context()
 				base := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-				drv.SpawnBaseCommit = base
-				if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-report", RunID: "run-1", Status: lane.StatusPlanned}); err != nil {
+				drv.ReportOnlyBranchExists = !same
+				drv.ReportOnlyCommitsAhead = map[bool]int{true: 0, false: 1}[same]
+				if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-report", RunID: "run-1", Status: lane.StatusPlanned, Branch: "lane-report"}); err != nil {
 					t.Fatal(err)
 				}
 				ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
@@ -829,13 +832,13 @@ func TestControllerReportOnlyUsesStoredBase(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if ln.BaseCommit != base {
-					t.Fatalf("stored base=%q, want %q", ln.BaseCommit, base)
-				}
-				if same && (ln.Status != lane.StatusDone || len(drv.PhaseStarts) != 0) {
+				if outcome == lane.OutcomeNoChange {
+					if ln.Status != lane.StatusDone || len(drv.PhaseStarts) != 0 {
+						t.Fatalf("no-change lane=%+v starts=%d", ln, len(drv.PhaseStarts))
+					}
+				} else if same && (ln.Status != lane.StatusDone || len(drv.PhaseStarts) != 0) {
 					t.Fatalf("same-base lane=%+v starts=%d", ln, len(drv.PhaseStarts))
-				}
-				if !same && (len(drv.PhaseStarts) != 1 || ln.Phase != recipe.PhaseClean) {
+				} else if !same && (len(drv.PhaseStarts) != 1 || ln.Phase != recipe.PhaseClean) {
 					t.Fatalf("changed-base starts=%d, want clean", len(drv.PhaseStarts))
 				}
 			})

@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -110,25 +109,6 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 	return lane.StartPhaseResult{SessionID: r.SessionID, TerminalID: r.TerminalID, StartedAt: r.StartedAt}, err
 }
 func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
-	baseCommit := ""
-	baseDir := req.Worktree
-	if baseDir == "" {
-		baseDir = d.repo
-	}
-	if baseDir == "" {
-		baseDir = "."
-	}
-	baseRef := "HEAD"
-	if req.Worktree == "" && strings.TrimSpace(req.BaseBranch) != "" {
-		baseRef = "origin/" + req.BaseBranch
-	}
-	if out, err := exec.CommandContext(ctx, "git", "-C", baseDir, "rev-parse", baseRef).Output(); err == nil {
-		baseCommit = strings.TrimSpace(string(out))
-	} else if baseRef != "HEAD" {
-		if out, err := exec.CommandContext(ctx, "git", "-C", baseDir, "rev-parse", req.BaseBranch).Output(); err == nil {
-			baseCommit = strings.TrimSpace(string(out))
-		}
-	}
 	prompt := req.Brief + "\n[orca run:" + req.RunID + " lane:" + req.LaneID + "]"
 	r, err := d.c.NewSession(ctx, br.SpawnRequest{Worktree: req.Worktree, Repo: d.repo, Parent: d.parent, Model: req.Model, Backend: req.Harness, Effort: req.Effort, Prompt: prompt, CreateWorktree: req.Worktree == "", Branch: req.Branch, From: req.BaseBranch})
 	if err != nil {
@@ -141,7 +121,7 @@ func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnRe
 	d.runs[r.SessionID] = req.RunID
 	d.runDirs[r.SessionID] = req.RunDir
 	d.mu.Unlock()
-	return lane.SpawnResult{SessionID: r.SessionID, TerminalID: r.SessionID, StartedAt: time.Now().UTC(), BaseCommit: baseCommit}, nil
+	return lane.SpawnResult{SessionID: r.SessionID, TerminalID: r.SessionID, StartedAt: time.Now().UTC()}, nil
 }
 func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
 	id := req.SessionID
@@ -159,6 +139,15 @@ func (d *Driver) Stop(ctx context.Context, req lane.StopRequest) error {
 		id = req.TerminalID
 	}
 	return d.c.SendKey(ctx, id, "C-c")
+}
+
+// ReleaseSession stops the local bramble session after lane completion.
+func (d *Driver) ReleaseSession(ctx context.Context, sessionID string, _ ...bool) error {
+	return d.c.SendKey(ctx, strings.TrimSpace(sessionID), "C-c")
+}
+
+func (d *Driver) ReportOnlyNoWork(context.Context, lane.Lane) (bool, error) {
+	return false, nil
 }
 func (d *Driver) ReadReport(_ context.Context, runID, laneID, terminalID string) (*lane.PhaseReport, error) {
 	d.mu.RLock()

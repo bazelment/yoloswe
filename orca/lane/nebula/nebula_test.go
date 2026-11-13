@@ -633,7 +633,7 @@ func TestSpawnReuseWakeAndSettleTimeout(t *testing.T) {
 	}
 }
 
-func TestSpawnStoresAPIOrResolvedBaseCommit(t *testing.T) {
+func TestSpawnStoresAPIBaseCommitOnly(t *testing.T) {
 	dir := t.TempDir()
 	script := "#!/bin/sh\n[ \"$1\" = rev-parse ] && [ \"$2\" = origin/main ] || exit 1\nprintf 'resolve\\n' >> git-calls\ncat origin-main\n"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o700); err != nil {
@@ -658,7 +658,7 @@ func TestSpawnStoresAPIOrResolvedBaseCommit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := base
+			want := ""
 			if api {
 				want = moved
 			}
@@ -676,8 +676,8 @@ func TestSpawnStoresAPIOrResolvedBaseCommit(t *testing.T) {
 				if !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("API base must bypass git: calls=%q err=%v", calls, err)
 				}
-			} else if err != nil || string(calls) != "resolve\n" {
-				t.Fatalf("fallback resolves exactly once across spawn and new terminal: calls=%q err=%v", calls, err)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("local base resolution must be skipped: calls=%q err=%v", calls, err)
 			}
 		})
 	}

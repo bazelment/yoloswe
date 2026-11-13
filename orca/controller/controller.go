@@ -1419,8 +1419,21 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		}
 	}
 
-	if (rep.Outcome == lane.OutcomeDone || rep.Outcome == lane.OutcomeNoChange) && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && rep.HeadSHA != "" && c.reportHeadIsBase(ctx, ln, rep.HeadSHA) {
+	if curPhase.Name == recipe.PhaseSWE && (rep.Outcome == lane.OutcomeNoChange || strings.EqualFold(strings.TrimSpace(rep.Change), "none")) {
 		return c.completeReportOnlyLane(ctx, ln, ev)
+	}
+	if curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 {
+		if rep.Outcome == lane.OutcomeDone {
+			if checker, ok := c.driver.(lane.ReportOnlyChecker); ok {
+				noWork, err := checker.ReportOnlyNoWork(ctx, *ln)
+				if err != nil {
+					return store.EventClassUnclassified, err
+				}
+				if noWork {
+					return c.completeReportOnlyLane(ctx, ln, ev)
+				}
+			}
+		}
 	}
 
 	if (rep.Outcome == lane.OutcomeDone || rep.Outcome == lane.OutcomeNoChange) && isReviewPhase(curPhase) {
@@ -1436,25 +1449,17 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 	return c.advanceByRecipe(ctx, ln, r, verdict, rep.Reason, rep.Breaks, ev)
 }
 
-// reportHeadIsBase compares against the immutable spawn commit.
-func (c *Controller) reportHeadIsBase(ctx context.Context, ln *lane.Lane, head string) bool {
-	if strings.TrimSpace(ln.BaseCommit) != "" {
-		return strings.TrimSpace(ln.BaseCommit) == strings.TrimSpace(head)
-	}
-	// Legacy lanes recorded a SHA directly in BaseBranch. Never resolve a
-	// branch ref here: refs can move after the lane was spawned.
-	base := strings.TrimSpace(ln.BaseBranch)
-	return len(base) == 40 && base == strings.TrimSpace(head)
-}
-
 func (c *Controller) completeReportOnlyLane(ctx context.Context, ln *lane.Lane, ev *store.Event) (store.EventClass, error) {
 	_, already, err := c.recordDecision(ctx, ToolLaneComplete, ln.ID,
-		"SWE reported done with HEAD equal to base and no PR", "lane done (report-only)",
+		"SWE reported no change and no remote work", "lane done (report-only)",
 		DecisionArgs{ActionKey: "report-only-complete:" + ln.ID + ":" + ln.AttemptKey(), EventID: ev.ID, FromPhase: ln.Phase, ToPhase: recipe.TargetComplete, Verdict: string(lane.OutcomeDone), Round: max(ln.Round, 1)})
 	if err != nil {
 		return store.EventClassUnclassified, err
 	}
 	if !already {
+		if err := c.releaseLaneSession(ctx, ln); err != nil {
+			return store.EventClassUnclassified, err
+		}
 		ln.Status = lane.StatusDone
 		ln.LastEventID = ev.ID
 		ln.LastEventAt = c.clock.Now().UTC()
@@ -1561,6 +1566,9 @@ func (c *Controller) advanceByRecipe(
 			return store.EventClassUnclassified, err
 		}
 		if !already {
+			if err := c.releaseLaneSession(ctx, ln); err != nil {
+				return store.EventClassUnclassified, err
+			}
 			ln.Status = lane.StatusDone
 			ln.MergeSHA = cmp.Or(ln.MergeSHA, ln.PRHead)
 			if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
@@ -1894,6 +1902,9 @@ func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.Ev
 				return store.EventClassUnclassified, err
 			}
 		}
+		if err := c.releaseLaneSession(ctx, ln); err != nil {
+			return store.EventClassUnclassified, err
+		}
 		ln.Status = lane.StatusBlocked
 		ln.LastEventID = ev.ID
 		ln.LastEventAt = c.clock.Now().UTC()
@@ -2096,6 +2107,16 @@ func (c *Controller) stopCurrentTerminal(ctx context.Context, ln *lane.Lane, rea
 	// Stopping is best effort: an exited or already-replaced terminal may
 	// legitimately return not-found, and must not prevent its replacement.
 	_ = c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: reason})
+	return nil
+}
+
+func (c *Controller) releaseLaneSession(ctx context.Context, ln *lane.Lane) error {
+	if ln == nil || strings.TrimSpace(ln.SessionID) == "" {
+		return nil
+	}
+	if r, ok := c.driver.(lane.SessionReleaser); ok {
+		return r.ReleaseSession(ctx, ln.SessionID)
+	}
 	return nil
 }
 
