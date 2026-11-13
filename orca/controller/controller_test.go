@@ -457,6 +457,56 @@ func TestControllerJudgmentRuleAndPhaseExitFallback(t *testing.T) {
 	}
 }
 
+func TestControllerWatchRestartLadder(t *testing.T) {
+	t.Parallel()
+	for _, restartAfter := range []int{0, 1, 2, 3} {
+		t.Run(time.Duration(restartAfter).String(), func(t *testing.T) {
+			t.Parallel()
+			clk, st, drv, judge := setupTestEnv(t)
+			ctx := t.Context()
+			if err := st.Lanes().Upsert(ctx, lane.Lane{
+				ID: "lane-quiet", RunID: "run-1", Status: lane.StatusPlanned,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			for step := 1; step <= 4; step++ {
+				if step-1 == restartAfter {
+					ctrl.Kill()
+					clk.Advance(controller.DefaultLeaseTTL + time.Second)
+					ctrl = controller.New(controller.Config{RunID: "run-1", HolderID: "replacement"}, st, drv, clk, judge)
+				}
+				if _, err := st.Events().Append(ctx, store.Event{
+					RunID: "run-1", LaneID: "lane-quiet", Kind: store.EventPhaseExit,
+					Source: "lane.watch", Payload: json.RawMessage(`{"error":"quiet"}`),
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if err := ctrl.Step(ctx); err != nil {
+					t.Fatal(err)
+				}
+				wantStarts := min(step-1, 2)
+				if len(drv.Steers) != 1 || len(drv.PhaseStarts) != wantStarts {
+					t.Fatalf("step %d: steers=%d starts=%d, want 1 and %d", step, len(drv.Steers), len(drv.PhaseStarts), wantStarts)
+				}
+			}
+			if drv.PhaseStarts[0].Model != "opus" || drv.PhaseStarts[1].Model != "gpt-5.4" {
+				t.Fatalf("starts = %+v, want fresh opus then fallback gpt-5.4", drv.PhaseStarts)
+			}
+			ln, err := st.Lanes().Get(ctx, "run-1", "lane-quiet")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ln.Status != lane.StatusBlocked {
+				t.Fatalf("status = %q, want blocked after exhausting fallback", ln.Status)
+			}
+		})
+	}
+}
+
 func TestControllerStallDetection(t *testing.T) {
 	t.Parallel()
 	clk, st, drv, judge := setupTestEnv(t)

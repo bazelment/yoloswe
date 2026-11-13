@@ -235,12 +235,13 @@ type pendingVerdict struct {
 }
 
 // Controller is the deterministic orchestration loop for a single Run.
-type Controller struct { //nolint:govet // lifecycle state is intentionally grouped
+type Controller struct {
 	batchFirstAt       time.Time
 	store              store.Store
 	driver             lane.LaneDriver
 	clock              clock.Clock
 	judge              Judge
+	mailbox            mailbox.Mailbox
 	decidedActions     map[string]store.Decision
 	decidedEvents      map[string]store.Decision
 	dispatchedEvents   map[string]store.Decision
@@ -256,9 +257,7 @@ type Controller struct { //nolint:govet // lifecycle state is intentionally grou
 	leaseHeld          bool
 	initialized        bool
 	killed             bool
-	mailbox            mailbox.Mailbox
 	watchStarted       bool
-	restartStages      map[string]int
 }
 
 // New constructs a new deterministic Controller for cfg.RunID.
@@ -279,7 +278,6 @@ func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge
 		emittedStalls:      make(map[string]bool),
 		emittedAskExpiries: make(map[string]bool),
 		wakeCh:             make(chan struct{}, 1),
-		restartStages:      make(map[string]int),
 	}
 	if len(boxes) > 0 {
 		c.mailbox = boxes[0]
@@ -290,14 +288,9 @@ func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge
 // StartWatches connects worker and mailbox streams to the controller.
 func (c *Controller) StartWatches(ctx context.Context) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.watchStarted {
-		c.mu.Unlock()
 		return nil
-	}
-	c.watchStarted = true
-	c.mu.Unlock()
-	if c.driver != nil {
-		go c.forwardLaneEvents(ctx, c.driver.Watch(ctx, c.cfg.RunID))
 	}
 	if c.mailbox != nil {
 		ch, err := c.mailbox.Watch(ctx)
@@ -318,6 +311,10 @@ func (c *Controller) StartWatches(ctx context.Context) error {
 			}
 		}()
 	}
+	if c.driver != nil {
+		go c.forwardLaneEvents(ctx, c.driver.Watch(ctx, c.cfg.RunID))
+	}
+	c.watchStarted = true
 	return nil
 }
 
@@ -662,12 +659,6 @@ func (c *Controller) indexDecision(d store.Decision) {
 	}
 	if args.ActionKey != "" {
 		c.decidedActions[args.ActionKey] = d
-		if strings.HasPrefix(args.ActionKey, "restart:nudge:") {
-			c.restartStages[strings.TrimPrefix(args.ActionKey, "restart:nudge:")] = max(c.restartStages[strings.TrimPrefix(args.ActionKey, "restart:nudge:")], 1)
-		}
-		if strings.HasPrefix(args.ActionKey, "restart:fresh:") {
-			c.restartStages[strings.TrimPrefix(args.ActionKey, "restart:fresh:")] = max(c.restartStages[strings.TrimPrefix(args.ActionKey, "restart:fresh:")], 2)
-		}
 	}
 	if args.EventID != "" && d.Tool != ToolLaneStall && d.Tool != ToolLaneEscalate {
 		c.decidedEvents[args.EventID] = d
@@ -1352,9 +1343,8 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 	ln.LastEventAt = c.clock.Now().UTC()
 	if ev.Source == "lane.watch" {
 		key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
-		switch c.restartStages[key] {
-		case 0:
-			c.restartStages[key] = 1
+		switch {
+		case !c.hasActionDecision("restart:nudge:" + key):
 			_, _, err := c.recordDecision(ctx, ToolPhaseRetry, ln.ID, "quiet lane: nudge before restart", "nudged terminal", DecisionArgs{ActionKey: "restart:nudge:" + key, EventID: ev.ID, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt})
 			if err != nil {
 				return store.EventClassUnclassified, err
@@ -1363,20 +1353,21 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 				return store.EventClassUnclassified, err
 			}
 			return store.EventClassAuto, c.store.Lanes().Upsert(ctx, *ln)
-		case 1:
-			c.restartStages[key] = 2
+		case !c.hasActionDecision("restart:fresh:" + key):
+			if len(curPhase.Agents) == 0 {
+				return store.EventClassUnclassified, fmt.Errorf("orca/controller: phase %q in recipe %q has no agents", curPhase.Name, r.Name)
+			}
 			_, _, err := c.recordDecision(ctx, ToolPhaseRetry, ln.ID, "quiet lane: fresh terminal same round", "fresh terminal", DecisionArgs{ActionKey: "restart:fresh:" + key, EventID: ev.ID, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt})
 			if err != nil {
 				return store.EventClassUnclassified, err
 			}
-			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: curPhase.Agents[0].Harness, Model: curPhase.Agents[0].Model, Effort: curPhase.Agents[0].Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, "fresh terminal after nudge")})
+			agent := curPhase.Agents[min(curAttempt-1, len(curPhase.Agents)-1)]
+			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: agent.Harness, Model: agent.Model, Effort: agent.Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, "fresh terminal after nudge")})
 			if err != nil {
 				return store.EventClassUnclassified, err
 			}
 			ln.SessionID, ln.TerminalID = res.SessionID, res.TerminalID
 			return store.EventClassAuto, c.store.Lanes().Upsert(ctx, *ln)
-		default:
-			delete(c.restartStages, key)
 		}
 	}
 
