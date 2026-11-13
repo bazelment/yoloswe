@@ -17,6 +17,10 @@ import (
 
 type fake struct{ text string }
 
+type staticRouter struct{ decision Decision }
+
+func (r staticRouter) Route(context.Context, string) (Decision, error) { return r.decision, nil }
+
 func (f fake) CreateMessage(context.Context, model.Request) (*model.Response, error) {
 	return &model.Response{Message: model.Message{Content: []model.ContentBlock{model.NewTextBlock(f.text)}}}, nil
 }
@@ -24,12 +28,34 @@ func TestFallbackRoutesFiveLabels(t *testing.T) {
 	for _, x := range []struct {
 		in string
 		d  Destination
-	}{{"show status", Controller}, {"plan this", Planner}, {"remember use tabs", Memory}, {"dispatch item", Dispatcher}, {"answer the open question", AnswerOpenQuestion}} {
+	}{{"show status", Controller}, {"plan this", Planner}, {"remember use tabs", Memory}, {"dispatch item", Dispatcher}, {FormatInput("answer the open question", "What should I do?"), AnswerOpenQuestion}} {
 		r := FallbackRouter{Client: fake{`{"destination":"` + string(x.d) + `","confidence":0.99}`}}
 		got, e := r.Route(context.Background(), x.in)
 		if e != nil || got.Destination != x.d {
 			t.Fatalf("%q: %+v %v", x.in, got, e)
 		}
+	}
+}
+
+func TestFallbackNeverAnswersWithoutOpenQuestion(t *testing.T) {
+	r := FallbackRouter{Client: fake{`{"destination":"answer-open-question","confidence":0.99,"answers_open_question":true,"question_id":"invented"}`}}
+	d, err := r.Route(context.Background(), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Destination == AnswerOpenQuestion || d.AnswersOpenQuestion || d.QuestionID != "" {
+		t.Fatalf("answer-open-question selected without context: %+v", d)
+	}
+}
+
+func TestFallbackMultipartAnswerRequiresOpenQuestionContext(t *testing.T) {
+	r := FallbackRouter{Client: fake{`{"parts":[{"text":"a","destination":"answer-open-question","confidence":0.99},{"text":"remember this","destination":"memory","confidence":0.99}]}`}}
+	d, err := r.Route(context.Background(), "a and remember this")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Parts) != 2 || d.Parts[0].Destination == AnswerOpenQuestion || d.Parts[1].Destination != Memory {
+		t.Fatalf("multipart normalization: %+v", d)
 	}
 }
 func TestFallbackClarifies(t *testing.T) {
@@ -227,12 +253,43 @@ func TestGeminiPreservesSelectedOpenQuestion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(raw) }))
 	defer server.Close()
 	r := Select(fake{`{"destination":"answer-open-question","confidence":0.99,"question_id":"ask-2"}`}, "concierge", "dummy", server.URL, nil)
-	d, err := r.Route(context.Background(), "yes to ask-2")
+	d, err := r.Route(context.Background(), FormatInput("yes to ask-2", "ask-2: choose a rollout"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if d.Destination != AnswerOpenQuestion || d.QuestionID != "ask-2" {
 		t.Fatal(d)
+	}
+}
+
+func TestGeminiMultipartPreservesOpenQuestionContext(t *testing.T) {
+	raw, err := os.ReadFile("testdata/gemini.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct{ Input string }
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		if !strings.Contains(request.Input, "Open questions:\nask-2: choose a rollout") {
+			t.Errorf("multipart request lost context: %q", request.Input)
+		}
+		var wire map[string]any
+		if err := json.Unmarshal(raw, &wire); err != nil {
+			t.Fatal(err)
+		}
+		wire["answers"].(map[string]any)["destination"].(map[string]any)["choice"] = "answer-open-question"
+		_ = json.NewEncoder(w).Encode(wire)
+	}))
+	defer server.Close()
+	c := GeminiClient{APIKey: "dummy", BaseURL: server.URL, Segmenter: staticRouter{decision: Decision{Parts: []Decision{{Text: "yes to ask-2", QuestionID: "ask-2"}}}}}
+	d, err := c.Route(context.Background(), FormatInput("yes to ask-2", "ask-2: choose a rollout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Parts) != 1 || d.Parts[0].Destination != AnswerOpenQuestion || d.Parts[0].QuestionID != "ask-2" {
+		t.Fatalf("multipart decision lost supplied context: %+v", d)
 	}
 }
 

@@ -639,24 +639,24 @@
     "id": "owner-54",
     "source_mail_id": "s:06a786c6",
     "text": "a",
-    "context": "",
+    "context": "Open question: refresh the mounted gcloud login (a) the host refreshes it (b) leave it",
     "destinations": [
       "answer-open-question"
     ],
-    "needs_clarification": true,
-    "rationale": "Bare option without a resolvable open question needs clarification.",
+    "needs_clarification": false,
+    "rationale": "Independent source-first audit (router-audit.final.md): linked source identifies the question or work item; reply is unambiguous.",
     "excerpt": false
   },
   {
     "id": "owner-55",
     "source_mail_id": "s:ab35d416",
     "text": "a",
-    "context": "",
+    "context": "Open question: keep 120 s, raise the default to 10 min, or keep as is",
     "destinations": [
       "answer-open-question"
     ],
-    "needs_clarification": true,
-    "rationale": "Bare option without context needs clarification.",
+    "needs_clarification": false,
+    "rationale": "Independent source-first audit (router-audit.final.md): linked source identifies the question or work item; reply is unambiguous.",
     "excerpt": false
   },
   {
@@ -667,8 +667,8 @@
     "destinations": [
       "dispatcher"
     ],
-    "needs_clarification": true,
-    "rationale": "Merge request has no named target or open question.",
+    "needs_clarification": false,
+    "rationale": "Independent source-first audit (router-audit.final.md): linked source identifies the question or work item; reply is unambiguous.",
     "excerpt": false
   },
   {
@@ -679,20 +679,20 @@
     "destinations": [
       "dispatcher"
     ],
-    "needs_clarification": true,
-    "rationale": "Merge request cannot identify a target in isolation.",
+    "needs_clarification": false,
+    "rationale": "Independent source-first audit (router-audit.final.md): linked source identifies the question or work item; reply is unambiguous.",
     "excerpt": false
   },
   {
     "id": "owner-58",
     "source_mail_id": "s:7929c93e",
     "text": "files cost approved",
-    "context": "",
+    "context": "Open question: reply files cost approved or files cost declined",
     "destinations": [
       "answer-open-question"
     ],
-    "needs_clarification": true,
-    "rationale": "Approval lacks the referenced scope or question.",
+    "needs_clarification": false,
+    "rationale": "Independent source-first audit (router-audit.final.md): linked source identifies the question or work item; reply is unambiguous.",
     "excerpt": false
   },
   {
@@ -712,7 +712,7 @@
     "id": "owner-60",
     "source_mail_id": "s:b050519d",
     "text": "Host: yes to both: recover-workspace 5b0fe5d2 and 481f35b9 (your own lane sessions; it backs up to refs, non-destructive), then release --backup. Standing rule for your run from now: recover-workspace then release for your own finished lanes needs no ask; just log the backup ref.",
-    "context": "",
+    "context": "Open question: recover-workspace 5b0fe5d2 and 481f35b9, then release --backup",
     "destinations": [
       "answer-open-question",
       "memory"

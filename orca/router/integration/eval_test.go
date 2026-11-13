@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/model"
+	"github.com/bazelment/yoloswe/orca/replay"
 	"github.com/bazelment/yoloswe/orca/router"
 	"github.com/bazelment/yoloswe/orca/router/eval"
 )
@@ -19,6 +20,12 @@ func TestOwnerChatRouterEval(t *testing.T) {
 		t.Skip("live fallback evaluation needs a session OpenAI gateway key")
 	}
 	cases, err := eval.OwnerChatCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if split := os.Getenv("ORCA_ROUTER_SPLIT"); split != "" {
+		cases, err = eval.OwnerChatCasesSplit(replay.Split(split))
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

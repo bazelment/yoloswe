@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bazelment/yoloswe/orca/replay"
 	"github.com/bazelment/yoloswe/orca/router"
 )
 
@@ -83,8 +84,36 @@ func TestOwnerChatDatasetCoverage(t *testing.T) {
 			multipart++
 		}
 	}
-	if len(covered) != 6 || ambiguous < 5 || multipart < 2 {
+	if len(covered) != 6 || ambiguous != 0 || multipart < 2 {
 		t.Fatalf("coverage: destinations=%d ambiguous=%d multipart=%d", len(covered), ambiguous, multipart)
+	}
+}
+
+func TestOwnerChatSplitMatchesReplayHashSplit(t *testing.T) {
+	tune, err := OwnerChatCasesSplit(replay.SplitTune)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdout, err := OwnerChatCasesSplit(replay.SplitHoldout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tune) != 30 || len(holdout) != 30 {
+		t.Fatalf("split sizes: %d/%d", len(tune), len(holdout))
+	}
+}
+
+func TestAnswerOpenQuestionCasesIncludeContext(t *testing.T) {
+	cases, err := OwnerChatCases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		for _, d := range c.Destinations {
+			if d == router.AnswerOpenQuestion && c.Context == "" {
+				t.Errorf("%s expects answer-open-question without context", c.ID)
+			}
+		}
 	}
 }
 
