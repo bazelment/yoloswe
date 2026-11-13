@@ -187,7 +187,7 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 		}
 	})
 
-	t.Run("DefaultFourPhaseRecipe", func(t *testing.T) {
+	t.Run("DefaultFourPhaseRecipeWithoutCI", func(t *testing.T) {
 		t.Parallel()
 		clk, st, drv, judge := setupTestEnv(t)
 		ctx := t.Context()
@@ -197,7 +197,6 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 			RunID:  "run-1",
 			Title:  "Default recipe lane",
 			Status: lane.StatusPlanned,
-			Checks: "green",
 		}); err != nil {
 			t.Fatalf("Upsert lane: %v", err)
 		}
