@@ -6,6 +6,7 @@ go_library(
         "http_client.go",
         "model.go",
         "openai_client.go",
+        "tool_name_codec.go",
     ],
     importpath = "github.com/bazelment/yoloswe/orca/model",
     visibility = ["//visibility:public"],

@@ -286,25 +286,40 @@ func (c *HTTPClient) CreateMessage(ctx context.Context, req Request) (*Response,
 	if req.ToolRegistry != nil {
 		return runToolLoopResponse(ctx, c, req)
 	}
+	codec, err := newToolNameCodec(req, 128)
+	if err != nil {
+		return nil, err
+	}
+	wireReq := req.Clone()
+	for i := range wireReq.Tools {
+		wireReq.Tools[i].Name = codec.wire(wireReq.Tools[i].Name)
+	}
+	for i := range wireReq.Messages {
+		for j := range wireReq.Messages[i].Content {
+			if wireReq.Messages[i].Content[j].Type == BlockTypeToolUse {
+				wireReq.Messages[i].Content[j].Name = codec.wire(wireReq.Messages[i].Content[j].Name)
+			}
+		}
+	}
 
-	maxTokens := req.MaxTokens
+	maxTokens := wireReq.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = DefaultMaxTokens
 	}
 	payload := wireRequest{
-		Model:         req.Model,
-		System:        req.System,
-		Messages:      req.Messages,
-		Tools:         req.Tools,
-		StopSequences: req.StopSequences,
+		Model:         wireReq.Model,
+		System:        wireReq.System,
+		Messages:      wireReq.Messages,
+		Tools:         wireReq.Tools,
+		StopSequences: wireReq.StopSequences,
 		MaxTokens:     maxTokens,
-		Temperature:   req.Temperature,
-		Metadata:      maps.Clone(req.Metadata),
+		Temperature:   wireReq.Temperature,
+		Metadata:      maps.Clone(wireReq.Metadata),
 	}
 	delete(payload.Metadata, "role")
 	delete(payload.Metadata, "provider")
-	if req.ReasoningEffort != "" {
-		payload.OutputConfig = &reasoningConfig{Effort: req.ReasoningEffort}
+	if wireReq.ReasoningEffort != "" {
+		payload.OutputConfig = &reasoningConfig{Effort: wireReq.ReasoningEffort}
 	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -368,6 +383,11 @@ func (c *HTTPClient) CreateMessage(ctx context.Context, req Request) (*Response,
 			var resp Response
 			if err := json.Unmarshal(respBytes, &resp); err != nil {
 				return nil, fmt.Errorf("orca/model: decode response: %w", err)
+			}
+			for i := range resp.Message.Content {
+				if resp.Message.Content[i].Type == BlockTypeToolUse {
+					resp.Message.Content[i].Name = codec.original(resp.Message.Content[i].Name)
+				}
 			}
 			if resp.Model == "" {
 				resp.Model = req.Model

@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,6 +62,64 @@ func TestOpenAIResponsesToolLoop(t *testing.T) {
 	last := items[len(items)-1].(map[string]any)
 	if last["type"] != "function_call_output" || last["call_id"] != "call-1" {
 		t.Fatalf("tool output=%#v", last)
+	}
+}
+
+func TestOpenAIToolNameCodecAndHistory(t *testing.T) {
+	var requests []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, body)
+		w.Header().Set("Content-Type", "application/json")
+		if len(requests) == 1 {
+			_, _ = w.Write([]byte(`{"id":"r1","model":"gpt-6.1-sol","output":[{"type":"function_call","id":"fc1","call_id":"call-1","name":"backlog_add","arguments":"{}"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"r2","model":"gpt-6.1-sol","output":[{"type":"message","text":"done"}]}`))
+	}))
+	defer server.Close()
+	reg := model.NewToolRegistry()
+	model.AddTool(reg, "backlog.add", "add to backlog", func(context.Context, struct{}) (string, error) { return "ok", nil })
+	model.AddTool(reg, "memory.submit", "submit memory", func(context.Context, struct{}) (string, error) { return "ok", nil })
+	client := model.NewOpenAIClient(model.WithOpenAIBaseURL(server.URL), model.WithOpenAIMaxRetries(0))
+	res, err := client.RunToolLoop(t.Context(), model.Request{Model: "gpt-6.1-sol", Messages: []model.Message{model.NewUserMessage("go")}, MaxTurns: 3}, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Response.Text() != "done" {
+		t.Fatalf("response=%q", res.Response.Text())
+	}
+	tools, ok := requests[0]["tools"].([]any)
+	if !ok || len(tools) != 2 {
+		t.Fatalf("tools=%#v", requests[0]["tools"])
+	}
+	if tools[0].(map[string]any)["name"] != "backlog_add" || tools[1].(map[string]any)["name"] != "memory_submit" {
+		t.Fatalf("encoded tools=%#v", tools)
+	}
+	input := requests[1]["input"].([]any)
+	var sawCall, sawResult bool
+	for _, raw := range input {
+		item := raw.(map[string]any)
+		if item["type"] == "function_call" {
+			sawCall = item["name"] == "backlog_add"
+		}
+		if item["type"] == "function_call_output" {
+			sawResult = item["call_id"] == "call-1" && item["output"] == "ok"
+		}
+	}
+	if !sawCall || !sawResult {
+		t.Fatalf("history input=%#v", input)
+	}
+}
+
+func TestOpenAIToolNameCodecCollision(t *testing.T) {
+	client := model.NewOpenAIClient(model.WithOpenAIBaseURL("http://unused"), model.WithOpenAIMaxRetries(0))
+	_, err := client.CreateMessage(t.Context(), model.Request{Model: "test", Tools: []model.ToolDefinition{{Name: "backlog.add"}, {Name: "backlog_add"}}})
+	if err == nil || !strings.Contains(err.Error(), "tool name collision") {
+		t.Fatalf("error=%v, want collision", err)
 	}
 }
 
@@ -156,4 +215,83 @@ func TestPlannerEffortOnProviderWire(t *testing.T) {
 func TestOpenAIClient_RetryAfter48Seconds(t *testing.T) {
 	t.Parallel()
 	testRetryWaits(t, "openai", "48", []time.Duration{48 * time.Second}, false, false)
+}
+
+func TestProviderToolNameCodecHistory(t *testing.T) {
+	t.Parallel()
+	for _, provider := range []string{"openai", "anthropic"} {
+		t.Run(provider, func(t *testing.T) {
+			t.Parallel()
+			maxNameLength := 64
+			if provider == "anthropic" {
+				maxNameLength = 128
+			}
+			var captured map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+					t.Error(err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if provider == "openai" {
+					_, _ = w.Write([]byte(`{"id":"r","output":[{"type":"function_call","call_id":"next","name":"backlog_add","arguments":"{}"}]}`))
+				} else {
+					_, _ = w.Write([]byte(`{"id":"r","role":"assistant","content":[{"type":"tool_use","id":"next","name":"backlog_add","input":{}}]}`))
+				}
+			}))
+			defer server.Close()
+			var client model.ModelClient
+			if provider == "openai" {
+				client = model.NewOpenAIClient(model.WithOpenAIBaseURL(server.URL), model.WithOpenAIMaxRetries(0))
+			} else {
+				client = model.NewHTTPClient(model.WithBaseURL(server.URL), model.WithMaxRetries(0))
+			}
+			req := model.Request{Model: "test", Tools: []model.ToolDefinition{{Name: "backlog.add"}, {Name: "memory.submit"}, {Name: strings.Repeat("a", maxNameLength)}}, Messages: []model.Message{
+				{Role: model.RoleAssistant, Content: []model.ContentBlock{model.NewToolUseBlock("prior", "backlog.add", json.RawMessage(`{}`))}},
+				{Role: model.RoleUser, Content: []model.ContentBlock{model.NewToolResultBlock("prior", "ok", false)}},
+			}}
+			resp, err := client.CreateMessage(t.Context(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := resp.Message.Content[0].Name; got != "backlog.add" {
+				t.Fatalf("decoded name=%q", got)
+			}
+			tools := captured["tools"].([]any)
+			if tools[0].(map[string]any)["name"] != "backlog_add" || tools[1].(map[string]any)["name"] != "memory_submit" {
+				t.Fatalf("tools=%v", tools)
+			}
+			if provider == "openai" {
+				items := captured["input"].([]any)
+				if items[0].(map[string]any)["name"] != "backlog_add" || items[1].(map[string]any)["call_id"] != "prior" {
+					t.Fatalf("history=%v", items)
+				}
+			} else {
+				messages := captured["messages"].([]any)
+				block := messages[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+				result := messages[1].(map[string]any)["content"].([]any)[0].(map[string]any)
+				if block["name"] != "backlog_add" || result["tool_use_id"] != "prior" {
+					t.Fatalf("history=%v", messages)
+				}
+			}
+			if req.Tools[0].Name != "backlog.add" || req.Messages[0].Content[0].Name != "backlog.add" {
+				t.Fatal("request mutated")
+			}
+			for _, invalid := range []struct {
+				name  string
+				want  string
+				tools []model.ToolDefinition
+			}{
+				{"empty", "tool name length", []model.ToolDefinition{{Name: ""}}},
+				{"long", "tool name length", []model.ToolDefinition{{Name: strings.Repeat("a", maxNameLength+1)}}},
+				{"collision", "tool name collision", []model.ToolDefinition{{Name: "backlog.add"}, {Name: "backlog_add"}}},
+			} {
+				t.Run(invalid.name, func(t *testing.T) {
+					_, err := client.CreateMessage(t.Context(), model.Request{Model: "test", Tools: invalid.tools})
+					if err == nil || !strings.Contains(err.Error(), invalid.want) {
+						t.Fatalf("error=%v, want %s", err, invalid.want)
+					}
+				})
+			}
+		})
+	}
 }

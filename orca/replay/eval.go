@@ -317,8 +317,9 @@ func newSeededEnv(
 	return st, drv, clk, nil
 }
 
-// NewWireToolClient encodes dotted tool names with '_' on the Messages API wire
-// (^[a-zA-Z0-9_-]{1,128}$) and restores canonical names in responses.
+// NewWireToolClient is retained for compatibility with replay callers. Tool
+// name encoding is owned by the model transport so production and replay use
+// the same wire path.
 func NewWireToolClient(inner model.ModelClient) model.ModelClient {
 	if inner == nil {
 		return nil
@@ -329,31 +330,10 @@ func NewWireToolClient(inner model.ModelClient) model.ModelClient {
 	return &wireToolClient{inner: inner}
 }
 
-type wireToolClient struct {
-	inner model.ModelClient
-}
+type wireToolClient struct{ inner model.ModelClient }
 
 func (w *wireToolClient) CreateMessage(ctx context.Context, req model.Request) (*model.Response, error) {
-	cp := req.Clone()
-	wireToCanon := make(map[string]string, len(cp.Tools))
-	for i := range cp.Tools {
-		orig := cp.Tools[i].Name
-		if strings.ContainsRune(orig, '.') {
-			wire := strings.ReplaceAll(orig, ".", "_")
-			wireToCanon[wire] = orig
-			cp.Tools[i].Name = wire
-		}
-	}
-	for i := range cp.Messages {
-		for j := range cp.Messages[i].Content {
-			b := &cp.Messages[i].Content[j]
-			if b.Type == model.BlockTypeToolUse && strings.ContainsRune(b.Name, '.') {
-				b.Name = strings.ReplaceAll(b.Name, ".", "_")
-			}
-		}
-	}
-
-	resp, err := w.inner.CreateMessage(ctx, cp)
+	resp, err := w.inner.CreateMessage(ctx, req)
 	if err != nil || resp == nil {
 		return resp, err
 	}
@@ -361,11 +341,7 @@ func (w *wireToolClient) CreateMessage(ctx context.Context, req model.Request) (
 	for i := range out.Message.Content {
 		b := &out.Message.Content[i]
 		if b.Type == model.BlockTypeToolUse {
-			if canon, ok := wireToCanon[b.Name]; ok {
-				b.Name = canon
-			} else {
-				b.Name = normalizeReplayToolName(b.Name)
-			}
+			b.Name = normalizeReplayToolName(b.Name)
 		}
 	}
 	return &out, nil
