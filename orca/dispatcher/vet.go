@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/clock"
+	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
@@ -29,6 +30,7 @@ const (
 	ToolLaneRetry      = "lane.retry"
 	ToolLaneStop       = "lane.stop"
 	ToolOwnerAsk       = "owner.ask"
+	ToolOwnerAnswer    = "owner.answer"
 	ToolDirectiveNote  = "directive.note"
 	ToolPlannerRequest = "planner.request"
 	ToolReadLaneReport = "read.lane_report"
@@ -127,6 +129,11 @@ type OwnerAskParams struct {
 	Options   []string `json:"options" jsonschema:"required" jsonschema_description:"Concrete options the owner can choose from: short labels, a few words each (put the detail in the question)"`
 }
 
+type OwnerAnswerParams struct {
+	AskID  string `json:"ask_id" jsonschema:"required,description=ID of an open owner ask in the snapshot"`
+	Answer string `json:"answer" jsonschema:"required,description=The owner's answer to the ask"`
+}
+
 // DirectiveNoteParams holds parameters for the directive.note tool.
 type DirectiveNoteParams struct {
 	ID     string `json:"id,omitempty" jsonschema:"description=Optional directive ID"`
@@ -177,6 +184,7 @@ type ProposedAction struct {
 	LaneRetry      *LaneRetryParams      `json:"-"`
 	LaneStop       *LaneStopParams       `json:"-"`
 	OwnerAsk       *OwnerAskParams       `json:"-"`
+	OwnerAnswer    *OwnerAnswerParams    `json:"-"`
 	DirectiveNote  *DirectiveNoteParams  `json:"-"`
 	PlannerRequest *PlannerRequestParams `json:"-"`
 	ReadLaneReport *ReadLaneReportParams `json:"-"`
@@ -224,7 +232,7 @@ func isKnownTool(tool string) bool {
 	switch tool {
 	case ToolBacklogAdd, ToolBacklogUpdate, ToolBacklogReorder, ToolBacklogClose,
 		ToolLaneSpawn, ToolLaneSteer, ToolLaneRetry, ToolLaneStop,
-		ToolOwnerAsk, ToolDirectiveNote, ToolPlannerRequest,
+		ToolOwnerAsk, ToolOwnerAnswer, ToolDirectiveNote, ToolPlannerRequest,
 		ToolReadLaneReport, ToolReadPR, ToolReadCI:
 		return true
 	default:
@@ -376,6 +384,14 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 		act.LaneID = p.LaneID
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Question))
 
+	case ToolOwnerAnswer:
+		p, err := decodeParams[OwnerAnswerParams](canonical, trimmed)
+		if err != nil {
+			return act, err
+		}
+		act.OwnerAnswer = p
+		act.Reason = strings.TrimSpace(p.Answer)
+
 	case ToolDirectiveNote:
 		p, err := decodeParams[DirectiveNoteParams](canonical, trimmed)
 		if err != nil {
@@ -449,6 +465,7 @@ type StateView struct {
 	VersionRecipes map[string]recipe.Recipe
 	MaxBriefBytes  int
 	Memories       []store.MemoryEntry
+	OwnerAsks      map[string]controller.OwnerAsk
 }
 
 // LoadStateView loads the current Run, Lanes, Backlog, and Recipes from st into
@@ -491,6 +508,10 @@ func loadStateViewWithCache(
 		return nil, err
 	}
 	memories, _ := st.Memories().List(ctx, store.MemoryFilter{RunID: runID})
+	directives, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	if err != nil {
+		return nil, err
+	}
 
 	view := &StateView{
 		Now:            clk.Now().UTC(),
@@ -501,6 +522,17 @@ func loadStateViewWithCache(
 		VersionRecipes: make(map[string]recipe.Recipe, len(latestRecipes)+1),
 		MaxBriefBytes:  maxBriefBytes,
 		Memories:       memories,
+		OwnerAsks:      make(map[string]controller.OwnerAsk),
+	}
+	for i := range directives {
+		d := directives[i]
+		if !strings.HasPrefix(d.Ref, ownerAskRefPrefix) || (d.ExpiresAt != nil && !view.Now.Before(*d.ExpiresAt)) {
+			continue
+		}
+		var ask controller.OwnerAsk
+		if json.Unmarshal([]byte(d.Text), &ask) == nil && ask.ID != "" {
+			view.OwnerAsks[ask.ID] = ask
+		}
 	}
 	defRecipe := recipe.Default()
 	view.Recipes[recipe.DefaultName] = defRecipe
@@ -678,6 +710,10 @@ func DefaultInvariants() []Invariant {
 		{
 			Name:  "owner.ask requires options, default, and deadline",
 			Check: checkOwnerAsk,
+		},
+		{
+			Name:  "owner.answer must name an open owner ask",
+			Check: checkOwnerAnswer,
 		},
 		{
 			Name:  "brief size within cap",
@@ -901,6 +937,22 @@ func checkOwnerAsk(st *StateView, act ProposedAction) error {
 	}
 	if !dl.After(now) {
 		return fmt.Errorf("deadline %s must be in the future (now=%s)", dl.Format(time.RFC3339), now.Format(time.RFC3339))
+	}
+	return nil
+}
+
+func checkOwnerAnswer(st *StateView, act ProposedAction) error {
+	if act.Tool != ToolOwnerAnswer {
+		return nil
+	}
+	if act.OwnerAnswer == nil || strings.TrimSpace(act.OwnerAnswer.AskID) == "" {
+		return errors.New("ask_id is required")
+	}
+	if strings.TrimSpace(act.OwnerAnswer.Answer) == "" {
+		return errors.New("answer is required")
+	}
+	if _, ok := st.OwnerAsks[strings.TrimSpace(act.OwnerAnswer.AskID)]; !ok {
+		return fmt.Errorf("owner ask %q is not open in the snapshot", act.OwnerAnswer.AskID)
 	}
 	return nil
 }

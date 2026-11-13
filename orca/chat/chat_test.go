@@ -8,7 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/concierge"
+	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/mailbox"
+	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/store"
 
 	tea "charm.land/bubbletea/v2"
@@ -20,13 +23,13 @@ import (
 type fixedRouter struct{}
 
 func (fixedRouter) Route(context.Context, string) (router.Decision, error) {
-	return router.Decision{Destination: router.Planner, Confidence: .99}, nil
+	return router.Decision{Handler: router.Planner, Confidence: .99}, nil
 }
 func TestPlanChangeReachesPlanner(t *testing.T) {
 	received := make(chan string, 1)
 	m := New(context.Background(), "run", nil, fixedRouter{})
 	m.Dispatch = func(_ context.Context, d router.Decision, text string, emit func(string)) error {
-		if d.Destination == router.Planner {
+		if d.Handler == router.Planner {
 			received <- text
 		}
 		return nil
@@ -62,41 +65,24 @@ func finish(t *testing.T, tm *teatest.TestModel) {
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(time.Second))
 }
-func TestClarificationReroutesOriginal(t *testing.T) {
-	seen := make(chan string, 2)
-	called := make(chan string, 1)
-	r := routeFunc(func(_ context.Context, s string) (router.Decision, error) {
-		seen <- s
-		if s == "change it" {
-			return router.Decision{NeedsClarification: true, ClarifyingQuestion: "Which plan?"}, nil
-		}
-		return router.Decision{Destination: router.Planner, Confidence: .99}, nil
-	})
-	m := New(context.Background(), "run", func(_ context.Context, s string) (string, error) {
-		t.Error("ambiguous original reached concierge")
-		return "", nil
-	}, r)
-	m.Dispatch = func(_ context.Context, _ router.Decision, s string, _ func(string)) error { called <- s; return nil }
-	tm := teatest.NewTestModel(t, m)
-	submit(tm, "change it")
-	waitText(t, tm, "Which plan?")
-	submit(tm, "the launch plan")
-	select {
-	case s := <-called:
-		if s != "change it\nClarification: the launch plan" {
-			t.Fatal(s)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("clarification lost")
+func TestUnclearMessageReachesConcierge(t *testing.T) {
+	m := New(t.Context(), "run", func(_ context.Context, s string) (string, error) { return "Which plan?", nil }, routeFunc(func(context.Context, string) (router.Decision, error) {
+		return router.Decision{Handler: router.Concierge}, nil
+	}))
+	var out strings.Builder
+	if err := Run(t.Context(), strings.NewReader("change it\n"), &out, m); err != nil {
+		t.Fatal(err)
 	}
-	finish(t, tm)
+	if !strings.Contains(out.String(), "→ concierge: change it") || !strings.Contains(out.String(), "Which plan?") {
+		t.Fatal(out.String())
+	}
 }
 func TestRoutingDoesNotBlockUpdateAndStreams(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	r := routeFunc(func(context.Context, string) (router.Decision, error) {
 		<-release
-		return router.Decision{Destination: router.Concierge, Confidence: 1}, nil
+		return router.Decision{Handler: router.Concierge, Confidence: 1}, nil
 	})
 	m := New(context.Background(), "run", nil, r)
 	m.Dispatch = func(_ context.Context, _ router.Decision, _ string, emit func(string)) error {
@@ -155,7 +141,7 @@ func TestStoreStatusSlashAndInlineAnswer(t *testing.T) {
 	}
 	b := &StoreBackend{Store: st, RunID: "run"}
 	r := routeFunc(func(context.Context, string) (router.Decision, error) {
-		return router.Decision{Destination: router.AnswerOpenQuestion, Confidence: 1}, nil
+		return router.Decision{Handler: router.Dispatcher, Confidence: 1}, nil
 	})
 	m := New(ctx, "run", nil, r)
 	m.Backend = b
@@ -167,7 +153,7 @@ func TestStoreStatusSlashAndInlineAnswer(t *testing.T) {
 		waitText(t, tm, s.want)
 	}
 	submit(tm, "yes")
-	waitText(t, tm, "Answer queued")
+	waitText(t, tm, "→ dispatcher: yes")
 	finish(t, tm)
 	evs, err := st.Events().List(ctx, store.EventFilter{RunID: "run"})
 	if err != nil {
@@ -180,7 +166,7 @@ func TestStoreStatusSlashAndInlineAnswer(t *testing.T) {
 	if err := json.Unmarshal(evs[0].Payload, &msg); err != nil {
 		t.Fatal(err)
 	}
-	if msg.InReplyTo != "decision-1" || msg.LaneID != "lane" || msg.Body != "yes" {
+	if msg.Body != "yes" || !msg.Owner {
 		t.Fatal(msg)
 	}
 	dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: "run", ActiveOnly: true})
@@ -198,54 +184,120 @@ func TestStoreStatusSlashAndInlineAnswer(t *testing.T) {
 	}
 }
 
-func TestMultipartDispatchesEveryDestination(t *testing.T) {
-	ctx := context.Background()
+func TestThreeHandlersDispatch(t *testing.T) {
 	st := store.NewMemoryStore(nil)
 	defer st.Close()
-	if err := st.Runs().Create(ctx, store.Run{ID: "run"}); err != nil {
+	if err := st.Runs().Create(t.Context(), store.Run{ID: "run"}); err != nil {
 		t.Fatal(err)
 	}
-	b := &StoreBackend{Store: st, RunID: "run", Stream: func(_ context.Context, s string, emit func(string)) error { emit("answer: " + s); return nil }}
-	parts := []router.Decision{{Destination: router.Concierge, Text: "hello"}, {Destination: router.Planner, Text: "ship chat first"}, {Destination: router.Memory, Text: "use Bazel", IsStandingRule: true}, {Destination: router.Dispatcher, Text: "add chat tests"}, {Destination: router.Controller, Text: "pause"}}
-	m := New(ctx, "run", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
-		return router.Decision{Parts: parts, Confidence: 1}, nil
-	}))
+	streamed := ""
+	b := &StoreBackend{Store: st, RunID: "run", Stream: func(_ context.Context, s string, emit func(string)) error { streamed = s; emit("answer"); return nil }}
+	for _, h := range []router.Handler{router.Concierge, router.Planner, router.Dispatcher} {
+		if err := b.Dispatch(t.Context(), router.Decision{Handler: h}, string(h), func(string) {}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if streamed != "concierge" {
+		t.Fatal(streamed)
+	}
+	dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: "run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[store.DirectiveKind]string{}
+	for _, d := range dirs {
+		found[d.Kind] = d.Text
+	}
+	if found[store.DirectivePlanImport] != "planner" || found[store.DirectiveInstruction] != "dispatcher" {
+		t.Fatal(dirs)
+	}
+	events, err := st.Events().List(t.Context(), store.EventFilter{RunID: "run"})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("%+v %v", events, err)
+	}
+}
+func TestOpenQuestionReplyReachesDispatcherSnapshot(t *testing.T) {
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(t.Context(), store.Run{ID: "run"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Directives().Add(t.Context(), store.Directive{ID: "ask", RunID: "run", Ref: "owner_ask:ask-1", Text: `{"id":"ask-1","question":"A or B?"}`, Kind: store.DirectiveInstruction, Status: store.DirectiveActive}); err != nil {
+		t.Fatal(err)
+	}
+	b := &StoreBackend{Store: st, RunID: "run"}
+	r := routeFunc(func(_ context.Context, input string) (router.Decision, error) {
+		if input != "go with B\nOpen questions:\nask-1: A or B?" {
+			t.Errorf("input=%q", input)
+		}
+		return router.Decision{Handler: router.Dispatcher}, nil
+	})
+	m := New(t.Context(), "run", nil, r)
+	m.Backend = b
 	m.Dispatch = b.Dispatch
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 50))
-	submit(tm, "hello and ship chat first and use Bazel and add chat tests and pause")
-	waitText(t, tm, "run pause")
-	finish(t, tm)
-	dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: "run"})
+	var out strings.Builder
+	if err := Run(t.Context(), strings.NewReader("go with B\n"), &out, m); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := dispatcher.BuildSnapshot(t.Context(), st, nil, "run", nil, dispatcher.SnapshotConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := map[string]bool{}
-	for i := range dirs {
-		found[string(dirs[i].Kind)+":"+dirs[i].Text] = true
+	if !strings.Contains(snap.Text, "owner_ask:ask-1") || !strings.Contains(snap.Text, "A or B?") {
+		t.Fatal(snap.Text)
 	}
-	for _, s := range []string{"plan_import:ship chat first", "instruction:add chat tests", "instruction:pause"} {
-		if !found[s] {
-			t.Errorf("missing %s in %+v", s, dirs)
+	events, err := st.Events().List(t.Context(), store.EventFilter{RunID: "run"})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+	var msg mailbox.Message
+	if err := json.Unmarshal(events[0].Payload, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.InReplyTo != "" {
+		t.Fatalf("reply=%+v, want no inferred identity", msg)
+	}
+	dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: "run", ActiveOnly: true})
+	if err != nil || len(dirs) != 2 {
+		t.Fatalf("directives=%+v err=%v", dirs, err)
+	}
+}
+func TestPauseViaConciergeTool(t *testing.T) {
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(t.Context(), store.Run{ID: "run"}); err != nil {
+		t.Fatal(err)
+	}
+	b := &StoreBackend{Store: st, RunID: "run"}
+	client := model.NewFakeClient(
+		model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("pause", concierge.ToolRunControl, json.RawMessage(`{"action":"pause"}`)))},
+		model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock("run paused"))},
+	)
+	c := concierge.New(concierge.Config{DisableCitations: true, RunControl: func(ctx context.Context, _ string, cmd string) (string, error) { return b.Command(ctx, cmd) }}, st, nil, nil, client)
+	b.Stream = func(ctx context.Context, text string, emit func(string)) error {
+		res, err := c.Ask(ctx, "run", text)
+		if err == nil {
+			emit(res.Answer)
 		}
+		return err
 	}
-	mem, err := st.Memories().List(ctx, store.MemoryFilter{RunID: "run"})
+	r := routeFunc(func(context.Context, string) (router.Decision, error) {
+		return router.Decision{Handler: router.Concierge, Fallback: true}, nil
+	})
+	m := New(t.Context(), "run", nil, r)
+	m.Dispatch = b.Dispatch
+	var out strings.Builder
+	if err := Run(t.Context(), strings.NewReader("pause the run\n"), &out, m); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "→ concierge: pause the run (via fallback)") {
+		t.Fatal(out.String())
+	}
+	dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: "run", ActiveOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	saved := false
-	for i := range mem {
-		if mem[i].Body == "use Bazel" {
-			saved = true
-		}
-	}
-	if !saved {
-		t.Fatal("memory missing")
-	}
-	evs, err := st.Events().List(ctx, store.EventFilter{RunID: "run"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(evs) != 1 || evs[0].Summary != "add chat tests" {
-		t.Fatal(evs)
+	if len(dirs) != 1 || dirs[0].Ref != "chat:control" || dirs[0].Text != "pause" {
+		t.Fatal(dirs)
 	}
 }

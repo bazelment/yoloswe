@@ -1349,3 +1349,32 @@ func TestStartupGoalDoesNotMatchDispatcherReplan(t *testing.T) {
 		t.Fatalf("startup calls=%d; dispatcher replan is not startup", len(fake.Requests))
 	}
 }
+
+func TestConciergeRunControl(t *testing.T) {
+	t.Parallel()
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(t.Context(), store.Run{ID: "run-control"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"pause", "resume", "stop"} {
+		client := model.NewFakeClient(
+			model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("control", "run.control", json.RawMessage(`{"action":"`+action+`"}`)))},
+			model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock("Run " + action))},
+		)
+		c := NewConcierge("run-control", st, nil, client, DefaultConciergeModel)
+		if _, err := c.Ask(t.Context(), action+" the run"); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Close(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: "run-control", ActiveOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(dirs) != 1 || dirs[0].Ref != "chat:control" || dirs[0].Text != action {
+			t.Fatalf("%s: %+v", action, dirs)
+		}
+	}
+}

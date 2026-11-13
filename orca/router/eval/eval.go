@@ -15,18 +15,18 @@ import (
 //go:embed testdata/owner_chat.json
 var ownerChatData []byte
 
-// EvalCase preserves a scrubbed source citation and an unaudited human label.
+// EvalCase preserves a scrubbed source citation and a frozen human label.
 //
 //nolint:govet // JSON fixture fields follow the human-readable label schema.
 type EvalCase struct {
-	ID                 string               `json:"id"`
-	SourceMailID       string               `json:"source_mail_id"`
-	Text               string               `json:"text"`
-	Context            string               `json:"context"`
-	Destinations       []router.Destination `json:"destinations"`
-	Rationale          string               `json:"rationale"`
-	NeedsClarification bool                 `json:"needs_clarification"`
-	Excerpt            bool                 `json:"excerpt"`
+	ID                 string   `json:"id"`
+	SourceMailID       string   `json:"source_mail_id"`
+	Text               string   `json:"text"`
+	Context            string   `json:"context"`
+	Destinations       []string `json:"destinations"`
+	Rationale          string   `json:"rationale"`
+	NeedsClarification bool     `json:"needs_clarification"`
+	Excerpt            bool     `json:"excerpt"`
 }
 
 // OwnerChatCases loads the frozen owner-mail labels. Labels are not model input.
@@ -65,103 +65,79 @@ func OwnerChatCasesSplit(split replay.Split) ([]EvalCase, error) {
 	return out, nil
 }
 
-// EvalResult records a whole-message routing result.
+// EvalResult records a handler routing result.
 //
-//nolint:govet // score rows mirror the report schema.
+//nolint:govet
 type EvalResult struct {
-	ID                       string
-	SourceMailID             string
-	Expected                 []router.Destination
-	Got                      []router.Destination
-	Decision                 router.Decision
-	Latency                  time.Duration
-	Error                    string
-	Correct                  bool
-	UnnecessaryClarification bool
+	ID           string
+	SourceMailID string
+	Expected     []router.Handler
+	Got          router.Handler
+	Decision     router.Decision
+	Latency      time.Duration
+	Error        string
+	Correct      bool
 }
-
-// EvalScorecard reports exact destination-set and clarification agreement.
 type EvalScorecard struct {
-	Results                   []EvalResult
-	Correct                   int
-	ClearCases                int
-	UnnecessaryClarifications int
-	Errors                    int
-	MeanLatency               time.Duration
-	P50Latency                time.Duration
-	P95Latency                time.Duration
+	Results    []EvalResult
+	Correct    int
+	Errors     int
+	Fallbacks  int
+	P50Latency time.Duration
+	P95Latency time.Duration
 }
 
-// Evaluate scores any Router backend. Errors count as misses; calls are serial.
+// AcceptedHandlers maps the frozen six-destination labels onto model handlers.
+func AcceptedHandlers(destinations []string) []router.Handler {
+	out := []router.Handler{}
+	for _, d := range destinations {
+		h := router.Handler(d)
+		switch d {
+		case "memory", "controller":
+			h = router.Concierge
+		case "answer-open-question":
+			h = router.Dispatcher
+		}
+		out = append(out, h)
+	}
+	if len(destinations) > 1 {
+		out = append(out, router.Concierge)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
 func Evaluate(ctx context.Context, backend router.Router, cases []EvalCase) EvalScorecard {
 	var score EvalScorecard
 	var latencies []time.Duration
-	var total time.Duration
-	for i := range cases {
-		c := &cases[i]
-		input := router.FormatInput(c.Text, c.Context)
+	for _, c := range cases {
 		start := time.Now()
-		d, err := backend.Route(ctx, input)
+		d, err := backend.Route(ctx, router.FormatInput(c.Text, c.Context))
 		elapsed := time.Since(start)
-		result := EvalResult{ID: c.ID, SourceMailID: c.SourceMailID, Expected: canonicalDestinations(c.Destinations), Decision: d, Latency: elapsed}
+		r := EvalResult{ID: c.ID, SourceMailID: c.SourceMailID, Expected: AcceptedHandlers(c.Destinations), Got: d.Handler, Decision: d, Latency: elapsed}
 		if err != nil {
-			// Provider errors can contain request headers or upstream response text.
-			result.Error = "routing backend error"
+			r.Error = "routing backend error"
 			score.Errors++
 		}
-		result.Got = decisionDestinations(d)
-		result.Correct = err == nil && slices.Equal(result.Expected, result.Got) && d.NeedsClarification == c.NeedsClarification
-		if result.Correct {
+		r.Correct = err == nil && slices.Contains(r.Expected, r.Got)
+		if r.Correct {
 			score.Correct++
 		}
-		if !c.NeedsClarification {
-			score.ClearCases++
-			result.UnnecessaryClarification = err == nil && d.NeedsClarification
-			if result.UnnecessaryClarification {
-				score.UnnecessaryClarifications++
-			}
+		if d.Fallback {
+			score.Fallbacks++
 		}
-		score.Results = append(score.Results, result)
+		score.Results = append(score.Results, r)
 		latencies = append(latencies, elapsed)
-		total += elapsed
 	}
 	if len(latencies) > 0 {
 		slices.Sort(latencies)
-		score.MeanLatency = total / time.Duration(len(latencies))
 		score.P50Latency = latencies[(len(latencies)-1)/2]
 		score.P95Latency = latencies[(95*len(latencies)+99)/100-1]
 	}
 	return score
 }
-
-func canonicalDestinations(ds []router.Destination) []router.Destination {
-	ds = slices.Clone(ds)
-	slices.Sort(ds)
-	return slices.Compact(ds)
-}
-func decisionDestinations(d router.Decision) []router.Destination {
-	if len(d.Parts) == 0 {
-		return []router.Destination{d.Destination}
-	}
-	var ds []router.Destination
-	for i := range d.Parts {
-		ds = append(ds, decisionDestinations(d.Parts[i])...)
-	}
-	return canonicalDestinations(ds)
-}
-
-// MeetsTargets requires >=90% accuracy, <10% needless asks, and no errors.
 func (s EvalScorecard) MeetsTargets() bool {
-	return len(s.Results) > 0 && s.ClearCases > 0 && s.Correct*100 >= 90*len(s.Results) && s.UnnecessaryClarifications*100 < 10*s.ClearCases && s.Errors == 0
+	return len(s.Results) > 0 && s.Correct*100 >= 90*len(s.Results) && s.Errors == 0
 }
-
 func (s EvalScorecard) String() string {
-	accuracy, unnecessary := 0.0, 0.0
-	if len(s.Results) > 0 {
-		accuracy = 100 * float64(s.Correct) / float64(len(s.Results))
-	}
-	if s.ClearCases > 0 {
-		unnecessary = 100 * float64(s.UnnecessaryClarifications) / float64(s.ClearCases)
-	}
-	return fmt.Sprintf("routing accuracy: %d/%d (%.2f%%); unnecessary clarifications: %d/%d (%.2f%%); errors: %d; latency mean=%s p50=%s p95=%s; targets_met=%t", s.Correct, len(s.Results), accuracy, s.UnnecessaryClarifications, s.ClearCases, unnecessary, s.Errors, s.MeanLatency.Round(time.Millisecond), s.P50Latency.Round(time.Millisecond), s.P95Latency.Round(time.Millisecond), s.MeetsTargets())
+	return fmt.Sprintf("accuracy=%d/%d errors=%d fallbacks=%d p50=%s p95=%s targets_met=%t", s.Correct, len(s.Results), s.Errors, s.Fallbacks, s.P50Latency, s.P95Latency, s.MeetsTargets())
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/model"
@@ -18,6 +19,40 @@ func toolUseResponse(calls ...model.ToolCall) model.Response {
 		blocks[i] = model.NewToolUseBlock(c.ID, c.Name, c.Input)
 	}
 	return model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(blocks...)}
+}
+
+func TestOwnerAnswerVetterRequiresOpenAsk(t *testing.T) {
+	clk, st, _ := setupTestEnv(t)
+	view, err := dispatcher.LoadStateView(t.Context(), st, clk, "run-1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.OwnerAsks["open-1"] = controller.OwnerAsk{ID: "open-1"}
+	invs := dispatcher.DefaultInvariants()
+	for _, tc := range []struct {
+		name string
+		id   string
+		want string
+	}{
+		{name: "unknown", id: "missing", want: "is not open"},
+		{name: "closed", id: "closed", want: "is not open"},
+		{name: "open", id: "open-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			act, err := dispatcher.ParseAction("call", dispatcher.ToolOwnerAnswer, json.RawMessage(`{"ask_id":"`+tc.id+`","answer":"go"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := dispatcher.VetAction(view, act, invs)
+			if tc.want == "" {
+				if got != nil {
+					t.Fatal(got)
+				}
+			} else if got == nil || !strings.Contains(got.Error(), tc.want) {
+				t.Fatalf("VetAction=%v, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 func endTurnResponse(text string) model.Response {

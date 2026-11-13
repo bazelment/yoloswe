@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
 	memorychat "github.com/bazelment/yoloswe/orca/concierge"
 	"github.com/bazelment/yoloswe/orca/model"
@@ -34,6 +35,7 @@ const (
 
 // ConciergeSystemPrompt is the system prompt for owner chat sessions.
 const ConciergeSystemPrompt = `You are the Nebula Swarm Concierge.
+You are the front desk for unclear or mixed messages: clarify with one question only if you must; otherwise save rules with memory.submit and forward plan changes or orders with directive.submit. Use run.control to pause, resume or stop execution.
 Answer the owner's questions accurately and concisely using read-only Store tools (status, lane.show, decisions.since, pr.ci).
 	Never invent facts not present in the Store. Owner corrections become memory.submit proposals saved immediately with a source quote; memory.undo reverts the last change.`
 
@@ -324,6 +326,10 @@ func (c *Concierge) RunInteractive(ctx context.Context, in io.Reader, out io.Wri
 
 func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho *string) *model.ToolRegistry {
 	reg := model.NewToolRegistry()
+	model.AddTool[memorychat.RunControlParams](reg, memorychat.ToolRunControl, "Pause, resume or stop execution", func(ctx context.Context, p memorychat.RunControlParams) (string, error) {
+		backend := &chat.StoreBackend{Store: c.store, RunID: c.runID}
+		return memorychat.Control(ctx, backend.Command, p)
+	})
 
 	model.AddTool[ConciergeStatusParams](reg, ToolConciergeStatus,
 		"Read structured run status, backlog, lanes, active directives, and decision/token/cost metrics",

@@ -37,6 +37,65 @@ func setupTestEnv(t *testing.T) (*clock.FakeClock, *store.MemoryStore, *lane.Fak
 	return clk, st, drv
 }
 
+func TestOwnerAnswerResolvesSelectedAskAndSteersItsLane(t *testing.T) {
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+	deadline := clk.Now().Add(time.Hour)
+	for _, ask := range []controller.OwnerAsk{
+		{ID: "q1", RunID: "run-1", Question: "Question one?", Options: []string{"A"}, Default: "A", Deadline: deadline},
+		{ID: "q2", RunID: "run-1", LaneID: "lane-q2", Question: "Question two?", Options: []string{"A", "B"}, Default: "A", Deadline: deadline},
+	} {
+		raw, err := json.Marshal(ask)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Directives().Add(ctx, store.Directive{ID: "ask-" + ask.ID, RunID: "run-1", Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Ref: "owner_ask:" + ask.ID, Scope: ask.LaneID, Text: string(raw), ExpiresAt: &deadline, Status: store.DirectiveActive}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-q2", RunID: "run-1", Status: lane.StatusBlocked, SessionID: "sess-q2", TerminalID: "term-q2"}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1", HolderID: "test-controller"}, st, drv, clk, controller.NewFakeJudge())
+	fake := model.NewFakeClient(toolUseResponse(model.ToolCall{ID: "answer", Name: dispatcher.ToolOwnerAnswer, Input: json.RawMessage(`{"ask_id":"q2","answer":"go with B"}`)}), endTurnResponse("done"))
+	d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+	d.SetOwnerAnswer(func(ctx context.Context, runID, askID, answer string) error {
+		if runID != "run-1" {
+			t.Fatalf("runID=%q", runID)
+		}
+		return ctrl.AnswerOwnerAskText(ctx, askID, answer)
+	})
+	ev, err := st.Events().Append(ctx, store.Event{RunID: "run-1", Kind: store.EventOwnerMessage, Class: store.EventClassJudgment, Summary: "go with B for q2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Dispatch(ctx, "run-1", []store.Event{ev}); err != nil {
+		t.Fatal(err)
+	}
+	q2, err := st.Directives().Get(ctx, "run-1", "ask-q2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q1, err := st.Directives().Get(ctx, "run-1", "ask-q1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q2.Status != store.DirectiveHandled || q1.Status != store.DirectiveActive {
+		t.Fatalf("q2=%s q1=%s", q2.Status, q1.Status)
+	}
+	ln, err := st.Lanes().Get(ctx, "run-1", "lane-q2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ln.Status != lane.StatusRunning {
+		t.Fatalf("lane status=%s", ln.Status)
+	}
+	requests := drv.Steers
+	if len(requests) != 1 || requests[0].LaneID != "lane-q2" || requests[0].Message != "go with B" {
+		t.Fatalf("steers=%+v", requests)
+	}
+}
+
 func TestInnerLoop_StalledLaneProducesLaneRetry(t *testing.T) {
 	t.Parallel()
 

@@ -1,1 +1,1 @@
-{"answers":{"destination":{"type":"choice","choice":"planner","confidence":0.96,"probabilities":{"planner":0.96,"concierge":0.01,"memory":0.01,"dispatcher":0.01,"controller":0.005,"answer-open-question":0.005}},"needs_clarification":{"type":"noul","noul":0.01,"confidence":0.99},"is_standing_rule":{"type":"noul","noul":0.01,"confidence":0.99},"answers_open_question":{"type":"noul","noul":0.01,"confidence":0.99}}}
+{"answers":{"handler":{"type":"choice","choice":"dispatcher","confidence":0.96,"probabilities":{"concierge":0.02,"planner":0.02,"dispatcher":0.96}}}}
