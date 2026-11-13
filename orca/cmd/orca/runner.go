@@ -305,8 +305,10 @@ func NewRunner(
 	if logger == nil {
 		logger = slog.Default()
 	}
-	// Decorate at the CLI boundary so every controller-launched phase receives
-	// the current run memories, including phases started after a chat correction.
+	// The dispatcher renders memories for its own launch requests. Keep its
+	// driver raw, while decorating the runner driver for controller-launched
+	// phases so each path renders exactly once.
+	rawDriver := drv
 	drv = brief.WithMemories(st, drv)
 
 	planner := NewPlanner(st, clk, client, cfg.Models.Planner, logger)
@@ -316,7 +318,7 @@ func NewRunner(
 		HardBatchModel:   cfg.Models.DispatcherHard,
 		RecipeCompiler:   planner,
 		OnPlannerRequest: planner.HandlePlannerRequest,
-	}, st, drv, clk, client)
+	}, st, rawDriver, clk, client)
 
 	r := &Runner{
 		cfg:               cfg,

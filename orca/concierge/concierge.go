@@ -195,16 +195,16 @@ type TurnResult struct {
 
 // Concierge hosts owner chat threads backed by read-only Store tools and directive.submit.
 type Concierge struct {
-	store      store.Store
-	driver     lane.LaneDriver
-	clock      clock.Clock
-	client     model.ModelClient
-	lastResult *TurnResult
-	editors    map[string]*MemoryEditor
-	lastEditor *MemoryEditor
-	cfg        Config
-	seq        int64
-	mu         sync.Mutex
+	store       store.Store
+	driver      lane.LaneDriver
+	clock       clock.Clock
+	client      model.ModelClient
+	lastResult  *TurnResult
+	editors     map[string]*MemoryEditor
+	lastEditors map[string]*MemoryEditor
+	cfg         Config
+	seq         int64
+	mu          sync.Mutex
 }
 
 // New constructs a new Concierge.
@@ -219,11 +219,12 @@ func New(
 		clk = clock.NewRealClock()
 	}
 	return &Concierge{
-		cfg:    cfg.withDefaults(),
-		store:  st,
-		driver: drv,
-		clock:  clk,
-		client: client,
+		cfg:         cfg.withDefaults(),
+		store:       st,
+		driver:      drv,
+		clock:       clk,
+		client:      client,
+		lastEditors: make(map[string]*MemoryEditor),
 	}
 }
 
@@ -413,11 +414,11 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 	// editor available so a following standalone "undo" or "forget" can
 	// revert the correction just made in the prior thread.
 	if strings.EqualFold(question, "undo") || strings.EqualFold(question, "forget") {
-		if c.lastEditor != nil {
-			editor = c.lastEditor
+		if last := c.lastEditors[runID]; last != nil {
+			editor = last
 		}
 	} else {
-		c.lastEditor = editor
+		c.lastEditors[runID] = editor
 	}
 	c.mu.Unlock()
 	if strings.EqualFold(question, "undo") || strings.EqualFold(question, "forget") {
