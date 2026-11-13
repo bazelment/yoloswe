@@ -17,5 +17,8 @@ go_test(
     srcs = ["eval_test.go"],
     data = glob(["testdata/**"]),
     embed = [":eval"],
-    deps = ["//orca/router"],
+    deps = [
+        "//orca/replay",
+        "//orca/router",
+    ],
 )

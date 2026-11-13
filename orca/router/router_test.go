@@ -10,299 +10,136 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bazelment/yoloswe/orca/store"
-
 	"github.com/bazelment/yoloswe/orca/model"
+	"github.com/bazelment/yoloswe/orca/store"
 )
 
-type fake struct{ text string }
+func TestLowMarginUsesConcierge(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"answers":{"handler":{"type":"choice","choice":"planner","confidence":0.5,"probabilities":{"planner":0.5,"dispatcher":0.4,"concierge":0.1}}}}`))
+	}))
+	defer server.Close()
+	d, err := (GeminiRouter{BaseURL: server.URL, APIKey: "dummy"}).Route(t.Context(), "change it")
+	if err != nil || d.Handler != Concierge || d.Confidence != .5 || d.Probabilities["planner"] != .5 {
+		t.Fatalf("low margin: %+v %v", d, err)
+	}
+}
 
-type staticRouter struct{ decision Decision }
-
-func (r staticRouter) Route(context.Context, string) (Decision, error) { return r.decision, nil }
+type fake struct {
+	err  error
+	text string
+}
 
 func (f fake) CreateMessage(context.Context, model.Request) (*model.Response, error) {
-	return &model.Response{Message: model.Message{Content: []model.ContentBlock{model.NewTextBlock(f.text)}}}, nil
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &model.Response{Message: model.NewAssistantMessage(model.NewTextBlock(f.text))}, nil
 }
-func TestFallbackRoutesFiveLabels(t *testing.T) {
-	for _, x := range []struct {
-		in string
-		d  Destination
-	}{{"show status", Controller}, {"plan this", Planner}, {"remember use tabs", Memory}, {"dispatch item", Dispatcher}, {FormatInput("answer the open question", "What should I do?"), AnswerOpenQuestion}} {
-		r := FallbackRouter{Client: fake{`{"destination":"` + string(x.d) + `","confidence":0.99}`}}
-		got, e := r.Route(context.Background(), x.in)
-		if e != nil || got.Destination != x.d {
-			t.Fatalf("%q: %+v %v", x.in, got, e)
+func TestLLMThreeWayParse(t *testing.T) {
+	for _, h := range []Handler{Concierge, Planner, Dispatcher} {
+		d, err := (LLMRouter{Client: fake{text: `{"handler":"` + string(h) + `","confidence":0.9}`}}).Route(t.Context(), "message")
+		if err != nil || d.Handler != h || d.Backend != "llm" {
+			t.Fatalf("%s: %+v %v", h, d, err)
+		}
+	}
+	d, err := (LLMRouter{Client: fake{text: `{"handler":"planner","confidence":0.4}`}}).Route(t.Context(), "message")
+	if err != nil || d.Handler != Concierge {
+		t.Fatalf("low confidence: %+v %v", d, err)
+	}
+	for _, raw := range []string{`{"handler":"memory","confidence":1}`, `{"handler":"planner","confidence":1.5}`, `invalid`} {
+		if _, err := (LLMRouter{Client: fake{text: raw}}).Route(t.Context(), "message"); err == nil {
+			t.Fatalf("accepted %s", raw)
 		}
 	}
 }
-
-func TestFallbackNeverAnswersWithoutOpenQuestion(t *testing.T) {
-	r := FallbackRouter{Client: fake{`{"destination":"answer-open-question","confidence":0.99,"answers_open_question":true,"question_id":"invented"}`}}
-	d, err := r.Route(context.Background(), "a")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d.Destination == AnswerOpenQuestion || d.AnswersOpenQuestion || d.QuestionID != "" {
-		t.Fatalf("answer-open-question selected without context: %+v", d)
-	}
-}
-
-func TestFallbackMultipartAnswerRequiresOpenQuestionContext(t *testing.T) {
-	r := FallbackRouter{Client: fake{`{"parts":[{"text":"a","destination":"answer-open-question","confidence":0.99},{"text":"remember this","destination":"memory","confidence":0.99}]}`}}
-	d, err := r.Route(context.Background(), "a and remember this")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(d.Parts) != 2 || d.Parts[0].Destination == AnswerOpenQuestion || d.Parts[1].Destination != Memory {
-		t.Fatalf("multipart normalization: %+v", d)
-	}
-}
-func TestFallbackClarifies(t *testing.T) {
-	r := FallbackRouter{Client: fake{`{"destination":"concierge","confidence":0.2}`}}
-	d, _ := r.Route(context.Background(), "hmm")
-	if !d.NeedsClarification || d.ClarifyingQuestion == "" {
-		t.Fatal(d)
-	}
-}
-
-type errorTransport struct {
-	t *testing.T
-}
-
-func (tr errorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.RawQuery != "" || strings.Contains(req.URL.String(), "test-secret") {
-		tr.t.Errorf("request URL contains a credential: %s", req.URL.Redacted())
-	}
-	if req.Header.Get("x-goog-api-key") != "test-secret" {
-		tr.t.Error("request is missing the API key header")
-	}
-	return nil, errors.New("transport unavailable")
-}
-
-func TestGeminiTransportErrorKeepsAPIKeyPrivate(t *testing.T) {
-	client := GeminiClient{
-		APIKey:     "test-secret",
-		HTTPClient: &http.Client{Transport: errorTransport{t: t}},
-	}
-	_, err := client.Route(context.Background(), "hello")
-	if err == nil {
-		t.Fatal("expected transport error")
-	}
-	if strings.Contains(err.Error(), client.APIKey) {
-		t.Fatalf("transport error exposes API key: %v", err)
-	}
-}
-
-func TestRecordedFallbackMultipartAndLog(t *testing.T) {
-	raw, err := os.ReadFile("testdata/fallback.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	st := store.NewMemoryStore(nil)
-	defer st.Close()
-	ctx := context.Background()
-	if err := st.Runs().Create(ctx, store.Run{ID: "run"}); err != nil {
-		t.Fatal(err)
-	}
-	r := FallbackRouter{Client: fake{string(raw)}, Logger: StoreLogger{Store: st, RunID: "run"}}
-	d, err := r.Route(ctx, "change the plan to ship chat first and remember to use Bazel")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(d.Parts) != 2 || d.Parts[0].Destination != Planner || d.Parts[1].Destination != Memory {
-		t.Fatalf("parts: %+v", d)
-	}
-	logs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(logs) != 1 {
-		t.Fatalf("logs: %+v", logs)
-	}
-	var logged Decision
-	if err := json.Unmarshal([]byte(logs[0].Output), &logged); err != nil {
-		t.Fatal(err)
-	}
-	if logged.Parts[0].Confidence != .97 || logs[0].TraceID == "" {
-		t.Fatal(logs[0])
-	}
-}
-func TestRecordedGeminiAndSelection(t *testing.T) {
+func TestGeminiSingleChoiceAndOpenQuestion(t *testing.T) {
 	raw, err := os.ReadFile("testdata/gemini.json")
 	if err != nil {
 		t.Fatal(err)
 	}
+	input := FormatInput("go with B", "ask-1: A or B?")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1beta/decisions" {
-			t.Error(r.URL.Path)
-		}
-		if r.Header.Get("x-goog-api-key") != "dummy" {
-			t.Error("missing header")
-		}
-		//nolint:govet // request fields follow the wire format
 		var body struct {
-			Model     string
 			Questions map[string]struct {
-				Type         string
 				Criteria     map[string]string
+				Type         string
 				Instructions string
 			}
+			Input string
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
 		}
-		if body.Model != "models/gemini-decision-1" || len(body.Questions) != 4 || len(body.Questions["destination"].Criteria) != 6 || body.Questions["needs_clarification"].Type != "noul" {
-			t.Errorf("request %+v", body)
+		if r.URL.Path != "/v1beta/decisions" || r.Header.Get("x-goog-api-key") != "dummy" || body.Input != input || len(body.Questions) != 1 || len(body.Questions["handler"].Criteria) != 3 || body.Questions["handler"].Instructions != routingRubric {
+			t.Errorf("unexpected request: %+v", body)
 		}
 		_, _ = w.Write(raw)
 	}))
 	defer server.Close()
-	r := Select(nil, "concierge", "dummy", server.URL, nil)
-	if _, ok := r.(GeminiClient); !ok {
-		t.Fatalf("selected %T", r)
-	}
-	d, err := r.Route(context.Background(), "change the plan to ship chat first")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d.Destination != Planner || d.Confidence != .96 || d.NeedsClarification {
-		t.Fatal(d)
-	}
-	if _, ok := Select(fake{}, "concierge", "", "", nil).(FallbackRouter); !ok {
-		t.Fatal("fallback not selected")
+	d, err := Select(fake{err: errors.New("LLM must not run")}, "model", "dummy", server.URL, nil).Route(t.Context(), input)
+	if err != nil || d.Handler != Dispatcher || d.Fallback || d.Backend != "gemini" {
+		t.Fatalf("%+v %v", d, err)
 	}
 }
-func TestRecordedFallbackClarificationAndValidation(t *testing.T) {
-	for _, raw := range []string{`{"destination":"planner","confidence":1.7}`, `{"destination":"planner","confidence":0.99,"needs_clarification":true}`} {
-		d, err := (FallbackRouter{Client: fake{raw}}).Route(context.Background(), "change it")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !d.NeedsClarification || d.ClarifyingQuestion == "" {
-			t.Fatal(d)
-		}
+func TestFallbackAndAudit(t *testing.T) {
+	//nolint:govet // Table fields follow the failure scenario.
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		llm        fake
+		want       Handler
+		backend    string
+	}{
+		{"500", "", 500, fake{text: `{"handler":"planner","confidence":0.9}`}, Planner, "llm"},
+		{"invalid choice", `{"answers":{"handler":{"type":"choice","choice":"memory","confidence":0.9,"probabilities":{"concierge":0.9,"planner":0.05,"dispatcher":0.05}}}}`, 200, fake{text: `{"handler":"dispatcher","confidence":0.9}`}, Dispatcher, "llm"},
+		{"invalid probabilities", `{"answers":{"handler":{"type":"choice","choice":"planner","confidence":0.9,"probabilities":{"planner":0.9}}}}`, 200, fake{text: `{"handler":"planner","confidence":0.9}`}, Planner, "llm"},
+		{"both down", "", 500, fake{err: errors.New("down")}, Concierge, "concierge"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			st := store.NewMemoryStore(nil)
+			defer st.Close()
+			if err := st.Runs().Create(t.Context(), store.Run{ID: "run"}); err != nil {
+				t.Fatal(err)
+			}
+			d, err := Select(tc.llm, "model", "dummy", server.URL, StoreLogger{Store: st, RunID: "run"}).Route(t.Context(), "message")
+			if err != nil || d.Handler != tc.want || !d.Fallback || d.Backend != tc.backend {
+				t.Fatalf("%+v %v", d, err)
+			}
+			logs, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: "run"})
+			if err != nil || len(logs) != 1 {
+				t.Fatalf("%+v %v", logs, err)
+			}
+			var logged Decision
+			if err := json.Unmarshal([]byte(logs[0].Output), &logged); err != nil {
+				t.Fatal(err)
+			}
+			if !logged.Fallback || logged.Handler != tc.want || logged.Backend != tc.backend || logs[0].Input != "message" {
+				t.Fatalf("%+v", logs[0])
+			}
+		})
 	}
 }
-
-func TestRecordedGeminiMultipartAndConfidences(t *testing.T) {
-	fallback, err := os.ReadFile("testdata/fallback.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile("testdata/gemini.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var wire map[string]any
-	if err := json.Unmarshal(raw, &wire); err != nil {
-		t.Fatal(err)
-	}
-	inputs := make(chan string, 2)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var request struct{ Input string }
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Error(err)
-			return
-		}
-		inputs <- request.Input
-		if request.Input == "remember to use Bazel" {
-			answers := wire["answers"].(map[string]any)
-			answers["destination"].(map[string]any)["choice"] = "memory"
-			answers["is_standing_rule"].(map[string]any)["noul"] = .99
-		}
-		if err := json.NewEncoder(w).Encode(wire); err != nil {
-			t.Error(err)
-		}
-	}))
-	defer server.Close()
-	st := store.NewMemoryStore(nil)
-	defer st.Close()
-	if err := st.Runs().Create(context.Background(), store.Run{ID: "run"}); err != nil {
-		t.Fatal(err)
-	}
-	r := Select(fake{string(fallback)}, "concierge", "dummy", server.URL, StoreLogger{Store: st, RunID: "run", Provider: "openai", Model: "concierge"})
-	d, err := r.Route(context.Background(), "change the plan to ship chat first and remember to use Bazel")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(d.Parts) != 2 || d.Parts[0].Destination != Planner || d.Parts[1].Destination != Memory || !d.Parts[1].IsStandingRule || d.Parts[1].Confidences["is_standing_rule"] != .99 {
-		t.Fatalf("decision: %+v", d)
-	}
-	logs, err := st.Decisions().List(context.Background(), store.DecisionFilter{RunID: "run"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(logs) != 2 || logs[0].Tool != "routing.segment" || logs[0].Provider != "openai" || logs[1].Provider != "gemini" || logs[1].Tool != "routing" {
-		t.Fatalf("routing logs: %+v", logs)
-	}
-	if got := <-inputs; got != "change the plan to ship chat first" {
-		t.Fatal(got)
-	}
-	if got := <-inputs; got != "remember to use Bazel" {
-		t.Fatal(got)
+func TestNoKeyUsesLLM(t *testing.T) {
+	d, err := Select(fake{text: `{"handler":"dispatcher","confidence":0.9}`}, "model", "", "http://unreachable.invalid", nil).Route(t.Context(), "message")
+	if err != nil || d.Handler != Dispatcher || d.Fallback {
+		t.Fatalf("%+v %v", d, err)
 	}
 }
 
-func TestGeminiPreservesSelectedOpenQuestion(t *testing.T) {
-	raw, err := os.ReadFile("testdata/gemini.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw = []byte(strings.Replace(string(raw), `"choice":"planner"`, `"choice":"answer-open-question"`, 1))
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(raw) }))
-	defer server.Close()
-	r := Select(fake{`{"destination":"answer-open-question","confidence":0.99,"question_id":"ask-2"}`}, "concierge", "dummy", server.URL, nil)
-	d, err := r.Route(context.Background(), FormatInput("yes to ask-2", "ask-2: choose a rollout"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d.Destination != AnswerOpenQuestion || d.QuestionID != "ask-2" {
-		t.Fatal(d)
-	}
-}
+type errorTransport struct{}
 
-func TestGeminiMultipartPreservesOpenQuestionContext(t *testing.T) {
-	raw, err := os.ReadFile("testdata/gemini.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var request struct{ Input string }
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Error(err)
-		}
-		if !strings.Contains(request.Input, "Open questions:\nask-2: choose a rollout") {
-			t.Errorf("multipart request lost context: %q", request.Input)
-		}
-		var wire map[string]any
-		if err := json.Unmarshal(raw, &wire); err != nil {
-			t.Fatal(err)
-		}
-		wire["answers"].(map[string]any)["destination"].(map[string]any)["choice"] = "answer-open-question"
-		_ = json.NewEncoder(w).Encode(wire)
-	}))
-	defer server.Close()
-	c := GeminiClient{APIKey: "dummy", BaseURL: server.URL, Segmenter: staticRouter{decision: Decision{Parts: []Decision{{Text: "yes to ask-2", QuestionID: "ask-2"}}}}}
-	d, err := c.Route(context.Background(), FormatInput("yes to ask-2", "ask-2: choose a rollout"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(d.Parts) != 1 || d.Parts[0].Destination != AnswerOpenQuestion || d.Parts[0].QuestionID != "ask-2" {
-		t.Fatalf("multipart decision lost supplied context: %+v", d)
-	}
+func (errorTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("private transport detail")
 }
-
-func TestRecordedFallbackLiveResponse(t *testing.T) {
-	raw, err := os.ReadFile("testdata/fallback-live.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	d, err := (FallbackRouter{Client: fake{string(raw)}, Model: "gpt-6.1-sol"}).Route(context.Background(), "Change the plan to ship chat first.")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d.Destination != Planner || d.Confidence != .99 || d.NeedsClarification {
-		t.Fatalf("recorded response: %+v", d)
+func TestTransportErrorIsSanitized(t *testing.T) {
+	_, err := (GeminiRouter{APIKey: "test-secret", HTTPClient: &http.Client{Transport: errorTransport{}}}).Route(t.Context(), "message")
+	if err == nil || strings.Contains(err.Error(), "test-secret") || strings.Contains(err.Error(), "private") {
+		t.Fatalf("%v", err)
 	}
 }

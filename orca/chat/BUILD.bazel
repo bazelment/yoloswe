@@ -23,7 +23,10 @@ go_test(
     srcs = ["chat_test.go"],
     embed = [":chat"],
     deps = [
+        "//orca/concierge",
+        "//orca/dispatcher",
         "//orca/mailbox",
+        "//orca/model",
         "//orca/router",
         "//orca/store",
         "@com_github_charmbracelet_x_exp_teatest_v2//:teatest",

@@ -100,61 +100,16 @@ func (b *StoreBackend) directive(ctx context.Context, kind store.DirectiveKind, 
 	return id, err
 }
 func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text string, emit func(string)) error {
-	if len(d.Parts) > 0 {
-		for i := range d.Parts {
-			part := d.Parts[i]
-			if err := b.Dispatch(ctx, part, part.Text, emit); err != nil {
-				return err
-			}
-			emit("\n")
-		}
-		return nil
-	}
-	if d.NeedsClarification {
-		return fmt.Errorf("cannot dispatch an ambiguous message")
-	}
-	switch d.Destination {
+	switch d.Handler {
 	case router.Concierge:
 		if b.Stream == nil {
 			return fmt.Errorf("concierge unavailable")
 		}
 		return b.Stream(ctx, text, emit)
-	case router.AnswerOpenQuestion:
-		asks, err := b.asks(ctx)
-		if err != nil {
-			return err
-		}
-		var match *store.Directive
-		for i := range asks {
-			if strings.TrimPrefix(asks[i].Ref, "owner_ask:") == d.QuestionID || (d.QuestionID == "" && len(asks) == 1) {
-				match = &asks[i]
-			}
-		}
-		if match == nil {
-			return fmt.Errorf("choose an open question with /asks")
-		}
-		_, err = mailbox.AppendEvent(ctx, b.Store.Events(), b.RunID, mailbox.Message{Owner: true, From: "owner", LaneID: match.Scope, InReplyTo: strings.TrimPrefix(match.Ref, "owner_ask:"), Body: text})
-		if err == nil {
-			emit("Answer queued for " + strings.TrimPrefix(match.Ref, "owner_ask:"))
-		}
-		return err
 	case router.Planner:
 		id, err := b.directive(ctx, store.DirectivePlanImport, text, "")
 		if err == nil {
 			emit("Plan change queued: " + id)
-		}
-		return err
-	case router.Memory:
-		typ := "fact"
-		if d.IsStandingRule {
-			typ = "rule"
-		}
-		echo, err := b.memory.Submit(ctx, b.Store, b.RunID, "chat-memory-"+rand.Text(), text, concierge.MemorySubmitParams{Action: "create", Name: text, Description: text, Body: text, Scope: "run", Type: typ})
-		if err == nil {
-			// Memory maintains its own undo journal; make /undo target this
-			// mutation rather than an older directive from another destination.
-			b.lastDirective = ""
-			emit(echo)
 		}
 		return err
 	case router.Dispatcher:
@@ -164,24 +119,9 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 		}
 		_, err = mailbox.AppendEvent(ctx, b.Store.Events(), b.RunID, mailbox.Message{Owner: true, From: "owner", Body: text})
 		return err
-	case router.Controller:
-		command := strings.ToLower(strings.TrimSpace(text))
-		if strings.Contains(command, "resume") {
-			command = "resume"
-		} else if strings.Contains(command, "pause") {
-			command = "pause"
-		} else if strings.Contains(command, "stop") {
-			command = "stop"
-		} else {
-			return fmt.Errorf("controller requires pause, resume or stop")
-		}
-		echo, err := b.Command(ctx, "/"+command)
-		if err == nil {
-			emit(echo)
-		}
-		return err
+
 	}
-	return fmt.Errorf("unsupported destination %q", d.Destination)
+	return fmt.Errorf("unsupported handler %q", d.Handler)
 }
 func (b *StoreBackend) Command(ctx context.Context, text string) (string, error) {
 	fields := strings.Fields(text)

@@ -30,18 +30,18 @@ type Backend interface {
 
 //nolint:govet
 type Model struct {
-	poll                          bool
-	questions                     []string
-	ctx                           context.Context
-	ask                           AskFunc
-	router                        router.Router
-	Dispatch                      DispatchFunc
-	Backend                       Backend
-	runID, input, status, waiting string
-	lines                         []string
-	busy                          bool
-	width, height                 int
-	streamLine                    int
+	poll                 bool
+	questions            []string
+	ctx                  context.Context
+	ask                  AskFunc
+	router               router.Router
+	Dispatch             DispatchFunc
+	Backend              Backend
+	runID, input, status string
+	lines                []string
+	busy                 bool
+	width, height        int
+	streamLine           int
 }
 
 func New(ctx context.Context, runID string, ask AskFunc, r router.Router) Model {
@@ -105,7 +105,7 @@ func receive(ctx context.Context, ch <-chan streamMsg) tea.Cmd {
 func (m Model) route(text string) tea.Cmd {
 	return func() tea.Msg {
 		if m.router == nil {
-			return routeMsg{text: text, decision: router.Decision{Destination: router.Concierge, Confidence: 1}}
+			return routeMsg{text: text, decision: router.Decision{Handler: router.Concierge, Confidence: 1}}
 		}
 		input := text
 		if m.Backend != nil {
@@ -133,12 +133,12 @@ func (m Model) dispatch(d router.Decision, text string) tea.Cmd {
 		var err error
 		if m.Dispatch != nil {
 			err = m.Dispatch(m.ctx, d, text, emit)
-		} else if d.Destination == router.Concierge && m.ask != nil {
+		} else if d.Handler == router.Concierge && m.ask != nil {
 			var s string
 			s, err = m.ask(m.ctx, text)
 			emit(s)
 		} else {
-			err = fmt.Errorf("no handler for %s", d.Destination)
+			err = fmt.Errorf("no handler for %s", d.Handler)
 		}
 		select {
 		case ch <- streamMsg{done: true, err: err}:
@@ -174,22 +174,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lines = append(m.lines, "error: "+x.err.Error())
 			return m, nil
 		}
-		if x.decision.NeedsClarification {
-			m.busy = false
-			m.waiting = x.text
-			m.lines = append(m.lines, "owner question> "+x.decision.ClarifyingQuestion)
-			return m, nil
+		echo := "→ " + string(x.decision.Handler) + ": " + x.text
+		if x.decision.Fallback {
+			echo += " (via fallback)"
 		}
-		echo := string(x.decision.Destination) + " — " + x.decision.Echo
-		if len(x.decision.Parts) > 0 {
-			dest := []string{}
-			for i := range x.decision.Parts {
-				part := x.decision.Parts[i]
-				dest = append(dest, string(part.Destination))
-			}
-			echo = strings.Join(dest, ", ")
-		}
-		m.lines = append(m.lines, "route> "+echo+" (/undo)", "orca> ")
+		m.lines = append(m.lines, echo, "orca> ")
 		m.streamLine = len(m.lines) - 1
 		return m, m.dispatch(x.decision, x.text)
 	case streamMsg:
@@ -241,10 +230,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s, e := m.Backend.Command(m.ctx, text)
 				return commandMsg{s, e}
 			}
-		}
-		if m.waiting != "" {
-			text = m.waiting + "\nClarification: " + text
-			m.waiting = ""
 		}
 		return m, m.route(text)
 	case tea.PasteMsg:

@@ -33,6 +33,7 @@ const (
 
 // Canonical tool names exposed to the Concierge model.
 const (
+	ToolRunControl      = "run.control"
 	ToolStatus          = "status"
 	ToolLaneShow        = "lane.show"
 	ToolDecisionsSince  = "decisions.since"
@@ -60,6 +61,7 @@ type DirectiveHandler func(ctx context.Context, runID string, dir store.Directiv
 
 // Config configures a Concierge instance.
 type Config struct {
+	RunControl       func(context.Context, string, string) (string, error)
 	OnDirective      DirectiveHandler
 	Model            string
 	SystemPrompt     string
@@ -128,7 +130,25 @@ type DirectiveSubmitParams struct {
 	Reason string `json:"reason,omitempty" jsonschema:"description=Optional reason for submitting the directive"`
 }
 
+type RunControlParams struct {
+	Action string `json:"action" jsonschema:"required,enum=pause,enum=resume,enum=stop"`
+}
+
+// Control validates the action before passing it to the chat command backend.
+func Control(ctx context.Context, command func(context.Context, string) (string, error), p RunControlParams) (string, error) {
+	switch p.Action {
+	case "pause", "resume", "stop":
+	default:
+		return "", fmt.Errorf("run.control requires pause, resume or stop")
+	}
+	if command == nil {
+		return "", fmt.Errorf("run.control unavailable")
+	}
+	return command(ctx, "/"+p.Action)
+}
+
 var conciergeToolDefs = []model.ToolDefinition{
+	{Name: ToolRunControl, Description: "Pause, resume or stop execution", InputSchema: model.SchemaFor[RunControlParams]()},
 	{Name: ToolMemorySubmit, Description: "Save an owner correction immediately (create, update, delete)", InputSchema: model.SchemaFor[MemorySubmitParams]()},
 	{Name: ToolMemoryUndo, Description: "Undo or forget the last memory change", InputSchema: model.SchemaFor[MemoryUndoParams]()},
 	{Name: ToolStatus, Description: "Read run status overview including objective, lease, backlog counts, lanes, directives, and latest sequence numbers", InputSchema: model.SchemaFor[StatusParams]()},
@@ -156,7 +176,7 @@ func NormalizeToolName(name string) string {
 
 func isKnownTool(name string) bool {
 	switch name {
-	case ToolStatus, ToolLaneShow, ToolDecisionsSince, ToolBacklog, ToolDirectiveSubmit, ToolMemoryRead, ToolMemorySubmit, ToolMemoryUndo:
+	case ToolRunControl, ToolStatus, ToolLaneShow, ToolDecisionsSince, ToolBacklog, ToolDirectiveSubmit, ToolMemoryRead, ToolMemorySubmit, ToolMemoryUndo:
 		return true
 	default:
 		return false
@@ -623,6 +643,16 @@ func (c *Concierge) handleRawToolCall(
 	}
 
 	switch canonical {
+	case ToolRunControl:
+		p, err := decodeToolParams[RunControlParams](canonical, trimmed)
+		if err != nil {
+			return "", err
+		}
+		var command func(context.Context, string) (string, error)
+		if c.cfg.RunControl != nil {
+			command = func(ctx context.Context, cmd string) (string, error) { return c.cfg.RunControl(ctx, runID, cmd) }
+		}
+		return Control(ctx, command, p)
 	case ToolMemorySubmit:
 		p, err := decodeToolParams[MemorySubmitParams](canonical, trimmed)
 		if err != nil {

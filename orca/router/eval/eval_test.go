@@ -17,41 +17,28 @@ func (r *sequenceRouter) Route(context.Context, string) (router.Decision, error)
 	return d, nil
 }
 
-func TestEvaluateScoresWholeMessageAndClarification(t *testing.T) {
+func TestEvaluateAcceptsMappedHandlers(t *testing.T) {
 	cases := []EvalCase{
-		{ID: "multipart", Destinations: []router.Destination{router.Planner, router.Memory}},
-		{ID: "ambiguous", Destinations: []router.Destination{router.Dispatcher}, NeedsClarification: true},
-		{ID: "needless-ask", Destinations: []router.Destination{router.Concierge}},
-		{ID: "missing-part", Destinations: []router.Destination{router.Planner, router.Dispatcher}},
+		{ID: "memory", Destinations: []string{"memory"}},
+		{ID: "answer", Destinations: []string{"answer-open-question"}},
+		{ID: "multipart-front-desk", Destinations: []string{"planner", "dispatcher"}},
+		{ID: "multipart-planner", Destinations: []string{"planner", "dispatcher"}},
+		{ID: "wrong", Destinations: []string{"planner"}},
 	}
-	backend := &sequenceRouter{decisions: []router.Decision{
-		{Parts: []router.Decision{{Destination: router.Memory}, {Destination: router.Planner}, {Destination: router.Memory}}},
-		{Destination: router.Dispatcher, NeedsClarification: true},
-		{Destination: router.Concierge, NeedsClarification: true},
-		{Destination: router.Planner},
-	}}
-	s := Evaluate(context.Background(), backend, cases)
-	if s.Correct != 2 || s.ClearCases != 3 || s.UnnecessaryClarifications != 1 || s.MeetsTargets() {
-		t.Fatalf("bad accounting: %s", s)
-	}
-	if !strings.Contains(s.String(), "2/4 (50.00%)") {
-		t.Fatal(s.String())
+	r := &sequenceRouter{decisions: []router.Decision{{Handler: router.Concierge}, {Handler: router.Dispatcher, Fallback: true}, {Handler: router.Concierge}, {Handler: router.Planner}, {Handler: router.Dispatcher}}}
+	s := Evaluate(t.Context(), r, cases)
+	if s.Correct != 4 || s.Fallbacks != 1 || s.Errors != 0 || s.MeetsTargets() {
+		t.Fatal(s)
 	}
 }
-
-func TestScorecardStrictClarificationBar(t *testing.T) {
-	s := EvalScorecard{Results: make([]EvalResult, 10), Correct: 9, ClearCases: 10}
+func TestScorecardTargets(t *testing.T) {
+	s := EvalScorecard{Results: make([]EvalResult, 10), Correct: 9}
 	if !s.MeetsTargets() {
-		t.Fatal("90% must pass")
+		t.Fatal(s)
 	}
-	s.UnnecessaryClarifications = 1
-	if s.MeetsTargets() {
-		t.Fatal("10% needless clarification must fail")
-	}
-	s.UnnecessaryClarifications = 0
 	s.Errors = 1
 	if s.MeetsTargets() {
-		t.Fatal("backend failures must fail")
+		t.Fatal(s)
 	}
 }
 
@@ -64,7 +51,7 @@ func TestOwnerChatDatasetCoverage(t *testing.T) {
 		t.Fatalf("want 60 cases, got %d", len(cases))
 	}
 	seen := map[string]bool{}
-	covered := map[router.Destination]bool{}
+	covered := map[string]bool{}
 	ambiguous, multipart := 0, 0
 	for _, c := range cases {
 		if seen[c.ID] || c.Text == "" || c.Rationale == "" || !strings.HasPrefix(c.SourceMailID, "s:") || len(c.Destinations) == 0 {
@@ -110,16 +97,16 @@ func TestAnswerOpenQuestionCasesIncludeContext(t *testing.T) {
 	}
 	for _, c := range cases {
 		for _, d := range c.Destinations {
-			if d == router.AnswerOpenQuestion && c.Context == "" {
+			if d == "answer-open-question" && c.Context == "" {
 				t.Errorf("%s expects answer-open-question without context", c.ID)
 			}
 		}
 	}
 }
 
-func validEvalDestination(d router.Destination) bool {
+func validEvalDestination(d string) bool {
 	switch d {
-	case router.Concierge, router.AnswerOpenQuestion, router.Planner, router.Memory, router.Dispatcher, router.Controller:
+	case "concierge", "answer-open-question", "planner", "memory", "dispatcher", "controller":
 		return true
 	default:
 		return false
