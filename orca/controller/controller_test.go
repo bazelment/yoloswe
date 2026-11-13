@@ -1154,7 +1154,7 @@ func seedLane(t *testing.T, st store.Store) {
 }
 func quiet(t *testing.T, st store.Store) {
 	t.Helper()
-	if _, err := st.Events().Append(t.Context(), store.Event{RunID: "run-1", LaneID: "worker", Kind: store.EventPhaseExit, Source: "lane.watch", Payload: json.RawMessage(`{"error":"quiet"}`)}); err != nil {
+	if _, err := st.Events().Append(t.Context(), store.Event{RunID: "run-1", LaneID: "worker", Kind: store.EventPhaseExit, Source: "lane.watch", Payload: json.RawMessage(`{"kind":"no_activity","error":"quiet"}`)}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1262,9 +1262,11 @@ func TestWorkerQuestionAnsweredFromNotesWithoutOwner(t *testing.T) {
 		return "Use the repository merge queue.", nil
 	}}, st, drv, clk, judge, box)
 	mustStep(t, ctrl)
-	mailEvent(t, st, mailbox.Message{LaneID: "worker", Question: true, Body: "Which merge path?"})
-	mustStep(t, ctrl)
-	if box.asks != 0 || len(drv.Steers) != 1 || !strings.Contains(drv.Steers[0].Message, "repository merge queue") {
+	for range 2 {
+		mailEvent(t, st, mailbox.Message{LaneID: "worker", Question: true, Body: "Which merge path?"})
+		mustStep(t, ctrl)
+	}
+	if box.asks != 0 || len(drv.Steers) != 2 || !strings.Contains(drv.Steers[0].Message, "repository merge queue") {
 		t.Fatalf("asks=%d steers=%+v", box.asks, drv.Steers)
 	}
 }
@@ -1436,7 +1438,7 @@ func TestNamedWaitsCompleteAndExpireAcrossRestart(t *testing.T) {
 	}
 }
 
-func TestWorkerQuestionDoesNotDumpUnrelatedTaskOrLoop(t *testing.T) {
+func TestWorkerQuestionDoesNotDumpUnrelatedTask(t *testing.T) {
 	clk, st, drv, judge := setupTestEnv(t)
 	seedLane(t, st)
 	for _, text := range []string{"Use the repository merge queue.", "The UI background is purple."} {
@@ -1453,8 +1455,8 @@ func TestWorkerQuestionDoesNotDumpUnrelatedTaskOrLoop(t *testing.T) {
 		mailEvent(t, st, mailbox.Message{LaneID: "worker", Question: true, Body: "Which merge path?"})
 		mustStep(t, ctrl)
 	}
-	if box.asks != 1 || len(drv.Steers) != 2 || strings.Contains(drv.Steers[0].Message, "purple") {
-		t.Fatalf("question context loop: asks=%d steers=%+v", box.asks, drv.Steers)
+	if box.asks != 0 || len(drv.Steers) != 2 || strings.Contains(drv.Steers[0].Message, "purple") {
+		t.Fatalf("question context routing: asks=%d steers=%+v", box.asks, drv.Steers)
 	}
 }
 
@@ -1540,6 +1542,7 @@ func TestReportNotesFailureRetriesBeforeTransition(t *testing.T) {
 }
 
 type startupBox struct {
+	connected chan struct{}
 	questionBox
 	calls int
 }
@@ -1548,6 +1551,9 @@ func (b *startupBox) Watch(context.Context) (<-chan store.Event, error) {
 	b.calls++
 	if b.calls == 1 {
 		return nil, errors.New("mailbox startup failed")
+	}
+	if b.connected != nil {
+		close(b.connected)
 	}
 	return make(chan store.Event), nil
 }
@@ -1563,17 +1569,24 @@ func (d *watchContextDriver) Watch(ctx context.Context, runID string) <-chan lan
 }
 func TestWatchStartupRetryAndKill(t *testing.T) {
 	clk, st, base, judge := setupTestEnv(t)
-	box := &startupBox{}
+	box := &startupBox{connected: make(chan struct{})}
 	drv := &watchContextDriver{FakeDriver: base}
-	ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge, box)
-	if err := ctrl.StartWatches(t.Context()); err == nil {
-		t.Fatal("mailbox startup failure was hidden")
-	}
+	ctrl := controller.New(controller.Config{RunID: "run-1", PollInterval: time.Second}, st, drv, clk, judge, box)
 	if err := ctrl.StartWatches(t.Context()); err != nil {
-		t.Fatal(err)
+		t.Fatalf("transient startup failure terminated watches: %v", err)
 	}
-	if drv.watchCtx == nil || box.calls != 2 {
-		t.Fatal("failed startup was not retried")
+	if drv.watchCtx == nil {
+		t.Fatal("mailbox failure prevented lane Watch startup")
+	}
+	waitFor(t, func() bool { return clk.Waiters() > 0 })
+	clk.Advance(time.Second)
+	select {
+	case <-box.connected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("initial mailbox Watch was not retried")
+	}
+	if box.calls != 2 {
+		t.Fatalf("Watch calls=%d, want 2", box.calls)
 	}
 	ctrl.Kill()
 	select {
@@ -1643,5 +1656,58 @@ func TestWatchReplayKeepsProducerIdentityAcrossRestart(t *testing.T) {
 	mustStep(t, ctrl)
 	if len(drv.Steers) != 1 || len(drv.PhaseStarts) != 0 {
 		t.Fatalf("replayed nudge advanced ladder: steers=%+v starts=%+v", drv.Steers, drv.PhaseStarts)
+	}
+}
+
+func TestWatchFailuresSkipQuietNudge(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []lane.EventKind{lane.EventExited, lane.EventAuthFailure, lane.EventQuotaFailure} {
+		t.Run(string(kind), func(t *testing.T) {
+			t.Parallel()
+			clk, st, drv, judge := setupTestEnv(t)
+			seedLane(t, st)
+			ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+			mustStep(t, ctrl)
+			if err := ctrl.StartWatches(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			ln, _ := st.Lanes().Get(t.Context(), "run-1", "worker")
+			drv.Emit(lane.Event{RunID: "run-1", LaneID: "worker", TerminalID: ln.TerminalID, Kind: kind, Text: "terminal failed", At: clk.Now()})
+			waitFor(t, func() bool {
+				events, _ := st.Events().List(t.Context(), store.EventFilter{RunID: "run-1"})
+				return len(events) == 1
+			})
+			mustStep(t, ctrl)
+			if len(drv.Steers) != 0 || len(drv.PhaseStarts) != 1 || drv.PhaseStarts[0].Model != "gpt-5.4" {
+				t.Fatalf("failed terminal entered quiet ladder: steers=%+v starts=%+v", drv.Steers, drv.PhaseStarts)
+			}
+		})
+	}
+}
+
+func TestWatchQuietHandlingDoesNotCountAsActivity(t *testing.T) {
+	clk, st, drv, judge := setupTestEnv(t)
+	seedLane(t, st)
+	ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+	mustStep(t, ctrl)
+	if err := ctrl.StartWatches(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	since := clk.Now()
+	for step := 1; step <= 2; step++ {
+		clk.Advance(time.Minute)
+		emitted := clk.Now()
+		drv.Emit(lane.Event{RunID: "run-1", Kind: lane.EventNoActivity, Since: since, At: emitted})
+		waitFor(t, func() bool {
+			events, _ := st.Events().List(t.Context(), store.EventFilter{RunID: "run-1"})
+			return len(events) == step
+		})
+		// Handling occurs after emission, as it does with a real clock.
+		clk.Advance(time.Second)
+		mustStep(t, ctrl)
+		since = emitted
+	}
+	if len(drv.Steers) != 1 || len(drv.PhaseStarts) != 1 {
+		t.Fatalf("quiet bookkeeping delayed fresh terminal: steers=%+v starts=%+v", drv.Steers, drv.PhaseStarts)
 	}
 }

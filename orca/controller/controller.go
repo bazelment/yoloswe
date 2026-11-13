@@ -198,11 +198,12 @@ type CIPayload struct {
 
 // PhaseExitPayload is the JSON payload for store.EventPhaseExit events.
 type PhaseExitPayload struct {
-	TerminalID string `json:"terminal_id,omitempty"`
-	Phase      string `json:"phase,omitempty"`
-	Error      string `json:"error,omitempty"`
-	Round      int    `json:"round,omitempty"`
-	ExitCode   int    `json:"exit_code,omitempty"`
+	Kind       lane.EventKind `json:"kind,omitempty"`
+	TerminalID string         `json:"terminal_id,omitempty"`
+	Phase      string         `json:"phase,omitempty"`
+	Error      string         `json:"error,omitempty"`
+	Round      int            `json:"round,omitempty"`
+	ExitCode   int            `json:"exit_code,omitempty"`
 }
 
 // LaneReportPayload is the JSON payload for store.EventLaneReport events.
@@ -308,29 +309,33 @@ func (c *Controller) StartWatches(ctx context.Context) error {
 	c.cancelWatches = cancel
 	if c.mailbox != nil {
 		ch, err := c.mailbox.Watch(ctx)
+		// Connection failures retry in the forwarder, so lane Watch can start
+		// even before the mailbox becomes available. Cancellation stops retries.
 		if err != nil {
-			cancel()
-			return err
+			c.reportWatchError(err)
+			ch = nil
 		}
 		go func() {
 			for {
+				if ch == nil {
+					if !c.watchRetry(ctx) {
+						return
+					}
+					var err error
+					ch, err = c.mailbox.Watch(ctx)
+					if err != nil {
+						c.reportWatchError(err)
+						ch = nil
+						continue
+					}
+				}
 				select {
 				case <-ctx.Done():
 					return
 				case _, ok := <-ch:
 					if !ok {
 						c.reportWatchError(errors.New("mailbox Watch closed; reconnecting"))
-						for {
-							if !c.watchRetry(ctx) {
-								return
-							}
-							var err error
-							ch, err = c.mailbox.Watch(ctx)
-							if err == nil {
-								break
-							}
-							c.reportWatchError(err)
-						}
+						ch = nil
 						continue
 					}
 					c.Wake()
@@ -407,7 +412,7 @@ func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
 	case lane.EventPhaseReported:
 		kind, payload = store.EventLaneReport, ev.Report
 	case lane.EventTurnEndedNoReport, lane.EventWaitingForInput, lane.EventExited, lane.EventQuotaFailure, lane.EventAuthFailure, lane.EventNoActivity:
-		payload = PhaseExitPayload{TerminalID: ev.TerminalID, Phase: ev.Phase, Error: ev.Text}
+		payload = PhaseExitPayload{Kind: ev.Kind, TerminalID: ev.TerminalID, Phase: ev.Phase, Error: ev.Text}
 	default:
 		return true
 	}
@@ -1243,7 +1248,7 @@ func (c *Controller) routeWorkerQuestion(ctx context.Context, ev *store.Event) (
 		}
 		contextParts = append(contextParts, item.Description, item.Acceptance)
 	}
-	questionKey := "worker-answer:" + ln.ID + ":" + strings.ToLower(strings.TrimSpace(msg.Body))
+	questionKey := "worker-answer:" + ev.ID
 	var answer string
 	if c.cfg.AnswerQuestion != nil && !c.hasActionDecision(questionKey) {
 		answer, err = c.cfg.AnswerQuestion(ctx, msg.Body, strings.Join(contextParts, "\n"))
@@ -1581,8 +1586,12 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 	}
 	curAttempt := max(ln.Attempt, 1)
 	ln.LastEventID = ev.ID
-	ln.LastEventAt = c.clock.Now().UTC()
-	if ev.Source == "lane.watch" {
+	// A quiet pulse is controller bookkeeping, not worker activity.
+	quiet := ev.Source == "lane.watch" && payload.Kind == lane.EventNoActivity
+	if !quiet {
+		ln.LastEventAt = c.clock.Now().UTC()
+	}
+	if quiet {
 		key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
 		switch {
 		case !c.hasActionDecision("restart:nudge:" + key):
