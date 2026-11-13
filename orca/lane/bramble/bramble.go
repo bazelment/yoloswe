@@ -4,7 +4,6 @@ package bramble
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -117,5 +116,3 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 	}()
 	return out
 }
-
-var _ = fmt.Sprintf

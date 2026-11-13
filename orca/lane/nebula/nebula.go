@@ -169,7 +169,11 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 		}
 		seen := map[int64]bool{}
 		started := map[string]bool{}
-		ticker := time.NewTicker(50 * time.Millisecond)
+		interval := d.pollInterval
+		if interval <= 0 {
+			interval = 50 * time.Millisecond
+		}
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		last := d.clock.Now()
 		for {
