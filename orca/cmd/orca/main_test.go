@@ -1198,14 +1198,18 @@ func TestPlanningFailureDoesNotPublishDraft(t *testing.T) {
 			st := store.NewMemoryStore(clk)
 			defer st.Close()
 			runner := NewRunner(Config{RunID: "failure", Goal: "Investigate", StoreSpec: "memory"}, st, lane.NewFakeDriver(), clk, client, nil)
-			if err := runner.Bootstrap(t.Context()); err == nil {
+			if err := runner.Bootstrap(t.Context()); stage == "critic" {
+				if err != nil {
+					t.Fatalf("critic failure should fall back to draft: %v", err)
+				}
+			} else if err == nil {
 				t.Fatal("expected error")
 			}
 			items, err := st.Backlog().List(t.Context(), store.BacklogFilter{RunID: "failure"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(items) != 0 {
+			if stage != "critic" && len(items) != 0 {
 				t.Fatalf("draft published: %+v", items)
 			}
 		})

@@ -340,7 +340,16 @@ func (p *Planner) runReconciliation(
 			Messages: []model.Message{model.NewUserMessage(prompt + "\n\nPlanner draft:\n" + string(raw))}, MaxTokens: model.DefaultMaxTokens,
 		})
 		if err != nil {
-			return fmt.Errorf("critic: %w", err)
+			message := "critic unavailable: " + err.Error()
+			if _, recordErr := p.store.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
+				RunID: runID, Category: store.DecisionJudgment, Actor: "critic", ThreadID: threadID, TurnID: turnID,
+				Model: p.criticModel, Provider: p.criticProvider, Tool: "planner.critique", Reason: message, Result: message,
+				Vetted: false, LatencyMs: max(p.clock.Now().Sub(criticStart).Milliseconds(), 0),
+			}); recordErr != nil {
+				return recordErr
+			}
+			// Keep the planner's first draft when the critic is unavailable.
+			goto applyPlan
 		}
 		if critique == nil || strings.TrimSpace(critique.Text()) == "" {
 			return errors.New("orca: critic returned no critique")
@@ -365,6 +374,7 @@ func (p *Planner) runReconciliation(
 		}
 		reconciled = revised
 	}
+applyPlan:
 	appliedSummary, err := p.applyReconciliation(ctx, runID, reconciled, planRef)
 	if err != nil {
 		return err

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"net/http"
 	"os"
@@ -20,12 +21,14 @@ import (
 
 // Default HTTP client configuration constants for the Anthropic Messages API.
 const (
-	DefaultBaseURL          = "https://api.anthropic.com"
-	DefaultAnthropicVersion = "2023-06-01"
-	DefaultMaxRetries       = 3
-	DefaultRetryBaseDelay   = 200 * time.Millisecond
-	DefaultRetryMaxDelay    = 5 * time.Second
-	DefaultHTTPTimeout      = 120 * time.Second
+	DefaultBaseURL           = "https://api.anthropic.com"
+	DefaultAnthropicVersion  = "2023-06-01"
+	DefaultMaxRetries        = 3
+	DefaultRetryBaseDelay    = 200 * time.Millisecond
+	DefaultRetryMaxDelay     = 5 * time.Second
+	DefaultRetryAfterCeiling = 2 * time.Minute
+	DefaultRetryTotalCeiling = 5 * time.Minute
+	DefaultHTTPTimeout       = 120 * time.Second
 )
 
 // APIError represents a non-2xx HTTP response from the Anthropic Messages API.
@@ -309,6 +312,7 @@ func (c *HTTPClient) CreateMessage(ctx context.Context, req Request) (*Response,
 
 	endpoint := messagesEndpointURL(c.baseURL)
 	maxAttempts := c.maxRetries + 1
+	retryStart := c.clock.Now()
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -339,7 +343,7 @@ func (c *HTTPClient) CreateMessage(ctx context.Context, req Request) (*Response,
 				return nil, ctx.Err()
 			}
 			if attempt < maxAttempts {
-				if waitErr := c.sleepRetry(ctx, attempt, nil); waitErr != nil {
+				if waitErr := c.sleepRetry(ctx, attempt, nil, 0, retryStart); waitErr != nil {
 					return nil, waitErr
 				}
 				continue
@@ -351,7 +355,7 @@ func (c *HTTPClient) CreateMessage(ctx context.Context, req Request) (*Response,
 		_ = httpResp.Body.Close()
 		if readErr != nil {
 			if attempt < maxAttempts {
-				if waitErr := c.sleepRetry(ctx, attempt, httpResp.Header); waitErr != nil {
+				if waitErr := c.sleepRetry(ctx, attempt, httpResp.Header, httpResp.StatusCode, retryStart); waitErr != nil {
 					return nil, waitErr
 				}
 				continue
@@ -381,7 +385,7 @@ func (c *HTTPClient) CreateMessage(ctx context.Context, req Request) (*Response,
 
 		apiErr := parseAPIError(httpResp.StatusCode, httpResp.Header, respBytes, attempt)
 		if apiErr.Retryable() && attempt < maxAttempts {
-			if waitErr := c.sleepRetry(ctx, attempt, httpResp.Header); waitErr != nil {
+			if waitErr := c.sleepRetry(ctx, attempt, httpResp.Header, httpResp.StatusCode, retryStart); waitErr != nil {
 				return nil, waitErr
 			}
 			continue
@@ -439,8 +443,18 @@ func parseAPIError(statusCode int, hdr http.Header, body []byte, attempts int) *
 	return apiErr
 }
 
-func (c *HTTPClient) sleepRetry(ctx context.Context, attempt int, hdr http.Header) error {
+func (c *HTTPClient) sleepRetry(ctx context.Context, attempt int, hdr http.Header, status int, retryStart time.Time) error {
 	delay := c.retryDelay(attempt, hdr)
+	remaining := DefaultRetryTotalCeiling - c.clock.Now().Sub(retryStart)
+	if remaining <= 0 {
+		return context.DeadlineExceeded
+	}
+	if delay > remaining {
+		delay = remaining
+	}
+	if delay > 0 {
+		log.Printf("orca/model: anthropic retry wait status=%d wait=%s attempt=%d", status, delay, attempt)
+	}
 	if delay <= 0 {
 		return ctx.Err()
 	}
@@ -464,6 +478,12 @@ func (c *HTTPClient) retryDelay(attempt int, hdr http.Header) time.Duration {
 			}
 			delay *= 2
 		}
+	}
+	if _, ok := parseRetryAfter(hdr); ok {
+		if delay > DefaultRetryAfterCeiling {
+			delay = DefaultRetryAfterCeiling
+		}
+		return delay
 	}
 	if c.retryMaxDelay > 0 && delay > c.retryMaxDelay {
 		return c.retryMaxDelay
