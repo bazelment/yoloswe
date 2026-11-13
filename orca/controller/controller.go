@@ -1403,9 +1403,6 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		}
 	}
 
-	// A report-only SWE lane has no diff to clean, review, or integrate. The
-	// report's HEAD equal to the recorded base identifies that deterministic
-	// no-op case; a PR or a changed head keeps the normal recipe transitions.
 	if rep.Outcome == lane.OutcomeDone && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && rep.HeadSHA != "" && rep.HeadSHA == ln.BaseBranch {
 		return c.completeReportOnlyLane(ctx, ln, ev)
 	}
