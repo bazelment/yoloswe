@@ -303,6 +303,30 @@ func TestSmoke_ThreeLaneScenarioAndConciergeChat(t *testing.T) {
 	if len(threads) != 1 || threads[0].Status != store.ThreadStatusArchived {
 		t.Fatalf("concierge threads = %+v, want 1 archived thread", threads)
 	}
+
+	var promptOut, promptErr bytes.Buffer
+	if err := Execute(ctx, []string{
+		"chat", "--run", "run-3lane", "--store", "sqlite:" + dbPath,
+		"--replay", "testdata/concierge_status_replay.json", "--prompt", "where are we?",
+	}, strings.NewReader(""), &promptOut, &promptErr); err != nil {
+		t.Fatalf("Execute chat --prompt: %v\nstderr:\n%s", err, promptErr.String())
+	}
+	if !strings.Contains(promptOut.String(), "→ concierge: where are we?") || !strings.Contains(promptOut.String(), "Run run-3lane is complete") {
+		t.Fatalf("prompt output = %q", promptOut.String())
+	}
+	decs, err = verifySt.Decisions().List(ctx, store.DecisionFilter{RunID: "run-3lane"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundRouting := false
+	for _, d := range decs {
+		if d.Actor == "router" && d.Tool == "routing" && d.Input == "where are we?" {
+			foundRouting = true
+		}
+	}
+	if !foundRouting {
+		t.Fatalf("--prompt did not record routing decision: %+v", decs)
+	}
 }
 
 func TestConfig_RoleModelsAndRecipeFiles(t *testing.T) {
@@ -1172,8 +1196,15 @@ func TestClosedPlanSkipsCritic(t *testing.T) {
 	if err := runner.Bootstrap(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.Requests) != 1 {
+	if len(fake.Requests) != 2 {
 		t.Fatalf("calls=%d", len(fake.Requests))
+	}
+	decisions, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: "closed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) < 2 || decisions[0].Actor != "critic" || decisions[0].Provider == decisions[len(decisions)-1].Provider {
+		t.Fatalf("startup decisions = %+v", decisions)
 	}
 }
 
@@ -1364,7 +1395,7 @@ func TestStartupGoalDoesNotMatchDispatcherReplan(t *testing.T) {
 	if err := runner.Bootstrap(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.Requests) != 1 {
+	if len(fake.Requests) != 2 {
 		t.Fatalf("startup calls=%d; dispatcher replan is not startup", len(fake.Requests))
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -191,9 +192,10 @@ func TestThreeHandlersDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	streamed := ""
+	var acknowledgements []string
 	b := &StoreBackend{Store: st, RunID: "run", Stream: func(_ context.Context, s string, emit func(string)) error { streamed = s; emit("answer"); return nil }}
 	for _, h := range []router.Handler{router.Concierge, router.Planner, router.Dispatcher} {
-		if err := b.Dispatch(t.Context(), router.Decision{Handler: h}, string(h), func(string) {}); err != nil {
+		if err := b.Dispatch(t.Context(), router.Decision{Handler: h}, string(h), func(s string) { acknowledgements = append(acknowledgements, s) }); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -210,6 +212,9 @@ func TestThreeHandlersDispatch(t *testing.T) {
 	}
 	if found[store.DirectivePlanImport] != "planner" || found[store.DirectiveInstruction] != "dispatcher" {
 		t.Fatal(dirs)
+	}
+	if !slices.Contains(acknowledgements, "Queued for the planner: planner") || !slices.Contains(acknowledgements, "Queued for the dispatcher: dispatcher") {
+		t.Fatalf("acknowledgements = %v", acknowledgements)
 	}
 	events, err := st.Events().List(t.Context(), store.EventFilter{RunID: "run"})
 	if err != nil || len(events) != 1 {

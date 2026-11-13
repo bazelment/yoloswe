@@ -106,7 +106,13 @@ func NewOpenAIClient(opts ...OpenAIClientOption) *OpenAIClient {
 }
 
 func defaultOpenAIPricing() map[string]ModelPricing {
-	return map[string]ModelPricing{"gpt-6.1-sol": {InputPerMTok: 0, OutputPerMTok: 0}, "gpt-6-sol": {InputPerMTok: 0, OutputPerMTok: 0}}
+	// OpenAI publishes GPT-5.1 at $1.25/$10 per million input/output tokens;
+	// the gateway's gpt-6 aliases have no public price, so use that closest
+	// published tier until the aliases receive an official price sheet.
+	gpt := ModelPricing{InputPerMTok: 1.25, OutputPerMTok: 10}
+	return map[string]ModelPricing{
+		"gpt-6.1-sol": gpt, "gpt-6-sol": gpt, "gpt-6-astra": gpt,
+	}
 }
 func (c *OpenAIClient) TotalUsage() Usage { c.mu.Lock(); defer c.mu.Unlock(); return c.totalUsage }
 func (c *OpenAIClient) ResetUsage()       { c.mu.Lock(); defer c.mu.Unlock(); c.totalUsage = Usage{} }
@@ -241,6 +247,11 @@ func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Respons
 			if err != nil {
 				return nil, err
 			}
+			for i := range resp.Message.Content {
+				if resp.Message.Content[i].Type == BlockTypeToolUse {
+					resp.Message.Content[i].Name = originalToolName(resp.Message.Content[i].Name, req.Tools)
+				}
+			}
 			c.mu.Lock()
 			resp.Usage.CostUSD = CalculateCost(resp.Model, resp.Usage, c.pricing)
 			c.totalUsage = c.totalUsage.Add(resp.Usage)
@@ -263,6 +274,19 @@ func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Respons
 		return nil, apiErr
 	}
 	return nil, fmt.Errorf("orca/model: OpenAI retry loop exhausted")
+}
+
+// OpenAI function names allow only letters, digits, '_' and '-'. The shared
+// tool registry also serves Anthropic, whose names may contain dots.
+func openAIToolName(name string) string { return strings.NewReplacer(".", "_").Replace(name) }
+
+func originalToolName(name string, defs []ToolDefinition) string {
+	for _, def := range defs {
+		if openAIToolName(def.Name) == name {
+			return def.Name
+		}
+	}
+	return name
 }
 
 func readResponsesStream(r io.ReadCloser, idle time.Duration) ([]byte, error) {

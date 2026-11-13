@@ -127,6 +127,14 @@ func TestHTTPClient_SingleTurn(t *testing.T) {
 	}
 }
 
+func TestCalculateCost_DefaultOpenAIModels(t *testing.T) {
+	for _, name := range []string{"gpt-6.1-sol", "gpt-6-astra"} {
+		if got := model.CalculateCost(name, model.Usage{InputTokens: 1000, OutputTokens: 1000}, nil); got <= 0 {
+			t.Fatalf("CalculateCost(%q) = %v, want nonzero", name, got)
+		}
+	}
+}
+
 func TestHTTPClient_ToolLoop(t *testing.T) {
 	t.Parallel()
 
