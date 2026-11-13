@@ -267,6 +267,7 @@ type Controller struct {
 	initialized        bool
 	killed             bool
 	watchStarted       bool
+	stallTimeoutSet    bool
 }
 
 // New constructs a new deterministic Controller for cfg.RunID.
@@ -274,6 +275,7 @@ func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge
 	if clk == nil {
 		clk = clock.NewRealClock()
 	}
+	stallTimeoutSet := cfg.StallTimeout > 0
 	c := &Controller{
 		cfg:                cfg.withDefaults(),
 		store:              st,
@@ -288,6 +290,7 @@ func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge
 		emittedAskExpiries: make(map[string]bool),
 		wakeCh:             make(chan struct{}, 1),
 		watchErrors:        make(chan error, 16),
+		stallTimeoutSet:    stallTimeoutSet,
 	}
 	if len(boxes) > 0 {
 		c.mailbox = boxes[0]
@@ -1075,6 +1078,9 @@ func (c *Controller) detectStalls(ctx context.Context) error {
 			return err
 		}
 		timeout := r.Limits.PhaseTimeout
+		if c.stallTimeoutSet {
+			timeout = c.cfg.StallTimeout
+		}
 		if timeout <= 0 {
 			timeout = c.cfg.StallTimeout
 		}
@@ -1404,7 +1410,7 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		}
 	}
 
-	if rep.Outcome == lane.OutcomeDone && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && (strings.EqualFold(strings.TrimSpace(rep.Change), "none") || (rep.HeadSHA != "" && c.reportHeadIsBase(ctx, ln, rep.HeadSHA))) {
+	if (rep.Outcome == lane.OutcomeDone || rep.Outcome == lane.OutcomeNoChange) && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && (strings.EqualFold(strings.TrimSpace(rep.Change), "none") || (rep.HeadSHA != "" && c.reportHeadIsBase(ctx, ln, rep.HeadSHA))) {
 		return c.completeReportOnlyLane(ctx, ln, ev)
 	}
 
@@ -1674,6 +1680,9 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 	ln.LastEventID = ev.ID
 	// A quiet pulse is controller bookkeeping, not worker activity.
 	quiet := ev.Source == "lane.watch" && payload.Kind == lane.EventNoActivity
+	if quiet && c.terminalIsWorking(ctx, ln.TerminalID) {
+		return store.EventClassAuto, nil
+	}
 	if !quiet {
 		ln.LastEventAt = c.clock.Now().UTC()
 	}
@@ -1706,6 +1715,9 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 			}
 
 			agent := curPhase.Agents[min(curAttempt-1, len(curPhase.Agents)-1)]
+			if err := c.stopCurrentTerminal(ctx, ln, "replace quiet terminal"); err != nil {
+				return store.EventClassUnclassified, err
+			}
 			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: agent.Harness, Model: agent.Model, Effort: agent.Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, max(ln.Round, 1), "fresh terminal after nudge")})
 			if err != nil {
 				return store.EventClassUnclassified, err
@@ -1989,6 +2001,11 @@ func (c *Controller) startLanePhase(
 			ln.BaseCommit = strings.TrimSpace(res.BaseCommit)
 		}
 	} else {
+		if tool == ToolPhaseRetry {
+			if err := c.stopCurrentTerminal(ctx, ln, "replace terminal for retry"); err != nil {
+				return err
+			}
+		}
 		res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
 			RunID:     c.cfg.RunID,
 			LaneID:    ln.ID,
@@ -2051,6 +2068,25 @@ func (c *Controller) startLanePhase(
 		}
 	}
 	return nil
+}
+
+func (c *Controller) stopCurrentTerminal(ctx context.Context, ln *lane.Lane, reason string) error {
+	if ln == nil || (strings.TrimSpace(ln.TerminalID) == "" && strings.TrimSpace(ln.SessionID) == "") {
+		return nil
+	}
+	return c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: reason})
+}
+
+func (c *Controller) terminalIsWorking(ctx context.Context, terminalID string) bool {
+	if strings.TrimSpace(terminalID) == "" {
+		return false
+	}
+	reader, ok := c.driver.(lane.TerminalStateReader)
+	if !ok {
+		return false
+	}
+	state, err := reader.TerminalAgentState(ctx, terminalID)
+	return err == nil && strings.EqualFold(strings.TrimSpace(state), "working")
 }
 
 func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Recipe, phase recipe.Phase, round int, extraNote string) string {

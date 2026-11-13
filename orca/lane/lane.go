@@ -408,6 +408,14 @@ type LaneDriver interface {
 	Watch(ctx context.Context, runID string) <-chan Event
 }
 
+// TerminalStateReader is optionally implemented by drivers that can report
+// whether a terminal is still actively running an agent turn. Controllers use
+// it to distinguish a quiet working terminal from a terminal that needs the
+// restart ladder.
+type TerminalStateReader interface {
+	TerminalAgentState(ctx context.Context, terminalID string) (string, error)
+}
+
 type Driver = LaneDriver
 
 // FakeDriver is an in-memory LaneDriver implementation for deterministic unit tests.
@@ -418,6 +426,7 @@ type FakeDriver struct { //nolint:govet // test double state is intentionally gr
 	Steers          []SteerRequest
 	Stops           []StopRequest
 	SpawnBaseCommit string
+	AgentStates     map[string]string
 	nextSeq         int
 	subs            map[int]chan Event
 	nextSub         int
@@ -426,9 +435,16 @@ type FakeDriver struct { //nolint:govet // test double state is intentionally gr
 
 func NewFakeDriver() *FakeDriver {
 	return &FakeDriver{
-		reports: make(map[string]*PhaseReport),
-		subs:    make(map[int]chan Event),
+		reports:     make(map[string]*PhaseReport),
+		AgentStates: make(map[string]string),
+		subs:        make(map[int]chan Event),
 	}
+}
+
+func (f *FakeDriver) TerminalAgentState(_ context.Context, terminalID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.AgentStates[terminalID], nil
 }
 
 func (f *FakeDriver) ReportInstructions(_, laneID, phase string, round int) string {

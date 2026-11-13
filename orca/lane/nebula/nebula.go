@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -519,9 +520,13 @@ func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.
 	if err != nil {
 		return lane.SpawnResult{}, err
 	}
+	baseCommit := strings.TrimSpace(sess.BaseCommit)
+	if baseCommit == "" {
+		baseCommit = resolveBaseCommit(ctx, req.Worktree, cmp.Or(strings.TrimSpace(req.BaseBranch), d.baseBranch))
+	}
 	res := lane.SpawnResult{
 		SessionID:  sess.ID,
-		BaseCommit: sess.BaseCommit,
+		BaseCommit: baseCommit,
 		StartedAt:  d.clock.Now().UTC(),
 	}
 	if req.Phase == "" && req.Harness == "" && req.Brief == "" {
@@ -545,6 +550,23 @@ func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.
 	res.TerminalID = termRes.TerminalID
 	res.StartedAt = termRes.StartedAt
 	return res, nil
+}
+
+func resolveBaseCommit(ctx context.Context, worktree, baseBranch string) string {
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		return ""
+	}
+	args := []string{"rev-parse", "origin/" + baseBranch}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if strings.TrimSpace(worktree) != "" {
+		cmd.Dir = worktree
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (d *Driver) laneLock(runID, laneID string) *sync.Mutex {
@@ -916,6 +938,16 @@ func (d *Driver) GetTerminal(ctx context.Context, terminalID string) (*TerminalI
 		return nil, err
 	}
 	return &term, nil
+}
+
+// TerminalAgentState reports the agent lifecycle state used by the controller
+// to avoid restarting a terminal that is actively working.
+func (d *Driver) TerminalAgentState(ctx context.Context, terminalID string) (string, error) {
+	term, err := d.GetTerminal(ctx, terminalID)
+	if err != nil {
+		return "", err
+	}
+	return term.AgentState, nil
 }
 
 // Stop stops a terminal or, when TerminalID is empty, all terminals in the session.
