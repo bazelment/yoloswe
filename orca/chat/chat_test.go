@@ -257,6 +257,10 @@ func TestOpenQuestionReplyReachesDispatcherSnapshot(t *testing.T) {
 	if msg.InReplyTo != "ask-1" {
 		t.Fatalf("reply=%+v", msg)
 	}
+	dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: "run", ActiveOnly: true})
+	if err != nil || len(dirs) != 1 {
+		t.Fatalf("directives=%+v err=%v", dirs, err)
+	}
 }
 func TestPauseViaConciergeTool(t *testing.T) {
 	st := store.NewMemoryStore(nil)

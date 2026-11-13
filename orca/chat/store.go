@@ -113,10 +113,6 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 		}
 		return err
 	case router.Dispatcher:
-		_, err := b.directive(ctx, store.DirectiveInstruction, text, "")
-		if err != nil {
-			return err
-		}
 		msg := mailbox.Message{Owner: true, From: "owner", Body: text}
 		// A reply to the sole open owner ask must retain its identity so the
 		// controller can resolve the ask instead of treating it as a new
@@ -135,7 +131,14 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 				msg.LaneID = ask.LaneID
 			}
 		}
-		_, err = mailbox.AppendEvent(ctx, b.Store.Events(), b.RunID, msg)
+		// An answer is consumed by the controller; do not also enqueue it as
+		// a fresh instruction for a later dispatcher judgment.
+		if msg.InReplyTo == "" {
+			if _, err := b.directive(ctx, store.DirectiveInstruction, text, ""); err != nil {
+				return err
+			}
+		}
+		_, err := mailbox.AppendEvent(ctx, b.Store.Events(), b.RunID, msg)
 		return err
 	}
 	return fmt.Errorf("unsupported handler %q", d.Handler)
