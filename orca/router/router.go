@@ -169,11 +169,12 @@ func (c GeminiClient) Route(ctx context.Context, text string) (Decision, error) 
 	}
 	body := map[string]any{"model": modelName, "input": text, "choices": destinations, "questions": []string{"needs clarification?", "standing rule?", "answers an open question?"}}
 	b, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1beta/decisions:create?key="+c.APIKey, strings.NewReader(string(b)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1beta/decisions:create", strings.NewReader(string(b)))
 	if err != nil {
 		return Decision{}, err
 	}
 	req.Header.Set("content-type", "application/json")
+	req.Header.Set("x-goog-api-key", c.APIKey)
 	res, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return Decision{}, err

@@ -3,6 +3,9 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/bazelment/yoloswe/orca/model"
@@ -34,3 +37,31 @@ func TestFallbackClarifies(t *testing.T) {
 }
 
 var _ = json.Valid
+
+type errorTransport struct {
+	t *testing.T
+}
+
+func (tr errorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.RawQuery != "" || strings.Contains(req.URL.String(), "test-secret") {
+		tr.t.Errorf("request URL contains a credential: %s", req.URL.Redacted())
+	}
+	if req.Header.Get("x-goog-api-key") != "test-secret" {
+		tr.t.Error("request is missing the API key header")
+	}
+	return nil, errors.New("transport unavailable")
+}
+
+func TestGeminiTransportErrorKeepsAPIKeyPrivate(t *testing.T) {
+	client := GeminiClient{
+		APIKey:     "test-secret",
+		HTTPClient: &http.Client{Transport: errorTransport{t: t}},
+	}
+	_, err := client.Route(context.Background(), "hello")
+	if err == nil {
+		t.Fatal("expected transport error")
+	}
+	if strings.Contains(err.Error(), client.APIKey) {
+		t.Fatalf("transport error exposes API key: %v", err)
+	}
+}
