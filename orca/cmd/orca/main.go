@@ -15,10 +15,12 @@ import (
 	"sync"
 	"syscall"
 
+	chatui "github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/mailbox"
 	mailboxnebula "github.com/bazelment/yoloswe/orca/mailbox/nebula"
+	"github.com/bazelment/yoloswe/orca/router"
 )
 
 func main() {
@@ -201,7 +203,13 @@ func executeChat(
 		return err
 	}
 
-	return concierge.RunInteractive(ctx, stdin, stdout)
+	routingLog := router.StoreLogger{Store: st, RunID: cfg.RunID, Model: cfg.Models.Concierge, Provider: cfg.ModelProvider}
+	r := router.Select(client, cfg.Models.Concierge, cmp.Or(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")), os.Getenv("GEMINI_DECISIONS_BASE_URL"), routingLog)
+	backend := &chatui.StoreBackend{Store: st, RunID: cfg.RunID, Stream: concierge.AskStream}
+	ui := chatui.New(ctx, cfg.RunID, concierge.Ask, r)
+	ui.Backend = backend
+	ui.Dispatch = backend.Dispatch
+	return chatui.Run(ctx, stdin, stdout, ui)
 }
 
 func newLogger(out io.Writer, levelStr, format string) *slog.Logger {

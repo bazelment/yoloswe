@@ -560,6 +560,21 @@ func (r *Runner) Step(ctx context.Context) error {
 		}
 	}
 
+	dirs, err := r.store.Directives().List(ctx, store.DirectiveFilter{RunID: r.cfg.RunID, ActiveOnly: true})
+	if err != nil {
+		return err
+	}
+	for i := range dirs {
+		d := dirs[i]
+		if d.Ref == "chat:control" {
+			switch d.Text {
+			case "pause":
+				return nil
+			case "stop":
+				return controller.ErrControllerStopped
+			}
+		}
+	}
 	if err := r.planner.ReconcileDirectives(ctx, r.cfg.RunID, r.cfg.ConcurrencyCap); err != nil {
 		return err
 	}

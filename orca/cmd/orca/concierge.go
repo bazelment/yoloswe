@@ -141,6 +141,16 @@ func (c *Concierge) Close(ctx context.Context) error {
 
 // Ask executes one conversational turn on the Concierge thread and returns the answer text.
 func (c *Concierge) Ask(ctx context.Context, question string) (string, error) {
+	return c.ask(ctx, question, nil)
+}
+
+// AskStream emits each assistant response as it arrives during the tool loop.
+func (c *Concierge) AskStream(ctx context.Context, question string, emit func(string)) error {
+	ctx, stream := withChatStream(ctx, emit)
+	_, err := c.ask(ctx, question, stream.complete)
+	return err
+}
+func (c *Concierge) ask(ctx context.Context, question string, emit func(string)) (string, error) {
 	question = strings.TrimSpace(question)
 	if question == "" {
 		return "", nil
@@ -193,6 +203,9 @@ func (c *Concierge) Ask(ctx context.Context, question string) (string, error) {
 			Content:  report,
 		})
 		_ = c.store.Threads().CompleteTurn(cleanupCtx, threadID, turnID, store.TurnStatusCompleted, model.Usage{}, "")
+		if emit != nil {
+			emit(report)
+		}
 		return report, nil
 	}
 
@@ -222,6 +235,9 @@ func (c *Concierge) Ask(ctx context.Context, question string) (string, error) {
 		model.WithMaxTurns(DefaultConciergeMaxTurn),
 		model.WithOnTurn(func(_ int, resp model.Response) {
 			if txt := strings.TrimSpace(resp.Text()); txt != "" {
+				if emit != nil {
+					emit(txt)
+				}
 				if memoryEcho != "" {
 					txt = memoryEcho
 				}

@@ -1,0 +1,1 @@
+{"destination":"concierge","confidence":0.98,"parts":[{"text":"change the plan to ship chat first","destination":"planner","confidence":0.97},{"text":"remember to use Bazel","destination":"memory","confidence":0.99,"is_standing_rule":true}]}

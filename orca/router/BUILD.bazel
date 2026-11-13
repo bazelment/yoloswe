@@ -1,0 +1,23 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "router",
+    srcs = ["router.go"],
+    importpath = "github.com/bazelment/yoloswe/orca/router",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//orca/model",
+        "//orca/store",
+    ],
+)
+
+go_test(
+    name = "router_test",
+    srcs = ["router_test.go"],
+    data = glob(["testdata/**"]),
+    embed = [":router"],
+    deps = [
+        "//orca/model",
+        "//orca/store",
+    ],
+)
