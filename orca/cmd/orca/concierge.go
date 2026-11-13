@@ -25,13 +25,16 @@ const (
 	ToolConciergeDecisions  = "decisions.since"
 	ToolConciergePRCI       = "pr.ci"
 	ToolDirectiveSubmit     = "directive.submit"
+	ToolMemorySubmit        = "memory.submit"
+	ToolMemoryUndo          = "memory.undo"
+	ToolMemoryRead          = "memory.read"
 	DefaultConciergeMaxTurn = 6
 )
 
 // ConciergeSystemPrompt is the system prompt for owner chat sessions.
 const ConciergeSystemPrompt = `You are the Nebula Swarm Concierge.
 Answer the owner's questions accurately and concisely using read-only Store tools (status, lane.show, decisions.since, pr.ci).
-Never invent facts not present in the Store. When the owner issues a rule, instruction, recipe edit, or plan import, call directive.submit.`
+	Never invent facts not present in the Store. Owner corrections become memory.submit proposals saved immediately with a source quote; memory.undo reverts the last change.`
 
 type ConciergeStatusParams struct {
 	IncludeMetrics bool `json:"include_metrics,omitempty" jsonschema:"description=Include decision, token, cost, and idle metrics"`
@@ -61,15 +64,19 @@ type DirectiveSubmitParams struct {
 }
 
 // Concierge hosts a fresh owner chat thread with read-only Store tools and `directive.submit`.
+//
+//nolint:govet
 type Concierge struct {
-	store     store.Store
-	clock     clock.Clock
-	client    model.ModelClient
-	runID     string
-	modelName string
-	threadID  string
-	history   []model.Message
-	mu        sync.Mutex
+	store              store.Store
+	clock              clock.Clock
+	client             model.ModelClient
+	runID              string
+	modelName          string
+	threadID           string
+	history            []model.Message
+	lastMemory         *store.MemoryEntry
+	lastMemoryPrevious *store.MemoryEntry
+	mu                 sync.Mutex
 }
 
 func NewConcierge(
@@ -311,8 +318,110 @@ func (c *Concierge) buildToolRegistry(threadID, turnID string) *model.ToolRegist
 			return c.handleDirectiveSubmit(ctx, threadID, turnID, p)
 		},
 	)
+	model.AddTool[MemorySubmitParams](reg, ToolMemorySubmit, "Save an owner correction as memory", func(ctx context.Context, p MemorySubmitParams) (string, error) { return c.handleMemorySubmit(ctx, p) })
+	model.AddTool[MemoryUndoParams](reg, ToolMemoryUndo, "Undo last memory change", func(ctx context.Context, _ MemoryUndoParams) (string, error) { return c.handleMemoryUndo(ctx) })
+	model.AddTool[MemoryReadParams](reg, ToolMemoryRead, "Read memory body", func(ctx context.Context, p MemoryReadParams) (string, error) {
+		m, e := c.store.Memories().Get(ctx, "", p.ID)
+		if e != nil {
+			return "", e
+		}
+		return m.Body, nil
+	})
 
 	return reg
+}
+
+type MemorySubmitParams struct {
+	Action      string `json:"action"`
+	ID          string `json:"id,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Type        string `json:"type,omitempty"`
+	Scope       string `json:"scope,omitempty"`
+	Source      string `json:"source"`
+	Body        string `json:"body,omitempty"`
+	ProposedBy  string `json:"proposed_by,omitempty"`
+}
+type MemoryUndoParams struct{}
+type MemoryReadParams struct {
+	ID string `json:"id"`
+}
+
+func (c *Concierge) handleMemorySubmit(ctx context.Context, p MemorySubmitParams) (string, error) {
+	id := strings.TrimSpace(p.ID)
+	if id == "" {
+		id = c.nextID("memory")
+	}
+	var prev *store.MemoryEntry
+	if o, e := c.store.Memories().Get(ctx, "", id); e == nil {
+		cp := *o
+		prev = &cp
+	}
+	if strings.EqualFold(p.Action, "delete") {
+		if prev == nil {
+			return "", store.ErrNotFound
+		}
+		if e := c.store.Memories().Delete(ctx, prev.Scope, id); e != nil {
+			return "", e
+		}
+		c.mu.Lock()
+		c.lastMemory = prev
+		c.lastMemoryPrevious = prev
+		c.mu.Unlock()
+		return "memory " + id + " deleted", nil
+	}
+	m := store.MemoryEntry{ID: id, Name: p.Name, Description: p.Description, Type: p.Type, Scope: p.Scope, Source: p.Source, Body: p.Body, ProposedBy: p.ProposedBy, RunID: c.runID}
+	if m.Scope == "" {
+		m.Scope = "run"
+	}
+	if m.Type == "" {
+		m.Type = "rule"
+	}
+	if m.ProposedBy == "" {
+		m.ProposedBy = "owner"
+	}
+	if m.Scope != "run" {
+		m.RunID = ""
+	}
+	if prev != nil {
+		if m.Name == "" {
+			m.Name = prev.Name
+		}
+		if m.Description == "" {
+			m.Description = prev.Description
+		}
+		if m.Body == "" {
+			m.Body = prev.Body
+		}
+		if m.Source == "" {
+			m.Source = prev.Source
+		}
+	}
+	v, e := c.store.Memories().Put(ctx, m)
+	if e != nil {
+		return "", e
+	}
+	cp := v
+	c.mu.Lock()
+	c.lastMemory = &cp
+	c.lastMemoryPrevious = prev
+	c.mu.Unlock()
+	return "memory " + v.ID + " saved: " + v.Name, nil
+}
+func (c *Concierge) handleMemoryUndo(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	m, p := c.lastMemory, c.lastMemoryPrevious
+	c.lastMemory = nil
+	c.mu.Unlock()
+	if m == nil {
+		return "nothing to undo", nil
+	}
+	if p != nil {
+		_, e := c.store.Memories().Put(ctx, *p)
+		return "memory change undone", e
+	}
+	e := c.store.Memories().Delete(ctx, m.Scope, m.ID)
+	return "memory change undone", e
 }
 
 // FormatStatusReport renders a structured status summary of the run from Store state and DecisionStore metrics.

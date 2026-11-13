@@ -924,12 +924,15 @@ func (p *Planner) buildReconcilePrompt(
 	if err != nil {
 		return "", err
 	}
+	memories, _ := p.store.Memories().List(ctx, store.MemoryFilter{RunID: run.ID})
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Planner Context for Run `%s`\n", run.ID)
 	fmt.Fprintf(&b, "Current Objective: %s\n", cmp.Or(strings.TrimSpace(run.Objective), "(none)"))
 	fmt.Fprintf(&b, "Current PlanRef: %s\n", cmp.Or(strings.TrimSpace(run.PlanRef), "(none)"))
 	fmt.Fprintf(&b, "Default Recipe: %s\n", cmp.Or(strings.TrimSpace(run.DefaultRecipe), recipe.DefaultName))
+	b.WriteString("\n## Memory Index\n")
+	b.WriteString(store.MemoryIndex(memories))
 	if strings.TrimSpace(reason) != "" {
 		fmt.Fprintf(&b, "Trigger Reason: %s\n", strings.TrimSpace(reason))
 	}

@@ -957,6 +957,9 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 	if err != nil {
 		return store.EventClassJudgment, nil
 	}
+	if strings.TrimSpace(rep.Summary) != "" {
+		_, _ = c.store.Notes().Append(ctx, store.RunNote{RunID: c.cfg.RunID, TaskID: ev.LaneID, Phase: rep.Phase, Text: rep.Summary})
+	}
 
 	if rep.Phase != "" && ln.Phase != "" {
 		repRound := rep.Round

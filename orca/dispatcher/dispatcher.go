@@ -329,7 +329,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 
 	req := model.Request{
 		Model:       modelName,
-		System:      d.cfg.SystemPrompt,
+		System:      d.systemPromptWithMemories(ctx, runID),
 		Messages:    []model.Message{model.NewUserMessage(snap.Text)},
 		Tools:       toolsForBatch(reg.Definitions(), events),
 		MaxTokens:   d.cfg.MaxTokens,
@@ -427,6 +427,14 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	return res, nil
 }
 
+func (d *Dispatcher) systemPromptWithMemories(ctx context.Context, runID string) string {
+	ms, err := d.store.Memories().List(ctx, store.MemoryFilter{RunID: runID})
+	if err != nil {
+		return d.cfg.SystemPrompt
+	}
+	return d.cfg.SystemPrompt + "\n\n## Memory Index\n" + store.MemoryIndex(ms)
+}
+
 func (d *Dispatcher) ensureThread(ctx context.Context, runID string) (string, error) {
 	threadID := strings.TrimSpace(d.cfg.ThreadID)
 	if threadID == "" {
@@ -504,6 +512,9 @@ var dispatcherToolDefs = []model.ToolDefinition{
 	{Name: ToolReadLaneReport, Description: "Read a bounded phase report for a lane", InputSchema: model.SchemaFor[ReadLaneReportParams]()},
 	{Name: ToolReadPR, Description: "Read bounded PR metadata and approval status for a lane", InputSchema: model.SchemaFor[ReadPRParams]()},
 	{Name: ToolReadCI, Description: "Read bounded CI check status and recent CI events for a lane", InputSchema: model.SchemaFor[ReadCIParams]()},
+	{Name: "memory.read", Description: "Read the full body of a memory by ID", InputSchema: model.SchemaFor[struct {
+		ID string `json:"id"`
+	}]()},
 }
 
 func (d *Dispatcher) buildToolRegistry(runID string, state *turnExecState) *model.ToolRegistry {
@@ -532,6 +543,19 @@ func (d *Dispatcher) handleRawToolCall(
 	toolName string,
 	raw json.RawMessage,
 ) (string, error) {
+	if toolName == "memory.read" {
+		var p struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return "", err
+		}
+		m, err := d.store.Memories().Get(ctx, "", strings.TrimSpace(p.ID))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%s\n%s", m.Name, m.Body), nil
+	}
 	start := d.clock.Now()
 	var callID string
 	if state != nil {
@@ -1055,6 +1079,9 @@ func (d *Dispatcher) buildRetryBrief(view *StateView, ln lane.Lane, r recipe.Rec
 	}
 	if strings.TrimSpace(note) != "" {
 		parts = append(parts, strings.TrimSpace(note))
+	}
+	if len(view.Memories) > 0 {
+		parts = append(parts, "Applicable memories:\n"+store.MemoryIndex(view.Memories))
 	}
 	brief := strings.Join(parts, "\n\n")
 	if maxBytes := view.EffectiveMaxBriefBytes(r); maxBytes > 0 && len(brief) > maxBytes {

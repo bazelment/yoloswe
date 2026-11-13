@@ -88,6 +88,16 @@ func StarterMemories() []MemoryEntry {
 	}
 }
 
+// MemoryIndex renders the compact index shared with orchestration roles.
+func MemoryIndex(entries []MemoryEntry) string {
+	var b strings.Builder
+	for i := range entries {
+		m := &entries[i]
+		fmt.Fprintf(&b, "- [%s] %s (%s/%s): %s\n", m.ID, m.Name, m.Type, m.Scope, strings.TrimSpace(m.Description))
+	}
+	return b.String()
+}
+
 // Lease represents exclusive controller ownership of a Run with a TTL heartbeat.
 type Lease struct {
 	AcquiredAt  time.Time `json:"acquired_at"`
