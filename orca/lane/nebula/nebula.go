@@ -279,9 +279,13 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 		e.Kind = lane.EventPhaseReported
 		e.Report = p.Report
 	case store.EventPhaseExit:
-		if p.TerminalEvent != nil && strings.Contains(strings.ToLower(p.TerminalEvent.Outcome), "auth") {
+		outcome := ""
+		if p.TerminalEvent != nil {
+			outcome = strings.ToLower(strings.TrimSpace(p.TerminalEvent.Outcome))
+		}
+		if strings.Contains(outcome, "auth") {
 			e.Kind = lane.EventAuthFailure
-		} else if p.TerminalEvent != nil && (strings.Contains(strings.ToLower(p.TerminalEvent.Outcome), "usage_limit") || strings.Contains(strings.ToLower(p.TerminalEvent.Outcome), "capacity")) {
+		} else if strings.Contains(outcome, "usage_limit") || strings.Contains(outcome, "usage_limited") || strings.Contains(outcome, "capacity") || p.UsageLimit != nil || p.Capacity != nil {
 			e.Kind = lane.EventQuotaFailure
 		} else if p.TerminalEvent != nil && (p.TerminalEvent.Type == "turn.ended" || p.TerminalEvent.Type == "api_error") {
 			e.Kind = lane.EventTurnEndedNoReport
@@ -290,13 +294,18 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 		}
 	case store.EventStall:
 		if p.TerminalEvent != nil {
+			outcome := strings.ToLower(strings.TrimSpace(p.TerminalEvent.Outcome))
 			switch strings.ToLower(p.TerminalEvent.Type) {
 			case "input.waiting":
 				e.Kind = lane.EventWaitingForInput
 			case "turn.capacity", "terminal.usage_limited":
 				e.Kind = lane.EventQuotaFailure
 			default:
-				e.Kind = lane.EventTurnEndedNoReport
+				if strings.Contains(outcome, "usage_limit") || strings.Contains(outcome, "usage_limited") || strings.Contains(outcome, "capacity") {
+					e.Kind = lane.EventQuotaFailure
+				} else {
+					e.Kind = lane.EventTurnEndedNoReport
+				}
 			}
 		} else if p.UsageLimit != nil || p.Capacity != nil || p.Usage != nil {
 			e.Kind = lane.EventQuotaFailure

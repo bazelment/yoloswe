@@ -34,6 +34,7 @@ type Driver struct { //nolint:govet // compact driver configuration
 	repo    string
 	parent  string
 	phases  map[string]string
+	rounds  map[string]int
 	lanes   map[string]string
 	runs    map[string]string
 	runDirs map[string]string
@@ -49,12 +50,22 @@ func New(cfg Config) (*Driver, error) {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 250 * time.Millisecond
 	}
-	return &Driver{c: cfg.Client, runDir: cfg.RunDir, repo: cfg.Repo, parent: cfg.Parent, poll: cfg.PollInterval, phases: map[string]string{}, lanes: map[string]string{}, runs: map[string]string{}, runDirs: map[string]string{}}, nil
+	return &Driver{c: cfg.Client, runDir: cfg.RunDir, repo: cfg.Repo, parent: cfg.Parent, poll: cfg.PollInterval, phases: map[string]string{}, rounds: map[string]int{}, lanes: map[string]string{}, runs: map[string]string{}, runDirs: map[string]string{}}, nil
 }
 func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
 	return d.start(ctx, req)
 }
 func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (lane.StartPhaseResult, error) {
+	if req.SessionID != "" {
+		d.mu.Lock()
+		d.phases[req.SessionID] = req.Phase
+		d.rounds[req.SessionID] = req.Round
+		d.lanes[req.SessionID] = req.LaneID
+		d.runs[req.SessionID] = req.RunID
+		d.runDirs[req.SessionID] = req.RunDir
+		d.mu.Unlock()
+		return lane.StartPhaseResult{SessionID: req.SessionID, TerminalID: req.SessionID, StartedAt: time.Now().UTC()}, nil
+	}
 	r, err := d.start(ctx, lane.SpawnRequest{RunID: req.RunID, LaneID: req.LaneID, Phase: req.Phase, Harness: req.Harness, Model: req.Model, Effort: req.Effort, Brief: req.Brief, Round: req.Round, RunDir: req.RunDir})
 	return lane.StartPhaseResult{SessionID: r.SessionID, TerminalID: r.TerminalID, StartedAt: r.StartedAt}, err
 }
@@ -66,6 +77,7 @@ func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnRe
 	}
 	d.mu.Lock()
 	d.phases[r.SessionID] = req.Phase
+	d.rounds[r.SessionID] = req.Round
 	d.lanes[r.SessionID] = req.LaneID
 	d.runs[r.SessionID] = req.RunID
 	d.runDirs[r.SessionID] = req.RunDir
@@ -92,6 +104,7 @@ func (d *Driver) Stop(ctx context.Context, req lane.StopRequest) error {
 func (d *Driver) ReadReport(_ context.Context, runID, laneID, terminalID string) (*lane.PhaseReport, error) {
 	d.mu.RLock()
 	phase := d.phases[terminalID]
+	round := d.rounds[terminalID]
 	runDir := d.runDirs[terminalID]
 	d.mu.RUnlock()
 	if phase == "" {
@@ -103,7 +116,11 @@ func (d *Driver) ReadReport(_ context.Context, runID, laneID, terminalID string)
 	if runDir == "" {
 		runDir = runID
 	}
-	b, err := os.ReadFile(filepath.Join(runDir, laneID+"."+phase+".report.md"))
+	key := lane.PhaseRoundKey(phase, round)
+	b, err := os.ReadFile(filepath.Join(runDir, laneID+"."+key+".report.md"))
+	if err != nil && key != phase {
+		b, err = os.ReadFile(filepath.Join(runDir, laneID+"."+phase+".report.md"))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +130,7 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 	out := make(chan lane.Event, 16)
 	go func() {
 		defer close(out)
-		reported := map[string]bool{}
+		reported := map[string]string{}
 		exited := map[string]bool{}
 		lastActivity := time.Now()
 		t := time.NewTicker(d.poll)
@@ -138,17 +155,14 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				if !owned {
 					continue
 				}
-				if !reported[s.ID] {
-					if rep, err := d.ReadReport(ctx, runID, laneID, s.ID); err == nil {
-						select {
-						case out <- lane.Event{Kind: lane.EventPhaseReported, RunID: runID, LaneID: laneID, SessionID: s.ID, Phase: phase, Report: rep}:
-						case <-ctx.Done():
-							return
-						}
-						reported[s.ID] = true
-						lastActivity = time.Now()
-						continue
+				if rep, err := d.ReadReport(ctx, runID, laneID, s.ID); err == nil && rep.Raw != reported[s.ID] {
+					select {
+					case out <- lane.Event{Kind: lane.EventPhaseReported, RunID: runID, LaneID: laneID, SessionID: s.ID, Phase: phase, Report: rep}:
+					case <-ctx.Done():
+						return
 					}
+					reported[s.ID] = rep.Raw
+					lastActivity = time.Now()
 				}
 				if exited[s.ID] {
 					continue
