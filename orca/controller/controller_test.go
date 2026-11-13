@@ -841,8 +841,8 @@ func TestControllerReportOnlyUsesStoredBase(t *testing.T) {
 			})
 		}
 	}
-
 }
+
 func TestControllerJudgmentBatchingAndUrgentBypass(t *testing.T) {
 	t.Parallel()
 	clk, st, drv, judge := setupTestEnv(t)

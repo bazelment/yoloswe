@@ -212,6 +212,7 @@ func (c Config) withDefaults() Config {
 		}
 	}
 	if c.StallTimeout <= 0 {
+		c.stallTimeoutSet = false
 		c.StallTimeout = controller.DefaultStallTimeout
 	}
 	c.LogLevel = cmp.Or(strings.ToLower(strings.TrimSpace(c.LogLevel)), "info")
@@ -343,7 +344,7 @@ func mergeConfig(lower, higher Config) Config {
 	if higher.JudgmentDebounce != 0 {
 		out.JudgmentDebounce = higher.JudgmentDebounce
 	}
-	if higher.StallTimeout != 0 {
+	if higher.stallTimeoutSet || higher.StallTimeout != 0 {
 		out.StallTimeout = higher.StallTimeout
 		out.stallTimeoutSet = higher.stallTimeoutSet
 	}

@@ -1472,6 +1472,10 @@ func TestConfigStallTimeoutExplicitPrecedence(t *testing.T) {
 		{name: "file", body: `{"stall_timeout":1800000000000}`, explicit: true, timeout: 30 * time.Minute},
 		{name: "flag with file", body: "{}", args: []string{"--stall-timeout", "5m"}, explicit: true, timeout: 5 * time.Minute},
 		{name: "flag overrides file", body: `{"stall_timeout":1800000000000}`, args: []string{"--stall-timeout", "5m"}, explicit: true, timeout: 5 * time.Minute},
+		{name: "zero flag resets file", body: `{"stall_timeout":1800000000000}`, args: []string{"--stall-timeout", "0"}, timeout: 45 * time.Minute},
+		{name: "zero file", body: `{"stall_timeout":0}`, timeout: 45 * time.Minute},
+		{name: "null file", body: `{"stall_timeout":null}`, timeout: 45 * time.Minute},
+		{name: "negative flag", args: []string{"--stall-timeout", "-1m"}, timeout: 45 * time.Minute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
