@@ -338,6 +338,7 @@ func (p *Planner) runReconciliation(
 		if critique == nil || strings.TrimSpace(critique.Text()) == "" {
 			return errors.New("orca: critic returned no critique")
 		}
+		usage = usage.Add(critique.Usage)
 		if _, err := p.store.Decisions().Append(ctx, store.Decision{
 			RunID: runID, Category: store.DecisionJudgment, Actor: "critic", ThreadID: threadID, TurnID: turnID,
 			Model: p.criticModel, Provider: p.criticProvider,
