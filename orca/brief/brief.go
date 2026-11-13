@@ -23,12 +23,37 @@ func Render(text string, memories []store.MemoryEntry, maxBytes int) (string, er
 	}
 	var b strings.Builder
 	b.WriteString(text)
-	if len(memories) > 0 {
-		b.WriteString("\n\n## Memories for this task\n")
-		b.WriteString(store.MemoryIndex(memories))
+	if strings.TrimSpace(text) == "" {
+		var b strings.Builder
 		for i := range memories {
 			m := &memories[i]
-			entry := fmt.Sprintf("\n### [%s] %s\n%s\nSource: %s\n", m.ID, m.Name, m.Body, m.Source)
+			fmt.Fprintf(&b, "\n### [%s] %s\n%s\nSource: %s\n", m.ID, m.Name, m.Body, m.Source)
+		}
+		return b.String(), nil
+	}
+	var applicable []store.MemoryEntry
+	generic := len(strings.Fields(text)) <= 2
+	for i := range memories {
+		if generic || applies(text, memories[i]) {
+			applicable = append(applicable, memories[i])
+		}
+	}
+	if len(applicable) > 0 {
+		b.WriteString("\n\n## Memories for this task\n")
+		for i := range applicable {
+			m := &applicable[i]
+			how := m.Description
+			if strings.TrimSpace(how) == "" {
+				how = strings.SplitN(m.Body, ".", 2)[0]
+			}
+			if strings.Contains(strings.ToLower(m.Source), "correction") {
+				how += " (" + m.Source + ")"
+			}
+			entry := fmt.Sprintf("- [%s] %s: %s", m.ID, m.Name, how)
+			if strings.TrimSpace(m.Body) != "" && strings.TrimSpace(m.Body) != strings.TrimSpace(m.Description) {
+				entry += " (" + m.Body + ")"
+			}
+			entry += "\n"
 			if maxBytes > 0 && b.Len()+len(entry) > maxBytes {
 				break
 			}
@@ -43,6 +68,21 @@ func Render(text string, memories []store.MemoryEntry, maxBytes int) (string, er
 		return out[:maxBytes], nil
 	}
 	return b.String(), nil
+}
+
+func applies(text string, m store.MemoryEntry) bool {
+	if m.Scope == "owner" || m.Scope == "repo" {
+		return true
+	}
+	words := strings.Fields(strings.ToLower(text))
+	hay := strings.ToLower(m.Name + " " + m.Description + " " + m.Body)
+	for _, w := range words {
+		w = strings.Trim(w, ".,:;()[]{}\"")
+		if len(w) >= 4 && strings.Contains(hay, w) {
+			return true
+		}
+	}
+	return false
 }
 
 // WithMemories decorates the controller's driver so every fresh phase gets

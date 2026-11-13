@@ -2051,7 +2051,8 @@ func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Re
 	if ln.Title != "" {
 		parts = append(parts, ln.Title)
 	}
-	if ln.ItemID != "" {
+	mechanical := phase.Name == recipe.PhaseClean || phase.Name == recipe.PhaseReview
+	if ln.ItemID != "" && !mechanical {
 		if item, err := c.store.Backlog().Get(ctx, c.cfg.RunID, ln.ItemID); err == nil {
 			if item.Description != "" {
 				parts = append(parts, item.Description)
@@ -2061,7 +2062,12 @@ func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Re
 			}
 		}
 	}
-	if phase.BriefTemplate != "" {
+	if skill := c.driver.PhaseSkill(phase.Name); skill != "" {
+		parts = []string{skill}
+		if ln.Title != "" {
+			parts = append(parts, "Goal: "+ln.Title)
+		}
+	} else if phase.BriefTemplate != "" {
 		parts = append(parts, phase.BriefTemplate)
 	}
 	if extraNote != "" {

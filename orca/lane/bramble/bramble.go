@@ -63,6 +63,15 @@ func (d *Driver) ReportInstructions(runID, laneID, phase string, round int) stri
 	path := reportPath(runDir, runID, laneID, phase, round)
 	return "Write the phase report to " + path + "; the phase is not finished until that file is written. Start it with Outcome: done|needs-swe|blocked|needs-input, include HEAD and PR lines, then include the report details."
 }
+func (d *Driver) PhaseSkill(phase string) string {
+	switch phase {
+	case "clean":
+		return "/simplify"
+	case "review":
+		return "/pr-polish"
+	}
+	return ""
+}
 
 func New(cfg Config) (*Driver, error) {
 	if cfg.Client == nil {
@@ -101,6 +110,17 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 	return lane.StartPhaseResult{SessionID: r.SessionID, TerminalID: r.TerminalID, StartedAt: r.StartedAt}, err
 }
 func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
+	baseCommit := ""
+	baseDir := req.Worktree
+	if baseDir == "" {
+		baseDir = d.repo
+	}
+	if baseDir == "" {
+		baseDir = "."
+	}
+	if out, err := exec.CommandContext(ctx, "git", "-C", baseDir, "rev-parse", "HEAD").Output(); err == nil {
+		baseCommit = strings.TrimSpace(string(out))
+	}
 	prompt := req.Brief + "\n[orca run:" + req.RunID + " lane:" + req.LaneID + "]"
 	r, err := d.c.NewSession(ctx, br.SpawnRequest{Worktree: req.Worktree, Repo: d.repo, Parent: d.parent, Model: req.Model, Backend: req.Harness, Effort: req.Effort, Prompt: prompt, CreateWorktree: req.Worktree == "", Branch: req.Branch, From: req.BaseBranch})
 	if err != nil {
@@ -113,12 +133,6 @@ func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnRe
 	d.runs[r.SessionID] = req.RunID
 	d.runDirs[r.SessionID] = req.RunDir
 	d.mu.Unlock()
-	baseCommit := ""
-	if r.WorktreePath != "" {
-		if out, err := exec.CommandContext(ctx, "git", "-C", r.WorktreePath, "rev-parse", "HEAD").Output(); err == nil {
-			baseCommit = strings.TrimSpace(string(out))
-		}
-	}
 	return lane.SpawnResult{SessionID: r.SessionID, TerminalID: r.SessionID, StartedAt: time.Now().UTC(), BaseCommit: baseCommit}, nil
 }
 func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
