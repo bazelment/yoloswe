@@ -1781,6 +1781,7 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 				c.noteStopFailure(ctx, ln, err)
 				return store.EventClassUnclassified, err
 			}
+			delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
 			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: agent.Harness, Model: agent.Model, Effort: agent.Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, max(ln.Round, 1), "fresh terminal after nudge")})
 			if err != nil {
 				return store.EventClassUnclassified, err
@@ -2066,6 +2067,7 @@ func (c *Controller) startLanePhase(
 				c.noteStopFailure(ctx, ln, err)
 				return err
 			}
+			delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
 		}
 		res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
 			RunID:     c.cfg.RunID,

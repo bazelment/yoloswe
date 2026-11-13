@@ -982,7 +982,24 @@ func (d *Driver) ReportOnlyNoWork(ctx context.Context, ln lane.Lane) (bool, erro
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return false, fmt.Errorf("github compare: status 404 (branch visibility is ambiguous)")
+		if strings.TrimSpace(d.token) == "" {
+			return false, fmt.Errorf("github compare: status 404 without authenticated access")
+		}
+		accessReq, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/"+d.repoFullName, http.NoBody)
+		if err != nil {
+			return false, err
+		}
+		accessReq.Header.Set("Accept", "application/vnd.github+json")
+		accessReq.Header.Set("Authorization", "Bearer "+d.token)
+		accessResp, err := d.httpClient.Do(accessReq)
+		if err != nil {
+			return false, err
+		}
+		defer accessResp.Body.Close()
+		if accessResp.StatusCode < 200 || accessResp.StatusCode >= 300 {
+			return false, fmt.Errorf("github repository access check: status %d", accessResp.StatusCode)
+		}
+		return true, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return false, fmt.Errorf("github compare: status %d", resp.StatusCode)

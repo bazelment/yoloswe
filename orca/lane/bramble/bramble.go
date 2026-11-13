@@ -112,6 +112,16 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 }
 func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
 	prompt := req.Brief + "\n[orca run:" + req.RunID + " lane:" + req.LaneID + "]"
+	baseCommit := ""
+	worktree := strings.TrimSpace(req.Worktree)
+	if worktree == "" {
+		worktree = d.runDir
+	}
+	if strings.TrimSpace(req.BaseBranch) != "" && worktree != "" {
+		if out, err := exec.CommandContext(ctx, "git", "-C", worktree, "rev-parse", req.BaseBranch).Output(); err == nil {
+			baseCommit = strings.TrimSpace(string(out))
+		}
+	}
 	r, err := d.c.NewSession(ctx, br.SpawnRequest{Worktree: req.Worktree, Repo: d.repo, Parent: d.parent, Model: req.Model, Backend: req.Harness, Effort: req.Effort, Prompt: prompt, CreateWorktree: req.Worktree == "", Branch: req.Branch, From: req.BaseBranch})
 	if err != nil {
 		return lane.SpawnResult{}, err
@@ -123,7 +133,7 @@ func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnRe
 	d.runs[r.SessionID] = req.RunID
 	d.runDirs[r.SessionID] = req.RunDir
 	d.mu.Unlock()
-	return lane.SpawnResult{SessionID: r.SessionID, TerminalID: r.SessionID, StartedAt: time.Now().UTC()}, nil
+	return lane.SpawnResult{SessionID: r.SessionID, TerminalID: r.SessionID, StartedAt: time.Now().UTC(), BaseCommit: baseCommit}, nil
 }
 func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
 	id := req.SessionID
