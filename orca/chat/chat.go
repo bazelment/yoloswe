@@ -16,7 +16,7 @@ import (
 
 type AskFunc func(context.Context, string) (string, error)
 
-//nolint:govet // field grouping keeps the model readable.
+//nolint:govet // keep related model fields together.
 type Model struct {
 	ctx           context.Context
 	ask           AskFunc
@@ -34,7 +34,7 @@ func New(ctx context.Context, runID string, ask AskFunc, r router.Router) Model 
 }
 func (m Model) Init() tea.Cmd { return nil }
 
-//nolint:govet // message payload is intentionally compact.
+//nolint:govet // keep the message payload compact.
 type replyMsg struct {
 	text string
 	err  error

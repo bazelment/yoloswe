@@ -28,7 +28,7 @@ var destinations = []Destination{Concierge, AnswerOpenQuestion, Planner, Memory,
 
 // Decision is the structured routing result. Confidence is in [0,1].
 //
-//nolint:govet // JSON field order mirrors the routing contract.
+//nolint:govet // preserve the routing contract's field grouping.
 type Decision struct {
 	Destination         Destination `json:"destination"`
 	Confidence          float64     `json:"confidence"`
@@ -52,7 +52,7 @@ type Logger interface {
 
 // FallbackRouter uses the existing model client with a strict JSON response.
 //
-//nolint:govet // configuration fields are grouped by public API.
+//nolint:govet // keep public configuration fields grouped.
 type FallbackRouter struct {
 	Client              model.ModelClient
 	Model               string
@@ -147,7 +147,7 @@ const routingPrompt = `Classify the owner message. Return JSON only with destina
 
 // GeminiClient calls Gemini Decisions API (v1beta) and translates its choice response.
 //
-//nolint:govet // field grouping keeps the public client configuration readable.
+//nolint:govet // keep public client configuration grouped.
 type GeminiClient struct {
 	HTTPClient             *http.Client
 	BaseURL, APIKey, Model string
