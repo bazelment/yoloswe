@@ -8,6 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +21,84 @@ import (
 	"github.com/bazelment/yoloswe/orca/lane/nebula"
 	"github.com/bazelment/yoloswe/orca/store"
 )
+
+func githubTestDriver(t *testing.T, status int, body string, token string) (*nebula.Driver, *httptest.Server, *[]string) {
+	t.Helper()
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		r2 := r.Clone(r.Context())
+		u, _ := url.Parse(srv.URL + r.URL.Path)
+		r2.URL = u
+		r2.Host = u.Host
+		return http.DefaultTransport.RoundTrip(r2)
+	})}
+	d, err := nebula.New(nebula.Config{APIURL: "http://nebula.test", Token: "nebula-token", GitHubToken: token}, nebula.WithRepositoryFullName("acme/repo"), nebula.WithHTTPClient(client))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d, srv, &paths
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestReportOnlyNoWork404WithoutConfirmedAuthContinues(t *testing.T) {
+	d, _, paths := githubTestDriver(t, http.StatusNotFound, `{"message":"Not Found"}`, "token")
+	noWork, err := d.ReportOnlyNoWork(t.Context(), lane.Lane{BaseBranch: "main", Branch: "lane-x"})
+	if err == nil || noWork {
+		t.Fatalf("result=(%v, %v), want error and no completion", noWork, err)
+	}
+	if len(*paths) != 2 {
+		t.Fatalf("requests=%v, want compare plus access confirmation", *paths)
+	}
+}
+
+func TestReportOnlyNoWorkTimeoutContinues(t *testing.T) {
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, context.DeadlineExceeded
+	})}
+	d, err := nebula.New(nebula.Config{APIURL: "http://nebula.test", Token: "token"}, nebula.WithRepositoryFullName("acme/repo"), nebula.WithHTTPClient(client))
+	if err != nil {
+		t.Fatal(err)
+	}
+	noWork, err := d.ReportOnlyNoWork(t.Context(), lane.Lane{BaseBranch: "main", Branch: "lane-x"})
+	if err == nil || noWork {
+		t.Fatalf("result=(%v, %v), want timeout error", noWork, err)
+	}
+}
+
+func TestReportOnlyNoWorkRateLimitContinues(t *testing.T) {
+	d, _, _ := githubTestDriver(t, http.StatusTooManyRequests, `{"message":"rate limit"}`, "token")
+	noWork, err := d.ReportOnlyNoWork(t.Context(), lane.Lane{BaseBranch: "main", Branch: "lane-x"})
+	if err == nil || noWork || !strings.Contains(err.Error(), "status 429") {
+		t.Fatalf("result=(%v, %v), want rate limit error", noWork, err)
+	}
+}
+
+func TestReportOnlyNoWorkCompareOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"branch one commit ahead", `{"ahead_by":1}`, false},
+		{"explicit no change", `{"ahead_by":0}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _, _ := githubTestDriver(t, http.StatusOK, tc.body, "token")
+			got, err := d.ReportOnlyNoWork(t.Context(), lane.Lane{BaseBranch: "main", Branch: "lane-x"})
+			if err != nil || got != tc.want {
+				t.Fatalf("result=(%v, %v), want %v", got, err, tc.want)
+			}
+		})
+	}
+}
 
 type autoAdvanceClock struct {
 	*clock.FakeClock
@@ -37,7 +118,7 @@ type recordedCall struct {
 	Body    string
 }
 
-type fakeNebulaServer struct {
+type fakeNebulaServer struct { //nolint:govet // test double state is intentionally grouped
 	srv              *httptest.Server
 	sessions         map[string]*nebula.SessionInfo
 	terminals        map[string]*nebula.TerminalInfo
@@ -51,6 +132,7 @@ type fakeNebulaServer struct {
 	startTerm409s    int
 	steer409s        int
 	stayProvisioning bool
+	spawnBaseCommit  string
 	mu               sync.Mutex
 }
 
@@ -162,6 +244,7 @@ func (f *fakeNebulaServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			WorkBranch:   req.WorkBranch,
 			SharedHome:   req.SharedHome,
 			Metadata:     req.Metadata,
+			BaseCommit:   f.spawnBaseCommit,
 		}
 		f.sessions[id] = s
 		cp := *s
@@ -626,6 +709,56 @@ func TestSpawnReuseWakeAndSettleTimeout(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "did not become ready") {
 		t.Fatalf("expected settle timeout error, got %v", err)
+	}
+}
+
+func TestSpawnStoresAPIBaseCommitOnly(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\n[ \"$1\" = rev-parse ] && [ \"$2\" = origin/main ] || exit 1\nprintf 'resolve\\n' >> git-calls\ncat origin-main\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	base := strings.Repeat("a", 40)
+	moved := strings.Repeat("b", 40)
+	for _, api := range []bool{true, false} {
+		t.Run(map[bool]string{true: "api base wins", false: "fallback is captured once"}[api], func(t *testing.T) {
+			worktree := t.TempDir()
+			ref := filepath.Join(worktree, "origin-main")
+			if err := os.WriteFile(ref, []byte(base), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			srv := newFakeNebulaServer(t)
+			if api {
+				srv.spawnBaseCommit = moved
+			}
+			drv, _, _ := newTestDriver(t, srv)
+			res, err := drv.SpawnSession(t.Context(), lane.SpawnRequest{RunID: "base", LaneID: "git", BaseBranch: "main", Worktree: worktree})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := ""
+			if api {
+				want = moved
+			}
+			if res.BaseCommit != want {
+				t.Fatalf("BaseCommit=%q, want %q", res.BaseCommit, want)
+			}
+			if err := os.WriteFile(ref, []byte(moved), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := drv.StartPhaseTerminal(t.Context(), lane.StartPhaseRequest{RunID: "base", LaneID: "git", SessionID: res.SessionID, Phase: "swe", Harness: "claude"}); err != nil {
+				t.Fatal(err)
+			}
+			calls, err := os.ReadFile(filepath.Join(worktree, "git-calls"))
+			if api {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("API base must bypass git: calls=%q err=%v", calls, err)
+				}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("local base resolution must be skipped: calls=%q err=%v", calls, err)
+			}
+		})
 	}
 }
 

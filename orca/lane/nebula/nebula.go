@@ -90,6 +90,7 @@ type Config struct {
 	HTTPClient         *http.Client
 	APIURL             string
 	Token              string
+	GitHubToken        string
 	RepositoryID       string
 	RepositoryFullName string
 	CurrentSessionID   string
@@ -107,6 +108,10 @@ func WithAPIURL(apiURL string) Option {
 
 func WithToken(token string) Option {
 	return func(c *Config) { c.Token = token }
+}
+
+func WithGitHubToken(token string) Option {
+	return func(c *Config) { c.GitHubToken = token }
 }
 
 func WithRepositoryID(repoID string) Option {
@@ -148,6 +153,7 @@ type Driver struct {
 	lastCapacity map[string]string
 	apiURL       string
 	token        string
+	githubToken  string
 	repoID       string
 	repoFullName string
 	currSessID   string
@@ -420,6 +426,7 @@ func New(cfg Config, opts ...Option) (*Driver, error) {
 		lastCapacity: make(map[string]string),
 		apiURL:       apiURL,
 		token:        token,
+		githubToken:  strings.TrimSpace(cfg.GitHubToken),
 		repoID:       strings.TrimSpace(cfg.RepositoryID),
 		repoFullName: strings.TrimSpace(cfg.RepositoryFullName),
 		currSessID:   currSessID,
@@ -519,9 +526,10 @@ func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.
 	if err != nil {
 		return lane.SpawnResult{}, err
 	}
+	baseCommit := strings.TrimSpace(sess.BaseCommit)
 	res := lane.SpawnResult{
 		SessionID:  sess.ID,
-		BaseCommit: sess.BaseCommit,
+		BaseCommit: baseCommit,
 		StartedAt:  d.clock.Now().UTC(),
 	}
 	if req.Phase == "" && req.Harness == "" && req.Brief == "" {
@@ -918,6 +926,16 @@ func (d *Driver) GetTerminal(ctx context.Context, terminalID string) (*TerminalI
 	return &term, nil
 }
 
+// TerminalAgentState reports the agent lifecycle state used by the controller
+// to avoid restarting a terminal that is actively working.
+func (d *Driver) TerminalAgentState(ctx context.Context, terminalID string) (string, error) {
+	term, err := d.GetTerminal(ctx, terminalID)
+	if err != nil {
+		return "", err
+	}
+	return term.AgentState, nil
+}
+
 // Stop stops a terminal or, when TerminalID is empty, all terminals in the session.
 func (d *Driver) Stop(ctx context.Context, req lane.StopRequest) error {
 	terminalID := strings.TrimSpace(req.TerminalID)
@@ -934,19 +952,72 @@ func (d *Driver) Stop(ctx context.Context, req lane.StopRequest) error {
 }
 
 // ReleaseSession releases a code session via POST /api/code-sessions/{id}/release.
-func (d *Driver) ReleaseSession(ctx context.Context, sessionID string, force bool) error {
+func (d *Driver) ReleaseSession(ctx context.Context, sessionID string, forceArg ...bool) error {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return fmt.Errorf("%w: session_id is required for ReleaseSession", store.ErrInvalidArgument)
 	}
 	path := fmt.Sprintf("/api/code-sessions/%s/release", url.PathEscape(sessionID))
 	var body any = struct{}{}
-	if force {
+	if len(forceArg) > 0 && forceArg[0] {
 		body = struct {
 			Force bool `json:"force"`
 		}{Force: true}
 	}
 	return d.doJSON(ctx, http.MethodPost, path, body, nil)
+}
+
+// ReportOnlyNoWork compares the lane branch against the current remote base.
+// A missing branch is the normal no-change result for lanes that created no PR.
+func (d *Driver) ReportOnlyNoWork(ctx context.Context, ln lane.Lane) (bool, error) {
+	if strings.TrimSpace(d.repoFullName) == "" || strings.TrimSpace(ln.Branch) == "" {
+		return false, nil
+	}
+	base := cmp.Or(strings.TrimSpace(ln.BaseBranch), d.baseBranch)
+	path := "https://api.github.com/repos/" + d.repoFullName + "/compare/" + url.PathEscape(base) + "..." + url.PathEscape(strings.TrimSpace(ln.Branch))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, http.NoBody)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if d.githubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+d.githubToken)
+	}
+	resp, err := d.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		if d.githubToken == "" {
+			return false, fmt.Errorf("github compare: status 404 without authenticated access")
+		}
+		accessReq, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/"+d.repoFullName, http.NoBody)
+		if err != nil {
+			return false, err
+		}
+		accessReq.Header.Set("Accept", "application/vnd.github+json")
+		accessReq.Header.Set("Authorization", "Bearer "+d.githubToken)
+		accessResp, err := d.httpClient.Do(accessReq)
+		if err != nil {
+			return false, err
+		}
+		defer accessResp.Body.Close()
+		if accessResp.StatusCode < 200 || accessResp.StatusCode >= 300 {
+			return false, fmt.Errorf("github repository access check: status %d", accessResp.StatusCode)
+		}
+		return true, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Errorf("github compare: status %d", resp.StatusCode)
+	}
+	var result struct {
+		AheadBy int `json:"ahead_by"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, err
+	}
+	return result.AheadBy == 0, nil
 }
 
 type phaseReportResponse struct {

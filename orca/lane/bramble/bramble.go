@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -110,26 +111,21 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 	return lane.StartPhaseResult{SessionID: r.SessionID, TerminalID: r.TerminalID, StartedAt: r.StartedAt}, err
 }
 func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
+	prompt := req.Brief + "\n[orca run:" + req.RunID + " lane:" + req.LaneID + "]"
 	baseCommit := ""
-	baseDir := req.Worktree
-	if baseDir == "" {
-		baseDir = d.repo
+	worktree := strings.TrimSpace(req.Worktree)
+	if worktree == "" {
+		worktree = d.repo
 	}
-	if baseDir == "" {
-		baseDir = "."
+	baseRef := strings.TrimSpace(req.BaseBranch)
+	if baseRef == "" {
+		baseRef = "origin/main"
 	}
-	baseRef := "HEAD"
-	if req.Worktree == "" && strings.TrimSpace(req.BaseBranch) != "" {
-		baseRef = "origin/" + req.BaseBranch
-	}
-	if out, err := exec.CommandContext(ctx, "git", "-C", baseDir, "rev-parse", baseRef).Output(); err == nil {
-		baseCommit = strings.TrimSpace(string(out))
-	} else if baseRef != "HEAD" {
-		if out, err := exec.CommandContext(ctx, "git", "-C", baseDir, "rev-parse", req.BaseBranch).Output(); err == nil {
+	if worktree != "" {
+		if out, err := exec.CommandContext(ctx, "git", "-C", worktree, "rev-parse", baseRef).Output(); err == nil {
 			baseCommit = strings.TrimSpace(string(out))
 		}
 	}
-	prompt := req.Brief + "\n[orca run:" + req.RunID + " lane:" + req.LaneID + "]"
 	r, err := d.c.NewSession(ctx, br.SpawnRequest{Worktree: req.Worktree, Repo: d.repo, Parent: d.parent, Model: req.Model, Backend: req.Harness, Effort: req.Effort, Prompt: prompt, CreateWorktree: req.Worktree == "", Branch: req.Branch, From: req.BaseBranch})
 	if err != nil {
 		return lane.SpawnResult{}, err
@@ -159,6 +155,44 @@ func (d *Driver) Stop(ctx context.Context, req lane.StopRequest) error {
 		id = req.TerminalID
 	}
 	return d.c.SendKey(ctx, id, "C-c")
+}
+
+// ReleaseSession stops the local bramble session after lane completion.
+func (d *Driver) ReleaseSession(ctx context.Context, sessionID string, _ ...bool) error {
+	return d.c.SendKey(ctx, strings.TrimSpace(sessionID), "C-c")
+}
+
+func (d *Driver) ReportOnlyNoWork(ctx context.Context, ln lane.Lane) (bool, error) {
+	base := strings.TrimSpace(ln.BaseCommit)
+	if base == "" {
+		base = strings.TrimSpace(ln.BaseBranch)
+	}
+	branch := strings.TrimSpace(ln.Branch)
+	if branch == "" || base == "" {
+		return false, nil
+	}
+	worktree := strings.TrimSpace(ln.Worktree)
+	d.mu.RLock()
+	if worktree == "" {
+		worktree = strings.TrimSpace(d.runDirs[ln.SessionID])
+	}
+	if worktree == "" {
+		worktree = d.runDir
+	}
+	d.mu.RUnlock()
+	if worktree == "" {
+		worktree = "."
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "rev-list", "--count", base+".."+branch)
+	out, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return false, err
+	}
+	return n == 0, nil
 }
 func (d *Driver) ReadReport(_ context.Context, runID, laneID, terminalID string) (*lane.PhaseReport, error) {
 	d.mu.RLock()

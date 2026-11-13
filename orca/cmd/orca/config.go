@@ -168,7 +168,10 @@ type Config struct {
 	FakeAutoComplete  bool          `json:"fake_auto_complete,omitempty"`
 	onceSet           bool
 	fakeAutoSet       bool
+	stallTimeoutSet   bool
 }
+
+func (c Config) HasExplicitStallTimeout() bool { return c.stallTimeoutSet }
 
 func (c Config) withDefaults() Config {
 	c.Objective = cmp.Or(c.Goal, c.Objective)
@@ -209,6 +212,7 @@ func (c Config) withDefaults() Config {
 		}
 	}
 	if c.StallTimeout <= 0 {
+		c.stallTimeoutSet = false
 		c.StallTimeout = controller.DefaultStallTimeout
 	}
 	c.LogLevel = cmp.Or(strings.ToLower(strings.TrimSpace(c.LogLevel)), "info")
@@ -269,6 +273,9 @@ func LoadConfigFile(path string, base Config) (Config, error) {
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err == nil {
+		if _, ok := raw["stall_timeout"]; ok {
+			fileCfg.stallTimeoutSet = true
+		}
 		if _, ok := raw["once"]; ok {
 			fileCfg.onceSet = true
 		}
@@ -337,8 +344,9 @@ func mergeConfig(lower, higher Config) Config {
 	if higher.JudgmentDebounce != 0 {
 		out.JudgmentDebounce = higher.JudgmentDebounce
 	}
-	if higher.StallTimeout != 0 {
+	if higher.stallTimeoutSet || higher.StallTimeout != 0 {
 		out.StallTimeout = higher.StallTimeout
+		out.stallTimeoutSet = higher.stallTimeoutSet
 	}
 	if higher.onceSet {
 		out.Once = higher.Once
@@ -449,6 +457,8 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 			cfg.onceSet = true
 		case "fake-auto":
 			cfg.fakeAutoSet = true
+		case "stall-timeout":
+			cfg.stallTimeoutSet = true
 		}
 	})
 
@@ -610,6 +620,7 @@ func openNebulaDriver(cfg Config, st store.Store, clk clock.Clock) (*nebula.Driv
 		Events:             driverEventStore{st.Events()},
 		APIURL:             cfg.NebulaAPIURL,
 		Token:              cfg.NebulaToken,
+		GitHubToken:        cmp.Or(os.Getenv("GITHUB_TOKEN"), os.Getenv("GH_TOKEN")),
 		RepositoryFullName: cfg.Repository,
 	})
 }

@@ -408,27 +408,60 @@ type LaneDriver interface {
 	Watch(ctx context.Context, runID string) <-chan Event
 }
 
+// SessionReleaser releases a backend session after a lane has reached a
+// terminal state. It is optional so small adapters can retain their existing
+// lifecycle implementation.
+type SessionReleaser interface {
+	ReleaseSession(ctx context.Context, sessionID string, force ...bool) error
+}
+
+// ReportOnlyChecker performs a fresh remote check for report-only completion.
+// The result is true when the lane branch is absent or has no commits ahead of
+// its base branch.
+type ReportOnlyChecker interface {
+	ReportOnlyNoWork(ctx context.Context, ln Lane) (bool, error)
+}
+
+// TerminalStateReader is optionally implemented by drivers that can report
+// whether a terminal is still actively running an agent turn. Controllers use
+// it to distinguish a quiet working terminal from a terminal that needs the
+// restart ladder.
+type TerminalStateReader interface {
+	TerminalAgentState(ctx context.Context, terminalID string) (string, error)
+}
+
 type Driver = LaneDriver
 
 // FakeDriver is an in-memory LaneDriver implementation for deterministic unit tests.
 type FakeDriver struct { //nolint:govet // test double state is intentionally grouped
-	reports         map[string]*PhaseReport
-	Spawns          []SpawnRequest
-	PhaseStarts     []StartPhaseRequest
-	Steers          []SteerRequest
-	Stops           []StopRequest
-	SpawnBaseCommit string
-	nextSeq         int
-	subs            map[int]chan Event
-	nextSub         int
-	mu              sync.Mutex
+	reports                map[string]*PhaseReport
+	Spawns                 []SpawnRequest
+	PhaseStarts            []StartPhaseRequest
+	Steers                 []SteerRequest
+	Stops                  []StopRequest
+	Releases               []string
+	ReportOnlyBranchExists bool
+	ReportOnlyCommitsAhead int
+	SpawnBaseCommit        string
+	AgentStates            map[string]string
+	nextSeq                int
+	subs                   map[int]chan Event
+	nextSub                int
+	mu                     sync.Mutex
 }
 
 func NewFakeDriver() *FakeDriver {
 	return &FakeDriver{
-		reports: make(map[string]*PhaseReport),
-		subs:    make(map[int]chan Event),
+		reports:     make(map[string]*PhaseReport),
+		AgentStates: make(map[string]string),
+		subs:        make(map[int]chan Event),
 	}
+}
+
+func (f *FakeDriver) TerminalAgentState(_ context.Context, terminalID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.AgentStates[terminalID], nil
 }
 
 func (f *FakeDriver) ReportInstructions(_, laneID, phase string, round int) string {
@@ -495,6 +528,22 @@ func (f *FakeDriver) Stop(_ context.Context, req StopRequest) error {
 	defer f.mu.Unlock()
 	f.Stops = append(f.Stops, req)
 	return nil
+}
+
+func (f *FakeDriver) ReleaseSession(_ context.Context, sessionID string, _ ...bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Releases = append(f.Releases, sessionID)
+	return nil
+}
+
+func (f *FakeDriver) ReportOnlyNoWork(_ context.Context, ln Lane) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if ln.Branch == "" {
+		return false, nil
+	}
+	return !f.ReportOnlyBranchExists || f.ReportOnlyCommitsAhead == 0, nil
 }
 
 // SetReport scripts a phase report to be returned by ReadReport for terminalID.
