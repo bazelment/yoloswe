@@ -134,7 +134,7 @@ type RunControlParams struct {
 	Action string `json:"action" jsonschema:"required,enum=pause,enum=resume,enum=stop"`
 }
 
-// Control validates the action before passing it to the chat command backend.
+// Control validates and runs a pause, resume or stop command.
 func Control(ctx context.Context, command func(context.Context, string) (string, error), p RunControlParams) (string, error) {
 	switch p.Action {
 	case "pause", "resume", "stop":
