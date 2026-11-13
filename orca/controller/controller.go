@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
@@ -1403,7 +1405,7 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		}
 	}
 
-	if rep.Outcome == lane.OutcomeDone && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && rep.HeadSHA != "" && rep.HeadSHA == ln.BaseBranch {
+	if rep.Outcome == lane.OutcomeDone && curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && rep.HeadSHA != "" && c.reportHeadIsBase(ctx, ln, rep.HeadSHA) {
 		return c.completeReportOnlyLane(ctx, ln, ev)
 	}
 
@@ -1412,6 +1414,24 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 	}
 
 	return c.advanceByRecipe(ctx, ln, r, string(rep.Outcome), rep.Reason, rep.Breaks, ev)
+}
+
+// reportHeadIsBase resolves the configured base ref before comparing it with
+// the worker's reported commit. Older synthetic lanes may store a SHA directly,
+// so retain that fast path for persisted/test data.
+func (c *Controller) reportHeadIsBase(ctx context.Context, ln *lane.Lane, head string) bool {
+	if head == ln.BaseBranch {
+		return true
+	}
+	if strings.TrimSpace(ln.BaseBranch) == "" {
+		return false
+	}
+	dir := strings.TrimSpace(ln.Worktree)
+	if dir == "" {
+		dir = "."
+	}
+	resolved, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--verify", ln.BaseBranch+"^{commit}").Output()
+	return err == nil && strings.TrimSpace(string(resolved)) == head
 }
 
 func (c *Controller) completeReportOnlyLane(ctx context.Context, ln *lane.Lane, ev *store.Event) (store.EventClass, error) {
@@ -1688,7 +1708,7 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 			}
 
 			agent := curPhase.Agents[min(curAttempt-1, len(curPhase.Agents)-1)]
-			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: agent.Harness, Model: agent.Model, Effort: agent.Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, "fresh terminal after nudge")})
+			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: agent.Harness, Model: agent.Model, Effort: agent.Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, max(ln.Round, 1), "fresh terminal after nudge")})
 			if err != nil {
 				return store.EventClassUnclassified, err
 			}
@@ -1921,7 +1941,7 @@ func (c *Controller) startLanePhase(
 	agent := phase.Agents[agentIdx]
 
 	fromPhase := ln.Phase
-	brief := c.buildBrief(ctx, ln, r, phase, extraNote)
+	brief := c.buildBrief(ctx, ln, r, phase, round, extraNote)
 	actionKey := phaseActionKey(tool, ln.ID, phase.Name, round, attempt)
 
 	if phase.Name == recipe.PhaseIntegrate {
@@ -2032,7 +2052,7 @@ func (c *Controller) startLanePhase(
 	return nil
 }
 
-func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Recipe, phase recipe.Phase, extraNote string) string {
+func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Recipe, phase recipe.Phase, round int, extraNote string) string {
 	var parts []string
 	if ln.Title != "" {
 		parts = append(parts, ln.Title)
@@ -2053,7 +2073,7 @@ func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Re
 	if extraNote != "" {
 		parts = append(parts, extraNote)
 	}
-	reportInstructions := c.driver.ReportInstructions(c.cfg.RunID, ln.ID, phase.Name, ln.TerminalID)
+	reportInstructions := c.driver.ReportInstructions(c.cfg.RunID, ln.ID, phase.Name, round, ln.TerminalID)
 	brief := strings.Join(parts, "\n\n")
 	if r.Limits.MaxBriefBytes > 0 {
 		separator := "\n\n"
@@ -2062,13 +2082,31 @@ func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Re
 			available = 0
 		}
 		if len(brief) > available {
-			brief = brief[:available]
+			brief = truncateUTF8(brief, available)
 		}
 		if brief == "" {
 			return reportInstructions
 		}
 	}
 	return brief + "\n\n" + reportInstructions
+}
+
+func truncateUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	s = s[:maxBytes]
+	for s != "" && !utf8.ValidString(s) {
+		_, size := utf8.DecodeLastRuneInString(s)
+		if size == 0 {
+			return ""
+		}
+		s = s[:len(s)-size]
+	}
+	return s
 }
 
 func (c *Controller) resolveRecipe(ctx context.Context, ln *lane.Lane) (*recipe.Recipe, error) {

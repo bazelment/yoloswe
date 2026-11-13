@@ -389,7 +389,7 @@ type Event struct { //nolint:govet // wire-shaped event prioritizes readable fie
 type LaneDriver interface {
 	// ReportInstructions returns the backend-specific contract a terminal must
 	// follow before it considers a phase complete.
-	ReportInstructions(runID, laneID, phase, terminal string) string
+	ReportInstructions(runID, laneID, phase string, round int, terminal string) string
 	SpawnSession(ctx context.Context, req SpawnRequest) (SpawnResult, error)
 	StartPhaseTerminal(ctx context.Context, req StartPhaseRequest) (StartPhaseResult, error)
 	Steer(ctx context.Context, req SteerRequest) error
@@ -420,8 +420,8 @@ func NewFakeDriver() *FakeDriver {
 	}
 }
 
-func (f *FakeDriver) ReportInstructions(_, laneID, phase, terminal string) string {
-	return fmt.Sprintf("File the phase report for lane %s phase %s (terminal %s) using the fake driver's report input; the phase is not finished until the report is filed. Report outcome done, needs-swe, blocked, or needs-input, with HEAD and PR lines.", laneID, phase, terminal)
+func (f *FakeDriver) ReportInstructions(_, laneID, phase string, round int, terminal string) string {
+	return fmt.Sprintf("File the phase report for lane %s phase %s round %d (terminal %s) using the fake driver's report input; the phase is not finished until the report is filed. Report outcome done, needs-swe, blocked, or needs-input, with HEAD and PR lines.", laneID, phase, round, terminal)
 }
 
 func (f *FakeDriver) SpawnSession(_ context.Context, req SpawnRequest) (SpawnResult, error) {
