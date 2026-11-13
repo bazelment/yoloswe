@@ -1408,7 +1408,7 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		return c.completeReportOnlyLane(ctx, ln, ev)
 	}
 
-	if rep.Outcome == lane.OutcomeDone && isReviewPhase(curPhase) {
+	if (rep.Outcome == lane.OutcomeDone || rep.Outcome == lane.OutcomeNoChange) && isReviewPhase(curPhase) {
 		ln.ApprovalSHA = cmp.Or(rep.HeadSHA, ln.PRHead, ln.ApprovalSHA)
 	}
 
