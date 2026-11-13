@@ -1,0 +1,26 @@
+# gazelle:ignore
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "eval_test",
+    size = "large",
+    srcs = ["eval_test.go"],
+    env_inherit = [
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "ANTHROPIC_BASE_URL",
+        "NEBULA_LLM_KEY",
+        "LLM_GATEWAY_URL",
+        "ORCH_MODEL",
+        "ORCA_ROUTER_INNER_LOOP",
+    ],
+    gotags = ["integration"],
+    tags = [
+        "local",
+        "manual",
+    ],
+    deps = [
+        "//orca/model",
+        "//orca/router",
+    ],
+)

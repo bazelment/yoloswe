@@ -1,0 +1,724 @@
+[
+  {
+    "id": "owner-01",
+    "source_mail_id": "s:5e989814",
+    "text": "With the merge queue off, how should PRs whose base lags main get merged?",
+    "context": "",
+    "destinations": [
+      "concierge"
+    ],
+    "needs_clarification": false,
+    "rationale": "Asks for an explanation of current merge policy.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-02",
+    "source_mail_id": "s:d812ba85",
+    "text": "Chose b: No freshness check.\nNote: Owner answered B in the host terminal (the post card failed, FB-682).",
+    "context": "With the merge queue off, how should PRs whose base lags main get merged?",
+    "destinations": [
+      "answer-open-question"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit choice answers the freshness question.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-03",
+    "source_mail_id": "s:955816ee",
+    "text": "Host: drop the #3431 revert from the jump set; it won't be opened (pre-steps done). The jump set is #4222 plus the AUTO_RECOVER values PR. No reply needed.",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Removes a named item from the existing jump set.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-04",
+    "source_mail_id": "s:e8ed0e15",
+    "text": "OWNER RULE (Ming, 22:4xZ): nebula PRs need NO GitHub PR approval. A pr-polish (or swarm review) PASS on the exact head is enough to proceed.",
+    "context": "",
+    "destinations": [
+      "memory"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit standing rule for future PRs.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-05",
+    "source_mail_id": "s:cef359c1",
+    "text": "stay idle until my GO.",
+    "context": "",
+    "destinations": [
+      "controller"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicitly holds execution until a GO.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-06",
+    "source_mail_id": "s:ba4816a9",
+    "text": "I thought nebula has supported using github app to reduce polling api cost already",
+    "context": "",
+    "destinations": [
+      "concierge"
+    ],
+    "needs_clarification": false,
+    "rationale": "Questions an existing capability; no execution request.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-07",
+    "source_mail_id": "s:a42fadb2",
+    "text": "if we dispatch main as-is WITHOUT #4472, does it still carry #4456's 20Gi memory, and does storage keep 2 CPU requested with no limit (so it can still burst to the 8-core node)?",
+    "context": "",
+    "destinations": [
+      "concierge"
+    ],
+    "needs_clarification": false,
+    "rationale": "Asks what the current build would carry.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-08",
+    "source_mail_id": "s:27db884a",
+    "text": "does RUNNER_REFRESH_AFTER=0 stop a COLD wake from taking runner_upgrade_disk_boot, or does it only stop the periodic sleep/wake refresh loop?",
+    "context": "",
+    "destinations": [
+      "concierge"
+    ],
+    "needs_clarification": false,
+    "rationale": "Asks about existing refresh semantics.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-09",
+    "source_mail_id": "s:2f4e1eca",
+    "text": "does a transient store read error during recovery end in FAILED with no retry?",
+    "context": "",
+    "destinations": [
+      "concierge"
+    ],
+    "needs_clarification": false,
+    "rationale": "Asks how recovery currently behaves.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-10",
+    "source_mail_id": "s:17779a33",
+    "text": "a short status, please, in 5 lines or fewer. No need to stop what is running.\n- Cause check: what it showed.\n- Fix: committed? At what SHA?\n- The one real run: done? Result?\n- The series now running (auto2b): what it proves, and when it ends.\n- What still stands between you and the PR.",
+    "context": "",
+    "destinations": [
+      "concierge"
+    ],
+    "needs_clarification": false,
+    "rationale": "Requests progress and outstanding blockers.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-11",
+    "source_mail_id": "s:16f8816e",
+    "text": "Is it still lost? Is it a new class, or lane ml-ready-without-terminal's known one? Does it count against the \"0 lost sessions\" bar?",
+    "context": "",
+    "destinations": [
+      "concierge"
+    ],
+    "needs_clarification": false,
+    "rationale": "Requests status of a known lost-session finding.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-12",
+    "source_mail_id": "s:7516aeef",
+    "text": "Did S1's acked-turn replay (#2394, cold path) run on that wake?",
+    "context": "",
+    "destinations": [
+      "concierge"
+    ],
+    "needs_clarification": false,
+    "rationale": "Requests evidence about a particular wake.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-13",
+    "source_mail_id": "s:f18f300a",
+    "text": "say how a wake behaves when the node cannot hold the snapshot's base (the case you name as not covered). Does the session fail permanently, or is the wake placed or retried elsewhere?",
+    "context": "",
+    "destinations": [
+      "concierge"
+    ],
+    "needs_clarification": false,
+    "rationale": "Asks about behavior under an explicitly named condition.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-14",
+    "source_mail_id": "s:8145f00e",
+    "text": "does your branch stop this retry (the worker exits, or follows the new runtime), yes or no, and where in the code.",
+    "context": "",
+    "destinations": [
+      "concierge"
+    ],
+    "needs_clarification": false,
+    "rationale": "Requests an explanation of existing branch behavior.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-15",
+    "source_mail_id": "s:820922eb",
+    "text": "Chose b: Resume us-south1 only.",
+    "context": "Resume the two paused agent-journey probe schedules (us-west1 via cell home, us-south1)? Session tokens get 403 on enable. (more in details)\n\n#4889 (agent journey probes) is live on dev in deploy 7662420b (rolled and verified 12:33Z). Its runbook (docs/runbooks/agent-journey-probe.md) has the run orchestrator activate the timers after merge. I created both as paused proposals:\n- agent-journey-us-west1: s:15fb6d1a. Created with --cell home: since #5023 the API refuses --cell us-west1 and accepts ",
+    "destinations": [
+      "answer-open-question"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit selection answers a waiting owner question.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-16",
+    "source_mail_id": "s:c043ea62",
+    "text": "a) Build now, slice 1 first (recommended)",
+    "context": "Build inline owner asks (answer a swarm's ask as a form inside its post), per design #2832? (more in details)\n\nWhy now: the design is reviewed (#2832). Daily and status posts keep asking you things you can only answer by mail or chat. Slice 1 alone already makes swarm asks complete and checked.\nDefault if unanswered: nothing gets built. The PR stays open.\nOptions:\na) Build now, slice 1 first (recommended). Slice 1 adds the ask spec plus CLI check (M). Then come 2 ask card (M), 3 asks in posts in",
+    "destinations": [
+      "answer-open-question"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit selection answers a waiting owner question.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-17",
+    "source_mail_id": "s:6e274359",
+    "text": "b: coded cap (recommended, default)",
+    "context": "Ask 19 (by 23:00Z): S2 crash guarantee for fsync-acked disk writes? (a) accept measured <0.55 s window, (b) coded 1 s cap [rec, default], (c) publish on every flush. Not one-way. (more in details)\n\nAsk 19 asks one thing: what crash guarantee do we promise for disk writes a session has fsynced, once the S2 durable disk is on?\n\nDecide by 23:00Z tonight (2026-11-02). Why now: the S2 re-enable evidence must state this contract plainly, and the durability work it needs must be built and proven before",
+    "destinations": [
+      "answer-open-question"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit selection answers a waiting owner question.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-18",
+    "source_mail_id": "s:f1a0e3f0",
+    "text": "a) re-enable with keep-parked + data protection; fund the anchor fix (rec)",
+    "context": "Q4 FC mobility: S2 refuses a restore with no matching full copy: may S2 re-enable rely on keep-parked? (rec a; default a at 05:30Z) (more in details)\n\n**Q4. When S2 refuses a restore and no complete disk copy matches, what may S2's re-enable rely on?** Answer by 05:30Z.\n\n**Why now.** Turning S2 back on in both dev cells (your later one-way call) needs a defined exit for this case. Today's repair schedule and the volume grade (07:35Z) are planned around your answer.\n\n**The case.** The S2 repair (",
+    "destinations": [
+      "answer-open-question"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit selection answers a waiting owner question.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-19",
+    "source_mail_id": "s:7e1ea906",
+    "text": "a) Both: rotate after a short scoping lane, plus separate runner user (recommended)",
+    "context": "FC 2: after the runner-memory fix (#2723), rotate guest-readable credentials and/or run the session runner as its own user? (more in details)\n\n**Decision:** after this morning's security fix, do we also (A) rotate the credentials a session's code could have read, and/or (B) run the session runner under its own Linux user?\n\n**What happened:**\n- Until 08:13Z today on dev, code inside a Firecracker session (the guest user, uid 1000) could read the session runner's process memory. That memory holds ",
+    "destinations": [
+      "answer-open-question"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit selection answers a waiting owner question.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-20",
+    "source_mail_id": "s:f152eb95",
+    "text": "a) Yes, next dev deploy slot (recommended)",
+    "context": "FC 1: turn on S1 transcript log + session lease in every nebula-dev release, west included (PR #2762)? (more in details)\n\n**Decision:** turn on the S1 transcript log and the session lease for every nebula-dev release that runs Firecracker code sessions, the west home deployment included. That is PR #2762, a chart values change.\n\n**What these are:**\n- S1 is a durable log of each session's conversation, so no acknowledged turn is lost when a node or Pod dies.\n- The session lease makes sure only on",
+    "destinations": [
+      "answer-open-question"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit selection answers a waiting owner question.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-21",
+    "source_mail_id": "s:200e5074",
+    "text": "(a) yes, apply #3229 then",
+    "context": "D4 (ONE-WAY, spend): if #3232 misses 11-05 20Z, apply south XFS pools #3229 instead? Default (b) no (more in details)\n\nAsk D4 (ONE-WAY: infra apply + spend; asked now so it's ready if needed). B3 needs trusted live copies. The planned route is #3232 (park live guests, the FB-508 fix). If #3232 fails review by 11-05 ~20Z, may the host apply the south XFS FC pools (#3229) as the alternative route?\nThat's new node pools in south, extra spend while both exist, and reversible only by a second apply. ",
+    "destinations": [
+      "answer-open-question"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit selection answers a waiting owner question.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-22",
+    "source_mail_id": "s:14bd0a16",
+    "text": "(b) 24 h",
+    "context": "D2: B3 soak before the 100% GO? Rec (a) 48 h incl. 2 weekday peaks (more in details)\n\nAsk D2 (two-way). B3 soak length before the 100% GO. B3's earliest GO is 11-07 ~16Z, a Saturday.\n(a) Recommended, default. 48 h covering 2 US weekday peaks. In practice B3 runs through Monday 11-09's peak, so the earliest 100% is 11-09 ~16Z.\n(b) 24 h. Faster, but likely only weekend load is seen before 100%.\n(c) A fixed calendar date you name.",
+    "destinations": [
+      "answer-open-question"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit selection answers a waiting owner question.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-23",
+    "source_mail_id": "s:c9394081",
+    "text": "(a) allow <=0.89 for 29v and 29v+1 only",
+    "context": "D1: let 29v and 29v+1 deploy at DB CPU <=0.89 (not 0.85)? Rec (a) (more in details)\n\nAsk D1 (two-way). The south1 child's critical path, 11-04 06Z: earliest B3 11-07 ~16Z, 100% 11-09 ~16Z, west retired 11-16 ~18Z.\nWhy now: deploy preflight requires DB CPU 10-min max <= 0.85. It has failed since 04:1xZ (max 0.89; 0 minutes >= 0.90). It blocks 29v and 29v+1 (#3238+#3230), which are themselves DB-CPU fixes (#3214 lease loop, pool re-list).\n(a) Recommended. For 29v and 29v+1 only, the host may dispa",
+    "destinations": [
+      "answer-open-question"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit selection answers a waiting owner question.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-24",
+    "source_mail_id": "s:363492c6",
+    "text": "The owner moved T to 01:00Z (train 2'' c98fed45 went first).",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Changes the scheduled cutover time.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-25",
+    "source_mail_id": "s:971a824b",
+    "text": "add s1-main's #3431 revert PR to the jump set, with #4222 and the AUTO_RECOVER values PR. Train 1 waits for all three.",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Adds a dependency to an existing jump set.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-26",
+    "source_mail_id": "s:ccae2a18",
+    "text": "If #5047 stays as the build half, the design must narrow it to affected images (Bazel rdeps of the changed files, per image), with unchanged images reusing the last digest in the manifest. Not a full build every commit.",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Revises scope of an existing build design.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-27",
+    "source_mail_id": "s:5b45084a",
+    "text": "The order is now: 7354b7c8 via the legacy path (dispatched ~17:49Z, LIVE ~18:45-19:00Z) then KEEP; then 4225537b alone (~20:30Z) then KEEP; then the #4344/#4326 merge.",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Changes the execution order.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-28",
+    "source_mail_id": "s:4f1ef2b0",
+    "text": "the inner loop for slice 1 should be: bazel test //nebula/apiserver/internal/api/handlers/codesession:all (seconds to minutes), not the whole handlers package.",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Corrects the validation scope.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-29",
+    "source_mail_id": "s:a70e43c3",
+    "text": "the Buildbarn worker ceiling is 64, not 40.",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Changes the resource ceiling in an existing plan.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-30",
+    "source_mail_id": "s:5df560c0",
+    "text": "no alerting work. Don't add Cloud Monitoring alert policies or notification channels, and don't make anything",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Removes alerting work from the current scope.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-31",
+    "source_mail_id": "s:06b0d600",
+    "text": "Keep theirs and DON'T fund a second one.",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Changes lane ownership to avoid duplicate work.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-32",
+    "source_mail_id": "s:6979b317",
+    "text": "keep code_session_resume.go's retry semantics as they are this round, and do not take the follow-up.",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Defers a follow-up and preserves current scope.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-33",
+    "source_mail_id": "s:77a9722c",
+    "text": "Rule from now on: every open PR your run owns is, within 1 h and then on every tick, either MERGED (review PASS, no CI wait), ARMED, CLOSED, or carries a dated 'Hold: <reason>; owner <who>; until <when>' line. A draft older than 12 h without a Hold line is a defect.",
+    "context": "",
+    "destinations": [
+      "memory"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit recurring PR handling rule.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-34",
+    "source_mail_id": "s:b050519d",
+    "text": "Standing rule for your run from now: recover-workspace then release for your own finished lanes needs no ask; just log the backup ref.",
+    "context": "",
+    "destinations": [
+      "memory"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit future permission rule.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-35",
+    "source_mail_id": "s:e8094d70",
+    "text": "nebula PRs no longer wait for CI. Merge on the local gate (scripts/prepush.sh, run before every push) plus review PASS pinned to the head.",
+    "context": "",
+    "destinations": [
+      "memory"
+    ],
+    "needs_clarification": false,
+    "rationale": "Standing merge policy.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-36",
+    "source_mail_id": "s:51f8ca64",
+    "text": "Your new rule (ask, or wake first, before releasing an asleep session) is right.",
+    "context": "",
+    "destinations": [
+      "memory"
+    ],
+    "needs_clarification": false,
+    "rationale": "Affirms a future release rule.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-37",
+    "source_mail_id": "s:e22c4206",
+    "text": "Sessions are named by 8-char sha256 hashes (s:xxxxxxxx), not raw id prefixes. The incident post is public.",
+    "context": "",
+    "destinations": [
+      "memory"
+    ],
+    "needs_clarification": false,
+    "rationale": "Standing privacy constraint for public incident evidence.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-38",
+    "source_mail_id": "s:0720520b",
+    "text": "Window priority must be a timed, named hold that expires on its own: \"hold main until T, reason, by whom\". Never an open-ended freeze; the owner rejected merge freezes.",
+    "context": "",
+    "destinations": [
+      "memory"
+    ],
+    "needs_clarification": false,
+    "rationale": "Standing timed-hold requirement.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-39",
+    "source_mail_id": "s:3efa0a62",
+    "text": "Do not hand over while a series, driver or long test you need is running. Finish it, then send the HANDOVER. I will not stop your terminal before your HANDOVER mail.",
+    "context": "",
+    "destinations": [
+      "memory"
+    ],
+    "needs_clarification": false,
+    "rationale": "Standing handover rule protecting running processes.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-40",
+    "source_mail_id": "s:ae7627ff",
+    "text": "keep bucket objects under `o/tb-fb476-cold-wake/`, not `o/fv-p2r-holder-fence/` (that is another lane's prefix; never write there).",
+    "context": "",
+    "destinations": [
+      "memory"
+    ],
+    "needs_clarification": false,
+    "rationale": "Persistent ownership constraint on object prefixes.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-41",
+    "source_mail_id": "s:6063e7d4",
+    "text": "Ming's standing rule is still swe AND review = codex gpt-6.1-sol medium first, so put clean/review back to Codex-first as soon as your 429s stop.",
+    "context": "",
+    "destinations": [
+      "memory"
+    ],
+    "needs_clarification": false,
+    "rationale": "Reiterates standing model-selection rule.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-42",
+    "source_mail_id": "s:12644ffb",
+    "text": "find the culprit commit and revert or fix-forward within 30 min. Check whether heal-ci has claimed it, and don't duplicate. Tell me the culprit and ETA.",
+    "context": "",
+    "destinations": [
+      "dispatcher"
+    ],
+    "needs_clarification": false,
+    "rationale": "New deterministic failure investigation and fix request.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-43",
+    "source_mail_id": "s:71d1eeb9",
+    "text": "Fix in the nebula-swarm skill: sw_step / sw_merge / pr_arm refuse to arm or merge when any check on the exact head is failing (pending is fine, so it waits), and name the red check. Add a test. Mail me the PR and ETA.",
+    "context": "",
+    "destinations": [
+      "dispatcher"
+    ],
+    "needs_clarification": false,
+    "rationale": "Requests a new guard implementation.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-44",
+    "source_mail_id": "s:0e601a05",
+    "text": "Run scripts/stale_prs.py --mail once now, listing only runs that have a now-invalid Hold, telling each to re-post the Hold with an ISO time or merge or close. No --close.",
+    "context": "",
+    "destinations": [
+      "dispatcher"
+    ],
+    "needs_clarification": false,
+    "rationale": "One-shot script execution request.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-45",
+    "source_mail_id": "s:b61f8a50",
+    "text": "Run an exact-head review; merge on PASS plus green checks (check them by hand until your guard lands).",
+    "context": "",
+    "destinations": [
+      "dispatcher"
+    ],
+    "needs_clarification": false,
+    "rationale": "Requests review and handling of a specific PR.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-46",
+    "source_mail_id": "s:31fea6be",
+    "text": "fund one small lane.",
+    "context": "",
+    "destinations": [
+      "dispatcher"
+    ],
+    "needs_clarification": false,
+    "rationale": "Funds a new small fix lane.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-47",
+    "source_mail_id": "s:3b956663",
+    "text": "fix datagarden's permissions and ingestion. Your lane datagarden-nebula-freshness owns both; make it p1.",
+    "context": "",
+    "destinations": [
+      "dispatcher"
+    ],
+    "needs_clarification": false,
+    "rationale": "Assigns a concrete permissions and ingestion fix.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-48",
+    "source_mail_id": "s:a893225a",
+    "text": "Retry it with round+1 now.",
+    "context": "",
+    "destinations": [
+      "dispatcher"
+    ],
+    "needs_clarification": false,
+    "rationale": "Retries a failed worker turn.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-49",
+    "source_mail_id": "s:d4c5ae37",
+    "text": "Run your one nebula slack check and close FB-432 with the result.",
+    "context": "",
+    "destinations": [
+      "dispatcher"
+    ],
+    "needs_clarification": false,
+    "rationale": "Runs a concrete existing verification.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-50",
+    "source_mail_id": "s:70bc1813",
+    "text": "keep the stop rule (it's the owner's), but PAUSE the daily read. Don't move it to the host.",
+    "context": "",
+    "destinations": [
+      "controller"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit pause of the daily read.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-51",
+    "source_mail_id": "s:510b65b6",
+    "text": "Stop the 10-run repeat now (kill that background job by its PID).",
+    "context": "",
+    "destinations": [
+      "controller"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit stop of a running repeat.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-52",
+    "source_mail_id": "s:a6f980be",
+    "text": "For the next 60 min (until 20:00Z): start NO new lanes or sessions. Lanes already running continue. Queue new work and start it after 20:00Z, staggered (at most 1 new lane per 5 min per run).",
+    "context": "",
+    "destinations": [
+      "controller"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit temporary admission pause.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-53",
+    "source_mail_id": "s:10e2dcf0",
+    "text": "OWNER DECISION: s:25537b39 recovery = HOLD. No D1/D2/D3/D4: no recover-workspace, pin, wake or member message. The session stays failed with its hold and all generations intact. Keep it out of pin-all (already excluded).",
+    "context": "",
+    "destinations": [
+      "controller"
+    ],
+    "needs_clarification": false,
+    "rationale": "Explicit hold on recovery execution.",
+    "excerpt": true
+  },
+  {
+    "id": "owner-54",
+    "source_mail_id": "s:06a786c6",
+    "text": "a",
+    "context": "",
+    "destinations": [
+      "answer-open-question"
+    ],
+    "needs_clarification": true,
+    "rationale": "Bare option without a resolvable open question needs clarification.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-55",
+    "source_mail_id": "s:ab35d416",
+    "text": "a",
+    "context": "",
+    "destinations": [
+      "answer-open-question"
+    ],
+    "needs_clarification": true,
+    "rationale": "Bare option without context needs clarification.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-56",
+    "source_mail_id": "s:7fcf503d",
+    "text": "merge",
+    "context": "",
+    "destinations": [
+      "dispatcher"
+    ],
+    "needs_clarification": true,
+    "rationale": "Merge request has no named target or open question.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-57",
+    "source_mail_id": "s:93acf590",
+    "text": "merge",
+    "context": "",
+    "destinations": [
+      "dispatcher"
+    ],
+    "needs_clarification": true,
+    "rationale": "Merge request cannot identify a target in isolation.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-58",
+    "source_mail_id": "s:7929c93e",
+    "text": "files cost approved",
+    "context": "",
+    "destinations": [
+      "answer-open-question"
+    ],
+    "needs_clarification": true,
+    "rationale": "Approval lacks the referenced scope or question.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-59",
+    "source_mail_id": "s:cd8c606d",
+    "text": "Host: YES, fund A+B as one lane, starting after #4849 merges. Also pull item #5 (pre-merge check against fresh main for classes 3+4) forward to start right after A+B rather than 11-13: semantic merge races and main-only tests caused most of the 439 red minutes. Each lands under the PR rule.",
+    "context": "",
+    "destinations": [
+      "dispatcher",
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Two independent requests: fund work and change item ordering.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-60",
+    "source_mail_id": "s:b050519d",
+    "text": "Host: yes to both: recover-workspace 5b0fe5d2 and 481f35b9 (your own lane sessions; it backs up to refs, non-destructive), then release --backup. Standing rule for your run from now: recover-workspace then release for your own finished lanes needs no ask; just log the backup ref.",
+    "context": "",
+    "destinations": [
+      "answer-open-question",
+      "memory"
+    ],
+    "needs_clarification": false,
+    "rationale": "Immediate yes to both plus a separate standing rule.",
+    "excerpt": false
+  }
+]
