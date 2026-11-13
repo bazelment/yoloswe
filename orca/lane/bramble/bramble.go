@@ -21,24 +21,26 @@ type Client interface {
 	ListSessions(context.Context) ([]br.Session, error)
 }
 type Config struct {
-	Client       Client
-	RunDir       string
-	Repo         string
-	Parent       string
-	PollInterval time.Duration
+	Client          Client
+	RunDir          string
+	Repo            string
+	Parent          string
+	PollInterval    time.Duration
+	InactivityAfter time.Duration
 }
 type Driver struct { //nolint:govet // compact driver configuration
-	c       Client
-	runDir  string
-	poll    time.Duration
-	repo    string
-	parent  string
-	phases  map[string]string
-	rounds  map[string]int
-	lanes   map[string]string
-	runs    map[string]string
-	runDirs map[string]string
-	mu      sync.RWMutex
+	c               Client
+	runDir          string
+	poll            time.Duration
+	repo            string
+	parent          string
+	phases          map[string]string
+	rounds          map[string]int
+	lanes           map[string]string
+	runs            map[string]string
+	runDirs         map[string]string
+	inactivityAfter time.Duration
+	mu              sync.RWMutex
 }
 
 var _ lane.LaneDriver = (*Driver)(nil)
@@ -50,7 +52,10 @@ func New(cfg Config) (*Driver, error) {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 250 * time.Millisecond
 	}
-	return &Driver{c: cfg.Client, runDir: cfg.RunDir, repo: cfg.Repo, parent: cfg.Parent, poll: cfg.PollInterval, phases: map[string]string{}, rounds: map[string]int{}, lanes: map[string]string{}, runs: map[string]string{}, runDirs: map[string]string{}}, nil
+	if cfg.InactivityAfter <= 0 {
+		cfg.InactivityAfter = time.Minute
+	}
+	return &Driver{c: cfg.Client, runDir: cfg.RunDir, repo: cfg.Repo, parent: cfg.Parent, poll: cfg.PollInterval, inactivityAfter: cfg.InactivityAfter, phases: map[string]string{}, rounds: map[string]int{}, lanes: map[string]string{}, runs: map[string]string{}, runDirs: map[string]string{}}, nil
 }
 func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
 	return d.start(ctx, req)
@@ -168,6 +173,10 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 						return
 					}
 					reported[reportKey] = rep.Raw
+					// A phase report is a lifecycle transition even when the
+					// backend keeps the same status (for example, waiting across
+					// rounds). Re-arm status emission for the new round.
+					delete(lastStatus, s.ID)
 					lastActivity = time.Now()
 				}
 				kind := lane.EventExited
@@ -197,7 +206,7 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				lastStatus[s.ID] = status
 				lastActivity = time.Now()
 			}
-			if time.Since(lastActivity) >= time.Minute {
+			if time.Since(lastActivity) >= d.inactivityAfter {
 				select {
 				case out <- lane.Event{Kind: lane.EventNoActivity, RunID: runID, Since: lastActivity}:
 				case <-ctx.Done():

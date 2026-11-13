@@ -1,10 +1,37 @@
 package lane_test
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/bazelment/yoloswe/orca/lane"
 )
+
+func TestFakeDriverWatchEmitsEveryEventKind(t *testing.T) {
+	t.Parallel()
+	cases := []lane.EventKind{
+		lane.EventPhaseReported, lane.EventTurnEndedNoReport, lane.EventWaitingForInput,
+		lane.EventExited, lane.EventQuotaFailure, lane.EventAuthFailure, lane.EventNoActivity,
+	}
+	for _, kind := range cases {
+		t.Run(string(kind), func(t *testing.T) {
+			drv := lane.NewFakeDriver()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			watch := drv.Watch(ctx, "run-1")
+			drv.Emit(lane.Event{Kind: kind, RunID: "run-1", Since: time.Now()})
+			select {
+			case got := <-watch:
+				if got.Kind != kind {
+					t.Fatalf("kind = %q, want %q", got.Kind, kind)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for event")
+			}
+		})
+	}
+}
 
 func TestLaneAttemptKeysAndValidation(t *testing.T) {
 	t.Parallel()
