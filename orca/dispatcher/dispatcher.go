@@ -1475,6 +1475,28 @@ func dispatcherOwnerPlainlyStatedNoNewWork(quote string) bool {
 	return false
 }
 
+func isDispatcherWordChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func dispatcherContainsWholeWord(s, word string) bool {
+	for start := 0; start < len(s); {
+		idx := strings.Index(s[start:], word)
+		if idx < 0 {
+			return false
+		}
+		pos := start + idx
+		end := pos + len(word)
+		leftOK := pos == 0 || !isDispatcherWordChar(s[pos-1])
+		rightOK := end == len(s) || !isDispatcherWordChar(s[end])
+		if leftOK && rightOK {
+			return true
+		}
+		start = pos + 1
+	}
+	return false
+}
+
 func (d *Dispatcher) validateDispatcherNoteFact(ctx context.Context, runID string, batchEvents []store.Event, fact string) error {
 	factLower := strings.ToLower(strings.TrimSpace(fact))
 	claimsNoNewWork := false
@@ -1484,7 +1506,8 @@ func (d *Dispatcher) validateDispatcherNoteFact(ctx context.Context, runID strin
 			break
 		}
 	}
-	if !claimsNoNewWork {
+	noteMentionsHold := claimsNoNewWork || (dispatcherContainsWholeWord(factLower, "hold") && !strings.Contains(factLower, "lease"))
+	if !noteMentionsHold {
 		return nil
 	}
 	var ownerSources strings.Builder
@@ -1507,11 +1530,18 @@ func (d *Dispatcher) validateDispatcherNoteFact(ctx context.Context, runID strin
 			}
 		}
 	}
-	if !dispatcherOwnerPlainlyStatedNoNewWork(ownerSources.String()) {
-		if strings.Contains(factLower, "keep the hold") {
-			return &invariantViolationError{msg: "directive.note [run]: 'keep the hold' on an adopted run means keep orca's lease on the run, not a standing rule blocking work"}
-		}
+	quoteText := ownerSources.String()
+	quoteLower := strings.ToLower(quoteText)
+	quoteMentionsLeaseHold := (strings.Contains(quoteLower, "keep the hold") ||
+		strings.Contains(quoteLower, "keep hold") ||
+		strings.Contains(quoteLower, "hold on the run") ||
+		strings.Contains(quoteLower, "hold on run"))
+	ownerPlainlyStated := dispatcherOwnerPlainlyStatedNoNewWork(quoteText)
+	if claimsNoNewWork && !ownerPlainlyStated {
 		return &invariantViolationError{msg: "directive.note [run]: cannot block new lanes or work unless the owner stated it plainly (in an adopted run, 'hold' means orca's lease on the run)"}
+	}
+	if quoteMentionsLeaseHold && noteMentionsHold && !ownerPlainlyStated {
+		return &invariantViolationError{msg: "directive.note [run]: 'keep the hold' on an adopted run means keep orca's lease on the run, not a standing rule blocking work"}
 	}
 	return nil
 }

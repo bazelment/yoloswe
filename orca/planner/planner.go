@@ -1687,8 +1687,7 @@ func PreserveAdoptedObjective(run store.Run, proposedObjective, proposedPlanRef 
 func ExtractObjectivePlanRefs(objective string) []string {
 	var out []string
 	for _, line := range strings.Split(objective, "\n") {
-		trimmed := strings.TrimSpace(line)
-		clean := strings.TrimLeft(trimmed, "-* \t")
+		clean := strings.TrimSpace(line)
 		lower := strings.ToLower(clean)
 		for _, prefix := range []string{"plan path:", "plan file:", "plan:"} {
 			if strings.HasPrefix(lower, prefix) {

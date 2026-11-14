@@ -1560,14 +1560,13 @@ func (s *runLedgerSync) SyncAll(ctx context.Context, lanes []lane.Lane) error {
 	return errors.Join(errs...)
 }
 
-// onLockLedgerContention, when set by tests, is invoked the first time
-// lockLedgerFile observes EWOULDBLOCK/EAGAIN so tests can release a held lock
-// deterministically without sleeping.
-var onLockLedgerContention func()
-
 // lockLedgerFile acquires an exclusive flock on state.json.lock, retrying
 // briefly under transient contention before returning an error.
 func lockLedgerFile(lock *os.File) error {
+	return lockLedgerFileWith(lock, nil)
+}
+
+func lockLedgerFileWith(lock *os.File, onContention func()) error {
 	deadline := time.Now().Add(2 * time.Second)
 	notified := false
 	for {
@@ -1578,9 +1577,9 @@ func lockLedgerFile(lock *os.File) error {
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 			return fmt.Errorf("lock host ledger: %w", err)
 		}
-		if !notified && onLockLedgerContention != nil {
+		if !notified && onContention != nil {
 			notified = true
-			onLockLedgerContention()
+			onContention()
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("lock host ledger: %w", err)

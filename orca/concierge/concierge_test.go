@@ -906,6 +906,36 @@ func TestConcierge_KeepTheHoldOnAdoptedRunCreatesNoStandingNoNewLanesRule(t *tes
 	if len(dispResLease.Rejected) != 0 {
 		t.Fatalf("expected factual lease hold note to be allowed, got Rejected=%+v", dispResLease.Rejected)
 	}
+	// A dispatcher note that uses "hold" as a work block ("Keep the hold: don't advance m3") is rejected when the owner only said "keep the hold".
+	dispClientBlockHold := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_disp_block_hold", dispatcher.ToolDirectiveNote, json.RawMessage(`{"id":"note-block-hold","fact":"Keep the hold: don't advance m3"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Acknowledged.")),
+		},
+	)
+	dispBlockHold := dispatcher.New(dispatcher.Config{}, st, drv, clk, dispClientBlockHold)
+	dispResBlockHold, err := dispBlockHold.Dispatch(ctx, adoptedRunID, []store.Event{
+		{
+			ID:      "ev-owner-block-hold",
+			RunID:   adoptedRunID,
+			Kind:    store.EventOwnerMessage,
+			Class:   store.EventClassJudgment,
+			Source:  "owner",
+			Summary: ownerQuote,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Dispatch block hold note: %v", err)
+	}
+	if len(dispResBlockHold.Rejected) != 1 {
+		t.Fatalf("expected work-blocking 'Keep the hold: don't advance m3' note to be rejected, got Rejected=%+v", dispResBlockHold.Rejected)
+	}
 	dispClient3 := model.NewFakeClient(
 		model.Response{
 			StopReason: model.StopReasonToolUse,

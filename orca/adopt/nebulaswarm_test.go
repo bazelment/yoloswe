@@ -1375,15 +1375,15 @@ func TestAdoptObjectiveAndCheckpointHelpers(t *testing.T) {
 	}
 	unconfinedRun := Run{
 		Dir:       dir,
-		Objective: "# Goal\nPlan: /etc/passwd\nPlan: ../outside.md\nPlan: sub/future-plan.md\nNext: staff m4\n",
+		Objective: "# Goal\nPlan: /etc/passwd\n- Plan: /etc/passwd\n* Plan: ../outside.md\nPlan: ../outside.md\nPlan: sub/future-plan.md\nNext: staff m4\n",
 	}
 	if full := unconfinedRun.FullObjective(); strings.Contains(full, "/etc/passwd") || strings.Contains(full, "../outside.md") || !strings.Contains(full, "Plan: sub/future-plan.md") {
 		t.Fatalf("FullObjective failed to strip unconfined Plan: lines or dropped safe relative Plan: line:\n%s", full)
 	}
-	if got := extractPlanPath(dir, "Plan: sub/future-plan.md\n"); got != filepath.Join(dir, "sub", "future-plan.md") {
-		t.Fatalf("extractPlanPath(nonexistent safe relative plan) = %q, want %q", got, filepath.Join(dir, "sub", "future-plan.md"))
+	if got := extractPlanPath(dir, "Plan: sub/future-plan.md\nSee docs/my-plan.md for background.\n"); got != filepath.Join(dir, "sub", "future-plan.md") {
+		t.Fatalf("extractPlanPath(nonexistent safe relative plan with incidental .md) = %q, want %q", got, filepath.Join(dir, "sub", "future-plan.md"))
 	}
-	if refs := planner.ExtractObjectivePlanRefs("Plan: docs/a.md\nPlan path: docs/b.md\nPlan file: post:286c9d4f-9da3-4787-aa66-bd97aa21f947\nPlan: ../escape.md\n"); len(refs) != 3 {
+	if refs := planner.ExtractObjectivePlanRefs("Plan: docs/a.md\nPlan path: docs/b.md\nPlan file: post:286c9d4f-9da3-4787-aa66-bd97aa21f947\n- Plan: /etc/passwd\nPlan: ../escape.md\n"); len(refs) != 3 {
 		t.Fatalf("ExtractObjectivePlanRefs returned %v, want 3 refs", refs)
 	}
 	adoptedRun := store.Run{
@@ -1427,7 +1427,7 @@ func TestAdoptObjectiveAndCheckpointHelpers(t *testing.T) {
 		t.Fatalf("ledgerPhase(integrate, [swe,review], '') = %q, want review", got)
 	}
 
-	// 4. checkpoint !found branch for subagent-swarm writes sessions and spawn.json, and lockLedgerFile retries under brief contention.
+	// 4. checkpoint !found branch for subagent-swarm writes sessions and spawn.json, and lockLedgerFileWith retries under brief contention.
 	lockFile, err := os.OpenFile(filepath.Join(dir, "state.json.lock"), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		t.Fatal(err)
@@ -1435,10 +1435,15 @@ func TestAdoptObjectiveAndCheckpointHelpers(t *testing.T) {
 	if err := lockLedgerFile(lockFile); err != nil {
 		t.Fatal(err)
 	}
-	onLockLedgerContention = func() {
-		_ = lockFile.Close()
+	contender, err := os.OpenFile(filepath.Join(dir, "state.json.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
 	}
-	defer func() { onLockLedgerContention = nil }()
+	defer contender.Close()
+	if err := lockLedgerFileWith(contender, func() { _ = lockFile.Close() }); err != nil {
+		t.Fatalf("lockLedgerFileWith under brief contention failed: %v", err)
+	}
+	_ = contender.Close()
 	newLane := lane.Lane{
 		ID:         "new-lane",
 		RunID:      "run-1",
@@ -1452,9 +1457,8 @@ func TestAdoptObjectiveAndCheckpointHelpers(t *testing.T) {
 		Terminals:  map[string]string{"swe": "term-new"},
 	}
 	if err := checkpoint(dir, []lane.Lane{newLane}); err != nil {
-		t.Fatalf("checkpoint with new lane under brief lock contention failed: %v", err)
+		t.Fatalf("checkpoint with new lane failed: %v", err)
 	}
-	onLockLedgerContention = nil
 	if !fileExists(filepath.Join(dir, "new-lane.swe.spawn.json")) {
 		t.Fatal("expected checkpoint(!found) for subagent-swarm to write new-lane.swe.spawn.json")
 	}

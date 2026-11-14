@@ -162,7 +162,7 @@ func sanitizeObjectivePlanLines(dir, obj string) string {
 	lines := strings.Split(obj, "\n")
 	keep := make([]string, 0, len(lines))
 	for _, line := range lines {
-		if m := explicitPlanLineRE.FindStringSubmatch(line); len(m) == 2 {
+		if m := sanitizePlanLineRE.FindStringSubmatch(line); len(m) == 2 {
 			if resolveSafePlanRef(dir, m[1]) == "" {
 				continue
 			}
@@ -443,6 +443,7 @@ func Read(dir string) (Run, error) {
 
 var (
 	explicitPlanLineRE = regexp.MustCompile(`(?im)^\s*plan(?:\s+file|\s+path)?\s*[:=]\s*([^\s` + "`" + `"',;()<>]+)`)
+	sanitizePlanLineRE = regexp.MustCompile(`(?im)^\s*(?:[-*+]\s*)?plan(?:\s+file|\s+path)?\s*[:=]\s*([^\s` + "`" + `"',;()<>]+)`)
 	markdownPathRE     = regexp.MustCompile(`([^\s` + "`" + `"',;()<>]+\.md)\b`)
 )
 
@@ -532,6 +533,13 @@ func extractPlanPath(dir string, sources ...string) string {
 		}
 	}
 	for _, src := range sources {
+		if m := explicitPlanLineRE.FindStringSubmatch(src); len(m) == 2 {
+			if p := resolveSafePlanRef(dir, m[1]); p != "" {
+				return p
+			}
+		}
+	}
+	for _, src := range sources {
 		for _, m := range markdownPathRE.FindAllStringSubmatch(src, -1) {
 			if len(m) == 2 {
 				if p := resolveCandidatePlanPath(dir, m[1]); p != "" {
@@ -542,13 +550,6 @@ func extractPlanPath(dir string, sources ...string) string {
 	}
 	if dir != "" && fileExists(filepath.Join(dir, "PLAN.md")) {
 		return filepath.Join(dir, "PLAN.md")
-	}
-	for _, src := range sources {
-		if m := explicitPlanLineRE.FindStringSubmatch(src); len(m) == 2 {
-			if p := resolveSafePlanRef(dir, m[1]); p != "" {
-				return p
-			}
-		}
 	}
 	return ""
 }

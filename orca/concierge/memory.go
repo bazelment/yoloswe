@@ -275,7 +275,7 @@ func ValidateStandingRule(ruleText, ownerQuote string) error {
 	ruleLower := strings.ToLower(strings.TrimSpace(ruleText))
 	quoteLower := strings.ToLower(strings.TrimSpace(ownerQuote))
 	claimsNoNewWork := ClaimsNoNewWork(ruleText)
-	ruleMentionsHold := claimsNoNewWork || containsWholeWord(ruleLower, "hold")
+	ruleMentionsHold := claimsNoNewWork || (containsWholeWord(ruleLower, "hold") && !strings.Contains(ruleLower, "lease"))
 	quoteMentionsLeaseHold := (strings.Contains(quoteLower, "keep the hold") ||
 		strings.Contains(quoteLower, "keep hold") ||
 		strings.Contains(quoteLower, "hold on the run") ||
