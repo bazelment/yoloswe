@@ -70,6 +70,19 @@ Split orchestration into a **deterministic Go Controller** that owns all state a
 
 ### Roles
 
+With no model flags or config, orchestrator roles use these models:
+
+| Role | Model | HTTP/gateway provider | Local-login provider (no HTTP credentials) |
+|---|---|---|---|
+| Dispatcher | `claude-sonnet-5-5` | `anthropic` | `claude-cli` |
+| Planner | `claude-opus-5-5` | `anthropic` | `claude-cli` |
+| Critic | `gpt-6.1-sol` | `openai` | `codex-cli` |
+
+Flags and config override these defaults. The critic defaults to a different
+vendor from the resolved planner. These selections apply to orca's orchestrator
+roles; worker phase recipes (`swe`, `clean`, `review`, `integrate`) retain their
+own agent model chains.
+
 1. **Controller (deterministic, no LLM)**:
    - Holds the run `Lease` (with heartbeat) so the process is stateless and replaceable (`orca --run <id>`).
    - Performs all waiting and event intake (`lane_report`, `phase_exit`, `ci`, `mail`, `timer`, `owner_msg`, `owner_ask_expired`, `stall`).
