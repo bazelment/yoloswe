@@ -40,6 +40,10 @@ type StoreBackend struct {
 	// When nil, AdoptionUnavailable says why /adopt and /release are off.
 	Adoption            *adopt.Service
 	AdoptionUnavailable string
+	// FrontDesk is the run of a chat opened without one. No controller runs
+	// it, so a Planner or Dispatcher instruction sent while attached to it
+	// goes to the one run a live controller holds, or is refused.
+	FrontDesk string
 
 	mu            sync.RWMutex
 	store         store.Store
@@ -165,27 +169,22 @@ func (b *StoreBackend) snapshot(ctx context.Context) (Snapshot, error) {
 	}
 	return s, nil
 }
-func (b *StoreBackend) directive(ctx context.Context, kind store.DirectiveKind, text, ref string) (string, error) {
+
+// directive adds an owner directive to runID in st. /undo revokes the last
+// one written to the attached run.
+func (b *StoreBackend) directive(ctx context.Context, st store.Store, runID string, kind store.DirectiveKind, text, ref string) error {
 	id := "chat-" + rand.Text()
-	err := b.store.Directives().Add(ctx, store.Directive{ID: id, RunID: b.runID, Kind: kind, Source: store.DirectiveSourceOwner, Text: text, Ref: ref, Status: store.DirectiveActive})
-	if err == nil {
+	err := st.Directives().Add(ctx, store.Directive{ID: id, RunID: runID, Kind: kind, Source: store.DirectiveSourceOwner, Text: text, Ref: ref, Status: store.DirectiveActive})
+	if err == nil && st == b.store && runID == b.runID {
 		b.lastDirective = id
 	}
-	return id, err
+	return err
 }
 
-// queued acknowledges an instruction written to the attached run. It
-// confirms only when a controller holds the run's lease and will act on it.
-func (b *StoreBackend) queued(ctx context.Context, handler router.Handler, text string) (string, error) {
-	run, err := b.store.Runs().Get(ctx, b.runID)
-	if err != nil {
-		return "", err
-	}
-	if run.Lease != nil && !run.Lease.Expired(b.now()) {
-		return fmt.Sprintf("Queued for the %s: %s", handler, text), nil
-	}
-	return fmt.Sprintf("Saved for the %s of run %s, but no controller is running it; it will act when one starts: %s", handler, b.runID, text), nil
+func (b *StoreBackend) live(run *store.Run) bool {
+	return run.Lease != nil && !run.Lease.Expired(b.now())
 }
+
 func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text string, emit func(string)) error {
 	if d.Handler == router.Concierge {
 		if b.Stream == nil {
@@ -193,32 +192,108 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 		}
 		return b.Stream(ctx, text, emit)
 	}
+	if d.Handler != router.Planner && d.Handler != router.Dispatcher {
+		return fmt.Errorf("unsupported handler %q", d.Handler)
+	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	switch d.Handler {
+	var ack string
+	var err error
+	if b.FrontDesk != "" && b.runID == b.FrontDesk {
+		ack, err = b.deliverFromFrontDesk(ctx, d.Handler, text)
+	} else {
+		var live bool
+		if live, err = b.deliver(ctx, b.store, b.runID, d.Handler, text); live {
+			ack = fmt.Sprintf("Queued for the %s: %s", d.Handler, text)
+		} else {
+			ack = fmt.Sprintf("Saved for the %s of run %s, but no controller is running it; it will act when one starts: %s", d.Handler, b.runID, text)
+		}
+	}
+	if err == nil && emit != nil {
+		emit(ack)
+	}
+	return err
+}
+
+// deliver writes an owner instruction for handler to runID in st and reports
+// whether a controller holds the run's lease and so will act on it now.
+func (b *StoreBackend) deliver(ctx context.Context, st store.Store, runID string, handler router.Handler, text string) (bool, error) {
+	switch handler {
 	case router.Planner:
-		if _, err := b.directive(ctx, store.DirectivePlanImport, text, ""); err != nil {
-			return err
+		if err := b.directive(ctx, st, runID, store.DirectivePlanImport, text, ""); err != nil {
+			return false, err
 		}
 	case router.Dispatcher:
 		msg := mailbox.Message{Owner: true, From: "owner", Body: text}
 		// Chat routing chooses the Dispatcher, but cannot infer which open ask
 		// (if any) this message answers. Let the Dispatcher decide from its
 		// snapshot and always preserve the owner message as a fresh instruction.
-		if _, err := b.directive(ctx, store.DirectiveInstruction, text, ""); err != nil {
-			return err
+		if err := b.directive(ctx, st, runID, store.DirectiveInstruction, text, ""); err != nil {
+			return false, err
 		}
-		if _, err := mailbox.AppendEvent(ctx, b.store.Events(), b.runID, msg); err != nil {
-			return err
+		if _, err := mailbox.AppendEvent(ctx, st.Events(), runID, msg); err != nil {
+			return false, err
 		}
+	}
+	run, err := st.Runs().Get(ctx, runID)
+	if err != nil {
+		return false, err
+	}
+	return b.live(run), nil
+}
+
+// deliverFromFrontDesk sends an instruction given at the front desk to the
+// one run a live controller holds: a run this chat adopted (driven in the
+// attached store) or one ListRuns offers. With none, or several, it saves
+// nothing and says so.
+func (b *StoreBackend) deliverFromFrontDesk(ctx context.Context, handler router.Handler, text string) (string, error) {
+	var candidates []store.Run
+	if b.Adoption != nil {
+		ids, err := b.Adoption.Adopted()
+		if err != nil {
+			return "", err
+		}
+		for _, id := range ids {
+			if run, err := b.store.Runs().Get(ctx, id); err == nil {
+				candidates = append(candidates, *run)
+			}
+		}
+	}
+	if b.ListRuns != nil {
+		listed, err := b.ListRuns(ctx)
+		if err != nil {
+			return "", err
+		}
+		candidates = append(candidates, listed...)
+	}
+	var live []string
+	for i := range candidates {
+		if r := &candidates[i]; r.ID != b.runID && b.live(r) && !slices.Contains(live, r.ID) {
+			live = append(live, r.ID)
+		}
+	}
+	switch len(live) {
+	case 0:
+		return fmt.Sprintf("Not queued: no controller is running for this chat, so nothing would act on it and it was not saved. Start a run, or attach to one with /runs <id>, then send it again: %s", text), nil
+	case 1:
 	default:
-		return fmt.Errorf("unsupported handler %q", d.Handler)
+		return fmt.Sprintf("Not queued: controllers are running runs %s; attach to one with /runs <id>, then send it again: %s", strings.Join(live, ", "), text), nil
 	}
-	ack, err := b.queued(ctx, d.Handler, text)
-	if err == nil && emit != nil {
-		emit(ack)
+	target, st := live[0], b.store
+	if _, err := st.Runs().Get(ctx, target); err != nil {
+		if b.OpenRun == nil {
+			return "", fmt.Errorf("run %s is not reachable from this chat", target)
+		}
+		if st, err = b.OpenRun(ctx, target); err != nil {
+			return "", err
+		}
+		defer func() { _ = st.Close() }()
 	}
-	return err
+	if live, err := b.deliver(ctx, st, target, handler, text); err != nil || !live {
+		// The lease lapsed between listing and writing.
+		return fmt.Sprintf("Saved for the %s of run %s, but its controller stopped; it will act when one starts: %s", handler, target, text), err
+	}
+	return fmt.Sprintf("Queued for the %s of run %s, whose controller is running: %s", handler, target, text), nil
 }
 
 // switchRun attaches to id when it is one of the runs ListRuns offers.
@@ -370,7 +445,7 @@ func (b *StoreBackend) runCommand(ctx context.Context, fields []string) (string,
 			}
 		}
 		action := strings.TrimPrefix(strings.ToLower(fields[0]), "/")
-		_, e = b.directive(ctx, store.DirectiveInstruction, action, "chat:control")
+		e = b.directive(ctx, b.store, b.runID, store.DirectiveInstruction, action, "chat:control")
 		return "run " + action, e
 	case "/undo":
 		if b.lastDirective != "" {

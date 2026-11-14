@@ -74,9 +74,6 @@ func Execute(
 	}
 
 	logger := newLogger(stderr, cfg.LogLevel, cfg.LogFormat)
-	if subcmd == "chat" && cfg.RunID == "" {
-		cfg.RunID, _ = selectChatRun(ctx, cfg, clock.NewRealClock())
-	}
 
 	switch subcmd {
 	case "run":
@@ -85,11 +82,10 @@ func Execute(
 		}
 		return executeRun(ctx, cfg, logger)
 	case "chat":
-		if cfg.RunID != "" {
-			if err := cfg.Validate(false); err != nil {
-				return err
-			}
-		} else if _, _, err := parseStoreSpec(cfg.StoreSpec, cfg.StoreBaseDir, "front-desk"); err != nil {
+		// A chat without --run picks its run later, from its store.
+		vcfg := cfg
+		vcfg.RunID = cmp.Or(vcfg.RunID, frontDeskRunID)
+		if err := vcfg.Validate(false); err != nil {
 			return err
 		}
 		return executeChat(ctx, cfg, posArgs, stdin, stdout, logger)
@@ -194,13 +190,22 @@ func executeChat(
 	logger *slog.Logger,
 ) error {
 	clk := clock.NewRealClock()
+	runs, err := openChatRuns(cfg, clk)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = runs.Close() }()
+	if strings.TrimSpace(cfg.RunID) == "" {
+		if found, _ := runs.List(ctx); len(found) > 0 {
+			cfg.RunID = found[0].ID
+		}
+	}
 	frontDesk := strings.TrimSpace(cfg.RunID) == ""
 	storeCfg := cfg
 	if frontDesk {
-		storeCfg.RunID = "front-desk"
-		storeCfg.StoreSpec = "memory"
+		storeCfg.RunID = frontDeskRunID
 	}
-	st, resolvedStore, err := openStore(storeCfg, clk)
+	st, resolvedStore, err := runs.Open(storeCfg)
 	if err != nil {
 		return err
 	}
@@ -209,6 +214,7 @@ func executeChat(
 	backend := chatui.NewStoreBackend(st, storeCfg.RunID)
 	defer func() { _ = backend.Close() }()
 	if frontDesk {
+		backend.FrontDesk = frontDeskRunID
 		if err := st.Runs().Create(ctx, store.Run{ID: storeCfg.RunID, Repository: cfg.Repository, Objective: ""}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			return err
 		}
@@ -267,17 +273,22 @@ func executeChat(
 		}
 		return err
 	}
-	backend.ListRuns = func(ctx context.Context) ([]store.Run, error) { return discoverChatRuns(ctx, cfg, clk) }
+	backend.ListRuns = runs.List
 	backend.OpenRun = func(_ context.Context, runID string) (store.Store, error) {
-		return openDiscoveredRun(cfg, runID, clk)
+		runCfg := cfg
+		runCfg.RunID = runID
+		st, _, err := runs.Open(runCfg)
+		return st, err
 	}
 	concierge.RunStart = func(ctx context.Context, goal string) (string, error) {
 		runID := nextUniqueID("run", clk)
-		runStore, _, err := createChatRun(ctx, cfg, runID, goal, clk)
+		runStore, spec, err := runs.Create(ctx, runID, goal)
 		if err != nil {
 			return "", err
 		}
-		if err := runLauncher(ctx, cfg, runID, goal); err != nil {
+		launchCfg := cfg
+		launchCfg.StoreSpec = spec
+		if err := runLauncher(ctx, launchCfg, runID, goal); err != nil {
 			_ = runStore.Close()
 			return "", err
 		}
@@ -338,14 +349,14 @@ func (l attachedRoutingLog) LogRouting(ctx context.Context, text string, d route
 }
 
 func launchDetachedRun(ctx context.Context, cfg Config, runID, goal string) error {
-	cmd, runDir, err := detachedRunCommand(cfg, runID, goal)
+	cmd, logPath, err := detachedRunCommand(cfg, runID, goal)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return err
 	}
-	logFile, err := os.OpenFile(filepath.Join(runDir, "orca.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
@@ -359,18 +370,23 @@ func launchDetachedRun(ctx context.Context, cfg Config, runID, goal string) erro
 }
 
 // detachedRunCommand builds the `orca run` controller for a run started from
-// chat. The controller inherits the chat's configuration flags and runs in its
-// own session, so the chat's terminal signals do not reach it. It keeps the
-// chat's working directory, so relative paths in inherited flags (--config,
-// --store-dir, ...) still resolve. runDir holds the run's store and log.
-func detachedRunCommand(cfg Config, runID, goal string) (cmd *exec.Cmd, runDir string, err error) {
+// chat, on the run's store cfg.StoreSpec ("sqlite:<absolute path>"). The
+// controller inherits the chat's configuration flags and runs in its own
+// session, so the chat's terminal signals do not reach it. It keeps the chat's
+// working directory, so relative paths in inherited flags (--config,
+// --store-dir, ...) still resolve. Its log sits next to the store: orca.log in
+// a per-run store's directory, orca-<run>.log beside a shared --store.
+func detachedRunCommand(cfg Config, runID, goal string) (cmd *exec.Cmd, logPath string, err error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, "", err
 	}
-	path, err := store.RunDBPath(chatStoreBaseDir(cfg), runID)
+	kind, path, err := parseStoreSpec(cfg.StoreSpec, cfg.StoreBaseDir, runID)
 	if err != nil {
 		return nil, "", err
+	}
+	if kind != "sqlite" {
+		return nil, "", fmt.Errorf("orca: a launched controller needs a sqlite store, not %q", cfg.StoreSpec)
 	}
 	if path, err = filepath.Abs(path); err != nil {
 		return nil, "", err
@@ -382,7 +398,17 @@ func detachedRunCommand(cfg Config, runID, goal string) (cmd *exec.Cmd, runDir s
 	}
 	cmd = exec.Command(exe, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	return cmd, filepath.Dir(path), nil
+	logPath = filepath.Join(filepath.Dir(path), "orca.log")
+	if perRun, err := store.RunDBPath(chatStoreBaseDir(cfg), runID); err != nil || !samePath(perRun, path) {
+		logPath = filepath.Join(filepath.Dir(path), "orca-"+runID+".log")
+	}
+	return cmd, logPath, nil
+}
+
+func samePath(a, b string) bool {
+	a, errA := filepath.Abs(a)
+	b, errB := filepath.Abs(b)
+	return errA == nil && errB == nil && a == b
 }
 
 // runLauncher is injectable for deterministic tests.
@@ -399,20 +425,159 @@ func chatStoreBaseDir(cfg Config) string {
 	return filepath.Join(home, ".swarm")
 }
 
+// frontDeskRunID is the run a chat without a run attaches to. It is a
+// conversation, not a run: discovery never offers it and no controller runs it.
+const frontDeskRunID = "front-desk"
+
+// chatRuns is where chat finds, opens and creates runs. An explicit --store
+// (sqlite:<path> or memory) holds every run chat picks, switches to, starts or
+// keeps its front desk in; otherwise each run has its own SQLite store under
+// the store dir and the front desk lives in memory.
+//
+//nolint:govet // field order follows the doc
+type chatRuns struct {
+	cfg Config
+	clk clock.Clock
+	// shared is the explicit --store, opened once for the whole chat; nil
+	// for per-run stores. spec is its resolved form ("sqlite:<abs>", "memory").
+	shared *sharedStore
+	spec   string
+}
+
+// sharedStore is the explicit store as handed to the chat backend: every run
+// attaches the same value, so switching runs never closes it. chatRuns.Close
+// closes the underlying store.
+type sharedStore struct{ store.Store }
+
+func (*sharedStore) Close() error { return nil }
+
+func openChatRuns(cfg Config, clk clock.Clock) (*chatRuns, error) {
+	runs := &chatRuns{cfg: cfg, clk: clk}
+	kind, path, err := parseStoreSpec(cfg.StoreSpec, cfg.StoreBaseDir, frontDeskRunID)
+	if err != nil {
+		return nil, err
+	}
+	spec := strings.ToLower(strings.TrimSpace(cfg.StoreSpec))
+	switch {
+	case kind == "memory":
+		runs.shared, runs.spec = &sharedStore{store.NewMemoryStore(clk)}, "memory"
+	case strings.HasPrefix(spec, "sqlite:"):
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return nil, err
+		}
+		st, err := store.OpenSQLite(abs, clk)
+		if err != nil {
+			return nil, err
+		}
+		runs.shared, runs.spec = &sharedStore{st}, "sqlite:"+abs
+	}
+	return runs, nil
+}
+
+// Close closes the explicit store.
+func (r *chatRuns) Close() error {
+	if r.shared == nil {
+		return nil
+	}
+	return r.shared.Store.Close()
+}
+
+// Open opens the store holding cfg.RunID: the explicit store, a memory store
+// for the front desk, or the run's own SQLite store.
+func (r *chatRuns) Open(cfg Config) (store.Store, string, error) {
+	if r.shared != nil {
+		return r.shared, r.spec, nil
+	}
+	if cfg.RunID == frontDeskRunID {
+		cfg.StoreSpec = "memory"
+	}
+	return openStore(cfg, r.clk)
+}
+
+// Create records a new run for goal and returns its store and spec, for the
+// controller chat launches on it.
+func (r *chatRuns) Create(ctx context.Context, runID, goal string) (store.Store, string, error) {
+	run := store.Run{ID: runID, Repository: r.cfg.Repository, Objective: goal}
+	if r.shared != nil {
+		if r.spec == "memory" {
+			return nil, "", errors.New("orca: cannot start a run in --store memory: a controller cannot share this chat's memory store")
+		}
+		if err := r.shared.Runs().Create(ctx, run); err != nil {
+			return nil, "", err
+		}
+		return r.shared, r.spec, nil
+	}
+	path, err := store.RunDBPath(chatStoreBaseDir(r.cfg), runID)
+	if err != nil {
+		return nil, "", err
+	}
+	st, err := store.OpenSQLite(path, r.clk)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := st.Runs().Create(ctx, run); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		_ = st.Close()
+		return nil, "", err
+	}
+	return st, "sqlite:" + path, nil
+}
+
+// List returns the runs chat may attach to, live controllers first, then most
+// recently updated. With an explicit store these are its runs (of the
+// inferred repository, when there is one). Otherwise they are the per-run
+// stores of the inferred repository; without one there is no safe way to
+// decide which stored run belongs to this conversation, so none.
+func (r *chatRuns) List(ctx context.Context) ([]store.Run, error) {
+	repo := strings.TrimSpace(r.cfg.Repository)
+	var runs []store.Run
+	if r.shared != nil {
+		all, err := r.shared.Runs().List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for i := range all {
+			if all[i].ID != frontDeskRunID && (repo == "" || all[i].Repository == repo) {
+				runs = append(runs, all[i])
+			}
+		}
+	} else {
+		var err error
+		if runs, err = discoverChatRuns(ctx, r.cfg, r.clk); err != nil {
+			return nil, err
+		}
+	}
+	now := time.Now()
+	if r.clk != nil {
+		now = r.clk.Now()
+	}
+	slices.SortStableFunc(runs, func(a, b store.Run) int {
+		aLive := a.Lease != nil && !a.Lease.Expired(now)
+		bLive := b.Lease != nil && !b.Lease.Expired(now)
+		if aLive != bLive {
+			if aLive {
+				return -1
+			}
+			return 1
+		}
+		return b.UpdatedAt.Compare(a.UpdatedAt)
+	})
+	return runs, nil
+}
+
+// discoverChatRuns reads the per-run stores of the inferred repository under
+// the store dir.
 func discoverChatRuns(ctx context.Context, cfg Config, clk clock.Clock) ([]store.Run, error) {
+	repo := strings.TrimSpace(cfg.Repository)
+	if repo == "" {
+		return nil, nil
+	}
 	entries, err := os.ReadDir(chatStoreBaseDir(cfg))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
-	}
-	repo := strings.TrimSpace(cfg.Repository)
-	// A bare chat outside a checkout is a front desk, not a global run
-	// browser. Without an inferred repository there is no safe way to decide
-	// which stored run belongs to this conversation.
-	if repo == "" {
-		return nil, nil
 	}
 	var runs []store.Run
 	for _, entry := range entries {
@@ -430,59 +595,12 @@ func discoverChatRuns(ctx context.Context, cfg Config, clk clock.Clock) ([]store
 		}
 		run, getErr := st.Runs().Get(ctx, id)
 		_ = st.Close()
-		if getErr != nil || (repo != "" && run.Repository != repo) {
+		if getErr != nil || run.Repository != repo {
 			continue
 		}
 		runs = append(runs, *run)
 	}
-	now := time.Now()
-	if clk != nil {
-		now = clk.Now()
-	}
-	slices.SortStableFunc(runs, func(a, b store.Run) int {
-		aLive := a.Lease != nil && !a.Lease.Expired(now)
-		bLive := b.Lease != nil && !b.Lease.Expired(now)
-		if aLive != bLive {
-			if aLive {
-				return -1
-			}
-			return 1
-		}
-		return b.UpdatedAt.Compare(a.UpdatedAt)
-	})
 	return runs, nil
-}
-
-func selectChatRun(ctx context.Context, cfg Config, clk clock.Clock) (string, error) {
-	runs, err := discoverChatRuns(ctx, cfg, clk)
-	if err != nil || len(runs) == 0 {
-		return "", err
-	}
-	return runs[0].ID, nil
-}
-
-func openDiscoveredRun(cfg Config, runID string, clk clock.Clock) (store.Store, error) {
-	path, err := store.RunDBPath(chatStoreBaseDir(cfg), runID)
-	if err != nil {
-		return nil, err
-	}
-	return store.OpenSQLite(path, clk)
-}
-
-func createChatRun(ctx context.Context, cfg Config, runID, goal string, clk clock.Clock) (store.Store, string, error) {
-	path, err := store.RunDBPath(chatStoreBaseDir(cfg), runID)
-	if err != nil {
-		return nil, "", err
-	}
-	st, err := store.OpenSQLite(path, clk)
-	if err != nil {
-		return nil, "", err
-	}
-	if err := st.Runs().Create(ctx, store.Run{ID: runID, Repository: cfg.Repository, Objective: goal}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		_ = st.Close()
-		return nil, "", err
-	}
-	return st, "sqlite:" + path, nil
 }
 
 // ensureChatRun creates a run record when chat is the first entry point.

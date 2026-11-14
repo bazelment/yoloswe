@@ -69,6 +69,38 @@ func finish(t *testing.T, tm *teatest.TestModel) {
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(time.Second))
 }
+func TestIsStartRequestOnlyForExplicitAffirmativeRequests(t *testing.T) {
+	t.Parallel()
+	for text, want := range map[string]bool{
+		"start a run to fix the flaky test":         true,
+		"Please start a run to fix the flaky test.": true,
+		"ok, start work on the docs task":           true,
+		"new goal: refresh the README":              true,
+		"Fix the docs. Start a run for it":          true,
+		"don't start a run yet":                     false,
+		"Don’t start a run yet":                     false,
+		"do not start work on this":                 false,
+		"how do I start work?":                      false,
+		"how do I start a run":                      false,
+		"can you start a run to fix the test":       false,
+		"start a run if CI is green":                false,
+		"wait, start a run later":                   false,
+		"explain how to start a run":                false,
+		"fix the flaky test":                        false,
+		"I never said start a run":                  false,
+		"":                                          false,
+	} {
+		if got := IsStartRequest(text); got != want {
+			t.Errorf("IsStartRequest(%q) = %v, want %v", text, got, want)
+		}
+	}
+	for text, want := range map[string]bool{"yes": true, "Yes, please!": true, "go ahead.": true, "yes but not now": false, "no": false} {
+		if got := IsConfirmation(text); got != want {
+			t.Errorf("IsConfirmation(%q) = %v, want %v", text, got, want)
+		}
+	}
+}
+
 func TestUnclearMessageReachesConcierge(t *testing.T) {
 	m := New(t.Context(), "run", func(_ context.Context, s string) (string, error) { return "Which plan?", nil }, routeFunc(func(context.Context, string) (router.Decision, error) {
 		return router.Decision{Handler: router.Concierge}, nil
@@ -228,6 +260,81 @@ func TestThreeHandlersDispatch(t *testing.T) {
 		t.Fatalf("%+v %v", events, err)
 	}
 }
+
+// closeCounter counts Close calls on a store a backend opened.
+type closeCounter struct {
+	store.Store
+	closed *atomic.Int32
+}
+
+func (c closeCounter) Close() error { c.closed.Add(1); return nil }
+
+func TestFrontDeskInstructionGoesToTheOneLiveControllerOrIsRefused(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	desk := store.NewMemoryStore(nil)
+	defer desk.Close()
+	if err := desk.Runs().Create(ctx, store.Run{ID: "front-desk"}); err != nil {
+		t.Fatal(err)
+	}
+	runs := map[string]store.Store{}
+	var listed []store.Run
+	for _, id := range []string{"run-live", "run-idle", "run-other-live"} {
+		st := store.NewMemoryStore(nil)
+		defer st.Close()
+		if err := st.Runs().Create(ctx, store.Run{ID: id}); err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasSuffix(id, "live") {
+			if _, err := st.Runs().AcquireLease(ctx, id, "controller", time.Hour); err != nil {
+				t.Fatal(err)
+			}
+		}
+		run, err := st.Runs().Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runs[id] = st
+		listed = append(listed, *run)
+	}
+	var closed atomic.Int32
+	b := NewStoreBackend(desk, "front-desk")
+	b.FrontDesk = "front-desk"
+	b.OpenRun = func(_ context.Context, id string) (store.Store, error) { return closeCounter{runs[id], &closed}, nil }
+	var offer []store.Run
+	b.ListRuns = func(context.Context) ([]store.Run, error) { return offer, nil }
+	send := func() string {
+		var ack string
+		if err := b.Dispatch(ctx, router.Decision{Handler: router.Planner}, "drop the docs task", func(s string) { ack = s }); err != nil {
+			t.Fatal(err)
+		}
+		return ack
+	}
+	directives := func(st store.Store, id string) int {
+		dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(dirs)
+	}
+
+	offer = listed[1:2] // only an idle run
+	if got := send(); !strings.HasPrefix(got, "Not queued: no controller is running for this chat") {
+		t.Fatalf("idle-only ack = %q", got)
+	}
+	offer = listed
+	if got := send(); got != "Not queued: controllers are running runs run-live, run-other-live; attach to one with /runs <id>, then send it again: drop the docs task" {
+		t.Fatalf("two-controller ack = %q", got)
+	}
+	offer = listed[:2]
+	if got := send(); got != "Queued for the planner of run run-live, whose controller is running: drop the docs task" {
+		t.Fatalf("one-controller ack = %q", got)
+	}
+	if directives(desk, "front-desk") != 0 || directives(runs["run-live"], "run-live") != 1 || directives(runs["run-idle"], "run-idle") != 0 || closed.Load() != 1 {
+		t.Fatalf("delivery: desk=%d live=%d idle=%d closed=%d", directives(desk, "front-desk"), directives(runs["run-live"], "run-live"), directives(runs["run-idle"], "run-idle"), closed.Load())
+	}
+}
+
 func TestOpenQuestionReplyReachesDispatcherSnapshot(t *testing.T) {
 	st := store.NewMemoryStore(nil)
 	defer st.Close()

@@ -86,14 +86,25 @@ type Concierge struct {
 	history      []model.Message
 	memoryEditor memorychat.MemoryEditor
 	mu           sync.Mutex
-	RunStart     func(context.Context, string) (string, error)
+	// startAsked is set when run.start was refused and the concierge asked
+	// the owner a question; a plain yes on the next turn confirms.
+	startAsked bool
+	RunStart   func(context.Context, string) (string, error)
 }
+
+// startTurn gates run.start for one owner turn.
+type startTurn struct {
+	allowed, refused bool
+}
+
+// runStartRefusal is the tool result when the owner did not ask to start.
+const runStartRefusal = "Not started: the owner did not explicitly ask to start a run. Do not start one. If they may want one, ask them whether to start a run for this goal; a plain yes confirms."
 
 // Attach selects a run for the Concierge.
 func (c *Concierge) Attach(st store.Store, runID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.store, c.runID, c.threadID, c.history = st, strings.TrimSpace(runID), "", nil
+	c.store, c.runID, c.threadID, c.history, c.startAsked = st, strings.TrimSpace(runID), "", nil, false
 }
 
 func NewConcierge(
@@ -228,10 +239,12 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 
 	c.mu.Lock()
 	msgs := append(slices.Clone(c.history), model.NewUserMessage(question))
+	start := &startTurn{allowed: chat.IsStartRequest(question) || (c.startAsked && chat.IsConfirmation(question))}
+	c.startAsked = false
 	c.mu.Unlock()
 
 	memoryEcho := ""
-	reg := c.buildToolRegistry(threadID, turnID, question, &memoryEcho)
+	reg := c.buildToolRegistry(threadID, turnID, question, &memoryEcho, start)
 	systemPrompt := ConciergeSystemPrompt
 	if memories, memErr := c.store.Memories().List(ctx, store.MemoryFilter{RunID: c.runID}); memErr == nil {
 		systemPrompt += "\n\n## Canonical Memory Index\n" + store.MemoryIndex(memories)
@@ -296,6 +309,7 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 		answer = strings.TrimSpace(loopRes.Response.Text())
 		c.mu.Lock()
 		c.history = slices.Clone(loopRes.Messages)
+		c.startAsked = start.refused && strings.HasSuffix(answer, "?")
 		c.mu.Unlock()
 	}
 
@@ -339,12 +353,21 @@ func (c *Concierge) RunInteractive(ctx context.Context, in io.Reader, out io.Wri
 	return scanner.Err()
 }
 
-func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho *string) *model.ToolRegistry {
+// buildToolRegistry builds the turn's tools. run.start launches only when
+// start allows it: an explicit start request, or a plain yes to the
+// concierge's question after a refused run.start.
+func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho *string, start *startTurn) *model.ToolRegistry {
 	reg := model.NewToolRegistry()
 	model.AddTool[RunStartParams](reg, ToolRunStart, "Start a new run for an owner goal", func(ctx context.Context, p RunStartParams) (string, error) {
 		goal := strings.TrimSpace(p.Goal)
 		if goal == "" {
 			return "", fmt.Errorf("run.start requires a goal")
+		}
+		if start == nil || !start.allowed {
+			if start != nil {
+				start.refused = true
+			}
+			return runStartRefusal, nil
 		}
 		if c.RunStart == nil {
 			return "", fmt.Errorf("run.start unavailable")

@@ -590,6 +590,26 @@ func (r *sqliteRunStore) Get(ctx context.Context, runID string) (*Run, error) {
 	return getRun(ctx, s.db, runID)
 }
 
+func (r *sqliteRunStore) List(ctx context.Context) ([]Run, error) {
+	s := r.s()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.QueryContext(ctx, selectRunColumns+` ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Run
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *run)
+	}
+	return out, rows.Err()
+}
+
 func (r *sqliteRunStore) UpdateObjective(ctx context.Context, runID, objective, planRef string) error {
 	s := r.s()
 	s.mu.Lock()

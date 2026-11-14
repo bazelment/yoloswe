@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -224,8 +225,13 @@ func TestConciergeRunStartInvokesLauncher(t *testing.T) {
 	c := NewConcierge("front-desk", st, nil, nil, DefaultConciergeModel)
 	var got string
 	c.RunStart = func(_ context.Context, goal string) (string, error) { got = goal; return "run-new", nil }
-	reg := c.buildToolRegistry("thread", "turn", "goal", new(string))
-	res := reg.Execute(t.Context(), model.ToolCall{ID: "start", Name: ToolRunStart, Input: json.RawMessage(`{"goal":"study bramble UX"}`)})
+	call := model.ToolCall{ID: "start", Name: ToolRunStart, Input: json.RawMessage(`{"goal":"study bramble UX"}`)}
+	refused := &startTurn{}
+	res := c.buildToolRegistry("thread", "turn", "study bramble UX", new(string), refused).Execute(t.Context(), call)
+	if res.IsError || res.Content != runStartRefusal || got != "" || !refused.refused {
+		t.Fatalf("unrequested run.start result=%+v goal=%q turn=%+v", res, got, refused)
+	}
+	res = c.buildToolRegistry("thread", "turn", "start a run to study bramble UX", new(string), &startTurn{allowed: true}).Execute(t.Context(), call)
 	if res.IsError || res.Content != "run-new" || got != "study bramble UX" {
 		t.Fatalf("run.start result=%+v goal=%q", res, got)
 	}
@@ -476,9 +482,186 @@ func TestChatPromptOnFrontDeskSaysNoControllerWillAct(t *testing.T) {
 	if err := Execute(t.Context(), []string{"chat", "--store-dir", t.TempDir(), "--replay", routerReplay(t, "dispatcher"), "--prompt", "retry the lint lane"}, strings.NewReader(""), &stdout, &stderr); err != nil {
 		t.Fatalf("Execute chat: %v\nstderr:\n%s", err, stderr.String())
 	}
-	want := "→ dispatcher: retry the lint lane\nSaved for the dispatcher of run front-desk, but no controller is running it; it will act when one starts: retry the lint lane\n"
+	want := "→ dispatcher: retry the lint lane\nNot queued: no controller is running for this chat, so nothing would act on it and it was not saved. Start a run, or attach to one with /runs <id>, then send it again: retry the lint lane\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+// seedStoreRuns creates runs in the SQLite store at path, leasing those named
+// in leased to a live controller.
+func seedStoreRuns(t *testing.T, path string, runs []store.Run, leased ...string) {
+	t.Helper()
+	st, err := store.OpenSQLite(path, clock.NewRealClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	for _, run := range runs {
+		if err := st.Runs().Create(t.Context(), run); err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(leased, run.ID) {
+			if _, err := st.Runs().AcquireLease(t.Context(), run.ID, "controller", time.Hour); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func chatLines(out, prefix string) []string {
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func TestChatPicksRunFromExplicitStore(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	seedChatRun(t, base, store.Run{ID: "run-dir", Repository: "bazelment/yoloswe", Objective: "in store dir"}, true)
+	explicit := filepath.Join(t.TempDir(), "explicit.db")
+	seedStoreRuns(t, explicit, []store.Run{{ID: "run-explicit", Repository: "bazelment/yoloswe", Objective: "in explicit store"}})
+
+	var stdout, stderr bytes.Buffer
+	if err := Execute(t.Context(), []string{"chat", "--store", "sqlite:" + explicit, "--store-dir", base, "--repo", "bazelment/yoloswe"}, strings.NewReader("/status\n"), &stdout, &stderr); err != nil {
+		t.Fatalf("Execute chat: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if got := chatLines(stdout.String(), "goal: "); len(got) != 1 || !strings.HasPrefix(got[0], "goal: in explicit store |") {
+		t.Fatalf("status = %q, want the explicit store's run\nstdout:\n%s", got, stdout.String())
+	}
+}
+
+func TestChatSwitchesOnlyWithinExplicitStore(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	seedChatRun(t, base, store.Run{ID: "run-dir", Repository: "bazelment/yoloswe", Objective: "in store dir"}, true)
+	explicit := filepath.Join(t.TempDir(), "explicit.db")
+	seedStoreRuns(t, explicit, []store.Run{
+		{ID: "run-a", Repository: "bazelment/yoloswe", Objective: "first"},
+		{ID: "run-b", Repository: "bazelment/yoloswe", Objective: "second"},
+	}, "run-a")
+
+	var stdout, stderr bytes.Buffer
+	script := "/runs\n/runs run-dir\n/runs run-b\n/status\n"
+	if err := Execute(t.Context(), []string{"chat", "--store", "sqlite:" + explicit, "--store-dir", base, "--repo", "bazelment/yoloswe", "--run", "run-a"}, strings.NewReader(script), &stdout, &stderr); err != nil {
+		t.Fatalf("Execute chat: %v\nstderr:\n%s", err, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"run-a: first\nrun-b: second\n",
+		`error: no run "run-dir" for this repository; /runs lists them`,
+		"attached to run run-b",
+		"goal: second |",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q\nstdout:\n%s", want, out)
+		}
+	}
+}
+
+func TestChatStartsRunInExplicitStore(t *testing.T) {
+	base := t.TempDir()
+	explicit := filepath.Join(t.TempDir(), "explicit.db")
+	goal := "summarize the help overlay"
+	oldLauncher := runLauncher
+	defer func() { runLauncher = oldLauncher }()
+	var launchedID, launchedStore string
+	runLauncher = func(_ context.Context, cfg Config, runID, _ string) error {
+		launchedID, launchedStore = runID, cfg.StoreSpec
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	if err := Execute(t.Context(), []string{"chat", "--store", "sqlite:" + explicit, "--store-dir", base, "--repo", "bazelment/yoloswe", "--replay", runStartReplay(t, goal)}, strings.NewReader("start a run to "+goal+"\n/status\n"), &stdout, &stderr); err != nil {
+		t.Fatalf("Execute chat: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if launchedID == "" || launchedStore != "sqlite:"+explicit {
+		t.Fatalf("launched %q on store %q, want sqlite:%s\nstdout:\n%s", launchedID, launchedStore, explicit, stdout.String())
+	}
+	if entries, _ := os.ReadDir(base); len(entries) != 0 {
+		t.Fatalf("run.start wrote to the store dir: %v", entries)
+	}
+	if !strings.Contains(stdout.String(), "goal: "+goal+" |") {
+		t.Fatalf("chat did not attach to the new run:\n%s", stdout.String())
+	}
+	cmd, logPath, err := detachedRunCommand(Config{StoreSpec: launchedStore, StoreBaseDir: base, DriverKind: "fake"}, launchedID, goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(cmd.Args, "sqlite:"+explicit) || logPath != filepath.Join(filepath.Dir(explicit), "orca-"+launchedID+".log") {
+		t.Fatalf("controller args %q log %q", cmd.Args, logPath)
+	}
+}
+
+// lineReader yields one line per Read and runs before[i] before line i, so a
+// test can change the world between chat messages.
+type lineReader struct {
+	before map[int]func()
+	lines  []string
+	next   int
+}
+
+func (r *lineReader) Read(p []byte) (int, error) {
+	if r.next >= len(r.lines) {
+		return 0, io.EOF
+	}
+	if fn := r.before[r.next]; fn != nil {
+		fn()
+	}
+	n := copy(p, r.lines[r.next]+"\n")
+	r.next++
+	return n, nil
+}
+
+func activeDirectives(t *testing.T, path, runID string) []string {
+	t.Helper()
+	st, err := store.OpenSQLite(path, clock.NewRealClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for i := range dirs {
+		out = append(out, dirs[i].Text)
+	}
+	return out
+}
+
+func TestChatFrontDeskDeliversToLiveControllerInExplicitStore(t *testing.T) {
+	t.Parallel()
+	explicit := filepath.Join(t.TempDir(), "explicit.db")
+	in := &lineReader{
+		lines: []string{"retry the lint lane", "retry the docs lane", "/runs"},
+		before: map[int]func(){1: func() {
+			seedStoreRuns(t, explicit, []store.Run{{ID: "run-live", Repository: "bazelment/yoloswe", Objective: "live"}}, "run-live")
+		}},
+	}
+	var stdout, stderr bytes.Buffer
+	if err := Execute(t.Context(), []string{"chat", "--store", "sqlite:" + explicit, "--store-dir", t.TempDir(), "--repo", "bazelment/yoloswe", "--replay", routerReplay(t, "dispatcher", "dispatcher")}, in, &stdout, &stderr); err != nil {
+		t.Fatalf("Execute chat: %v\nstderr:\n%s", err, stderr.String())
+	}
+	want := []string{
+		"orca> Not queued: no controller is running for this chat, so nothing would act on it and it was not saved. Start a run, or attach to one with /runs <id>, then send it again: retry the lint lane",
+		"orca> Queued for the dispatcher of run run-live, whose controller is running: retry the docs lane",
+	}
+	if got := chatLines(stdout.String(), "orca> "); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("replies = %q, want %q\nstdout:\n%s", got, want, stdout.String())
+	}
+	if got := activeDirectives(t, explicit, "run-live"); strings.Join(got, ",") != "retry the docs lane" {
+		t.Fatalf("run-live directives = %q", got)
+	}
+	if got := activeDirectives(t, explicit, frontDeskRunID); len(got) != 0 {
+		t.Fatalf("front desk kept directives no controller reads: %q", got)
+	}
+	if !strings.HasSuffix(stdout.String(), "you> /runs\nrun-live: live\n") {
+		t.Fatalf("/runs offered more than run-live:\n%s", stdout.String())
 	}
 }
 
@@ -532,6 +715,100 @@ func runStartReplay(t *testing.T, goal string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// eagerRunStartReplay is a concierge model that calls run.start on every
+// owner message, answering text after each tool result.
+func eagerRunStartReplay(t *testing.T, goal string, turns int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "eager-run-start-replay.json")
+	input, err := json.Marshal(RunStartParams{Goal: goal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exchanges []model.RecordedExchange
+	for range turns {
+		exchanges = append(exchanges,
+			model.RecordedExchange{Response: model.Response{
+				StopReason: model.StopReasonToolUse,
+				Message:    model.NewAssistantMessage(model.NewToolUseBlock("start", ToolRunStart, input)),
+			}},
+			model.RecordedExchange{Response: model.Response{
+				StopReason: model.StopReasonEndTurn,
+				Message:    model.NewAssistantMessage(model.NewTextBlock("ok")),
+			}},
+		)
+	}
+	if err := model.SaveRecording(path, exchanges); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestChatNegatedOrInformationalStartNeverStartsRun(t *testing.T) {
+	base := t.TempDir()
+	oldLauncher := runLauncher
+	defer func() { runLauncher = oldLauncher }()
+	var launched []string
+	runLauncher = func(_ context.Context, _ Config, runID, _ string) error {
+		launched = append(launched, runID)
+		return nil
+	}
+
+	script := "don't start a run yet\nhow do I start work?\n"
+	var stdout, stderr bytes.Buffer
+	if err := Execute(t.Context(), []string{"chat", "--store-dir", base, "--repo", "bazelment/yoloswe", "--driver", "fake", "--replay", eagerRunStartReplay(t, "fix the flaky test", 2)}, strings.NewReader(script), &stdout, &stderr); err != nil {
+		t.Fatalf("Execute chat: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if len(launched) != 0 || strings.Contains(stdout.String(), "Starting run") {
+		t.Fatalf("negated/informational text started runs %q:\n%s", launched, stdout.String())
+	}
+	if entries, _ := os.ReadDir(base); len(entries) != 0 {
+		t.Fatalf("run stores created: %v", entries)
+	}
+}
+
+func TestChatStartsUnclearGoalOnlyAfterYesToConciergeQuestion(t *testing.T) {
+	base := t.TempDir()
+	oldLauncher := runLauncher
+	defer func() { runLauncher = oldLauncher }()
+	var launched []string
+	runLauncher = func(_ context.Context, _ Config, runID, _ string) error {
+		launched = append(launched, runID)
+		return nil
+	}
+
+	goal := "fix the flaky test"
+	input, err := json.Marshal(RunStartParams{Goal: goal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := model.RecordedExchange{Response: model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock(`{"handler":"concierge","confidence":0.9}`))}}
+	startCall := model.RecordedExchange{Response: model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("start", ToolRunStart, input))}}
+	say := func(text string) model.RecordedExchange {
+		return model.RecordedExchange{Response: model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock(text))}}
+	}
+	replay := filepath.Join(t.TempDir(), "confirm-replay.json")
+	if err := model.SaveRecording(replay, []model.RecordedExchange{
+		route, startCall, say("Noted."), // "fix the flaky test": refused, no question asked
+		route, startCall, say("Not started."), // "yes" answers no question: refused
+		route, startCall, say("Shall I start a run to " + goal + "?"), // refused, asks
+		route, startCall, say("run started"), // "yes" confirms
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	script := goal + "\nyes\n" + goal + "\nyes\n"
+	if err := Execute(t.Context(), []string{"chat", "--store-dir", base, "--repo", "bazelment/yoloswe", "--driver", "fake", "--replay", replay}, strings.NewReader(script), &stdout, &stderr); err != nil {
+		t.Fatalf("Execute chat: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if len(launched) != 1 || strings.Count(stdout.String(), "Starting run "+launched[0]+" for: "+goal) != 1 {
+		t.Fatalf("launched %q, want one run after the confirmed question:\n%s", launched, stdout.String())
+	}
+	before, _, _ := strings.Cut(stdout.String(), "Starting run")
+	if strings.Count(before, "you> ") != 4 {
+		t.Fatalf("run started before the fourth message:\n%s", stdout.String())
+	}
 }
 
 func TestChatRunStartEchoRendersInChatView(t *testing.T) {
@@ -718,7 +995,7 @@ func TestConciergeRunSettingsRejectsInvalidValues(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := NewConcierge("chat-invalid", st, clk, nil, DefaultConciergeModel)
-			result := c.buildToolRegistry("thread", "turn", "", nil).Execute(ctx, model.ToolCall{ID: "bad", Name: ToolRunSettings, Input: json.RawMessage(args)})
+			result := c.buildToolRegistry("thread", "turn", "", nil, nil).Execute(ctx, model.ToolCall{ID: "bad", Name: ToolRunSettings, Input: json.RawMessage(args)})
 			if !result.IsError || !strings.Contains(result.Content, "run.settings") {
 				t.Fatalf("tool result=%+v, want run.settings validation message", result)
 			}
