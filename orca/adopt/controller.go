@@ -112,6 +112,13 @@ func (d *Controllers) Start(ctx context.Context, r Run) error {
 		if err := d.store.Lanes().Upsert(ctx, *ln); err != nil {
 			return err
 		}
+		if ln.Status.Terminal() && ln.SessionID != "" {
+			if releaser, ok := d.driver.(lane.SessionReleaser); ok {
+				if err := releaser.ReleaseSession(ctx, ln.SessionID, true); err != nil {
+					return fmt.Errorf("release completed lane session %s: %w", ln.SessionID, err)
+				}
+			}
+		}
 		if tracker, ok := d.driver.(interface{ TrackLane(lane.Lane) }); ok && !ln.Status.Terminal() {
 			tracker.TrackLane(*ln)
 		}

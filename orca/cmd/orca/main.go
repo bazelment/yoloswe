@@ -217,13 +217,16 @@ func executeChat(
 				}
 			}
 		}()
-		ids, err := adoption.Adopted()
-		if err != nil {
-			return err
-		}
-		for _, id := range ids {
-			if _, err := adoption.Adopt(ctx, id); err != nil {
-				return err
+		if question == "" {
+			ids, err := adoption.Adopted()
+			if err != nil {
+				logger.Warn("list adopted runs", "error", err)
+			} else {
+				for _, id := range ids {
+					if _, err := adoption.Adopt(ctx, id); err != nil {
+						logger.Warn("adopt run", "run_id", id, "error", err)
+					}
+				}
 			}
 		}
 	}
