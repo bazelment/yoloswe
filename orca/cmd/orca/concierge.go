@@ -447,6 +447,7 @@ func (c *Concierge) budgetAnswer(ctx context.Context, req model.Request, questio
 // last, without repeating an identical one.
 func toolResults(msgs []model.Message) []string {
 	names := map[string]string{}
+	seen := map[string]struct{}{}
 	var out []string
 	for i := range msgs {
 		for j := range msgs[i].Content {
@@ -459,7 +460,8 @@ func toolResults(msgs []model.Message) []string {
 				if blk.IsError {
 					r = fmt.Sprintf("[%s] error: %s", cmp.Or(names[blk.ToolUseID], "tool"), clipText(strings.TrimSpace(blk.Content), 300))
 				}
-				if !slices.Contains(out, r) {
+				if _, ok := seen[r]; !ok {
+					seen[r] = struct{}{}
 					out = append(out, r)
 				}
 			}
