@@ -299,8 +299,10 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		if err := validatePathComponent("lane id", imported.ID); err != nil {
 			return workflow, nil, nil, err
 		}
-		if err := validatePathComponent("lane phase", imported.Phase); err != nil {
-			return workflow, nil, nil, err
+		if imported.Phase != "" {
+			if err := validatePathComponent("lane phase", imported.Phase); err != nil {
+				return workflow, nil, nil, err
+			}
 		}
 		status := lane.Status(imported.Status)
 		if !status.Valid() {
@@ -460,8 +462,10 @@ func checkpoint(dir string, lanes []lane.Lane) error {
 		if err := validatePathComponent("lane id", ln.ID); err != nil {
 			return err
 		}
-		if err := validatePathComponent("lane phase", ln.Phase); err != nil {
-			return err
+		if ln.Phase != "" {
+			if err := validatePathComponent("lane phase", ln.Phase); err != nil {
+				return err
+			}
 		}
 		for _, task := range tasks {
 			var id string
