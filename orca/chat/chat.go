@@ -41,7 +41,7 @@ type Command struct{ Name, Args string }
 var Commands = []Command{
 	{"/runs", "[run-id]"}, {"/status", ""}, {"/lanes", ""}, {"/asks", ""}, {"/memory", ""}, {"/plan", ""},
 	{"/log", "<trace>"}, {"/pause", ""}, {"/resume", ""}, {"/stop", ""}, {"/undo", ""},
-	{"/adopt", "[run-id]"}, {"/release", "[run-id]"}, {"/restart", ""}, {"/exit", ""},
+	{"/adopt", "[run-id]"}, {"/release", "[run-id]"}, {"/restart", "[path]"}, {"/exit", ""},
 }
 
 func (c Command) usage() string { return strings.TrimSpace(c.Name + " " + c.Args) }

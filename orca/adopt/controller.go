@@ -255,6 +255,8 @@ func sameAdoptionGeneration(storedPlanRef, currentMarker string) bool {
 	return g1 != "" && g1 == g2
 }
 
+// Stop stops r's controller, checkpoints its lanes, and releases its SQLite
+// run lease (used by /release).
 func (d *Controllers) Stop(ctx context.Context, r Run) error {
 	return d.stop(ctx, r, true)
 }
@@ -419,7 +421,9 @@ func (d *Controllers) addEscalationAsk(ctx context.Context, runID string, ln *la
 	return err
 }
 
-// Close stops controllers while leaving the handover lease for another chat.
+// Close stops controllers and checkpoints their lanes while keeping both the
+// handover lease and the SQLite run lease so a restarted or re-opened chat
+// continues holding adopted host runs until /release.
 func (d *Controllers) Close(ctx context.Context) error {
 	d.mu.Lock()
 	var starts []*startup

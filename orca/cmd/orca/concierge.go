@@ -320,8 +320,9 @@ func (c *Concierge) Resume(ctx context.Context) ([]model.Message, error) {
 func (c *Concierge) Close(ctx context.Context) error {
 	c.mu.Lock()
 	threadID := c.threadID
+	c.threadID = ""
 	c.mu.Unlock()
-	if threadID == "" {
+	if threadID == "" || c.store == nil {
 		return nil
 	}
 	return c.store.Threads().UpdateThreadStatus(ctx, threadID, store.ThreadStatusArchived)
@@ -878,16 +879,17 @@ func (c *Concierge) RunInteractive(ctx context.Context, in io.Reader, out io.Wri
 		if line == "" {
 			continue
 		}
-		fields := strings.Fields(line)
-		switch strings.ToLower(fields[0]) {
+		switch strings.ToLower(line) {
 		case "/exit", "/quit", "exit", "quit":
 			return nil
-		case "/restart":
+		}
+		fields := strings.Fields(line)
+		if strings.EqualFold(fields[0], "/restart") {
 			if c.Restart == nil {
 				return fmt.Errorf("restart unavailable")
 			}
 			if len(fields) > 2 {
-				if _, err := fmt.Fprintln(out, "error: usage: /restart"); err != nil {
+				if _, err := fmt.Fprintln(out, "error: usage: /restart [path]"); err != nil {
 					return err
 				}
 				continue

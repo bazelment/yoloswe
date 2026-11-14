@@ -38,7 +38,10 @@ const restartEnvVar = "ORCA_RESTARTED_FROM_PID"
 
 var (
 	// buildCommit can be set via linker -X main.buildCommit=<sha>.
-	buildCommit    = ""
+	buildCommit = ""
+	// startupPath and startupVersion are captured at process init so replacing
+	// the binary on disk (rm + mv) before /restart neither points exec at a
+	// deleted inode nor overwrites the running process's old version.
 	startupPath    = resolveStartupPath(os.Args)
 	startupVersion = detectBinaryVersion(startupPath)
 	execProcess    = syscall.Exec
@@ -69,8 +72,15 @@ func resolveStartupPath(args []string) string {
 	return ""
 }
 
-func detectBinaryVersion(binPath string) string {
+func stampedBuildCommit() string {
 	if c := strings.TrimSpace(buildCommit); c != "" && c != "unknown" && !strings.HasPrefix(c, "{") {
+		return c
+	}
+	return ""
+}
+
+func detectBinaryVersion(binPath string) string {
+	if c := stampedBuildCommit(); c != "" {
 		return c
 	}
 	if info, ok := debug.ReadBuildInfo(); ok {
@@ -107,7 +117,7 @@ func detectBinaryVersion(binPath string) string {
 }
 
 func currentVersion() string {
-	if c := strings.TrimSpace(buildCommit); c != "" && c != "unknown" && !strings.HasPrefix(c, "{") {
+	if c := stampedBuildCommit(); c != "" {
 		return c
 	}
 	if v := strings.TrimSpace(startupVersion); v != "" {
@@ -313,6 +323,13 @@ type detachedChild struct {
 	storeSpec string
 }
 
+func formatDetachedRunLine(runID, storeSpec string) string {
+	if strings.TrimSpace(storeSpec) != "" {
+		return fmt.Sprintf("detached orca run %s continues on old binary; to roll: stop old process and run `orca run --run %s --store %s`", runID, runID, storeSpec)
+	}
+	return fmt.Sprintf("detached orca run %s continues on old binary; to roll: stop old process and run `orca run --run %s`", runID, runID)
+}
+
 func executeChat(
 	ctx context.Context,
 	cfg Config,
@@ -326,7 +343,10 @@ func executeChat(
 	if err != nil || reexec == nil {
 		return err
 	}
-	return execProcess(reexec.path, reexec.argv, reexec.env)
+	if err := execProcess(reexec.path, reexec.argv, reexec.env); err != nil {
+		return fmt.Errorf("restart exec %s failed (held leases preserved; run orca to reattach): %w", reexec.path, err)
+	}
+	return nil
 }
 
 func runChatSession(
@@ -499,7 +519,7 @@ func runChatSession(
 		seenDetached := map[string]bool{}
 		for _, child := range detachedChildren {
 			seenDetached[child.runID] = true
-			lines = append(lines, fmt.Sprintf("detached orca run %s continues on old binary; to roll: stop old process and run `orca run --run %s --store %s`", child.runID, child.runID, child.storeSpec))
+			lines = append(lines, formatDetachedRunLine(child.runID, child.storeSpec))
 		}
 		if listed, listErr := runs.List(restartCtx); listErr == nil {
 			now := clk.Now()
@@ -515,11 +535,7 @@ func runChatSession(
 						spec = "sqlite:" + p
 					}
 				}
-				if spec != "" {
-					lines = append(lines, fmt.Sprintf("detached orca run %s continues on old binary; to roll: stop old process and run `orca run --run %s --store %s`", lr.ID, lr.ID, spec))
-				} else {
-					lines = append(lines, fmt.Sprintf("detached orca run %s continues on old binary; to roll: stop old process and run `orca run --run %s`", lr.ID, lr.ID))
-				}
+				lines = append(lines, formatDetachedRunLine(lr.ID, spec))
 			}
 		}
 		env := append(os.Environ(), fmt.Sprintf("%s=%d", restartEnvVar, os.Getpid()))
@@ -580,6 +596,24 @@ func runChatSession(
 	ui.Dispatch = backend.Dispatch
 	if err := chatui.Run(ctx, stdin, stdout, ui); err != nil {
 		return nil, err
+	}
+	if reexec != nil {
+		shutdownCtx := context.WithoutCancel(ctx)
+		var shutdownErr error
+		if adoption != nil {
+			if closer, ok := adoption.Driver.(interface{ Close(context.Context) error }); ok {
+				shutdownErr = errors.Join(shutdownErr, closer.Close(shutdownCtx))
+			}
+		}
+		shutdownErr = errors.Join(
+			shutdownErr,
+			concierge.Close(shutdownCtx),
+			backend.Close(),
+			runs.Close(),
+		)
+		if shutdownErr != nil {
+			return nil, fmt.Errorf("restart shutdown failed: %w", shutdownErr)
+		}
 	}
 	return reexec, nil
 }
@@ -765,7 +799,9 @@ func (r *chatRuns) Close() error {
 	if r.shared == nil {
 		return nil
 	}
-	return r.shared.Store.Close()
+	err := r.shared.Store.Close()
+	r.shared = nil
+	return err
 }
 
 // Open opens the store holding cfg.RunID: the explicit store or the run's own

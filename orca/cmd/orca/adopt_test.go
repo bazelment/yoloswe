@@ -1011,3 +1011,123 @@ func TestRestartTwiceInProcessPreservesHeldLeasesAndControllers(t *testing.T) {
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+func TestConciergeRunInteractiveExitPrefixAndRestart(t *testing.T) {
+	clk := clock.NewRealClock()
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	if err := st.Runs().Create(t.Context(), store.Run{ID: "run-1", Objective: "test interactive"}); err != nil {
+		t.Fatal(err)
+	}
+	c := NewConcierge("run-1", st, clk, nil, "")
+	var restartPath string
+	c.Restart = func(_ context.Context, path string) (string, error) {
+		restartPath = path
+		return "restarting orca (old -> new): " + path, nil
+	}
+	var out bytes.Buffer
+	in := strings.NewReader("exit code handling is broken\n/restart /bin/orca-next\nshould not run\n")
+	if err := c.RunInteractive(t.Context(), in, &out); err != nil {
+		t.Fatalf("RunInteractive: %v", err)
+	}
+	if !strings.Contains(out.String(), "Objective: test interactive") {
+		t.Fatalf("prompt starting with 'exit ' did not reach concierge:\n%s", out.String())
+	}
+	if restartPath != "/bin/orca-next" || !strings.Contains(out.String(), "restarting orca (old -> new): /bin/orca-next") {
+		t.Fatalf("restartPath = %q, out =\n%s", restartPath, out.String())
+	}
+}
+
+func TestRestartShutdownFailureAbortsExecAndVersionValidation(t *testing.T) {
+	var verOut, verErr bytes.Buffer
+	if err := Execute(t.Context(), []string{"--version"}, strings.NewReader(""), &verOut, &verErr); err != nil {
+		t.Fatalf("Execute --version: %v", err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(verOut.String()), "orca ") {
+		t.Fatalf("--version output = %q, want prefix 'orca '", verOut.String())
+	}
+
+	dir := t.TempDir()
+	nonExec := filepath.Join(dir, "nonexec")
+	writeFile(t, nonExec, "#!/bin/sh\n")
+	for _, tc := range []struct {
+		path, wantErr string
+	}{
+		{"", "restart target path is empty"},
+		{filepath.Join(dir, "missing"), "no such file"},
+		{dir, "not a regular file"},
+		{nonExec, "not executable"},
+	} {
+		if _, err := verifyRestartTarget(t.Context(), tc.path); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("verifyRestartTarget(%q) = %v, want %q", tc.path, err, tc.wantErr)
+		}
+	}
+
+	// Verify that a controller checkpoint failure during /restart shutdown aborts execProcess.
+	root := t.TempDir()
+	const runID = "20261114-shutdown-fail"
+	runDir := filepath.Join(root, ".shared", "subagent-swarm", runID)
+	if err := os.MkdirAll(filepath.Join(runDir, "missions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(runDir, "state.json")
+	writeFile(t, statePath, `{"config":{"goal":"checkpoint test","target":"release"},"tasks":[{"id":"a","title":"A","branch":"lane-a","phase":"review","status":"running","round":1,"pr":42,"sessions":{"review":"nebula:imported-review"}}]}`)
+	writeFile(t, filepath.Join(runDir, "missions", "a.md"), "mission")
+	writeFile(t, filepath.Join(runDir, "a.review.spawn.json"), `{"session_id":"s-1","terminal_id":"imported-review"}`)
+	script := filepath.Join(root, "watch_lanes.sh")
+	writeFile(t, script, "#!/bin/bash\necho 'armed: none'\necho 'bridges: none'\nexit 1\n")
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ORCA_SWARM_ROOTS", root)
+	t.Setenv("ORCA_WATCH_LANES", script)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/code-runs/" + runID:
+			_, _ = io.WriteString(w, `{"id":"`+runID+`","externalOrchestratorLabel":"claude"}`)
+		case "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	binPath := filepath.Join(root, "orca")
+	writeFakeOrcaBinary(t, binPath, "commit-v2", 0)
+	origPath, origVer, origExec := startupPath, startupVersion, execProcess
+	t.Cleanup(func() {
+		startupPath, startupVersion, execProcess = origPath, origVer, origExec
+	})
+	startupPath = binPath
+	startupVersion = "commit-v1"
+	execCalled := false
+	execProcess = func(string, []string, []string) error {
+		execCalled = true
+		return nil
+	}
+
+	cfgPath := filepath.Join(root, "orca.json")
+	cfg, _ := json.Marshal(map[string]string{"nebula_api_url": srv.URL, "nebula_token": "test-token"})
+	writeFile(t, cfgPath, string(cfg))
+	storeDir := filepath.Join(root, "store")
+	args := []string{"chat", "--config", cfgPath, "--store-dir", storeDir, "--repo", "bazelment/yoloswe", "--replay", "testdata/concierge_status_replay.json"}
+
+	var out bytes.Buffer
+	writer := writerFunc(func(p []byte) (int, error) {
+		n, err := out.Write(p)
+		if strings.Contains(out.String(), "adopted "+runID) {
+			// Remove state.json after adoption so controller checkpointing fails during /restart shutdown.
+			_ = os.Remove(statePath)
+		}
+		return n, err
+	})
+	err := Execute(t.Context(), args, strings.NewReader("/adopt "+runID+"\n/restart\n"), writer, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "restart shutdown failed") {
+		t.Fatalf("Execute /restart with broken checkpoint = %v, want restart shutdown failed", err)
+	}
+	if execCalled {
+		t.Fatal("execProcess called despite restart shutdown failure")
+	}
+}

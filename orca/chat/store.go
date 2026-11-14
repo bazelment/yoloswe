@@ -844,7 +844,7 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 		return "released " + target, nil
 	case "/restart":
 		if len(fields) > 2 {
-			return "", fmt.Errorf("usage: /restart")
+			return "", fmt.Errorf("usage: /restart [path]")
 		}
 		if b.Restart == nil {
 			return "", fmt.Errorf("restart unavailable")
