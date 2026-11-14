@@ -91,7 +91,7 @@ func (c *CLIClient) CreateMessage(ctx context.Context, req Request) (*Response, 
 	}
 	args := append([]string{}, c.extra...)
 	if c.provider == "claude-cli" {
-		args = append(args, "-p", "--output-format", "json", "--tools", "")
+		args = append(args, "-p", "--bare", "--no-session-persistence", "--output-format", "json", "--tools", "")
 		if req.Model != "" {
 			args = append(args, "--model", req.Model)
 		}
@@ -99,7 +99,7 @@ func (c *CLIClient) CreateMessage(ctx context.Context, req Request) (*Response, 
 			args = append(args, "--effort", req.ReasoningEffort)
 		}
 	} else {
-		args = append(args, "exec", "--json", "--sandbox", "read-only")
+		args = append(args, "exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral")
 		if req.Model != "" {
 			args = append(args, "--model", req.Model)
 		}
@@ -109,6 +109,14 @@ func (c *CLIClient) CreateMessage(ctx context.Context, req Request) (*Response, 
 		args = append(args, "-")
 	}
 	cmd := exec.CommandContext(ctx, c.path, args...)
+	// Keep native CLI tools away from the repository and its settings. Authentication
+	// still comes from the caller's environment, while the working directory is empty.
+	workDir, err := os.MkdirTemp("", "orca-cli-")
+	if err != nil {
+		return nil, fmt.Errorf("orca/model: create CLI workdir: %w", err)
+	}
+	defer os.RemoveAll(workDir)
+	cmd.Dir = workDir
 	cmd.Stdin = strings.NewReader(prompt)
 	var out bytes.Buffer
 	cmd.Stdout = &out
