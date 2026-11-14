@@ -2104,3 +2104,170 @@ func TestClipRunFileContent(t *testing.T) {
 		t.Fatalf("utf8-safe clipRunFileContent = %q", gotUTF8)
 	}
 }
+
+func TestAdoptedSelfMergeRecipeHasNoControllerMergePhase(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 20, 30, 0, 0, time.UTC))
+	// Fixture run whose OBJECTIVE.md states the run's rule: a lane merges once
+	// pr-polish finishes, and whose active lane is in clean r2 (#5811).
+	write(t, filepath.Join(dir, "OBJECTIVE.md"), "# 20261114-trial-m1\n\nGoal: trial m1: slim prompts.\nMerge rule: a lane merges once pr-polish finishes.\n")
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"squash",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":""},
+{"name":"clean","kind":"codex","model":"gpt-5.6-sol","effort":"high","prompt":""},
+{"name":"review","kind":"claude","model":"sonnet","effort":"high","prompt":""}]},
+"tasks":[
+{"id":"m3-polish","title":"polish prompts","branch":"swarm-lane/20261114-trial-m1/m3-polish","priority":"p1","status":"running","phase":"clean","round":2,"session_id":"sess-m3","terminals":{"swe":{"1":"term-m3-swe"},"clean":{"2":"term-m3-clean"}},"pr":5811,"pr_head":"ccc","terminal_state":"working","verdict":""}]}`)
+
+	r, err := Read(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow, lanes, _, err := controllerState(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workflow.MergePolicy.Mode != recipe.MergeModeSelf {
+		t.Fatalf("workflow.MergePolicy.Mode = %q, want %q", workflow.MergePolicy.Mode, recipe.MergeModeSelf)
+	}
+	if _, hasIntegrate := workflow.Phase(recipe.PhaseIntegrate); hasIntegrate {
+		t.Fatalf("self-merge adopted recipe must not have controller merge phase %q: phases=%+v", recipe.PhaseIntegrate, workflow.Phases)
+	}
+	if _, hasReview := workflow.Phase(recipe.PhaseReview); hasReview {
+		t.Fatalf("adopted recipe where a lane merges once pr-polish finishes must not have review phase: phases=%+v", workflow.Phases)
+	}
+	cleanPhase, hasClean := workflow.Phase(recipe.PhaseClean)
+	if !hasClean || !strings.Contains(cleanPhase.BriefTemplate, "/pr-polish-nebula") {
+		t.Fatalf("clean phase = %+v, want /pr-polish-nebula brief", cleanPhase)
+	}
+	mech, _ := workflow.MatchTransitions(recipe.PhaseClean, recipe.OutcomeDone, false, 2)
+	if mech == nil || mech.To != recipe.TargetComplete {
+		t.Fatalf("clean -> done transition = %+v, want To=%q", mech, recipe.TargetComplete)
+	}
+	if len(lanes) != 1 || lanes[0].Phase != recipe.PhaseClean || lanes[0].Round != 2 {
+		t.Fatalf("imported lanes = %+v, want m3-polish in clean r2", lanes)
+	}
+
+	// Also verify string-array config.phases ["swe", "pr-polish"] with merge="self".
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"self",
+"phases":["swe","pr-polish"]},
+"tasks":[{"id":"m3-polish","title":"polish prompts","branch":"swarm-lane/20261114-trial-m1/m3-polish","priority":"p1","status":"running","phase":"pr-polish","round":1,"session_id":"sess-m3","terminals":{"pr-polish":{"1":"term-m3-polish"}},"pr":5811}]}`)
+	r2, err := Read(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf2, lanes2, _, err := controllerState(r2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wf2.MergePolicy.Mode != recipe.MergeModeSelf {
+		t.Fatalf("wf2.MergePolicy.Mode = %q, want %q", wf2.MergePolicy.Mode, recipe.MergeModeSelf)
+	}
+	if _, hasIntegrate := wf2.Phase(recipe.PhaseIntegrate); hasIntegrate {
+		t.Fatalf("wf2 must not have integrate phase: %+v", wf2.Phases)
+	}
+	if len(lanes2) != 1 || lanes2[0].Phase != recipe.PhaseClean || lanes2[0].TerminalID != "term-m3-polish" {
+		t.Fatalf("lanes2 = %+v, want normalized clean phase with term-m3-polish", lanes2)
+	}
+
+	// Negative check: prose mentioning "no review" or negated "do not self-merge"
+	// must NOT flip merge policy to self or drop the review phase.
+	write(t, filepath.Join(dir, "OBJECTIVE.md"), "# 20261114-trial-m1\n\nGoal: ensure no review comments are dropped.\nMerge rule: lanes must not self-merge; controller merges after review.\n")
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"ensure no review comments are dropped","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"squash",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":""},
+{"name":"clean","kind":"codex","model":"gpt-5.6-sol","effort":"high","prompt":""},
+{"name":"review","kind":"claude","model":"sonnet","effort":"high","prompt":""}]},
+"tasks":[]}`)
+	r3, err := Read(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf3, _, _, err := controllerState(r3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wf3.MergePolicy.Mode != recipe.MergeModeController {
+		t.Fatalf("wf3.MergePolicy.Mode = %q, want %q when self-merge is negated", wf3.MergePolicy.Mode, recipe.MergeModeController)
+	}
+	if _, hasReview := wf3.Phase(recipe.PhaseReview); !hasReview {
+		t.Fatalf("wf3 dropped review phase on generic 'no review' prose: %+v", wf3.Phases)
+	}
+	if _, hasIntegrate := wf3.Phase(recipe.PhaseIntegrate); !hasIntegrate {
+		t.Fatalf("wf3 missing controller integrate phase: %+v", wf3.Phases)
+	}
+
+	// Self-merge rule variants: "Merge mode: self", "Merge: self", "merge_mode=self",
+	// and unprefixed prose "In this run, a lane merges once pr-polish finishes."
+	for _, tc := range []struct {
+		name         string
+		objective    string
+		wantNoReview bool
+	}{
+		{
+			name:      "Merge mode: self",
+			objective: "# 20261114-trial-m1\n\nMerge mode: self\n",
+		},
+		{
+			name:      "Merge: self",
+			objective: "# 20261114-trial-m1\n\nMerge: self\n",
+		},
+		{
+			name:      "merge_mode=self",
+			objective: "# 20261114-trial-m1\n\nmerge_mode=self\n",
+		},
+		{
+			name:         "unprefixed prose lane merges once pr-polish finishes",
+			objective:    "# 20261114-trial-m1\n\nIn this run, a lane merges once pr-polish finishes.\n",
+			wantNoReview: true,
+		},
+	} {
+		write(t, filepath.Join(dir, "OBJECTIVE.md"), tc.objective)
+		rVar, err := Read(dir)
+		if err != nil {
+			t.Fatalf("%s: Read: %v", tc.name, err)
+		}
+		wfVar, _, _, err := controllerState(rVar)
+		if err != nil {
+			t.Fatalf("%s: controllerState: %v", tc.name, err)
+		}
+		if wfVar.MergePolicy.Mode != recipe.MergeModeSelf {
+			t.Fatalf("%s: MergePolicy.Mode = %q, want %q", tc.name, wfVar.MergePolicy.Mode, recipe.MergeModeSelf)
+		}
+		if _, hasIntegrate := wfVar.Phase(recipe.PhaseIntegrate); hasIntegrate {
+			t.Fatalf("%s: unexpected integrate phase: %+v", tc.name, wfVar.Phases)
+		}
+		if _, hasReview := wfVar.Phase(recipe.PhaseReview); tc.wantNoReview && hasReview {
+			t.Fatalf("%s: unexpected review phase: %+v", tc.name, wfVar.Phases)
+		}
+	}
+}
+
+func TestAdoptStartAndHoldIntentParityWithDispatcher(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		text      string
+		wantStart bool
+		wantHold  bool
+	}{
+		{"yes: clear both hold directives and start M4", true, false},
+		{"hold is lifted, proceed with M4", true, false},
+		{"do not start M4 yet", false, true},
+		{"don't spawn any new lanes", false, true},
+		{"pause until I say resume", false, true},
+		{"cancel X and don't start Y", false, true},
+		{"Why did it say \"start M4\" when I asked to hold?", false, false},
+		{"can we start M4 or what is the status?", false, false},
+		{"the M4 requirement is unclear", false, false},
+	} {
+		gotAdoptStart := adoptOwnerTextAskedToStart(tc.text)
+		gotDispStart := dispatcher.OwnerTextAskedToStart(tc.text)
+		if gotAdoptStart != tc.wantStart || gotDispStart != tc.wantStart {
+			t.Fatalf("start intent(%q): adopt=%v dispatcher=%v, want %v", tc.text, gotAdoptStart, gotDispStart, tc.wantStart)
+		}
+		gotAdoptHold := adoptIsHoldDirectiveText(tc.text)
+		gotDispHold := dispatcher.IsHoldDirectiveText(tc.text)
+		if gotAdoptHold != tc.wantHold || gotDispHold != tc.wantHold {
+			t.Fatalf("hold intent(%q): adopt=%v dispatcher=%v, want %v", tc.text, gotAdoptHold, gotDispHold, tc.wantHold)
+		}
+	}
+}

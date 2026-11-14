@@ -18,6 +18,7 @@ import (
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/lane"
+	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/router"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -559,6 +560,189 @@ func TestSlashCompletion(t *testing.T) {
 	}
 }
 
+func TestDispatcherOutcomePrintedInChatAndTranscript(t *testing.T) {
+	t.Parallel()
+	t.Run("failed dispatcher turn prints outcome under Queued line", func(t *testing.T) {
+		t.Parallel()
+		fj := failingJudge{batches: make(chan []store.Event, 8)}
+		f := newAdoptedFixture(t, func(string, func(context.Context, string, string, string) error) controller.Judge {
+			return fj
+		})
+		r := routeFunc(func(context.Context, string) (router.Decision, error) {
+			return router.Decision{Handler: router.Dispatcher, Confidence: 1}, nil
+		})
+		m := New(t.Context(), chatRun, nil, r)
+		m.Backend = f.backend
+		m.Dispatch = f.backend.Dispatch
+		var out strings.Builder
+		if err := Run(t.Context(), strings.NewReader("yes: clear both hold directives and start M4\n"), &out, m); err != nil {
+			t.Fatal(err)
+		}
+		got := out.String()
+		wantQueued := "Queued for the dispatcher of adopted run " + adoptedRun + ": yes: clear both hold directives and start M4"
+		wantOutcome := "dispatcher failed: model unavailable"
+		if !strings.Contains(got, wantQueued+"\n"+wantOutcome) {
+			t.Fatalf("chat output missing dispatcher failure outcome directly under Queued line:\n%s", got)
+		}
+	})
+
+	t.Run("dispatcher turn outcome and assistant message printed under Queued line", func(t *testing.T) {
+		t.Parallel()
+		var f *adoptedFixture
+		f = newAdoptedFixture(t, func(runID string, _ func(context.Context, string, string, string) error) controller.Judge {
+			return controller.JudgeFunc(func(ctx context.Context, rID string, _ []store.Event) error {
+				_, _ = f.store.Threads().StartThread(ctx, store.Thread{
+					ID:    "dispatcher-" + rID,
+					RunID: rID,
+					Role:  store.ThreadRoleDispatcher,
+				})
+				tr, err := f.store.Threads().StartTurn(ctx, store.Turn{
+					ID:       "turn-m4-1",
+					ThreadID: "dispatcher-" + rID,
+					RunID:    rID,
+					Input:    "owner instruction",
+				})
+				if err != nil {
+					return err
+				}
+				_, _ = f.store.Decisions().Append(ctx, store.Decision{
+					RunID:    rID,
+					TurnID:   tr.ID,
+					Category: store.DecisionJudgment,
+					Actor:    "dispatcher",
+					Tool:     "backlog.add",
+					Result:   "added backlog item m4-metrics (open ready)",
+					Vetted:   true,
+				})
+				_, _ = f.store.Threads().AppendItem(ctx, store.Item{
+					ThreadID: tr.ThreadID,
+					TurnID:   tr.ID,
+					Kind:     store.ItemKindAssistantMessage,
+					Content:  "I could not spawn the M4 lane.",
+				})
+				return f.store.Threads().CompleteTurn(ctx, tr.ThreadID, tr.ID, store.TurnStatusCompleted, model.Usage{}, "")
+			})
+		})
+		r := routeFunc(func(context.Context, string) (router.Decision, error) {
+			return router.Decision{Handler: router.Dispatcher, Confidence: 1}, nil
+		})
+		m := New(t.Context(), chatRun, nil, r)
+		m.Backend = f.backend
+		m.Dispatch = f.backend.Dispatch
+		var out strings.Builder
+		if err := Run(t.Context(), strings.NewReader("yes: clear both hold directives and start M4\n"), &out, m); err != nil {
+			t.Fatal(err)
+		}
+		got := out.String()
+		wantQueued := "Queued for the dispatcher of adopted run " + adoptedRun + ": yes: clear both hold directives and start M4"
+		wantOutcome := "dispatcher: backlog.add (added backlog item m4-metrics (open ready)) — I could not spawn the M4 lane."
+		if !strings.Contains(got, wantQueued+"\n"+wantOutcome) {
+			t.Fatalf("chat output missing dispatcher outcome under Queued line:\n%s", got)
+		}
+	})
+}
+
+func TestCostLineSumsTurnAndDecisionCostsAcrossFrontDeskAndHeldRuns(t *testing.T) {
+	t.Parallel()
+	f := newAdoptedFixture(t, nil)
+	f.backend.FrontDesk = chatRun
+	ctx := t.Context()
+
+	// 1. Front-desk concierge thread with a prior-day turn ($5.00, must be excluded from today)
+	// and a today turn with explicit CostUSD ($0.12).
+	if _, err := f.store.Threads().StartThread(ctx, store.Thread{
+		ID:    "concierge-" + chatRun,
+		RunID: chatRun,
+		Role:  store.ThreadRoleConcierge,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.clock.Advance(-24 * time.Hour)
+	if _, err := f.store.Threads().StartTurn(ctx, store.Turn{
+		ID:       "c-turn-yesterday",
+		ThreadID: "concierge-" + chatRun,
+		RunID:    chatRun,
+		Input:    "yesterday status?",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Threads().CompleteTurn(ctx, "concierge-"+chatRun, "c-turn-yesterday", store.TurnStatusCompleted, model.Usage{CostUSD: 5.00}, ""); err != nil {
+		t.Fatal(err)
+	}
+	f.clock.Advance(24 * time.Hour)
+	if _, err := f.store.Threads().StartTurn(ctx, store.Turn{
+		ID:       "c-turn-1",
+		ThreadID: "concierge-" + chatRun,
+		RunID:    chatRun,
+		Input:    "status?",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Threads().CompleteTurn(ctx, "concierge-"+chatRun, "c-turn-1", store.TurnStatusCompleted, model.Usage{CostUSD: 0.12}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Adopted run dispatcher turn with CostUSD ($0.25) and a decision on the same turn ($0.10, included in the $0.25 turn cost).
+	if _, err := f.store.Threads().StartThread(ctx, store.Thread{
+		ID:    "dispatcher-" + adoptedRun,
+		RunID: adoptedRun,
+		Role:  store.ThreadRoleDispatcher,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Threads().StartTurn(ctx, store.Turn{
+		ID:       "d-turn-1",
+		ThreadID: "dispatcher-" + adoptedRun,
+		RunID:    adoptedRun,
+		Input:    "batch 1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Threads().CompleteTurn(ctx, "dispatcher-"+adoptedRun, "d-turn-1", store.TurnStatusCompleted, model.Usage{CostUSD: 0.25}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Decisions().Append(ctx, store.Decision{
+		RunID:     adoptedRun,
+		TurnID:    "d-turn-1",
+		Category:  store.DecisionJudgment,
+		Actor:     "dispatcher",
+		Tool:      "lane.spawn",
+		CostUSD:   0.10,
+		CreatedAt: f.clock.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Adopted run dispatcher turn with CostUSD == 0 but token usage (10,000 input + 2,000 output on sonnet = $0.03 + $0.03 = $0.06).
+	if _, err := f.store.Threads().StartTurn(ctx, store.Turn{
+		ID:       "d-turn-2",
+		ThreadID: "dispatcher-" + adoptedRun,
+		RunID:    adoptedRun,
+		Input:    "batch 2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Threads().CompleteTurn(ctx, "dispatcher-"+adoptedRun, "d-turn-2", store.TurnStatusCompleted, model.Usage{InputTokens: 10_000, OutputTokens: 2_000}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Total expected: $0.12 + $0.25 + $0.06 = $0.43.
+	snap, err := f.backend.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snap.Status, "cost today: $0.43") {
+		t.Fatalf("Snapshot.Status = %q, want cost today: $0.43", snap.Status)
+	}
+	statusOut, err := f.backend.Command(ctx, "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(statusOut, "cost today: $0.43") {
+		t.Fatalf("/status = %q, want cost today: $0.43", statusOut)
+	}
+}
+
 func TestStatusListsStandingRules(t *testing.T) {
 	t.Parallel()
 	f := newAdoptedFixture(t, nil)
@@ -600,5 +784,64 @@ func TestStatusListsStandingRules(t *testing.T) {
 	}
 	if !strings.Contains(gotRun.Objective, "updated host goal") || !strings.Contains(gotRun.Objective, "Next: staff m4") {
 		t.Fatalf("expected /status to refresh adopted run objective from disk, got %q", gotRun.Objective)
+	}
+}
+
+func TestDispatchDoesNotHoldRLockAcrossStepAdopted(t *testing.T) {
+	t.Parallel()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	f := newAdoptedFixture(t, func(string, func(context.Context, string, string, string) error) controller.Judge {
+		return controller.JudgeFunc(func(context.Context, string, []store.Event) error {
+			select {
+			case <-entered:
+			default:
+				close(entered)
+			}
+			<-release
+			return nil
+		})
+	})
+	ctx := t.Context()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- f.backend.Dispatch(ctx, router.Decision{Handler: router.Dispatcher, Confidence: 1}, "start M4", nil)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Dispatch to enter Step")
+	}
+
+	// Queue and complete a write-lock caller (Attach) while Step is still in-flight;
+	// if Dispatch held b.mu.RLock across Step, Attach and any subsequent Snapshot/RunID
+	// would deadlock here.
+	attachDone := make(chan struct{})
+	go func() {
+		f.backend.Attach(f.store, adoptedRun)
+		close(attachDone)
+	}()
+
+	select {
+	case <-attachDone:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("Attach blocked while Dispatch was in Step (RLock held across stepAdopted)")
+	}
+
+	if gotRun := f.backend.RunID(); gotRun != adoptedRun {
+		close(release)
+		t.Fatalf("RunID() = %q, want %q", gotRun, adoptedRun)
+	}
+	if _, err := f.backend.Snapshot(ctx); err != nil {
+		close(release)
+		t.Fatalf("Snapshot() while Step running: %v", err)
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("Dispatch: %v", err)
 	}
 }

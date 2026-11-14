@@ -31,6 +31,10 @@ type JudgeFactory func(runID string, answer func(ctx context.Context, runID, ask
 // escalationAskTTL bounds an unanswered escalation question.
 const escalationAskTTL = 24 * time.Hour
 
+// ReadyBacklogSummaryPrefix prefixes the urgent judgment trigger emitted when
+// an owner start instruction leaves open ready P0 items unspawned.
+const ReadyBacklogSummaryPrefix = "open backlog items ready for dispatch: "
+
 // Controllers attaches host runs to orca's deterministic lane lifecycle.
 type Controllers struct {
 	ctx          context.Context
@@ -47,13 +51,16 @@ type Controllers struct {
 	mu           sync.Mutex
 }
 
+//nolint:govet // field alignment
 type controlledRun struct {
-	controller *controller.Controller
-	syncer     *runLedgerSync
-	cancel     context.CancelFunc
-	done       chan struct{}
-	holder     string
-	run        Run
+	controller         *controller.Controller
+	syncer             *runLedgerSync
+	cancel             context.CancelFunc
+	done               chan struct{}
+	dispatchedOpenSet  map[string]bool
+	maxConcurrentLanes int
+	holder             string
+	run                Run
 }
 
 type startup struct {
@@ -86,6 +93,17 @@ func (d *Controllers) Wake(runID string) {
 	if cr != nil {
 		cr.controller.Wake()
 	}
+}
+
+// Step executes one synchronous controller step for an active adopted run.
+func (d *Controllers) Step(ctx context.Context, runID string) error {
+	d.mu.Lock()
+	cr := d.runs[runID]
+	d.mu.Unlock()
+	if cr == nil {
+		return nil
+	}
+	return cr.controller.Step(ctx)
 }
 
 // Active reports whether this process currently runs a controller for runID.
@@ -266,7 +284,16 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		JudgeLaneMail: true,
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
-	cr := &controlledRun{controller: ctrl, syncer: syncer, cancel: cancel, done: make(chan struct{}), run: r, holder: holder}
+	cr := &controlledRun{
+		controller:         ctrl,
+		syncer:             syncer,
+		cancel:             cancel,
+		done:               make(chan struct{}),
+		dispatchedOpenSet:  map[string]bool{},
+		maxConcurrentLanes: workflow.Limits.MaxConcurrentLanes,
+		run:                r,
+		holder:             holder,
+	}
 	d.mu.Lock()
 	s.cr = cr
 	d.mu.Unlock()
@@ -378,9 +405,37 @@ func (d *Controllers) judge(holder string, dispatch controller.Judge) controller
 		_, _ = d.RefreshObjective(ctx, runID)
 		var err error
 		if dispatch != nil {
+			var turnsBefore int
+			if d.store != nil {
+				if turns, tErr := d.store.Threads().ListTurns(ctx, "dispatcher-"+runID); tErr == nil {
+					turnsBefore = len(turns)
+				}
+			}
 			stop := d.keepLease(ctx, runID, holder)
 			err = dispatch.Judge(ctx, runID, events)
 			stop()
+			if err != nil {
+				if d.store != nil {
+					var turnsAfter int
+					if turns, tErr := d.store.Threads().ListTurns(ctx, "dispatcher-"+runID); tErr == nil {
+						turnsAfter = len(turns)
+					}
+					if turnsAfter == turnsBefore {
+						_, _ = d.store.Decisions().Append(ctx, store.Decision{
+							RunID:     runID,
+							Category:  store.DecisionJudgment,
+							Actor:     "dispatcher",
+							Tool:      controller.ToolJudgmentDispatch,
+							Reason:    "dispatcher turn failed",
+							Result:    "dispatcher failed: " + err.Error(),
+							Vetted:    false,
+							CreatedAt: d.clock.Now().UTC(),
+						})
+					}
+				}
+			} else {
+				d.enqueueReadyBacklogTriggerIfNeeded(ctx, runID, events)
+			}
 		}
 		d.syncRunLanes(ctx, runID)
 		if _, pErr := d.planNextWorkIfDrained(ctx, runID, "backlog_drained"); pErr != nil {
@@ -391,6 +446,357 @@ func (d *Controllers) judge(holder string, dispatch controller.Judge) controller
 		}
 		return d.askOwnerOnEscalation(ctx, runID, events)
 	})
+}
+
+func (d *Controllers) enqueueReadyBacklogTriggerIfNeeded(ctx context.Context, runID string, events []store.Event) {
+	if d.store == nil {
+		return
+	}
+	cr := d.lookupRun(runID)
+	clearDedup := func() {
+		if cr != nil {
+			d.mu.Lock()
+			cr.dispatchedOpenSet = nil
+			d.mu.Unlock()
+		}
+	}
+	asked, ownerKey := adoptOwnerAskedToStart(events)
+	if !asked {
+		clearDedup()
+		return
+	}
+	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	if err != nil {
+		return
+	}
+	for i := range dirs {
+		if strings.HasPrefix(dirs[i].Ref, "owner_ask:") {
+			continue
+		}
+		if adoptIsHoldDirectiveText(dirs[i].Text) {
+			clearDedup()
+			return
+		}
+	}
+	items, err := d.store.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
+	if err != nil {
+		return
+	}
+	byID := make(map[string]store.BacklogStatus, len(items))
+	for i := range items {
+		byID[items[i].ID] = items[i].Status
+	}
+	lanes, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
+	if err != nil {
+		return
+	}
+	activeItemLane := make(map[string]bool, len(lanes))
+	activeOrPlanned := 0
+	for i := range lanes {
+		if !lanes[i].Status.Terminal() {
+			activeItemLane[cmp.Or(lanes[i].ItemID, lanes[i].ID)] = true
+			activeItemLane[lanes[i].ID] = true
+		}
+		if lanes[i].Status == lane.StatusRunning || lanes[i].Status == lane.StatusPlanned {
+			activeOrPlanned++
+		}
+	}
+	if cr != nil && cr.maxConcurrentLanes > 0 && activeOrPlanned >= cr.maxConcurrentLanes {
+		return
+	}
+	var readyP0 []string
+	for i := range items {
+		it := &items[i]
+		if it.Status != store.BacklogOpen || it.Priority != store.PriorityP0 || it.LaneID != "" || activeItemLane[it.ID] {
+			continue
+		}
+		ready := true
+		for _, dep := range it.DependsOn {
+			if byID[dep] != store.BacklogDone {
+				ready = false
+				break
+			}
+		}
+		if ready {
+			readyP0 = append(readyP0, it.ID)
+		}
+	}
+	if len(readyP0) == 0 {
+		clearDedup()
+		return
+	}
+	stateKey := fmt.Sprintf("owner:%s:open:%s:active:%d", ownerKey, strings.Join(readyP0, ","), activeOrPlanned)
+	if cr != nil {
+		d.mu.Lock()
+		already := cr.dispatchedOpenSet[stateKey]
+		d.mu.Unlock()
+		if already {
+			return
+		}
+	}
+	if _, err := d.store.Events().Append(ctx, store.Event{
+		RunID:     runID,
+		Kind:      store.EventTimer,
+		Class:     store.EventClassJudgment,
+		Urgent:    true,
+		Source:    controller.ActorController,
+		Summary:   ReadyBacklogSummaryPrefix + strings.Join(readyP0, ", "),
+		CreatedAt: d.clock.Now().UTC(),
+	}); err != nil {
+		return
+	}
+	if cr != nil {
+		d.mu.Lock()
+		cr.dispatchedOpenSet = map[string]bool{stateKey: true}
+		d.mu.Unlock()
+	}
+	d.Wake(runID)
+}
+
+func adoptOwnerAskedToStart(events []store.Event) (bool, string) {
+	asked := false
+	ownerKey := ""
+	for i := range events {
+		if events[i].Kind != store.EventOwnerMessage {
+			continue
+		}
+		text := strings.TrimSpace(events[i].Summary + " " + string(events[i].Payload))
+		if adoptIsHoldDirectiveText(text) {
+			asked = false
+			ownerKey = ""
+			continue
+		}
+		if adoptOwnerTextAskedToStart(text) {
+			asked = true
+			ownerKey = cmp.Or(events[i].ID, strconv.FormatInt(events[i].Seq, 10), events[i].Summary)
+		}
+	}
+	return asked, ownerKey
+}
+
+func adoptStripQuotedSpans(s string) string {
+	var b strings.Builder
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		if c == '"' {
+			quote = c
+			b.WriteByte(' ')
+			continue
+		}
+		if c == '\'' {
+			prevAlpha := i > 0 && ((s[i-1] >= 'a' && s[i-1] <= 'z') || (s[i-1] >= 'A' && s[i-1] <= 'Z'))
+			nextAlpha := i+1 < len(s) && ((s[i+1] >= 'a' && s[i+1] <= 'z') || (s[i+1] >= 'A' && s[i+1] <= 'Z'))
+			if !prevAlpha || !nextAlpha {
+				quote = c
+				b.WriteByte(' ')
+				continue
+			}
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+func adoptSplitIntentClauses(s string) []string {
+	r := strings.NewReplacer(
+		"\n", "|",
+		".", "|",
+		";", "|",
+		"!", "|",
+		",", "|",
+		":", "|",
+		" — ", "|",
+		" – ", "|",
+		" - ", "|",
+		" and ", "|",
+		" then ", "|",
+		" but ", "|",
+	)
+	return strings.Split(r.Replace(s), "|")
+}
+
+func adoptSplitHoldClauses(s string) []string {
+	r := strings.NewReplacer(
+		"\n", "|",
+		".", "|",
+		";", "|",
+		"!", "|",
+		",", "|",
+		":", "|",
+		" — ", "|",
+		" – ", "|",
+		" - ", "|",
+		" and ", "|",
+		" then ", "|",
+		" but ", "|",
+		" until ", "|",
+		" unless ", "|",
+	)
+	return strings.Split(r.Replace(s), "|")
+}
+
+func adoptNormalizeContractions(s string) string {
+	return strings.NewReplacer(
+		"don't", "dont",
+		"can't", "cant",
+		"won't", "wont",
+		"shouldn't", "shouldnt",
+		"didn't", "didnt",
+		"isn't", "isnt",
+		"wasn't", "wasnt",
+	).Replace(s)
+}
+
+func adoptContainsWholeWord(text, word string) bool {
+	if word == "" {
+		return false
+	}
+	for start := 0; start < len(text); {
+		idx := strings.Index(text[start:], word)
+		if idx < 0 {
+			return false
+		}
+		pos := start + idx
+		end := pos + len(word)
+		leftOK := pos == 0 || !isWordByte(text[pos-1])
+		rightOK := end == len(text) || !isWordByte(text[end])
+		if leftOK && rightOK {
+			return true
+		}
+		start = pos + 1
+	}
+	return false
+}
+
+func adoptHasStartNegation(prefix string) bool {
+	norm := adoptNormalizeContractions(prefix)
+	for _, neg := range []string{
+		"not", "no", "never", "dont", "cannot", "cant", "wont", "shouldnt",
+		"hold", "pause", "stop", "wait", "delay", "defer", "block", "avoid",
+		"without", "before", "until", "unless",
+	} {
+		if adoptContainsWholeWord(norm, neg) {
+			return true
+		}
+	}
+	return false
+}
+
+func adoptOwnerTextAskedToStart(text string) bool {
+	unquoted := strings.ToLower(adoptStripQuotedSpans(text))
+	for _, sentence := range strings.FieldsFunc(unquoted, func(r rune) bool {
+		return r == '.' || r == ';' || r == '\n' || r == '!'
+	}) {
+		sentence = strings.TrimSpace(sentence)
+		if sentence == "" || strings.Contains(sentence, "?") {
+			continue
+		}
+		for _, clause := range adoptSplitIntentClauses(sentence) {
+			clause = strings.TrimSpace(clause)
+			if clause == "" {
+				continue
+			}
+			for _, phrase := range []string{"go ahead", "clear the hold", "clear both hold", "clear hold", "lift the hold", "lift hold"} {
+				if idx := strings.Index(clause, phrase); idx >= 0 && !adoptHasStartNegation(clause[:idx]) {
+					return true
+				}
+			}
+			for _, kw := range []string{"start", "spawn", "launch", "proceed", "resume", "unblock", "unpause"} {
+				for start := 0; start < len(clause); {
+					idx := strings.Index(clause[start:], kw)
+					if idx < 0 {
+						break
+					}
+					pos := start + idx
+					end := pos + len(kw)
+					leftOK := pos == 0 || !isWordByte(clause[pos-1])
+					rightOK := end == len(clause) || !isWordByte(clause[end])
+					if leftOK && rightOK && !adoptHasStartNegation(clause[:pos]) {
+						return true
+					}
+					start = pos + 1
+				}
+			}
+		}
+	}
+	return false
+}
+
+func isWordByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func adoptIsHoldDirectiveText(text string) bool {
+	unquoted := strings.ToLower(adoptStripQuotedSpans(text))
+	for _, sentence := range strings.FieldsFunc(unquoted, func(r rune) bool {
+		return r == '.' || r == ';' || r == '\n' || r == '!'
+	}) {
+		sentence = strings.TrimSpace(sentence)
+		if sentence == "" || strings.Contains(sentence, "?") {
+			continue
+		}
+		for _, clause := range adoptSplitHoldClauses(sentence) {
+			clause = strings.TrimSpace(clause)
+			if clause == "" {
+				continue
+			}
+			if strings.Contains(clause, "keep the hold") ||
+				strings.Contains(clause, "keep hold") ||
+				strings.Contains(clause, "hold on the run") ||
+				strings.Contains(clause, "hold on run") ||
+				adoptContainsWholeWord(clause, "lease") {
+				continue
+			}
+			lifting := false
+			for _, lift := range []string{
+				"clear", "cleared", "clearing", "lift", "lifted", "lifting",
+				"remove", "removed", "removing", "revoke", "revoked", "revoking",
+				"cancel", "canceled", "cancelled", "drop", "dropped", "undo",
+				"unpause", "unpaused", "resume", "resumed", "unblock", "unblocked",
+				"release", "released",
+			} {
+				if adoptContainsWholeWord(clause, lift) {
+					lifting = true
+					break
+				}
+			}
+			if lifting {
+				continue
+			}
+			for _, phrase := range []string{
+				"do not start", "don't start", "dont start",
+				"do not spawn", "don't spawn", "dont spawn",
+				"do not launch", "don't launch", "dont launch",
+				"no new lanes", "start no new lanes", "stop spawning", "pause spawning",
+				"no additional lanes", "no more lanes", "hold new lanes", "hold off",
+				"hold on starting", "hold starting", "block new lanes", "pause new lanes",
+				"no new work", "block all new work", "standing hold", "standing owner hold",
+			} {
+				if idx := strings.Index(clause, phrase); idx >= 0 {
+					prefix := adoptNormalizeContractions(clause[:idx])
+					if !adoptContainsWholeWord(prefix, "not") && !adoptContainsWholeWord(prefix, "never") && !adoptContainsWholeWord(prefix, "didnt") {
+						return true
+					}
+				}
+			}
+			norm := adoptNormalizeContractions(clause)
+			if (adoptContainsWholeWord(norm, "hold") || adoptContainsWholeWord(norm, "pause")) &&
+				!adoptContainsWholeWord(norm, "no") &&
+				!adoptContainsWholeWord(norm, "not") &&
+				!adoptContainsWholeWord(norm, "never") &&
+				!adoptContainsWholeWord(norm, "without") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (d *Controllers) syncRunLanes(ctx context.Context, runID string) {
@@ -707,8 +1113,12 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	workflow := defaultRecipe.Clone()
 	workflow.RunID = r.ID
 	workflow.Name = "adopted"
+	objectiveText := stripMarker(readText(filepath.Join(r.Dir, "OBJECTIVE.md")))
+	ruleText := extractMergeRuleText(r.Dir, st.Config.MergeRule, objectiveText, r.Goal, st.Config.Phases)
 	if st.Config.MergePolicy != nil {
 		workflow.MergePolicy = *st.Config.MergePolicy
+	} else if strings.EqualFold(st.Config.Merge, "self") || strings.EqualFold(st.Config.Merge, "lane") || hasSelfMergeRule(ruleText) {
+		workflow.MergePolicy.Mode = recipe.MergeModeSelf
 	} else if r.Format == FormatNebulaSwarm && (st.Config.Merge == "" || st.Config.Merge == "none") {
 		// A nebula-swarm run without merge authority leaves its PRs to a person.
 		workflow.MergePolicy.Mode = recipe.MergeModeManual
@@ -719,10 +1129,18 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	if !workflow.MergePolicy.Mode.Valid() {
 		return workflow, nil, nil, fmt.Errorf("invalid adopted merge mode %q", workflow.MergePolicy.Mode)
 	}
+	hasExplicitClean := false
+	for _, spec := range st.Config.Phases {
+		switch strings.ToLower(strings.TrimSpace(spec.Name)) {
+		case recipe.PhaseClean, "simplify":
+			hasExplicitClean = true
+		}
+	}
 	if len(st.Config.Phases) > 0 {
 		workflow.Phases = nil
 		for _, spec := range st.Config.Phases {
-			ph, ok := defaultRecipe.Phase(spec.Name)
+			canonical, isPolish := normalizeHostPhaseName(spec.Name, hasExplicitClean)
+			ph, ok := defaultRecipe.Phase(canonical)
 			if !ok {
 				return workflow, nil, nil, fmt.Errorf("unsupported host phase %q", spec.Name)
 			}
@@ -734,13 +1152,43 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			} else if spec.Model != "" {
 				ph.Agents = []recipe.AgentSpec{spec.hostAgent.agent()}
 			}
+			promptFallback := spec.Prompt
+			if isPolish && strings.TrimSpace(promptFallback) == "" {
+				promptFallback = "Run /pr-polish-nebula."
+			}
 			if r.Format == FormatNebulaSwarm && (ph.Name == recipe.PhaseClean || ph.Name == recipe.PhaseReview) {
-				ph.BriefTemplate = nebulaSwarmPhaseBrief(r.Dir, ph.Name, spec.Prompt)
+				ph.BriefTemplate = nebulaSwarmPhaseBrief(r.Dir, ph.Name, promptFallback)
+			} else if strings.TrimSpace(promptFallback) != "" {
+				ph.BriefTemplate = strings.TrimSpace(promptFallback)
 			}
 			workflow.Phases = append(workflow.Phases, ph)
 		}
 	}
-	if workflow.MergePolicy.Mode == recipe.MergeModeManual || workflow.MergePolicy.Mode == recipe.MergeModeNone {
+	if workflow.MergePolicy.Mode == recipe.MergeModeSelf && mergesAfterCleanOrPolish(ruleText) {
+		hasReviewLane := false
+		for i := range r.Lanes {
+			norm, _ := normalizeHostPhaseName(r.Lanes[i].Phase, hasExplicitClean)
+			if norm == recipe.PhaseReview {
+				hasReviewLane = true
+				break
+			}
+		}
+		if !hasReviewLane {
+			if _, hasClean := workflow.Phase(recipe.PhaseClean); hasClean {
+				workflow.Phases = slices.DeleteFunc(workflow.Phases, func(ph recipe.Phase) bool {
+					return ph.Name == recipe.PhaseReview
+				})
+				if strings.Contains(strings.ToLower(ruleText), "pr-polish") {
+					for i := range workflow.Phases {
+						if workflow.Phases[i].Name == recipe.PhaseClean && strings.Contains(workflow.Phases[i].BriefTemplate, "/simplify-branch") {
+							workflow.Phases[i].BriefTemplate = "Run /pr-polish-nebula."
+						}
+					}
+				}
+			}
+		}
+	}
+	if workflow.MergePolicy.Mode != recipe.MergeModeController {
 		var phases []recipe.Phase
 		for _, ph := range workflow.Phases {
 			if ph.Name != recipe.PhaseIntegrate {
@@ -751,6 +1199,9 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	} else if _, ok := workflow.Phase(recipe.PhaseIntegrate); !ok {
 		ph, _ := defaultRecipe.Phase(recipe.PhaseIntegrate)
 		workflow.Phases = append(workflow.Phases, ph)
+	}
+	if _, hasReview := workflow.Phase(recipe.PhaseReview); !hasReview {
+		workflow.MergePolicy.RequireReviewPass = false
 	}
 	workflow.Transitions = nil
 	for i := range workflow.Phases {
@@ -829,6 +1280,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 				items = append(items, store.BacklogItem{ID: ln.ID, RunID: r.ID, LaneID: ln.ID, Title: ln.Title, Description: mission, Priority: priority, Status: status, DependsOn: task.DependsOn})
 				ln.PRHead, ln.ApprovalSHA, ln.MergeSHA, ln.Checks, ln.BaseCommit, ln.Worktree = task.PRHead, task.ApprovalSHA, task.MergeSHA, task.Checks, task.BaseCommit, task.Worktree
 				for phase, rounds := range task.Terminals {
+					normPhase, _ := normalizeHostPhaseName(phase, hasExplicitClean)
 					for round, id := range rounds {
 						n, err := strconv.Atoi(round)
 						if err != nil || id == "" {
@@ -837,7 +1289,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 						if ln.Terminals == nil {
 							ln.Terminals = map[string]string{}
 						}
-						ln.Terminals[lane.PhaseRoundKey(phase, n)] = id
+						ln.Terminals[lane.PhaseRoundKey(normPhase, n)] = id
 					}
 				}
 				for key, terminal := range task.Sessions {
@@ -850,7 +1302,8 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 				}
 			}
 		}
-		ln.RecordAttempt(imported.Phase, imported.Round, imported.Session, imported.Terminal)
+		normImportedPhase, _ := normalizeHostPhaseName(imported.Phase, hasExplicitClean)
+		ln.RecordAttempt(normImportedPhase, imported.Round, imported.Session, imported.Terminal)
 		lanes = append(lanes, ln)
 	}
 	return workflow, lanes, items, nil
@@ -938,6 +1391,153 @@ type hostPhase struct {
 	Name   string      `json:"name"`
 	Prompt string      `json:"prompt"`
 	Chain  []hostAgent `json:"chain"`
+}
+
+func (p *hostPhase) UnmarshalJSON(data []byte) error {
+	var name string
+	if err := json.Unmarshal(data, &name); err == nil {
+		*p = hostPhase{Name: strings.TrimSpace(name)}
+		return nil
+	}
+	type rawHostPhase hostPhase
+	var raw rawHostPhase
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = hostPhase(raw)
+	return nil
+}
+
+func normalizeHostPhaseName(name string, hasExplicitClean bool) (string, bool) {
+	trimmed := strings.TrimSpace(name)
+	switch strings.ToLower(trimmed) {
+	case "":
+		return "", false
+	case recipe.PhaseSWE, "implement", "code":
+		return recipe.PhaseSWE, false
+	case recipe.PhaseClean, "simplify":
+		return recipe.PhaseClean, false
+	case recipe.PhaseReview:
+		return recipe.PhaseReview, false
+	case recipe.PhaseIntegrate, "merge":
+		return recipe.PhaseIntegrate, false
+	case "pr-polish", "pr_polish", "polish":
+		if hasExplicitClean {
+			return recipe.PhaseReview, true
+		}
+		return recipe.PhaseClean, true
+	default:
+		return trimmed, false
+	}
+}
+
+func extractMergeRuleText(dir, configMergeRule, objectiveText, goal string, phases []hostPhase) string {
+	var parts []string
+	for _, s := range []string{
+		configMergeRule,
+		objectiveText,
+		goal,
+		readText(filepath.Join(dir, "clean.brief")),
+		readText(filepath.Join(dir, "review.brief")),
+	} {
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	for i := range phases {
+		if trimmed := strings.TrimSpace(phases[i].Prompt); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func splitMergeRuleClauses(s string) []string {
+	r := strings.NewReplacer(
+		"\n", "|",
+		".", "|",
+		";", "|",
+		"!", "|",
+		",", "|",
+		" — ", "|",
+		" – ", "|",
+		" and ", "|",
+		" then ", "|",
+		" but ", "|",
+	)
+	return strings.Split(r.Replace(s), "|")
+}
+
+func isNegatedMergeRuleClause(clause string) bool {
+	norm := adoptNormalizeContractions(clause)
+	for _, neg := range []string{"not", "no", "never", "dont", "cannot", "cant", "without", "forbid"} {
+		if adoptContainsWholeWord(norm, neg) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSelfMergeRule(text string) bool {
+	lower := strings.ToLower(text)
+	for _, clause := range splitMergeRuleClauses(lower) {
+		clause = strings.TrimSpace(clause)
+		if clause == "" || isNegatedMergeRuleClause(clause) {
+			continue
+		}
+		for _, phrase := range []string{
+			"self-merge",
+			"self merge",
+			"merge themselves",
+			"merges itself",
+			"merge itself",
+			"merges its own pr",
+			"merge its own pr",
+			"lanes merge their own",
+			"lane merges its own",
+			"lane merges once",
+			"lanes merge once",
+			"merges once pr-polish",
+			"merge once pr-polish",
+			"merges after pr-polish",
+			"merge after pr-polish",
+			"merges once clean",
+			"merge once clean",
+			"merge_mode=self",
+			"merge mode: self",
+			"merge: self",
+		} {
+			if strings.Contains(clause, phrase) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mergesAfterCleanOrPolish(text string) bool {
+	lower := strings.ToLower(text)
+	for _, clause := range splitMergeRuleClauses(lower) {
+		clause = strings.TrimSpace(clause)
+		if clause == "" || isNegatedMergeRuleClause(clause) {
+			continue
+		}
+		for _, phrase := range []string{
+			"merges once pr-polish",
+			"merge once pr-polish",
+			"merges after pr-polish",
+			"merge after pr-polish",
+			"merges once clean",
+			"merge once clean",
+			"merges after clean",
+			"merge after clean",
+		} {
+			if strings.Contains(clause, phrase) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a hostAgent) agent() recipe.AgentSpec {

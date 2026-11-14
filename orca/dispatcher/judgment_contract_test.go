@@ -460,3 +460,295 @@ func TestDispatch_RequestShapePerModel(t *testing.T) {
 		})
 	}
 }
+
+func TestDispatch_OwnerYesStartItSpawnsReadyP0(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:     "dir-hold-1",
+		RunID:  "run-1",
+		Kind:   store.DirectiveStanding,
+		Source: store.DirectiveSourceOwner,
+		Text:   "Hold starting M4 until I say so",
+		Status: store.DirectiveActive,
+	}); err != nil {
+		t.Fatalf("Add directive: %v", err)
+	}
+	if err := st.Backlog().Add(ctx, store.BacklogItem{
+		ID:       "m4-metrics",
+		RunID:    "run-1",
+		Title:    "M4 metrics lane",
+		Priority: store.PriorityP0,
+		Status:   store.BacklogOpen,
+	}); err != nil {
+		t.Fatalf("Add backlog item: %v", err)
+	}
+
+	fake := model.NewFakeClient(
+		toolUseResponse(
+			model.ToolCall{ID: "t1", Name: "directive.revoke", Input: json.RawMessage(`{"id":"dir-hold-1","reason":"owner lifted hold"}`)},
+			model.ToolCall{ID: "t2", Name: dispatcher.ToolLaneSpawn, Input: json.RawMessage(`{"item_id":"m4-metrics","brief":"Implement M4 metrics","reason":"owner ordered start"}`)},
+		),
+		endTurnResponse("Revoked dir-hold-1 and spawned m4-metrics."),
+	)
+	d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+	ev, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventOwnerMessage,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "yes, start it",
+	})
+	if err != nil {
+		t.Fatalf("Append event: %v", err)
+	}
+
+	res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	offered := toolNames(fake.Requests[0])
+	for _, wantTool := range []string{
+		dispatcher.ToolBacklogAdd, dispatcher.ToolBacklogUpdate, dispatcher.ToolBacklogReorder, dispatcher.ToolBacklogClose,
+		dispatcher.ToolLaneSpawn, dispatcher.ToolLaneSteer, dispatcher.ToolLaneRetry, dispatcher.ToolLaneStop,
+		dispatcher.ToolOwnerAsk, dispatcher.ToolOwnerAnswer, dispatcher.ToolDirectiveNote, dispatcher.ToolDirectiveRevoke,
+		dispatcher.ToolPlannerRequest, "memory.read",
+	} {
+		if !slices.Contains(offered, wantTool) {
+			t.Fatalf("offered tools %v missing %q", offered, wantTool)
+		}
+	}
+	if len(res.Rejected) > 0 {
+		t.Fatalf("unexpected rejections: %v", res.Rejected)
+	}
+	if len(res.Accepted) != 2 || res.Accepted[1].Tool != dispatcher.ToolLaneSpawn {
+		t.Fatalf("accepted = %+v, want directive.revoke + lane.spawn", res.Accepted)
+	}
+	ln, err := st.Lanes().Get(ctx, "run-1", "m4-metrics")
+	if err != nil || ln.Status != lane.StatusRunning {
+		t.Fatalf("lane m4-metrics = %+v, err=%v, want running", ln, err)
+	}
+	laterSnap, err := d.BuildSnapshot(ctx, "run-1", nil)
+	if err != nil {
+		t.Fatalf("BuildSnapshot: %v", err)
+	}
+	if strings.Contains(laterSnap.Text, "dir-hold-1") || strings.Contains(laterSnap.Text, "Hold starting M4") {
+		t.Fatalf("later snapshot still lists revoked directive dir-hold-1:\n%s", laterSnap.Text)
+	}
+}
+
+func TestDispatch_RevokeHoldAndFollowUpSpawnAfterBacklogAdd(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	for _, id := range []string{"hold-1", "hold-2"} {
+		if err := st.Directives().Add(ctx, store.Directive{
+			ID:     id,
+			RunID:  "run-1",
+			Kind:   store.DirectiveStanding,
+			Source: store.DirectiveSourceConcierge,
+			Text:   "Do not start M4 yet (" + id + ")",
+			Status: store.DirectiveActive,
+		}); err != nil {
+			t.Fatalf("Add directive %s: %v", id, err)
+		}
+		if _, err := st.Memories().Put(ctx, store.MemoryEntry{
+			ID: id, Name: "Directive: " + id, Description: "Do not start M4 yet", Type: "rule", Scope: "run",
+			RunID: "run-1", Source: "hold", Body: "Do not start M4 yet", ProposedBy: "owner",
+		}); err != nil {
+			t.Fatalf("Put memory %s: %v", id, err)
+		}
+	}
+	// Also seed the active DirectiveInstruction that StoreBackend.deliver writes
+	// for the incoming owner chat message itself ("yes: clear both hold directives and start M4").
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:     "dir-chat-msg",
+		RunID:  "run-1",
+		Kind:   store.DirectiveInstruction,
+		Source: store.DirectiveSourceOwner,
+		Text:   "yes: clear both hold directives and start M4",
+		Status: store.DirectiveActive,
+	}); err != nil {
+		t.Fatalf("Add chat instruction directive: %v", err)
+	}
+
+	fake := model.NewFakeClient(
+		toolUseResponse(
+			model.ToolCall{ID: "t1", Name: dispatcher.ToolDirectiveRevoke, Input: json.RawMessage(`{"id":"hold-1","reason":"owner cleared hold"}`)},
+			model.ToolCall{ID: "t2", Name: dispatcher.ToolDirectiveRevoke, Input: json.RawMessage(`{"id":"hold-2","reason":"owner cleared hold"}`)},
+			model.ToolCall{ID: "t3", Name: dispatcher.ToolBacklogAdd, Input: json.RawMessage(`{"id":"m4-metrics","title":"M4 metrics","priority":"p0","reason":"owner ordered M4"}`)},
+		),
+		endTurnResponse("I could not spawn the M4 lane. The lane.spawn tool was not available in this session."),
+		toolUseResponse(
+			model.ToolCall{ID: "t4", Name: dispatcher.ToolLaneSpawn, Input: json.RawMessage(`{"item_id":"m4-metrics","brief":"Implement M4 metrics","reason":"owner ordered M4"}`)},
+		),
+		endTurnResponse("Cleared both holds and spawned m4-metrics."),
+	)
+	d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+	ev, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventOwnerMessage,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "yes: clear both hold directives and start M4",
+	})
+	if err != nil {
+		t.Fatalf("Append event: %v", err)
+	}
+
+	res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(res.Rejected) > 0 {
+		t.Fatalf("unexpected rejections: %v", res.Rejected)
+	}
+	if len(drv.Spawns) != 1 || drv.Spawns[0].LaneID != "m4-metrics" {
+		t.Fatalf("spawns = %+v, want m4-metrics spawned in same turn", drv.Spawns)
+	}
+	laterSnap, err := d.BuildSnapshot(ctx, "run-1", nil)
+	if err != nil {
+		t.Fatalf("BuildSnapshot: %v", err)
+	}
+	for _, id := range []string{"hold-1", "hold-2"} {
+		if strings.Contains(laterSnap.Text, id) {
+			t.Fatalf("later snapshot still lists revoked directive %s:\n%s", id, laterSnap.Text)
+		}
+	}
+}
+
+func TestDispatch_NegatedStartOrStatusQuestionDoesNotNudgeSpawn(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		msg  string
+	}{
+		{"negated start", "do not start M4 yet"},
+		{"negated spawn", "don't spawn any new lanes"},
+		{"pause until resume", "pause until I say resume"},
+		{"cancel and dont start", "cancel X and don't start Y"},
+		{"substring unclear", "the M4 requirement is unclear"},
+		{"status question", "can we start M4 or what is the status?"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clk, st, drv := setupTestEnv(t)
+			ctx := t.Context()
+			fake := model.NewFakeClient(
+				toolUseResponse(
+					model.ToolCall{ID: "t1", Name: dispatcher.ToolBacklogAdd, Input: json.RawMessage(`{"id":"m4-metrics","title":"M4 metrics","priority":"p0","reason":"record M4"}`)},
+				),
+				endTurnResponse("Recorded m4-metrics without spawning."),
+			)
+			d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+			ev, err := st.Events().Append(ctx, store.Event{
+				RunID:   "run-1",
+				Kind:    store.EventOwnerMessage,
+				Class:   store.EventClassJudgment,
+				Urgent:  true,
+				Summary: tc.msg,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.Dispatch(ctx, "run-1", []store.Event{ev}); err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+			if len(fake.Requests) != 2 {
+				t.Fatalf("Requests = %d, want 2 (no follow-up spawn nudge for %q)", len(fake.Requests), tc.msg)
+			}
+		})
+	}
+}
+
+func TestVet_DirectMergeGuardNegationBoundaries(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		brief      string
+		wantReject bool
+	}{
+		{"explicit prohibition do not run", "Implement M4. Do not run gh pr merge.", false},
+		{"explicit prohibition never backticked", "Implement M4. Never `gh pr merge` directly.", false},
+		{"explicit prohibition do not merge yourself", "Implement M4. Do not merge the PR yourself.", false},
+		{"explicit prohibition list with or", "Implement M4. Never run gh pr merge or git push origin main.", false},
+		{"explicit prohibition list with commas", "Implement M4. Do not run gh pr merge, hub merge, or git push origin main.", false},
+		{"explicit prohibition parenthetical interjection", "Implement M4. Do not, under any circumstances, run gh pr merge.", false},
+		{"direct instruction", "Implement M4 and run gh pr merge --squash.", true},
+		{"comma separated no issues before merge", "When done, no issues, gh pr merge.", true},
+		{"know substring before merge", "Once you know CI is green, run gh pr merge.", true},
+		{"cannot in earlier verb before merge", "We cannot wait to run gh pr merge.", true},
+		{"do not hesitate before merge", "Do not hesitate to run gh pr merge now.", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clk, st, drv := setupTestEnv(t)
+			ctx := t.Context()
+			if err := st.Backlog().Add(ctx, store.BacklogItem{
+				ID:       "m4",
+				RunID:    "run-1",
+				Title:    "M4",
+				Priority: store.PriorityP0,
+				Status:   store.BacklogOpen,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			input, _ := json.Marshal(map[string]string{
+				"item_id": "m4",
+				"brief":   tc.brief,
+				"reason":  "test brief merge guard",
+			})
+			fake := model.NewFakeClient(
+				toolUseResponse(model.ToolCall{ID: "t1", Name: dispatcher.ToolLaneSpawn, Input: input}),
+				endTurnResponse("done"),
+			)
+			d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+			ev, _ := st.Events().Append(ctx, store.Event{
+				RunID:   "run-1",
+				Kind:    store.EventTimer,
+				Class:   store.EventClassJudgment,
+				Summary: "tick",
+			})
+			res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+			if err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+			if tc.wantReject && len(res.Rejected) == 0 {
+				t.Fatalf("brief %q was accepted, want rejected by direct-merge guard", tc.brief)
+			}
+			if !tc.wantReject && len(res.Rejected) > 0 {
+				t.Fatalf("brief %q was rejected (%v), want accepted", tc.brief, res.Rejected)
+			}
+		})
+	}
+}
+
+func TestDispatch_DirectiveRevokeNotFoundRejected(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+	fake := model.NewFakeClient(
+		toolUseResponse(
+			model.ToolCall{ID: "t1", Name: dispatcher.ToolDirectiveRevoke, Input: json.RawMessage(`{"id":"nonexistent-dir","reason":"clear nonexistent hold"}`)},
+		),
+		endTurnResponse("done"),
+	)
+	d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+	ev, _ := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventOwnerMessage,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "clear nonexistent-dir",
+	})
+	res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(res.Accepted) != 0 || len(res.Rejected) != 1 {
+		t.Fatalf("Accepted=%d Rejected=%d, want 0 accepted and 1 rejected", len(res.Accepted), len(res.Rejected))
+	}
+}

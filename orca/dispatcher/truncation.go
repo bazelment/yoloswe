@@ -19,7 +19,8 @@ const truncationNudge = "Your previous reply was cut off by the output limit bef
 // loop treats any stop other than tool_use as the end of the turn, so a reply
 // cut off before its tool call would lose the batch.
 type retryOnTruncationClient struct {
-	inner model.ModelClient
+	inner    model.ModelClient
+	followUp func(ctx context.Context, resp *model.Response) string
 }
 
 func (c retryOnTruncationClient) CreateMessage(ctx context.Context, req model.Request) (*model.Response, error) {
@@ -34,6 +35,22 @@ func (c retryOnTruncationClient) CreateMessage(ctx context.Context, req model.Re
 		if resp.StopReason != model.StopReasonMaxTokens || attempt >= maxTruncationRetries {
 			out := resp.Clone()
 			out.Usage = usage
+			if out.StopReason != model.StopReasonToolUse && len(out.ToolCalls()) == 0 && c.followUp != nil {
+				if nudge := strings.TrimSpace(c.followUp(ctx, &out)); nudge != "" {
+					followReq := cur.Clone()
+					followReq.Messages = append(followReq.Messages,
+						model.Message{
+							Role:    model.RoleAssistant,
+							Content: []model.ContentBlock{{Type: model.BlockTypeText, Text: cmp.Or(strings.TrimSpace(out.Text()), "(no tool call)")}},
+						},
+						model.NewUserMessage(nudge))
+					if resp2, err2 := c.inner.CreateMessage(ctx, followReq); err2 == nil && resp2 != nil {
+						out2 := resp2.Clone()
+						out2.Usage = usage.Add(resp2.Usage)
+						return &out2, nil
+					}
+				}
+			}
 			return &out, nil
 		}
 		cur = req.Clone()

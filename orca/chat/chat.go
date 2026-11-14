@@ -24,6 +24,7 @@ type DispatchFunc func(context.Context, router.Decision, string, func(string)) e
 type Snapshot struct {
 	Status    string
 	Questions []string
+	Outcomes  []string
 }
 type Backend interface {
 	Snapshot(context.Context) (Snapshot, error)
@@ -411,6 +412,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status = x.snapshot.Status
 		m.questions = x.snapshot.Questions
+		if len(x.snapshot.Outcomes) > 0 {
+			m.lines = append(m.lines, x.snapshot.Outcomes...)
+			return m, m.printLines(x.snapshot.Outcomes...)
+		}
 	case commandMsg:
 		out := x.text
 		if x.err != nil {

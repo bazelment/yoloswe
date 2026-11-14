@@ -388,9 +388,22 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 		Temperature: d.cfg.Temperature,
 	}
 
+	var followedUp bool
 	loopRes, loopErr := model.RunToolLoop(
 		ctx,
-		retryOnTruncationClient{inner: d.client},
+		retryOnTruncationClient{
+			inner: d.client,
+			followUp: func(callCtx context.Context, resp *model.Response) string {
+				if followedUp {
+					return ""
+				}
+				nudge := d.followUpSpawnNudge(callCtx, runID, events, state, resp)
+				if nudge != "" {
+					followedUp = true
+				}
+				return nudge
+			},
+		},
 		req,
 		reg,
 		model.WithMaxTurns(d.cfg.MaxTurns),
@@ -577,6 +590,7 @@ var dispatcherToolDefs = []model.ToolDefinition{
 	{Name: ToolOwnerAsk, Description: "Pose a decision to the owner that only the owner can make (product scope, spend, credentials, one-way/destructive policy) and that the batch presents as still open, with options, a mandatory default, and a deadline. Never use it for engineering, ordering or retry choices, or for work the owner already ordered", InputSchema: model.SchemaFor[OwnerAskParams]()},
 	{Name: ToolOwnerAnswer, Description: "If the owner's message answers one of the listed open owner asks, resolve it with that ask's id; otherwise treat the message as work", InputSchema: model.SchemaFor[OwnerAnswerParams]()},
 	{Name: ToolDirectiveNote, Description: "Persist a standing rule, preference or decision that later batches need and that no backlog item, lane or other call in this batch carries. At most one per batch, holding every point in its fact. Not a log of your own actions or questions", InputSchema: model.SchemaFor[DirectiveNoteParams]()},
+	{Name: ToolDirectiveRevoke, Description: "Revoke or supersede an active standing directive or instruction by ID when the owner lifts, clears, or replaces it", InputSchema: model.SchemaFor[DirectiveRevokeParams]()},
 	{Name: ToolPlannerRequest, Description: "Request a Planner turn to replan or import a plan. The reason is delivered to the Planner and also stored as an active directive, so it carries any standing rule given with the request", InputSchema: model.SchemaFor[PlannerRequestParams]()},
 	{Name: ToolReadLaneReport, Description: "Read a bounded phase report for a lane", InputSchema: model.SchemaFor[ReadLaneReportParams]()},
 	{Name: ToolReadPR, Description: "Read bounded PR metadata and approval status for a lane", InputSchema: model.SchemaFor[ReadPRParams]()},
@@ -722,7 +736,8 @@ func (d *Dispatcher) handleRawToolCall(
 // isFanOutTool reports whether a tool may repeat or combine within a batch:
 // the work that is naturally plural and independent per target.
 func isFanOutTool(tool string) bool {
-	return tool == ToolBacklogAdd || tool == ToolLaneSpawn || tool == ToolLaneRetry
+	return tool == ToolBacklogAdd || tool == ToolLaneSpawn || tool == ToolLaneRetry ||
+		tool == ToolDirectiveRevoke || tool == ToolOwnerAnswer
 }
 
 // checkOnePrimaryAction enforces one primary action per batch: the first
@@ -738,8 +753,8 @@ func checkOnePrimaryAction(accepted []ProposedAction, act ProposedAction) error 
 		if isReadOnlyTool(prev.Tool) || (isFanOutTool(prev.Tool) && isFanOutTool(act.Tool)) {
 			continue
 		}
-		return fmt.Errorf("this batch already applied %s [%s]; answer a batch with a single primary action (only %s, %s and %s may combine)",
-			prev.Tool, prev.Target(), ToolBacklogAdd, ToolLaneSpawn, ToolLaneRetry)
+		return fmt.Errorf("this batch already applied %s [%s]; answer a batch with a single primary action (only %s, %s, %s, %s and %s may combine)",
+			prev.Tool, prev.Target(), ToolBacklogAdd, ToolLaneSpawn, ToolLaneRetry, ToolDirectiveRevoke, ToolOwnerAnswer)
 	}
 	return nil
 }
@@ -859,6 +874,8 @@ func (d *Dispatcher) applyVettedAction(
 		return fmt.Sprintf("resolved owner ask %s", act.OwnerAnswer.AskID), d.cfg.OnOwnerAnswer(ctx, runID, act.OwnerAnswer.AskID, act.OwnerAnswer.Answer)
 	case ToolDirectiveNote:
 		return d.applyDirectiveNote(ctx, runID, state, *act.DirectiveNote)
+	case ToolDirectiveRevoke:
+		return d.applyDirectiveRevoke(ctx, runID, view, *act.DirectiveRevoke)
 	case ToolPlannerRequest:
 		return d.applyPlannerRequest(ctx, runID, *act.PlannerRequest)
 	case ToolReadLaneReport:
@@ -892,6 +909,9 @@ func (d *Dispatcher) applyBacklogAdd(ctx context.Context, runID string, p Backlo
 	}
 	if err := d.store.Backlog().Add(ctx, item); err != nil {
 		return "", err
+	}
+	if len(item.DependsOn) == 0 {
+		return fmt.Sprintf("added backlog item %s (%s, open ready — call %s with item_id=%q to spawn its lane now)", item.ID, item.Priority, ToolLaneSpawn, item.ID), nil
 	}
 	return fmt.Sprintf("added backlog item %s (%s)", item.ID, item.Priority), nil
 }
@@ -1433,6 +1453,388 @@ func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, state
 	return fmt.Sprintf("recorded directive note %s", dir.ID), nil
 }
 
+func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, view *StateView, p DirectiveRevokeParams) (string, error) {
+	id := strings.TrimSpace(p.ID)
+	if id == "" {
+		return "", fmt.Errorf("%w: directive id is required", store.ErrInvalidArgument)
+	}
+	err := d.store.Directives().UpdateStatus(ctx, runID, id, store.DirectiveRevoked)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return "", err
+	}
+	memErr := d.store.Memories().Delete(ctx, "", id)
+	if memErr != nil && !errors.Is(memErr, store.ErrNotFound) {
+		return "", memErr
+	}
+	if errors.Is(err, store.ErrNotFound) && errors.Is(memErr, store.ErrNotFound) {
+		return "", fmt.Errorf("directive %q not found: %w", id, err)
+	}
+	if view != nil && view.Directives != nil {
+		delete(view.Directives, id)
+	}
+	return fmt.Sprintf("revoked directive %s", id), nil
+}
+
+func (d *Dispatcher) followUpSpawnNudge(
+	ctx context.Context,
+	runID string,
+	events []store.Event,
+	state *turnExecState,
+	resp *model.Response,
+) string {
+	if state == nil || len(state.rejected) > 0 {
+		return ""
+	}
+	for i := range state.accepted {
+		switch state.accepted[i].Tool {
+		case ToolBacklogAdd, ToolDirectiveRevoke, ToolOwnerAnswer:
+		default:
+			return ""
+		}
+	}
+	txtLower := ""
+	if resp != nil {
+		txtLower = strings.ToLower(resp.Text())
+	}
+	claimedMissing := strings.Contains(txtLower, "lane.spawn")
+	if len(state.accepted) == 0 && !claimedMissing {
+		return ""
+	}
+	if !ownerAskedToStart(events) && !claimedMissing {
+		return ""
+	}
+	view, err := loadStateViewWithCache(ctx, d.store, d.clock, runID, d.cfg.MaxBriefBytes, state.pinnedRecipes)
+	if err != nil {
+		return ""
+	}
+	for id := range view.Directives {
+		dir := view.Directives[id]
+		if strings.HasPrefix(dir.Ref, ownerAskRefPrefix) {
+			continue
+		}
+		if isHoldDirectiveText(dir.Text) {
+			return ""
+		}
+	}
+	var readyP0 *store.BacklogItem
+	for id := range view.Backlog {
+		item := view.Backlog[id]
+		if item.Status != store.BacklogOpen || item.Priority != store.PriorityP0 {
+			continue
+		}
+		ready := true
+		for _, depID := range item.DependsOn {
+			dep, ok := view.BacklogItem(depID)
+			if !ok || dep.Status != store.BacklogDone {
+				ready = false
+				break
+			}
+		}
+		if !ready {
+			continue
+		}
+		if existing, hasLane := view.Lane(item.ID); hasLane && existing.Status != lane.StatusPlanned {
+			continue
+		}
+		_, r, _ := view.ResolveSpawnRecipe(LaneSpawnParams{ItemID: item.ID, RecipeName: item.RecipeName})
+		if r.Limits.MaxConcurrentLanes > 0 && view.RunningLaneCount() >= r.Limits.MaxConcurrentLanes {
+			continue
+		}
+		if readyP0 == nil || item.Order < readyP0.Order || (item.Order == readyP0.Order && item.ID < readyP0.ID) {
+			cp := item
+			readyP0 = &cp
+		}
+	}
+	if readyP0 == nil {
+		return ""
+	}
+	return fmt.Sprintf("The %s tool is registered and callable in this session, and backlog item %q (%s, open ready) has no lane yet. Call %s with item_id=%q and a task brief now.",
+		ToolLaneSpawn, readyP0.ID, readyP0.Priority, ToolLaneSpawn, readyP0.ID)
+}
+
+func ownerAskedToStart(events []store.Event) bool {
+	asked := false
+	for i := range events {
+		if events[i].Kind != store.EventOwnerMessage {
+			continue
+		}
+		text := strings.TrimSpace(events[i].Summary + " " + string(events[i].Payload))
+		if isHoldDirectiveText(text) {
+			asked = false
+			continue
+		}
+		if ownerTextAskedToStart(text) {
+			asked = true
+		}
+	}
+	return asked
+}
+
+var (
+	dispatcherStartIntentWords = []string{
+		"start",
+		"spawn",
+		"launch",
+		"proceed",
+		"resume",
+		"unblock",
+		"unpause",
+	}
+	dispatcherStartIntentPhrases = []string{
+		"go ahead",
+		"clear the hold",
+		"clear both hold",
+		"clear hold",
+		"lift the hold",
+		"lift hold",
+	}
+	dispatcherStartNegationWords = []string{
+		"not",
+		"no",
+		"never",
+		"dont",
+		"cannot",
+		"cant",
+		"wont",
+		"shouldnt",
+		"hold",
+		"pause",
+		"stop",
+		"wait",
+		"delay",
+		"defer",
+		"block",
+		"avoid",
+		"without",
+		"before",
+		"until",
+		"unless",
+	}
+	dispatcherHoldLiftWords = []string{
+		"clear",
+		"cleared",
+		"clearing",
+		"lift",
+		"lifted",
+		"lifting",
+		"remove",
+		"removed",
+		"removing",
+		"revoke",
+		"revoked",
+		"revoking",
+		"cancel",
+		"canceled",
+		"cancelled",
+		"drop",
+		"dropped",
+		"undo",
+		"unpause",
+		"unpaused",
+		"resume",
+		"resumed",
+		"unblock",
+		"unblocked",
+		"release",
+		"released",
+	}
+	dispatcherExplicitHoldPhrases = []string{
+		"do not start",
+		"don't start",
+		"dont start",
+		"do not spawn",
+		"don't spawn",
+		"dont spawn",
+		"do not launch",
+		"don't launch",
+		"dont launch",
+		"no new lanes",
+		"start no new lanes",
+		"stop spawning",
+		"pause spawning",
+		"no additional lanes",
+		"no more lanes",
+		"hold new lanes",
+		"hold off",
+		"hold on starting",
+		"hold starting",
+		"block new lanes",
+		"pause new lanes",
+		"no new work",
+		"block all new work",
+		"standing hold",
+		"standing owner hold",
+	}
+)
+
+func splitIntentClauses(s string) []string {
+	r := strings.NewReplacer(
+		"\n", "|",
+		".", "|",
+		";", "|",
+		"!", "|",
+		",", "|",
+		":", "|",
+		" — ", "|",
+		" – ", "|",
+		" - ", "|",
+		" and ", "|",
+		" then ", "|",
+		" but ", "|",
+	)
+	return strings.Split(r.Replace(s), "|")
+}
+
+func splitHoldClauses(s string) []string {
+	r := strings.NewReplacer(
+		"\n", "|",
+		".", "|",
+		";", "|",
+		"!", "|",
+		",", "|",
+		":", "|",
+		" — ", "|",
+		" – ", "|",
+		" - ", "|",
+		" and ", "|",
+		" then ", "|",
+		" but ", "|",
+		" until ", "|",
+		" unless ", "|",
+	)
+	return strings.Split(r.Replace(s), "|")
+}
+
+func normalizeContractionWords(s string) string {
+	return strings.NewReplacer(
+		"don't", "dont",
+		"can't", "cant",
+		"won't", "wont",
+		"shouldn't", "shouldnt",
+		"didn't", "didnt",
+		"isn't", "isnt",
+		"wasn't", "wasnt",
+	).Replace(s)
+}
+
+func hasStartNegationInPrefix(prefix string) bool {
+	norm := normalizeContractionWords(prefix)
+	for _, neg := range dispatcherStartNegationWords {
+		if dispatcherContainsWholeWord(norm, neg) {
+			return true
+		}
+	}
+	return false
+}
+
+// OwnerTextAskedToStart reports whether an owner message asks to start, spawn,
+// or lift a hold on work.
+func OwnerTextAskedToStart(text string) bool {
+	return ownerTextAskedToStart(text)
+}
+
+func ownerTextAskedToStart(text string) bool {
+	unquoted := strings.ToLower(stripDispatcherQuotedSpans(text))
+	for _, sentence := range strings.FieldsFunc(unquoted, func(r rune) bool {
+		return r == '.' || r == ';' || r == '\n' || r == '!'
+	}) {
+		sentence = strings.TrimSpace(sentence)
+		if sentence == "" || strings.HasSuffix(sentence, "?") || strings.Contains(sentence, "?") {
+			continue
+		}
+		for _, clause := range splitIntentClauses(sentence) {
+			clause = strings.TrimSpace(clause)
+			if clause == "" {
+				continue
+			}
+			for _, phrase := range dispatcherStartIntentPhrases {
+				if idx := strings.Index(clause, phrase); idx >= 0 {
+					if !hasStartNegationInPrefix(clause[:idx]) {
+						return true
+					}
+				}
+			}
+			for _, kw := range dispatcherStartIntentWords {
+				for start := 0; start < len(clause); {
+					idx := strings.Index(clause[start:], kw)
+					if idx < 0 {
+						break
+					}
+					pos := start + idx
+					end := pos + len(kw)
+					leftOK := pos == 0 || !isDispatcherWordChar(clause[pos-1])
+					rightOK := end == len(clause) || !isDispatcherWordChar(clause[end])
+					if leftOK && rightOK && !hasStartNegationInPrefix(clause[:pos]) {
+						return true
+					}
+					start = pos + 1
+				}
+			}
+		}
+	}
+	return false
+}
+
+// IsHoldDirectiveText reports whether text states an active hold or pause on
+// starting new lanes.
+func IsHoldDirectiveText(text string) bool {
+	return isHoldDirectiveText(text)
+}
+
+func isHoldDirectiveText(text string) bool {
+	unquoted := strings.ToLower(stripDispatcherQuotedSpans(text))
+	for _, sentence := range strings.FieldsFunc(unquoted, func(r rune) bool {
+		return r == '.' || r == ';' || r == '\n' || r == '!'
+	}) {
+		sentence = strings.TrimSpace(sentence)
+		if sentence == "" || strings.Contains(sentence, "?") {
+			continue
+		}
+		for _, clause := range splitHoldClauses(sentence) {
+			clause = strings.TrimSpace(clause)
+			if clause == "" {
+				continue
+			}
+			if strings.Contains(clause, "keep the hold") ||
+				strings.Contains(clause, "keep hold") ||
+				strings.Contains(clause, "hold on the run") ||
+				strings.Contains(clause, "hold on run") ||
+				dispatcherContainsWholeWord(clause, "lease") {
+				continue
+			}
+			lifting := false
+			for _, lift := range dispatcherHoldLiftWords {
+				if dispatcherContainsWholeWord(clause, lift) {
+					lifting = true
+					break
+				}
+			}
+			if lifting {
+				continue
+			}
+			for _, phrase := range dispatcherExplicitHoldPhrases {
+				if idx := strings.Index(clause, phrase); idx >= 0 {
+					prefix := normalizeContractionWords(clause[:idx])
+					if !dispatcherContainsWholeWord(prefix, "not") &&
+						!dispatcherContainsWholeWord(prefix, "never") &&
+						!dispatcherContainsWholeWord(prefix, "didnt") {
+						return true
+					}
+				}
+			}
+			norm := normalizeContractionWords(clause)
+			if (dispatcherContainsWholeWord(norm, "hold") || dispatcherContainsWholeWord(norm, "pause")) &&
+				!dispatcherContainsWholeWord(norm, "no") &&
+				!dispatcherContainsWholeWord(norm, "not") &&
+				!dispatcherContainsWholeWord(norm, "never") &&
+				!dispatcherContainsWholeWord(norm, "without") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 var (
 	dispatcherOwnerNoNewWorkPhrases = []string{
 		"no new lanes",
@@ -1609,7 +2011,6 @@ func (d *Dispatcher) validateDispatcherNoteFact(ctx context.Context, runID strin
 	}
 	return nil
 }
-
 func (d *Dispatcher) applyPlannerRequest(ctx context.Context, runID string, p PlannerRequestParams) (string, error) {
 	reqID := d.nextID("planreq")
 

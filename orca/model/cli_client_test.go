@@ -133,3 +133,53 @@ func TestCLIFailureAndCancellation(t *testing.T) {
 		t.Fatalf("cancel=%v", err)
 	}
 }
+
+func TestCLIMultiCallArrayAndCostFallbacks(t *testing.T) {
+	t.Parallel()
+	t.Run("array reply deduplicates colliding ids and uses total_cost_usd", func(t *testing.T) {
+		t.Parallel()
+		fixture := filepath.Join(t.TempDir(), "output")
+		out := `{"result":"[{\"id\":\"dup\",\"tool\":\"directive.revoke\",\"input\":{\"id\":\"h1\"}},{\"id\":\"dup\",\"name\":\"lane.spawn\",\"input\":{\"item_id\":\"m4\"}}]","total_cost_usd":0.042,"usage":{"input_tokens":100,"output_tokens":20}}`
+		if err := os.WriteFile(fixture, []byte(out), 0600); err != nil {
+			t.Fatal(err)
+		}
+		client := model.NewCLIClient("claude-cli", model.WithCLIPath(cliScript(t, "cat '"+fixture+"'\n")))
+		resp, err := client.CreateMessage(t.Context(), model.Request{Model: "sonnet"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := resp.ToolCalls()
+		if len(calls) != 2 {
+			t.Fatalf("ToolCalls = %+v, want 2", calls)
+		}
+		if calls[0].ID == calls[1].ID || calls[0].ID != "dup" || calls[1].ID != "cli-tool-2" {
+			t.Fatalf("ToolCalls IDs = %q, %q; want unique IDs (dup, cli-tool-2)", calls[0].ID, calls[1].ID)
+		}
+		if resp.Usage.CostUSD != 0.042 {
+			t.Fatalf("CostUSD = %v, want 0.042", resp.Usage.CostUSD)
+		}
+	})
+
+	t.Run("array reply mixed unnamed entry returns error", func(t *testing.T) {
+		t.Parallel()
+		fixture := filepath.Join(t.TempDir(), "output")
+		out := `{"result":"[{\"tool\":\"directive.revoke\",\"input\":{\"id\":\"h1\"}},{\"input\":{\"item_id\":\"m4\"}}]","usage":{"input_tokens":10,"output_tokens":5}}`
+		if err := os.WriteFile(fixture, []byte(out), 0600); err != nil {
+			t.Fatal(err)
+		}
+		client := model.NewCLIClient("claude-cli", model.WithCLIPath(cliScript(t, "cat '"+fixture+"'\n")))
+		if _, err := client.CreateMessage(t.Context(), model.Request{Model: "sonnet"}); err == nil {
+			t.Fatal("expected error for unnamed entry in tool call array")
+		}
+	})
+
+	t.Run("pricing family fallback calculates cost without false o3 substring match", func(t *testing.T) {
+		t.Parallel()
+		if got := model.CalculateCost("claude-sonnet-4-6-custom", model.Usage{InputTokens: 1_000_000}, nil); got != 3.0 {
+			t.Fatalf("CalculateCost(claude-sonnet-4-6-custom) = %v, want 3.0", got)
+		}
+		if got := model.CalculateCost("custom-foo3-bar", model.Usage{InputTokens: 1_000_000}, nil); got != 0 {
+			t.Fatalf("CalculateCost(custom-foo3-bar) = %v, want 0 for unknown model", got)
+		}
+	})
+}

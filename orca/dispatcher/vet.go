@@ -21,22 +21,23 @@ import (
 
 // Canonical tool names exposed to the Dispatcher model.
 const (
-	ToolBacklogAdd     = "backlog.add"
-	ToolBacklogUpdate  = "backlog.update"
-	ToolBacklogReorder = "backlog.reorder"
-	ToolBacklogClose   = "backlog.close"
-	ToolLaneSpawn      = "lane.spawn"
-	ToolLaneSteer      = "lane.steer"
-	ToolLaneRetry      = "lane.retry"
-	ToolLaneStop       = "lane.stop"
-	ToolOwnerAsk       = "owner.ask"
-	ToolOwnerAnswer    = "owner.answer"
-	ToolMailAnswer     = "mail.answer"
-	ToolDirectiveNote  = "directive.note"
-	ToolPlannerRequest = "planner.request"
-	ToolReadLaneReport = "read.lane_report"
-	ToolReadPR         = "read.pr"
-	ToolReadCI         = "read.ci"
+	ToolBacklogAdd      = "backlog.add"
+	ToolBacklogUpdate   = "backlog.update"
+	ToolBacklogReorder  = "backlog.reorder"
+	ToolBacklogClose    = "backlog.close"
+	ToolLaneSpawn       = "lane.spawn"
+	ToolLaneSteer       = "lane.steer"
+	ToolLaneRetry       = "lane.retry"
+	ToolLaneStop        = "lane.stop"
+	ToolOwnerAsk        = "owner.ask"
+	ToolOwnerAnswer     = "owner.answer"
+	ToolMailAnswer      = "mail.answer"
+	ToolDirectiveNote   = "directive.note"
+	ToolDirectiveRevoke = "directive.revoke"
+	ToolPlannerRequest  = "planner.request"
+	ToolReadLaneReport  = "read.lane_report"
+	ToolReadPR          = "read.pr"
+	ToolReadCI          = "read.ci"
 )
 
 // DefaultMaxBriefBytes is the fallback brief/note size cap when a recipe does
@@ -153,6 +154,12 @@ type DirectiveNoteParams struct {
 	Reason string `json:"reason,omitempty" jsonschema:"description=Reason for recording this note"`
 }
 
+// DirectiveRevokeParams holds parameters for the directive.revoke tool.
+type DirectiveRevokeParams struct {
+	ID     string `json:"id" jsonschema:"required,description=ID of an active directive in the snapshot to revoke or supersede"`
+	Reason string `json:"reason,omitempty" jsonschema:"description=Reason for revoking or superseding this directive"`
+}
+
 // PlannerRequestParams holds parameters for the planner.request tool.
 type PlannerRequestParams struct {
 	Reason  string `json:"reason" jsonschema:"required,description=Why replanning or plan reconciliation is needed"`
@@ -185,28 +192,29 @@ type ReadCIParams struct {
 // ProposedAction is one typed tool call proposed by the Dispatcher model; it must
 // pass Vet before being applied.
 type ProposedAction struct {
-	BacklogAdd     *BacklogAddParams     `json:"-"`
-	BacklogUpdate  *BacklogUpdateParams  `json:"-"`
-	BacklogReorder *BacklogReorderParams `json:"-"`
-	BacklogClose   *BacklogCloseParams   `json:"-"`
-	LaneSpawn      *LaneSpawnParams      `json:"-"`
-	LaneSteer      *LaneSteerParams      `json:"-"`
-	LaneRetry      *LaneRetryParams      `json:"-"`
-	LaneStop       *LaneStopParams       `json:"-"`
-	OwnerAsk       *OwnerAskParams       `json:"-"`
-	OwnerAnswer    *OwnerAnswerParams    `json:"-"`
-	MailAnswer     *MailAnswerParams     `json:"-"`
-	DirectiveNote  *DirectiveNoteParams  `json:"-"`
-	PlannerRequest *PlannerRequestParams `json:"-"`
-	ReadLaneReport *ReadLaneReportParams `json:"-"`
-	ReadPR         *ReadPRParams         `json:"-"`
-	ReadCI         *ReadCIParams         `json:"-"`
-	ID             string                `json:"id,omitempty"`
-	Tool           string                `json:"tool"`
-	LaneID         string                `json:"lane_id,omitempty"`
-	ItemID         string                `json:"item_id,omitempty"`
-	Reason         string                `json:"reason,omitempty"`
-	Args           json.RawMessage       `json:"args,omitempty"`
+	BacklogAdd      *BacklogAddParams      `json:"-"`
+	BacklogUpdate   *BacklogUpdateParams   `json:"-"`
+	BacklogReorder  *BacklogReorderParams  `json:"-"`
+	BacklogClose    *BacklogCloseParams    `json:"-"`
+	LaneSpawn       *LaneSpawnParams       `json:"-"`
+	LaneSteer       *LaneSteerParams       `json:"-"`
+	LaneRetry       *LaneRetryParams       `json:"-"`
+	LaneStop        *LaneStopParams        `json:"-"`
+	OwnerAsk        *OwnerAskParams        `json:"-"`
+	OwnerAnswer     *OwnerAnswerParams     `json:"-"`
+	MailAnswer      *MailAnswerParams      `json:"-"`
+	DirectiveNote   *DirectiveNoteParams   `json:"-"`
+	DirectiveRevoke *DirectiveRevokeParams `json:"-"`
+	PlannerRequest  *PlannerRequestParams  `json:"-"`
+	ReadLaneReport  *ReadLaneReportParams  `json:"-"`
+	ReadPR          *ReadPRParams          `json:"-"`
+	ReadCI          *ReadCIParams          `json:"-"`
+	ID              string                 `json:"id,omitempty"`
+	Tool            string                 `json:"tool"`
+	LaneID          string                 `json:"lane_id,omitempty"`
+	ItemID          string                 `json:"item_id,omitempty"`
+	Reason          string                 `json:"reason,omitempty"`
+	Args            json.RawMessage        `json:"args,omitempty"`
 }
 
 // Target returns a human-readable identifier (lane ID, item ID, or "run") for
@@ -230,6 +238,10 @@ type Advisor interface {
 // canonical dotted tool names ("lane.spawn").
 func NormalizeToolName(name string) string {
 	trimmed := strings.TrimSpace(name)
+	switch trimmed {
+	case "directive.supersede", "directive_supersede":
+		return ToolDirectiveRevoke
+	}
 	if isKnownTool(trimmed) {
 		return trimmed
 	}
@@ -243,7 +255,7 @@ func isKnownTool(tool string) bool {
 	switch tool {
 	case ToolBacklogAdd, ToolBacklogUpdate, ToolBacklogReorder, ToolBacklogClose,
 		ToolLaneSpawn, ToolLaneSteer, ToolLaneRetry, ToolLaneStop,
-		ToolOwnerAsk, ToolOwnerAnswer, ToolMailAnswer, ToolDirectiveNote, ToolPlannerRequest,
+		ToolOwnerAsk, ToolOwnerAnswer, ToolMailAnswer, ToolDirectiveNote, ToolDirectiveRevoke, ToolPlannerRequest,
 		ToolReadLaneReport, ToolReadPR, ToolReadCI:
 		return true
 	default:
@@ -252,17 +264,18 @@ func isKnownTool(tool string) bool {
 }
 
 type jsonAliases struct {
-	ID        string `json:"id"`
-	MsgID     string `json:"msg_id"`
-	Item      string `json:"item"`
-	Lane      string `json:"lane"`
-	Recipe    string `json:"recipe"`
-	Message   string `json:"message"`
-	Body      string `json:"body"`
-	Note      string `json:"note"`
-	Brief     string `json:"brief"`
-	Text      string `json:"text"`
-	ExpiresAt string `json:"expires_at"`
+	ID          string `json:"id"`
+	MsgID       string `json:"msg_id"`
+	Item        string `json:"item"`
+	Lane        string `json:"lane"`
+	Recipe      string `json:"recipe"`
+	Message     string `json:"message"`
+	Body        string `json:"body"`
+	Note        string `json:"note"`
+	Brief       string `json:"brief"`
+	Text        string `json:"text"`
+	ExpiresAt   string `json:"expires_at"`
+	DirectiveID string `json:"directive_id"`
 }
 
 func decodeAliases(raw []byte) jsonAliases {
@@ -438,6 +451,18 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 		act.LaneID = p.Scope
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Fact))
 
+	case ToolDirectiveRevoke:
+		p, err := decodeParams[DirectiveRevokeParams](canonical, trimmed)
+		if err != nil {
+			return act, err
+		}
+		if p.ID == "" {
+			p.ID = decodeAliases(trimmed).DirectiveID
+		}
+		act.DirectiveRevoke = p
+		act.ItemID = p.ID
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("revoke directive %s", p.ID))
+
 	case ToolPlannerRequest:
 		p, err := decodeParams[PlannerRequestParams](canonical, trimmed)
 		if err != nil {
@@ -498,6 +523,7 @@ type StateView struct {
 	MaxBriefBytes  int
 	Memories       []store.MemoryEntry
 	OwnerAsks      map[string]controller.OwnerAsk
+	Directives     map[string]store.Directive
 }
 
 // LoadStateView loads the current Run, Lanes, Backlog, and Recipes from st into
@@ -555,9 +581,13 @@ func loadStateViewWithCache(
 		MaxBriefBytes:  maxBriefBytes,
 		Memories:       memories,
 		OwnerAsks:      make(map[string]controller.OwnerAsk),
+		Directives:     make(map[string]store.Directive, len(directives)),
 	}
 	for i := range directives {
 		d := directives[i]
+		if d.ExpiresAt == nil || view.Now.Before(*d.ExpiresAt) {
+			view.Directives[d.ID] = d
+		}
 		if !strings.HasPrefix(d.Ref, ownerAskRefPrefix) || (d.ExpiresAt != nil && !view.Now.Before(*d.ExpiresAt)) {
 			continue
 		}
@@ -893,19 +923,127 @@ func checkNoMergeOutsideRecipe(st *StateView, act ProposedAction) error {
 	return nil
 }
 
+var directMergePatterns = []string{
+	"gh pr merge",
+	"hub merge",
+	"merge the pr yourself",
+	"merge your own pr",
+	"git push origin main",
+	"git push origin master",
+}
+
 func containsDirectMergeInstruction(text string) bool {
 	lower := strings.ToLower(text)
-	for _, pat := range []string{
-		"gh pr merge",
-		"hub merge",
-		"merge the pr yourself",
-		"merge your own pr",
-		"git push origin main",
-		"git push origin master",
-	} {
-		if strings.Contains(lower, pat) {
-			return true
+	for _, pat := range directMergePatterns {
+		search := lower
+		for {
+			idx := strings.Index(search, pat)
+			if idx < 0 {
+				break
+			}
+			prefix := search[:idx]
+			if cut := strings.LastIndexAny(prefix, ".\n;!?:"); cut >= 0 {
+				prefix = prefix[cut+1:]
+			}
+			if !hasNegationPrefix(prefix) {
+				return true
+			}
+			search = search[idx+len(pat):]
 		}
+	}
+	return false
+}
+
+func stripNegatedMergeListTail(clause string) string {
+	for {
+		trimmed := strings.TrimRight(clause, " \t`\"'([—–-")
+		before := trimmed
+		hasListSep := false
+		for _, conj := range []string{" or", " nor", " and"} {
+			if strings.HasSuffix(before, conj) {
+				before = strings.TrimRight(before[:len(before)-len(conj)], " \t,`\"')]")
+				hasListSep = true
+				break
+			}
+		}
+		if !hasListSep && strings.HasSuffix(before, ",") {
+			before = strings.TrimRight(before, " \t,`\"')]")
+			hasListSep = true
+		}
+		if !hasListSep {
+			return clause
+		}
+		changed := false
+		for _, pat := range directMergePatterns {
+			if idx := strings.LastIndex(before, pat); idx >= 0 {
+				tail := strings.TrimSpace(before[idx+len(pat):])
+				if tail == "" || strings.HasPrefix(tail, "--") || strings.HasPrefix(tail, "-") {
+					clause = strings.TrimRight(before[:idx], " \t`\"'([") + " "
+					changed = true
+					break
+				}
+			}
+		}
+		if !changed {
+			return clause
+		}
+	}
+}
+
+func isDirectMergeNegationWord(w string) bool {
+	switch w {
+	case "not", "never", "no", "neither", "nor", "dont", "cannot", "cant", "mustnt", "shouldnt", "without", "forbid", "forbidden", "prohibited":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDirectMergeExecVerb(w string) bool {
+	switch w {
+	case "run", "running", "call", "calling", "execute", "executing",
+		"use", "using", "invoke", "invoking", "perform", "performing",
+		"do", "doing", "issue", "issuing":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasNegationPrefix(clause string) bool {
+	clause = stripNegatedMergeListTail(clause)
+	if firstComma := strings.IndexByte(clause, ','); firstComma >= 0 {
+		lastComma := strings.LastIndexByte(clause, ',')
+		beforeFirst := normalizeContractionWords(strings.ToLower(strings.TrimSpace(clause[:firstComma])))
+		beforeWords := strings.FieldsFunc(beforeFirst, func(r rune) bool {
+			return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+		})
+		if firstComma < lastComma && len(beforeWords) > 0 && isDirectMergeNegationWord(beforeWords[len(beforeWords)-1]) {
+			clause = clause[:firstComma] + " " + clause[lastComma+1:]
+		} else {
+			clause = clause[lastComma+1:]
+		}
+	}
+	cleaned := strings.TrimRight(clause, " \t`\"'([—–-")
+	norm := normalizeContractionWords(strings.ToLower(cleaned))
+	words := strings.FieldsFunc(norm, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
+	if len(words) == 0 {
+		return false
+	}
+	if isDirectMergeExecVerb(words[len(words)-1]) {
+		words = words[:len(words)-1]
+	}
+	if len(words) == 0 {
+		return false
+	}
+	last := words[len(words)-1]
+	if isDirectMergeNegationWord(last) {
+		return true
+	}
+	if (last == "to" || last == "from") && len(words) >= 2 && (words[len(words)-2] == "forbidden" || words[len(words)-2] == "prohibited") {
+		return true
 	}
 	return false
 }
@@ -1314,6 +1452,20 @@ func checkDirectiveAndPlannerInvariants(st *StateView, act ProposedAction) error
 			}
 			if !exp.After(now) {
 				return fmt.Errorf("expiry %s must be in the future (now=%s)", exp.Format(time.RFC3339), now.Format(time.RFC3339))
+			}
+		}
+
+	case ToolDirectiveRevoke:
+		p := act.DirectiveRevoke
+		if p == nil || strings.TrimSpace(p.ID) == "" {
+			return errors.New("id is required for directive.revoke")
+		}
+		if st != nil && st.Directives != nil {
+			id := strings.TrimSpace(p.ID)
+			_, inDirs := st.Directives[id]
+			inMem := slices.ContainsFunc(st.Memories, func(m store.MemoryEntry) bool { return m.ID == id })
+			if !inDirs && !inMem {
+				return fmt.Errorf("active directive %q does not exist in the snapshot", id)
 			}
 		}
 
