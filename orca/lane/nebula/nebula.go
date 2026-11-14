@@ -282,7 +282,7 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				// external orchestrator can miss the terminal SSE publication
 				// while the report itself is already durable.
 				if rep, err := d.ReadReport(ctx, runID, target.laneID, target.terminalID); err == nil && rep != nil {
-					key := target.terminalID + ":" + rep.Raw
+					key := reportKey(target.terminalID, rep)
 					if reported[target.terminalID] != key {
 						reported[target.terminalID] = key
 						select {
@@ -309,6 +309,16 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				}
 				seen[ev.Seq] = true
 				if e, ok := uniformEvent(*ev, runID); ok {
+					// A host fallback report may race the SSE stream. Treat the
+					// terminal/report payload as its identity so the controller sees
+					// one lifecycle event regardless of which path delivered it.
+					if e.Kind == lane.EventPhaseReported && e.Report != nil {
+						key := reportKey(e.TerminalID, e.Report)
+						if _, already := reported[key]; already {
+							continue
+						}
+						reported[key] = key
+					}
 					select {
 					case out <- e:
 					case <-ctx.Done():
@@ -328,6 +338,16 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 		}
 	}()
 	return out
+}
+
+func reportKey(terminalID string, rep *lane.PhaseReport) string {
+	if rep == nil {
+		return terminalID
+	}
+	if rep.Raw != "" {
+		return terminalID + ":" + rep.Raw
+	}
+	return fmt.Sprintf("%s:%s:%d:%s:%s", terminalID, rep.Phase, rep.Round, rep.Outcome, rep.HeadSHA)
 }
 
 func (d *Driver) watchStream(ctx context.Context, req StreamRequest) {
