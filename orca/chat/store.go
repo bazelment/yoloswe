@@ -530,7 +530,14 @@ func (b *StoreBackend) renderLiveLanes(ctx context.Context, groups []liveRunGrou
 	if len(groups) == 0 {
 		return nil
 	}
-	out := make([]string, len(groups))
+	probeCtx, cancel := context.WithTimeout(ctx, snapshotPRProbeTimeout)
+	defer cancel()
+	// Each live lane writes to its own preallocated items[i] slot under wg; sem
+	// has capacity 4 so goroutines acquire a token before probing and release it
+	// before wg.Done(), and wg.Wait() completes before items is joined.
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	groupItems := make([][]string, len(groups))
 	for gi := range groups {
 		g := &groups[gi]
 		hr, _ := b.ReadHostRun(g.runID)
@@ -539,22 +546,35 @@ func (b *StoreBackend) renderLiveLanes(ctx context.Context, groups []liveRunGrou
 			hostLanes[hr.Lanes[i].ID] = hr.Lanes[i]
 		}
 		repo := cmp.Or(g.repo, hr.Repo)
-		items := make([]string, 0, len(g.lanes))
+		items := make([]string, len(g.lanes))
+		groupItems[gi] = items
 		for i := range g.lanes {
-			l := &g.lanes[i]
-			phase := cmp.Or(l.Phase, string(l.Status), "-")
-			desc := fmt.Sprintf("%s %s r%d", l.ID, phase, max(l.Round, 1))
-			if pr := b.cachedLanePRDesc(ctx, g.probe, g.now, repo, hr.Dir, l); pr != "" {
-				desc += " " + pr
-			}
-			if start := resolveLanePhaseStart(g.decisionStart[l.ID], hostLanes[l.ID], l); !start.IsZero() {
-				desc += " " + phaseElapsed(g.now.Sub(start))
-			}
-			items = append(items, desc)
+			l := g.lanes[i]
+			hl := hostLanes[l.ID]
+			decStart := g.decisionStart[l.ID]
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				phase := cmp.Or(l.Phase, string(l.Status), "-")
+				desc := fmt.Sprintf("%s %s r%d", l.ID, phase, max(l.Round, 1))
+				if pr := b.cachedLanePRDesc(probeCtx, g.probe, g.now, repo, hr.Dir, &l); pr != "" {
+					desc += " " + pr
+				}
+				if start := resolveLanePhaseStart(decStart, hl, &l); !start.IsZero() {
+					desc += " " + phaseElapsed(g.now.Sub(start))
+				}
+				items[idx] = desc
+			}(i)
 		}
-		joined := strings.Join(items, ", ")
+	}
+	wg.Wait()
+	out := make([]string, len(groups))
+	for gi := range groups {
+		joined := strings.Join(groupItems[gi], ", ")
 		if len(groups) > 1 {
-			joined = g.runID + ": " + joined
+			joined = groups[gi].runID + ": " + joined
 		}
 		out[gi] = joined
 	}
@@ -580,21 +600,25 @@ func (b *StoreBackend) cachedLanePRDesc(ctx context.Context, probe HostProbe, no
 		}
 		b.cacheMu.Unlock()
 		if fresh {
-			state = cached.status.String()
+			if cached.status.State != "" {
+				state = cached.status.String()
+			}
 		} else {
 			probeCtx, cancel := context.WithTimeout(ctx, snapshotPRProbeTimeout)
 			pr, err := probe.PR(probeCtx, repo, dir, num)
 			cancel()
+			nextStatus := cached.status
 			if err == nil && pr.State != "" {
-				b.cacheMu.Lock()
-				if b.prCache == nil {
-					b.prCache = make(map[string]cachedPR)
-				}
-				b.prCache[key] = cachedPR{at: now, phase: l.Phase, round: l.Round, status: pr}
-				b.cacheMu.Unlock()
-				state = pr.String()
-			} else if hasCached && cached.status.State != "" {
-				state = cached.status.String()
+				nextStatus = pr
+			}
+			b.cacheMu.Lock()
+			if b.prCache == nil {
+				b.prCache = make(map[string]cachedPR)
+			}
+			b.prCache[key] = cachedPR{at: now, phase: l.Phase, round: l.Round, status: nextStatus}
+			b.cacheMu.Unlock()
+			if nextStatus.State != "" {
+				state = nextStatus.String()
 			}
 		}
 	}

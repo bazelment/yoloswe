@@ -214,7 +214,7 @@ func TestHeldRunStatusLineShowsLiveLanePhasePRAndCost(t *testing.T) {
 		t.Fatal(err)
 	}
 	drv := lane.NewFakeDriver()
-	ctrls := adopt.NewControllers(ctx, st, drv, clk, nil)
+	ctrls := adopt.NewControllers(ctx, st, drv, clock.NewFakeClock(swarmNow), nil)
 	t.Cleanup(func() { _ = ctrls.Close(context.Background()) })
 	b := NewStoreBackend(st, "front-desk")
 	b.FrontDesk = "front-desk"
@@ -271,7 +271,7 @@ func TestHeldRunStatusLineShowsLiveLanePhasePRAndCost(t *testing.T) {
 	if _, err := st.Events().Append(ctx, store.Event{
 		RunID:   heldID,
 		LaneID:  "m2-default",
-		Kind:    store.EventStall,
+		Kind:    store.EventTimer,
 		Class:   store.EventClassAuto,
 		Source:  "nebula:usage:term-m2",
 		Summary: "lane m2-default usage",
@@ -875,21 +875,43 @@ func TestSnapshotCachesPRProbeAndReleasesLockBeforeProbing(t *testing.T) {
 			n := calls.Add(1)
 			probeEntered <- struct{}{}
 			<-blockProbe
-			if n == 1 {
+			switch n {
+			case 1:
 				return PRStatus{Number: 401, State: "OPEN", Checks: "1 passed"}, nil
+			case 2:
+				return PRStatus{Number: 401, State: "MERGED"}, nil
+			default:
+				return PRStatus{}, os.ErrClosed
 			}
-			return PRStatus{Number: 401, State: "MERGED"}, nil
 		},
 	}
 
+	if _, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventStall,
+		Source:  "nebula:usage:term-1",
+		Payload: []byte(`{"terminalId":"term-1","usage":{"estimatedCostUsd":0.25}}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 	s1, err := b.Snapshot(ctx)
-	if err != nil || !strings.Contains(s1.Status, "PR #401 (open, checks: 1 passed)") {
+	if err != nil || !strings.Contains(s1.Status, "PR #401 (open, checks: 1 passed)") || !strings.Contains(s1.Status, "cost today: $0.25") {
 		t.Fatalf("first snapshot = %+v, %v", s1, err)
 	}
-	// Second snapshot within TTL reuses cached PR summary without calling HostProbe.PR.
+	// Second snapshot within TTL reuses cached PR summary without calling HostProbe.PR,
+	// and incrementally folds new nebula:usage events without double-counting earlier ones.
+	if _, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventStall,
+		Source:  "nebula:usage:term-1",
+		Payload: []byte(`{"terminalId":"term-1","usage":{"estimatedCostUsd":0.40}}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	clk.Advance(10 * time.Second)
 	s2, err := b.Snapshot(ctx)
-	if err != nil || !strings.Contains(s2.Status, "PR #401 (open, checks: 1 passed)") {
+	if err != nil || !strings.Contains(s2.Status, "PR #401 (open, checks: 1 passed)") || !strings.Contains(s2.Status, "cost today: $0.40") {
 		t.Fatalf("second snapshot = %+v, %v", s2, err)
 	}
 	if got := calls.Load(); got != 1 {
@@ -931,6 +953,25 @@ func TestSnapshotCachesPRProbeAndReleasesLockBeforeProbing(t *testing.T) {
 	s3 := <-snapDone
 	if !strings.Contains(s3.Status, "PR #401 (merged)") || calls.Load() != 2 {
 		t.Fatalf("third snapshot after TTL = %q (calls=%d), want merged and 2 calls", s3.Status, calls.Load())
+	}
+
+	// After TTL expiry, a failing probe falls back to the stale cached PR state and
+	// caches that failure for prCacheTTL so the next poll within TTL does not re-probe.
+	clk.Advance(35 * time.Second)
+	s4, err := b.Snapshot(ctx)
+	if err != nil || !strings.Contains(s4.Status, "PR #401 (merged)") || calls.Load() != 3 {
+		t.Fatalf("fourth snapshot on probe error = %q (calls=%d), want stale merged and 3 calls", s4.Status, calls.Load())
+	}
+	clk.Advance(5 * time.Second)
+	s5, err := b.Snapshot(ctx)
+	if err != nil || !strings.Contains(s5.Status, "PR #401 (merged)") || calls.Load() != 3 {
+		t.Fatalf("fifth snapshot within negative-cache TTL = %q (calls=%d), want 3 calls", s5.Status, calls.Load())
+	}
+	// Advancing to the next UTC day resets today's usage cache to $0.00.
+	clk.Advance(24 * time.Hour)
+	s6, err := b.Snapshot(ctx)
+	if err != nil || !strings.Contains(s6.Status, "cost today: $0.00") {
+		t.Fatalf("sixth snapshot on next UTC day = %q, want cost today: $0.00", s6.Status)
 	}
 }
 
