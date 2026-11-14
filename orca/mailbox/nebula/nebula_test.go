@@ -41,6 +41,43 @@ func TestHTTPMailbox(t *testing.T) {
 	}
 }
 
+func TestHostMailboxScopesToRun(t *testing.T) {
+	s := store.NewMemoryStore(nil)
+	var gotBox, gotRun string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		gotBox, gotRun = r.URL.Query().Get("box"), r.URL.Query().Get("run")
+		w.Header().Set("Content-Type", "application/json")
+		// The server would return the account inbox for an unscoped request.
+		// A host request is scoped by the run mailbox before it reaches us.
+		json.NewEncoder(w).Encode(map[string]any{"messages": []any{map[string]any{"id": "own", "run_id": "run", "body": "own"}}})
+	}))
+	defer srv.Close()
+	m, err := nebula.New(nebula.Config{BaseURL: srv.URL, Token: "x", RunID: "run", Events: s.Events(), Host: true, PollInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ch, err := m.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case ev := <-ch:
+		if ev.Summary != "own" {
+			t.Fatalf("event=%+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+	if gotBox != "host" || gotRun != "run" {
+		t.Fatalf("mail scope box=%q run=%q, want host/run", gotBox, gotRun)
+	}
+}
+
 func TestInvalidURLReturnsError(t *testing.T) {
 	m, err := nebula.New(nebula.Config{BaseURL: ":invalid", Events: store.NewMemoryStore(nil).Events()})
 	if err != nil {

@@ -1449,6 +1449,12 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 	}
 
 	if curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && (rep.Outcome == lane.OutcomeNoChange || strings.EqualFold(strings.TrimSpace(rep.Change), "none") || rep.Outcome == lane.OutcomeDone) {
+		// A host run can prove a report-only lane without a local checkout or
+		// GitHub compare: the terminal's HEAD is the immutable base returned by
+		// the spawn response.
+		if rep.Outcome == lane.OutcomeDone && strings.TrimSpace(rep.HeadSHA) != "" && strings.EqualFold(strings.TrimSpace(rep.HeadSHA), strings.TrimSpace(ln.BaseCommit)) {
+			return c.completeReportOnlyLane(ctx, ln, ev)
+		}
 		if rep.Outcome == lane.OutcomeNoChange || strings.EqualFold(strings.TrimSpace(rep.Change), "none") || rep.Outcome == lane.OutcomeDone {
 			if checker, ok := c.driver.(lane.ReportOnlyChecker); ok {
 				noWork, err := checker.ReportOnlyNoWork(ctx, *ln)
@@ -2077,6 +2083,12 @@ func (c *Controller) startLanePhase(
 		}
 		sessionID = res.SessionID
 		terminalID = res.TerminalID
+		if strings.TrimSpace(res.Branch) != "" {
+			ln.Branch = strings.TrimSpace(res.Branch)
+		}
+		if strings.TrimSpace(res.BaseBranch) != "" {
+			ln.BaseBranch = strings.TrimSpace(res.BaseBranch)
+		}
 		if strings.TrimSpace(res.BaseCommit) != "" {
 			ln.BaseCommit = strings.TrimSpace(res.BaseCommit)
 		}
