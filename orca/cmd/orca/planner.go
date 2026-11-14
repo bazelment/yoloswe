@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -265,17 +266,26 @@ func (p *Planner) handlePlanImportDirective(ctx context.Context, runID string, d
 // HandlePlannerRequest implements dispatcher.Config.OnPlannerRequest by executing
 // a fresh Planner reconciliation turn.
 func (p *Planner) HandlePlannerRequest(ctx context.Context, runID, reason, planRef string) error {
-	if strings.TrimSpace(planRef) != "" {
-		// Model-selected references may fetch posts; local files require an owner CLI input.
-		if kind, _ := planreader.ParsePlanRef(planRef); kind != planreader.PlanSourceNebulaPost {
+	if trimmedRef := strings.TrimSpace(planRef); trimmedRef != "" {
+		// Allow Nebula post references or a confined plan file recorded on an adopted run's Objective.
+		kind, target := planreader.ParsePlanRef(trimmedRef)
+		allowed := kind == planreader.PlanSourceNebulaPost
+		if !allowed && p.store != nil && filepath.IsAbs(target) && filepath.Clean(target) == target {
+			if run, err := p.store.Runs().Get(ctx, runID); err == nil && run != nil && planreader.IsAdoptionMarker(run.PlanRef) {
+				if planreader.MatchesObjectivePlanRef(run.Objective, trimmedRef) {
+					allowed = true
+				}
+			}
+		}
+		if !allowed {
 			return errors.New("orca: planner request requires a post reference")
 		}
-		doc, err := p.planReader.ReadPlan(ctx, planRef)
+		doc, err := p.planReader.ReadPlan(ctx, trimmedRef)
 		if err != nil {
 			return fmt.Errorf("load plan: %w", err)
 		}
 		if strings.TrimSpace(doc.Content) == "" {
-			return fmt.Errorf("plan %q is empty", planRef)
+			return fmt.Errorf("plan %q is empty", trimmedRef)
 		}
 		reason += "\n\nReferenced plan:\n" + doc.Content
 	}
@@ -432,8 +442,11 @@ func (p *Planner) applyReconciliation(
 	if err != nil {
 		return "", err
 	}
-	newObj := cmp.Or(strings.TrimSpace(rec.Objective), run.Objective)
-	newRef := cmp.Or(strings.TrimSpace(rec.PlanRef), strings.TrimSpace(fallbackPlanRef), run.PlanRef)
+	newObj, newRef := planreader.PreserveAdoptedObjective(
+		*run,
+		rec.Objective,
+		cmp.Or(strings.TrimSpace(rec.PlanRef), strings.TrimSpace(fallbackPlanRef)),
+	)
 	if newObj != run.Objective || newRef != run.PlanRef {
 		if err := p.store.Runs().UpdateObjective(ctx, runID, newObj, newRef); err != nil {
 			return "", err

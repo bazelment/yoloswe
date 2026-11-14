@@ -32,27 +32,44 @@ const escalationAskTTL = 24 * time.Hour
 
 // Controllers attaches host runs to orca's deterministic lane lifecycle.
 type Controllers struct {
-	ctx      context.Context
-	store    store.Store
-	driver   lane.LaneDriver
-	clock    clock.Clock
-	judges   JudgeFactory
-	PRProbe  controller.PRProbe
-	runs     map[string]*controlledRun
-	starting map[string]*startup
-	mu       sync.Mutex
+	ctx          context.Context
+	store        store.Store
+	driver       lane.LaneDriver
+	clock        clock.Clock
+	judges       JudgeFactory
+	PRProbe      controller.PRProbe
+	Planner      func(ctx context.Context, runID, reason, planRef string) error
+	ledgerScript *string
+	runs         map[string]*controlledRun
+	starting     map[string]*startup
+	mu           sync.Mutex
 }
 
 type controlledRun struct {
 	controller *controller.Controller
+	syncer     *runLedgerSync
 	cancel     context.CancelFunc
 	done       chan struct{}
+	holder     string
 	run        Run
 }
 
 type startup struct {
 	done chan struct{}
+	cr   *controlledRun
 	err  error
+}
+
+func (d *Controllers) lookupRun(runID string) *controlledRun {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if cr := d.runs[runID]; cr != nil {
+		return cr
+	}
+	if s := d.starting[runID]; s != nil {
+		return s.cr
+	}
+	return nil
 }
 
 func NewControllers(ctx context.Context, st store.Store, driver lane.LaneDriver, clk clock.Clock, judges JudgeFactory) *Controllers {
@@ -122,7 +139,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		return err
 	}
 	repo := cmp.Or(r.Repo, r.RepoID)
-	if err := d.store.Runs().Create(ctx, store.Run{ID: r.ID, Repository: repo, Objective: r.Goal, DefaultRecipe: workflow.Name}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+	if err := d.store.Runs().Create(ctx, store.Run{ID: r.ID, Repository: repo, Objective: r.FullObjective(), DefaultRecipe: workflow.Name}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		return err
 	}
 	holder := cmp.Or(strings.TrimSpace(r.Holder), fmt.Sprintf("orca-adopt:%p", d))
@@ -193,8 +210,26 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			tracker.TrackLane(*ln)
 		}
 	}
-	if err := d.store.Runs().UpdateObjective(ctx, r.ID, r.Goal, generation); err != nil {
+	if err := d.store.Runs().UpdateObjective(ctx, r.ID, r.FullObjective(), generation); err != nil {
 		return err
+	}
+	syncer := newRunLedgerSync(r, d.clock, lanes)
+	syncer.ledgerScript = d.ledgerScript
+	runStore := &adoptedStore{
+		Store: d.store,
+		runs: &adoptedRunStore{
+			RunStore: d.store.Runs(),
+			syncer:   syncer,
+		},
+		lanes: &adoptedLaneStore{
+			LaneStore:   d.store.Lanes(),
+			syncer:      syncer,
+			controllers: d,
+		},
+		backlog: &adoptedBacklogStore{
+			BacklogStore: d.store.Backlog(),
+			controllers:  d,
+		},
 	}
 	var ctrl *controller.Controller
 	var dispatch controller.Judge
@@ -208,25 +243,38 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	runDriver := d.driver
 	if runDriver != nil {
-		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: d.store}
+		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: runStore}
 		if ds, ok := dispatch.(interface{ SetDriver(lane.LaneDriver) }); ok {
 			ds.SetDriver(runDriver)
 		} else if dispatch != nil {
 			slog.DebugContext(ctx, "orca/adopt: judge does not implement SetDriver; adoptedRunDriver not attached to judge", "run_id", r.ID)
 		}
 	}
-	ctrl = controller.New(controller.Config{RunID: r.ID, HolderID: holder, PRProbe: d.PRProbe}, d.store, runDriver, d.clock, d.judge(holder, dispatch))
+	ctrl = controller.New(controller.Config{RunID: r.ID, HolderID: holder, PRProbe: d.PRProbe}, runStore, runDriver, d.clock, d.judge(holder, dispatch))
+	runCtx, cancel := context.WithCancel(d.ctx)
+	cr := &controlledRun{controller: ctrl, syncer: syncer, cancel: cancel, done: make(chan struct{}), run: r, holder: holder}
+	d.mu.Lock()
+	s.cr = cr
+	d.mu.Unlock()
+	cleanupFailedStart := func() {
+		cancel()
+		close(cr.done)
+	}
 	// Fail synchronously if another process still holds the controller lease.
 	if err := ctrl.Step(ctx); err != nil {
+		cleanupFailedStart()
 		return err
 	}
-	runCtx, cancel := context.WithCancel(d.ctx)
+	if planned, err := d.planNextWorkIfDrained(ctx, r.ID, "adopt"); err != nil {
+		slog.Warn("plan next work on adopt failed", "run", r.ID, "error", err)
+	} else if planned {
+		_ = ctrl.Step(ctx)
+	}
 	if err := ctrl.StartWatches(runCtx); err != nil {
-		cancel()
+		cleanupFailedStart()
 		_ = ctrl.ReleaseLease(ctx)
 		return err
 	}
-	cr := &controlledRun{controller: ctrl, cancel: cancel, done: make(chan struct{}), run: r}
 	d.mu.Lock()
 	d.runs[r.ID] = cr
 	d.mu.Unlock()
@@ -277,8 +325,8 @@ func (d *Controllers) stop(ctx context.Context, r Run, releaseLease bool) error 
 		<-s.done
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	cr := d.runs[r.ID]
+	d.mu.Unlock()
 	if cr == nil {
 		return nil
 	}
@@ -289,6 +337,11 @@ func (d *Controllers) stop(ctx context.Context, r Run, releaseLease bool) error 
 	if err != nil {
 		return err
 	}
+	if cr.syncer != nil {
+		if err := cr.syncer.SyncAll(ctx, current); err != nil {
+			slog.Warn("sync adopted run lanes on stop failed", "run", r.ID, "error", err)
+		}
+	}
 	if err := checkpoint(r.Dir, current); err != nil {
 		return err
 	}
@@ -297,24 +350,170 @@ func (d *Controllers) stop(ctx context.Context, r Run, releaseLease bool) error 
 			return err
 		}
 	}
-	delete(d.runs, r.ID)
+	d.mu.Lock()
+	if d.runs[r.ID] == cr {
+		delete(d.runs, r.ID)
+	}
+	d.mu.Unlock()
 	return nil
 }
 
 // judge runs the dispatcher and exposes unresolved escalations to the owner.
 func (d *Controllers) judge(holder string, dispatch controller.Judge) controller.Judge {
 	return controller.JudgeFunc(func(ctx context.Context, runID string, events []store.Event) error {
+		_, _ = d.RefreshObjective(ctx, runID)
+		var err error
 		if dispatch != nil {
 			stop := d.keepLease(ctx, runID, holder)
-			err := dispatch.Judge(ctx, runID, events)
+			err = dispatch.Judge(ctx, runID, events)
 			stop()
-			if err != nil {
-				slog.Error("adopted run dispatcher failed; asking the owner about its escalations", "run", runID, "error", err)
-				return d.askOwnerOnEscalation(ctx, runID, events)
-			}
+		}
+		d.syncRunLanes(ctx, runID)
+		if _, pErr := d.planNextWorkIfDrained(ctx, runID, "backlog_drained"); pErr != nil {
+			slog.Warn("plan next work after judge failed", "run", runID, "error", pErr)
+		}
+		if err != nil {
+			slog.Error("adopted run dispatcher failed; asking the owner about its escalations", "run", runID, "error", err)
 		}
 		return d.askOwnerOnEscalation(ctx, runID, events)
 	})
+}
+
+func (d *Controllers) syncRunLanes(ctx context.Context, runID string) {
+	cr := d.lookupRun(runID)
+	if cr == nil || cr.syncer == nil {
+		return
+	}
+	_, _ = cr.syncer.RefreshObjectiveIfChanged(ctx, d.store.Runs())
+	lanes, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
+	if err != nil {
+		return
+	}
+	if err := cr.syncer.SyncAll(ctx, lanes); err != nil {
+		slog.Warn("sync adopted run lanes failed", "run", runID, "error", err)
+	}
+}
+
+// RefreshObjective re-reads OBJECTIVE.md from the adopted run directory when
+// its stat signature changes and updates store.Run.Objective if the content changed.
+func (d *Controllers) RefreshObjective(ctx context.Context, runID string) (bool, error) {
+	cr := d.lookupRun(runID)
+	if cr == nil || cr.syncer == nil {
+		return false, nil
+	}
+	return cr.syncer.RefreshObjectiveIfChanged(ctx, d.store.Runs())
+}
+
+func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger string) (bool, error) {
+	cr := d.lookupRun(runID)
+	d.mu.Lock()
+	plannerFn := d.Planner
+	d.mu.Unlock()
+	if cr == nil || cr.syncer == nil {
+		return false, nil
+	}
+	_, _ = cr.syncer.RefreshObjectiveIfChanged(ctx, d.store.Runs())
+	if plannerFn == nil {
+		return false, nil
+	}
+	curRun := cr.syncer.CurrentRun()
+	if !curRun.HasNextWork() {
+		return false, nil
+	}
+	lanes, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
+	if err != nil {
+		return false, err
+	}
+	terminalLanes := make(map[string]bool, len(lanes))
+	for i := range lanes {
+		if !lanes[i].Status.Terminal() {
+			return false, nil
+		}
+		terminalLanes[lanes[i].ID] = true
+	}
+	items, err := d.store.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
+	if err != nil {
+		return false, err
+	}
+	var doneSummary []string
+	for i := range items {
+		it := &items[i]
+		if !it.Status.Terminal() && !terminalLanes[it.ID] && !terminalLanes[it.LaneID] {
+			return false, nil
+		}
+		doneSummary = append(doneSummary, fmt.Sprintf("%s:%s", it.ID, it.Status))
+	}
+	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	if err != nil {
+		return false, err
+	}
+	now := d.clock.Now().UTC()
+	for i := range dirs {
+		dir := &dirs[i]
+		if strings.HasPrefix(dir.Ref, ownerAskRef) && (dir.ExpiresAt == nil || now.Before(*dir.ExpiresAt)) {
+			return false, nil
+		}
+	}
+	planKey := curRun.FullObjective() + "|" + strings.Join(doneSummary, ",")
+	if !cr.syncer.MarkPlanned(planKey) {
+		return false, nil
+	}
+	var reason strings.Builder
+	fmt.Fprintf(&reason, "Adopted run %s backlog drained (%s); turn the remaining Next: / open work in OBJECTIVE.md into backlog items, or ask the owner one question if a decision is required.\n\n", runID, trigger)
+	fmt.Fprintf(&reason, "OBJECTIVE.md:\n%s\n", curRun.FullObjective())
+	if curRun.Next != "" {
+		fmt.Fprintf(&reason, "\nNext: %s\n", curRun.Next)
+	}
+	if curRun.PlanPath != "" {
+		fmt.Fprintf(&reason, "Plan path: %s\n", curRun.PlanPath)
+	}
+	planRef := ""
+	if curRun.PlanPath != "" && fileExists(curRun.PlanPath) {
+		planRef = curRun.PlanPath
+	}
+	stop := func() {}
+	if cr.holder != "" {
+		stop = d.keepLease(ctx, runID, cr.holder)
+	}
+	err = plannerFn(ctx, runID, reason.String(), planRef)
+	stop()
+	if err != nil {
+		if ctx.Err() != nil {
+			cr.syncer.ClearPlanned(planKey)
+		} else {
+			_, _ = d.store.Events().Append(context.WithoutCancel(ctx), store.Event{
+				RunID:   runID,
+				Kind:    store.EventTimer,
+				Class:   store.EventClassJudgment,
+				Source:  "planner",
+				Summary: "planner next-work handoff failed: " + err.Error(),
+			})
+		}
+		return false, err
+	}
+	afterItems, err := d.store.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
+	if err != nil {
+		return true, nil
+	}
+	addedOpen := false
+	for i := range afterItems {
+		if afterItems[i].Status == store.BacklogOpen {
+			addedOpen = true
+			break
+		}
+	}
+	if addedOpen {
+		_, _ = d.store.Events().Append(ctx, store.Event{
+			RunID:   runID,
+			Kind:    store.EventTimer,
+			Class:   store.EventClassJudgment,
+			Source:  "planner",
+			Urgent:  true,
+			Summary: "planner created next backlog items from OBJECTIVE.md",
+		})
+		d.Wake(runID)
+	}
+	return true, nil
 }
 
 func (d *Controllers) keepLease(ctx context.Context, runID, holder string) func() {
@@ -1031,6 +1230,402 @@ func (d *adoptedRunDriver) TrackLane(ln lane.Lane) {
 	}
 }
 
+type adoptedStore struct {
+	store.Store
+	runs    store.RunStore
+	lanes   store.LaneStore
+	backlog store.BacklogStore
+}
+
+func (s *adoptedStore) Runs() store.RunStore {
+	if s.runs != nil {
+		return s.runs
+	}
+	return s.Store.Runs()
+}
+
+func (s *adoptedStore) Lanes() store.LaneStore { return s.lanes }
+
+func (s *adoptedStore) Backlog() store.BacklogStore {
+	if s.backlog != nil {
+		return s.backlog
+	}
+	return s.Store.Backlog()
+}
+
+type adoptedRunStore struct {
+	store.RunStore
+	syncer *runLedgerSync
+}
+
+func (s *adoptedRunStore) Get(ctx context.Context, runID string) (*store.Run, error) {
+	if s.syncer != nil && runID == s.syncer.runID {
+		_, _ = s.syncer.RefreshObjectiveIfChanged(ctx, s.RunStore)
+	}
+	return s.RunStore.Get(ctx, runID)
+}
+
+func (s *adoptedRunStore) List(ctx context.Context) ([]store.Run, error) {
+	if s.syncer != nil {
+		_, _ = s.syncer.RefreshObjectiveIfChanged(ctx, s.RunStore)
+	}
+	return s.RunStore.List(ctx)
+}
+
+type adoptedLaneStore struct {
+	store.LaneStore
+	syncer      *runLedgerSync
+	controllers *Controllers
+}
+
+// Upsert checkpoints the lane live to the host ledger and, when the lane reaches
+// a terminal status with no active backlog item, triggers planNextWorkIfDrained
+// (controller.stepIntegrate marks merged lanes done directly without calling judge).
+func (s *adoptedLaneStore) Upsert(ctx context.Context, ln lane.Lane) error {
+	if s.syncer != nil && ln.RunID == s.syncer.runID {
+		if err := s.syncer.SyncLane(ctx, ln); err != nil {
+			slog.Warn("live checkpoint adopted lane failed", "run", ln.RunID, "lane", ln.ID, "error", err)
+		}
+	}
+	if err := s.LaneStore.Upsert(ctx, ln); err != nil {
+		return err
+	}
+	if ln.Status.Terminal() && s.controllers != nil {
+		itemID := cmp.Or(ln.ItemID, ln.ID)
+		hasActiveItem := false
+		if itemID != "" {
+			if item, err := s.controllers.store.Backlog().Get(ctx, ln.RunID, itemID); err == nil && !item.Status.Terminal() {
+				hasActiveItem = true
+			}
+		}
+		if !hasActiveItem {
+			if _, err := s.controllers.planNextWorkIfDrained(ctx, ln.RunID, "lane_completed"); err != nil {
+				slog.Warn("plan next work after lane completion failed", "run", ln.RunID, "lane", ln.ID, "error", err)
+			}
+		}
+	}
+	return nil
+}
+
+type adoptedBacklogStore struct {
+	store.BacklogStore
+	controllers *Controllers
+}
+
+// Close triggers planNextWorkIfDrained after closing a backlog item so merges
+// handled directly by controller.stepIntegrate hand off remaining OBJECTIVE.md work.
+func (s *adoptedBacklogStore) Close(ctx context.Context, runID, itemID string, status store.BacklogStatus, actor, reason string) error {
+	if err := s.BacklogStore.Close(ctx, runID, itemID, status, actor, reason); err != nil {
+		return err
+	}
+	if s.controllers != nil {
+		if _, err := s.controllers.planNextWorkIfDrained(ctx, runID, "backlog_drained"); err != nil {
+			slog.Warn("plan next work after backlog close failed", "run", runID, "item", itemID, "error", err)
+		}
+	}
+	return nil
+}
+
+// runLedgerSync mirrors controller lane transitions and OBJECTIVE.md updates
+// to an adopted host run directory.
+//
+// Lock ordering: ioMu serializes disk and subprocess I/O in SyncLane; mu guards
+// in-memory state (run, known, lastObjective, lastPlannedKey, stat signatures).
+// Callers may acquire mu while holding ioMu, never the reverse, and mu is never
+// held across file or subprocess I/O.
+type runLedgerSync struct {
+	clock          clock.Clock
+	known          map[string]lane.Lane
+	ledgerScript   *string
+	runID          string
+	resolvedScript string
+	lastObjective  string
+	lastPlannedKey string
+	run            Run
+	objModNano     int64
+	objSize        int64
+	progModNano    int64
+	progSize       int64
+	statReady      bool
+	scriptResolved bool
+	ioMu           sync.Mutex
+	mu             sync.Mutex
+}
+
+func fileStatSignature(path string) (int64, int64) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return -1, -1
+	}
+	return info.ModTime().UnixNano(), info.Size()
+}
+
+func newRunLedgerSync(r Run, clk clock.Clock, initial []lane.Lane) *runLedgerSync {
+	if clk == nil {
+		clk = clock.NewRealClock()
+	}
+	known := make(map[string]lane.Lane, len(initial))
+	for i := range initial {
+		known[initial[i].ID] = initial[i].Clone()
+	}
+	objMod, objSize := fileStatSignature(filepath.Join(r.Dir, "OBJECTIVE.md"))
+	progMod, progSize := fileStatSignature(filepath.Join(r.Dir, "PROGRESS.md"))
+	return &runLedgerSync{
+		runID:         r.ID,
+		run:           r,
+		clock:         clk,
+		known:         known,
+		lastObjective: r.FullObjective(),
+		objModNano:    objMod,
+		objSize:       objSize,
+		progModNano:   progMod,
+		progSize:      progSize,
+		statReady:     r.Dir != "",
+	}
+}
+
+func (s *runLedgerSync) CurrentRun() Run {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.run
+}
+
+func (s *runLedgerSync) MarkPlanned(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastPlannedKey == key {
+		return false
+	}
+	s.lastPlannedKey = key
+	return true
+}
+
+func (s *runLedgerSync) ClearPlanned(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastPlannedKey == key {
+		s.lastPlannedKey = ""
+	}
+}
+
+func (s *runLedgerSync) RefreshObjectiveIfChanged(ctx context.Context, runs store.RunStore) (bool, error) {
+	s.mu.Lock()
+	dir := s.run.Dir
+	ready := s.statReady
+	prevObjMod, prevObjSize := s.objModNano, s.objSize
+	prevProgMod, prevProgSize := s.progModNano, s.progSize
+	s.mu.Unlock()
+	if dir == "" || runs == nil {
+		return false, nil
+	}
+	objMod, objSize := fileStatSignature(filepath.Join(dir, "OBJECTIVE.md"))
+	progMod, progSize := fileStatSignature(filepath.Join(dir, "PROGRESS.md"))
+	if ready && objMod == prevObjMod && objSize == prevObjSize && progMod == prevProgMod && progSize == prevProgSize {
+		return false, nil
+	}
+	return s.RefreshObjective(ctx, runs)
+}
+
+func (s *runLedgerSync) RefreshObjective(ctx context.Context, runs store.RunStore) (bool, error) {
+	s.mu.Lock()
+	dir := s.run.Dir
+	runID := s.run.ID
+	goal := s.run.Goal
+	prevObj := s.lastObjective
+	s.mu.Unlock()
+	if dir == "" || runs == nil {
+		return false, nil
+	}
+	objPath := filepath.Join(dir, "OBJECTIVE.md")
+	progPath := filepath.Join(dir, "PROGRESS.md")
+	objMod, objSize := fileStatSignature(objPath)
+	progMod, progSize := fileStatSignature(progPath)
+	objText := stripMarker(readText(objPath))
+	progText := clip(stripMarker(readText(progPath)), 1500)
+	s.mu.Lock()
+	s.objModNano, s.objSize = objMod, objSize
+	s.progModNano, s.progSize = progMod, progSize
+	s.statReady = true
+	updated := s.run
+	updated.Objective = objText
+	updated.Progress = progText
+	if updated.Goal == "" {
+		updated.Goal = goal
+	}
+	updated.PlanPath = extractPlanPath(dir, updated.Objective, updated.Progress)
+	updated.Next = extractNextSection(updated.Objective)
+	fullObj := updated.FullObjective()
+	if fullObj == "" || fullObj == prevObj {
+		s.mu.Unlock()
+		return false, nil
+	}
+	s.run = updated
+	s.lastObjective = fullObj
+	s.mu.Unlock()
+
+	cur, err := runs.Get(ctx, runID)
+	if err != nil {
+		return false, err
+	}
+	if err := runs.UpdateObjective(ctx, runID, fullObj, cur.PlanRef); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func lanePersistedDiff(a, b lane.Lane) bool {
+	return a.Phase != b.Phase ||
+		a.Round != b.Round ||
+		a.Status != b.Status ||
+		a.SessionID != b.SessionID ||
+		a.TerminalID != b.TerminalID ||
+		a.PR != b.PR ||
+		a.PRHead != b.PRHead ||
+		a.ApprovalSHA != b.ApprovalSHA ||
+		a.MergeSHA != b.MergeSHA ||
+		a.Checks != b.Checks ||
+		a.BaseCommit != b.BaseCommit
+}
+
+func (s *runLedgerSync) resolveLedgerScript() *string {
+	s.mu.Lock()
+	if s.ledgerScript != nil {
+		override := s.ledgerScript
+		s.mu.Unlock()
+		return override
+	}
+	if s.scriptResolved {
+		script := s.resolvedScript
+		s.mu.Unlock()
+		return &script
+	}
+	s.mu.Unlock()
+	found := FindLedgerScript()
+	s.mu.Lock()
+	if !s.scriptResolved {
+		s.resolvedScript = found
+		s.scriptResolved = true
+	}
+	script := s.resolvedScript
+	s.mu.Unlock()
+	return &script
+}
+
+func (s *runLedgerSync) SyncLane(ctx context.Context, ln lane.Lane) error {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+
+	s.mu.Lock()
+	prev, ok := s.known[ln.ID]
+	run := s.run
+	s.mu.Unlock()
+	if ok && !lanePersistedDiff(prev, ln) {
+		return nil
+	}
+	var prevPtr *lane.Lane
+	if ok {
+		cp := prev.Clone()
+		prevPtr = &cp
+	}
+	if run.Format == FormatNebulaSwarm {
+		cfgPhases, _, _, _ := readNebulaSwarmLedgerMeta(run.Dir)
+		usedHelper, err := writeNebulaSwarmLaneWithHelper(ctx, run.Dir, ln, s.resolveLedgerScript())
+		if err != nil {
+			slog.Warn("nebula-swarm ledger.py helper failed; falling back to direct checkpoint", "dir", run.Dir, "lane", ln.ID, "error", err)
+		}
+		if err != nil || !usedHelper {
+			if cErr := checkpoint(run.Dir, []lane.Lane{ln}); cErr != nil {
+				return errors.Join(err, cErr)
+			}
+		}
+		if err := appendNebulaSwarmEvents(run.Dir, s.clock.Now(), prevPtr, ln, cfgPhases); err != nil {
+			return err
+		}
+	} else {
+		if err := checkpoint(run.Dir, []lane.Lane{ln}); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.known[ln.ID] = ln.Clone()
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *runLedgerSync) SyncAll(ctx context.Context, lanes []lane.Lane) error {
+	var errs []error
+	for i := range lanes {
+		errs = append(errs, s.SyncLane(ctx, lanes[i]))
+	}
+	return errors.Join(errs...)
+}
+
+// lockLedgerFile acquires an exclusive flock on state.json.lock, retrying
+// briefly under transient contention before returning an error.
+func lockLedgerFile(lock *os.File) error {
+	return lockLedgerFileWith(lock, nil)
+}
+
+func lockLedgerFileWith(lock *os.File, onContention func()) error {
+	deadline := time.Now().Add(2 * time.Second)
+	notified := false
+	for {
+		err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			return fmt.Errorf("lock host ledger: %w", err)
+		}
+		if !notified && onContention != nil {
+			notified = true
+			onContention()
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("lock host ledger: %w", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func checkpointSubagentSwarm(dir string, task map[string]json.RawMessage, ln *lane.Lane) error {
+	fields := map[string]any{"phase": ln.Phase, "round": ln.Round, "status": ln.Status, "nebula_session": ln.SessionID, "nebula_terminal": ln.TerminalID, "pr": ln.PR, "pr_head": ln.PRHead, "approval_sha": ln.ApprovalSHA, "merge_sha": ln.MergeSHA, "checks": ln.Checks, "fork_sha": ln.BaseCommit}
+	for k, v := range fields {
+		task[k], _ = json.Marshal(v)
+	}
+	var sessions map[string]string
+	if raw := task["sessions"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &sessions); err != nil {
+			return err
+		}
+	}
+	if sessions == nil {
+		sessions = map[string]string{}
+	}
+	for k, v := range ln.Terminals {
+		sessions[k] = "nebula:" + v
+	}
+	task["sessions"], _ = json.Marshal(sessions)
+	if ln.Phase != "" && ln.TerminalID != "" {
+		spawnPath := filepath.Join(dir, ln.ID+"."+ln.Phase+".spawn.json")
+		sp := map[string]json.RawMessage{}
+		if raw, err := os.ReadFile(spawnPath); err == nil {
+			if err := json.Unmarshal(raw, &sp); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		sp["session_id"], _ = json.Marshal(ln.SessionID)
+		sp["terminal_id"], _ = json.Marshal(ln.TerminalID)
+		spawn, _ := json.Marshal(sp)
+		if err := writeAtomic(spawnPath, spawn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // checkpoint writes controller state back to the host ledger and spawn files.
 func checkpoint(dir string, lanes []lane.Lane) error {
 	lock, err := os.OpenFile(filepath.Join(dir, "state.json.lock"), os.O_CREATE|os.O_RDWR, 0o644)
@@ -1038,9 +1633,10 @@ func checkpoint(dir string, lanes []lane.Lane) error {
 		return err
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return fmt.Errorf("lock host ledger: %w", err)
+	if err := lockLedgerFile(lock); err != nil {
+		return err
 	}
+	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
 	path := filepath.Join(dir, "state.json")
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -1054,6 +1650,19 @@ func checkpoint(dir string, lanes []lane.Lane) error {
 	if err := json.Unmarshal(doc["tasks"], &tasks); err != nil {
 		return err
 	}
+	var cfgPhases []string
+	if rawCfg := doc["config"]; len(rawCfg) > 0 {
+		var cfg struct {
+			Phases []hostPhase `json:"phases"`
+		}
+		if json.Unmarshal(rawCfg, &cfg) == nil {
+			for _, p := range cfg.Phases {
+				if p.Name != "" {
+					cfgPhases = append(cfgPhases, p.Name)
+				}
+			}
+		}
+	}
 	nebulaSwarm := detectFormat(dir, b) == FormatNebulaSwarm
 	for i := range lanes {
 		ln := &lanes[i]
@@ -1065,6 +1674,7 @@ func checkpoint(dir string, lanes []lane.Lane) error {
 				return err
 			}
 		}
+		found := false
 		for _, task := range tasks {
 			var id string
 			if err := json.Unmarshal(task["id"], &id); err != nil {
@@ -1073,46 +1683,37 @@ func checkpoint(dir string, lanes []lane.Lane) error {
 			if id != ln.ID {
 				continue
 			}
+			found = true
 			if nebulaSwarm {
-				if err := checkpointNebulaSwarm(task, ln); err != nil {
+				if err := checkpointNebulaSwarm(task, ln, cfgPhases); err != nil {
 					return err
 				}
 				continue
 			}
-			fields := map[string]any{"phase": ln.Phase, "round": ln.Round, "status": ln.Status, "nebula_session": ln.SessionID, "nebula_terminal": ln.TerminalID, "pr": ln.PR, "pr_head": ln.PRHead, "approval_sha": ln.ApprovalSHA, "merge_sha": ln.MergeSHA, "checks": ln.Checks, "fork_sha": ln.BaseCommit}
-			for k, v := range fields {
-				task[k], _ = json.Marshal(v)
+			if err := checkpointSubagentSwarm(dir, task, ln); err != nil {
+				return err
 			}
-			var sessions map[string]string
-			if raw := task["sessions"]; len(raw) > 0 {
-				if err := json.Unmarshal(raw, &sessions); err != nil {
+		}
+		if !found {
+			task := map[string]json.RawMessage{}
+			task["id"], _ = json.Marshal(ln.ID)
+			task["title"], _ = json.Marshal(cmp.Or(ln.Title, ln.ID))
+			task["branch"], _ = json.Marshal(ln.Branch)
+			if nebulaSwarm {
+				task["priority"], _ = json.Marshal("p1")
+				task["depends_on"], _ = json.Marshal([]string{})
+				task["verdict"], _ = json.Marshal("")
+				task["terminal_state"], _ = json.Marshal("")
+				task["terminals"], _ = json.Marshal(map[string]map[string]string{})
+				if err := checkpointNebulaSwarm(task, ln, cfgPhases); err != nil {
+					return err
+				}
+			} else {
+				if err := checkpointSubagentSwarm(dir, task, ln); err != nil {
 					return err
 				}
 			}
-			if sessions == nil {
-				sessions = map[string]string{}
-			}
-			for k, v := range ln.Terminals {
-				sessions[k] = "nebula:" + v
-			}
-			task["sessions"], _ = json.Marshal(sessions)
-			if ln.Phase != "" && ln.TerminalID != "" {
-				spawnPath := filepath.Join(dir, ln.ID+"."+ln.Phase+".spawn.json")
-				sp := map[string]json.RawMessage{}
-				if raw, err := os.ReadFile(spawnPath); err == nil {
-					if err := json.Unmarshal(raw, &sp); err != nil {
-						return err
-					}
-				} else if !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
-				sp["session_id"], _ = json.Marshal(ln.SessionID)
-				sp["terminal_id"], _ = json.Marshal(ln.TerminalID)
-				spawn, _ := json.Marshal(sp)
-				if err := writeAtomic(spawnPath, spawn); err != nil {
-					return err
-				}
-			}
+			tasks = append(tasks, task)
 		}
 	}
 	doc["tasks"], _ = json.Marshal(tasks)
@@ -1128,15 +1729,24 @@ const nsNeedsHuman = "needs-human"
 
 // checkpointNebulaSwarm writes a lane back in nebula-swarm's ledger fields:
 // its session, the terminal of its phase and round, and its PR state.
-func checkpointNebulaSwarm(task map[string]json.RawMessage, ln *lane.Lane) error {
-	var prev string
+func checkpointNebulaSwarm(task map[string]json.RawMessage, ln *lane.Lane, cfgPhases []string) error {
+	var prev, prevPhase, prevVerdict string
 	_ = json.Unmarshal(task["status"], &prev)
+	_ = json.Unmarshal(task["phase"], &prevPhase)
+	_ = json.Unmarshal(task["verdict"], &prevVerdict)
 	status := string(ln.Status)
 	if prev == nsNeedsHuman && ln.Status == lane.StatusBlocked {
 		status = nsNeedsHuman
 	}
+	effPhase := ledgerPhase(ln.Phase, cfgPhases, prevPhase)
 	round := max(ln.Round, 1)
-	fields := map[string]any{"phase": ln.Phase, "round": round, "status": status, "session_id": ln.SessionID, "pr": ln.PR, "pr_head": ln.PRHead, "approval_sha": ln.ApprovalSHA, "merge_sha": ln.MergeSHA, "checks": ln.Checks, "fork_sha": ln.BaseCommit}
+	fields := map[string]any{"phase": effPhase, "round": round, "status": status, "session_id": ln.SessionID, "pr": ln.PR, "pr_head": ln.PRHead, "approval_sha": ln.ApprovalSHA, "merge_sha": ln.MergeSHA, "checks": ln.Checks, "fork_sha": ln.BaseCommit}
+	if ln.ApprovalSHA != "" && prevVerdict == "" {
+		fields["verdict"] = "pass"
+	}
+	if ln.Status.Terminal() {
+		fields["terminal_state"] = ""
+	}
 	for k, v := range fields {
 		task[k], _ = json.Marshal(v)
 	}
@@ -1146,11 +1756,11 @@ func checkpointNebulaSwarm(task map[string]json.RawMessage, ln *lane.Lane) error
 			return err
 		}
 	}
-	if ln.Phase != "" && ln.TerminalID != "" {
-		if terminals[ln.Phase] == nil {
-			terminals[ln.Phase] = map[string]string{}
+	if effPhase != "" && effPhase == ln.Phase && ln.TerminalID != "" {
+		if terminals[effPhase] == nil {
+			terminals[effPhase] = map[string]string{}
 		}
-		terminals[ln.Phase][strconv.Itoa(round)] = ln.TerminalID
+		terminals[effPhase][strconv.Itoa(round)] = ln.TerminalID
 	}
 	task["terminals"], _ = json.Marshal(terminals)
 	return nil

@@ -66,6 +66,33 @@ func FindSwarmScript() string {
 	return ""
 }
 
+// FindLedgerScript returns $ORCA_NEBULA_LEDGER_PY, else ledger.py beside
+// FindSwarmScript(), else the installed nebula-swarm ledger.py, else "".
+func FindLedgerScript() string {
+	if v := os.Getenv("ORCA_NEBULA_LEDGER_PY"); v != "" {
+		if fileExists(v) {
+			return v
+		}
+		return ""
+	}
+	var cands []string
+	if sw := FindSwarmScript(); sw != "" {
+		cands = append(cands, filepath.Join(filepath.Dir(sw), "ledger.py"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		cands = append(cands, filepath.Join(home, ".claude", "skills", "nebula-swarm", "scripts", "ledger.py"))
+	}
+	cands = append(cands, "/opt/nebula/skills/nebula-swarm/scripts/ledger.py")
+	glob, _ := filepath.Glob("/opt/nebula/skills/.nebula-tree-nebula-swarm.*/scripts/ledger.py")
+	cands = append(cands, glob...)
+	for _, c := range cands {
+		if fileExists(c) {
+			return c
+		}
+	}
+	return ""
+}
+
 type proc struct {
 	args []string
 	ppid int

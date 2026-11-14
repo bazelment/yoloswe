@@ -1131,3 +1131,94 @@ func TestRestartShutdownFailureAbortsExecAndVersionValidation(t *testing.T) {
 		t.Fatal("execProcess called despite restart shutdown failure")
 	}
 }
+
+type testLabeler struct{}
+
+func (testLabeler) RunOrchestrator(context.Context, string) (string, error)  { return "claude", nil }
+func (testLabeler) SetRunOrchestrator(context.Context, string, string) error { return nil }
+
+type testWatcher struct{}
+
+func (testWatcher) Running(context.Context, string) ([]int, error) { return nil, nil }
+func (testWatcher) Stop(context.Context, []int) error              { return nil }
+func (testWatcher) Start(context.Context, string) error            { return nil }
+
+func TestAdoptedHandlePlannerRequestWithRelativePlanAndConfinement(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), ".swarm")
+	const runID = "20261114-trial-m1"
+	dir := filepath.Join(root, runID)
+	if err := os.MkdirAll(filepath.Join(dir, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"M1 trial","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"squash",
+"phases":[{"name":"swe","kind":"claude"},{"name":"review","kind":"claude"}]},
+"tasks":[{"id":"m2-gaps2","title":"m2 gaps2","branch":"swarm-lane/20261114-trial-m1/m2-gaps2","priority":"p1","status":"done","phase":"review","round":1,"session_id":"sess-m2","terminals":{"review":{"1":"term-m2-review"}},"pr":5786,"pr_head":"bbb","approval_sha":"bbb","merge_sha":"999aaaa","terminal_state":"","verdict":"pass"}]}`)
+	writeFile(t, filepath.Join(dir, "PLAN.md"), "# Trial Plan\n- Staff items 6-7\n")
+	writeFile(t, filepath.Join(dir, "OBJECTIVE.md"), "# 20261114-trial-m1\n\nGoal: Validate slim-prompt trial.\nPlan: PLAN.md\nNext: staff a lane for items 6-7.\n")
+	writeFile(t, filepath.Join(dir, "PROGRESS.md"), "progress\n")
+	writeFile(t, filepath.Join(dir, "EVENTS"), "")
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 18, 52, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+
+	recJSON, err := json.Marshal(PlanReconciliation{
+		Summary:   "Added m2-items-6-7 from relative PLAN.md.",
+		Objective: "Multi-line replacement\nthat must not overwrite adopted OBJECTIVE.md",
+		AddItems: []PlanBacklogSpec{
+			{
+				ID:          "m2-items-6-7",
+				Title:       "Staff items 6-7",
+				Description: "From PLAN.md and OBJECTIVE.md Next:",
+				Priority:    "p1",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeClient := model.NewFakeClient(
+		model.Response{
+			ID:         "msg_cmd_plan",
+			Model:      DefaultPlannerModel,
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_cmd_plan", SubmitPlanReconcileTool, recJSON),
+			),
+		},
+	)
+	pln := NewPlanner(st, clk, fakeClient, DefaultPlannerModel, nil)
+
+	ctrls := adopt.NewControllers(t.Context(), st, drv, clk, nil)
+	ctrls.Planner = pln.HandlePlannerRequest
+	t.Cleanup(func() { _ = ctrls.Close(context.Background()) })
+
+	svc := &adopt.Service{
+		Importer: adopt.Importer{Roots: []string{root}},
+		Labeler:  testLabeler{},
+		Watcher:  testWatcher{},
+		Holder:   "orca-chat:front-desk",
+		Driver:   ctrls,
+		Now:      clk.Now,
+	}
+	if _, err := svc.Adopt(t.Context(), runID); err != nil {
+		t.Fatal(err)
+	}
+
+	item, err := st.Backlog().Get(t.Context(), runID, "m2-items-6-7")
+	if err != nil || item.Status != store.BacklogOpen {
+		t.Fatalf("expected HandlePlannerRequest to add m2-items-6-7 from relative Plan: PLAN.md, got %+v, err=%v", item, err)
+	}
+	storedRun, err := st.Runs().Get(t.Context(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(storedRun.Objective, "Multi-line replacement") {
+		t.Fatalf("expected adopted run Objective to remain owned by OBJECTIVE.md, got:\n%s", storedRun.Objective)
+	}
+	if err := pln.HandlePlannerRequest(t.Context(), runID, "unconfined read", "/etc/passwd"); err == nil {
+		t.Fatal("expected HandlePlannerRequest to reject unconfined local file /etc/passwd")
+	}
+}

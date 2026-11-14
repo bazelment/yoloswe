@@ -282,6 +282,7 @@ type turnExecState struct {
 	pinnedRecipes map[string]recipe.Recipe
 	turnUsage     map[int]model.Usage
 	turnUsed      map[int]bool
+	events        []store.Event
 	threadID      string
 	turnID        string
 	decisions     []store.Decision
@@ -351,6 +352,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	state := &turnExecState{
 		threadID:      threadID,
 		turnID:        turnID,
+		events:        events,
 		pinnedRecipes: make(map[string]recipe.Recipe),
 		turnUsage:     make(map[int]model.Usage),
 		turnUsed:      make(map[int]bool),
@@ -649,7 +651,7 @@ func (d *Dispatcher) handleRawToolCall(
 		}
 	}
 
-	result, execErr := d.applyVettedAction(ctx, runID, view, act)
+	result, execErr := d.applyVettedAction(ctx, runID, state, view, act)
 	if execErr != nil {
 		if state != nil && !isReadOnlyTool(act.Tool) {
 			state.view = nil
@@ -786,6 +788,7 @@ func outcomeLabel(result string) string {
 func (d *Dispatcher) applyVettedAction(
 	ctx context.Context,
 	runID string,
+	state *turnExecState,
 	view *StateView,
 	act ProposedAction,
 ) (string, error) {
@@ -814,7 +817,7 @@ func (d *Dispatcher) applyVettedAction(
 		}
 		return fmt.Sprintf("resolved owner ask %s", act.OwnerAnswer.AskID), d.cfg.OnOwnerAnswer(ctx, runID, act.OwnerAnswer.AskID, act.OwnerAnswer.Answer)
 	case ToolDirectiveNote:
-		return d.applyDirectiveNote(ctx, runID, view, *act.DirectiveNote)
+		return d.applyDirectiveNote(ctx, runID, state, *act.DirectiveNote)
 	case ToolPlannerRequest:
 		return d.applyPlannerRequest(ctx, runID, *act.PlannerRequest)
 	case ToolReadLaneReport:
@@ -1303,7 +1306,7 @@ func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, view *Stat
 	return fmt.Sprintf("registered owner ask %s (default=%q deadline=%s)", ask.ID, ask.Default, dl.Format(time.RFC3339)), nil
 }
 
-func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, _ *StateView, p DirectiveNoteParams) (string, error) {
+func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, state *turnExecState, p DirectiveNoteParams) (string, error) {
 	now := d.clock.Now().UTC()
 	var expiresAt *time.Time
 	if strings.TrimSpace(p.Expiry) != "" {
@@ -1312,6 +1315,13 @@ func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, _ *St
 			return "", err
 		}
 		expiresAt = &exp
+	}
+	var batchEvents []store.Event
+	if state != nil {
+		batchEvents = state.events
+	}
+	if err := d.validateDispatcherNoteFact(ctx, runID, batchEvents, p.Fact); err != nil {
+		return "", err
 	}
 	dirID := strings.TrimSpace(p.ID)
 	if dirID == "" {
@@ -1357,6 +1367,183 @@ func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, _ *St
 		return "", err
 	}
 	return fmt.Sprintf("recorded directive note %s", dir.ID), nil
+}
+
+var (
+	dispatcherOwnerNoNewWorkPhrases = []string{
+		"no new lanes",
+		"start no new lanes",
+		"do not start new lanes",
+		"don't start new lanes",
+		"do not spawn",
+		"don't spawn",
+		"stop spawning",
+		"pause spawning",
+		"no additional lanes",
+		"no more lanes",
+		"hold new lanes",
+		"hold off on new lanes",
+		"block new lanes",
+		"pause new lanes",
+		"no new work",
+		"block all new work",
+	}
+	dispatcherNoNewWorkRulePhrases = append(slices.Clone(dispatcherOwnerNoNewWorkPhrases),
+		"standing owner hold",
+		"standing hold",
+	)
+	dispatcherNegatedNoNewWorkPrefixes = []string{
+		"not ",
+		"no ",
+		"never ",
+		"did not ",
+		"didn't ",
+		"do not want",
+		"don't want",
+		"without ",
+		"remove ",
+		"forget ",
+		"undo ",
+		"drop ",
+		"revoke ",
+		"clear ",
+		"isn't ",
+		"is not ",
+		"wasn't ",
+		"was not ",
+	}
+)
+
+func stripDispatcherQuotedSpans(s string) string {
+	var b strings.Builder
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		if c == '"' {
+			quote = c
+			b.WriteByte(' ')
+			continue
+		}
+		if c == '\'' {
+			prevAlpha := i > 0 && ((s[i-1] >= 'a' && s[i-1] <= 'z') || (s[i-1] >= 'A' && s[i-1] <= 'Z'))
+			nextAlpha := i+1 < len(s) && ((s[i+1] >= 'a' && s[i+1] <= 'z') || (s[i+1] >= 'A' && s[i+1] <= 'Z'))
+			if !prevAlpha || !nextAlpha {
+				quote = c
+				b.WriteByte(' ')
+				continue
+			}
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+func dispatcherOwnerPlainlyStatedNoNewWork(quote string) bool {
+	unquoted := strings.ToLower(stripDispatcherQuotedSpans(quote))
+	for _, p := range dispatcherOwnerNoNewWorkPhrases {
+		idx := strings.Index(unquoted, p)
+		for idx >= 0 {
+			prefix := unquoted[:idx]
+			if sep := strings.LastIndexAny(prefix, ".;\n!?"); sep >= 0 {
+				prefix = prefix[sep+1:]
+			}
+			prefixTrim := strings.TrimSpace(prefix)
+			negated := false
+			for _, neg := range dispatcherNegatedNoNewWorkPrefixes {
+				if strings.Contains(prefix, neg) || strings.HasSuffix(prefixTrim, strings.TrimSpace(neg)) {
+					negated = true
+					break
+				}
+			}
+			if !negated {
+				return true
+			}
+			rest := unquoted[idx+len(p):]
+			next := strings.Index(rest, p)
+			if next < 0 {
+				break
+			}
+			idx += len(p) + next
+		}
+	}
+	return false
+}
+
+func isDispatcherWordChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func dispatcherContainsWholeWord(s, word string) bool {
+	for start := 0; start < len(s); {
+		idx := strings.Index(s[start:], word)
+		if idx < 0 {
+			return false
+		}
+		pos := start + idx
+		end := pos + len(word)
+		leftOK := pos == 0 || !isDispatcherWordChar(s[pos-1])
+		rightOK := end == len(s) || !isDispatcherWordChar(s[end])
+		if leftOK && rightOK {
+			return true
+		}
+		start = pos + 1
+	}
+	return false
+}
+
+func (d *Dispatcher) validateDispatcherNoteFact(ctx context.Context, runID string, batchEvents []store.Event, fact string) error {
+	factLower := strings.ToLower(strings.TrimSpace(fact))
+	claimsNoNewWork := false
+	for _, p := range dispatcherNoNewWorkRulePhrases {
+		if strings.Contains(factLower, p) {
+			claimsNoNewWork = true
+			break
+		}
+	}
+	noteMentionsHold := claimsNoNewWork || (dispatcherContainsWholeWord(factLower, "hold") && !strings.Contains(factLower, "lease"))
+	if !noteMentionsHold {
+		return nil
+	}
+	var ownerSources strings.Builder
+	for i := range batchEvents {
+		ev := &batchEvents[i]
+		if ev.Kind == store.EventOwnerMessage &&
+			!strings.EqualFold(ev.Source, string(store.DirectiveSourceConcierge)) &&
+			!strings.EqualFold(ev.Source, string(store.DirectiveSourcePlanner)) &&
+			!strings.EqualFold(ev.Source, string(store.DirectiveSourceDispatcher)) {
+			ownerSources.WriteString(ev.Summary + "\n" + string(ev.Payload) + "\n")
+		}
+	}
+	if d.store != nil {
+		if dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true}); err == nil {
+			for i := range dirs {
+				dir := &dirs[i]
+				if dir.Source == store.DirectiveSourceOwner {
+					ownerSources.WriteString(dir.Text + "\n")
+				}
+			}
+		}
+	}
+	quoteText := ownerSources.String()
+	quoteLower := strings.ToLower(quoteText)
+	quoteMentionsLeaseHold := (strings.Contains(quoteLower, "keep the hold") ||
+		strings.Contains(quoteLower, "keep hold") ||
+		strings.Contains(quoteLower, "hold on the run") ||
+		strings.Contains(quoteLower, "hold on run"))
+	ownerPlainlyStated := dispatcherOwnerPlainlyStatedNoNewWork(quoteText)
+	if claimsNoNewWork && !ownerPlainlyStated {
+		return &invariantViolationError{msg: "directive.note [run]: cannot block new lanes or work unless the owner stated it plainly (in an adopted run, 'hold' means orca's lease on the run)"}
+	}
+	if quoteMentionsLeaseHold && noteMentionsHold && !ownerPlainlyStated {
+		return &invariantViolationError{msg: "directive.note [run]: 'keep the hold' on an adopted run means keep orca's lease on the run, not a standing rule blocking work"}
+	}
+	return nil
 }
 
 func (d *Dispatcher) applyPlannerRequest(ctx context.Context, runID string, p PlannerRequestParams) (string, error) {

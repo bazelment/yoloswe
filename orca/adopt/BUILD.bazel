@@ -34,6 +34,7 @@ go_test(
         "//orca/lane",
         "//orca/lane/nebula",
         "//orca/model",
+        "//orca/planner",
         "//orca/recipe",
         "//orca/store",
     ],

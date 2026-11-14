@@ -688,3 +688,489 @@ func TestConcierge_DirectiveSubmitWritesSourcedMemoryAndUndoRevokesAlias(t *test
 		t.Fatalf("undo kept directive alias active: %+v, %v", alias, err)
 	}
 }
+
+func TestConcierge_KeepTheHoldOnAdoptedRunCreatesNoStandingNoNewLanesRule(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupSeededStore(t)
+	ctx := t.Context()
+
+	const adoptedRunID = "20261114-trial-m1"
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:            adoptedRunID,
+		Repository:    "bazelment/yoloswe",
+		Objective:     "Goal: trial m1\nNext: when #5786 merges, staff a lane for 6-7",
+		PlanRef:       "ORCHESTRATOR: orca since 2026-11-14T18:18:00Z (orca-chat:front-desk)",
+		DefaultRecipe: "adopted",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const ownerQuote = "for run 20261114-trial-m1: keep the hold; when m2-gaps2 finishes swe, carry on with its normal phases"
+
+	// 1. Even if a model tries to submit a standing rule or an invented no-new-lanes
+	// directive/memory from "keep the hold", it is rejected and only the legitimate
+	// one-time order to carry on with normal phases is accepted (without creating a
+	// standing rule in Directives or Memories).
+	badRule, _ := json.Marshal(concierge.DirectiveSubmitParams{
+		ID:   "dir-invented-hold",
+		Kind: concierge.KindRule,
+		Text: "Standing owner hold: start no new lanes until you say otherwise.",
+	})
+	badMemory, _ := json.Marshal(concierge.MemorySubmitParams{
+		Action: "create",
+		ID:     "mem-invented-hold",
+		Name:   "Standing owner hold",
+		Type:   "rule",
+		Body:   "No new lanes until the owner says otherwise.",
+	})
+	goodOrder, _ := json.Marshal(concierge.DirectiveSubmitParams{
+		ID:    "dir-carry-on",
+		Kind:  concierge.KindOrder,
+		Scope: "m2-gaps2",
+		Text:  "Keep the lease on 20261114-trial-m1; when m2-gaps2 finishes swe, carry on with its normal phases.",
+	})
+
+	client := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_bad_rule", concierge.ToolDirectiveSubmit, badRule),
+				model.NewToolUseBlock("tu_bad_mem", "memory.submit", badMemory),
+				model.NewToolUseBlock("tu_good_order", concierge.ToolDirectiveSubmit, goodOrder),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message: model.NewAssistantMessage(
+				model.NewTextBlock("Kept the lease on `20261114-trial-m1` and queued order `dir-carry-on` so `m2-gaps2` continues through its normal phases."),
+			),
+		},
+	)
+
+	conc := concierge.New(concierge.Config{}, st, drv, clk, client)
+	if _, err := conc.Ask(ctx, adoptedRunID, ownerQuote); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+
+	// Verify no standing rule directive exists on the adopted run.
+	standingDirs, err := st.Directives().List(ctx, store.DirectiveFilter{
+		RunID:      adoptedRunID,
+		Kinds:      []store.DirectiveKind{store.DirectiveStanding},
+		ActiveOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(standingDirs) != 0 {
+		t.Fatalf("expected 0 standing rule directives on %s, got %+v", adoptedRunID, standingDirs)
+	}
+
+	// Verify no standing rule memory was created on the adopted run (not even from the valid one-time order).
+	ruleMems, err := st.Memories().List(ctx, store.MemoryFilter{RunID: adoptedRunID, Type: "rule"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ruleMems {
+		if m.Source != "orca starter set" {
+			t.Fatalf("expected 0 non-starter rule memories on %s, got %+v", adoptedRunID, m)
+		}
+	}
+
+	// 2. Also verify the Dispatcher cannot invent a standing no-new-lanes note from the same owner message.
+	dispClient := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_disp_note", dispatcher.ToolDirectiveNote, json.RawMessage(`{"id":"note-hold","fact":"The standing owner hold is active: no new lanes until you say otherwise"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Acknowledged.")),
+		},
+	)
+	disp := dispatcher.New(dispatcher.Config{}, st, drv, clk, dispClient)
+	dispRes, err := disp.Dispatch(ctx, adoptedRunID, []store.Event{
+		{
+			ID:      "ev-owner-hold",
+			RunID:   adoptedRunID,
+			Kind:    store.EventOwnerMessage,
+			Class:   store.EventClassJudgment,
+			Source:  "owner",
+			Summary: ownerQuote,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(dispRes.Rejected) != 1 {
+		t.Fatalf("expected dispatcher invented hold note to be rejected, got Rejected=%+v", dispRes.Rejected)
+	}
+	ruleMems, _ = st.Memories().List(ctx, store.MemoryFilter{RunID: adoptedRunID, Type: "rule"})
+	for _, m := range ruleMems {
+		if m.Source != "orca starter set" {
+			t.Fatalf("expected 0 non-starter rule memories after dispatcher turn, got %+v", m)
+		}
+	}
+
+	// 3. Even if a model-authored EventOwnerMessage (Source="concierge" or "planner") or
+	// DirectiveSourceConcierge directive in the store contains "no new lanes" text,
+	// validateDispatcherNoteFact must still reject a dispatcher no-new-lanes note because
+	// the owner never stated it.
+	_, _ = st.Events().Append(ctx, store.Event{
+		ID:      "ev-concierge-synthetic",
+		RunID:   adoptedRunID,
+		Kind:    store.EventOwnerMessage,
+		Class:   store.EventClassJudgment,
+		Source:  "concierge",
+		Summary: "concierge directive: no new lanes",
+	})
+	_ = st.Directives().Add(ctx, store.Directive{
+		ID:     "dir-concierge-synthetic",
+		RunID:  adoptedRunID,
+		Kind:   store.DirectiveInstruction,
+		Source: store.DirectiveSourceConcierge,
+		Text:   "no new lanes",
+		Status: store.DirectiveActive,
+	})
+	dispClient2 := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_disp_note_2", dispatcher.ToolDirectiveNote, json.RawMessage(`{"id":"note-hold-2","fact":"Standing hold: start no new lanes"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Acknowledged.")),
+		},
+	)
+	disp2 := dispatcher.New(dispatcher.Config{}, st, drv, clk, dispClient2)
+	dispRes2, err := disp2.Dispatch(ctx, adoptedRunID, []store.Event{
+		{
+			ID:      "ev-owner-hold-2",
+			RunID:   adoptedRunID,
+			Kind:    store.EventOwnerMessage,
+			Class:   store.EventClassJudgment,
+			Source:  "owner",
+			Summary: ownerQuote,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Dispatch 2: %v", err)
+	}
+	if len(dispRes2.Rejected) != 1 {
+		t.Fatalf("expected dispatcher note to be rejected despite non-owner store records, got Rejected=%+v", dispRes2.Rejected)
+	}
+
+	// 4. Negated or quoted no-new-lanes substrings in an owner message must NOT authorize a standing rule or dispatcher hold note.
+	negatedOwnerQuote := `I do not want a "no new lanes" rule; remove the 'do not start new lanes' note.`
+	if err := concierge.ValidateStandingRule("Start no new lanes until told otherwise", negatedOwnerQuote); err == nil {
+		t.Fatal("expected ValidateStandingRule to reject no-new-lanes rule when owner message only mentions it inside quotes/negation")
+	}
+	// An unrelated standing rule is allowed even when the owner quote mentions "keep the hold"
+	// or when the rule contains words with "hold" as a substring (e.g., "threshold", "placeholder").
+	if err := concierge.ValidateStandingRule("Always run lint before pushing.", ownerQuote); err != nil {
+		t.Fatalf("expected unrelated standing rule to be allowed alongside 'keep the hold', got: %v", err)
+	}
+	if err := concierge.ValidateStandingRule("Set stall threshold to 30m and avoid placeholder text.", ownerQuote); err != nil {
+		t.Fatalf("expected rule containing 'threshold'/'placeholder' to be allowed alongside 'keep the hold', got: %v", err)
+	}
+	// A factual dispatcher note that mentions "keep the hold" (orca lease) without claiming a work/lane block is allowed.
+	dispClientLeaseNote := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_disp_lease_note", dispatcher.ToolDirectiveNote, json.RawMessage(`{"id":"note-lease-hold","fact":"Owner asked to keep the hold (orca lease) on run 20261114-trial-m1 while m2-gaps2 finishes."}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Recorded lease note.")),
+		},
+	)
+	dispLease := dispatcher.New(dispatcher.Config{}, st, drv, clk, dispClientLeaseNote)
+	dispResLease, err := dispLease.Dispatch(ctx, adoptedRunID, []store.Event{
+		{
+			ID:      "ev-owner-lease-note",
+			RunID:   adoptedRunID,
+			Kind:    store.EventOwnerMessage,
+			Class:   store.EventClassJudgment,
+			Source:  "owner",
+			Summary: ownerQuote,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Dispatch lease note: %v", err)
+	}
+	if len(dispResLease.Rejected) != 0 {
+		t.Fatalf("expected factual lease hold note to be allowed, got Rejected=%+v", dispResLease.Rejected)
+	}
+	// A dispatcher note that uses "hold" as a work block ("Keep the hold: don't advance m3") is rejected when the owner only said "keep the hold".
+	dispClientBlockHold := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_disp_block_hold", dispatcher.ToolDirectiveNote, json.RawMessage(`{"id":"note-block-hold","fact":"Keep the hold: don't advance m3"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Acknowledged.")),
+		},
+	)
+	dispBlockHold := dispatcher.New(dispatcher.Config{}, st, drv, clk, dispClientBlockHold)
+	dispResBlockHold, err := dispBlockHold.Dispatch(ctx, adoptedRunID, []store.Event{
+		{
+			ID:      "ev-owner-block-hold",
+			RunID:   adoptedRunID,
+			Kind:    store.EventOwnerMessage,
+			Class:   store.EventClassJudgment,
+			Source:  "owner",
+			Summary: ownerQuote,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Dispatch block hold note: %v", err)
+	}
+	if len(dispResBlockHold.Rejected) != 1 {
+		t.Fatalf("expected work-blocking 'Keep the hold: don't advance m3' note to be rejected, got Rejected=%+v", dispResBlockHold.Rejected)
+	}
+	dispClient3 := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_disp_note_3", dispatcher.ToolDirectiveNote, json.RawMessage(`{"id":"note-hold-3","fact":"Standing hold: start no new lanes"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Acknowledged.")),
+		},
+	)
+	disp3 := dispatcher.New(dispatcher.Config{}, st, drv, clk, dispClient3)
+	dispRes3, err := disp3.Dispatch(ctx, adoptedRunID, []store.Event{
+		{
+			ID:      "ev-owner-negated",
+			RunID:   adoptedRunID,
+			Kind:    store.EventOwnerMessage,
+			Class:   store.EventClassJudgment,
+			Source:  "owner",
+			Summary: negatedOwnerQuote,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Dispatch 3: %v", err)
+	}
+	if len(dispRes3.Rejected) != 1 {
+		t.Fatalf("expected dispatcher note to be rejected for negated/quoted owner message, got Rejected=%+v", dispRes3.Rejected)
+	}
+
+	// 5. When the current batch's owner event plainly states a no-new-lanes hold, dispatcher directive.note is allowed.
+	dispClient4 := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_disp_note_4", dispatcher.ToolDirectiveNote, json.RawMessage(`{"id":"note-explicit-hold","fact":"Owner requested: do not start new lanes while auditing."}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Recorded explicit hold.")),
+		},
+	)
+	disp4 := dispatcher.New(dispatcher.Config{}, st, drv, clk, dispClient4)
+	dispRes4, err := disp4.Dispatch(ctx, adoptedRunID, []store.Event{
+		{
+			ID:      "ev-owner-explicit-hold",
+			RunID:   adoptedRunID,
+			Kind:    store.EventOwnerMessage,
+			Class:   store.EventClassJudgment,
+			Source:  "owner",
+			Summary: "Please do not start new lanes until I finish the audit.",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Dispatch 4: %v", err)
+	}
+	if len(dispRes4.Rejected) != 0 {
+		t.Fatalf("expected explicit owner no-new-lanes batch event to allow directive.note, got Rejected=%+v", dispRes4.Rejected)
+	}
+}
+
+func TestConcierge_StatusListsStandingRules(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupSeededStore(t)
+	ctx := t.Context()
+
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:     "rule-max-store-lanes",
+		RunID:  "run-1",
+		Kind:   store.DirectiveStanding,
+		Source: store.DirectiveSourceOwner,
+		Scope:  "store/",
+		Text:   "Never spawn more than 2 concurrent lanes touching store/.",
+		Status: store.DirectiveActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Memories().Put(ctx, store.MemoryEntry{
+		ID:          "rule-random-ports",
+		RunID:       "run-1",
+		Scope:       "run",
+		Type:        "rule",
+		ProposedBy:  "owner",
+		Name:        "Random ports",
+		Description: "Always use random ports in tests.",
+		Body:        "Always use random ports in tests.",
+		Source:      "Standing rule: always use random ports in tests.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	client := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_status", concierge.ToolStatus, json.RawMessage(`{}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message: model.NewAssistantMessage(
+				model.NewTextBlock("On `run-1`, active standing rules are `rule-max-store-lanes` and `rule-random-ports` (say `undo` or `forget` to remove)."),
+			),
+		},
+	)
+	conc := concierge.New(concierge.Config{}, st, drv, clk, client)
+	res, err := conc.Ask(ctx, "run-1", "/status")
+	if err != nil {
+		t.Fatalf("Ask(/status): %v", err)
+	}
+	if !strings.Contains(res.Answer, "rule-max-store-lanes") || !strings.Contains(res.Answer, "rule-random-ports") {
+		t.Fatalf("answer missing standing rule IDs: %q", res.Answer)
+	}
+	statusOutput := client.Requests[1].Messages[2].Content[0].Content
+	for _, want := range []string{
+		"Standing Rules (2):",
+		"rule-max-store-lanes [scope=store/]: Never spawn more than 2 concurrent lanes touching store/.",
+		"rule-random-ports [scope=run]: Always use random ports in tests.",
+		"forget rule-max-store-lanes",
+	} {
+		if !strings.Contains(statusOutput, want) {
+			t.Fatalf("status output missing %q:\n%s", want, statusOutput)
+		}
+	}
+}
+
+func TestConcierge_ProgressAnswerCarriesFullObjectiveMilestonesAndNextStep(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupSeededStore(t)
+	ctx := t.Context()
+
+	const runID = "20261114-trial-m1"
+	const fullObjective = `# 20261114-trial-m1
+
+Goal: Complete slim-prompt trial across M1, M2 (items 6-7), and M4 metrics.
+Plan: docs/design/slim-prompts-plan.md
+
+Milestones:
+- [x] M1: slim-prompt trial mode (2 real code lanes; PR #5604 and PR #5786 merged)
+- [ ] M2 (items 6-7): live write-back to state.json/EVENTS and planner handoff on drained backlog
+- [ ] M4: lane_metrics day vs baseline comparison and PLAN.md / Nebula post update
+
+Next: when #5786 merges, staff a lane for 6-7 if not covered; then M4 (lane_metrics day vs baseline), update PLAN.md log and the Nebula post`
+
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:            runID,
+		Repository:    "bazelment/yoloswe",
+		Objective:     fullObjective,
+		PlanRef:       "ORCHESTRATOR: orca since 2026-11-14T18:18:00Z (orca-chat:front-desk)",
+		DefaultRecipe: "adopted",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Backlog().Add(ctx, store.BacklogItem{
+		ID:       "m2-gaps2",
+		RunID:    runID,
+		LaneID:   "m2-gaps2",
+		Title:    "m2 gaps2",
+		Priority: store.PriorityP1,
+		Status:   store.BacklogDone,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:            "m2-gaps2",
+		RunID:         runID,
+		ItemID:        "m2-gaps2",
+		Title:         "m2 gaps2",
+		RecipeName:    "adopted",
+		RecipeVersion: 1,
+		Phase:         recipe.PhaseIntegrate,
+		Round:         1,
+		Status:        lane.StatusDone,
+		PR:            5786,
+		PRHead:        "fb6c5bae",
+		MergeSHA:      "999aaaa",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	client := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_prog_status", concierge.ToolStatus, json.RawMessage(`{}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message: model.NewAssistantMessage(
+				model.NewTextBlock(
+					"On `20261114-trial-m1`, the goal is **not** met yet (1 of 3 milestones met, 2 open):\n" +
+						"- **Met**: `M1` (slim-prompt trial mode; `m2-gaps2` `PR #5786` merged at `fb6c5bae`).\n" +
+						"- **Open**: `M2` (items 6-7: live write-back to `state.json`/`EVENTS` and planner handoff on drained backlog) and `M4` (`lane_metrics` day vs baseline comparison and `PLAN.md` / Nebula post update).\n" +
+						"- **Next**: staff a lane for items 6-7 now that `#5786` is merged, then run `M4` (`lane_metrics` day vs baseline) and update `docs/design/slim-prompts-plan.md` / `PLAN.md`.",
+				),
+			),
+		},
+	)
+
+	conc := concierge.New(concierge.Config{}, st, drv, clk, client)
+	res, err := conc.Ask(ctx, runID, "What's our goal? Have we met the goal, and what is our progress?")
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+
+	// Assert the snapshot/status tool result given to the model carries all 3 milestones, the plan path, and Next:.
+	if len(client.Requests) != 2 {
+		t.Fatalf("expected 2 model requests, got %d", len(client.Requests))
+	}
+	snapshotGiven := client.Requests[1].Messages[2].Content[0].Content
+	for _, wantInSnapshot := range []string{
+		"M1: slim-prompt trial mode",
+		"M2 (items 6-7): live write-back to state.json/EVENTS and planner handoff on drained backlog",
+		"M4: lane_metrics day vs baseline comparison",
+		"docs/design/slim-prompts-plan.md",
+		"Next: when #5786 merges, staff a lane for 6-7 if not covered; then M4",
+	} {
+		if !strings.Contains(snapshotGiven, wantInSnapshot) {
+			t.Fatalf("status snapshot given to model missing %q:\n%s", wantInSnapshot, snapshotGiven)
+		}
+	}
+
+	// Assert the concierge answer names the open milestones and the next step.
+	for _, wantInAnswer := range []string{
+		"not",
+		"M1",
+		"M2",
+		"M4",
+		"6-7",
+		"#5786",
+	} {
+		if !strings.Contains(res.Answer, wantInAnswer) {
+			t.Fatalf("concierge progress answer missing %q:\n%s", wantInAnswer, res.Answer)
+		}
+	}
+}

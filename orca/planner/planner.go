@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -665,6 +666,12 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 			return nil, readErr
 		}
 		planDoc = &doc
+	} else if IsAdoptionMarker(run.PlanRef) {
+		if objRef := ExtractObjectivePlanRef(run.Objective); objRef != "" {
+			if doc, readErr := p.cfg.PlanReader.ReadPlan(ctx, objRef); readErr == nil {
+				planDoc = &doc
+			}
+		}
 	}
 
 	goal := fmt.Sprintf("Planner %s for run %s", mode, runID)
@@ -735,11 +742,20 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 			return "", fmt.Errorf("decode %s: %w", ToolReadPlan, err)
 		}
 		reqRef := strings.TrimSpace(rp.Ref)
-		pinnedRef := cmp.Or(effectiveRef, strings.TrimSpace(run.PlanRef))
-		if pinnedRef != "" && reqRef != "" && reqRef != effectiveRef && reqRef != strings.TrimSpace(run.PlanRef) {
+		runPlanRef := strings.TrimSpace(run.PlanRef)
+		adopted := IsAdoptionMarker(runPlanRef)
+		if adopted {
+			runPlanRef = ExtractObjectivePlanRef(run.Objective)
+		}
+		pinnedRef := cmp.Or(effectiveRef, runPlanRef)
+		matchedAdopted := adopted && MatchesObjectivePlanRef(run.Objective, reqRef)
+		if pinnedRef != "" && reqRef != "" && reqRef != effectiveRef && reqRef != runPlanRef && !matchedAdopted {
 			return "", fmt.Errorf("%w: read.plan ref %q does not match pinned plan %q", store.ErrInvalidArgument, reqRef, pinnedRef)
 		}
 		ref := cmp.Or(reqRef, pinnedRef)
+		if matchedAdopted && reqRef != "" && !filepath.IsAbs(reqRef) && filepath.IsAbs(runPlanRef) && filepath.Base(runPlanRef) == filepath.Base(reqRef) {
+			ref = runPlanRef
+		}
 		doc, readErr := p.cfg.PlanReader.ReadPlan(callCtx, ref)
 		if readErr != nil {
 			return "", readErr
@@ -1079,14 +1095,12 @@ func (p *Planner) applyReconciliation(
 		}
 	}
 
-	newObj := strings.TrimSpace(rec.Objective)
-	newPlanRef := cmp.Or(strings.TrimSpace(planRef), run.PlanRef)
-	if (newObj != "" && newObj != run.Objective) || (newPlanRef != "" && newPlanRef != run.PlanRef) {
-		targetObj := cmp.Or(newObj, run.Objective)
+	targetObj, newPlanRef := PreserveAdoptedObjective(run, rec.Objective, planRef)
+	if targetObj != run.Objective || newPlanRef != run.PlanRef {
 		if err := p.store.Runs().UpdateObjective(ctx, run.ID, targetObj, newPlanRef); err != nil {
 			return applied, decisions, err
 		}
-		applied.ObjectiveUpdated = newObj != "" && newObj != run.Objective
+		applied.ObjectiveUpdated = targetObj != run.Objective
 		applied.NewObjective = targetObj
 		applied.NewPlanRef = newPlanRef
 		if err := appendDec(ToolObjectiveUpdate, "", "plan reconciliation updated run objective/plan_ref",
@@ -1649,4 +1663,78 @@ func (p *Planner) resolveBaseRecipe(ctx context.Context, runID, name string) rec
 	def.Name = name
 	def.Version = 1
 	return def
+}
+
+// IsAdoptionMarker reports whether ref is an orca adoption handover marker
+// ("ORCHESTRATOR: orca since ...").
+func IsAdoptionMarker(ref string) bool {
+	return strings.HasPrefix(strings.TrimSpace(ref), "ORCHESTRATOR: orca since ")
+}
+
+// PreserveAdoptedObjective returns the objective and planRef to persist for run
+// during a planner reconciliation. For an adopted run (whose PlanRef carries an
+// adoption handover marker), OBJECTIVE.md on disk owns both the objective and
+// the marker, so planner reconciliations never overwrite them.
+func PreserveAdoptedObjective(run store.Run, proposedObjective, proposedPlanRef string) (string, string) {
+	if IsAdoptionMarker(run.PlanRef) {
+		return run.Objective, run.PlanRef
+	}
+	return cmp.Or(strings.TrimSpace(proposedObjective), run.Objective), cmp.Or(strings.TrimSpace(proposedPlanRef), run.PlanRef)
+}
+
+// ExtractObjectivePlanRefs extracts all "Plan:", "Plan path:", or "Plan file:"
+// references from a multi-line run objective, rejecting relative path traversals.
+func ExtractObjectivePlanRefs(objective string) []string {
+	var out []string
+	for _, line := range strings.Split(objective, "\n") {
+		clean := strings.TrimSpace(line)
+		lower := strings.ToLower(clean)
+		for _, prefix := range []string{"plan path:", "plan file:", "plan:"} {
+			if strings.HasPrefix(lower, prefix) {
+				candidate := strings.TrimSpace(clean[len(prefix):])
+				candidate = strings.TrimLeft(candidate, "`\"'(")
+				candidate = strings.TrimRight(candidate, "`\"'.,;:)")
+				if candidate == "" {
+					break
+				}
+				kind, target := ParsePlanRef(candidate)
+				if kind == PlanSourceFile {
+					cleaned := filepath.Clean(target)
+					if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+						break
+					}
+				}
+				out = append(out, candidate)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// ExtractObjectivePlanRef extracts the resolved "Plan:", "Plan path:", or
+// "Plan file:" reference from a multi-line run objective. When FullObjective()
+// appends a resolved absolute path after a relative Plan: line, the last entry
+// is returned so callers receive the resolved path.
+func ExtractObjectivePlanRef(objective string) string {
+	refs := ExtractObjectivePlanRefs(objective)
+	if len(refs) == 0 {
+		return ""
+	}
+	return refs[len(refs)-1]
+}
+
+// MatchesObjectivePlanRef reports whether planRef matches a plan reference
+// recorded in objective.
+func MatchesObjectivePlanRef(objective, planRef string) bool {
+	planRef = strings.TrimSpace(planRef)
+	if planRef == "" {
+		return false
+	}
+	for _, r := range ExtractObjectivePlanRefs(objective) {
+		if r == planRef {
+			return true
+		}
+	}
+	return false
 }

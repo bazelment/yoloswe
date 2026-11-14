@@ -558,3 +558,47 @@ func TestSlashCompletion(t *testing.T) {
 		t.Fatalf("/s + Tab = %q hints %q", m.input, m.hints)
 	}
 }
+
+func TestStatusListsStandingRules(t *testing.T) {
+	t.Parallel()
+	f := newAdoptedFixture(t, nil)
+	if err := f.store.Directives().Add(t.Context(), store.Directive{
+		ID:     "rule-store-cap",
+		RunID:  adoptedRun,
+		Kind:   store.DirectiveStanding,
+		Source: store.DirectiveSourceOwner,
+		Text:   "Run at most 2 store lanes concurrently.",
+		Status: store.DirectiveActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := f.backend.Command(t.Context(), "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"standing rules: 1",
+		"[" + adoptedRun + "] rule-store-cap: Run at most 2 store lanes concurrently.",
+		"forget rule-store-cap",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("/status missing %q:\n%s", want, out)
+		}
+	}
+
+	// Updating OBJECTIVE.md on disk is picked up when /status runs (via RefreshObjectives).
+	objPath := filepath.Join(f.root, ".shared", "subagent-swarm", adoptedRun, "OBJECTIVE.md")
+	if err := os.WriteFile(objPath, []byte("Goal: updated host goal\nNext: staff m4\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.backend.Command(t.Context(), "/status"); err != nil {
+		t.Fatal(err)
+	}
+	gotRun, err := f.store.Runs().Get(t.Context(), adoptedRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotRun.Objective, "updated host goal") || !strings.Contains(gotRun.Objective, "Next: staff m4") {
+		t.Fatalf("expected /status to refresh adopted run objective from disk, got %q", gotRun.Objective)
+	}
+}

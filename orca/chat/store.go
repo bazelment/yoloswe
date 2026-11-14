@@ -376,7 +376,23 @@ func (b *StoreBackend) view(ctx context.Context, includeLive bool) (runView, []l
 	if v.held, runsByID, err = b.heldRunsWithRecords(ctx); err != nil {
 		return runView{}, nil, err
 	}
-	runsByID[b.runID] = run
+	if b.Adoption != nil {
+		if refresher, ok := b.Adoption.Driver.(interface {
+			RefreshObjective(context.Context, string) (bool, error)
+		}); ok {
+			for _, id := range v.held {
+				if changed, _ := refresher.RefreshObjective(ctx, id); changed {
+					if r, getErr := b.store.Runs().Get(ctx, id); getErr == nil {
+						runsByID[id] = r
+					}
+				}
+			}
+			if run, err = b.store.Runs().Get(ctx, b.runID); err == nil {
+				v.run = run
+			}
+		}
+	}
+	runsByID[b.runID] = v.run
 	if v.lanes, err = b.lanes(ctx, v.held); err != nil {
 		return runView{}, nil, err
 	}
@@ -724,8 +740,36 @@ func (b *StoreBackend) statusReport(ctx context.Context) (string, error) {
 	default:
 		fmt.Fprintf(&out, "held runs: %s (attached)\n", b.runID)
 	}
+	if rules := b.standingRules(ctx, v.held); len(rules) > 0 {
+		fmt.Fprintf(&out, "standing rules: %d\n", len(rules))
+		for i := range rules {
+			fmt.Fprintf(&out, "  %s\n", rules[i])
+		}
+	}
 	fmt.Fprintf(&out, "cost today: $%.2f", v.cost)
 	return out.String(), nil
+}
+
+func (b *StoreBackend) standingRules(ctx context.Context, held []string) []string {
+	now := b.now().UTC()
+	seenGlobal := map[string]bool{}
+	var out []string
+	for _, runID := range held {
+		prefix := ""
+		if len(held) > 1 {
+			prefix = "[" + runID + "] "
+		}
+		for _, r := range concierge.ListStandingRules(ctx, b.store, runID, now) {
+			if r.RunID == "" {
+				if seenGlobal[r.ID] {
+					continue
+				}
+				seenGlobal[r.ID] = true
+			}
+			out = append(out, prefix+r.FormatLine(false))
+		}
+	}
+	return out
 }
 
 // splitAdopted partitions adopted runs into those with a live controller and those without.

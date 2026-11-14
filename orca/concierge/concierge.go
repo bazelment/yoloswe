@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -861,6 +862,8 @@ func (c *Concierge) execStatus(ctx context.Context, runID string, p StatusParams
 			d.ID, d.Kind, d.Source, cmp.Or(d.Scope, "run"), cmp.Or(d.Ref, "-"), d.Text)
 	}
 
+	WriteStandingRulesSection(&b, ListStandingRules(ctx, c.store, runID, now))
+
 	var latestDecSeq, latestEvSeq int64
 	if len(decisions) > 0 {
 		latestDecSeq = decisions[len(decisions)-1].Seq
@@ -1190,6 +1193,14 @@ func (c *Concierge) execDirectiveSubmit(
 	scope := strings.TrimSpace(p.Scope)
 	laneID := c.resolveLaneScope(ctx, runID, scope)
 
+	var ownerQuote string
+	if state != nil {
+		ownerQuote = state.quote
+	}
+	if err := ValidateDirectiveText(kind, text, ownerQuote); err != nil {
+		return "", err
+	}
+
 	dir := store.Directive{
 		ID:        dirID,
 		RunID:     runID,
@@ -1239,7 +1250,7 @@ func (c *Concierge) execDirectiveSubmit(
 		}
 	}
 
-	if handlerErr == nil && expiresAt == nil {
+	if handlerErr == nil && kind == store.DirectiveStanding && expiresAt == nil {
 		quote := text
 		editor := &MemoryEditor{}
 		if state != nil {
@@ -1357,6 +1368,14 @@ func VerifyAnswerCitations(
 		addCandidate(run.PlanRef)
 		if run.Lease != nil {
 			addCandidate(run.Lease.HolderID)
+		}
+		for _, tok := range extractObjectiveCitationTokens(run.Objective) {
+			addCandidate(tok)
+		}
+	}
+	if memories, mErr := st.Memories().List(ctx, store.MemoryFilter{RunID: runID}); mErr == nil {
+		for i := range memories {
+			addCandidate(memories[i].ID)
 		}
 	}
 
@@ -1564,4 +1583,13 @@ func validUTF8Prefix(s string, maxBytes int) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+var objectiveTokenRE = regexp.MustCompile(`\b(?:M\d+[A-Za-z0-9_-]*|[A-Za-z0-9_./-]+\.md)\b|#\d+`)
+
+func extractObjectiveCitationTokens(objective string) []string {
+	if strings.TrimSpace(objective) == "" {
+		return nil
+	}
+	return objectiveTokenRE.FindAllString(objective, -1)
 }
