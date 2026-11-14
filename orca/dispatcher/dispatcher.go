@@ -53,6 +53,7 @@ func (f RecipeCompilerFunc) CompileOverride(ctx context.Context, base recipe.Rec
 // Config configures a Dispatcher instance.
 type Config struct {
 	RecipeCompiler   RecipeCompiler
+	PRProbe          controller.PRProbe
 	OnPlannerRequest func(ctx context.Context, runID, reason, planRef string) error
 	OnOwnerAnswer    func(ctx context.Context, runID, askID, answer string) error
 	// Logger, when set, receives one INFO line per tool call.
@@ -974,6 +975,9 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		ln.Attempt = 1
 		ln.LastEventAt = now
 	}
+	if settled, msg, err := d.reconcileLanePRState(ctx, runID, &ln); settled || err != nil {
+		return msg, err
+	}
 
 	workerBrief, err := d.buildWorkerBrief(view, ln, r, firstPhase, ln.Round, p.Brief)
 	if err != nil {
@@ -1010,10 +1014,67 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		ln.ID, item.ID, ln.Phase, ln.Round, ln.RecipeName, ln.RecipeVersion), nil
 }
 
+func (d *Dispatcher) reconcileLanePRState(ctx context.Context, runID string, ln *lane.Lane) (bool, string, error) {
+	if d.cfg.PRProbe == nil || ln == nil || (ln.PR <= 0 && strings.TrimSpace(ln.Branch) == "") {
+		return false, "", nil
+	}
+	prState, err := d.cfg.PRProbe(ctx, "", ln.Branch, ln.PR)
+	if err != nil {
+		return false, "", nil
+	}
+	if prState.Number > 0 && ln.PR <= 0 {
+		ln.PR = prState.Number
+	}
+	state := strings.ToUpper(strings.TrimSpace(prState.State))
+	switch state {
+	case "MERGED", "CLOSED":
+	default:
+		return false, "", nil
+	}
+	if d.driver != nil {
+		if strings.TrimSpace(ln.TerminalID) != "" || strings.TrimSpace(ln.SessionID) != "" {
+			_ = d.driver.Stop(ctx, lane.StopRequest{
+				RunID:      runID,
+				LaneID:     ln.ID,
+				SessionID:  ln.SessionID,
+				TerminalID: ln.TerminalID,
+				Reason:     "pr " + strings.ToLower(state),
+			})
+		}
+		if r, ok := d.driver.(lane.SessionReleaser); ok && strings.TrimSpace(ln.SessionID) != "" {
+			_ = r.ReleaseSession(ctx, ln.SessionID)
+		}
+	}
+	if state == "MERGED" {
+		ln.Status = lane.StatusDone
+		ln.MergeSHA = cmp.Or(strings.TrimSpace(prState.MergeSHA), ln.MergeSHA, ln.PRHead)
+	} else {
+		ln.Status = lane.StatusFailed
+	}
+	ln.LastEventAt = d.clock.Now().UTC()
+	if err := d.store.Lanes().Upsert(ctx, *ln); err != nil {
+		return true, "", err
+	}
+	itemID := cmp.Or(ln.ItemID, ln.ID)
+	if itemID != "" {
+		if item, err := d.store.Backlog().Get(ctx, runID, itemID); err == nil && !item.Status.Terminal() {
+			status := store.BacklogDone
+			if state == "CLOSED" {
+				status = store.BacklogDropped
+			}
+			_ = d.store.Backlog().Close(ctx, runID, itemID, status, ActorDispatcher, fmt.Sprintf("PR #%d %s", ln.PR, strings.ToLower(state)))
+		}
+	}
+	return true, fmt.Sprintf("lane %s PR #%d already %s; stopped terminals", ln.ID, ln.PR, strings.ToLower(state)), nil
+}
+
 func (d *Dispatcher) applyLaneSteer(ctx context.Context, runID string, view *StateView, p LaneSteerParams) (string, error) {
 	ln, ok := view.Lane(p.LaneID)
 	if !ok {
 		return "", fmt.Errorf("%w: lane %q", store.ErrNotFound, p.LaneID)
+	}
+	if settled, msg, err := d.reconcileLanePRState(ctx, runID, &ln); settled || err != nil {
+		return msg, err
 	}
 	if d.driver != nil {
 		if err := d.driver.Steer(ctx, lane.SteerRequest{
@@ -1040,6 +1101,9 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 	ln, ok := view.Lane(p.LaneID)
 	if !ok {
 		return "", fmt.Errorf("%w: lane %q", store.ErrNotFound, p.LaneID)
+	}
+	if settled, msg, err := d.reconcileLanePRState(ctx, runID, &ln); settled || err != nil {
+		return msg, err
 	}
 	r, ok := view.RecipeForLane(ln)
 	if !ok {

@@ -678,3 +678,130 @@ func TestConciergeOnHoldChangeResetsHistoryAndRunTokenHelpers(t *testing.T) {
 		t.Fatalf("matchedRunTokens follow-up without run = %v, want empty", got)
 	}
 }
+
+func TestConciergeInstructionAfterUnrelatedQuestionAddressesInstruction(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+
+	if err := st.Runs().Create(ctx, store.Run{ID: frontDeskRunID, Repository: "bazelment/yoloswe", Objective: "front desk"}); err != nil {
+		t.Fatal(err)
+	}
+	const heldRunID = "20261114-trial-m1"
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:            heldRunID,
+		Repository:    "sycamore-labs/nebula",
+		Objective:     "trial m1: slim prompts",
+		DefaultRecipe: "adopted",
+		PlanRef:       "ORCHESTRATOR: orca since 2026-11-14T06:36:00Z (orca-chat:front-desk)",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(ctx, store.Lane{
+		RunID:      heldRunID,
+		ID:         "m2-default",
+		ItemID:     "m2-default",
+		Status:     "running",
+		Phase:      "review",
+		Round:      1,
+		PR:         5705,
+		SessionID:  "sess-m2",
+		TerminalID: "term-m2-review",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Events().Append(ctx, store.Event{
+		RunID:   heldRunID,
+		LaneID:  "m2-default",
+		Kind:    store.EventCI,
+		Source:  "ci",
+		Payload: json.RawMessage(`{"status":"success","head_sha":"fb6c5bae"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := chatui.NewStoreBackend(st, frontDeskRunID)
+	backend.FrontDesk = frontDeskRunID
+
+	var mu sync.Mutex
+	var requests []model.Request
+	responses := []model.Response{
+		textAnswer("Question answer: two swarms are active on this host."),
+		toolUse("show-1", ToolConciergeLaneShow, `{"lane_id":"m2-default"}`),
+		toolUse("ci-1", ToolConciergePRCI, `{"lane_id":"m2-default"}`),
+		toolUse("dir-1", ToolDirectiveSubmit, `{"text":"Stop retrying review on m2-default."}`),
+		textAnswer("Instruction applied: stopped retrying review on m2-default (PR #5705 in 20261114-trial-m1)."),
+	}
+	var call int
+	client := modelClientFunc(func(_ context.Context, req model.Request) (*model.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		requests = append(requests, req.Clone())
+		i := call
+		call++
+		if i >= len(responses) {
+			return &responses[len(responses)-1], nil
+		}
+		return &responses[i], nil
+	})
+
+	c := NewConcierge(frontDeskRunID, st, nil, client, DefaultConciergeModel)
+	c.BindBackend(backend)
+	c.OwnerRun = nil
+	c.HeldRuns = func(context.Context) ([]string, error) {
+		return []string{frontDeskRunID, heldRunID}, nil
+	}
+
+	// 1. Unrelated question first.
+	qReply, err := c.Ask(ctx, "which swarms are active on this host right now?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(qReply, "Question answer:") {
+		t.Fatalf("unexpected question reply: %q", qReply)
+	}
+
+	// 2. Owner instruction after the unrelated question.
+	instReply, err := c.Ask(ctx, "for lane m2-default, stop retrying review and hold until I say otherwise")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(instReply, "Question answer:") || !strings.Contains(instReply, "Instruction applied:") {
+		t.Fatalf("instruction reply bled previous question answer: %q", instReply)
+	}
+
+	mu.Lock()
+	if len(requests) < 2 {
+		t.Fatalf("expected at least 2 model requests, got %d", len(requests))
+	}
+	instReq := requests[1]
+	mu.Unlock()
+	for _, m := range instReq.Messages {
+		if strings.Contains(m.Text(), "which swarms are active") || strings.Contains(m.Text(), "Question answer:") {
+			t.Fatalf("unrelated question turn bled into instruction request messages: %+v", instReq.Messages)
+		}
+	}
+
+	// Verify lane.show, pr.ci, and directive.submit resolved against the held run
+	// (20261114-trial-m1) rather than front-desk.
+	items, err := st.Threads().ListItems(ctx, c.threadID, "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolResults := map[string]string{}
+	for _, it := range items {
+		if it.Kind == store.ItemKindToolResult {
+			toolResults[it.Name] = it.Content
+		}
+	}
+	if !strings.Contains(toolResults[ToolConciergeLaneShow], "Lane m2-default") || !strings.Contains(toolResults[ToolConciergeLaneShow], "PR: #5705") {
+		t.Fatalf("lane.show did not resolve held run lane m2-default:\n%s", toolResults[ToolConciergeLaneShow])
+	}
+	if !strings.Contains(toolResults[ToolConciergePRCI], "Lane m2-default PR #5705") || !strings.Contains(toolResults[ToolConciergePRCI], "success") {
+		t.Fatalf("pr.ci did not resolve held run lane m2-default:\n%s", toolResults[ToolConciergePRCI])
+	}
+	if !strings.Contains(toolResults[ToolDirectiveSubmit], "on run 20261114-trial-m1") {
+		t.Fatalf("directive.submit did not target held run 20261114-trial-m1:\n%s", toolResults[ToolDirectiveSubmit])
+	}
+}

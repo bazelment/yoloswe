@@ -27,5 +27,11 @@ go_test(
         "nebulaswarm_test.go",
     ],
     embed = [":adopt"],
-    deps = ["//orca/recipe"],
+    deps = [
+        "//orca/clock",
+        "//orca/controller",
+        "//orca/lane",
+        "//orca/recipe",
+        "//orca/store",
+    ],
 )

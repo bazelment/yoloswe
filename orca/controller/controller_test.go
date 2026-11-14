@@ -2130,3 +2130,59 @@ func TestControllerPlannedLaneWaitsForDependencies(t *testing.T) {
 		t.Fatalf("dependent lane not started: %+v", drv.Spawns)
 	}
 }
+
+func TestControllerMergedPRBeforeRetry(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	if err := st.Backlog().Add(t.Context(), store.BacklogItem{
+		ID:       "m2-default",
+		RunID:    "run-1",
+		Title:    "Default lane",
+		Priority: store.PriorityP2,
+		Status:   store.BacklogInProgress,
+		LaneID:   "m2-default",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{
+		ID:         "m2-default",
+		ItemID:     "m2-default",
+		RunID:      "run-1",
+		Status:     lane.StatusRunning,
+		Phase:      "review",
+		Round:      1,
+		Attempt:    1,
+		PR:         5705,
+		Branch:     "swarm-lane/trial-m1/m2-default",
+		SessionID:  "sess-m2",
+		TerminalID: "term-review-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := controller.New(controller.Config{
+		RunID: "run-1",
+		PRProbe: func(_ context.Context, _, _ string, pr int) (controller.PRStatus, error) {
+			if pr == 5705 {
+				return controller.PRStatus{Number: 5705, State: "MERGED", MergeSHA: "merged-sha-5705"}, nil
+			}
+			return controller.PRStatus{Number: pr, State: "OPEN"}, nil
+		},
+	}, st, drv, clk, judge)
+
+	appendLaneWatchEvent(t, st, "m2-default", "term-review-1", lane.EventExited)
+	mustStep(t, ctrl)
+
+	ln, err := st.Lanes().Get(t.Context(), "run-1", "m2-default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ln.Status != lane.StatusDone {
+		t.Fatalf("lane status = %q, want %q (starts=%d steers=%d stops=%d releases=%d)", ln.Status, lane.StatusDone, len(drv.PhaseStarts), len(drv.Steers), len(drv.Stops), len(drv.Releases))
+	}
+	if len(drv.PhaseStarts) != 0 || len(drv.Steers) != 0 || len(drv.Spawns) != 0 {
+		t.Fatalf("merged PR lane spawned/retried: starts=%+v steers=%+v spawns=%+v", drv.PhaseStarts, drv.Steers, drv.Spawns)
+	}
+	if len(drv.Stops) == 0 && len(drv.Releases) == 0 {
+		t.Fatalf("expected merged PR lane terminals/session stopped, stops=%+v releases=%+v", drv.Stops, drv.Releases)
+	}
+}

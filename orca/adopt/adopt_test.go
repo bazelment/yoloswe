@@ -328,6 +328,49 @@ func TestLeaseUnderFormerHolderIsOwn(t *testing.T) {
 	}
 }
 
+func TestOldHolderJournalMigratesOnReattach(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	before := w.snapshot(t)
+	legacy := w.service()
+	legacy.Holder = ChatHolder("")
+	if _, err := legacy.Adopt(t.Context(), testRun); err != nil {
+		t.Fatal(err)
+	}
+	if j, err := readJournal(filepath.Join(w.dir, leaseFile)); err != nil || j.Holder != "orca-chat:" {
+		t.Fatalf("legacy journal = %+v, err = %v", j, err)
+	}
+
+	// Reattach with a stable holder (without needing Former explicitly set):
+	// Adopted() and Adopt() migrate the journal and stand-down lines on disk.
+	restarted := w.service()
+	restarted.Holder = ChatHolder("front-desk")
+	r, err := restarted.Adopt(t.Context(), testRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Holder != "orca-chat:front-desk" {
+		t.Fatalf("r.Holder = %q, want orca-chat:front-desk", r.Holder)
+	}
+	j, err := readJournal(filepath.Join(w.dir, leaseFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Holder != "orca-chat:front-desk" || j.Import == nil || j.Import.Holder != "orca-chat:front-desk" || !strings.Contains(j.Marker, "(orca-chat:front-desk)") {
+		t.Fatalf("migrated journal = %+v, import = %+v", j, j.Import)
+	}
+	for _, n := range handoverFiles {
+		body := readText(filepath.Join(w.dir, n))
+		if !strings.HasPrefix(body, "ORCHESTRATOR: orca since 2026-11-13T01:02:03Z (orca-chat:front-desk)") || strings.Contains(body, "(orca-chat:)") {
+			t.Fatalf("%s did not migrate stand-down line: %q", n, body)
+		}
+	}
+	if err := restarted.Release(t.Context(), testRun); err != nil {
+		t.Fatal(err)
+	}
+	assertSame(t, "release after old-holder journal migration", w.snapshot(t), before)
+}
+
 func TestLeaseHeldByAnotherHolderChangesNothing(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)

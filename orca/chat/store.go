@@ -132,6 +132,24 @@ func (b *StoreBackend) HeldRuns(ctx context.Context) ([]string, error) {
 	return b.heldRuns(ctx)
 }
 
+// RestartHeld restarts controllers for every adopted run this chat holds.
+func (b *StoreBackend) RestartHeld(ctx context.Context) error {
+	if b.Adoption == nil {
+		return nil
+	}
+	ids, err := b.Adoption.Adopted()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, id := range ids {
+		if _, adoptErr := b.Adoption.Adopt(ctx, id); adoptErr != nil {
+			errs = append(errs, adoptErr)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // ReadHostRun reads the host swarm run directory of id when Adoption is set.
 func (b *StoreBackend) ReadHostRun(id string) (adopt.Run, error) {
 	if b.Adoption == nil {
@@ -866,20 +884,36 @@ func (b *StoreBackend) runCommand(ctx context.Context, fields []string) (string,
 		}
 		return pretty(out, nil)
 	case "/pause", "/resume", "/stop":
-		dirs, e := b.store.Directives().List(ctx, store.DirectiveFilter{RunID: b.runID, ActiveOnly: true})
+		targetRun := b.runID
+		if b.frontDesk() {
+			tRun, refusal, tErr := b.target(ctx, "")
+			if tErr != nil {
+				return "", tErr
+			}
+			if refusal != "" {
+				return refusal, nil
+			}
+			if tRun != "" {
+				targetRun = tRun
+			}
+		}
+		dirs, e := b.store.Directives().List(ctx, store.DirectiveFilter{RunID: targetRun, ActiveOnly: true})
 		if e != nil {
 			return "", e
 		}
 		for i := range dirs {
 			d := dirs[i]
 			if d.Ref == "chat:control" {
-				if e := b.store.Directives().UpdateStatus(ctx, b.runID, d.ID, store.DirectiveRevoked); e != nil {
+				if e := b.store.Directives().UpdateStatus(ctx, targetRun, d.ID, store.DirectiveRevoked); e != nil {
 					return "", e
 				}
 			}
 		}
 		action := strings.TrimPrefix(strings.ToLower(fields[0]), "/")
-		e = b.directive(ctx, b.store, b.runID, store.DirectiveInstruction, action, "chat:control")
+		e = b.directive(ctx, b.store, targetRun, store.DirectiveInstruction, action, "chat:control")
+		if e == nil {
+			b.Wake(targetRun)
+		}
 		return "run " + action, e
 	case "/undo":
 		if last := b.lastDirective; last.id != "" {

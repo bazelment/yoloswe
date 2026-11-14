@@ -1,6 +1,7 @@
 package adopt
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -35,6 +36,7 @@ type Controllers struct {
 	driver   lane.LaneDriver
 	clock    clock.Clock
 	judges   JudgeFactory
+	PRProbe  controller.PRProbe
 	runs     map[string]*controlledRun
 	starting map[string]*startup
 	mu       sync.Mutex
@@ -122,7 +124,15 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	holder := fmt.Sprintf("%s:%p", r.Holder, d)
 	if _, err := d.store.Runs().AcquireLease(ctx, r.ID, holder, controller.DefaultLeaseTTL); err != nil {
-		return err
+		if errors.Is(err, store.ErrLeaseHeld) {
+			if curRun, gErr := d.store.Runs().Get(ctx, r.ID); gErr == nil && curRun.Lease != nil && strings.HasPrefix(curRun.Lease.HolderID, "orca-chat:") {
+				_ = d.store.Runs().ReleaseLease(ctx, r.ID, curRun.Lease.HolderID)
+				_, err = d.store.Runs().AcquireLease(ctx, r.ID, holder, controller.DefaultLeaseTTL)
+			}
+		}
+		if err != nil {
+			return err
+		}
 	}
 	started := false
 	defer func() {
@@ -134,7 +144,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	if err != nil {
 		return err
 	}
-	resume := generation != "" && storedRun.PlanRef == generation
+	resume := generation != "" && (storedRun.PlanRef == generation || strings.HasPrefix(storedRun.PlanRef, markerPrefix))
 	workflow.Version = 0
 	saved, err := d.store.Recipes().Save(ctx, workflow)
 	if err != nil {
@@ -192,7 +202,11 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			return ctrl.AnswerOwnerAskTextFromJudge(ctx, askID, text)
 		})
 	}
-	ctrl = controller.New(controller.Config{RunID: r.ID, HolderID: holder}, d.store, d.driver, d.clock, d.judge(holder, dispatch))
+	runDriver := d.driver
+	if runDriver != nil {
+		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: d.store}
+	}
+	ctrl = controller.New(controller.Config{RunID: r.ID, HolderID: holder, PRProbe: d.PRProbe}, d.store, runDriver, d.clock, d.judge(holder, dispatch))
 	// Fail synchronously if another process still holds the controller lease.
 	if err := ctrl.Step(ctx); err != nil {
 		return err
@@ -466,6 +480,9 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			} else if spec.Model != "" {
 				ph.Agents = []recipe.AgentSpec{spec.hostAgent.agent()}
 			}
+			if r.Format == FormatNebulaSwarm && (ph.Name == recipe.PhaseClean || ph.Name == recipe.PhaseReview) {
+				ph.BriefTemplate = nebulaSwarmPhaseBrief(r.Dir, ph.Name, spec.Prompt)
+			}
 			workflow.Phases = append(workflow.Phases, ph)
 		}
 	}
@@ -658,8 +675,9 @@ type hostAgent struct {
 }
 type hostPhase struct {
 	hostAgent
-	Name  string      `json:"name"`
-	Chain []hostAgent `json:"chain"`
+	Name   string      `json:"name"`
+	Prompt string      `json:"prompt"`
+	Chain  []hostAgent `json:"chain"`
 }
 
 func (a hostAgent) agent() recipe.AgentSpec {
@@ -668,6 +686,200 @@ func (a hostAgent) agent() recipe.AgentSpec {
 		kind = "claude"
 	}
 	return recipe.AgentSpec{Harness: kind, Model: a.Model, Effort: a.Effort}
+}
+
+func nebulaSwarmPhaseBrief(dir, phase, specPrompt string) string {
+	if p := strings.TrimSpace(specPrompt); p != "" {
+		return p
+	}
+	if b := strings.TrimSpace(readText(filepath.Join(dir, phase+".brief"))); b != "" {
+		return b
+	}
+	switch phase {
+	case recipe.PhaseClean:
+		return "Run /simplify-branch. If that skill command is unavailable, read .claude/skills/simplify-branch/SKILL.md and follow it."
+	case recipe.PhaseReview:
+		return "Run /pr-polish-nebula."
+	default:
+		return ""
+	}
+}
+
+type adoptedRunDriver struct {
+	lane.LaneDriver
+	store store.Store
+	run   Run
+}
+
+func (d *adoptedRunDriver) PhaseSkill(phase string) string {
+	if d.run.Format == FormatNebulaSwarm && (phase == recipe.PhaseClean || phase == recipe.PhaseReview) {
+		return ""
+	}
+	return d.LaneDriver.PhaseSkill(phase)
+}
+
+func (d *adoptedRunDriver) ReportInstructions(runID, laneID, phase string, round int) string {
+	if d.run.Format != FormatNebulaSwarm {
+		return d.LaneDriver.ReportInstructions(runID, laneID, phase, round)
+	}
+	r := max(round, 1)
+	reportFile := filepath.Join(d.run.Dir, "reports", fmt.Sprintf("%s.%s.r%d.md", laneID, phase, r))
+	return fmt.Sprintf(
+		"Hand back: push your branch before reporting. Write the phase report for lane %s phase %s round %d to R=\"$(git rev-parse --git-dir)/phase-report.$NEBULA_TERMINAL_ID.md\" (and/or %s) with headers:\n"+
+			"Outcome: done | no-change | needs-swe | blocked | needs-input\n"+
+			"HEAD: <pushed commit sha>\n"+
+			"PR: #<number>\n"+
+			"Verdict: pass | needs-changes\n"+
+			"Then file it with:\n"+
+			"nebula phase report --outcome <outcome> [--pr <n>] --file \"$R\"\n"+
+			"The phase is not finished until the phase report is filed.",
+		laneID, phase, r, reportFile,
+	)
+}
+
+func (d *adoptedRunDriver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
+	if d.run.Format == FormatNebulaSwarm {
+		if req.RunDir == "" {
+			req.RunDir = d.run.Dir
+		}
+		req.Brief = d.expandNebulaSwarmBrief(ctx, req.LaneID, req.Phase, req.Brief)
+	}
+	return d.LaneDriver.SpawnSession(ctx, req)
+}
+
+func (d *adoptedRunDriver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (lane.StartPhaseResult, error) {
+	if d.run.Format == FormatNebulaSwarm {
+		if req.RunDir == "" {
+			req.RunDir = d.run.Dir
+		}
+		req.Brief = d.expandNebulaSwarmBrief(ctx, req.LaneID, req.Phase, req.Brief)
+	}
+	return d.LaneDriver.StartPhaseTerminal(ctx, req)
+}
+
+func (d *adoptedRunDriver) expandNebulaSwarmBrief(ctx context.Context, laneID, phase, brief string) string {
+	out := strings.ReplaceAll(brief, "@LANE@", laneID)
+	if validatePathComponent("lane id", laneID) == nil && validatePathComponent("phase", phase) == nil {
+		for _, name := range []string{laneID + "." + phase + ".brief", laneID + "." + phase + ".prompt"} {
+			if custom := strings.TrimSpace(readText(filepath.Join(d.run.Dir, name))); custom != "" && !strings.Contains(out, custom) {
+				out = custom + "\n\n" + out
+				break
+			}
+		}
+	}
+	if d.store != nil {
+		if ln, err := d.store.Lanes().Get(ctx, d.run.ID, laneID); err == nil && ln != nil {
+			out = strings.ReplaceAll(out, "@BRANCH@", ln.Branch)
+			if phase == recipe.PhaseReview && ln.PR > 0 {
+				prTag := fmt.Sprintf("PR #%d", ln.PR)
+				if !strings.Contains(out, prTag) {
+					out = fmt.Sprintf("Review lane %s (%s).\n\n%s", laneID, prTag, out)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func (d *adoptedRunDriver) ReadReport(ctx context.Context, runID, laneID, terminalID string) (*lane.PhaseReport, error) {
+	rep, err := d.LaneDriver.ReadReport(ctx, runID, laneID, terminalID)
+	if err == nil && rep != nil && rep.Outcome.Valid() {
+		return rep, nil
+	}
+	if fileRep := d.readRunReportFile(ctx, runID, laneID, terminalID); fileRep != nil {
+		return fileRep, nil
+	}
+	return rep, err
+}
+
+func (d *adoptedRunDriver) readRunReportFile(ctx context.Context, runID, laneID, terminalID string) *lane.PhaseReport {
+	if validatePathComponent("lane id", laneID) != nil {
+		return nil
+	}
+	var phase, worktree string
+	round := 1
+	if d.store != nil {
+		if ln, err := d.store.Lanes().Get(ctx, runID, laneID); err == nil && ln != nil {
+			phase = ln.Phase
+			round = max(ln.Round, 1)
+			worktree = ln.Worktree
+			for k, tid := range ln.Terminals {
+				if tid == terminalID {
+					p, r := lane.SplitPhaseRound(k)
+					if p != "" {
+						phase, round = p, max(r, 1)
+					}
+					break
+				}
+			}
+		}
+	}
+	if phase == "" {
+		for i := range d.run.Lanes {
+			if d.run.Lanes[i].ID == laneID {
+				phase = d.run.Lanes[i].Phase
+				round = max(d.run.Lanes[i].Round, 1)
+				break
+			}
+		}
+	}
+	var candidates []string
+	if worktree != "" && terminalID != "" && validatePathComponent("terminal id", terminalID) == nil {
+		candidates = append(candidates, filepath.Join(worktree, ".git", "phase-report."+terminalID+".md"))
+	}
+	if phase != "" && validatePathComponent("phase", phase) == nil {
+		candidates = append(candidates,
+			filepath.Join(d.run.Dir, "reports", fmt.Sprintf("%s.%s.r%d.md", laneID, phase, round)),
+			filepath.Join(d.run.Dir, fmt.Sprintf("%s.%s.r%d.md", laneID, phase, round)),
+			filepath.Join(d.run.Dir, "reports", fmt.Sprintf("%s.%s.md", laneID, phase)),
+			filepath.Join(d.run.Dir, fmt.Sprintf("%s.%s.md", laneID, phase)),
+		)
+	}
+	for _, p := range candidates {
+		raw := strings.TrimSpace(readText(p))
+		if raw == "" {
+			continue
+		}
+		rep, err := lane.ParsePhaseReport(raw)
+		if err != nil || rep == nil || !rep.Outcome.Valid() {
+			continue
+		}
+		rep.LaneID = cmp.Or(rep.LaneID, laneID)
+		rep.TerminalID = cmp.Or(rep.TerminalID, terminalID)
+		rep.Phase = cmp.Or(rep.Phase, phase)
+		if rep.Round == 0 {
+			rep.Round = round
+		}
+		return rep
+	}
+	return nil
+}
+
+func (d *adoptedRunDriver) ReleaseSession(ctx context.Context, sessionID string, force ...bool) error {
+	if rel, ok := d.LaneDriver.(lane.SessionReleaser); ok {
+		return rel.ReleaseSession(ctx, sessionID, force...)
+	}
+	return nil
+}
+
+func (d *adoptedRunDriver) ReportOnlyNoWork(ctx context.Context, ln lane.Lane) (bool, error) {
+	if rc, ok := d.LaneDriver.(lane.ReportOnlyChecker); ok {
+		return rc.ReportOnlyNoWork(ctx, ln)
+	}
+	return false, nil
+}
+
+func (d *adoptedRunDriver) TerminalAgentState(ctx context.Context, terminalID string) (string, error) {
+	if tr, ok := d.LaneDriver.(lane.TerminalStateReader); ok {
+		return tr.TerminalAgentState(ctx, terminalID)
+	}
+	return "", nil
+}
+
+func (d *adoptedRunDriver) TrackLane(ln lane.Lane) {
+	if tl, ok := d.LaneDriver.(interface{ TrackLane(lane.Lane) }); ok {
+		tl.TrackLane(ln)
+	}
 }
 
 // checkpoint writes controller state back to the host ledger and spawn files.

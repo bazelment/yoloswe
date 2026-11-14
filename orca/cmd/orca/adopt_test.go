@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/clock"
+	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
@@ -504,5 +505,110 @@ func testAdoptTransition(t *testing.T, outcome, policy, wantPhase string, wantRo
 	}
 	if st.Tasks[0].Status != wantStatus || st.Tasks[0].NebulaTerminal != wantTerminal || st.Tasks[0].Sessions["review"] != "nebula:old-review" || st.Tasks[0].Sessions["review2"] != "nebula:imported-review" {
 		t.Fatalf("lost handback state: %s", b)
+	}
+}
+
+func TestRestartRestartsHeldControllers(t *testing.T) {
+	root := t.TempDir()
+	runID := "20261114-trial-m1"
+	dir := filepath.Join(root, ".swarm", runID)
+	if err := os.MkdirAll(filepath.Join(dir, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1","base":"main","target":"main","repo":"repo-1","merge":"none",
+"phases":[{"name":"swe"},{"name":"clean"},{"name":"review"}]},
+"tasks":[{"id":"m2-default","title":"default prompts","branch":"swarm-lane/`+runID+`/m2-default","priority":"p1","status":"running","phase":"review","round":1,"session_id":"sess-m2","terminals":{"review":{"1":"term-m2-review"}},"pr":5705,"pr_head":"bbb"}]}`)
+	writeFile(t, filepath.Join(dir, "OBJECTIVE.md"), "# "+runID+"\n")
+	writeFile(t, filepath.Join(dir, "PROGRESS.md"), "Next: m2-default review.\n")
+	writeFile(t, filepath.Join(dir, "EVENTS"), "2026-11-14T06:35:00Z\tm2-default\tstarted\treview term-m2-review\n")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/code-runs/" + runID:
+			_, _ = io.WriteString(w, `{"id":"`+runID+`","externalOrchestratorLabel":"claude"}`)
+		case "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		case "/api/code-terminals/term-m2-review/phase-report":
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfgPath := filepath.Join(root, "orca.json")
+	cfg, _ := json.Marshal(map[string]string{"nebula_api_url": srv.URL, "nebula_token": "test-token"})
+	writeFile(t, cfgPath, string(cfg))
+	t.Setenv("ORCA_SWARM_ROOTS", filepath.Join(root, ".swarm"))
+	t.Setenv("ORCA_SWARM_NEBULA", filepath.Join(root, "unused_swarm_nebula.sh"))
+
+	storeDir := filepath.Join(root, "store")
+	baseArgs := []string{"chat", "--config", cfgPath, "--store-dir", storeDir, "--repo", "sycamore-labs/nebula"}
+
+	// First bare orca session adopts the run.
+	var out1, errOut1 bytes.Buffer
+	if err := Execute(t.Context(), append(slices.Clone(baseArgs), "--replay", "testdata/concierge_status_replay.json"), strings.NewReader("/adopt "+runID+"\n"), &out1, &errOut1); err != nil {
+		t.Fatalf("first Execute chat: %v\nstderr:\n%s", err, errOut1.String())
+	}
+	if !strings.Contains(out1.String(), "adopted "+runID) {
+		t.Fatalf("first session output missing adoption confirmation:\n%s", out1.String())
+	}
+
+	// Simulate a journal written with the old empty holder ("orca-chat:") and a
+	// stale SQLite lease left behind by an ungraceful process exit.
+	for _, n := range []string{".orca-lease.json", "OBJECTIVE.md", "PROGRESS.md"} {
+		p := filepath.Join(dir, n)
+		writeFile(t, p, strings.ReplaceAll(readFile(t, p), "orca-chat:"+frontDeskRunID, "orca-chat:"))
+	}
+	dbPath, err := store.RunDBPath(storeDir, frontDeskRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.OpenSQLite(dbPath, clock.NewRealClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Runs().AcquireLease(t.Context(), runID, "orca-chat:crashed-pid", time.Hour); err != nil {
+		_ = st.Close()
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	// Replay fixture that routes to the concierge and submits a directive to the held run without a second /adopt.
+	var exchanges []model.RecordedExchange
+	exchanges = append(exchanges,
+		model.RecordedExchange{Response: textAnswer(`{"handler":"concierge","confidence":0.9}`)},
+		model.RecordedExchange{Response: toolUse("call-dir-1", ToolDirectiveSubmit, `{"kind":"instruction","text":"Hold new lanes until m2-default merges."}`)},
+		model.RecordedExchange{Response: textAnswer("Recorded directive on 20261114-trial-m1.")},
+	)
+	replayPath := filepath.Join(root, "directive_replay.json")
+	if err := model.SaveRecording(replayPath, exchanges); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second bare orca session starts and immediately sends an owner instruction
+	// (no second /adopt). The held run's controller must be live and migrated.
+	var out2, errOut2 bytes.Buffer
+	if err := Execute(t.Context(), append(slices.Clone(baseArgs), "--replay", replayPath), strings.NewReader("hold new lanes until m2-default merges\n"), &out2, &errOut2); err != nil {
+		t.Fatalf("restarted Execute chat: %v\nstderr:\n%s", err, errOut2.String())
+	}
+	if !strings.Contains(out2.String(), "Recorded directive on 20261114-trial-m1.") {
+		t.Fatalf("restarted chat output = %q", out2.String())
+	}
+
+	// Verify the journal migrated to the stable holder and the directive was
+	// recorded without "adopted run ... has no live controller".
+	var lease struct{ Holder string }
+	if err := json.Unmarshal([]byte(readFile(t, filepath.Join(dir, ".orca-lease.json"))), &lease); err != nil || lease.Holder != "orca-chat:"+frontDeskRunID {
+		t.Fatalf("migrated lease holder = %q (%v), want orca-chat:%s", lease.Holder, err, frontDeskRunID)
+	}
+	st2, err := store.OpenSQLite(dbPath, clock.NewRealClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	dirs, err := st2.Directives().List(t.Context(), store.DirectiveFilter{RunID: runID})
+	if err != nil || len(dirs) != 1 || !strings.Contains(dirs[0].Text, "Hold new lanes until m2-default merges.") {
+		t.Fatalf("directives on held run after restart = %+v, err = %v", dirs, err)
 	}
 }

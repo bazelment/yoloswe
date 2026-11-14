@@ -257,13 +257,46 @@ func ParsePhaseReport(raw string) (*PhaseReport, error) {
 
 func applyReportHeader(rep *PhaseReport, key, val string) bool {
 	switch strings.ToLower(key) {
+	case "lane":
+		if rep.LaneID == "" && val != "" {
+			rep.LaneID = strings.Fields(val)[0]
+		}
+	case "phase":
+		if rep.Phase == "" && val != "" {
+			rep.Phase = strings.ToLower(strings.Fields(val)[0])
+		}
+	case "round":
+		if rep.Round == 0 && val != "" {
+			trimmed := strings.TrimPrefix(strings.ToLower(strings.Fields(val)[0]), "r")
+			if n, err := strconv.Atoi(trimmed); err == nil && n > 0 {
+				rep.Round = n
+			}
+		}
 	case "outcome":
-		rep.Outcome = ReportOutcome(val)
-	case "head":
-		rep.HeadSHA = val
+		fields := strings.Fields(strings.ToLower(val))
+		if len(fields) == 0 {
+			rep.Outcome = ReportOutcome(val)
+			return true
+		}
+		switch fields[0] {
+		case "pass":
+			rep.Outcome = OutcomeDone
+		case "needs-changes", "needs_changes":
+			rep.Outcome = OutcomeNeedsSWE
+		case "needs-human", "needs_human":
+			rep.Outcome = OutcomeNeedsInput
+		default:
+			rep.Outcome = ReportOutcome(fields[0])
+		}
+	case "head", "head-sha", "head_sha":
+		if fields := strings.Fields(val); len(fields) > 0 && fields[0] != "none" {
+			rep.HeadSHA = fields[0]
+		}
 	case "pr":
-		if n, err := strconv.Atoi(strings.TrimPrefix(val, "#")); err == nil {
-			rep.PR = n
+		if fields := strings.Fields(val); len(fields) > 0 {
+			if n, err := strconv.Atoi(strings.TrimPrefix(fields[0], "#")); err == nil {
+				rep.PR = n
+			}
 		}
 	case "reason":
 		rep.Reason = val
@@ -273,12 +306,32 @@ func applyReportHeader(rep *PhaseReport, key, val string) bool {
 		rep.Ask = val
 	case "breaks":
 		rep.Breaks = val
+	case "rework-class", "rework_class":
+		if rep.Reason == "" {
+			rep.Reason = val
+		}
 	case "riskiest step":
 		rep.RiskiestStep = val
 	case "observed":
 		rep.Observed = val
 	case "verdict":
 		rep.Verdict = val
+		if fields := strings.Fields(strings.ToLower(val)); len(fields) > 0 {
+			switch fields[0] {
+			case "pass":
+				if rep.Outcome == "" {
+					rep.Outcome = OutcomeDone
+				}
+			case "needs-changes", "needs_changes":
+				if rep.Outcome == "" || rep.Outcome == OutcomeDone {
+					rep.Outcome = OutcomeNeedsSWE
+				}
+			case "fail", "failed":
+				if rep.Outcome == "" {
+					rep.Outcome = OutcomeNeedsSWE
+				}
+			}
+		}
 	case "reach":
 		rep.Reach = val
 	case "reach observed":
@@ -292,7 +345,11 @@ func applyReportHeader(rep *PhaseReport, key, val string) bool {
 }
 
 func splitHeader(line string) (string, string, bool) {
-	k, v, ok := strings.Cut(line, ":")
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
+		trimmed = strings.TrimSpace(trimmed[2:])
+	}
+	k, v, ok := strings.Cut(trimmed, ":")
 	if !ok {
 		return "", "", false
 	}

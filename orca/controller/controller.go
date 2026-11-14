@@ -114,11 +114,24 @@ func (f *FakeJudge) AllEvents() []store.Event {
 	return out
 }
 
+// PRStatus reports the live state of a lane's pull request on GitHub.
+type PRStatus struct {
+	State    string
+	MergeSHA string
+	Number   int
+}
+
+// PRProbe queries the live state of a lane's pull request on GitHub.
+type PRProbe func(ctx context.Context, repo, branch string, pr int) (PRStatus, error)
+
 // Config configures a Controller instance for a single Run.
 type Config struct {
 	// AnswerQuestion delegates interpretation of task text and notes to the
 	// dispatcher. An empty answer requests owner escalation.
-	AnswerQuestion    func(context.Context, string, string) (string, error)
+	AnswerQuestion func(context.Context, string, string) (string, error)
+	// PRProbe optionally queries a lane's PR state on GitHub before retry,
+	// advance, or spawn.
+	PRProbe           PRProbe
 	RunID             string
 	HolderID          string
 	Consumer          string
@@ -1606,6 +1619,74 @@ func (c *Controller) escalateLane(ctx context.Context, ln *lane.Lane, reason, re
 	return store.EventClassJudgment, nil
 }
 
+func (c *Controller) reconcileLanePRState(ctx context.Context, ln *lane.Lane, eventID string) (bool, error) {
+	if c.cfg.PRProbe == nil || ln == nil || (ln.PR <= 0 && strings.TrimSpace(ln.Branch) == "") {
+		return false, nil
+	}
+	prState, err := c.cfg.PRProbe(ctx, "", ln.Branch, ln.PR)
+	if err != nil {
+		return false, nil
+	}
+	if prState.Number > 0 && ln.PR <= 0 {
+		ln.PR = prState.Number
+	}
+	state := strings.ToUpper(strings.TrimSpace(prState.State))
+	switch state {
+	case "MERGED", "CLOSED":
+	default:
+		return false, nil
+	}
+
+	delete(c.pendingVerdicts, ln.ID)
+	_ = c.stopCurrentTerminal(ctx, ln, "pr "+strings.ToLower(state))
+	c.tryRelease(ctx, ln)
+	delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
+
+	round := max(ln.Round, 1)
+	if state == "MERGED" {
+		ln.Status = lane.StatusDone
+		ln.MergeSHA = cmp.Or(strings.TrimSpace(prState.MergeSHA), ln.MergeSHA, ln.PRHead)
+	} else {
+		ln.Status = lane.StatusFailed
+	}
+	if eventID != "" {
+		ln.LastEventID = eventID
+	}
+	ln.LastEventAt = c.clock.Now().UTC()
+	if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+		return true, err
+	}
+
+	actionKey := fmt.Sprintf("pr-state:%s:%d:%s", ln.ID, ln.PR, strings.ToLower(state))
+	result := "lane done (pr merged)"
+	backlogStatus := store.BacklogDone
+	backlogReason := fmt.Sprintf("PR #%d merged", ln.PR)
+	if state == "CLOSED" {
+		result = "lane failed (pr closed)"
+		backlogStatus = store.BacklogDropped
+		backlogReason = fmt.Sprintf("PR #%d closed", ln.PR)
+	}
+	_, _, _ = c.recordDecision(ctx, ToolLaneComplete, ln.ID,
+		fmt.Sprintf("PR #%d is %s on GitHub", ln.PR, state),
+		result,
+		DecisionArgs{
+			ActionKey: actionKey,
+			EventID:   eventID,
+			FromPhase: ln.Phase,
+			ToPhase:   recipe.TargetComplete,
+			Verdict:   strings.ToLower(state),
+			Round:     round,
+		},
+	)
+	itemID := cmp.Or(ln.ItemID, ln.ID)
+	if itemID != "" {
+		if item, err := c.store.Backlog().Get(ctx, c.cfg.RunID, itemID); err == nil && !item.Status.Terminal() {
+			_ = c.store.Backlog().Close(ctx, c.cfg.RunID, itemID, backlogStatus, ActorController, backlogReason)
+		}
+	}
+	return true, nil
+}
+
 func (c *Controller) advanceByRecipe(
 	ctx context.Context,
 	ln *lane.Lane,
@@ -1613,6 +1694,16 @@ func (c *Controller) advanceByRecipe(
 	verdict, reason, breaks string,
 	ev *store.Event,
 ) (store.EventClass, error) {
+	eventID := ""
+	if ev != nil {
+		eventID = ev.ID
+	}
+	if settled, err := c.reconcileLanePRState(ctx, ln, eventID); settled || err != nil {
+		if err != nil {
+			return store.EventClassUnclassified, err
+		}
+		return store.EventClassAuto, nil
+	}
 	round := max(ln.Round, 1)
 	ciGreen := isCIGreen(ln.Checks)
 
@@ -1777,11 +1868,24 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		// Stale exit for an earlier terminal that already advanced.
 		return store.EventClassAuto, nil
 	}
+	if settled, err := c.reconcileLanePRState(ctx, ln, ev.ID); settled || err != nil {
+		if err != nil {
+			return store.EventClassUnclassified, err
+		}
+		return store.EventClassAuto, nil
+	}
 
 	termID := cmp.Or(payload.TerminalID, ln.TerminalID)
-	if termID != "" && payload.ExitCode == 0 && payload.Error == "" {
-		if rep, err := c.driver.ReadReport(ctx, c.cfg.RunID, ln.ID, termID); err == nil && rep != nil && rep.Outcome.Valid() {
-			return c.handleLaneReport(ctx, ev)
+	if payload.ExitCode == 0 && (payload.Error == "" || payload.Kind == lane.EventTurnEndedNoReport || payload.Kind == lane.EventExited) {
+		if termID != "" && c.driver != nil {
+			if rep, err := c.driver.ReadReport(ctx, c.cfg.RunID, ln.ID, termID); err == nil && rep != nil && rep.Outcome.Valid() {
+				return c.handleLaneReport(ctx, ev)
+			}
+		}
+		if payload.Error != "" {
+			if rep, err := lane.ParsePhaseReport(payload.Error); err == nil && rep != nil && rep.Outcome.Valid() {
+				return c.handleLaneReport(ctx, ev)
+			}
 		}
 	}
 
@@ -1975,6 +2079,12 @@ func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.Ev
 		}
 		return store.EventClassUnclassified, err
 	}
+	if settled, err := c.reconcileLanePRState(ctx, ln, ev.ID); settled || err != nil {
+		if err != nil {
+			return store.EventClassUnclassified, err
+		}
+		return store.EventClassAuto, nil
+	}
 
 	round := max(ln.Round, 1)
 	attempt := max(ln.Attempt, 1)
@@ -2065,6 +2175,9 @@ func (c *Controller) startLanePhase(
 	round, attempt int,
 	tool, eventID, reason, extraNote string,
 ) error {
+	if settled, err := c.reconcileLanePRState(ctx, ln, eventID); settled || err != nil {
+		return err
+	}
 	if round < 1 {
 		round = 1
 	}
@@ -2357,6 +2470,15 @@ func (c *Controller) extractReport(ctx context.Context, ln *lane.Lane, ev store.
 			payload.Ask = cmp.Or(payload.Ask, drvRep.Ask)
 			payload.Breaks = cmp.Or(payload.Breaks, drvRep.Breaks)
 			payload.Summary = cmp.Or(payload.Summary, drvRep.Summary)
+		}
+	}
+
+	if payload.Outcome == "" && len(ev.Payload) > 0 {
+		var exitPayload PhaseExitPayload
+		if err := json.Unmarshal(ev.Payload, &exitPayload); err == nil && exitPayload.Error != "" {
+			if parsed, pErr := lane.ParsePhaseReport(exitPayload.Error); pErr == nil {
+				payload.PhaseReport = *parsed
+			}
 		}
 	}
 
