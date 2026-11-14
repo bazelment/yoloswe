@@ -30,13 +30,14 @@ const escalationAskTTL = 24 * time.Hour
 
 // Controllers attaches host runs to orca's deterministic lane lifecycle.
 type Controllers struct {
-	ctx    context.Context
-	store  store.Store
-	driver lane.LaneDriver
-	clock  clock.Clock
-	judges JudgeFactory
-	runs   map[string]*controlledRun
-	mu     sync.Mutex
+	ctx      context.Context
+	store    store.Store
+	driver   lane.LaneDriver
+	clock    clock.Clock
+	judges   JudgeFactory
+	runs     map[string]*controlledRun
+	starting map[string]struct{}
+	mu       sync.Mutex
 }
 
 type controlledRun struct {
@@ -47,7 +48,7 @@ type controlledRun struct {
 }
 
 func NewControllers(ctx context.Context, st store.Store, driver lane.LaneDriver, clk clock.Clock, judges JudgeFactory) *Controllers {
-	return &Controllers{ctx: ctx, store: st, driver: driver, clock: clk, judges: judges, runs: map[string]*controlledRun{}}
+	return &Controllers{ctx: ctx, store: st, driver: driver, clock: clk, judges: judges, runs: map[string]*controlledRun{}, starting: map[string]struct{}{}}
 }
 
 // Wake asks an adopted controller to process pending events immediately.
@@ -78,15 +79,26 @@ func (d *Controllers) Active(runID string) bool {
 
 func (d *Controllers) Start(ctx context.Context, r Run) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if cr := d.runs[r.ID]; cr != nil {
 		select {
 		case <-cr.done:
 			delete(d.runs, r.ID)
 		default:
+			d.mu.Unlock()
 			return nil
 		}
 	}
+	if _, ok := d.starting[r.ID]; ok {
+		d.mu.Unlock()
+		return nil
+	}
+	d.starting[r.ID] = struct{}{}
+	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		delete(d.starting, r.ID)
+		d.mu.Unlock()
+	}()
 	journal, err := readJournal(filepath.Join(r.Dir, leaseFile))
 	if err != nil {
 		return err
@@ -183,7 +195,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) error {
 		return err
 	}
 	cr := &controlledRun{controller: ctrl, cancel: cancel, done: make(chan struct{}), run: r}
+	d.mu.Lock()
 	d.runs[r.ID] = cr
+	d.mu.Unlock()
 	started = true
 	go func() {
 		defer close(cr.done)
