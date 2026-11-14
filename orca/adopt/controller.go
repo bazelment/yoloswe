@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
@@ -788,8 +789,8 @@ func (d *adoptedRunDriver) SpawnSession(ctx context.Context, req lane.SpawnReque
 	if repoID == "" && repo == "" {
 		return lane.SpawnResult{}, fmt.Errorf("spawn lane %s for adopted run %s: repository is not configured", req.LaneID, cmp.Or(req.RunID, d.run.ID))
 	}
-	req.RepositoryID = cmp.Or(req.RepositoryID, repoID)
-	req.Repository = cmp.Or(req.Repository, repo, repoID)
+	req.RepositoryID = cmp.Or(repoID, req.RepositoryID)
+	req.Repository = cmp.Or(repo, repoID, req.Repository)
 	if req.RunDir == "" {
 		req.RunDir = d.run.Dir
 	}
@@ -802,8 +803,8 @@ func (d *adoptedRunDriver) StartPhaseTerminal(ctx context.Context, req lane.Star
 	if strings.TrimSpace(req.SessionID) == "" && repoID == "" && repo == "" {
 		return lane.StartPhaseResult{}, fmt.Errorf("start phase %s on lane %s for adopted run %s: repository is not configured", req.Phase, req.LaneID, cmp.Or(req.RunID, d.run.ID))
 	}
-	req.RepositoryID = cmp.Or(req.RepositoryID, repoID)
-	req.Repository = cmp.Or(req.Repository, repo, repoID)
+	req.RepositoryID = cmp.Or(repoID, req.RepositoryID)
+	req.Repository = cmp.Or(repo, repoID, req.Repository)
 	if req.RunDir == "" {
 		req.RunDir = d.run.Dir
 	}
@@ -866,7 +867,22 @@ func splitReportTail(brief string) (body, tail string) {
 	return brief, ""
 }
 
-const maxInlinedRunFileBytes = 4096
+const maxInlinedRunFileBytes = 16384
+
+func clipRunFileContent(content string, maxBytes int) string {
+	s := strings.TrimSpace(content)
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	if nl := strings.LastIndexByte(s[:cut], '\n'); nl >= maxBytes/2 {
+		cut = nl
+	}
+	return fmt.Sprintf("%s\n... (truncated %d bytes)", strings.TrimRight(s[:cut], " \t\r\n"), len(s)-cut)
+}
 
 func inlineRunFileCitations(dir, laneID, brief string) string {
 	if dir == "" || strings.TrimSpace(brief) == "" {
@@ -902,7 +918,7 @@ func inlineRunFileCitations(dir, laneID, brief string) string {
 		if err != nil || info.IsDir() {
 			continue
 		}
-		content := clip(stripMarker(readText(resolved)), maxInlinedRunFileBytes)
+		content := clipRunFileContent(stripMarker(readText(resolved)), maxInlinedRunFileBytes)
 		header := fmt.Sprintf("Inlined from %s:", rel)
 		if content == "" || strings.Contains(out, header) || strings.Contains(out, content) {
 			continue

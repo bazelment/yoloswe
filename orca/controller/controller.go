@@ -2460,13 +2460,19 @@ func isWrongRepoText(text, wantRepo string) bool {
 		if idx < 0 {
 			continue
 		}
-		rest := strings.TrimSpace(s[idx+len(prefix):])
-		if strings.Contains(rest, " instead of ") {
+		clause := strings.TrimSpace(s[idx+len(prefix):])
+		for _, sep := range []string{"\n", ";", ". "} {
+			clause, _, _ = strings.Cut(clause, sep)
+		}
+		word, _, _ := strings.Cut(clause, " ")
+		word = strings.Trim(word, ".,;:()[]\"'`")
+		if !lane.IsRepositorySlug(word) || isLikelyBranchName(word) {
+			continue
+		}
+		if strings.Contains(clause, " instead of ") {
 			return true
 		}
-		word, _, _ := strings.Cut(rest, " ")
-		word = strings.Trim(word, ".,;:()[]\"'`")
-		if !lane.IsRepositorySlug(word) || !lane.IsRepositorySlug(wantRepo) {
+		if !lane.IsRepositorySlug(wantRepo) {
 			continue
 		}
 		if !strings.EqualFold(lane.NormalizeRepositorySlug(word), lane.NormalizeRepositorySlug(wantRepo)) {
@@ -2474,6 +2480,19 @@ func isWrongRepoText(text, wantRepo string) bool {
 		}
 	}
 	return false
+}
+
+func isLikelyBranchName(slug string) bool {
+	owner, _, ok := strings.Cut(strings.ToLower(strings.TrimSpace(slug)), "/")
+	if !ok {
+		return false
+	}
+	switch owner {
+	case "feat", "feature", "fix", "bugfix", "hotfix", "chore", "refactor", "docs", "test", "ci", "release", "swarm-lane", "refs", "origin", "heads":
+		return true
+	default:
+		return false
+	}
 }
 
 func wrongRepoActionKey(ln *lane.Lane) string {

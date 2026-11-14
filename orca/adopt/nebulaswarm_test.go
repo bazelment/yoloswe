@@ -810,7 +810,9 @@ func TestAdoptedNebulaSwarmSpawnUsesConfigRepo(t *testing.T) {
 	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"`+wantRepoID+`","orchestrator_session_id":"sess-orch","merge":"none",
 "phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
 "tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
-	os.Remove(filepath.Join(dir, ".repo-slug"))
+	// Keep .repo-slug present so both RepositoryID and Repository slug are set,
+	// proving that an exact repositoryId match short-circuits even when gitUrl
+	// points to an internal mirror with a different slug.
 
 	var gotRepoID atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1031,6 +1033,53 @@ func TestAdoptedSpawnReleasesSessionInWrongRepo(t *testing.T) {
 	if got, _ := released.Load().(string); got != "018a40aa" {
 		t.Fatalf("released session when repositoryId omitted = %q, want 018a40aa", got)
 	}
+
+	// Also verify that if Nebula omits both repositoryId and gitUrl on create
+	// and GetSession, verifySessionRepository fails closed, releases the session,
+	// and refuses the spawn.
+	released.Store("")
+	srvOmittedBoth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"session":{"id":"018a40ab","status":"ready"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions/018a40ab":
+			_, _ = io.WriteString(w, `{"session":{"id":"018a40ab","status":"ready"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions/018a40ab/release":
+			released.Store("018a40ab")
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srvOmittedBoth.Close()
+
+	drvOmittedBoth, err := nebula.New(nebula.Config{
+		APIURL: srvOmittedBoth.URL,
+		Token:  "test-token",
+		Clock:  clk,
+		Events: st.Events(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = drvOmittedBoth.SpawnSession(t.Context(), lane.SpawnRequest{
+		RunID:        nsRun,
+		RepositoryID: wantRepoID,
+		LaneID:       "m2-gaps3",
+		Phase:        "swe",
+		Round:        1,
+		Harness:      "claude",
+		Brief:        "test",
+	})
+	if err == nil || !strings.Contains(err.Error(), "omitted repositoryId and gitUrl") {
+		t.Fatalf("SpawnSession with both repositoryId and gitUrl omitted = %v, want omitted repositoryId and gitUrl error", err)
+	}
+	if got, _ := released.Load().(string); got != "018a40ab" {
+		t.Fatalf("released session when both fields omitted = %q, want 018a40ab", got)
+	}
 }
 
 func TestAdoptedBriefCitingObjectiveInlinesItems(t *testing.T) {
@@ -1176,8 +1225,8 @@ func TestAdoptedWrongRepoLaneReportRespawnsInsteadOfSteering(t *testing.T) {
 			Phase:      "swe",
 			Round:      1,
 			Outcome:    lane.OutcomeNeedsInput,
-			Summary:    "checked out on main and checked out to sycamore-labs/nebula; waiting on PR in another repository.",
-			Raw:        "Outcome: needs-input\nchecked out on main and checked out to sycamore-labs/nebula; waiting on PR in another repository.",
+			Summary:    "checked out on main, checked out to feature/foo, and checked out to sycamore-labs/nebula; waiting on PR in another repository.\nShould we use X instead of Y?",
+			Raw:        "Outcome: needs-input\nchecked out on main, checked out to feature/foo, and checked out to sycamore-labs/nebula; waiting on PR in another repository.\nShould we use X instead of Y?",
 		},
 	})
 	waitFor(t, func() bool {
@@ -1280,5 +1329,32 @@ func TestAdoptedSubagentSwarmEnvRepoUsedOnSpawn(t *testing.T) {
 
 	if len(drv.Spawns) != 1 || drv.Spawns[0].RepositoryID != wantRepoID || drv.Spawns[0].Repository != "sycamore-labs/nebula" {
 		t.Fatalf("Spawns = %+v, want RepositoryID=%q Repository=sycamore-labs/nebula", drv.Spawns, wantRepoID)
+	}
+}
+
+func TestNormalizeRepositorySlugTable(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		raw      string
+		wantSlug string
+		wantIs   bool
+	}{
+		{"sycamore-labs/nebula", "sycamore-labs/nebula", true},
+		{"https://github.com/sycamore-labs/nebula.git", "sycamore-labs/nebula", true},
+		{"https://token@github.com/sycamore-labs/nebula.GIT/", "sycamore-labs/nebula", true},
+		{"ssh://git@gitlab.example.com/sycamore-labs/nebula.git/", "sycamore-labs/nebula", true},
+		{"git@github.com:sycamore-labs/nebula.git", "sycamore-labs/nebula", true},
+		{"2a19e6e7-939e-44b2-a80f-8980030efc50", "2a19e6e7-939e-44b2-a80f-8980030efc50", false},
+		{"main", "main", false},
+		{"a/b/c", "a/b/c", false},
+		{"", "", false},
+	}
+	for _, tc := range cases {
+		if got := lane.NormalizeRepositorySlug(tc.raw); got != tc.wantSlug {
+			t.Errorf("NormalizeRepositorySlug(%q) = %q, want %q", tc.raw, got, tc.wantSlug)
+		}
+		if got := lane.IsRepositorySlug(tc.raw); got != tc.wantIs {
+			t.Errorf("IsRepositorySlug(%q) = %v, want %v", tc.raw, got, tc.wantIs)
+		}
 	}
 }

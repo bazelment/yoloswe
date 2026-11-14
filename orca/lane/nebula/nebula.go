@@ -683,6 +683,7 @@ func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*Ses
 	}
 	baseBranch := cmp.Or(strings.TrimSpace(req.BaseBranch), d.baseBranch)
 
+	requireVerified := strings.TrimSpace(req.RepositoryID) != "" || strings.TrimSpace(req.Repository) != ""
 	repoID, repoSlug, err := d.resolveTargetRepository(ctx, req.RepositoryID, req.Repository)
 	if err != nil {
 		return nil, err
@@ -697,7 +698,7 @@ func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*Ses
 		if err != nil {
 			return nil, err
 		}
-		if err := d.verifySessionRepository(ctx, *settled, repoID, repoSlug); err != nil {
+		if err := d.verifySessionRepository(ctx, *settled, repoID, repoSlug, requireVerified); err != nil {
 			if relErr := d.ReleaseSession(ctx, settled.ID, true); relErr != nil {
 				return nil, errors.Join(err, fmt.Errorf("release mismatched session %s: %w", settled.ID, relErr))
 			}
@@ -745,7 +746,7 @@ func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*Ses
 	if err != nil {
 		return nil, err
 	}
-	if err := d.verifySessionRepository(ctx, *settled, repoID, repoSlug); err != nil {
+	if err := d.verifySessionRepository(ctx, *settled, repoID, repoSlug, requireVerified); err != nil {
 		if relErr := d.ReleaseSession(ctx, settled.ID, true); relErr != nil {
 			return nil, errors.Join(err, fmt.Errorf("release mismatched session %s: %w", settled.ID, relErr))
 		}
@@ -1806,17 +1807,29 @@ func (d *Driver) lookupRepositoryID(ctx context.Context, target string) (string,
 	return "", fmt.Errorf("nebula resolve repository id: no matching repository found for %q", target)
 }
 
-func (d *Driver) verifySessionRepository(ctx context.Context, sess SessionInfo, wantRepoID, wantRepoSlug string) error {
+func (d *Driver) verifySessionRepository(ctx context.Context, sess SessionInfo, wantRepoID, wantRepoSlug string, requireVerified bool) error {
 	gotID := strings.TrimSpace(sess.RepositoryID)
-	if gotID != "" && wantRepoID != "" && gotID != wantRepoID {
-		return fmt.Errorf("nebula session %s repositoryId %q does not match expected %q", sess.ID, gotID, wantRepoID)
-	}
 	gotSlug := lane.NormalizeRepositorySlug(sess.GitURL)
-	if gotSlug != "" {
-		if wantRepoSlug != "" && !strings.EqualFold(gotSlug, wantRepoSlug) {
-			return fmt.Errorf("nebula session %s gitUrl %q does not match expected repository %q", sess.ID, sess.GitURL, wantRepoSlug)
+	if requireVerified && gotID == "" && gotSlug == "" && sess.ID != "" {
+		if detail, err := d.GetSession(ctx, sess.ID); err == nil {
+			gotID = strings.TrimSpace(detail.Session.RepositoryID)
+			gotSlug = lane.NormalizeRepositorySlug(detail.Session.GitURL)
 		}
-		if gotID == "" && wantRepoSlug == "" && wantRepoID != "" && !strings.EqualFold(gotSlug, wantRepoID) {
+	}
+	if gotID != "" && wantRepoID != "" {
+		if gotID != wantRepoID {
+			return fmt.Errorf("nebula session %s repositoryId %q does not match expected %q", sess.ID, gotID, wantRepoID)
+		}
+		return nil
+	}
+	if gotSlug != "" {
+		if wantRepoSlug != "" {
+			if !strings.EqualFold(gotSlug, wantRepoSlug) {
+				return fmt.Errorf("nebula session %s gitUrl %q does not match expected repository %q", sess.ID, sess.GitURL, wantRepoSlug)
+			}
+			return nil
+		}
+		if wantRepoID != "" && !strings.EqualFold(gotSlug, wantRepoID) {
 			resolvedID, err := d.lookupRepositoryID(ctx, gotSlug)
 			if err != nil {
 				return fmt.Errorf("nebula session %s verify gitUrl %q against expected repository %q: %w", sess.ID, sess.GitURL, wantRepoID, err)
@@ -1824,7 +1837,11 @@ func (d *Driver) verifySessionRepository(ctx context.Context, sess SessionInfo, 
 			if resolvedID != wantRepoID {
 				return fmt.Errorf("nebula session %s gitUrl %q (repository %q) does not match expected %q", sess.ID, sess.GitURL, resolvedID, wantRepoID)
 			}
+			return nil
 		}
+	}
+	if requireVerified && (wantRepoID != "" || wantRepoSlug != "") {
+		return fmt.Errorf("nebula session %s omitted repositoryId and gitUrl; cannot verify expected repository %q", sess.ID, cmp.Or(wantRepoSlug, wantRepoID))
 	}
 	return nil
 }
