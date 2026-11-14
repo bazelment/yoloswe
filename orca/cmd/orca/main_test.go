@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1883,10 +1885,97 @@ func TestRoleResolution(t *testing.T) {
 	}
 }
 
+func clearRoleModelEnvironment(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{"ORCH_MODEL_PROVIDER", "OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "LLM_GATEWAY_URL", "NEBULA_LLM_KEY"} {
+		t.Setenv(key, "")
+	}
+}
+
+func TestNoFlagsHTTPRoleDefaults(t *testing.T) {
+	clearRoleModelEnvironment(t)
+	for _, key := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "NEBULA_LLM_KEY", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "LLM_GATEWAY_URL"} {
+		t.Run(key, func(t *testing.T) {
+			t.Setenv(key, "test-http-config")
+			for _, cmd := range []string{"orca", "chat", "run"} {
+				cfg, _, err := parseFlags(cmd, nil, io.Discard)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for role, want := range map[string]RoleSelection{
+					"dispatcher": {Provider: "anthropic", Model: "claude-sonnet-5-5"},
+					"planner":    {Provider: "anthropic", Model: "claude-opus-5-5", Effort: "high"},
+					"critic":     {Provider: "openai", Model: "gpt-6.1-sol"},
+				} {
+					if got := cfg.Models.Roles[role]; got != want {
+						t.Errorf("%s %s = %+v, want %+v", cmd, role, got, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRoleModelFlagsOverrideDefaults(t *testing.T) {
+	clearRoleModelEnvironment(t)
+	for _, httpConfigured := range []bool{false, true} {
+		t.Run(fmt.Sprint(httpConfigured), func(t *testing.T) {
+			if httpConfigured {
+				t.Setenv("OPENAI_API_KEY", "test-key")
+			}
+			cfg, _, err := parseFlags("run", []string{"--planner-model", "custom-opus", "--dispatcher-model", "custom-sonnet"}, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Models.Planner != "custom-opus" || cfg.Models.Dispatcher != "custom-sonnet" || cfg.Models.Roles["planner"].Model != "custom-opus" || cfg.Models.Roles["dispatcher"].Model != "custom-sonnet" {
+				t.Fatalf("models = %+v", cfg.Models)
+			}
+		})
+	}
+}
+
+func TestModelDefaultHelp(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{{"--help"}, {"run", "--help"}, {"chat", "--help"}} {
+		var out bytes.Buffer
+		err := Execute(t.Context(), args, strings.NewReader(""), &out, &out)
+		if err != nil && !errors.Is(err, flag.ErrHelp) {
+			t.Fatal(err)
+		}
+		for _, modelName := range []string{"claude-sonnet-5-5", "claude-opus-5-5"} {
+			if !strings.Contains(out.String(), modelName) {
+				t.Errorf("%v help missing %s: %s", args, modelName, out.String())
+			}
+		}
+	}
+}
+
+func TestCriticDefaultsFollowPlannerVendor(t *testing.T) {
+	clearRoleModelEnvironment(t)
+	for _, tc := range []struct {
+		planner, critic, model string
+	}{
+		{"anthropic", "openai", "gpt-6.1-sol"},
+		{"openai", "anthropic", "claude-sonnet-5-5"},
+		{"claude-cli", "codex-cli", "gpt-6.1-sol"},
+		{"codex-cli", "claude-cli", "claude-sonnet-5-5"},
+	} {
+		t.Run(tc.planner, func(t *testing.T) {
+			cfg, _, err := parseFlags("run", []string{"--model-provider", tc.planner}, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.Models.Roles["critic"]; got.Provider != tc.critic || got.Model != tc.model {
+				t.Fatalf("critic = %+v, want %s / %s", got, tc.critic, tc.model)
+			}
+		})
+	}
+}
+
 func TestDefaultRoleModelsUseCurrentProviderIDs(t *testing.T) {
 	for provider, want := range map[string]map[string]string{
 		"anthropic": {
-			"planner": "claude-opus-4-6", "critic": "gpt-6.1-sol",
+			"planner": "claude-opus-5-5", "critic": "gpt-6.1-sol",
 			"dispatcher": "claude-sonnet-5-5", "concierge": "claude-haiku-5-5", "router": "claude-haiku-5-5",
 		},
 		"openai": {
@@ -1908,7 +1997,7 @@ func TestDefaultRoleModelsUseCurrentProviderIDs(t *testing.T) {
 func TestRoleConfigPrecedenceAndValidation(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "roles.json")
-	if err := os.WriteFile(path, []byte(`{"run_id":"roles","models":{"roles":{"planner":{"provider":"anthropic","model":"old","effort":"medium"},"critic":{"provider":"openai"},"router":{"provider":"anthropic","model":"cheap"}}}}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"run_id":"roles","models":{"roles":{"planner":{"provider":"anthropic","model":"old","effort":"medium"},"dispatcher":{"provider":"openai","model":"custom-dispatcher"},"critic":{"provider":"openai"},"router":{"provider":"anthropic","model":"cheap"}}}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, _, err := parseFlags("run", []string{"--store", "memory", "--config", path, "--planner-model", "new", "--planner-effort", "high"}, io.Discard)
@@ -1918,7 +2007,7 @@ func TestRoleConfigPrecedenceAndValidation(t *testing.T) {
 	if err := cfg.Validate(true); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Models.Roles["planner"] != (RoleSelection{Provider: "anthropic", Model: "new", Effort: "high"}) || cfg.Models.Roles["router"].Model != "cheap" {
+	if cfg.Models.Roles["planner"] != (RoleSelection{Provider: "anthropic", Model: "new", Effort: "high"}) || cfg.Models.Roles["dispatcher"] != (RoleSelection{Provider: "openai", Model: "custom-dispatcher"}) || cfg.Models.Roles["router"].Model != "cheap" {
 		t.Fatalf("roles: %+v", cfg.Models.Roles)
 	}
 	cfg.Models.Roles["critic"] = RoleSelection{Provider: "anthropic", Model: "same"}
@@ -2278,8 +2367,7 @@ func TestRoleProviderRoutingAndExplicitGateway(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	t.Setenv("ANTHROPIC_BASE_URL", server.URL)
-	t.Setenv("ORCH_MODEL_PROVIDER", "")
+	clearRoleModelEnvironment(t)
 	cfg := Config{LLMGatewayURL: server.URL}.withDefaults()
 	client, err := openModelClient(cfg, clock.NewRealClock())
 	if err != nil {
@@ -2291,7 +2379,7 @@ func TestRoleProviderRoutingAndExplicitGateway(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := "OpenAI"
-		if role == "critic" {
+		if role == "planner" || role == "dispatcher" {
 			want = "Anthropic"
 		}
 		if got.Text() != want {
@@ -2396,17 +2484,22 @@ func TestConciergeRunControl(t *testing.T) {
 }
 
 func TestCredentiallessRoles(t *testing.T) {
-	for _, key := range []string{"ORCH_MODEL_PROVIDER", "OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "LLM_GATEWAY_URL", "NEBULA_LLM_KEY"} {
-		t.Setenv(key, "")
-	}
-	cfg := Config{DriverKind: "fake"}.withDefaults()
-	for _, role := range []string{"planner", "critic", "dispatcher", "concierge", "router"} {
-		want := "claude-cli"
-		if role == "planner" {
-			want = "codex-cli"
+	clearRoleModelEnvironment(t)
+	for _, cmd := range []string{"orca", "chat", "run"} {
+		cfg, _, err := parseFlags(cmd, nil, io.Discard)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if got := cfg.Models.Roles[role].Provider; got != want {
-			t.Errorf("%s provider = %s, want %s", role, got, want)
+		for role, want := range map[string]RoleSelection{
+			"dispatcher": {Provider: "claude-cli", Model: "claude-sonnet-5-5"},
+			"planner":    {Provider: "claude-cli", Model: "claude-opus-5-5", Effort: "high"},
+			"critic":     {Provider: "codex-cli", Model: "gpt-6.1-sol"},
+			"concierge":  {Provider: "claude-cli", Model: "claude-haiku-5-5"},
+			"router":     {Provider: "claude-cli", Model: "claude-haiku-5-5"},
+		} {
+			if got := cfg.Models.Roles[role]; got != want {
+				t.Errorf("%s %s = %+v, want %+v", cmd, role, got, want)
+			}
 		}
 	}
 }

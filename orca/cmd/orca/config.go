@@ -51,10 +51,10 @@ func nextUniqueID(prefix string, clk clock.Clock) string {
 }
 
 const (
-	DefaultDispatcherModel       = dispatcher.DefaultModel
+	DefaultDispatcherModel       = "claude-sonnet-5-5"
 	DefaultDispatcherHardModel   = dispatcher.DefaultHardBatchModel
 	DefaultConciergeModel        = "claude-haiku-5-5"
-	DefaultPlannerModel          = recipe.DefaultCompilerModel
+	DefaultPlannerModel          = "claude-opus-5-5"
 	DefaultOpenAIDispatcherModel = "gpt-6.1-sol"
 	DefaultOpenAIConciergeModel  = "gpt-6.1-sol"
 	DefaultOpenAIPlannerModel    = "gpt-6-astra"
@@ -103,31 +103,28 @@ func providerVendor(provider string) string {
 	}
 }
 
-func (m RoleModels) withDefaults(provider string) RoleModels {
+func (m RoleModels) withDefaults(provider string, httpConfigured bool) RoleModels {
 	m.Roles = maps.Clone(m.Roles)
 	if m.Roles == nil {
 		m.Roles = map[string]RoleSelection{}
 	}
 	defaultProvider := strings.ToLower(strings.TrimSpace(provider))
-	credentialless := defaultProvider == "" && !hasModelEnvironment()
-	if defaultProvider == "" {
+	automatic := defaultProvider == ""
+	if automatic {
 		defaultProvider = "openai"
-		if !hasModelEnvironment() {
-			defaultProvider = "codex-cli"
+		if !httpConfigured {
+			defaultProvider = "claude-cli"
 		}
-	}
-	plannerProvider := strings.ToLower(strings.TrimSpace(m.Roles["planner"].Provider))
-	if plannerProvider == "" {
-		plannerProvider = defaultProvider
 	}
 	legacy := map[string]string{"dispatcher": m.Dispatcher, "planner": m.Planner, "concierge": m.Concierge}
 	for _, role := range []string{"planner", "dispatcher", "concierge", "router", "critic"} {
 		sel := m.Roles[role]
 		fallbackProvider := defaultProvider
-		if credentialless && role != "planner" {
-			fallbackProvider = "claude-cli"
+		if automatic && httpConfigured && (role == "planner" || role == "dispatcher") {
+			fallbackProvider = "anthropic"
 		}
 		if role == "critic" {
+			plannerProvider := m.Roles["planner"].Provider
 			fallbackProvider = "anthropic"
 			if providerVendor(plannerProvider) == "anthropic" {
 				fallbackProvider = "openai"
@@ -219,11 +216,7 @@ func (c Config) withDefaults() Config {
 		c.Once = true
 	}
 	c.ModelProvider = strings.ToLower(cmp.Or(strings.TrimSpace(c.ModelProvider), strings.TrimSpace(os.Getenv("ORCH_MODEL_PROVIDER"))))
-	roleProvider := c.ModelProvider
-	if roleProvider == "" && strings.TrimSpace(c.LLMGatewayURL) != "" {
-		roleProvider = "openai"
-	}
-	c.Models = c.Models.withDefaults(roleProvider)
+	c.Models = c.Models.withDefaults(c.ModelProvider, hasModelEnvironment() || strings.TrimSpace(c.LLMGatewayURL) != "")
 	c.StoreSpec = cmp.Or(strings.TrimSpace(c.StoreSpec), DefaultStoreSpec)
 	c.DriverKind = cmp.Or(strings.ToLower(strings.TrimSpace(c.DriverKind)), DefaultDriverKind)
 	c.LLMGatewayURL = strings.TrimSpace(c.LLMGatewayURL)
@@ -457,10 +450,10 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.StringVar(&cfg.DriverKind, "driver", "", "Worker lane driver: nebula or fake (default nebula)")
 	fs.StringVar(&cfg.ModelProvider, "model-provider", "", "Model provider: anthropic, openai, claude-cli, or codex-cli")
 	fs.StringVar(&cfg.LLMGatewayURL, "llm-gateway-url", "", "Messages API / llm-gateway base URL")
-	fs.StringVar(&cfg.Models.Dispatcher, "dispatcher-model", "", "Model for Dispatcher turns")
+	fs.StringVar(&cfg.Models.Dispatcher, "dispatcher-model", "", "Model for Dispatcher turns (default "+DefaultDispatcherModel+")")
 	fs.StringVar(&cfg.Models.DispatcherHard, "dispatcher-hard-model", "", "Escalation model for hard Dispatcher batches")
 	fs.StringVar(&cfg.Models.Concierge, "concierge-model", "", "Model for Concierge chat turns")
-	fs.StringVar(&cfg.Models.Planner, "planner-model", "", "Model for Planner compilation and replanning turns")
+	fs.StringVar(&cfg.Models.Planner, "planner-model", "", "Model for Planner compilation and replanning turns (default "+DefaultPlannerModel+")")
 	for _, role := range []string{"planner", "critic", "dispatcher", "concierge", "router"} {
 		for _, field := range []string{"provider", "model", "effort"} {
 			if field == "model" && (role == "planner" || role == "dispatcher" || role == "concierge") {
@@ -720,11 +713,8 @@ func openModelClient(cfg Config, clk clock.Clock) (model.ModelClient, error) {
 		anthropicOpts = append(anthropicOpts, model.WithClock(clk))
 	}
 	if cfg.LLMGatewayURL != "" {
-		if cmp.Or(cfg.ModelProvider, "openai") == "openai" {
-			openOpts = append(openOpts, model.WithOpenAIBaseURL(cfg.LLMGatewayURL))
-		} else {
-			anthropicOpts = append(anthropicOpts, model.WithBaseURL(cfg.LLMGatewayURL))
-		}
+		openOpts = append(openOpts, model.WithOpenAIBaseURL(cfg.LLMGatewayURL))
+		anthropicOpts = append(anthropicOpts, model.WithBaseURL(cfg.LLMGatewayURL))
 	}
 	clients := map[string]model.ModelClient{"openai": model.NewOpenAIClient(openOpts...), "anthropic": model.NewHTTPClient(anthropicOpts...), "claude-cli": model.NewCLIClient("claude-cli"), "codex-cli": model.NewCLIClient("codex-cli")}
 	var client model.ModelClient = modelClientFunc(func(ctx context.Context, req model.Request) (*model.Response, error) {

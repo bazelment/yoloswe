@@ -34,6 +34,28 @@ func TestDefaultRecipe(t *testing.T) {
 	if def.FirstPhase() != recipe.PhaseSWE {
 		t.Fatalf("FirstPhase() = %q, want %q", def.FirstPhase(), recipe.PhaseSWE)
 	}
+	wantAgents := map[string][]recipe.AgentSpec{
+		recipe.PhaseSWE: {
+			{Harness: "claude", Model: "opus", Effort: "high"},
+			{Harness: "codex", Model: "gpt-6.1-sol", Effort: "high"},
+		},
+		recipe.PhaseClean: {
+			{Harness: "claude", Model: "sonnet", Effort: "medium"},
+			{Harness: "codex", Model: "gpt-6.1-sol", Effort: "medium"},
+		},
+		recipe.PhaseReview: {
+			{Harness: "claude", Model: "sonnet", Effort: "high"},
+			{Harness: "codex", Model: "gpt-6.1-sol", Effort: "high"},
+		},
+		recipe.PhaseIntegrate: {
+			{Harness: "claude", Model: "sonnet", Effort: "medium"},
+		},
+	}
+	for _, phase := range def.Phases {
+		if want := wantAgents[phase.Name]; !slices.Equal(phase.Agents, want) {
+			t.Errorf("%s agents = %+v, want %+v", phase.Name, phase.Agents, want)
+		}
+	}
 
 	tr1, judg := def.MatchTransitions(recipe.PhaseSWE, recipe.OutcomeDone, false, 1)
 	if tr1 == nil || tr1.To != recipe.PhaseClean || len(judg) != 0 {
