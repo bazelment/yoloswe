@@ -115,7 +115,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) error {
 		if ln.Status.Terminal() && ln.SessionID != "" {
 			if releaser, ok := d.driver.(lane.SessionReleaser); ok {
 				if err := releaser.ReleaseSession(ctx, ln.SessionID, true); err != nil {
-					return fmt.Errorf("release completed lane session %s: %w", ln.SessionID, err)
+					slog.Warn("release completed lane session during adoption", "session", ln.SessionID, "error", err)
 				}
 			}
 		}
