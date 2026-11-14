@@ -368,20 +368,22 @@ func splitHeader(line string) (string, string, bool) {
 
 // SpawnRequest holds the parameters to spawn a new worker session for a lane.
 type SpawnRequest struct {
-	RunDir     string            `json:"run_dir,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
-	RunID      string            `json:"run_id"`
-	LaneID     string            `json:"lane_id"`
-	Phase      string            `json:"phase"`
-	Harness    string            `json:"harness"`
-	Model      string            `json:"model"`
-	Effort     string            `json:"effort,omitempty"`
-	Brief      string            `json:"brief"`
-	Branch     string            `json:"branch,omitempty"`
-	BaseBranch string            `json:"base_branch,omitempty"`
-	Worktree   string            `json:"worktree,omitempty"`
-	Round      int               `json:"round"`
-	SharedHome bool              `json:"shared_home,omitempty"`
+	RunDir       string            `json:"run_dir,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	RunID        string            `json:"run_id"`
+	Repository   string            `json:"repository,omitempty"`
+	RepositoryID string            `json:"repository_id,omitempty"`
+	LaneID       string            `json:"lane_id"`
+	Phase        string            `json:"phase"`
+	Harness      string            `json:"harness"`
+	Model        string            `json:"model"`
+	Effort       string            `json:"effort,omitempty"`
+	Brief        string            `json:"brief"`
+	Branch       string            `json:"branch,omitempty"`
+	BaseBranch   string            `json:"base_branch,omitempty"`
+	Worktree     string            `json:"worktree,omitempty"`
+	Round        int               `json:"round"`
+	SharedHome   bool              `json:"shared_home,omitempty"`
 }
 
 // SpawnResult describes a newly spawned worker session and initial phase terminal.
@@ -398,17 +400,19 @@ type SpawnResult struct {
 
 // StartPhaseRequest starts a phase terminal on an existing or new worker session.
 type StartPhaseRequest struct {
-	RunDir    string            `json:"run_dir,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-	RunID     string            `json:"run_id"`
-	LaneID    string            `json:"lane_id"`
-	SessionID string            `json:"session_id,omitempty"`
-	Phase     string            `json:"phase"`
-	Harness   string            `json:"harness"`
-	Model     string            `json:"model"`
-	Effort    string            `json:"effort,omitempty"`
-	Brief     string            `json:"brief"`
-	Round     int               `json:"round"`
+	RunDir       string            `json:"run_dir,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	RunID        string            `json:"run_id"`
+	Repository   string            `json:"repository,omitempty"`
+	RepositoryID string            `json:"repository_id,omitempty"`
+	LaneID       string            `json:"lane_id"`
+	SessionID    string            `json:"session_id,omitempty"`
+	Phase        string            `json:"phase"`
+	Harness      string            `json:"harness"`
+	Model        string            `json:"model"`
+	Effort       string            `json:"effort,omitempty"`
+	Brief        string            `json:"brief"`
+	Round        int               `json:"round"`
 }
 
 // StartPhaseResult describes the started phase terminal.
@@ -690,4 +694,32 @@ func AppendReportInstructions(text, instructions string, maxBytes int) string {
 		return instructions
 	}
 	return text + separator + instructions
+}
+
+// NormalizeRepositorySlug extracts a canonical "owner/repo" slug (or trimmed
+// identifier when not a URL/slug) from a git remote URL or repository string.
+func NormalizeRepositorySlug(raw string) string {
+	s := strings.TrimSpace(raw)
+	if schemeIdx := strings.Index(s, "://"); schemeIdx >= 0 {
+		rest := s[schemeIdx+3:]
+		if slashIdx := strings.IndexByte(rest, '/'); slashIdx >= 0 {
+			s = rest[slashIdx+1:]
+		}
+	} else if atIdx := strings.IndexByte(s, '@'); atIdx >= 0 {
+		if colonIdx := strings.IndexByte(s[atIdx+1:], ':'); colonIdx >= 0 {
+			s = s[atIdx+1+colonIdx+1:]
+		}
+	}
+	s = strings.Trim(s, "/")
+	if len(s) > 4 && strings.EqualFold(s[len(s)-4:], ".git") {
+		s = s[:len(s)-4]
+	}
+	return strings.Trim(s, "/")
+}
+
+// IsRepositorySlug reports whether raw normalizes to an "owner/repo" slug.
+func IsRepositorySlug(raw string) bool {
+	slug := NormalizeRepositorySlug(raw)
+	owner, repo, ok := strings.Cut(slug, "/")
+	return ok && owner != "" && repo != "" && !strings.Contains(repo, "/")
 }

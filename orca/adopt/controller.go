@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
@@ -115,11 +116,13 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		return err
 	}
 	generation := journal.Marker
+	populateRunRepo(&r)
 	workflow, lanes, items, err := controllerState(r)
 	if err != nil {
 		return err
 	}
-	if err := d.store.Runs().Create(ctx, store.Run{ID: r.ID, Repository: r.Repo, Objective: r.Goal, DefaultRecipe: workflow.Name}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+	repo := cmp.Or(r.Repo, r.RepoID)
+	if err := d.store.Runs().Create(ctx, store.Run{ID: r.ID, Repository: repo, Objective: r.Goal, DefaultRecipe: workflow.Name}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		return err
 	}
 	holder := cmp.Or(strings.TrimSpace(r.Holder), fmt.Sprintf("orca-adopt:%p", d))
@@ -206,6 +209,11 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	runDriver := d.driver
 	if runDriver != nil {
 		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: d.store}
+		if ds, ok := dispatch.(interface{ SetDriver(lane.LaneDriver) }); ok {
+			ds.SetDriver(runDriver)
+		} else if dispatch != nil {
+			slog.DebugContext(ctx, "orca/adopt: judge does not implement SetDriver; adoptedRunDriver not attached to judge", "run_id", r.ID)
+		}
 	}
 	ctrl = controller.New(controller.Config{RunID: r.ID, HolderID: holder, PRProbe: d.PRProbe}, d.store, runDriver, d.clock, d.judge(holder, dispatch))
 	// Fail synchronously if another process still holds the controller lease.
@@ -652,11 +660,17 @@ func hostMission(dir, id, brief string) (string, error) {
 	for _, path := range paths {
 		b, err := os.ReadFile(path)
 		if err == nil {
-			return string(b), nil
+			return inlineRunFileCitations(dir, id, string(b)), nil
 		}
 		if !errors.Is(err, os.ErrNotExist) {
 			return "", err
 		}
+	}
+	if strings.TrimSpace(brief) != "" {
+		return inlineRunFileCitations(dir, id, brief), nil
+	}
+	if obj := stripMarker(readText(filepath.Join(dir, "OBJECTIVE.md"))); obj != "" && containsWord(obj, id) {
+		return obj, nil
 	}
 	return "", nil
 }
@@ -771,28 +785,57 @@ func (d *adoptedRunDriver) ReportInstructions(runID, laneID, phase string, round
 }
 
 func (d *adoptedRunDriver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
-	if d.run.Format == FormatNebulaSwarm {
-		if req.RunDir == "" {
-			req.RunDir = d.run.Dir
-		}
-		req.Brief = d.expandNebulaSwarmBrief(ctx, req.LaneID, req.Phase, req.Brief)
+	repoID, repo := d.resolveRepository(req.RepositoryID, req.Repository)
+	if repoID == "" && repo == "" {
+		return lane.SpawnResult{}, fmt.Errorf("spawn lane %s for adopted run %s: repository is not configured", req.LaneID, cmp.Or(req.RunID, d.run.ID))
 	}
+	req.RepositoryID = cmp.Or(repoID, req.RepositoryID)
+	req.Repository = cmp.Or(repo, repoID, req.Repository)
+	if req.RunDir == "" {
+		req.RunDir = d.run.Dir
+	}
+	req.Brief = d.expandRunBrief(ctx, req.LaneID, req.Phase, req.Brief)
 	return d.LaneDriver.SpawnSession(ctx, req)
 }
 
 func (d *adoptedRunDriver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (lane.StartPhaseResult, error) {
-	if d.run.Format == FormatNebulaSwarm {
-		if req.RunDir == "" {
-			req.RunDir = d.run.Dir
-		}
-		req.Brief = d.expandNebulaSwarmBrief(ctx, req.LaneID, req.Phase, req.Brief)
+	repoID, repo := d.resolveRepository(req.RepositoryID, req.Repository)
+	if strings.TrimSpace(req.SessionID) == "" && repoID == "" && repo == "" {
+		return lane.StartPhaseResult{}, fmt.Errorf("start phase %s on lane %s for adopted run %s: repository is not configured", req.Phase, req.LaneID, cmp.Or(req.RunID, d.run.ID))
 	}
+	req.RepositoryID = cmp.Or(repoID, req.RepositoryID)
+	req.Repository = cmp.Or(repo, repoID, req.Repository)
+	if req.RunDir == "" {
+		req.RunDir = d.run.Dir
+	}
+	req.Brief = d.expandRunBrief(ctx, req.LaneID, req.Phase, req.Brief)
 	return d.LaneDriver.StartPhaseTerminal(ctx, req)
 }
 
-func (d *adoptedRunDriver) expandNebulaSwarmBrief(ctx context.Context, laneID, phase, brief string) string {
-	out := strings.ReplaceAll(brief, "@LANE@", laneID)
-	if validatePathComponent("lane id", laneID) == nil && validatePathComponent("phase", phase) == nil {
+func populateRunRepo(r *Run) {
+	if r == nil || r.Dir == "" || (r.Repo != "" && r.RepoID != "") {
+		return
+	}
+	if loaded, err := Read(r.Dir); err == nil {
+		r.Repo = cmp.Or(r.Repo, loaded.Repo)
+		r.RepoID = cmp.Or(r.RepoID, loaded.RepoID)
+	}
+}
+
+func (d *adoptedRunDriver) resolveRepository(reqRepoID, reqRepo string) (repoID, repo string) {
+	tmp := d.run
+	applyRepoValue(&tmp, reqRepoID)
+	applyRepoValue(&tmp, reqRepo)
+	if tmp.Repo == "" && tmp.RepoID != "" {
+		tmp.Repo = tmp.RepoID
+	}
+	return tmp.RepoID, tmp.Repo
+}
+
+func (d *adoptedRunDriver) expandRunBrief(ctx context.Context, laneID, phase, brief string) string {
+	body, tail := splitReportTail(brief)
+	out := strings.ReplaceAll(body, "@LANE@", laneID)
+	if d.run.Format == FormatNebulaSwarm && validatePathComponent("lane id", laneID) == nil && validatePathComponent("phase", phase) == nil {
 		for _, name := range []string{laneID + "." + phase + ".brief", laneID + "." + phase + ".prompt"} {
 			if custom := strings.TrimSpace(readText(filepath.Join(d.run.Dir, name))); custom != "" && !strings.Contains(out, custom) {
 				out = custom + "\n\n" + out
@@ -803,13 +846,84 @@ func (d *adoptedRunDriver) expandNebulaSwarmBrief(ctx context.Context, laneID, p
 	if d.store != nil {
 		if ln, err := d.store.Lanes().Get(ctx, d.run.ID, laneID); err == nil && ln != nil {
 			out = strings.ReplaceAll(out, "@BRANCH@", ln.Branch)
-			if phase == recipe.PhaseReview && ln.PR > 0 {
+			if d.run.Format == FormatNebulaSwarm && phase == recipe.PhaseReview && ln.PR > 0 {
 				prTag := fmt.Sprintf("PR #%d", ln.PR)
 				if !strings.Contains(out, prTag) {
 					out = fmt.Sprintf("Review lane %s (%s).\n\n%s", laneID, prTag, out)
 				}
 			}
 		}
+	}
+	out = inlineRunFileCitations(d.run.Dir, laneID, out)
+	return out + tail
+}
+
+func splitReportTail(brief string) (body, tail string) {
+	for _, marker := range []string{"\n\nHand back:", "\n\nFile the phase report for lane "} {
+		if idx := strings.LastIndex(brief, marker); idx >= 0 {
+			return brief[:idx], brief[idx:]
+		}
+	}
+	return brief, ""
+}
+
+const maxInlinedRunFileBytes = 16384
+
+func clipRunFileContent(content string, maxBytes int) string {
+	s := strings.TrimSpace(content)
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	if nl := strings.LastIndexByte(s[:cut], '\n'); nl >= maxBytes/2 {
+		cut = nl
+	}
+	return fmt.Sprintf("%s\n... (truncated %d bytes)", strings.TrimRight(s[:cut], " \t\r\n"), len(s)-cut)
+}
+
+func inlineRunFileCitations(dir, laneID, brief string) string {
+	if dir == "" || strings.TrimSpace(brief) == "" {
+		return brief
+	}
+	candidates := []string{
+		"OBJECTIVE.md",
+		"PROGRESS.md",
+		"ESCALATIONS.md",
+		"ledger.md",
+	}
+	if validatePathComponent("lane id", laneID) == nil {
+		candidates = append(candidates,
+			filepath.Join("missions", laneID+".md"),
+			filepath.Join("briefs", laneID+".mission.md"),
+			laneID+".swe.brief",
+			laneID+".swe.prompt",
+		)
+	}
+
+	out := brief
+	lowerBrief := strings.ToLower(brief)
+	for _, rel := range candidates {
+		baseName := filepath.Base(rel)
+		if !strings.Contains(lowerBrief, strings.ToLower(rel)) && !strings.Contains(lowerBrief, strings.ToLower(baseName)) {
+			continue
+		}
+		resolved, err := resolveBriefPath(dir, rel)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(resolved)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		content := clipRunFileContent(stripMarker(readText(resolved)), maxInlinedRunFileBytes)
+		header := fmt.Sprintf("Inlined from %s:", rel)
+		if content == "" || strings.Contains(out, header) || strings.Contains(out, content) {
+			continue
+		}
+		out += fmt.Sprintf("\n\n%s\n%s", header, content)
 	}
 	return out
 }

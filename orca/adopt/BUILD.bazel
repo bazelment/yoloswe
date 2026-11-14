@@ -30,7 +30,10 @@ go_test(
     deps = [
         "//orca/clock",
         "//orca/controller",
+        "//orca/dispatcher",
         "//orca/lane",
+        "//orca/lane/nebula",
+        "//orca/model",
         "//orca/recipe",
         "//orca/store",
     ],

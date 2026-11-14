@@ -157,6 +157,19 @@ func (d *Dispatcher) SetOwnerAnswer(fn func(context.Context, string, string, str
 	d.cfg.OnOwnerAnswer = fn
 }
 
+// SetDriver replaces the lane driver used for spawns, retries, steers, and stops.
+func (d *Dispatcher) SetDriver(drv lane.LaneDriver) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.driver = drv
+}
+
+func (d *Dispatcher) laneDriver() lane.LaneDriver {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.driver
+}
+
 // Judge implements controller.Judge by executing a fresh Dispatcher turn for events.
 func (d *Dispatcher) Judge(ctx context.Context, runID string, events []store.Event) error {
 	_, err := d.Dispatch(ctx, runID, events)
@@ -984,8 +997,8 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		return "", err
 	}
 
-	if d.driver != nil && len(firstPhase.Agents) > 0 {
-		spawnRes, err := d.spawnLaneSession(ctx, runID, ln, firstPhase.Name, ln.Round, firstPhase.Agents[0], workerBrief)
+	if drv := d.laneDriver(); drv != nil && len(firstPhase.Agents) > 0 {
+		spawnRes, err := d.spawnLaneSession(ctx, drv, runID, view.Run.Repository, ln, firstPhase.Name, ln.Round, firstPhase.Agents[0], workerBrief)
 		if err != nil {
 			return "", err
 		}
@@ -1015,7 +1028,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 }
 
 func (d *Dispatcher) reconcileLanePRState(ctx context.Context, runID string, ln *lane.Lane) (bool, string, error) {
-	settled, state, err := controller.ReconcileLanePRState(ctx, d.cfg.PRProbe, d.store, d.driver, d.clock.Now(), runID, ActorDispatcher, "", ln)
+	settled, state, err := controller.ReconcileLanePRState(ctx, d.cfg.PRProbe, d.store, d.laneDriver(), d.clock.Now(), runID, ActorDispatcher, "", ln)
 	if !settled || err != nil {
 		return settled, "", err
 	}
@@ -1030,8 +1043,8 @@ func (d *Dispatcher) applyLaneSteer(ctx context.Context, runID string, view *Sta
 	if settled, msg, err := d.reconcileLanePRState(ctx, runID, &ln); settled || err != nil {
 		return msg, err
 	}
-	if d.driver != nil {
-		if err := d.driver.Steer(ctx, lane.SteerRequest{
+	if drv := d.laneDriver(); drv != nil {
+		if err := drv.Steer(ctx, lane.SteerRequest{
 			RunID:      runID,
 			LaneID:     ln.ID,
 			SessionID:  ln.SessionID,
@@ -1080,10 +1093,10 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 	}
 	var sessionID, terminalID string
 
-	if d.driver != nil && len(targetPhase.Agents) > 0 {
+	if drv := d.laneDriver(); drv != nil && len(targetPhase.Agents) > 0 {
 		agent := targetPhase.Agents[0]
 		if ln.SessionID == "" {
-			res, err := d.spawnLaneSession(ctx, runID, ln, targetPhase.Name, round, agent, workerBrief)
+			res, err := d.spawnLaneSession(ctx, drv, runID, view.Run.Repository, ln, targetPhase.Name, round, agent, workerBrief)
 			if err != nil {
 				return "", err
 			}
@@ -1093,16 +1106,17 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 				ln.BaseCommit = strings.TrimSpace(res.BaseCommit)
 			}
 		} else {
-			res, err := d.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
-				RunID:     runID,
-				LaneID:    ln.ID,
-				SessionID: ln.SessionID,
-				Phase:     targetPhase.Name,
-				Round:     round,
-				Harness:   agent.Harness,
-				Model:     agent.Model,
-				Effort:    agent.Effort,
-				Brief:     workerBrief,
+			res, err := drv.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
+				RunID:      runID,
+				Repository: view.Run.Repository,
+				LaneID:     ln.ID,
+				SessionID:  ln.SessionID,
+				Phase:      targetPhase.Name,
+				Round:      round,
+				Harness:    agent.Harness,
+				Model:      agent.Model,
+				Effort:     agent.Effort,
+				Brief:      workerBrief,
 			})
 			if err != nil {
 				return "", err
@@ -1127,15 +1141,18 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 
 func (d *Dispatcher) spawnLaneSession(
 	ctx context.Context,
+	drv lane.LaneDriver,
 	runID string,
+	repository string,
 	ln lane.Lane,
 	phase string,
 	round int,
 	agent recipe.AgentSpec,
 	brief string,
 ) (lane.SpawnResult, error) {
-	return d.driver.SpawnSession(ctx, lane.SpawnRequest{
+	return drv.SpawnSession(ctx, lane.SpawnRequest{
 		RunID:      runID,
+		Repository: repository,
 		LaneID:     ln.ID,
 		Phase:      phase,
 		Round:      round,
@@ -1153,10 +1170,11 @@ func (d *Dispatcher) spawnLaneSession(
 // Keeping the report contract here ensures initial spawns and retries have the
 // same handback instructions as controller-started phase terminals.
 func (d *Dispatcher) buildWorkerBrief(view *StateView, ln lane.Lane, r recipe.Recipe, phase recipe.Phase, round int, extra string) (string, error) {
+	drv := d.laneDriver()
 	raw := d.buildRetryBriefText(view, ln, phase, extra)
 	instructions := ""
-	if d.driver != nil {
-		instructions = d.driver.ReportInstructions(ln.RunID, ln.ID, phase.Name, round)
+	if drv != nil {
+		instructions = drv.ReportInstructions(ln.RunID, ln.ID, phase.Name, round)
 	}
 	text, err := brief.Render(raw, view.Memories, 0)
 	if err != nil {
@@ -1182,8 +1200,8 @@ func (d *Dispatcher) buildRetryBriefText(view *StateView, ln lane.Lane, phase re
 		}
 	}
 	var skill string
-	if d.driver != nil {
-		skill = d.driver.PhaseSkill(phase.Name)
+	if drv := d.laneDriver(); drv != nil {
+		skill = drv.PhaseSkill(phase.Name)
 	}
 	if skill != "" {
 		parts = []string{skill}
@@ -1204,8 +1222,8 @@ func (d *Dispatcher) applyLaneStop(ctx context.Context, runID string, view *Stat
 	if !ok {
 		return "", fmt.Errorf("%w: lane %q", store.ErrNotFound, p.LaneID)
 	}
-	if d.driver != nil && (ln.SessionID != "" || ln.TerminalID != "") {
-		if err := d.driver.Stop(ctx, lane.StopRequest{
+	if drv := d.laneDriver(); drv != nil && (ln.SessionID != "" || ln.TerminalID != "") {
+		if err := drv.Stop(ctx, lane.StopRequest{
 			RunID:      runID,
 			LaneID:     ln.ID,
 			SessionID:  ln.SessionID,
@@ -1377,8 +1395,8 @@ func (d *Dispatcher) applyReadLaneReport(ctx context.Context, runID string, view
 	termID := cmp.Or(strings.TrimSpace(p.TerminalID), ln.TerminalID)
 	maxBytes := d.effectiveReadLimit(p.MaxBytes)
 
-	if d.driver != nil && termID != "" {
-		if rep, err := d.driver.ReadReport(ctx, runID, ln.ID, termID); err == nil && rep != nil {
+	if drv := d.laneDriver(); drv != nil && termID != "" {
+		if rep, err := drv.ReadReport(ctx, runID, ln.ID, termID); err == nil && rep != nil {
 			out := formatPhaseReport(*rep)
 			return truncateText(out, maxBytes, nil), nil
 		}

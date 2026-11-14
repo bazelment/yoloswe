@@ -1495,6 +1495,13 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 	}
 
 	curPhase, hasPhase := r.Phase(ln.Phase)
+	if hasPhase && (rep.Outcome == lane.OutcomeNeedsInput || rep.Outcome == lane.OutcomeBlocked) && isWrongRepoReport(rep, ev.Summary, c.runRepository(ctx)) {
+		if replayed, allowed := c.canRespawnWrongRepo(ln, ev.ID); replayed {
+			return store.EventClassAuto, nil
+		} else if allowed {
+			return c.respawnWrongRepoLane(ctx, ln, r, curPhase, ev.ID, cmp.Or(rep.Reason, rep.Summary, ev.Summary))
+		}
+	}
 	if hasPhase && len(curPhase.ExitContract.AllowedOutcomes) > 0 {
 		noChangeAllowed := rep.Outcome == lane.OutcomeNoChange && (curPhase.Name == recipe.PhaseSWE || curPhase.Name == recipe.PhaseClean || curPhase.Name == recipe.PhaseReview)
 		if !noChangeAllowed && !slices.Contains(curPhase.ExitContract.AllowedOutcomes, string(rep.Outcome)) {
@@ -1991,7 +1998,7 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 				return store.EventClassUnclassified, err
 			}
 			delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
-			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: agent.Harness, Model: agent.Model, Effort: agent.Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, max(ln.Round, 1), "fresh terminal after nudge")})
+			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, Repository: c.runRepository(ctx), LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: agent.Harness, Model: agent.Model, Effort: agent.Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, max(ln.Round, 1), "fresh terminal after nudge")})
 			if err != nil {
 				return store.EventClassUnclassified, err
 			}
@@ -2253,9 +2260,11 @@ func (c *Controller) startLanePhase(
 	}
 
 	var sessionID, terminalID string
+	repo := c.runRepository(ctx)
 	if ln.SessionID == "" {
 		res, err := c.driver.SpawnSession(ctx, lane.SpawnRequest{
 			RunID:      c.cfg.RunID,
+			Repository: repo,
 			LaneID:     ln.ID,
 			Phase:      phase.Name,
 			Round:      round,
@@ -2290,15 +2299,16 @@ func (c *Controller) startLanePhase(
 			delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
 		}
 		res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
-			RunID:     c.cfg.RunID,
-			LaneID:    ln.ID,
-			SessionID: ln.SessionID,
-			Phase:     phase.Name,
-			Round:     round,
-			Harness:   agent.Harness,
-			Model:     agent.Model,
-			Effort:    agent.Effort,
-			Brief:     brief,
+			RunID:      c.cfg.RunID,
+			Repository: repo,
+			LaneID:     ln.ID,
+			SessionID:  ln.SessionID,
+			Phase:      phase.Name,
+			Round:      round,
+			Harness:    agent.Harness,
+			Model:      agent.Model,
+			Effort:     agent.Effort,
+			Brief:      brief,
 		})
 		if err != nil {
 			return err
@@ -2408,6 +2418,178 @@ func (c *Controller) releaseLaneSession(ctx context.Context, ln *lane.Lane) erro
 		return r.ReleaseSession(ctx, ln.SessionID)
 	}
 	return nil
+}
+
+func (c *Controller) runRepository(ctx context.Context) string {
+	if c.store == nil || c.cfg.RunID == "" {
+		return ""
+	}
+	if run, err := c.store.Runs().Get(ctx, c.cfg.RunID); err == nil && run != nil {
+		return strings.TrimSpace(run.Repository)
+	}
+	return ""
+}
+
+func isWrongRepoReport(rep LaneReportPayload, eventSummary, wantRepo string) bool {
+	combined := strings.Join([]string{rep.Reason, rep.Summary, rep.Ask, rep.Breaks, rep.Raw, eventSummary}, "\n")
+	return isWrongRepoText(combined, wantRepo)
+}
+
+func isWrongRepoText(text, wantRepo string) bool {
+	s := strings.ToLower(strings.TrimSpace(text))
+	if s == "" {
+		return false
+	}
+	for _, phrase := range []string{
+		"wrong repo",
+		"wrong repository",
+		"unrelated repo",
+		"unrelated repository",
+	} {
+		if strings.Contains(s, phrase) {
+			return true
+		}
+	}
+	for _, prefix := range []string{
+		"checked out to ",
+		"checked out in ",
+		"workspace is in ",
+		"session is on ",
+	} {
+		idx := strings.Index(s, prefix)
+		if idx < 0 {
+			continue
+		}
+		clause := strings.TrimSpace(s[idx+len(prefix):])
+		for _, sep := range []string{"\n", ";", ". "} {
+			clause, _, _ = strings.Cut(clause, sep)
+		}
+		word, _, _ := strings.Cut(clause, " ")
+		word = strings.Trim(word, ".,;:()[]\"'`")
+		if !lane.IsRepositorySlug(word) {
+			continue
+		}
+		if _, afterInstead, ok := strings.Cut(clause, " instead of "); ok {
+			other, _, _ := strings.Cut(strings.TrimSpace(afterInstead), " ")
+			other = strings.Trim(other, ".,;:()[]\"'`")
+			if lane.IsRepositorySlug(other) && !strings.EqualFold(lane.NormalizeRepositorySlug(word), lane.NormalizeRepositorySlug(other)) {
+				return true
+			}
+		}
+		if !strings.Contains(clause, "repo") || !lane.IsRepositorySlug(wantRepo) {
+			continue
+		}
+		if !strings.EqualFold(lane.NormalizeRepositorySlug(word), lane.NormalizeRepositorySlug(wantRepo)) {
+			return true
+		}
+	}
+	return false
+}
+
+func wrongRepoActionKey(ln *lane.Lane) string {
+	return fmt.Sprintf("wrong-repo-respawn:%s:%s", ln.ID, ln.AttemptKey())
+}
+
+func (c *Controller) canRespawnWrongRepo(ln *lane.Lane, eventID string) (replayed bool, allowed bool) {
+	dec, ok := c.decidedActions[wrongRepoActionKey(ln)]
+	if !ok {
+		return false, true
+	}
+	var args DecisionArgs
+	if len(dec.Args) > 0 && json.Unmarshal(dec.Args, &args) == nil && eventID != "" && args.EventID == eventID {
+		return true, true
+	}
+	return false, false
+}
+
+func (c *Controller) respawnWrongRepoLane(
+	ctx context.Context,
+	ln *lane.Lane,
+	r *recipe.Recipe,
+	phase recipe.Phase,
+	eventID, reason string,
+) (store.EventClass, error) {
+	round := max(ln.Round, 1)
+	attempt := max(ln.Attempt, 1)
+	oldSession := strings.TrimSpace(ln.SessionID)
+	actionKey := wrongRepoActionKey(ln)
+	if replayed, allowed := c.canRespawnWrongRepo(ln, eventID); replayed || !allowed {
+		return store.EventClassAuto, nil
+	}
+	if len(phase.Agents) == 0 {
+		return store.EventClassUnclassified, fmt.Errorf("orca/controller: phase %q in recipe %q has no agents", phase.Name, r.Name)
+	}
+	agent := phase.Agents[min(attempt-1, len(phase.Agents)-1)]
+
+	if err := c.stopCurrentTerminal(ctx, ln, "wrong repository"); err != nil {
+		slog.WarnContext(ctx, "orca/controller: failed to stop terminal before wrong-repo respawn",
+			"run_id", c.cfg.RunID, "lane_id", ln.ID, "terminal_id", ln.TerminalID, "err", err)
+	}
+	delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
+	if oldSession != "" {
+		if rel, ok := c.driver.(lane.SessionReleaser); ok {
+			if err := rel.ReleaseSession(ctx, oldSession, true); err != nil {
+				slog.WarnContext(ctx, "orca/controller: failed to release wrong-repo session",
+					"run_id", c.cfg.RunID, "lane_id", ln.ID, "session_id", oldSession, "err", err)
+			}
+		}
+	}
+	ln.SessionID = ""
+	ln.TerminalID = ""
+
+	brief := c.buildBrief(ctx, ln, r, phase, round, "")
+	res, err := c.driver.SpawnSession(ctx, lane.SpawnRequest{
+		RunID:      c.cfg.RunID,
+		Repository: c.runRepository(ctx),
+		LaneID:     ln.ID,
+		Phase:      phase.Name,
+		Round:      round,
+		Harness:    agent.Harness,
+		Model:      agent.Model,
+		Effort:     agent.Effort,
+		Brief:      brief,
+		Branch:     ln.Branch,
+		BaseBranch: ln.BaseBranch,
+		Worktree:   ln.Worktree,
+	})
+	if err != nil {
+		ln.Status = lane.StatusBlocked
+		ln.LastEventID = eventID
+		ln.LastEventAt = c.clock.Now().UTC()
+		_ = c.store.Lanes().Upsert(ctx, *ln)
+		return store.EventClassUnclassified, err
+	}
+	if strings.TrimSpace(res.Branch) != "" {
+		ln.Branch = strings.TrimSpace(res.Branch)
+	}
+	if strings.TrimSpace(res.BaseBranch) != "" {
+		ln.BaseBranch = strings.TrimSpace(res.BaseBranch)
+	}
+	if strings.TrimSpace(res.BaseCommit) != "" {
+		ln.BaseCommit = strings.TrimSpace(res.BaseCommit)
+	}
+	ln.Status = lane.StatusRunning
+	ln.Attempt = attempt
+	ln.RecordAttempt(phase.Name, round, res.SessionID, res.TerminalID)
+	ln.LastEventID = eventID
+	ln.LastEventAt = c.clock.Now().UTC()
+	if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+		return store.EventClassUnclassified, err
+	}
+	_, _, err = c.recordDecision(ctx, ToolPhaseRetry, ln.ID,
+		fmt.Sprintf("wrong repository on session %s (%s); released and respawned", oldSession, reason),
+		fmt.Sprintf("respawned %s round %d on %s", phase.Name, round, res.SessionID),
+		DecisionArgs{
+			ActionKey:  actionKey,
+			EventID:    eventID,
+			Phase:      phase.Name,
+			Round:      round,
+			Attempt:    attempt,
+			SessionID:  res.SessionID,
+			TerminalID: res.TerminalID,
+		},
+	)
+	return store.EventClassAuto, err
 }
 
 func (c *Controller) terminalIsWorking(ctx context.Context, terminalID string) bool {

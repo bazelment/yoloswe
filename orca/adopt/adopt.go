@@ -114,6 +114,8 @@ type Run struct {
 	Loop string
 	// Repo is the run's owner/repo when the run records it.
 	Repo string
+	// RepoID is the run's Nebula repository id when the run records one.
+	RepoID string `json:",omitempty"`
 	// Progress and Escalations are PROGRESS.md and ESCALATIONS.md, clipped.
 	Progress, Escalations string
 	// Unchecked lists what discovery could not check for this run.
@@ -308,6 +310,7 @@ type ledgerLane struct {
 	Status         string `json:"status"`
 	NebulaSession  string `json:"nebula_session"`
 	NebulaTerminal string `json:"nebula_terminal"`
+	RepoURL        string `json:"repo_url"`
 	PR             int    `json:"pr"`
 	Round          int    `json:"round"`
 }
@@ -315,6 +318,7 @@ type ledgerLane struct {
 type ledger struct {
 	Config struct {
 		Goal   string      `json:"goal"`
+		Repo   string      `json:"repo"`
 		Phases []hostPhase `json:"phases"`
 	} `json:"config"`
 	Tasks []ledgerLane `json:"tasks"`
@@ -345,11 +349,14 @@ func Read(dir string) (Run, error) {
 			return Run{}, fmt.Errorf("parse %s: %w", filepath.Join(dir, "state.json"), err)
 		}
 		r.Goal = st.Config.Goal
+		applyRepoValue(&r, st.Config.Repo)
 		for i := range st.Tasks {
+			applyRepoValue(&r, st.Tasks[i].RepoURL)
 			r.Lanes = append(r.Lanes, importLane(dir, &st.Tasks[i]))
 		}
 		annotateLanes(dir, &r, st.Config.Phases)
 	}
+	applyRunEnvRepo(dir, &r)
 	sort.Slice(r.Lanes, func(a, b int) bool { return r.Lanes[a].ID < r.Lanes[b].ID })
 	r.State = RunFinished
 	if runLive(&r) {

@@ -2,20 +2,28 @@ package adopt
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
+	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
+	"github.com/bazelment/yoloswe/orca/lane/nebula"
+	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -789,5 +797,583 @@ func TestNebulaSwarmReviewReportRecognised(t *testing.T) {
 	rOther.Holder = "orca-chat:other-chat"
 	if err := competing.Start(t.Context(), rOther); !errors.Is(err, store.ErrLeaseHeld) {
 		t.Fatalf("competing Controllers.Start = %v, want store.ErrLeaseHeld", err)
+	}
+}
+
+func TestAdoptedNebulaSwarmSpawnUsesConfigRepo(t *testing.T) {
+	t.Parallel()
+	const wantRepoID = "2a19e6e7-939e-44b2-a80f-8980030efc50"
+	const wrongRepoID = "76672137-0000-0000-0000-000000000000"
+
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"`+wantRepoID+`","orchestrator_session_id":"sess-orch","merge":"none",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
+"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
+	// Keep .repo-slug present so both RepositoryID and Repository slug are set,
+	// proving that an exact repositoryId match short-circuits even when gitUrl
+	// points to an internal mirror with a different slug.
+
+	var gotRepoID atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-repositories":
+			_, _ = io.WriteString(w, `{"repositories":[{"id":"`+wrongRepoID+`","fullName":"build-perf-sweeping/house-design"},{"id":"`+wantRepoID+`","fullName":"sycamore-labs/nebula"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions":
+			var body struct {
+				RepositoryID string `json:"repositoryId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			gotRepoID.Store(body.RepositoryID)
+			// Even if gitUrl points to an internal mirror or renamed slug, an exact
+			// repositoryId match short-circuits without rejecting the session.
+			_, _ = io.WriteString(w, `{"session":{"id":"sess-gaps3","status":"ready","repositoryId":"`+body.RepositoryID+`","gitUrl":"ssh://git@git.internal/mirrors/nebula.git/"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions/sess-gaps3/terminals":
+			_, _ = io.WriteString(w, `{"id":"term-gaps3-swe"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 1, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv, err := nebula.New(nebula.Config{
+		APIURL: srv.URL,
+		Token:  "test-token",
+		Clock:  clk,
+		Events: st.Events(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	controllers := NewControllers(t.Context(), st, drv, clk, nil)
+	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+	s := nsService(root, loop, label)
+	s.Driver = controllers
+	r, err := s.Adopt(t.Context(), nsRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+	controllers.mu.Lock()
+	ctrl := controllers.runs[nsRun].controller
+	controllers.mu.Unlock()
+	if err := ctrl.StartLane(t.Context(), "m2-gaps3"); err != nil {
+		t.Fatalf("StartLane: %v", err)
+	}
+	if got, _ := gotRepoID.Load().(string); got != wantRepoID {
+		t.Fatalf("create session repositoryId = %q, want %q", got, wantRepoID)
+	}
+}
+
+func TestAdoptedSpawnRefusedWhenRepoMissing(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"","orchestrator_session_id":"sess-orch","merge":"none",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
+"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
+	os.Remove(filepath.Join(dir, ".repo-slug"))
+
+	var creates atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-repositories":
+			_, _ = io.WriteString(w, `{"repositories":[{"id":"76672137-0000-0000-0000-000000000000","fullName":"build-perf-sweeping/house-design"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions":
+			creates.Add(1)
+			_, _ = io.WriteString(w, `{"session":{"id":"sess-unexpected","status":"ready"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 1, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv, err := nebula.New(nebula.Config{
+		APIURL: srv.URL,
+		Token:  "test-token",
+		Clock:  clk,
+		Events: st.Events(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	controllers := NewControllers(t.Context(), st, drv, clk, nil)
+	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+	s := nsService(root, loop, label)
+	s.Driver = controllers
+	_, err = s.Adopt(t.Context(), nsRun)
+	if err == nil || !strings.Contains(err.Error(), "repository is not configured") {
+		t.Fatalf("Adopt with missing repository = %v, want repository is not configured error", err)
+	}
+	if got := creates.Load(); got != 0 {
+		t.Fatalf("POST /api/code-sessions called %d times, want 0", got)
+	}
+}
+
+func TestAdoptedSpawnReleasesSessionInWrongRepo(t *testing.T) {
+	t.Parallel()
+	const wantRepoID = "2a19e6e7-939e-44b2-a80f-8980030efc50"
+	const wrongRepoID = "76672137-0000-0000-0000-000000000000"
+
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"`+wantRepoID+`","orchestrator_session_id":"sess-orch","merge":"none",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
+"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
+
+	var released atomic.Value
+	var termStarts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-repositories":
+			_, _ = io.WriteString(w, `{"repositories":[{"id":"`+wrongRepoID+`","fullName":"build-perf-sweeping/house-design"},{"id":"`+wantRepoID+`","fullName":"sycamore-labs/nebula"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"session":{"id":"018a40a9","status":"ready","repositoryId":"`+wrongRepoID+`","gitUrl":"https://github.com/build-perf-sweeping/house-design.git"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions/018a40a9/release":
+			released.Store("018a40a9")
+			_, _ = io.WriteString(w, `{}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions/018a40a9/terminals":
+			termStarts.Add(1)
+			_, _ = io.WriteString(w, `{"id":"term-wrong"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 1, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv, err := nebula.New(nebula.Config{
+		APIURL: srv.URL,
+		Token:  "test-token",
+		Clock:  clk,
+		Events: st.Events(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	controllers := NewControllers(t.Context(), st, drv, clk, nil)
+	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+	s := nsService(root, loop, label)
+	s.Driver = controllers
+	_, err = s.Adopt(t.Context(), nsRun)
+	if err == nil {
+		t.Fatal("Adopt succeeded on wrong-repo session; want error")
+	}
+	if got, _ := released.Load().(string); got != "018a40a9" {
+		t.Fatalf("released session = %q, want 018a40a9", got)
+	}
+	if got := termStarts.Load(); got != 0 {
+		t.Fatalf("terminal starts on wrong-repo session = %d, want 0", got)
+	}
+
+	// Also verify that if Nebula omits repositoryId on the created session and
+	// only returns a gitUrl for the wrong repository, verifySessionRepository
+	// resolves gitUrl via /api/code-repositories, releases the session, and fails.
+	released.Store("")
+	srvOmittedID := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-repositories":
+			_, _ = io.WriteString(w, `{"repositories":[{"id":"`+wrongRepoID+`","fullName":"build-perf-sweeping/house-design"},{"id":"`+wantRepoID+`","fullName":"sycamore-labs/nebula"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"session":{"id":"018a40aa","status":"ready","gitUrl":"git@github.com:build-perf-sweeping/house-design.git"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions/018a40aa/release":
+			released.Store("018a40aa")
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srvOmittedID.Close()
+
+	drvOmitted, err := nebula.New(nebula.Config{
+		APIURL: srvOmittedID.URL,
+		Token:  "test-token",
+		Clock:  clk,
+		Events: st.Events(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = drvOmitted.SpawnSession(t.Context(), lane.SpawnRequest{
+		RunID:        nsRun,
+		RepositoryID: wantRepoID,
+		LaneID:       "m2-gaps3",
+		Phase:        "swe",
+		Round:        1,
+		Harness:      "claude",
+		Brief:        "test",
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not match expected") {
+		t.Fatalf("SpawnSession with omitted repositoryId and wrong gitUrl = %v, want mismatch error", err)
+	}
+	if got, _ := released.Load().(string); got != "018a40aa" {
+		t.Fatalf("released session when repositoryId omitted = %q, want 018a40aa", got)
+	}
+
+	// Also verify that if Nebula omits both repositoryId and gitUrl on create
+	// and GetSession, verifySessionRepository fails closed, releases the session,
+	// and refuses the spawn.
+	released.Store("")
+	srvOmittedBoth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"session":{"id":"018a40ab","status":"ready"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions/018a40ab":
+			_, _ = io.WriteString(w, `{"session":{"id":"018a40ab","status":"ready"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions/018a40ab/release":
+			released.Store("018a40ab")
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srvOmittedBoth.Close()
+
+	drvOmittedBoth, err := nebula.New(nebula.Config{
+		APIURL: srvOmittedBoth.URL,
+		Token:  "test-token",
+		Clock:  clk,
+		Events: st.Events(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = drvOmittedBoth.SpawnSession(t.Context(), lane.SpawnRequest{
+		RunID:        nsRun,
+		RepositoryID: wantRepoID,
+		LaneID:       "m2-gaps3",
+		Phase:        "swe",
+		Round:        1,
+		Harness:      "claude",
+		Brief:        "test",
+	})
+	if err == nil || !strings.Contains(err.Error(), "omitted repositoryId and gitUrl") {
+		t.Fatalf("SpawnSession with both repositoryId and gitUrl omitted = %v, want omitted repositoryId and gitUrl error", err)
+	}
+	if got, _ := released.Load().(string); got != "018a40ab" {
+		t.Fatalf("released session when both fields omitted = %q, want 018a40ab", got)
+	}
+}
+
+func TestAdoptedBriefCitingObjectiveInlinesItems(t *testing.T) {
+	t.Parallel()
+	const wantRepoID = "2a19e6e7-939e-44b2-a80f-8980030efc50"
+
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"`+wantRepoID+`","orchestrator_session_id":"sess-orch","merge":"none",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
+"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
+	objectiveText := "# 20261114-trial-m1\n\n## m2-gaps3\n- Item A: strip redundant prompt preambles.\n- Item B: verify token count drops below 1200.\n"
+	write(t, filepath.Join(dir, "OBJECTIVE.md"), objectiveText)
+	write(t, filepath.Join(dir, "NOTES.md"), "host-only scratch notes that must not be inlined unless allowlisted\n")
+	write(t, filepath.Join(dir, "m2-gaps3.swe.prompt"), "Implement m2-gaps3. Read OBJECTIVE.md for the exact items. Do not inline NOTES.md.\n")
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 1, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+
+	var disp *dispatcher.Dispatcher
+	controllers := NewControllers(t.Context(), st, drv, clk, func(_ string, answer func(context.Context, string, string, string) error) controller.Judge {
+		fakeClient := model.NewFakeClient(
+			model.Response{
+				StopReason: model.StopReasonToolUse,
+				Message: model.NewAssistantMessage(model.NewToolUseBlock(
+					"call-spawn",
+					dispatcher.ToolLaneSpawn,
+					json.RawMessage(`{"item_id":"m2-gaps4","lane_id":"m2-gaps4","brief":"Implement m2-gaps4. Read OBJECTIVE.md for the exact items. Check NOTES.md in the repo."}`),
+				)),
+			},
+			model.Response{
+				StopReason: model.StopReasonEndTurn,
+				Message:    model.NewAssistantMessage(model.NewTextBlock("spawned m2-gaps4")),
+			},
+		)
+		disp = dispatcher.New(dispatcher.Config{}, st, drv, clk, fakeClient)
+		disp.SetOwnerAnswer(answer)
+		return disp
+	})
+	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+	s := nsService(root, loop, label)
+	s.Driver = controllers
+	r, err := s.Adopt(t.Context(), nsRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+	if len(drv.Spawns) != 1 || drv.Spawns[0].RepositoryID != wantRepoID {
+		t.Fatalf("Spawns = %+v, want 1 spawn with RepositoryID=%q", drv.Spawns, wantRepoID)
+	}
+	gotBrief := drv.Spawns[0].Brief
+	for _, want := range []string{
+		"Item A: strip redundant prompt preambles.",
+		"Item B: verify token count drops below 1200.",
+	} {
+		if !strings.Contains(gotBrief, want) {
+			t.Fatalf("brief citing OBJECTIVE.md missing %q:\n%s", want, gotBrief)
+		}
+	}
+	if strings.Contains(gotBrief, "host-only scratch notes") {
+		t.Fatalf("brief unexpectedly inlined unallowlisted NOTES.md:\n%s", gotBrief)
+	}
+
+	// Exercise the real Dispatcher (wired via SetDriver in NewControllers)
+	// spawning a new backlog item whose brief cites OBJECTIVE.md.
+	if err := st.Backlog().Add(t.Context(), store.BacklogItem{
+		ID:       "m2-gaps4",
+		RunID:    nsRun,
+		Title:    "gaps 4",
+		Priority: store.PriorityP1,
+		Status:   store.BacklogOpen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Events().Append(t.Context(), store.Event{
+		RunID:   nsRun,
+		Kind:    store.EventOwnerMessage,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "spawn m2-gaps4",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		return len(drv.Spawns) == 2
+	})
+	if len(drv.Spawns) != 2 || drv.Spawns[1].LaneID != "m2-gaps4" || drv.Spawns[1].RepositoryID != wantRepoID {
+		t.Fatalf("Dispatcher spawn = %+v, want m2-gaps4 with RepositoryID=%q", drv.Spawns, wantRepoID)
+	}
+	dispBrief := drv.Spawns[1].Brief
+	if gotCount := strings.Count(dispBrief, "Inlined from OBJECTIVE.md:"); gotCount != 1 {
+		t.Fatalf("Dispatcher brief Inlined from OBJECTIVE.md count = %d, want 1:\n%s", gotCount, dispBrief)
+	}
+	if !strings.Contains(dispBrief, "Item A: strip redundant prompt preambles.") {
+		t.Fatalf("Dispatcher brief missing OBJECTIVE.md items:\n%s", dispBrief)
+	}
+	if strings.Contains(dispBrief, "host-only scratch notes") {
+		t.Fatalf("Dispatcher brief unexpectedly inlined NOTES.md:\n%s", dispBrief)
+	}
+}
+
+func TestAdoptedWrongRepoLaneReportRespawnsInsteadOfSteering(t *testing.T) {
+	t.Parallel()
+	const wantRepoID = "2a19e6e7-939e-44b2-a80f-8980030efc50"
+
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"`+wantRepoID+`","orchestrator_session_id":"sess-orch","merge":"none",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
+"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"running","phase":"swe","round":1,"session_id":"018a40a9","terminals":{"swe":{"1":"term-bad"}},"terminal_state":"working","verdict":""}]}`)
+	os.Remove(filepath.Join(dir, ".repo-slug"))
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 12, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+
+	controllers := NewControllers(t.Context(), st, drv, clk, nil)
+	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+	s := nsService(root, loop, label)
+	s.Driver = controllers
+	r, err := s.Adopt(t.Context(), nsRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+	// First verify that normal blocked/needs-input reports mentioning branches,
+	// cross-repo dependencies, or the run's own repo slug do NOT trigger a
+	// false-positive wrong-repo respawn.
+	drv.Emit(lane.Event{
+		RunID:      nsRun,
+		LaneID:     "m2-gaps3",
+		SessionID:  "018a40a9",
+		TerminalID: "term-bad",
+		Kind:       lane.EventPhaseReported,
+		Report: &lane.PhaseReport{
+			LaneID:     "m2-gaps3",
+			TerminalID: "term-bad",
+			Phase:      "swe",
+			Round:      1,
+			Outcome:    lane.OutcomeNeedsInput,
+			Summary:    "checked out on main, checked out to feature/foo, and checked out to sycamore-labs/nebula; waiting on PR in another repository.\nShould we use X instead of Y?",
+			Raw:        "Outcome: needs-input\nchecked out on main, checked out to feature/foo, and checked out to sycamore-labs/nebula; waiting on PR in another repository.\nShould we use X instead of Y?",
+		},
+	})
+	waitFor(t, func() bool {
+		got, err := st.Lanes().Get(t.Context(), nsRun, "m2-gaps3")
+		return err == nil && got.Status == lane.StatusBlocked
+	})
+	if len(drv.Releases) != 0 || len(drv.Spawns) != 0 {
+		t.Fatalf("false-positive wrong-repo respawn on benign report: Releases=%v Spawns=%v", drv.Releases, drv.Spawns)
+	}
+
+	// Emit the exact needs-input report from a lane spawned in the wrong repo.
+	drv.Emit(lane.Event{
+		RunID:      nsRun,
+		LaneID:     "m2-gaps3",
+		SessionID:  "018a40a9",
+		TerminalID: "term-bad",
+		Kind:       lane.EventPhaseReported,
+		Report: &lane.PhaseReport{
+			LaneID:     "m2-gaps3",
+			TerminalID: "term-bad",
+			Phase:      "swe",
+			Round:      1,
+			Outcome:    lane.OutcomeNeedsInput,
+			Summary:    "the lane is checked out to build-perf-sweeping/house-design instead of sycamore-labs/nebula; OBJECTIVE.md is also unavailable.",
+			Raw:        "Outcome: needs-input\nthe lane is checked out to build-perf-sweeping/house-design instead of sycamore-labs/nebula; OBJECTIVE.md is also unavailable.",
+		},
+	})
+
+	waitFor(t, func() bool {
+		return len(drv.Releases) == 1 && len(drv.Spawns) == 1
+	})
+	if drv.Releases[0] != "018a40a9" {
+		t.Fatalf("released session = %q, want 018a40a9", drv.Releases[0])
+	}
+	if len(drv.Spawns) != 1 || drv.Spawns[0].RepositoryID != wantRepoID {
+		t.Fatalf("respawn Spawns = %+v, want RepositoryID=%q", drv.Spawns, wantRepoID)
+	}
+	if len(drv.Steers) != 0 {
+		t.Fatalf("unexpected steer sends = %+v, want 0", drv.Steers)
+	}
+	gotLane, err := st.Lanes().Get(t.Context(), nsRun, "m2-gaps3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLane.Status != lane.StatusRunning || gotLane.SessionID == "018a40a9" {
+		t.Fatalf("m2-gaps3 after wrong-repo respawn = %+v, want running on new session", gotLane)
+	}
+
+	// A second wrong-repo report in the same phase/round must NOT trigger an
+	// unbounded respawn loop; it caps at 1 automatic respawn and blocks the lane.
+	secondSession := gotLane.SessionID
+	secondTerm := gotLane.TerminalID
+	drv.Emit(lane.Event{
+		RunID:      nsRun,
+		LaneID:     "m2-gaps3",
+		SessionID:  secondSession,
+		TerminalID: secondTerm,
+		Kind:       lane.EventPhaseReported,
+		Report: &lane.PhaseReport{
+			LaneID:     "m2-gaps3",
+			TerminalID: secondTerm,
+			Phase:      "swe",
+			Round:      1,
+			Outcome:    lane.OutcomeNeedsInput,
+			Summary:    "still in the wrong repository",
+			Raw:        "Outcome: needs-input\nstill in the wrong repository",
+		},
+	})
+	waitFor(t, func() bool {
+		got, err := st.Lanes().Get(t.Context(), nsRun, "m2-gaps3")
+		return err == nil && got.Status == lane.StatusBlocked
+	})
+	if len(drv.Spawns) != 1 || len(drv.Releases) != 1 {
+		t.Fatalf("expected wrong-repo respawn cap of 1 per phase/round, got Spawns=%d Releases=%d", len(drv.Spawns), len(drv.Releases))
+	}
+}
+
+func TestAdoptedSubagentSwarmEnvRepoUsedOnSpawn(t *testing.T) {
+	t.Parallel()
+	const wantRepoID = "2a19e6e7-939e-44b2-a80f-8980030efc50"
+
+	w := newWorld(t)
+	write(t, filepath.Join(w.dir, "env.sh"), "export SNL_REPO_ID=\""+wantRepoID+"\"\nexport SNL_REPO_URL=\"https://github.com/sycamore-labs/nebula.git\"\n")
+	write(t, filepath.Join(w.dir, "state.json"), `{"config":{"goal":"host goal","phases":[{"name":"swe"}]},"tasks":[{"id":"a","title":"A","phase":"swe","status":"planned","round":1,"sessions":{}}]}`)
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 1, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+
+	controllers := NewControllers(t.Context(), st, drv, clk, nil)
+	w.watcher.running = false
+	s := w.service()
+	s.Driver = controllers
+	r, err := s.Adopt(t.Context(), testRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+	if len(drv.Spawns) != 1 || drv.Spawns[0].RepositoryID != wantRepoID || drv.Spawns[0].Repository != "sycamore-labs/nebula" {
+		t.Fatalf("Spawns = %+v, want RepositoryID=%q Repository=sycamore-labs/nebula", drv.Spawns, wantRepoID)
+	}
+}
+
+func TestNormalizeRepositorySlugTable(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		raw      string
+		wantSlug string
+		wantIs   bool
+	}{
+		{"sycamore-labs/nebula", "sycamore-labs/nebula", true},
+		{"https://github.com/sycamore-labs/nebula.git", "sycamore-labs/nebula", true},
+		{"https://token@github.com/sycamore-labs/nebula.GIT/", "sycamore-labs/nebula", true},
+		{"ssh://git@gitlab.example.com/sycamore-labs/nebula.git/", "sycamore-labs/nebula", true},
+		{"git@github.com:sycamore-labs/nebula.git", "sycamore-labs/nebula", true},
+		{"2a19e6e7-939e-44b2-a80f-8980030efc50", "2a19e6e7-939e-44b2-a80f-8980030efc50", false},
+		{"main", "main", false},
+		{"a/b/c", "a/b/c", false},
+		{"", "", false},
+	}
+	for _, tc := range cases {
+		if got := lane.NormalizeRepositorySlug(tc.raw); got != tc.wantSlug {
+			t.Errorf("NormalizeRepositorySlug(%q) = %q, want %q", tc.raw, got, tc.wantSlug)
+		}
+		if got := lane.IsRepositorySlug(tc.raw); got != tc.wantIs {
+			t.Errorf("IsRepositorySlug(%q) = %v, want %v", tc.raw, got, tc.wantIs)
+		}
+	}
+}
+
+func TestClipRunFileContent(t *testing.T) {
+	t.Parallel()
+	if got := clipRunFileContent("  short text\n", 100); got != "short text" {
+		t.Fatalf("under-limit clipRunFileContent = %q, want %q", got, "short text")
+	}
+	// Line-boundary cut in the second half of maxBytes.
+	lined := "line one\nline two\nline three that exceeds the limit"
+	gotLined := clipRunFileContent(lined, 22)
+	if !strings.HasPrefix(gotLined, "line one\nline two\n... (truncated ") {
+		t.Fatalf("newline-cut clipRunFileContent = %q", gotLined)
+	}
+	// Multibyte UTF-8 rune boundary safety when no newline is in the second half.
+	multibyte := "éééééééééé"
+	gotUTF8 := clipRunFileContent(multibyte, 5)
+	if !strings.HasPrefix(gotUTF8, "éé\n... (truncated ") {
+		t.Fatalf("utf8-safe clipRunFileContent = %q", gotUTF8)
 	}
 }
