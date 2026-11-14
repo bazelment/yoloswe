@@ -12,6 +12,7 @@ go_library(
     deps = [
         "//orca/clock",
         "//orca/lane",
+        "//orca/mailbox",
         "//orca/model",
         "//orca/recipe",
         "//orca/store",

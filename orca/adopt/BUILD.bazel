@@ -15,6 +15,7 @@ go_library(
         "//orca/clock",
         "//orca/controller",
         "//orca/lane",
+        "//orca/mailbox",
         "//orca/recipe",
         "//orca/store",
     ],

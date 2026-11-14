@@ -20,6 +20,7 @@ import (
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/lane"
+	"github.com/bazelment/yoloswe/orca/mailbox"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -37,6 +38,7 @@ type Controllers struct {
 	driver       lane.LaneDriver
 	clock        clock.Clock
 	judges       JudgeFactory
+	Mailboxes    func(runID string) []mailbox.Mailbox
 	PRProbe      controller.PRProbe
 	Planner      func(ctx context.Context, runID, reason, planRef string) error
 	ledgerScript *string
@@ -213,6 +215,10 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	if err := d.store.Runs().UpdateObjective(ctx, r.ID, r.FullObjective(), generation); err != nil {
 		return err
 	}
+	var boxes []mailbox.Mailbox
+	if d.Mailboxes != nil {
+		boxes = d.Mailboxes(r.ID)
+	}
 	syncer := newRunLedgerSync(r, d.clock, lanes)
 	syncer.ledgerScript = d.ledgerScript
 	runStore := &adoptedStore{
@@ -241,6 +247,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			return ctrl.AnswerOwnerAskTextFromJudge(ctx, askID, text)
 		})
 	}
+	if setter, ok := dispatch.(interface{ SetMailboxes(...mailbox.Mailbox) }); ok && len(boxes) > 0 {
+		setter.SetMailboxes(boxes...)
+	}
 	runDriver := d.driver
 	if runDriver != nil {
 		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: runStore}
@@ -250,7 +259,12 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			slog.DebugContext(ctx, "orca/adopt: judge does not implement SetDriver; adoptedRunDriver not attached to judge", "run_id", r.ID)
 		}
 	}
-	ctrl = controller.New(controller.Config{RunID: r.ID, HolderID: holder, PRProbe: d.PRProbe}, runStore, runDriver, d.clock, d.judge(holder, dispatch))
+	ctrl = controller.New(controller.Config{
+		RunID:         r.ID,
+		HolderID:      holder,
+		PRProbe:       d.PRProbe,
+		JudgeLaneMail: true,
+	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
 	cr := &controlledRun{controller: ctrl, syncer: syncer, cancel: cancel, done: make(chan struct{}), run: r, holder: holder}
 	d.mu.Lock()

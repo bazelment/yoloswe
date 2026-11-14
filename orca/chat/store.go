@@ -225,35 +225,79 @@ func (b *StoreBackend) heldRunsWithRecords(ctx context.Context) ([]string, map[s
 	return runs, byID, err
 }
 
-// openAsk is an unanswered owner question.
+// openAsk is an unanswered owner or lane question.
 type openAsk struct {
 	run, scope string
+	age        string
 	ask        controller.OwnerAsk
 }
 
 func (b *StoreBackend) asks(ctx context.Context, runs []string) ([]openAsk, error) {
+	now := b.now()
 	var out []openAsk
 	for _, run := range runs {
+		allLaneQs, err := mailbox.OpenLaneQuestions(ctx, b.store, run, now)
+		if err != nil {
+			return nil, err
+		}
+		mailCreated := make(map[string]time.Time, len(allLaneQs)*2)
+		for i := range allLaneQs {
+			q := &allLaneQs[i]
+			if q.ID != "" && !q.CreatedAt.IsZero() {
+				mailCreated[q.ID] = q.CreatedAt
+			}
+			if q.EventID != "" && !q.CreatedAt.IsZero() {
+				mailCreated[q.EventID] = q.CreatedAt
+			}
+		}
+
 		dirs, err := b.store.Directives().List(ctx, store.DirectiveFilter{RunID: run, ActiveOnly: true})
 		if err != nil {
 			return nil, err
 		}
 		for i := range dirs {
 			d := &dirs[i]
-			if !strings.HasPrefix(d.Ref, "owner_ask:") || (d.ExpiresAt != nil && !b.now().Before(*d.ExpiresAt)) {
+			if !strings.HasPrefix(d.Ref, "owner_ask:") || (d.ExpiresAt != nil && !now.Before(*d.ExpiresAt)) {
 				continue
 			}
 			a := openAsk{run: run, scope: d.Scope}
 			if err := json.Unmarshal([]byte(d.Text), &a.ask); err != nil {
 				return nil, fmt.Errorf("owner ask %s in run %s: %w", d.ID, run, err)
 			}
+			if srcID := cmp.Or(a.ask.SourceMessageID, a.ask.SourceEventID); srcID != "" {
+				if ts, ok := mailCreated[srcID]; ok && !ts.IsZero() {
+					a.age = mailbox.FormatAge(now, ts)
+				} else if ts, ok := mailCreated[a.ask.SourceEventID]; ok && !ts.IsZero() {
+					a.age = mailbox.FormatAge(now, ts)
+				} else if !d.CreatedAt.IsZero() {
+					a.age = mailbox.FormatAge(now, d.CreatedAt)
+				}
+			}
 			out = append(out, a)
+		}
+
+		for i := range allLaneQs {
+			q := allLaneQs[i]
+			if q.EscalatedAskID != "" {
+				continue
+			}
+			out = append(out, openAsk{
+				run:   run,
+				scope: q.LaneID,
+				age:   cmp.Or(q.Age, "0s"),
+				ask: controller.OwnerAsk{
+					ID:       q.ID,
+					RunID:    run,
+					LaneID:   q.LaneID,
+					Question: q.Question,
+				},
+			})
 		}
 	}
 	return out, nil
 }
 
-// question renders an owner ask with its run, lane, choices, and default.
+// question renders an owner or lane ask with its run, lane, age, choices, and default.
 func (b *StoreBackend) question(a *openAsk) string {
 	q := a.ask.ID + ": " + a.ask.Question
 	if a.run != b.runID {
@@ -262,6 +306,9 @@ func (b *StoreBackend) question(a *openAsk) string {
 	var details []string
 	if l := cmp.Or(a.ask.LaneID, a.scope); l != "" {
 		details = append(details, "lane "+l)
+	}
+	if a.age != "" {
+		details = append(details, "age "+a.age)
 	}
 	if len(a.ask.Options) > 0 {
 		details = append(details, "choices: "+strings.Join(a.ask.Options, " | "))
