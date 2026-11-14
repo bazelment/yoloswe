@@ -24,7 +24,7 @@ Each role selects a provider and model independently. JSON config uses
       "planner": {"provider": "openai", "model": "gpt-6-astra", "effort": "high"},
       "critic": {"provider": "anthropic", "model": "claude-sonnet-5-5"},
       "dispatcher": {"provider": "openai", "model": "gpt-6.1-sol"},
-      "concierge": {"provider": "anthropic", "model": "claude-haiku-4-5-20251001"},
+      "concierge": {"provider": "anthropic", "model": "claude-haiku-5-5"},
       "router": {"provider": "openai", "model": "gpt-6.1-sol"}
     }
   }

@@ -212,6 +212,8 @@ func executeChat(
 		if err := st.Runs().Create(ctx, store.Run{ID: storeCfg.RunID, Repository: cfg.Repository, Objective: ""}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			return err
 		}
+	} else if err := ensureChatRun(ctx, st, cfg); err != nil {
+		return err
 	}
 
 	client, err := openModelClient(cfg, clk)
@@ -466,6 +468,23 @@ func createChatRun(ctx context.Context, cfg Config, runID, goal string, clk cloc
 		return nil, "", err
 	}
 	return st, "sqlite:" + path, nil
+}
+
+// ensureChatRun creates a run record when chat is the first entry point.
+func ensureChatRun(ctx context.Context, st store.Store, cfg Config) error {
+	if _, err := st.Runs().Get(ctx, cfg.RunID); err == nil {
+		return nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	objective := strings.TrimSpace(cmp.Or(cfg.Objective, cfg.Goal))
+	if objective == "" {
+		objective = "Owner chat for run " + cfg.RunID
+	}
+	if err := st.Runs().Create(ctx, store.Run{ID: cfg.RunID, Repository: cfg.Repository, Objective: objective, PlanRef: cfg.PlanRef}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		return err
+	}
+	return nil
 }
 
 func newLogger(out io.Writer, levelStr, format string) *slog.Logger {
