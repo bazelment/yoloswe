@@ -9,6 +9,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/orca/chat",
     visibility = ["//visibility:public"],
     deps = [
+        "//orca/adopt",
         "//orca/concierge",
         "//orca/mailbox",
         "//orca/router",

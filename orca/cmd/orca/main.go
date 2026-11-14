@@ -207,7 +207,8 @@ func executeChat(
 	routerSel := cfg.Models.Roles["router"]
 	routingLog := router.StoreLogger{Store: st, RunID: cfg.RunID, Model: routerSel.Model, Provider: routerSel.Provider}
 	r := router.Select(roleClient(client, cfg, "router"), routerSel.Model, os.Getenv("ORCA_GEMINI_API_KEY"), os.Getenv("GEMINI_DECISIONS_BASE_URL"), routingLog)
-	backend := &chatui.StoreBackend{Store: st, RunID: cfg.RunID, Stream: concierge.AskStream}
+	adoption, adoptionOff := newAdoption(cfg)
+	backend := &chatui.StoreBackend{Store: st, RunID: cfg.RunID, Stream: concierge.AskStream, Adoption: adoption, AdoptionUnavailable: adoptionOff}
 	if question != "" {
 		d, err := r.Route(ctx, question)
 		if err != nil {
