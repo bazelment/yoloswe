@@ -39,6 +39,8 @@ type StoreBackend struct {
 	OpenRun func(context.Context, string) (store.Store, error)
 	// OnAttach runs under the attachment lock whenever another run is attached.
 	OnAttach func(store.Store, string)
+	// OnHoldChange runs when /adopt or /release changes the held runs.
+	OnHoldChange func()
 	// Adoption hands host swarms to this chat; its lease holder is stable
 	// across chat restarts, so /release finds the adopted run after one.
 	// When nil, AdoptionUnavailable says why /adopt and /release are off.
@@ -121,6 +123,26 @@ func (b *StoreBackend) now() time.Time {
 }
 
 func (b *StoreBackend) frontDesk() bool { return b.FrontDesk != "" && b.runID == b.FrontDesk }
+
+// HeldRuns returns the attached run followed by the adopted runs driven in
+// the attached store.
+func (b *StoreBackend) HeldRuns(ctx context.Context) ([]string, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.heldRuns(ctx)
+}
+
+// ReadHostRun reads the host swarm run directory of id when Adoption is set.
+func (b *StoreBackend) ReadHostRun(id string) (adopt.Run, error) {
+	if b.Adoption == nil {
+		return adopt.Run{}, adopt.ErrRunNotFound
+	}
+	dir, err := b.Adoption.Importer.Find(id)
+	if err != nil {
+		return adopt.Run{}, err
+	}
+	return adopt.Read(dir)
+}
 
 // heldRuns returns the attached run followed by the adopted runs driven in
 // the attached store. The caller holds b.mu.
@@ -225,13 +247,14 @@ func (b *StoreBackend) Snapshot(ctx context.Context) (Snapshot, error) {
 //
 //nolint:govet // field order follows the doc
 type runView struct {
-	run    *store.Run
-	held   []string
-	lanes  []heldLane
-	asks   []openAsk
-	cost   float64
-	desk   bool
-	phases map[string]int
+	run      *store.Run
+	held     []string
+	lanes    []heldLane
+	asks     []openAsk
+	cost     float64
+	desk     bool
+	statuses map[string]int
+	phases   map[string]int
 }
 
 // view reads the attached run's view; the caller holds b.mu.
@@ -240,7 +263,7 @@ func (b *StoreBackend) view(ctx context.Context) (runView, error) {
 	if err != nil {
 		return runView{}, err
 	}
-	v := runView{run: run, desk: b.frontDesk(), phases: map[string]int{}}
+	v := runView{run: run, desk: b.frontDesk(), statuses: map[string]int{}, phases: map[string]int{}}
 	if v.held, err = b.heldRuns(ctx); err != nil {
 		return runView{}, err
 	}
@@ -276,6 +299,7 @@ func (b *StoreBackend) view(ctx context.Context) (runView, error) {
 		}
 	}
 	for i := range v.lanes {
+		v.statuses[cmp.Or(string(v.lanes[i].lane.Status), "-")]++
 		v.phases[cmp.Or(v.lanes[i].lane.Phase, "-")]++
 	}
 	return v, nil
@@ -294,7 +318,7 @@ func (v *runView) snapshot(b *StoreBackend) Snapshot {
 	if len(v.held) > 1 {
 		status += " | adopted: " + strings.Join(v.held[1:], ", ")
 	}
-	status += " | lanes: " + countLine(len(v.lanes), v.phases)
+	status += " | lanes: " + laneCounts(len(v.lanes), v.statuses, v.phases)
 	s := Snapshot{Status: status + fmt.Sprintf(" | open questions: %d | cost today: $%.2f", len(v.asks), v.cost)}
 	for i := range v.asks {
 		s.Questions = append(s.Questions, b.question(&v.asks[i]))
@@ -302,8 +326,8 @@ func (v *runView) snapshot(b *StoreBackend) Snapshot {
 	return s
 }
 
-// statusReport is /status: the run and its goal, lanes by phase, open
-// questions, held runs and today's cost. The caller holds b.mu.
+// statusReport is /status: the run and its goal, lanes by status and phase,
+// open questions, held runs and today's cost. The caller holds b.mu.
 func (b *StoreBackend) statusReport(ctx context.Context) (string, error) {
 	v, err := b.view(ctx)
 	if err != nil {
@@ -311,7 +335,7 @@ func (b *StoreBackend) statusReport(ctx context.Context) (string, error) {
 	}
 	var out strings.Builder
 	fmt.Fprintf(&out, "%s | run: %s\n", v.goal(), b.runID)
-	fmt.Fprintf(&out, "lanes: %s\n", countLine(len(v.lanes), v.phases))
+	fmt.Fprintf(&out, "lanes: %s\n", laneCounts(len(v.lanes), v.statuses, v.phases))
 	fmt.Fprintf(&out, "open questions: %d\n", len(v.asks))
 	for i := range v.asks {
 		fmt.Fprintf(&out, "  %s\n", b.question(&v.asks[i]))
@@ -694,7 +718,13 @@ func (b *StoreBackend) Swarms(ctx context.Context) SwarmList {
 // LiveSwarms is Swarms with each host lane's terminal agent state and PR
 // state read live through HostProbe.
 func (b *StoreBackend) LiveSwarms(ctx context.Context) SwarmList {
-	l := b.Swarms(ctx)
+	return b.LiveSwarmsFiltered(ctx, "")
+}
+
+// LiveSwarmsFiltered filters Swarms by run before probing live terminal and
+// PR state.
+func (b *StoreBackend) LiveSwarmsFiltered(ctx context.Context, run string) SwarmList {
+	l := b.Swarms(ctx).Filter(run)
 	if l.HostOff == "" {
 		l.Probe(ctx, b.HostProbe)
 	}
@@ -711,6 +741,7 @@ func (b *StoreBackend) RunIDs(ctx context.Context) ([]string, error) {
 	for i := range rs {
 		ids = append(ids, rs[i].ID)
 	}
+	slices.Sort(ids)
 	return ids, err
 }
 
@@ -754,6 +785,9 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 		if e != nil {
 			return "", e
 		}
+		if b.OnHoldChange != nil {
+			b.OnHoldChange()
+		}
 		return fmt.Sprintf("adopted %s (%d lanes imported)", r.ID, len(r.Lanes)), nil
 	case "/release":
 		if b.Adoption == nil {
@@ -778,6 +812,9 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 		}
 		if e := b.Adoption.Release(ctx, target); e != nil {
 			return "", e
+		}
+		if b.OnHoldChange != nil {
+			b.OnHoldChange()
 		}
 		return "released " + target, nil
 	}

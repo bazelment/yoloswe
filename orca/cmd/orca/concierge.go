@@ -9,15 +9,20 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/bazelment/yoloswe/orca/adopt"
 	"github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
 	memorychat "github.com/bazelment/yoloswe/orca/concierge"
+	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
@@ -47,7 +52,8 @@ const (
 const ConciergeSystemPrompt = `You are the Nebula Swarm Concierge.
 When the owner states a new goal or asks to start work, call run.start with the goal text. Do not submit a generic directive for a new goal.
 You are the front desk for unclear or mixed messages: clarify with one question only if you must; otherwise save rules with memory.submit and forward plan changes or orders with directive.submit. Use run.control to pause, resume or stop execution. Use run.settings to tune concurrency and stall timeout.
-Answer the owner's questions accurately and concisely using read-only Store tools (status, lane.show, decisions.since, pr.ci). For questions about the swarms or runs on this machine (which are active, what each is doing), call swarms once and answer from it.
+Each answer must address only the question asked; never open with or repeat status or conclusions from earlier, unrelated turns or other runs.
+Answer the owner's questions accurately and concisely using read-only Store tools (status, lane.show, decisions.since, pr.ci). For runs this chat holds (including adopted runs), answer from the Store and live probes via status, lane.show, or pr.ci—do not call swarms for a held run. For questions about other swarms on this machine, call swarms once (pass the run filter when asking about a specific swarm) and answer from it.
 	Never invent facts not present in the Store. Owner corrections become memory.submit proposals saved immediately with a source quote; memory.undo reverts the last change.`
 
 type ConciergeStatusParams struct {
@@ -78,8 +84,10 @@ type DirectiveSubmitParams struct {
 	RunID  string `json:"run_id,omitempty" jsonschema:"description=Run the directive is about when the owner names one; defaults to the run this chat holds"`
 }
 
-// SwarmsParams takes no arguments.
-type SwarmsParams struct{}
+// SwarmsParams optionally filters swarms by run ID or substring.
+type SwarmsParams struct {
+	Run string `json:"run,omitempty" jsonschema:"description=Optional run ID or substring filter (e.g. trial-m1)"`
+}
 
 type RunStartParams struct {
 	Goal string `json:"goal" jsonschema:"required,description=Goal for the new run"`
@@ -102,9 +110,18 @@ type Concierge struct {
 	// the owner a question; a plain yes on the next turn confirms.
 	startAsked bool
 	RunStart   func(context.Context, string) (string, error)
+	// HeldRuns lists the run IDs currently held by this chat (attached run and
+	// any adopted runs). When nil, Concierge infers held runs from Store.
+	HeldRuns func(context.Context) ([]string, error)
+	// HostRun reads optional host-directory metadata for an adopted run ID.
+	HostRun func(string) (adopt.Run, error)
+	// Probe reads live Nebula terminal state and GitHub PR state for held lanes.
+	Probe     chat.HostProbe
+	probeFrom func() chat.HostProbe
 	// Swarms lists this machine's orca runs and host swarms for the swarms
 	// tool; nil leaves the tool out.
-	Swarms func(context.Context) chat.SwarmList
+	Swarms       func(context.Context) chat.SwarmList
+	SwarmsFilter func(context.Context, string) chat.SwarmList
 	// OwnerRun picks the run a directive is about from the run the tool
 	// names and the owner's words; nil keeps directives on the chat's run.
 	OwnerRun func(ctx context.Context, run, text string) (string, error)
@@ -146,6 +163,44 @@ func (c *Concierge) Attach(st store.Store, runID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.store, c.runID, c.threadID, c.history, c.startAsked = st, strings.TrimSpace(runID), "", nil, false
+}
+
+// ResetHistory clears in-memory turn history when the held-run set changes
+// (e.g., on /adopt or /release) so earlier turns do not bleed into new answers.
+func (c *Concierge) ResetHistory() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.threadID, c.history, c.startAsked = "", nil, false
+}
+
+// BindBackend connects the Concierge to a StoreBackend's held runs, live
+// probes, swarm discovery, directive routing, wakeups, and attach/adopt/release
+// lifecycle hooks.
+func (c *Concierge) BindBackend(b *chat.StoreBackend) {
+	if b == nil {
+		return
+	}
+	c.Swarms = b.LiveSwarms
+	c.SwarmsFilter = b.LiveSwarmsFiltered
+	c.OwnerRun = b.OwnerRun
+	c.Wake = b.Wake
+	c.HeldRuns = b.HeldRuns
+	c.HostRun = b.ReadHostRun
+	c.probeFrom = func() chat.HostProbe {
+		if c.Probe.TerminalState != nil || c.Probe.PR != nil || len(c.Probe.Off) > 0 {
+			return c.Probe
+		}
+		return b.HostProbe
+	}
+	b.OnAttach = c.Attach
+	b.OnHoldChange = c.ResetHistory
+}
+
+func (c *Concierge) hostProbe() chat.HostProbe {
+	if c.probeFrom != nil {
+		return c.probeFrom()
+	}
+	return c.Probe
 }
 
 func NewConcierge(
@@ -337,14 +392,20 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 	}
 
 	c.mu.Lock()
-	msgs := append(slices.Clone(c.history), model.NewUserMessage(question))
+	prior := slices.Clone(c.history)
 	start := &ownerTurn{allowed: chat.IsStartRequest(question) || (c.startAsked && chat.IsConfirmation(question))}
 	c.startAsked = false
 	c.mu.Unlock()
 
+	held := c.heldRunIDs(ctx)
+	msgs := append(c.relevantHistory(ctx, prior, question, held), model.NewUserMessage(question))
+
 	memoryEcho := ""
 	reg := c.buildToolRegistry(threadID, turnID, question, &memoryEcho, start)
 	systemPrompt := ConciergeSystemPrompt
+	if len(held) > 0 && (len(held) > 1 || held[0] != frontDeskRunID) {
+		systemPrompt += "\n\n## Held Runs\nThis chat currently holds in its Store: " + strings.Join(held, ", ") + ". Use status, lane.show, and pr.ci (not swarms) to answer questions about held runs."
+	}
 	if memories, memErr := c.store.Memories().List(ctx, store.MemoryFilter{RunID: c.runID}); memErr == nil {
 		systemPrompt += "\n\n## Canonical Memory Index\n" + store.MemoryIndex(memories)
 	}
@@ -416,13 +477,13 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 		// The transcript ends on an unanswered tool call; keep the turn as
 		// plain text so the next request is well formed.
 		c.mu.Lock()
-		c.history = append(slices.Clone(msgs), model.NewAssistantMessage(model.NewTextBlock(answer)))
+		c.history = append(plainHistory(prior), model.NewUserMessage(question), model.NewAssistantMessage(model.NewTextBlock(answer)))
 		c.mu.Unlock()
 	} else if loopRes != nil {
 		usage = loopRes.Usage
 		answer = strings.TrimSpace(loopRes.Response.Text())
 		c.mu.Lock()
-		c.history = slices.Clone(loopRes.Messages)
+		c.history = append(plainHistory(prior), model.NewUserMessage(question), model.NewAssistantMessage(model.NewTextBlock(answer)))
 		c.startAsked = start.refused && strings.HasSuffix(answer, "?")
 		c.mu.Unlock()
 	}
@@ -538,6 +599,173 @@ func plainHistory(msgs []model.Message) []model.Message {
 	return out
 }
 
+// relevantHistory drops earlier user/assistant turns that are about a different
+// run than the current question so unrelated run status never bleeds into the
+// current answer.
+func (c *Concierge) relevantHistory(ctx context.Context, history []model.Message, question string, held []string) []model.Message {
+	plain := plainHistory(history)
+	if len(plain) == 0 || chat.IsConfirmation(question) {
+		return plain
+	}
+	knownRuns := slices.Clone(held)
+	if c.store != nil {
+		if runs, err := c.store.Runs().List(ctx); err == nil {
+			for i := range runs {
+				if runs[i].ID != "" && !slices.Contains(knownRuns, runs[i].ID) {
+					knownRuns = append(knownRuns, runs[i].ID)
+				}
+			}
+		}
+	}
+	qLower := strings.ToLower(question)
+	targetRuns := matchedRunTokens(qLower, knownRuns)
+	var out []model.Message
+	for i := 0; i < len(plain); {
+		end := i + 1
+		if end < len(plain) && plain[i].Role == model.RoleUser && plain[end].Role == model.RoleAssistant {
+			end++
+		}
+		var turnText strings.Builder
+		for j := i; j < end; j++ {
+			turnText.WriteString(strings.ToLower(plain[j].Text()))
+			turnText.WriteByte('\n')
+		}
+		tLower := turnText.String()
+		keep := true
+		if len(targetRuns) > 0 {
+			keep = false
+			for _, tok := range targetRuns {
+				if strings.Contains(tLower, tok) {
+					keep = true
+					break
+				}
+			}
+		} else if turnRuns := matchedRunTokens(tLower, knownRuns); len(turnRuns) > 0 {
+			for _, tok := range turnRuns {
+				if !strings.Contains(qLower, tok) {
+					keep = false
+					break
+				}
+			}
+		}
+		if keep {
+			out = append(out, plain[i:end]...)
+		}
+		i = end
+	}
+	return out
+}
+
+// matchedRunTokens extracts run identifiers or hyphenated run slugs mentioned
+// in lower-cased text.
+func matchedRunTokens(lower string, knownRuns []string) []string {
+	var out []string
+	add := func(s string) {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if len(s) >= 3 && !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	for _, id := range knownRuns {
+		if id == "" || id == frontDeskRunID {
+			continue
+		}
+		idLower := strings.ToLower(id)
+		if strings.Contains(lower, idLower) {
+			add(idLower)
+		}
+		if slug := runSlug(idLower); slug != "" && strings.Contains(lower, slug) {
+			add(slug)
+		}
+	}
+	fields := strings.FieldsFunc(lower, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-'
+	})
+	for idx, w := range fields {
+		w = strings.Trim(w, "-")
+		if !strings.Contains(w, "-") || len(w) < 4 {
+			continue
+		}
+		nearRunWord := (idx > 0 && (fields[idx-1] == "run" || fields[idx-1] == "swarm" || fields[idx-1] == "hold" || fields[idx-1] == "adopt")) ||
+			(idx+1 < len(fields) && (fields[idx+1] == "run" || fields[idx+1] == "swarm" || fields[idx+1] == "hold"))
+		if nearRunWord || isDatedRunID(w) {
+			add(w)
+			if slug := runSlug(w); slug != "" {
+				add(slug)
+			}
+		}
+	}
+	return out
+}
+
+func isDatedRunID(s string) bool {
+	if len(s) < 10 {
+		return false
+	}
+	for i := range 8 {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return s[8] == '-'
+}
+
+func runSlug(id string) string {
+	if !isDatedRunID(id) {
+		return ""
+	}
+	rest := id[9:]
+	if len(rest) > 7 {
+		digits := true
+		for i := range 6 {
+			if rest[i] < '0' || rest[i] > '9' {
+				digits = false
+				break
+			}
+		}
+		if digits && rest[6] == '-' {
+			return rest[7:]
+		}
+	}
+	return rest
+}
+
+// heldRunIDs returns the runs currently held by this chat (attached run and any
+// adopted or non-front-desk runs in Store).
+func (c *Concierge) heldRunIDs(ctx context.Context) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	if c.HeldRuns != nil {
+		if ids, err := c.HeldRuns(ctx); err == nil {
+			for _, id := range ids {
+				if id != frontDeskRunID {
+					add(id)
+				}
+			}
+		}
+	}
+	if c.store != nil {
+		if runs, err := c.store.Runs().List(ctx); err == nil {
+			for i := range runs {
+				if runs[i].ID != frontDeskRunID {
+					add(runs[i].ID)
+				}
+			}
+		}
+	}
+	if c.runID != "" && (c.runID != frontDeskRunID || len(out) == 0) {
+		add(c.runID)
+	}
+	return out
+}
+
 // clipText bounds s to n bytes without splitting a rune.
 func clipText(s string, n int) string {
 	if len(s) <= n {
@@ -641,17 +869,30 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 		})
 
 	model.AddTool[ConciergeStatusParams](reg, ToolConciergeStatus,
-		"Read structured run status, backlog, lanes, active directives, and decision/token/cost metrics",
+		"Read structured run status, backlog, lanes, sessions, terminals, live terminal agent state, live GitHub PR state, active directives, and metrics for held runs",
 		func(ctx context.Context, _ ConciergeStatusParams) (string, error) {
 			return c.FormatStatusReport(ctx)
 		},
 	)
 
-	if c.Swarms != nil {
+	if c.Swarms != nil || c.SwarmsFilter != nil {
 		model.AddTool[SwarmsParams](reg, ToolSwarms,
-			"List every swarm on this machine: orca runs and host swarms, each with its goal, lanes by phase and status, last activity and orchestrator",
-			func(ctx context.Context, _ SwarmsParams) (string, error) {
-				return clipText(c.Swarms(ctx).Render(c.clock.Now(), true), swarmsReadBytes), nil
+			"List swarms on this machine (or filter by run): orca runs and host swarms, recent-first, each with its goal, lanes by status and phase, last activity and orchestrator",
+			func(ctx context.Context, p SwarmsParams) (string, error) {
+				var list chat.SwarmList
+				switch {
+				case c.SwarmsFilter != nil:
+					list = c.SwarmsFilter(ctx, p.Run)
+				case c.Swarms != nil:
+					list = c.Swarms(ctx).Filter(p.Run)
+					if list.Live == nil {
+						probe := c.hostProbe()
+						if probe.TerminalState != nil || probe.PR != nil || len(probe.Off) > 0 {
+							list.Probe(ctx, probe)
+						}
+					}
+				}
+				return clipText(list.Render(c.clock.Now(), true), swarmsReadBytes), nil
 			},
 		)
 	}
@@ -719,32 +960,80 @@ type MemoryReadParams struct {
 	ID string `json:"id"`
 }
 
-// FormatStatusReport renders a structured status summary of the run from Store state and DecisionStore metrics.
+// FormatStatusReport renders a structured status summary of held runs from
+// Store state, DecisionStore metrics, and live Nebula/GitHub probes.
 func (c *Concierge) FormatStatusReport(ctx context.Context) (string, error) {
-	run, err := c.store.Runs().Get(ctx, c.runID)
+	runIDs := c.heldRunIDs(ctx)
+	if len(runIDs) == 0 {
+		runIDs = []string{c.runID}
+	}
+	var reports []string
+	var firstErr error
+	for _, runID := range runIDs {
+		rep, err := c.formatRunStatusReport(ctx, runID)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		reports = append(reports, rep)
+	}
+	if len(reports) == 0 {
+		return "", firstErr
+	}
+	return strings.Join(reports, "\n\n"), nil
+}
+
+type heldLaneProbeResult struct {
+	agent        string
+	agentErr     string
+	prErr        string
+	pr           chat.PRStatus
+	agentChecked bool
+	prChecked    bool
+}
+
+func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (string, error) {
+	run, err := c.store.Runs().Get(ctx, runID)
 	if err != nil {
 		return "", err
 	}
-	backlog, err := c.store.Backlog().List(ctx, store.BacklogFilter{RunID: c.runID})
+	backlog, err := c.store.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
 	if err != nil {
 		return "", err
 	}
-	lanes, err := c.store.Lanes().List(ctx, store.LaneFilter{RunID: c.runID})
+	lanes, err := c.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
 	if err != nil {
 		return "", err
 	}
-	dirs, err := c.store.Directives().List(ctx, store.DirectiveFilter{RunID: c.runID, ActiveOnly: true})
+	dirs, err := c.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
 	if err != nil {
 		return "", err
 	}
-	metrics, err := ComputeMetrics(ctx, c.store, c.clock, c.runID)
+	metrics, err := ComputeMetrics(ctx, c.store, c.clock, runID)
 	if err != nil {
 		return "", err
 	}
-	settings, err := c.store.Runs().GetSettings(ctx, c.runID)
+	settings, err := c.store.Runs().GetSettings(ctx, runID)
 	if err != nil {
 		return "", err
 	}
+
+	var hostRun adopt.Run
+	hostLanes := map[string]adopt.Lane{}
+	if c.HostRun != nil {
+		if hr, hrErr := c.HostRun(runID); hrErr == nil {
+			hostRun = hr
+			for i := range hr.Lanes {
+				hostLanes[hr.Lanes[i].ID] = hr.Lanes[i]
+			}
+		}
+	}
+	repo := cmp.Or(run.Repository, hostRun.Repo)
+	runDir := hostRun.Dir
+	probe := c.hostProbe()
+	probed := c.probeHeldLanes(ctx, probe, repo, runDir, lanes, hostLanes)
 
 	counts := make(map[store.BacklogStatus]int)
 	for i := range backlog {
@@ -753,7 +1042,10 @@ func (c *Concierge) FormatStatusReport(ctx context.Context) (string, error) {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Run: %s\n", run.ID)
-	fmt.Fprintf(&b, "Objective: %s\n", cmp.Or(run.Objective, "(none)"))
+	fmt.Fprintf(&b, "Objective: %s\n", cmp.Or(run.Objective, hostRun.Goal, "(none)"))
+	if repo != "" {
+		fmt.Fprintf(&b, "Repository: %s\n", repo)
+	}
 	fmt.Fprintf(&b, "Settings: concurrency_cap=%d stall_timeout=%s paused=%t\n", settings.ConcurrencyCap, settings.StallTimeout, settings.Paused)
 	if run.PlanRef != "" {
 		fmt.Fprintf(&b, "PlanRef: %s\n", run.PlanRef)
@@ -778,19 +1070,27 @@ func (c *Concierge) FormatStatusReport(ctx context.Context) (string, error) {
 			it.ID, it.Priority, it.Status, cmp.Or(it.LaneID, "-"), it.Title)
 	}
 
-	fmt.Fprintf(&b, "\nLanes (%d):\n", len(lanes))
+	fmt.Fprintf(&b, "\nLanes (%s):\n", formatStoreLaneCounts(lanes))
+	var runningNow, unknownNow []string
 	for i := range lanes {
 		ln := lanes[i]
+		hl := hostLanes[ln.ID]
+		live := probed[ln.ID]
 		rec := cmp.Or(ln.RecipeName, recipe.DefaultName)
 		if ln.RecipeVersion > 0 {
 			rec = fmt.Sprintf("%s@v%d", rec, ln.RecipeVersion)
 		}
-		fmt.Fprintf(&b, "- %s: item=%s status=%s phase=%s round=%d recipe=%s pr=#%d head=%s approval=%s merge=%s checks=%s\n",
+		sessionID := cmp.Or(ln.SessionID, hl.Session)
+		terminalID := cmp.Or(ln.TerminalID, hl.Terminal)
+		title := cmp.Or(ln.Title, hl.Title)
+		line := fmt.Sprintf("- %s: item=%s status=%s phase=%s round=%d session=%s terminal=%s recipe=%s pr=#%d head=%s approval=%s merge=%s checks=%s",
 			ln.ID,
 			cmp.Or(ln.ItemID, "-"),
 			ln.Status,
 			cmp.Or(ln.Phase, "-"),
 			ln.Round,
+			cmp.Or(sessionID, "-"),
+			cmp.Or(terminalID, "-"),
 			rec,
 			ln.PR,
 			cmp.Or(ln.PRHead, "-"),
@@ -798,6 +1098,46 @@ func (c *Concierge) FormatStatusReport(ctx context.Context) (string, error) {
 			cmp.Or(ln.MergeSHA, "-"),
 			cmp.Or(ln.Checks, "-"),
 		)
+		if title != "" {
+			line += " " + title
+		}
+		b.WriteString(line + "\n")
+
+		nowParts := c.laneNowParts(ctx, runID, &ln, hl, terminalID, sessionID, live)
+		nextStep := c.laneNextStep(ctx, run, &ln, dirs, hl)
+		fmt.Fprintf(&b, "    now: %s\n", strings.Join(nowParts, "; "))
+		fmt.Fprintf(&b, "    next: %s\n", nextStep)
+		if ln.PR > 0 {
+			switch {
+			case live.prChecked && live.prErr == "":
+				fmt.Fprintf(&b, "    pr #%d (GitHub): %s\n", ln.PR, live.pr)
+			case live.prChecked:
+				fmt.Fprintf(&b, "    pr #%d (GitHub): unreadable: %s\n", ln.PR, live.prErr)
+			default:
+				fmt.Fprintf(&b, "    pr #%d: store checks=%s head=%s approval=%s merge=%s (GitHub state not checked)\n",
+					ln.PR, cmp.Or(ln.Checks, "-"), cmp.Or(ln.PRHead, "-"), cmp.Or(ln.ApprovalSHA, "-"), cmp.Or(ln.MergeSHA, "-"))
+			}
+		}
+		if !ln.Status.Terminal() {
+			switch {
+			case live.agentChecked && live.agentErr == "" && !isIdleTerminalState(live.agent):
+				runningNow = append(runningNow, fmt.Sprintf("%s (%s, agent %s)", ln.ID, cmp.Or(ln.Phase, "-"), live.agent))
+			case live.agentChecked && live.agentErr == "":
+				// Checked idle.
+			default:
+				unknownNow = append(unknownNow, fmt.Sprintf("%s (%s)", ln.ID, cmp.Or(ln.Phase, string(ln.Status))))
+			}
+		}
+	}
+	if len(lanes) > 0 {
+		switch {
+		case len(runningNow) > 0:
+			fmt.Fprintf(&b, "Running now: %s\n", strings.Join(runningNow, ", "))
+		case len(unknownNow) > 0:
+			fmt.Fprintf(&b, "Running now: %s\n", strings.Join(unknownNow, ", "))
+		default:
+			b.WriteString("Running now: nothing (every lane is finished or its terminal checked idle)\n")
+		}
 	}
 
 	fmt.Fprintf(&b, "\nActive Directives (%d):\n", len(dirs))
@@ -811,28 +1151,265 @@ func (c *Concierge) FormatStatusReport(ctx context.Context) (string, error) {
 	return b.String(), nil
 }
 
-func (c *Concierge) handleLaneShow(ctx context.Context, laneID string) (string, error) {
+func (c *Concierge) probeHeldLanes(
+	ctx context.Context,
+	probe chat.HostProbe,
+	repo, runDir string,
+	lanes []store.Lane,
+	hostLanes map[string]adopt.Lane,
+) map[string]heldLaneProbeResult {
+	out := make(map[string]heldLaneProbeResult, len(lanes))
+	if probe.TerminalState == nil && probe.PR == nil {
+		return out
+	}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	for i := range lanes {
+		ln := lanes[i]
+		hl := hostLanes[ln.ID]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			var res heldLaneProbeResult
+			terminalID := cmp.Or(ln.TerminalID, hl.Terminal)
+			if probe.TerminalState != nil && terminalID != "" && !ln.Status.Terminal() {
+				res.agentChecked = true
+				st, err := probe.TerminalState(ctx, terminalID)
+				if err != nil {
+					res.agentErr = err.Error()
+				} else {
+					res.agent = cmp.Or(st, "unknown")
+				}
+			}
+			if probe.PR != nil && ln.PR > 0 {
+				res.prChecked = true
+				pr, err := probe.PR(ctx, repo, runDir, strconv.Itoa(ln.PR))
+				if err != nil {
+					res.prErr = err.Error()
+				} else {
+					res.pr = pr
+				}
+			}
+			mu.Lock()
+			out[ln.ID] = res
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	return out
+}
+
+func (c *Concierge) laneNowParts(
+	ctx context.Context,
+	runID string,
+	ln *store.Lane,
+	hl adopt.Lane,
+	terminalID, sessionID string,
+	live heldLaneProbeResult,
+) []string {
+	parts := []string{fmt.Sprintf("%s round %d", cmp.Or(ln.Phase, "-"), max(ln.Round, 1))}
+	if sessionID != "" {
+		parts = append(parts, "session="+sessionID)
+	}
+	switch {
+	case terminalID == "":
+		parts = append(parts, "no terminal recorded")
+	case ln.Status.Terminal():
+		parts = append(parts, fmt.Sprintf("terminal %s (lane %s, not probed)", terminalID, ln.Status))
+	case live.agentChecked && live.agentErr == "":
+		parts = append(parts, fmt.Sprintf("terminal %s agent=%s", terminalID, live.agent))
+	case live.agentChecked:
+		parts = append(parts, fmt.Sprintf("terminal %s agent state unreadable: %s", terminalID, live.agentErr))
+	default:
+		parts = append(parts, fmt.Sprintf("terminal %s agent state not checked", terminalID))
+	}
+	if hl.TerminalState != "" {
+		parts = append(parts, "ledger terminal_state="+hl.TerminalState)
+	}
+	lastEvent := hl.LastEvent
+	if lastEvent == "" && c.store != nil {
+		if evs, err := c.store.Events().List(ctx, store.EventFilter{RunID: runID, LaneID: ln.ID}); err == nil && len(evs) > 0 {
+			lastEvent = evs[len(evs)-1].Summary
+		}
+	}
+	if lastEvent != "" {
+		parts = append(parts, "last event: "+lastEvent)
+	}
+	if hl.Report != "" {
+		parts = append(parts, fmt.Sprintf("latest report %s: %s", filepath.Base(hl.ReportPath), hl.Report))
+	}
+	return parts
+}
+
+func (c *Concierge) laneNextStep(
+	ctx context.Context,
+	run *store.Run,
+	ln *store.Lane,
+	dirs []store.Directive,
+	hl adopt.Lane,
+) string {
+	if ln.Status.Terminal() {
+		return fmt.Sprintf("nothing (lane %s)", ln.Status)
+	}
+	for i := range dirs {
+		d := &dirs[i]
+		if d.Scope == ln.ID && strings.HasPrefix(d.Ref, "owner_ask:") {
+			var ask controller.OwnerAsk
+			if err := json.Unmarshal([]byte(d.Text), &ask); err == nil && ask.Question != "" {
+				return "awaiting owner answer: " + ask.Question
+			}
+			return "awaiting owner answer"
+		}
+	}
+	if hl.Next != "" {
+		return hl.Next
+	}
+	rec := recipe.Default()
+	if c.store != nil && run != nil {
+		recName := cmp.Or(ln.RecipeName, run.DefaultRecipe, recipe.DefaultName)
+		if loaded, err := c.store.Recipes().Get(ctx, run.ID, recName, ln.RecipeVersion); err == nil && loaded != nil {
+			rec = *loaded
+		} else if loaded, err := c.store.Recipes().Get(ctx, run.ID, recName, 0); err == nil && loaded != nil {
+			rec = *loaded
+		}
+	}
+	if ln.Phase == "" && len(rec.Phases) > 0 {
+		return "start phase: " + rec.Phases[0].Name
+	}
+	for i := range rec.Transitions {
+		tr := &rec.Transitions[i]
+		if tr.From == ln.Phase && tr.On.Verdict == recipe.OutcomeDone {
+			if tr.To == recipe.TargetComplete {
+				if rec.MergePolicy.Mode == recipe.MergeModeManual {
+					return fmt.Sprintf("manual merge after %s", cmp.Or(ln.Phase, "review"))
+				}
+				return fmt.Sprintf("complete after %s", cmp.Or(ln.Phase, "current phase"))
+			}
+			if tr.To != "" {
+				return "next phase: " + tr.To
+			}
+		}
+	}
+	for i := range rec.Phases {
+		if rec.Phases[i].Name == ln.Phase {
+			if i+1 < len(rec.Phases) {
+				return "next phase: " + rec.Phases[i+1].Name
+			}
+			if rec.MergePolicy.Mode == recipe.MergeModeManual {
+				return fmt.Sprintf("manual merge after %s", ln.Phase)
+			}
+			return fmt.Sprintf("complete after %s", ln.Phase)
+		}
+	}
+	return "continue " + cmp.Or(ln.Phase, "work")
+}
+
+func formatStoreLaneCounts(lanes []store.Lane) string {
+	if len(lanes) == 0 {
+		return "0"
+	}
+	statuses, phases := map[string]int{}, map[string]int{}
+	for i := range lanes {
+		statuses[cmp.Or(string(lanes[i].Status), "-")]++
+		phases[cmp.Or(lanes[i].Phase, "-")]++
+	}
+	return fmt.Sprintf("%d (%s; %s)", len(lanes), sortedMapCounts(statuses), sortedMapCounts(phases))
+}
+
+func sortedMapCounts(counts map[string]int) string {
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = fmt.Sprintf("%s:%d", k, counts[k])
+	}
+	return strings.Join(parts, ", ")
+}
+
+func isIdleTerminalState(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "idle", "exited", "stopped", "released", "ended", "done", "completed", "finished", "sleeping":
+		return true
+	}
+	return false
+}
+
+func (c *Concierge) findHeldLane(ctx context.Context, laneID string) (string, *store.Lane, error) {
 	laneID = strings.TrimSpace(laneID)
-	ln, err := c.store.Lanes().Get(ctx, c.runID, laneID)
+	if ln, err := c.store.Lanes().Get(ctx, c.runID, laneID); err == nil {
+		return c.runID, ln, nil
+	}
+	for _, runID := range c.heldRunIDs(ctx) {
+		if runID == c.runID {
+			continue
+		}
+		if ln, err := c.store.Lanes().Get(ctx, runID, laneID); err == nil {
+			return runID, ln, nil
+		}
+	}
+	return "", nil, store.ErrNotFound
+}
+
+func (c *Concierge) handleLaneShow(ctx context.Context, laneID string) (string, error) {
+	runID, ln, err := c.findHeldLane(ctx, laneID)
 	if err != nil {
 		return "", err
 	}
 	decs, err := c.store.Decisions().List(ctx, store.DecisionFilter{
-		RunID:  c.runID,
-		LaneID: laneID,
+		RunID:  runID,
+		LaneID: ln.ID,
 		Limit:  10,
 	})
 	if err != nil {
 		return "", err
 	}
+	run, _ := c.store.Runs().Get(ctx, runID)
+	dirs, _ := c.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	var hl adopt.Lane
+	var repo, runDir string
+	if run != nil {
+		repo = run.Repository
+	}
+	if c.HostRun != nil {
+		if hr, hrErr := c.HostRun(runID); hrErr == nil {
+			repo = cmp.Or(repo, hr.Repo)
+			runDir = hr.Dir
+			for i := range hr.Lanes {
+				if hr.Lanes[i].ID == ln.ID {
+					hl = hr.Lanes[i]
+					break
+				}
+			}
+		}
+	}
+	probed := c.probeHeldLanes(ctx, c.hostProbe(), repo, runDir, []store.Lane{*ln}, map[string]adopt.Lane{ln.ID: hl})
+	live := probed[ln.ID]
+	sessionID := cmp.Or(ln.SessionID, hl.Session)
+	terminalID := cmp.Or(ln.TerminalID, hl.Terminal)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "Lane %s (item=%s status=%s phase=%s round=%d attempt=%d recipe=%s@v%d)\n",
-		ln.ID, cmp.Or(ln.ItemID, "-"), ln.Status, cmp.Or(ln.Phase, "-"), ln.Round, ln.Attempt,
+	fmt.Fprintf(&b, "Lane %s (run=%s item=%s status=%s phase=%s round=%d attempt=%d session=%s terminal=%s recipe=%s@v%d)\n",
+		ln.ID, runID, cmp.Or(ln.ItemID, "-"), ln.Status, cmp.Or(ln.Phase, "-"), ln.Round, ln.Attempt,
+		cmp.Or(sessionID, "-"), cmp.Or(terminalID, "-"),
 		cmp.Or(ln.RecipeName, recipe.DefaultName), max(ln.RecipeVersion, 1))
+	fmt.Fprintf(&b, "Now: %s\n", strings.Join(c.laneNowParts(ctx, runID, ln, hl, terminalID, sessionID, live), "; "))
+	fmt.Fprintf(&b, "Next: %s\n", c.laneNextStep(ctx, run, ln, dirs, hl))
 	fmt.Fprintf(&b, "PR: #%d branch=%s head=%s approval=%s merge=%s checks=%s\n",
 		ln.PR, cmp.Or(ln.Branch, "-"), cmp.Or(ln.PRHead, "-"), cmp.Or(ln.ApprovalSHA, "-"),
 		cmp.Or(ln.MergeSHA, "-"), cmp.Or(ln.Checks, "-"))
+	if ln.PR > 0 && live.prChecked {
+		if live.prErr == "" {
+			fmt.Fprintf(&b, "GitHub PR #%d: %s\n", ln.PR, live.pr)
+		} else {
+			fmt.Fprintf(&b, "GitHub PR #%d: unreadable: %s\n", ln.PR, live.prErr)
+		}
+	}
 	fmt.Fprintf(&b, "Decisions (%d):\n", len(decs))
 	for i := range decs {
 		d := decs[i]
@@ -846,8 +1423,16 @@ func (c *Concierge) handleDecisionsSince(ctx context.Context, p ConciergeDecisio
 	if limit <= 0 {
 		limit = 25
 	}
+	runID := c.runID
+	if laneID := strings.TrimSpace(p.LaneID); laneID != "" {
+		if rID, _, err := c.findHeldLane(ctx, laneID); err == nil {
+			runID = rID
+		}
+	} else if held := c.heldRunIDs(ctx); len(held) > 0 && runID == frontDeskRunID {
+		runID = held[0]
+	}
 	filter := store.DecisionFilter{
-		RunID:    c.runID,
+		RunID:    runID,
 		LaneID:   strings.TrimSpace(p.LaneID),
 		Category: store.DecisionCategory(strings.TrimSpace(p.Category)),
 		SinceSeq: p.SinceSeq,
@@ -869,14 +1454,13 @@ func (c *Concierge) handleDecisionsSince(ctx context.Context, p ConciergeDecisio
 }
 
 func (c *Concierge) handlePRCI(ctx context.Context, laneID string) (string, error) {
-	laneID = strings.TrimSpace(laneID)
-	ln, err := c.store.Lanes().Get(ctx, c.runID, laneID)
+	runID, ln, err := c.findHeldLane(ctx, laneID)
 	if err != nil {
 		return "", err
 	}
 	evs, err := c.store.Events().List(ctx, store.EventFilter{
-		RunID:  c.runID,
-		LaneID: laneID,
+		RunID:  runID,
+		LaneID: ln.ID,
 		Kinds:  []store.EventKind{store.EventCI},
 	})
 	if err != nil {
@@ -886,6 +1470,26 @@ func (c *Concierge) handlePRCI(ctx context.Context, laneID string) (string, erro
 	fmt.Fprintf(&b, "Lane %s PR #%d head=%s approval=%s stale=%t merge=%s checks=%s ci_events=%d\n",
 		ln.ID, ln.PR, cmp.Or(ln.PRHead, "-"), cmp.Or(ln.ApprovalSHA, "-"), ln.ApprovalStale(),
 		cmp.Or(ln.MergeSHA, "-"), cmp.Or(ln.Checks, "-"), len(evs))
+	if ln.PR > 0 {
+		var repo, runDir string
+		if run, rErr := c.store.Runs().Get(ctx, runID); rErr == nil {
+			repo = run.Repository
+		}
+		if c.HostRun != nil {
+			if hr, hrErr := c.HostRun(runID); hrErr == nil {
+				repo = cmp.Or(repo, hr.Repo)
+				runDir = hr.Dir
+			}
+		}
+		probed := c.probeHeldLanes(ctx, c.hostProbe(), repo, runDir, []store.Lane{*ln}, nil)
+		if live := probed[ln.ID]; live.prChecked {
+			if live.prErr == "" {
+				fmt.Fprintf(&b, "GitHub PR #%d: %s\n", ln.PR, live.pr)
+			} else {
+				fmt.Fprintf(&b, "GitHub PR #%d: unreadable: %s\n", ln.PR, live.prErr)
+			}
+		}
+	}
 	for i := max(len(evs)-5, 0); i < len(evs); i++ {
 		ev := evs[i]
 		fmt.Fprintf(&b, "- [seq=%d %s] %s %s\n", ev.Seq, ev.ID, ev.Summary, string(ev.Payload))

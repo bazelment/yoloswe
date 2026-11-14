@@ -479,17 +479,27 @@ type RunDriver interface {
 	Stop(context.Context, Run) error
 }
 
+// StoppedLoop records the step-loop process /adopt stopped so /release can
+// restart it or tell the owner what to restart.
+type StoppedLoop struct {
+	Command string   `json:"command,omitempty"`
+	Dir     string   `json:"dir,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Env     []string `json:"env,omitempty"`
+}
+
 // journal is the lease file: who holds the run and what each completed
 // handover step changed, written before the step acts.
 type journal struct {
-	PrevLabel   *string  `json:"previous_label,omitempty"`
-	Import      *Run     `json:"import,omitempty"`
-	Holder      string   `json:"holder"`
-	State       string   `json:"state"`
-	Marker      string   `json:"marker,omitempty"`
-	Created     []string `json:"marker_created,omitempty"`
-	WatcherPIDs []int    `json:"watcher_pids,omitempty"`
-	WatcherStep bool     `json:"watcher_step,omitempty"`
+	PrevLabel   *string      `json:"previous_label,omitempty"`
+	Import      *Run         `json:"import,omitempty"`
+	StoppedLoop *StoppedLoop `json:"stopped_loop,omitempty"`
+	Holder      string       `json:"holder"`
+	State       string       `json:"state"`
+	Marker      string       `json:"marker,omitempty"`
+	Created     []string     `json:"marker_created,omitempty"`
+	WatcherPIDs []int        `json:"watcher_pids,omitempty"`
+	WatcherStep bool         `json:"watcher_step,omitempty"`
 }
 
 // List returns the discoverable host runs.
@@ -843,12 +853,15 @@ func (s *Service) stopWatcher(ctx context.Context, dir string, j *journal) error
 	if err := s.check("adopt:watcher"); err != nil {
 		return err
 	}
+	if s.Watcher == nil {
+		return errors.New("step loop watcher is not configured")
+	}
 	if !j.WatcherStep {
 		pids, err := s.Watcher.Running(ctx, dir)
 		if err != nil {
 			return err
 		}
-		j.WatcherPIDs, j.WatcherStep = pids, true
+		j.WatcherPIDs, j.StoppedLoop, j.WatcherStep = pids, inspectWatcherLoop(s.Watcher, pids), true
 		if err := s.save(dir, j); err != nil {
 			return err
 		}
@@ -859,6 +872,10 @@ func (s *Service) stopWatcher(ctx context.Context, dir string, j *journal) error
 		if err != nil || len(pids) == 0 {
 			return err
 		}
+		if j.StoppedLoop == nil {
+			j.StoppedLoop = inspectWatcherLoop(s.Watcher, pids)
+			_ = s.save(dir, j)
+		}
 		if err := s.Watcher.Stop(ctx, pids); err != nil {
 			return err
 		}
@@ -867,6 +884,18 @@ func (s *Service) stopWatcher(ctx context.Context, dir string, j *journal) error
 		return errors.Join(err, fmt.Errorf("watcher still running: %v", pids))
 	}
 	return nil
+}
+
+func inspectWatcherLoop(w Watcher, pids []int) *StoppedLoop {
+	if len(pids) == 0 {
+		return nil
+	}
+	if ins, ok := w.(interface{ Inspect([]int) *StoppedLoop }); ok {
+		if l := ins.Inspect(pids); l != nil {
+			return l
+		}
+	}
+	return inspectStoppedLoop("", pids)
 }
 
 func (s *Service) startWatcher(ctx context.Context, dir string, j *journal) error {
@@ -882,12 +911,20 @@ func (s *Service) startWatcher(ctx context.Context, dir string, j *journal) erro
 			return err
 		}
 		if len(pids) == 0 {
-			if err := s.Watcher.Start(ctx, dir); err != nil {
-				return err
+			var startErr error
+			if r, ok := s.Watcher.(interface {
+				Restart(context.Context, string, *StoppedLoop) error
+			}); ok {
+				startErr = r.Restart(ctx, dir, j.StoppedLoop)
+			} else {
+				startErr = s.Watcher.Start(ctx, dir)
+			}
+			if startErr != nil {
+				return startErr
 			}
 		}
 	}
-	j.WatcherPIDs, j.WatcherStep = nil, false
+	j.WatcherPIDs, j.StoppedLoop, j.WatcherStep = nil, nil, false
 	return s.save(dir, j)
 }
 

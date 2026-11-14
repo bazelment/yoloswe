@@ -117,7 +117,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	if err != nil {
 		return err
 	}
-	if err := d.store.Runs().Create(ctx, store.Run{ID: r.ID, Objective: r.Goal, DefaultRecipe: workflow.Name}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+	if err := d.store.Runs().Create(ctx, store.Run{ID: r.ID, Repository: r.Repo, Objective: r.Goal, DefaultRecipe: workflow.Name}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		return err
 	}
 	holder := fmt.Sprintf("%s:%p", r.Holder, d)

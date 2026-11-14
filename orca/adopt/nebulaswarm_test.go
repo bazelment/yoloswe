@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -221,6 +222,101 @@ func TestAdoptNebulaSwarmStopsAndRestartsStepLoop(t *testing.T) {
 	}
 	if err := loops.Stop(t.Context(), bridge); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAdoptFakeStepLoopStoppedRecordedAndRestarted(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	marker := filepath.Join(t.TempDir(), "stepped")
+	loops := StepLoopWatcher{StopTimeout: 5 * time.Second}
+	fw := FormatWatcher{Nebula: loops, SubagentMissing: "watch_lanes.sh not found", StopTimeout: 5 * time.Second}
+
+	loopCmd := fmt.Sprintf(`while (( SECONDS < 600 )); do echo "$1" >> %q; sleep 180; done`, marker)
+	host := exec.Command("bash", "-c", loopCmd, "fake-step-loop", dir)
+	if err := host.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() { _ = host.Wait(); close(exited) }()
+	t.Cleanup(func() { _ = host.Process.Kill() })
+	var initialPIDs []int
+	waitFor(t, func() bool {
+		initialPIDs, _ = fw.Running(t.Context(), dir)
+		return fileExists(marker) && len(initialPIDs) == 2
+	})
+
+	before := nsSnapshot(t, dir)
+	label := &fakeLabeler{label: "claude"}
+	s := nsService(root, fw, label)
+	if _, err := s.Adopt(t.Context(), nsRun); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fake step loop still running after adopt")
+	}
+	for _, pid := range initialPIDs {
+		if procAlive(pid) {
+			t.Fatalf("loop or sleep child pid %d still alive after adopt", pid)
+		}
+	}
+	j, err := readJournal(filepath.Join(dir, leaseFile))
+	if err != nil || len(j.WatcherPIDs) != 2 || j.StoppedLoop == nil || !strings.Contains(j.StoppedLoop.Command, dir) {
+		t.Fatalf("journal = %+v, stopped_loop = %+v, err = %v", j, j.StoppedLoop, err)
+	}
+
+	if err := s.Release(t.Context(), nsRun); err != nil {
+		t.Fatal(err)
+	}
+	var restarted []int
+	waitFor(t, func() bool { restarted, _ = loops.Running(t.Context(), dir); return len(restarted) == 2 })
+	t.Cleanup(func() { _ = loops.Stop(context.Background(), restarted) })
+	if after := nsSnapshot(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatalf("release left the run changed:\n got %v\nwant %v", after, before)
+	}
+	if err := loops.Stop(t.Context(), restarted); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAdoptRefusesWhenStepLoopNotStoppable(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	loops := StepLoopWatcher{
+		StopTimeout: 500 * time.Millisecond,
+		Signal:      func(int, syscall.Signal) error { return syscall.EPERM },
+	}
+	fw := FormatWatcher{Nebula: loops, SubagentMissing: "watch_lanes.sh not found", StopTimeout: 500 * time.Millisecond}
+
+	host := exec.Command("bash", "-c", `while (( SECONDS < 600 )); do sleep 180; done`, "fake-step-loop", dir)
+	if err := host.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if pids, err := (StepLoopWatcher{StopTimeout: 2 * time.Second}).Running(context.Background(), dir); err == nil && len(pids) > 0 {
+			_ = (StepLoopWatcher{StopTimeout: 2 * time.Second}).Stop(context.Background(), pids)
+		}
+		_ = host.Process.Kill()
+		_ = host.Wait()
+	})
+	var pids []int
+	waitFor(t, func() bool { pids, _ = fw.Running(t.Context(), dir); return len(pids) == 2 })
+
+	before := nsSnapshot(t, dir)
+	label := &fakeLabeler{label: "claude"}
+	s := nsService(root, fw, label)
+	if _, err := s.Adopt(t.Context(), nsRun); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("adopt = %v, want EPERM refusal when step loop is not stoppable", err)
+	}
+	if after := nsSnapshot(t, dir); !reflect.DeepEqual(after, before) || label.label != "claude" {
+		t.Fatalf("refused adopt changed state: label=%q\n got %v\nwant %v", label.label, after, before)
+	}
+	if afterPIDs, err := fw.Running(t.Context(), dir); err != nil || len(afterPIDs) != 2 {
+		t.Fatalf("loop pids after refused adopt = %v, err = %v", afterPIDs, err)
 	}
 }
 

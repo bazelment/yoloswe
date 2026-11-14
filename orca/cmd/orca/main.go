@@ -271,7 +271,6 @@ func executeChat(
 	if question == "" && len(posArgs) > 0 {
 		question = strings.TrimSpace(strings.Join(posArgs, " "))
 	}
-	backend.OnAttach = concierge.Attach
 	adoption, adoptionOff := newAdoption(ctx, cfg, host, holder, formerHolders, st, clk, client, logger)
 	backend.Adoption, backend.AdoptionUnavailable = adoption, adoptionOff
 	if adoption != nil {
@@ -363,9 +362,10 @@ func executeChat(
 	return chatui.Run(ctx, stdin, stdout, ui)
 }
 
-// wireChatConcierge connects run listing, directive routing, and wakeups.
+// wireChatConcierge connects run listing, directive routing, wakeups, held
+// runs, and live probes.
 func wireChatConcierge(c *Concierge, b *chatui.StoreBackend) {
-	c.Swarms, c.OwnerRun, c.Wake = b.LiveSwarms, b.OwnerRun, b.Wake
+	c.BindBackend(b)
 }
 
 // chatHolder returns the stable holder and any legacy holder ids it owns.

@@ -76,11 +76,15 @@ func idleAgent(state string) bool {
 func (l *SwarmList) Probe(ctx context.Context, p HostProbe) {
 	l.Live = map[string]LaneLive{}
 	l.ProbeOff = p.Off
+	l.probe = &p
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
 	for i := range l.Host {
 		r := &l.Host[i]
+		if !l.Filtered && len(l.Host) > 1 && r.State != adopt.RunActive && r.State != "" {
+			continue
+		}
 		for j := range r.Lanes {
 			ln := r.Lanes[j]
 			wg.Add(1)
