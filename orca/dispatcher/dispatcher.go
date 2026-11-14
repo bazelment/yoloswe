@@ -157,6 +157,13 @@ func (d *Dispatcher) SetOwnerAnswer(fn func(context.Context, string, string, str
 	d.cfg.OnOwnerAnswer = fn
 }
 
+// SetDriver replaces the lane driver used for spawns, retries, steers, and stops.
+func (d *Dispatcher) SetDriver(drv lane.LaneDriver) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.driver = drv
+}
+
 // Judge implements controller.Judge by executing a fresh Dispatcher turn for events.
 func (d *Dispatcher) Judge(ctx context.Context, runID string, events []store.Event) error {
 	_, err := d.Dispatch(ctx, runID, events)
@@ -985,7 +992,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	}
 
 	if d.driver != nil && len(firstPhase.Agents) > 0 {
-		spawnRes, err := d.spawnLaneSession(ctx, runID, ln, firstPhase.Name, ln.Round, firstPhase.Agents[0], workerBrief)
+		spawnRes, err := d.spawnLaneSession(ctx, runID, view.Run.Repository, ln, firstPhase.Name, ln.Round, firstPhase.Agents[0], workerBrief)
 		if err != nil {
 			return "", err
 		}
@@ -1083,7 +1090,7 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 	if d.driver != nil && len(targetPhase.Agents) > 0 {
 		agent := targetPhase.Agents[0]
 		if ln.SessionID == "" {
-			res, err := d.spawnLaneSession(ctx, runID, ln, targetPhase.Name, round, agent, workerBrief)
+			res, err := d.spawnLaneSession(ctx, runID, view.Run.Repository, ln, targetPhase.Name, round, agent, workerBrief)
 			if err != nil {
 				return "", err
 			}
@@ -1094,15 +1101,16 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 			}
 		} else {
 			res, err := d.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
-				RunID:     runID,
-				LaneID:    ln.ID,
-				SessionID: ln.SessionID,
-				Phase:     targetPhase.Name,
-				Round:     round,
-				Harness:   agent.Harness,
-				Model:     agent.Model,
-				Effort:    agent.Effort,
-				Brief:     workerBrief,
+				RunID:      runID,
+				Repository: view.Run.Repository,
+				LaneID:     ln.ID,
+				SessionID:  ln.SessionID,
+				Phase:      targetPhase.Name,
+				Round:      round,
+				Harness:    agent.Harness,
+				Model:      agent.Model,
+				Effort:     agent.Effort,
+				Brief:      workerBrief,
 			})
 			if err != nil {
 				return "", err
@@ -1128,6 +1136,7 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 func (d *Dispatcher) spawnLaneSession(
 	ctx context.Context,
 	runID string,
+	repository string,
 	ln lane.Lane,
 	phase string,
 	round int,
@@ -1136,6 +1145,7 @@ func (d *Dispatcher) spawnLaneSession(
 ) (lane.SpawnResult, error) {
 	return d.driver.SpawnSession(ctx, lane.SpawnRequest{
 		RunID:      runID,
+		Repository: repository,
 		LaneID:     ln.ID,
 		Phase:      phase,
 		Round:      round,
@@ -1196,7 +1206,13 @@ func (d *Dispatcher) buildRetryBriefText(view *StateView, ln lane.Lane, phase re
 	if strings.TrimSpace(note) != "" {
 		parts = append(parts, strings.TrimSpace(note))
 	}
-	return strings.Join(parts, "\n\n")
+	joined := strings.Join(parts, "\n\n")
+	if view != nil && strings.Contains(strings.ToLower(joined), "objective.md") {
+		if obj := strings.TrimSpace(view.Run.Objective); obj != "" && !strings.Contains(joined, obj) {
+			joined += "\n\nInlined from OBJECTIVE.md:\n" + obj
+		}
+	}
+	return joined
 }
 
 func (d *Dispatcher) applyLaneStop(ctx context.Context, runID string, view *StateView, p LaneStopParams) (string, error) {

@@ -31,6 +31,7 @@ go_test(
         "//orca/clock",
         "//orca/controller",
         "//orca/lane",
+        "//orca/lane/nebula",
         "//orca/recipe",
         "//orca/store",
     ],

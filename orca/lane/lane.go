@@ -368,20 +368,22 @@ func splitHeader(line string) (string, string, bool) {
 
 // SpawnRequest holds the parameters to spawn a new worker session for a lane.
 type SpawnRequest struct {
-	RunDir     string            `json:"run_dir,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
-	RunID      string            `json:"run_id"`
-	LaneID     string            `json:"lane_id"`
-	Phase      string            `json:"phase"`
-	Harness    string            `json:"harness"`
-	Model      string            `json:"model"`
-	Effort     string            `json:"effort,omitempty"`
-	Brief      string            `json:"brief"`
-	Branch     string            `json:"branch,omitempty"`
-	BaseBranch string            `json:"base_branch,omitempty"`
-	Worktree   string            `json:"worktree,omitempty"`
-	Round      int               `json:"round"`
-	SharedHome bool              `json:"shared_home,omitempty"`
+	RunDir       string            `json:"run_dir,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	RunID        string            `json:"run_id"`
+	Repository   string            `json:"repository,omitempty"`
+	RepositoryID string            `json:"repository_id,omitempty"`
+	LaneID       string            `json:"lane_id"`
+	Phase        string            `json:"phase"`
+	Harness      string            `json:"harness"`
+	Model        string            `json:"model"`
+	Effort       string            `json:"effort,omitempty"`
+	Brief        string            `json:"brief"`
+	Branch       string            `json:"branch,omitempty"`
+	BaseBranch   string            `json:"base_branch,omitempty"`
+	Worktree     string            `json:"worktree,omitempty"`
+	Round        int               `json:"round"`
+	SharedHome   bool              `json:"shared_home,omitempty"`
 }
 
 // SpawnResult describes a newly spawned worker session and initial phase terminal.
@@ -398,17 +400,19 @@ type SpawnResult struct {
 
 // StartPhaseRequest starts a phase terminal on an existing or new worker session.
 type StartPhaseRequest struct {
-	RunDir    string            `json:"run_dir,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-	RunID     string            `json:"run_id"`
-	LaneID    string            `json:"lane_id"`
-	SessionID string            `json:"session_id,omitempty"`
-	Phase     string            `json:"phase"`
-	Harness   string            `json:"harness"`
-	Model     string            `json:"model"`
-	Effort    string            `json:"effort,omitempty"`
-	Brief     string            `json:"brief"`
-	Round     int               `json:"round"`
+	RunDir       string            `json:"run_dir,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	RunID        string            `json:"run_id"`
+	Repository   string            `json:"repository,omitempty"`
+	RepositoryID string            `json:"repository_id,omitempty"`
+	LaneID       string            `json:"lane_id"`
+	SessionID    string            `json:"session_id,omitempty"`
+	Phase        string            `json:"phase"`
+	Harness      string            `json:"harness"`
+	Model        string            `json:"model"`
+	Effort       string            `json:"effort,omitempty"`
+	Brief        string            `json:"brief"`
+	Round        int               `json:"round"`
 }
 
 // StartPhaseResult describes the started phase terminal.

@@ -2,13 +2,18 @@ package adopt
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -16,6 +21,7 @@ import (
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/lane"
+	"github.com/bazelment/yoloswe/orca/lane/nebula"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -789,5 +795,323 @@ func TestNebulaSwarmReviewReportRecognised(t *testing.T) {
 	rOther.Holder = "orca-chat:other-chat"
 	if err := competing.Start(t.Context(), rOther); !errors.Is(err, store.ErrLeaseHeld) {
 		t.Fatalf("competing Controllers.Start = %v, want store.ErrLeaseHeld", err)
+	}
+}
+
+func TestAdoptedNebulaSwarmSpawnUsesConfigRepo(t *testing.T) {
+	t.Parallel()
+	const wantRepoID = "2a19e6e7-939e-44b2-a80f-8980030efc50"
+	const wrongRepoID = "76672137-0000-0000-0000-000000000000"
+
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"`+wantRepoID+`","orchestrator_session_id":"sess-orch","merge":"none",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
+"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
+	os.Remove(filepath.Join(dir, ".repo-slug"))
+
+	var gotRepoID atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-repositories":
+			_, _ = io.WriteString(w, `{"repositories":[{"id":"`+wrongRepoID+`","fullName":"build-perf-sweeping/house-design"},{"id":"`+wantRepoID+`","fullName":"sycamore-labs/nebula"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions":
+			var body struct {
+				RepositoryID string `json:"repositoryId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			gotRepoID.Store(body.RepositoryID)
+			_, _ = io.WriteString(w, `{"session":{"id":"sess-gaps3","status":"ready","repositoryId":"`+body.RepositoryID+`"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions/sess-gaps3/terminals":
+			_, _ = io.WriteString(w, `{"id":"term-gaps3-swe"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 1, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv, err := nebula.New(nebula.Config{
+		APIURL: srv.URL,
+		Token:  "test-token",
+		Clock:  clk,
+		Events: st.Events(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	controllers := NewControllers(t.Context(), st, drv, clk, nil)
+	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+	s := nsService(root, loop, label)
+	s.Driver = controllers
+	r, err := s.Adopt(t.Context(), nsRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+	controllers.mu.Lock()
+	ctrl := controllers.runs[nsRun].controller
+	controllers.mu.Unlock()
+	if err := ctrl.StartLane(t.Context(), "m2-gaps3"); err != nil {
+		t.Fatalf("StartLane: %v", err)
+	}
+	if got, _ := gotRepoID.Load().(string); got != wantRepoID {
+		t.Fatalf("create session repositoryId = %q, want %q", got, wantRepoID)
+	}
+}
+
+func TestAdoptedSpawnRefusedWhenRepoMissing(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"","orchestrator_session_id":"sess-orch","merge":"none",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
+"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
+	os.Remove(filepath.Join(dir, ".repo-slug"))
+
+	var creates atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-repositories":
+			_, _ = io.WriteString(w, `{"repositories":[{"id":"76672137-0000-0000-0000-000000000000","fullName":"build-perf-sweeping/house-design"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions":
+			creates.Add(1)
+			_, _ = io.WriteString(w, `{"session":{"id":"sess-unexpected","status":"ready"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 1, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv, err := nebula.New(nebula.Config{
+		APIURL: srv.URL,
+		Token:  "test-token",
+		Clock:  clk,
+		Events: st.Events(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	controllers := NewControllers(t.Context(), st, drv, clk, nil)
+	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+	s := nsService(root, loop, label)
+	s.Driver = controllers
+	_, err = s.Adopt(t.Context(), nsRun)
+	if err == nil || !strings.Contains(err.Error(), "repository is not configured") {
+		t.Fatalf("Adopt with missing repository = %v, want repository is not configured error", err)
+	}
+	if got := creates.Load(); got != 0 {
+		t.Fatalf("POST /api/code-sessions called %d times, want 0", got)
+	}
+}
+
+func TestAdoptedSpawnReleasesSessionInWrongRepo(t *testing.T) {
+	t.Parallel()
+	const wantRepoID = "2a19e6e7-939e-44b2-a80f-8980030efc50"
+	const wrongRepoID = "76672137-0000-0000-0000-000000000000"
+
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"`+wantRepoID+`","orchestrator_session_id":"sess-orch","merge":"none",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
+"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
+
+	var released atomic.Value
+	var termStarts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-repositories":
+			_, _ = io.WriteString(w, `{"repositories":[{"id":"`+wrongRepoID+`","fullName":"build-perf-sweeping/house-design"},{"id":"`+wantRepoID+`","fullName":"sycamore-labs/nebula"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"session":{"id":"018a40a9","status":"ready","repositoryId":"`+wrongRepoID+`","gitUrl":"https://github.com/build-perf-sweeping/house-design.git"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions/018a40a9/release":
+			released.Store("018a40a9")
+			_, _ = io.WriteString(w, `{}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions/018a40a9/terminals":
+			termStarts.Add(1)
+			_, _ = io.WriteString(w, `{"id":"term-wrong"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 1, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv, err := nebula.New(nebula.Config{
+		APIURL: srv.URL,
+		Token:  "test-token",
+		Clock:  clk,
+		Events: st.Events(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	controllers := NewControllers(t.Context(), st, drv, clk, nil)
+	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+	s := nsService(root, loop, label)
+	s.Driver = controllers
+	_, err = s.Adopt(t.Context(), nsRun)
+	if err == nil {
+		t.Fatal("Adopt succeeded on wrong-repo session; want error")
+	}
+	if got, _ := released.Load().(string); got != "018a40a9" {
+		t.Fatalf("released session = %q, want 018a40a9", got)
+	}
+	if got := termStarts.Load(); got != 0 {
+		t.Fatalf("terminal starts on wrong-repo session = %d, want 0", got)
+	}
+}
+
+func TestAdoptedBriefCitingObjectiveInlinesItems(t *testing.T) {
+	t.Parallel()
+	const wantRepoID = "2a19e6e7-939e-44b2-a80f-8980030efc50"
+
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"`+wantRepoID+`","orchestrator_session_id":"sess-orch","merge":"none",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
+"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
+	objectiveText := "# 20261114-trial-m1\n\n## m2-gaps3\n- Item A: strip redundant prompt preambles.\n- Item B: verify token count drops below 1200.\n"
+	write(t, filepath.Join(dir, "OBJECTIVE.md"), objectiveText)
+	write(t, filepath.Join(dir, "m2-gaps3.swe.prompt"), "Implement m2-gaps3. Read OBJECTIVE.md for the exact items.\n")
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 1, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+
+	controllers := NewControllers(t.Context(), st, drv, clk, nil)
+	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+	s := nsService(root, loop, label)
+	s.Driver = controllers
+	r, err := s.Adopt(t.Context(), nsRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+	if len(drv.Spawns) != 1 || drv.Spawns[0].RepositoryID != wantRepoID {
+		t.Fatalf("Spawns = %+v, want 1 spawn with RepositoryID=%q", drv.Spawns, wantRepoID)
+	}
+	gotBrief := drv.Spawns[0].Brief
+	for _, want := range []string{
+		"Item A: strip redundant prompt preambles.",
+		"Item B: verify token count drops below 1200.",
+	} {
+		if !strings.Contains(gotBrief, want) {
+			t.Fatalf("brief citing OBJECTIVE.md missing %q:\n%s", want, gotBrief)
+		}
+	}
+}
+
+func TestAdoptedWrongRepoLaneReportRespawnsInsteadOfSteering(t *testing.T) {
+	t.Parallel()
+	const wantRepoID = "2a19e6e7-939e-44b2-a80f-8980030efc50"
+
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"`+wantRepoID+`","orchestrator_session_id":"sess-orch","merge":"none",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
+"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"running","phase":"swe","round":1,"session_id":"018a40a9","terminals":{"swe":{"1":"term-bad"}},"terminal_state":"working","verdict":""}]}`)
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 12, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+
+	controllers := NewControllers(t.Context(), st, drv, clk, nil)
+	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+	s := nsService(root, loop, label)
+	s.Driver = controllers
+	r, err := s.Adopt(t.Context(), nsRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+	// Emit the exact needs-input report from a lane spawned in the wrong repo.
+	drv.Emit(lane.Event{
+		RunID:      nsRun,
+		LaneID:     "m2-gaps3",
+		SessionID:  "018a40a9",
+		TerminalID: "term-bad",
+		Kind:       lane.EventPhaseReported,
+		Report: &lane.PhaseReport{
+			LaneID:     "m2-gaps3",
+			TerminalID: "term-bad",
+			Phase:      "swe",
+			Round:      1,
+			Outcome:    lane.OutcomeNeedsInput,
+			Summary:    "the lane is checked out to build-perf-sweeping/house-design instead of sycamore-labs/nebula; OBJECTIVE.md is also unavailable.",
+			Raw:        "Outcome: needs-input\nthe lane is checked out to build-perf-sweeping/house-design instead of sycamore-labs/nebula; OBJECTIVE.md is also unavailable.",
+		},
+	})
+
+	waitFor(t, func() bool {
+		return len(drv.Releases) == 1 && len(drv.Spawns) == 1
+	})
+	if drv.Releases[0] != "018a40a9" {
+		t.Fatalf("released session = %q, want 018a40a9", drv.Releases[0])
+	}
+	if len(drv.Spawns) != 1 || drv.Spawns[0].RepositoryID != wantRepoID {
+		t.Fatalf("respawn Spawns = %+v, want RepositoryID=%q", drv.Spawns, wantRepoID)
+	}
+	if len(drv.Steers) != 0 {
+		t.Fatalf("unexpected steer sends = %+v, want 0", drv.Steers)
+	}
+	gotLane, err := st.Lanes().Get(t.Context(), nsRun, "m2-gaps3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLane.Status != lane.StatusRunning || gotLane.SessionID == "018a40a9" {
+		t.Fatalf("m2-gaps3 after wrong-repo respawn = %+v, want running on new session", gotLane)
+	}
+}
+
+func TestAdoptedSubagentSwarmEnvRepoUsedOnSpawn(t *testing.T) {
+	t.Parallel()
+	const wantRepoID = "2a19e6e7-939e-44b2-a80f-8980030efc50"
+
+	w := newWorld(t)
+	write(t, filepath.Join(w.dir, "env.sh"), "export SNL_REPO_ID=\""+wantRepoID+"\"\nexport SNL_REPO_URL=\"https://github.com/sycamore-labs/nebula.git\"\n")
+	write(t, filepath.Join(w.dir, "state.json"), `{"config":{"goal":"host goal","phases":[{"name":"swe"}]},"tasks":[{"id":"a","title":"A","phase":"swe","status":"planned","round":1,"sessions":{}}]}`)
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 1, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+
+	controllers := NewControllers(t.Context(), st, drv, clk, nil)
+	w.watcher.running = false
+	s := w.service()
+	s.Driver = controllers
+	r, err := s.Adopt(t.Context(), testRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+	if len(drv.Spawns) != 1 || drv.Spawns[0].RepositoryID != wantRepoID || drv.Spawns[0].Repository != "sycamore-labs/nebula" {
+		t.Fatalf("Spawns = %+v, want RepositoryID=%q Repository=sycamore-labs/nebula", drv.Spawns, wantRepoID)
 	}
 }

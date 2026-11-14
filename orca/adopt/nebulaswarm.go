@@ -107,6 +107,7 @@ type nsLane struct {
 type nsLedger struct {
 	Config struct {
 		Goal         string      `json:"goal"`
+		Repo         string      `json:"repo"`
 		Orchestrator string      `json:"orchestrator_session_id"`
 		Phases       []hostPhase `json:"phases"`
 	} `json:"config"`
@@ -121,6 +122,7 @@ func readNebulaSwarm(dir string, b []byte, r *Run) error {
 		return fmt.Errorf("parse %s: %w", filepath.Join(dir, "state.json"), err)
 	}
 	r.Goal, r.DrivenBy = st.Config.Goal, st.Config.Orchestrator
+	applyRepoValue(r, st.Config.Repo)
 	for i := range st.Tasks {
 		t := &st.Tasks[i]
 		round := max(t.Round, 1)
@@ -333,5 +335,74 @@ func clip(s string, n int) string {
 
 // repoSlug is the run's owner/repo: nebula-swarm caches it in .repo-slug.
 func repoSlug(dir string) string {
-	return strings.TrimSpace(readText(filepath.Join(dir, ".repo-slug")))
+	return normalizeGitSlug(readText(filepath.Join(dir, ".repo-slug")))
+}
+
+func normalizeGitSlug(raw string) string {
+	s := strings.TrimSpace(raw)
+	for _, prefix := range []string{"https://github.com/", "http://github.com/", "ssh://git@github.com/", "git@github.com:"} {
+		if strings.HasPrefix(strings.ToLower(s), prefix) {
+			s = s[len(prefix):]
+			break
+		}
+	}
+	s = strings.TrimSuffix(s, ".git")
+	return strings.Trim(s, "/")
+}
+
+func applyRepoValue(r *Run, raw string) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return
+	}
+	if slug := normalizeGitSlug(v); strings.Contains(slug, "/") {
+		if r.Repo == "" || r.Repo == r.RepoID {
+			r.Repo = slug
+		}
+		return
+	}
+	if r.RepoID == "" {
+		r.RepoID = v
+	}
+}
+
+func applyRunEnvRepo(dir string, r *Run) {
+	for _, line := range strings.Split(readText(filepath.Join(dir, "env.sh")), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.Trim(strings.TrimSpace(v), `"'`)
+		if v == "" {
+			continue
+		}
+		switch k {
+		case "SNL_REPO_ID", "NEBULA_REPO_ID":
+			if r.RepoID == "" {
+				r.RepoID = v
+			}
+		case "SNL_GH_REPO", "SNL_REPO_URL", "GITHUB_REPO", "REPO":
+			applyRepoValue(r, v)
+		}
+	}
+	if (r.ID != "" && os.Getenv("SNL_RUN_ID") == r.ID) || (dir != "" && os.Getenv("RUN") != "" && filepath.Clean(os.Getenv("RUN")) == filepath.Clean(dir)) {
+		if v := strings.TrimSpace(os.Getenv("SNL_REPO_ID")); v != "" && r.RepoID == "" {
+			r.RepoID = v
+		}
+		if v := strings.TrimSpace(os.Getenv("NEBULA_REPO_ID")); v != "" && r.RepoID == "" {
+			r.RepoID = v
+		}
+		if v := strings.TrimSpace(os.Getenv("SNL_GH_REPO")); v != "" {
+			applyRepoValue(r, v)
+		}
+		if v := strings.TrimSpace(os.Getenv("SNL_REPO_URL")); v != "" {
+			applyRepoValue(r, v)
+		}
+	}
 }

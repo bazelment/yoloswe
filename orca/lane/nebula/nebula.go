@@ -537,6 +537,7 @@ type SessionInfo struct {
 	Title        string            `json:"title,omitempty"`
 	URL          string            `json:"url,omitempty"`
 	RepositoryID string            `json:"repositoryId,omitempty"`
+	GitURL       string            `json:"gitUrl,omitempty"`
 	BaseBranch   string            `json:"baseBranch,omitempty"`
 	BaseCommit   string            `json:"baseCommit,omitempty"`
 	WorkBranch   string            `json:"workBranch,omitempty"`
@@ -626,16 +627,19 @@ func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.
 		return res, nil
 	}
 	termRes, err := d.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
-		RunID:     req.RunID,
-		LaneID:    req.LaneID,
-		SessionID: sess.ID,
-		Phase:     req.Phase,
-		Harness:   req.Harness,
-		Model:     req.Model,
-		Effort:    req.Effort,
-		Brief:     req.Brief,
-		Round:     req.Round,
-		Env:       req.Env,
+		RunDir:       req.RunDir,
+		RunID:        req.RunID,
+		Repository:   req.Repository,
+		RepositoryID: req.RepositoryID,
+		LaneID:       req.LaneID,
+		SessionID:    sess.ID,
+		Phase:        req.Phase,
+		Harness:      req.Harness,
+		Model:        req.Model,
+		Effort:       req.Effort,
+		Brief:        req.Brief,
+		Round:        req.Round,
+		Env:          req.Env,
 	})
 	if err != nil {
 		return lane.SpawnResult{}, err
@@ -679,22 +683,25 @@ func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*Ses
 	}
 	baseBranch := cmp.Or(strings.TrimSpace(req.BaseBranch), d.baseBranch)
 
-	if d.repoFullName != "" {
-		if _, err := d.resolveRepositoryID(ctx); err != nil {
-			return nil, err
-		}
+	repoID, repoSlug, err := d.resolveTargetRepository(ctx, req.RepositoryID, req.Repository)
+	if err != nil {
+		return nil, err
 	}
-	existing, err := d.findReusableSession(ctx, req.RunID, req.LaneID, workBranch, baseBranch)
+
+	existing, err := d.findReusableSession(ctx, req.RunID, req.LaneID, workBranch, baseBranch, repoID, repoSlug)
 	if err != nil {
 		return nil, err
 	}
 	if existing != nil {
-		return d.settleSession(ctx, *existing)
-	}
-
-	repoID, err := d.resolveRepositoryID(ctx)
-	if err != nil {
-		return nil, err
+		settled, err := d.settleSession(ctx, *existing)
+		if err != nil {
+			return nil, err
+		}
+		if err := d.verifySessionRepository(ctx, *settled, repoID, repoSlug); err != nil {
+			_ = d.ReleaseSession(ctx, settled.ID, true)
+			return nil, err
+		}
+		return settled, nil
 	}
 
 	meta := map[string]string{
@@ -732,10 +739,22 @@ func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*Ses
 	if created.Session.ID == "" {
 		return nil, fmt.Errorf("nebula create session returned empty session id")
 	}
-	return d.settleSession(ctx, created.Session)
+	if err := d.verifySessionRepository(ctx, created.Session, repoID, repoSlug); err != nil {
+		_ = d.ReleaseSession(ctx, created.Session.ID, true)
+		return nil, err
+	}
+	settled, err := d.settleSession(ctx, created.Session)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.verifySessionRepository(ctx, *settled, repoID, repoSlug); err != nil {
+		_ = d.ReleaseSession(ctx, settled.ID, true)
+		return nil, err
+	}
+	return settled, nil
 }
 
-func (d *Driver) findReusableSession(ctx context.Context, runID, laneID, workBranch, baseBranch string) (*SessionInfo, error) {
+func (d *Driver) findReusableSession(ctx context.Context, runID, laneID, workBranch, baseBranch, repoID, repoSlug string) (*SessionInfo, error) {
 	q := url.Values{}
 	if laneID != "" {
 		q.Set("metadata.swarmLane", laneID)
@@ -756,7 +775,7 @@ func (d *Driver) findReusableSession(ctx context.Context, runID, laneID, workBra
 	var fallback *SessionInfo
 	for i := range resp.Sessions {
 		s := &resp.Sessions[i]
-		if !d.matchesLaneSession(s, runID, laneID, workBranch, baseBranch) {
+		if !d.matchesLaneSession(s, runID, laneID, workBranch, baseBranch, repoID, repoSlug) {
 			continue
 		}
 		if s.Status == "ready" {
@@ -769,15 +788,24 @@ func (d *Driver) findReusableSession(ctx context.Context, runID, laneID, workBra
 	return fallback, nil
 }
 
-func (d *Driver) matchesLaneSession(s *SessionInfo, runID, laneID, workBranch, baseBranch string) bool {
+func (d *Driver) matchesLaneSession(s *SessionInfo, runID, laneID, workBranch, baseBranch, repoID, repoSlug string) bool {
 	if s == nil || s.ID == "" || !isSessionReusableStatus(s.Status) {
 		return false
 	}
-	d.mu.Lock()
-	repoID := d.repoID
-	d.mu.Unlock()
+	if repoID != "" && s.RepositoryID != "" && s.RepositoryID != repoID {
+		return false
+	}
 	if d.repoFullName != "" && s.RepositoryID != repoID {
 		return false
+	}
+	if s.GitURL != "" {
+		gotSlug := normalizeRepoSlug(s.GitURL)
+		if repoSlug != "" && !strings.EqualFold(gotSlug, repoSlug) {
+			return false
+		}
+		if repoSlug == "" && s.RepositoryID == "" && repoID != "" && !strings.EqualFold(gotSlug, repoID) {
+			return false
+		}
 	}
 	if d.currSessID != "" && s.ID == d.currSessID {
 		return false
@@ -892,9 +920,12 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 	sessionID := strings.TrimSpace(req.SessionID)
 	if sessionID == "" {
 		sess, err := d.EnsureSession(ctx, lane.SpawnRequest{
-			RunID:  req.RunID,
-			LaneID: req.LaneID,
-			Env:    req.Env,
+			RunDir:       req.RunDir,
+			RunID:        req.RunID,
+			Repository:   req.Repository,
+			RepositoryID: req.RepositoryID,
+			LaneID:       req.LaneID,
+			Env:          req.Env,
 		})
 		if err != nil {
 			return lane.StartPhaseResult{}, err
@@ -1706,6 +1737,133 @@ func (d *Driver) PollCapacity(ctx context.Context, events store.EventStore, runI
 	return ev, nil
 }
 
+func normalizeRepoSlug(raw string) string {
+	s := strings.TrimSpace(raw)
+	for _, prefix := range []string{"https://github.com/", "http://github.com/", "ssh://git@github.com/", "git@github.com:"} {
+		if strings.HasPrefix(strings.ToLower(s), prefix) {
+			s = s[len(prefix):]
+			break
+		}
+	}
+	s = strings.TrimSuffix(s, ".git")
+	return strings.Trim(s, "/")
+}
+
+func isRepoSlug(raw string) bool {
+	return strings.Contains(normalizeRepoSlug(raw), "/")
+}
+
+func (d *Driver) resolveTargetRepository(ctx context.Context, reqRepoID, reqRepo string) (repoID, repoSlug string, err error) {
+	reqRepoID = strings.TrimSpace(reqRepoID)
+	reqRepo = strings.TrimSpace(reqRepo)
+	if reqRepoID != "" || reqRepo != "" {
+		if reqRepoID != "" {
+			if isRepoSlug(reqRepoID) {
+				repoSlug = normalizeRepoSlug(reqRepoID)
+			} else {
+				repoID = reqRepoID
+			}
+		}
+		if reqRepo != "" {
+			if isRepoSlug(reqRepo) {
+				repoSlug = cmp.Or(repoSlug, normalizeRepoSlug(reqRepo))
+			} else if repoID == "" {
+				repoID = reqRepo
+			}
+		}
+		if repoID == "" && repoSlug != "" {
+			id, err := d.lookupRepositoryID(ctx, repoSlug)
+			if err != nil {
+				return "", "", err
+			}
+			repoID = id
+		}
+		if repoID == "" {
+			return "", "", fmt.Errorf("nebula resolve repository id: repository is required")
+		}
+		return repoID, repoSlug, nil
+	}
+
+	id, err := d.resolveRepositoryID(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	d.mu.Lock()
+	slug := normalizeRepoSlug(d.repoFullName)
+	d.mu.Unlock()
+	return id, slug, nil
+}
+
+func (d *Driver) lookupRepositoryID(ctx context.Context, target string) (string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", fmt.Errorf("nebula resolve repository id: repository is required")
+	}
+	targetSlug := normalizeRepoSlug(target)
+	var resp struct {
+		Repositories []struct {
+			ID       string `json:"id"`
+			FullName string `json:"fullName"`
+			GitURL   string `json:"gitUrl"`
+		} `json:"repositories"`
+	}
+	if err := d.doJSON(ctx, http.MethodGet, "/api/code-repositories", nil, &resp); err != nil {
+		return "", fmt.Errorf("nebula resolve repository id: %w", err)
+	}
+	for _, r := range resp.Repositories {
+		if r.ID == target ||
+			(r.FullName != "" && strings.EqualFold(normalizeRepoSlug(r.FullName), targetSlug)) ||
+			(r.GitURL != "" && strings.EqualFold(normalizeRepoSlug(r.GitURL), targetSlug)) {
+			if r.ID != "" {
+				return r.ID, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("nebula resolve repository id: no matching repository found for %q", target)
+}
+
+func (d *Driver) verifySessionRepository(ctx context.Context, sess SessionInfo, wantRepoID, wantRepoSlug string) error {
+	gotID := strings.TrimSpace(sess.RepositoryID)
+	if gotID != "" && wantRepoID != "" && gotID != wantRepoID {
+		return fmt.Errorf("nebula session %s repositoryId %q does not match expected %q", sess.ID, gotID, wantRepoID)
+	}
+	gotSlug := normalizeRepoSlug(sess.GitURL)
+	if gotSlug != "" {
+		if wantRepoSlug != "" && !strings.EqualFold(gotSlug, wantRepoSlug) {
+			return fmt.Errorf("nebula session %s gitUrl %q does not match expected repository %q", sess.ID, sess.GitURL, wantRepoSlug)
+		}
+		if wantRepoSlug == "" && wantRepoID != "" && !strings.EqualFold(gotSlug, wantRepoID) {
+			var resp struct {
+				Repositories []struct {
+					ID       string `json:"id"`
+					FullName string `json:"fullName"`
+					GitURL   string `json:"gitUrl"`
+				} `json:"repositories"`
+			}
+			matched := false
+			if err := d.doJSON(ctx, http.MethodGet, "/api/code-repositories", nil, &resp); err == nil {
+				for _, r := range resp.Repositories {
+					rSlug := cmp.Or(normalizeRepoSlug(r.FullName), normalizeRepoSlug(r.GitURL))
+					if r.ID == wantRepoID && rSlug != "" {
+						if strings.EqualFold(rSlug, gotSlug) {
+							matched = true
+						} else {
+							return fmt.Errorf("nebula session %s gitUrl %q does not match expected repository %q (%s)", sess.ID, sess.GitURL, rSlug, wantRepoID)
+						}
+					}
+					if rSlug != "" && strings.EqualFold(rSlug, gotSlug) && r.ID != "" && r.ID != wantRepoID {
+						return fmt.Errorf("nebula session %s gitUrl %q (repository %q) does not match expected %q", sess.ID, sess.GitURL, r.ID, wantRepoID)
+					}
+				}
+			}
+			if !matched && gotID == "" {
+				return fmt.Errorf("nebula session %s gitUrl %q does not match expected repository %q", sess.ID, sess.GitURL, wantRepoID)
+			}
+		}
+	}
+	return nil
+}
+
 func (d *Driver) resolveRepositoryID(ctx context.Context) (string, error) {
 	d.mu.Lock()
 	if d.repoID != "" {
@@ -1725,28 +1883,13 @@ func (d *Driver) resolveRepositoryID(ctx context.Context) (string, error) {
 			return detail.Session.RepositoryID, nil
 		}
 	}
+	if strings.TrimSpace(repoFullName) == "" {
+		return "", fmt.Errorf("nebula resolve repository id: repository is required")
+	}
 
-	var resp struct {
-		Repositories []struct {
-			ID       string `json:"id"`
-			FullName string `json:"fullName"`
-		} `json:"repositories"`
-	}
-	if err := d.doJSON(ctx, http.MethodGet, "/api/code-repositories", nil, &resp); err != nil {
-		return "", fmt.Errorf("nebula resolve repository id: %w", err)
-	}
-	var chosen string
-	for _, r := range resp.Repositories {
-		if repoFullName != "" && strings.EqualFold(r.FullName, repoFullName) {
-			chosen = r.ID
-			break
-		}
-		if repoFullName == "" && chosen == "" && r.ID != "" {
-			chosen = r.ID
-		}
-	}
-	if chosen == "" {
-		return "", fmt.Errorf("nebula resolve repository id: no matching repository found for %q", repoFullName)
+	chosen, err := d.lookupRepositoryID(ctx, repoFullName)
+	if err != nil {
+		return "", err
 	}
 	d.mu.Lock()
 	d.repoID = chosen
