@@ -284,6 +284,9 @@ func (c *Controller) SetRuntimeSettings(settings store.RunSettings) {
 		c.cfg.StallTimeout = settings.StallTimeout
 		c.stallTimeoutSet = true
 	}
+	if settings.StallTimeout <= 0 && settings.ConcurrencyCap == 0 && !settings.Paused {
+		return
+	}
 	if settings.ConcurrencyCap >= 0 {
 		c.cfg.ConcurrencyCap = settings.ConcurrencyCap
 	}
@@ -2081,8 +2084,7 @@ func (c *Controller) startLanePhase(
 		if tool == ToolPhaseRetry {
 			if err := c.stopCurrentTerminal(ctx, ln, "replace terminal for retry"); err != nil {
 				c.noteStopFailure(ctx, ln, err)
-				// Keep the controller alive; retryStops handles this on the next tick.
-				return nil
+				return err
 			}
 			delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
 		}

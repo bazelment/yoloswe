@@ -347,6 +347,7 @@ func NewRunner(
 		PollInterval:      cfg.PollInterval,
 		JudgmentDebounce:  cfg.JudgmentDebounce,
 		StallTimeout:      cfg.StallTimeout,
+		StallTimeoutSet:   cfg.HasExplicitStallTimeout(),
 		ConcurrencyCap:    cfg.ConcurrencyCap,
 	}, st, drv, clk, controller.JudgeFunc(r.judgeBatch), boxes...)
 
