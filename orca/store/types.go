@@ -122,6 +122,7 @@ type Run struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 	Lease         *Lease    `json:"lease,omitempty"`
 	ID            string    `json:"id"`
+	Repository    string    `json:"repository,omitempty"`
 	Objective     string    `json:"objective"`
 	PlanRef       string    `json:"plan_ref,omitempty"`
 	DefaultRecipe string    `json:"default_recipe,omitempty"`

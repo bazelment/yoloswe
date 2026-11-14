@@ -560,7 +560,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	if cmdName == "run" && cfg.RunID == "" && strings.TrimSpace(cmp.Or(cfg.Goal, cfg.Objective)) != "" {
 		cfg.RunID = nextUniqueID("run", clock.NewRealClock())
 	}
-	if cmdName == "run" && strings.TrimSpace(cfg.Repository) == "" {
+	if (cmdName == "run" || cmdName == "chat") && strings.TrimSpace(cfg.Repository) == "" {
 		cfg.Repository = inferRepository()
 	}
 	return cfg.withDefaults(), fs.Args(), nil

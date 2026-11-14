@@ -484,7 +484,7 @@ type sqliteRunStore SQLiteStore
 func (r *sqliteRunStore) s() *SQLiteStore { return (*SQLiteStore)(r) }
 
 const selectRunColumns = `
-SELECT id, objective, plan_ref, default_recipe, created_at, updated_at,
+SELECT id, repository, objective, plan_ref, default_recipe, created_at, updated_at,
        lease_holder_id, lease_acquired_at, lease_heartbeat_at, lease_expires_at
 FROM runs`
 
@@ -529,11 +529,11 @@ func (r *sqliteRunStore) Create(ctx context.Context, run Run) error {
 
 	return execInsertNew(ctx, s.db, fmt.Errorf("%w: run %q", ErrAlreadyExists, run.ID), `
 INSERT INTO runs (
-    id, objective, plan_ref, default_recipe, created_at, updated_at,
+		id, repository, objective, plan_ref, default_recipe, created_at, updated_at,
     lease_holder_id, lease_acquired_at, lease_heartbeat_at, lease_expires_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO NOTHING`,
-		cp.ID, cp.Objective, cp.PlanRef, cp.DefaultRecipe,
+		cp.ID, cp.Repository, cp.Objective, cp.PlanRef, cp.DefaultRecipe,
 		formatTime(cp.CreatedAt), formatTime(cp.UpdatedAt),
 		holderID, acquiredAt, heartbeatAt, expiresAt,
 	)
@@ -546,7 +546,7 @@ func scanRun(scanner rowScanner) (*Run, error) {
 		holderID, acquiredStr, heartbeatStr, expiresStr string
 	)
 	err := scanner.Scan(
-		&run.ID, &run.Objective, &run.PlanRef, &run.DefaultRecipe,
+		&run.ID, &run.Repository, &run.Objective, &run.PlanRef, &run.DefaultRecipe,
 		&createdStr, &updatedStr,
 		&holderID, &acquiredStr, &heartbeatStr, &expiresStr,
 	)

@@ -31,11 +31,13 @@ const (
 	ToolMemoryUndo          = "memory.undo"
 	ToolMemoryRead          = "memory.read"
 	ToolRunSettings         = memorychat.ToolRunSettings
+	ToolRunStart            = "run.start"
 	DefaultConciergeMaxTurn = 6
 )
 
 // ConciergeSystemPrompt is the system prompt for owner chat sessions.
 const ConciergeSystemPrompt = `You are the Nebula Swarm Concierge.
+When the owner states a new goal or asks to start work, call run.start with the goal text. Do not submit a generic directive for a new goal.
 You are the front desk for unclear or mixed messages: clarify with one question only if you must; otherwise save rules with memory.submit and forward plan changes or orders with directive.submit. Use run.control to pause, resume or stop execution. Use run.settings to tune concurrency and stall timeout.
 Answer the owner's questions accurately and concisely using read-only Store tools (status, lane.show, decisions.since, pr.ci).
 	Never invent facts not present in the Store. Owner corrections become memory.submit proposals saved immediately with a source quote; memory.undo reverts the last change.`
@@ -67,6 +69,10 @@ type DirectiveSubmitParams struct {
 	Expiry string `json:"expiry,omitempty" jsonschema:"description=Optional RFC3339 timestamp or Go duration (e.g. 24h)"`
 }
 
+type RunStartParams struct {
+	Goal string `json:"goal" jsonschema:"required,description=Goal for the new run"`
+}
+
 // Concierge hosts a fresh owner chat thread with read-only Store tools and `directive.submit`.
 //
 //nolint:govet
@@ -80,6 +86,15 @@ type Concierge struct {
 	history      []model.Message
 	memoryEditor memorychat.MemoryEditor
 	mu           sync.Mutex
+	RunStart     func(context.Context, string) (string, error)
+	OnRunStart   func(string, string)
+}
+
+// Attach selects a run for the Concierge.
+func (c *Concierge) Attach(st store.Store, runID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.store, c.runID, c.threadID, c.history = st, strings.TrimSpace(runID), "", nil
 }
 
 func NewConcierge(
@@ -327,6 +342,23 @@ func (c *Concierge) RunInteractive(ctx context.Context, in io.Reader, out io.Wri
 
 func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho *string) *model.ToolRegistry {
 	reg := model.NewToolRegistry()
+	model.AddTool[RunStartParams](reg, ToolRunStart, "Start a new run for an owner goal", func(ctx context.Context, p RunStartParams) (string, error) {
+		goal := strings.TrimSpace(p.Goal)
+		if goal == "" {
+			return "", fmt.Errorf("run.start requires a goal")
+		}
+		if c.RunStart == nil {
+			return "", fmt.Errorf("run.start unavailable")
+		}
+		runID, err := c.RunStart(ctx, goal)
+		if err != nil {
+			return "", err
+		}
+		if c.OnRunStart != nil {
+			c.OnRunStart(runID, goal)
+		}
+		return runID, nil
+	})
 	model.AddTool[memorychat.RunControlParams](reg, memorychat.ToolRunControl, "Pause, resume or stop execution", func(ctx context.Context, p memorychat.RunControlParams) (string, error) {
 		backend := &chat.StoreBackend{Store: c.store, RunID: c.runID}
 		return memorychat.Control(ctx, backend.Command, p)

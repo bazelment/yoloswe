@@ -48,6 +48,15 @@ func New(ctx context.Context, runID string, ask AskFunc, r router.Router) Model 
 	return Model{ctx: ctx, runID: runID, ask: ask, router: r}
 }
 
+// SetRunID changes the run shown in the chat header after a front-desk attach.
+func (m *Model) SetRunID(runID string) { m.runID = runID }
+
+// IsNewGoal reports whether text asks the concierge to start work.
+func IsNewGoal(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	return strings.Contains(lower, "start a run") || strings.Contains(lower, "start work") || strings.HasPrefix(lower, "new goal")
+}
+
 //nolint:govet // message payload grouping
 type pollMsg struct{}
 
@@ -104,6 +113,9 @@ func receive(ctx context.Context, ch <-chan streamMsg) tea.Cmd {
 }
 func (m Model) route(text string) tea.Cmd {
 	return func() tea.Msg {
+		if IsNewGoal(text) {
+			return routeMsg{text: text, decision: router.Decision{Handler: router.Concierge, Confidence: 1, Backend: "goal-detection"}}
+		}
 		if m.router == nil {
 			return routeMsg{text: text, decision: router.Decision{Handler: router.Concierge, Confidence: 1}}
 		}
@@ -241,6 +253,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 func (m Model) View() tea.View {
+	runID := m.runID
+	if backend, ok := m.Backend.(*StoreBackend); ok && backend.RunID != "" {
+		runID = backend.RunID
+	}
 	lines := m.lines
 	if m.height > 5 && len(lines) > m.height-5 {
 		lines = lines[len(lines)-(m.height-5):]
@@ -249,7 +265,7 @@ func (m Model) View() tea.View {
 	for _, q := range m.questions {
 		questions += "\nowner question> " + q
 	}
-	return tea.NewView("orca chat — run " + m.runID + "\n" + strings.Join(lines, "\n") + questions + "\n\n" + m.status + "\n> " + m.input)
+	return tea.NewView("orca chat — run " + runID + "\n" + strings.Join(lines, "\n") + questions + "\n\n" + m.status + "\n> " + m.input)
 }
 func isTerminal(in io.Reader) bool { f, ok := in.(*os.File); return ok && term.IsTerminal(int(f.Fd())) }
 func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {

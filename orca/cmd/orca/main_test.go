@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	chatui "github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
@@ -131,6 +132,177 @@ func TestRepoInference_GitHubOrigins(t *testing.T) {
 		t.Fatalf("parseFlags: %v", err)
 	} else if cfg.Repository != "override/repo" {
 		t.Fatalf("--repo override = %q", cfg.Repository)
+	}
+}
+
+func TestBareExecuteStartsChatWithoutRun(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var stderr bytes.Buffer
+	if err := Execute(t.Context(), nil, strings.NewReader("exit\n"), io.Discard, &stderr); err != nil {
+		t.Fatalf("bare Execute: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "orca chat starting") {
+		t.Fatalf("bare command did not start chat: %s", stderr.String())
+	}
+}
+
+func TestBareExecuteAttachesMostRecentRepositoryRun(t *testing.T) {
+	base := t.TempDir()
+	clk := clock.NewRealClock()
+	path, err := store.RunDBPath(base, "run-attached")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.OpenSQLite(path, clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runs().Create(t.Context(), store.Run{ID: "run-attached", Repository: "bazelment/yoloswe", Objective: "attached"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Runs().AcquireLease(t.Context(), "run-attached", "controller", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	var stderr bytes.Buffer
+	if err := Execute(t.Context(), []string{"--store-dir", base, "--repo", "bazelment/yoloswe"}, strings.NewReader("exit\n"), io.Discard, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), `"run_id":"run-attached"`) {
+		t.Fatalf("chat did not attach: %s", stderr.String())
+	}
+}
+
+func TestBareExecuteWithoutRepositoryStartsFrontDesk(t *testing.T) {
+	base := t.TempDir()
+	clk := clock.NewRealClock()
+	path, err := store.RunDBPath(base, "run-unrelated")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.OpenSQLite(path, clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runs().Create(t.Context(), store.Run{ID: "run-unrelated", Repository: "other/repo", Objective: "unrelated"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	runs, err := discoverChatRuns(t.Context(), Config{StoreBaseDir: base}, clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("discovered runs without an inferred repository: %+v", runs)
+	}
+}
+
+func TestConciergeRunStartInvokesLauncher(t *testing.T) {
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(t.Context(), store.Run{ID: "front-desk"}); err != nil {
+		t.Fatal(err)
+	}
+	c := NewConcierge("front-desk", st, nil, nil, DefaultConciergeModel)
+	var got string
+	c.RunStart = func(_ context.Context, goal string) (string, error) { got = goal; return "run-new", nil }
+	reg := c.buildToolRegistry("thread", "turn", "goal", new(string))
+	res := reg.Execute(t.Context(), model.ToolCall{ID: "start", Name: ToolRunStart, Input: json.RawMessage(`{"goal":"study bramble UX"}`)})
+	if res.IsError || res.Content != "run-new" || got != "study bramble UX" {
+		t.Fatalf("run.start result=%+v goal=%q", res, got)
+	}
+}
+
+func TestChatGoalCreatesRunAndLaunchesDetachedController(t *testing.T) {
+	base := t.TempDir()
+	replay := filepath.Join(t.TempDir(), "chat-replay.json")
+	goal := "write a one-line report about bramble's help overlay"
+	if err := model.SaveRecording(replay, []model.RecordedExchange{
+		{Response: model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message:    model.NewAssistantMessage(model.NewToolUseBlock("start", ToolRunStart, json.RawMessage(`{"goal":"write a one-line report about bramble's help overlay"}`))),
+		}},
+		{Response: model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("run started")),
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldLauncher := runLauncher
+	defer func() { runLauncher = oldLauncher }()
+	var launchedID, launchedGoal, launchedRepo string
+	runLauncher = func(_ context.Context, cfg Config, runID, gotGoal string) error {
+		launchedID, launchedGoal, launchedRepo = runID, gotGoal, cfg.Repository
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	if err := Execute(t.Context(), []string{
+		"--repo", "bazelment/yoloswe",
+		"--store-dir", base,
+		"--driver", "fake",
+		"--replay", replay,
+		"--prompt", "start a run to " + goal + ", report only",
+	}, strings.NewReader(""), &stdout, &stderr); err != nil {
+		t.Fatalf("Execute chat: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if launchedID == "" || launchedGoal != goal || launchedRepo != "bazelment/yoloswe" {
+		t.Fatalf("launcher got id=%q goal=%q repo=%q", launchedID, launchedGoal, launchedRepo)
+	}
+	if !strings.Contains(stdout.String(), "Starting run "+launchedID+" for: "+goal+" (say stop to cancel)") {
+		t.Fatalf("missing start echo in stdout: %s", stdout.String())
+	}
+	path, err := store.RunDBPath(base, launchedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.OpenSQLite(path, clock.NewRealClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	run, err := st.Runs().Get(t.Context(), launchedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Objective != goal || run.Repository != "bazelment/yoloswe" {
+		t.Fatalf("run=%+v", run)
+	}
+}
+
+func TestChatRunsListsRepositoryRuns(t *testing.T) {
+	base := t.TempDir()
+	clk := clock.NewRealClock()
+	for _, run := range []store.Run{
+		{ID: "run-one", Repository: "bazelment/yoloswe", Objective: "first"},
+		{ID: "run-other", Repository: "other/repo", Objective: "hidden"},
+	} {
+		path, err := store.RunDBPath(base, run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, err := store.OpenSQLite(path, clk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Runs().Create(t.Context(), run); err != nil {
+			t.Fatal(err)
+		}
+		_ = st.Close()
+	}
+	runs, err := discoverChatRuns(t.Context(), Config{StoreBaseDir: base, Repository: "bazelment/yoloswe"}, clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &chatui.StoreBackend{ListRuns: func(context.Context) ([]store.Run, error) { return runs, nil }}
+	got, err := backend.Command(t.Context(), "/runs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "run-one: first" {
+		t.Fatalf("/runs = %q", got)
 	}
 }
 

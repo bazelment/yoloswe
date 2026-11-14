@@ -10,10 +10,14 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	chatui "github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
@@ -21,6 +25,7 @@ import (
 	"github.com/bazelment/yoloswe/orca/mailbox"
 	mailboxnebula "github.com/bazelment/yoloswe/orca/mailbox/nebula"
 	"github.com/bazelment/yoloswe/orca/router"
+	"github.com/bazelment/yoloswe/orca/store"
 )
 
 func main() {
@@ -46,20 +51,24 @@ func Execute(
 	stdin io.Reader,
 	stdout, stderr io.Writer,
 ) error {
-	if len(args) == 0 {
-		printUsage(stderr)
-		return ErrRunIDRequired
-	}
-
 	subcmd := "run"
 	rest := args
-	switch args[0] {
-	case "run", "chat", "report", "export":
-		subcmd = args[0]
-		rest = args[1:]
-	case "-h", "--help", "help":
-		printUsage(stdout)
-		return nil
+	if len(args) == 0 {
+		subcmd = "chat"
+		rest = nil
+	} else {
+		switch args[0] {
+		case "run", "chat", "report", "export":
+			subcmd = args[0]
+			rest = args[1:]
+		case "-h", "--help", "help":
+			printUsage(stdout)
+			return nil
+		default:
+			if strings.HasPrefix(args[0], "-") {
+				subcmd = "chat"
+			}
+		}
 	}
 
 	cfg, posArgs, err := parseFlags(subcmd, rest, stderr)
@@ -68,6 +77,9 @@ func Execute(
 	}
 
 	logger := newLogger(stderr, cfg.LogLevel, cfg.LogFormat)
+	if subcmd == "chat" && cfg.RunID == "" {
+		cfg.RunID, _ = selectChatRun(ctx, cfg, clock.NewRealClock())
+	}
 
 	switch subcmd {
 	case "run":
@@ -76,7 +88,11 @@ func Execute(
 		}
 		return executeRun(ctx, cfg, logger)
 	case "chat":
-		if err := cfg.Validate(false); err != nil {
+		if cfg.RunID != "" {
+			if err := cfg.Validate(false); err != nil {
+				return err
+			}
+		} else if _, _, err := parseStoreSpec(cfg.StoreSpec, cfg.StoreBaseDir, "front-desk"); err != nil {
 			return err
 		}
 		return executeChat(ctx, cfg, posArgs, stdin, stdout, logger)
@@ -181,11 +197,22 @@ func executeChat(
 	logger *slog.Logger,
 ) error {
 	clk := clock.NewRealClock()
-	st, resolvedStore, err := openStore(cfg, clk)
+	frontDesk := strings.TrimSpace(cfg.RunID) == ""
+	storeCfg := cfg
+	if frontDesk {
+		storeCfg.RunID = "front-desk"
+		storeCfg.StoreSpec = "memory"
+	}
+	st, resolvedStore, err := openStore(storeCfg, clk)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	if frontDesk {
+		if err := st.Runs().Create(ctx, store.Run{ID: storeCfg.RunID, Repository: cfg.Repository, Objective: ""}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return err
+		}
+	}
 
 	client, err := openModelClient(cfg, clk)
 	if err != nil {
@@ -198,7 +225,7 @@ func executeChat(
 		"model", cfg.Models.Concierge,
 	)
 
-	concierge := NewConcierge(cfg.RunID, st, clk, roleClient(client, cfg, "concierge"), cfg.Models.Concierge)
+	concierge := NewConcierge(storeCfg.RunID, st, clk, roleClient(client, cfg, "concierge"), cfg.Models.Concierge)
 	defer func() { _ = concierge.Close(context.WithoutCancel(ctx)) }()
 
 	question := strings.TrimSpace(cfg.Prompt)
@@ -206,14 +233,59 @@ func executeChat(
 		question = strings.TrimSpace(strings.Join(posArgs, " "))
 	}
 	routerSel := cfg.Models.Roles["router"]
-	routingLog := router.StoreLogger{Store: st, RunID: cfg.RunID, Model: routerSel.Model, Provider: routerSel.Provider}
+	routingLog := router.StoreLogger{Store: st, RunID: storeCfg.RunID, Model: routerSel.Model, Provider: routerSel.Provider}
 	r := router.Select(roleClient(client, cfg, "router"), routerSel.Model, os.Getenv("ORCA_GEMINI_API_KEY"), os.Getenv("GEMINI_DECISIONS_BASE_URL"), routingLog)
 	adoption, adoptionOff := newAdoption(cfg)
-	backend := &chatui.StoreBackend{Store: st, RunID: cfg.RunID, Stream: concierge.AskStream, Adoption: adoption, AdoptionUnavailable: adoptionOff}
-	if question != "" {
-		d, err := r.Route(ctx, question)
+	var pendingRunID string
+	var pendingRunStore store.Store
+	backend := &chatui.StoreBackend{Store: st, RunID: storeCfg.RunID, Adoption: adoption, AdoptionUnavailable: adoptionOff}
+	backend.Stream = func(streamCtx context.Context, text string, emit func(string)) error {
+		err := concierge.AskStream(streamCtx, text, emit)
+		if pendingRunStore != nil {
+			backend.Store, backend.RunID = pendingRunStore, pendingRunID
+			concierge.Attach(pendingRunStore, pendingRunID)
+			pendingRunStore, pendingRunID = nil, ""
+		}
+		return err
+	}
+	attach := func(runID string, runStore store.Store) {
+		backend.Store, backend.RunID = runStore, runID
+		concierge.Attach(runStore, runID)
+	}
+	backend.ListRuns = func(ctx context.Context) ([]store.Run, error) { return discoverChatRuns(ctx, cfg, clk) }
+	backend.SwitchRun = func(ctx context.Context, runID string) error {
+		runStore, err := openDiscoveredRun(cfg, runID, clk)
 		if err != nil {
 			return err
+		}
+		attach(runID, runStore)
+		return nil
+	}
+	concierge.RunStart = func(ctx context.Context, goal string) (string, error) {
+		runID := nextUniqueID("run", clk)
+		runStore, _, err := createChatRun(ctx, cfg, runID, goal, clk)
+		if err != nil {
+			return "", err
+		}
+		if err := runLauncher(ctx, cfg, runID, goal); err != nil {
+			_ = runStore.Close()
+			return "", err
+		}
+		pendingRunID, pendingRunStore = runID, runStore
+		return runID, nil
+	}
+	concierge.OnRunStart = func(runID, goal string) {
+		_, _ = fmt.Fprintf(stdout, "Starting run %s for: %s (say stop to cancel)\n", runID, goal)
+	}
+	if question != "" {
+		var d router.Decision
+		if chatui.IsNewGoal(question) {
+			d = router.Decision{Handler: router.Concierge, Confidence: 1, Backend: "goal-detection"}
+		} else {
+			d, err = r.Route(ctx, question)
+			if err != nil {
+				return err
+			}
 		}
 		echo := "→ " + string(d.Handler) + ": " + question
 		if d.Fallback {
@@ -229,10 +301,144 @@ func executeChat(
 		_, err = fmt.Fprintln(stdout, reply.String())
 		return err
 	}
-	ui := chatui.New(ctx, cfg.RunID, concierge.Ask, r)
+	ui := chatui.New(ctx, storeCfg.RunID, concierge.Ask, r)
+	ui.SetRunID(backend.RunID)
 	ui.Backend = backend
 	ui.Dispatch = backend.Dispatch
 	return chatui.Run(ctx, stdin, stdout, ui)
+}
+
+func launchDetachedRun(ctx context.Context, cfg Config, runID, goal string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	path, err := store.RunDBPath(cfg.StoreBaseDir, runID)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(filepath.Join(filepath.Dir(path), "orca.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	args := []string{"run", "--run", runID, "--goal", goal, "--store", "sqlite:" + path}
+	if cfg.Repository != "" {
+		args = append(args, "--repo", cfg.Repository)
+	}
+	if cfg.DriverKind != "" {
+		args = append(args, "--driver", cfg.DriverKind)
+	}
+	cmd := exec.CommandContext(context.WithoutCancel(ctx), exe, args...)
+	cmd.Dir, cmd.Stdout, cmd.Stderr = filepath.Dir(path), logFile, logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return err
+	}
+	go func() { _ = cmd.Wait(); _ = logFile.Close() }()
+	return nil
+}
+
+// runLauncher is injectable for deterministic tests.
+var runLauncher = launchDetachedRun
+
+func chatStoreBaseDir(cfg Config) string {
+	if strings.TrimSpace(cfg.StoreBaseDir) != "" {
+		return cfg.StoreBaseDir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".", ".swarm")
+	}
+	return filepath.Join(home, ".swarm")
+}
+
+func discoverChatRuns(ctx context.Context, cfg Config, clk clock.Clock) ([]store.Run, error) {
+	entries, err := os.ReadDir(chatStoreBaseDir(cfg))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	repo := strings.TrimSpace(cfg.Repository)
+	// A bare chat outside a checkout is a front desk, not a global run
+	// browser. Without an inferred repository there is no safe way to decide
+	// which stored run belongs to this conversation.
+	if repo == "" {
+		return nil, nil
+	}
+	var runs []store.Run
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		id := entry.Name()
+		path, pathErr := store.RunDBPath(chatStoreBaseDir(cfg), id)
+		if pathErr != nil {
+			continue
+		}
+		st, openErr := store.OpenSQLite(path, clk)
+		if openErr != nil {
+			continue
+		}
+		run, getErr := st.Runs().Get(ctx, id)
+		_ = st.Close()
+		if getErr != nil || (repo != "" && run.Repository != repo) {
+			continue
+		}
+		runs = append(runs, *run)
+	}
+	now := time.Now()
+	if clk != nil {
+		now = clk.Now()
+	}
+	slices.SortStableFunc(runs, func(a, b store.Run) int {
+		aLive := a.Lease != nil && !a.Lease.Expired(now)
+		bLive := b.Lease != nil && !b.Lease.Expired(now)
+		if aLive != bLive {
+			if aLive {
+				return -1
+			}
+			return 1
+		}
+		return b.UpdatedAt.Compare(a.UpdatedAt)
+	})
+	return runs, nil
+}
+
+func selectChatRun(ctx context.Context, cfg Config, clk clock.Clock) (string, error) {
+	runs, err := discoverChatRuns(ctx, cfg, clk)
+	if err != nil || len(runs) == 0 {
+		return "", err
+	}
+	return runs[0].ID, nil
+}
+
+func openDiscoveredRun(cfg Config, runID string, clk clock.Clock) (store.Store, error) {
+	path, err := store.RunDBPath(chatStoreBaseDir(cfg), runID)
+	if err != nil {
+		return nil, err
+	}
+	return store.OpenSQLite(path, clk)
+}
+
+func createChatRun(ctx context.Context, cfg Config, runID, goal string, clk clock.Clock) (store.Store, string, error) {
+	path, err := store.RunDBPath(chatStoreBaseDir(cfg), runID)
+	if err != nil {
+		return nil, "", err
+	}
+	st, err := store.OpenSQLite(path, clk)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := st.Runs().Create(ctx, store.Run{ID: runID, Repository: cfg.Repository, Objective: goal}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		_ = st.Close()
+		return nil, "", err
+	}
+	return st, "sqlite:" + path, nil
 }
 
 func newLogger(out io.Writer, levelStr, format string) *slog.Logger {
@@ -291,6 +497,7 @@ func notifySignalContext(parent context.Context, forceExit func()) (context.Cont
 
 func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, `Usage:
+  orca [flags]                             Start or reattach to owner chat
   orca run --goal "<text>" [--standing] [--repo <owner/name>] [flags]
   orca chat --run <id> [--store sqlite:<path>|nebula] [--prompt "<question>"] [flags]`)
 	_, _ = fmt.Fprintln(w, "  orca report --run <id> [--day YYYY-MM-DD] [flags]\n  orca export --run <id> [flags]")

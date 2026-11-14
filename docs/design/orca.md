@@ -6,7 +6,16 @@ Reference design for the native Go swarm orchestrator harness in [`orca/`](../..
 
 ## Usage
 
-From a GitHub checkout, the short form starts a run with sensible defaults:
+The primary entry point opens the owner chat. From a GitHub checkout, it
+reattaches to the live (or most recently active) run for the inferred
+repository; `/runs` lists runs and switches between them. A goal stated in
+chat starts a detached controller run.
+
+```text
+orca
+```
+
+To start a run directly, use the explicit form:
 
 ```text
 orca run --goal "<text>"

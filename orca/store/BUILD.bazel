@@ -15,6 +15,7 @@ go_library(
         "migrations/0003_decision_trace.sql",
         "migrations/0004_lane_base_commit.sql",
         "migrations/0005_run_settings.sql",
+        "migrations/0006_run_repository.sql",
     ],
     importpath = "github.com/bazelment/yoloswe/orca/store",
     visibility = ["//visibility:public"],

@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -24,6 +25,8 @@ type StoreBackend struct {
 	RunID         string
 	Stream        func(context.Context, string, func(string)) error
 	Now           func() time.Time
+	ListRuns      func(context.Context) ([]store.Run, error)
+	SwitchRun     func(context.Context, string) error
 	memory        concierge.MemoryEditor
 	lastDirective string
 	// Adoption hands host swarms to this chat; its lease holder is stable
@@ -140,6 +143,33 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 		return "", nil
 	}
 	switch strings.ToLower(fields[0]) {
+	case "/runs":
+		if b.ListRuns == nil {
+			return "no run discovery configured", nil
+		}
+		runs, err := b.ListRuns(ctx)
+		if err != nil {
+			return "", err
+		}
+		if len(fields) > 1 {
+			if b.SwitchRun == nil {
+				return "run switching unavailable", nil
+			}
+			if err := b.SwitchRun(ctx, fields[1]); err != nil {
+				return "", err
+			}
+			b.RunID = fields[1]
+			return "attached to run " + fields[1], nil
+		}
+		var out strings.Builder
+		for i := range runs {
+			run := &runs[i]
+			fmt.Fprintf(&out, "%s: %s\n", run.ID, cmp.Or(run.Objective, "(no goal)"))
+		}
+		if out.Len() == 0 {
+			return "no runs", nil
+		}
+		return strings.TrimSpace(out.String()), nil
 	case "/adopt":
 		if b.Adoption == nil {
 			return "adoption unavailable: " + b.AdoptionUnavailable, nil
