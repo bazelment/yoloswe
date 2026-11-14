@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "model",
     srcs = [
+        "cli_client.go",
         "http_client.go",
         "model.go",
         "openai_client.go",
@@ -16,6 +17,7 @@ go_library(
 go_test(
     name = "model_test",
     srcs = [
+        "cli_client_test.go",
         "model_test.go",
         "openai_client_test.go",
     ],

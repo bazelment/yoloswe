@@ -4,6 +4,7 @@ package integration_test
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"os"
 	"slices"
@@ -166,4 +167,57 @@ func splitIDs(raw string) []string {
 		}
 	}
 	return ids
+}
+
+// TestCLIF1Probe measures exactly one real model turn per historical moment.
+// EvaluateMoment supplies the production snapshot, filtered dispatcher tools,
+// argument parser and vetter. The local terminal message closes the tool loop
+// after that first call so subsequent inference cannot repair the first choice.
+func TestCLIF1Probe(t *testing.T) {
+	provider := os.Getenv("ORCH_MODEL_PROVIDER")
+	if provider != "claude-cli" && provider != "codex-cli" {
+		t.Skip("set ORCH_MODEL_PROVIDER to a CLI provider to run the live probe")
+	}
+	ds, err := replay.LoadDefaultDataset()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "gpt-6.1-sol"
+	if provider == "claude-cli" {
+		name = "claude-sonnet-5-5"
+	}
+	correct := 0
+	var latencies []int64
+	for _, index := range []int{0, 15, 20, 26, 30} {
+		moment := ds.Moments[index]
+		client := &singleProbeTurn{inner: model.NewCLIClient(provider)}
+		result, err := replay.EvaluateMoment(t.Context(), moment, client, dispatcher.Config{Model: name, HardBatchModel: name, MaxTurns: 2, MaxTokens: 1024})
+		if err != nil {
+			t.Fatalf("%s: %v", moment.ID, err)
+		}
+		if result.Agreed {
+			correct++
+		}
+		latencies = append(latencies, client.latencyMS)
+		fmt.Printf("F1 provider=%s model=%s moment=%s correct=%t tools=%v expected=%v latency_ms=%d tokens=%d/%d rejected=%v\n", provider, name, moment.ID, result.Agreed, result.AcceptedTools, result.ExpectedTools, client.latencyMS, result.InputTokens, result.OutputTokens, result.RejectedReasons)
+	}
+	slices.Sort(latencies)
+	fmt.Printf("F1 SUMMARY provider=%s correct_tool_calls=%d/5 median_latency_ms=%d min_latency_ms=%d max_latency_ms=%d\n", provider, correct, latencies[2], latencies[0], latencies[4])
+}
+
+type singleProbeTurn struct {
+	inner     model.ModelClient
+	called    bool
+	latencyMS int64
+}
+
+func (p *singleProbeTurn) CreateMessage(ctx context.Context, req model.Request) (*model.Response, error) {
+	if p.called {
+		return &model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock("One-turn probe complete."))}, nil
+	}
+	p.called = true
+	start := time.Now()
+	resp, err := p.inner.CreateMessage(ctx, req)
+	p.latencyMS = time.Since(start).Milliseconds()
+	return resp, err
 }

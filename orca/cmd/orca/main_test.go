@@ -944,7 +944,7 @@ func TestRunnerWorkerQuestionUsesRouterModel(t *testing.T) {
 
 func TestRoleResolution(t *testing.T) {
 	t.Parallel()
-	cfg, _, err := parseFlags("run", []string{"--store", "memory", "--goal", "resolve roles", "--planner-provider", "anthropic", "--planner-model", "claude-opus-4-6", "--critic-provider", "openai", "--critic-model", "gpt-6.1-sol", "--router-model", "router-test"}, io.Discard)
+	cfg, _, err := parseFlags("run", []string{"--model-provider", "openai", "--store", "memory", "--goal", "resolve roles", "--planner-provider", "anthropic", "--planner-model", "claude-opus-4-6", "--critic-provider", "openai", "--critic-model", "gpt-6.1-sol", "--router-model", "router-test"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -963,7 +963,7 @@ func TestRoleResolution(t *testing.T) {
 	if got.Model != "claude-opus-4-6" || got.Metadata["provider"] != "anthropic" || got.Metadata["role"] != "planner" || got.ReasoningEffort != "high" {
 		t.Fatalf("request: %+v", got)
 	}
-	defaults := Config{}.withDefaults()
+	defaults := Config{ModelProvider: "openai"}.withDefaults()
 	if defaults.Models.Roles["planner"].Provider == defaults.Models.Roles["critic"].Provider || defaults.Models.Dispatcher != "gpt-6.1-sol" {
 		t.Fatalf("defaults: %+v", defaults.Models)
 	}
@@ -1455,6 +1455,22 @@ func TestConciergeRunControl(t *testing.T) {
 		}
 		if len(dirs) != 1 || dirs[0].Ref != "chat:control" || dirs[0].Text != action {
 			t.Fatalf("%s: %+v", action, dirs)
+		}
+	}
+}
+
+func TestCredentiallessRoles(t *testing.T) {
+	for _, key := range []string{"ORCH_MODEL_PROVIDER", "OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "LLM_GATEWAY_URL", "NEBULA_LLM_KEY"} {
+		t.Setenv(key, "")
+	}
+	cfg := Config{DriverKind: "fake"}.withDefaults()
+	for _, role := range []string{"planner", "critic", "dispatcher", "concierge", "router"} {
+		want := "claude-cli"
+		if role == "planner" {
+			want = "codex-cli"
+		}
+		if got := cfg.Models.Roles[role].Provider; got != want {
+			t.Errorf("%s provider = %s, want %s", role, got, want)
 		}
 	}
 }
