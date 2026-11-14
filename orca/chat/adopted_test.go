@@ -521,8 +521,14 @@ func TestSlashCompletion(t *testing.T) {
 	tab := tea.KeyPressMsg{Code: tea.KeyTab}
 
 	m = typed(m, "/")
-	if view := m.View().Content; !strings.Contains(view, "/status  /lanes  /asks") || !strings.Contains(view, "/adopt [run-id]  /release [run-id]") {
+	if view := m.View().Content; !strings.Contains(view, "/status  /lanes  /asks") || !strings.Contains(view, "/adopt [run-id]  /release [run-id]  /restart") {
 		t.Fatalf("\"/\" shows no command list:\n%s", view)
+	}
+	if helpOut, err := f.backend.Command(t.Context(), "/help"); err != nil || !strings.Contains(helpOut, "/restart") {
+		t.Fatalf("/help = %q, %v; want /restart listed", helpOut, err)
+	}
+	if _, err := f.backend.Command(t.Context(), "/restart /tmp/other"); err == nil || strings.Contains(err.Error(), "usage: /restart") {
+		t.Fatalf("/restart <path> = %v, want target validation error", err)
 	}
 	m = press(typed(m, "ad"), tab)
 	if m.input != "/adopt " {
@@ -542,6 +548,10 @@ func TestSlashCompletion(t *testing.T) {
 	m.input = "/rel"
 	if m = press(press(m, tab), tab); m.input != "/release 20261113-0" {
 		t.Fatalf("/rel + Tab + Tab = %q", m.input)
+	}
+	m.input = "/rest"
+	if m = press(m, tab); m.input != "/restart " {
+		t.Fatalf("/rest + Tab = %q, want \"/restart \"", m.input)
 	}
 	m.input = "/s"
 	if m = press(m, tab); m.input != "/st" || !slices.Equal(m.hints, []string{"/status", "/stop"}) {

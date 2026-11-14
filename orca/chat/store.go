@@ -56,6 +56,9 @@ type StoreBackend struct {
 	// goes to a run whose controller this chat holds, else to the one run a
 	// live controller holds, or is refused.
 	FrontDesk string
+	// Restart validates the startup binary and prepares an in-place re-exec
+	// for /restart.
+	Restart func(context.Context, string) (string, error)
 
 	mu            sync.RWMutex
 	store         store.Store
@@ -133,21 +136,25 @@ func (b *StoreBackend) HeldRuns(ctx context.Context) ([]string, error) {
 }
 
 // RestartHeld restarts controllers for every adopted run this chat holds.
-func (b *StoreBackend) RestartHeld(ctx context.Context) error {
+func (b *StoreBackend) RestartHeld(ctx context.Context) ([]adopt.Run, error) {
 	if b.Adoption == nil {
-		return nil
+		return nil, nil
 	}
 	ids, err := b.Adoption.Adopted()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var restarted []adopt.Run
 	var errs []error
 	for _, id := range ids {
-		if _, adoptErr := b.Adoption.Adopt(ctx, id); adoptErr != nil {
+		r, adoptErr := b.Adoption.Adopt(ctx, id)
+		if adoptErr != nil {
 			errs = append(errs, adoptErr)
+			continue
 		}
+		restarted = append(restarted, r)
 	}
-	return errors.Join(errs...)
+	return restarted, errors.Join(errs...)
 }
 
 // ReadHostRun reads the host swarm run directory of id when Adoption is set.
@@ -835,6 +842,18 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 			b.OnHoldChange()
 		}
 		return "released " + target, nil
+	case "/restart":
+		if len(fields) > 2 {
+			return "", fmt.Errorf("usage: /restart [path]")
+		}
+		if b.Restart == nil {
+			return "", fmt.Errorf("restart unavailable")
+		}
+		path := ""
+		if len(fields) == 2 {
+			path = fields[1]
+		}
+		return b.Restart(ctx, path)
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()

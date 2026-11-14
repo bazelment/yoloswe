@@ -131,6 +131,8 @@ type Concierge struct {
 	OwnerRun func(ctx context.Context, run, text string) (string, error)
 	// Wake asks the controller of a run to act on a new directive now.
 	Wake func(runID string)
+	// Restart validates the startup binary and prepares an in-place re-exec.
+	Restart func(context.Context, string) (string, error)
 	// Logger receives one INFO line per tool call and a WARN on a budget stop.
 	Logger *slog.Logger
 }
@@ -318,8 +320,9 @@ func (c *Concierge) Resume(ctx context.Context) ([]model.Message, error) {
 func (c *Concierge) Close(ctx context.Context) error {
 	c.mu.Lock()
 	threadID := c.threadID
+	c.threadID = ""
 	c.mu.Unlock()
-	if threadID == "" {
+	if threadID == "" || c.store == nil {
 		return nil
 	}
 	return c.store.Threads().UpdateThreadStatus(ctx, threadID, store.ThreadStatusArchived)
@@ -878,6 +881,33 @@ func (c *Concierge) RunInteractive(ctx context.Context, in io.Reader, out io.Wri
 		}
 		switch strings.ToLower(line) {
 		case "/exit", "/quit", "exit", "quit":
+			return nil
+		}
+		fields := strings.Fields(line)
+		if strings.EqualFold(fields[0], "/restart") {
+			if c.Restart == nil {
+				return fmt.Errorf("restart unavailable")
+			}
+			if len(fields) > 2 {
+				if _, err := fmt.Fprintln(out, "error: usage: /restart [path]"); err != nil {
+					return err
+				}
+				continue
+			}
+			path := ""
+			if len(fields) == 2 {
+				path = fields[1]
+			}
+			msg, err := c.Restart(ctx, path)
+			if err != nil {
+				if _, werr := fmt.Fprintf(out, "error: %v\n", err); werr != nil {
+					return werr
+				}
+				continue
+			}
+			if _, err := fmt.Fprintln(out, msg); err != nil {
+				return err
+			}
 			return nil
 		}
 		ans, err := c.Ask(ctx, line)

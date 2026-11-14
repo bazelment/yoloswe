@@ -5,6 +5,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -31,6 +33,128 @@ import (
 	"github.com/bazelment/yoloswe/orca/router"
 	"github.com/bazelment/yoloswe/orca/store"
 )
+
+const restartEnvVar = "ORCA_RESTARTED_FROM_PID"
+
+var (
+	// buildCommit can be set via linker -X main.buildCommit=<sha>.
+	buildCommit = ""
+	// startupPath and startupVersion are captured at process init so replacing
+	// the binary on disk (rm + mv) before /restart neither points exec at a
+	// deleted inode nor overwrites the running process's old version.
+	startupPath    = resolveStartupPath(os.Args)
+	startupVersion = detectBinaryVersion(startupPath)
+	execProcess    = syscall.Exec
+)
+
+func resolveStartupPath(args []string) string {
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		arg0 := args[0]
+		if looked, err := exec.LookPath(arg0); err == nil || (errors.Is(err, exec.ErrDot) && looked != "") {
+			if abs, absErr := filepath.Abs(looked); absErr == nil {
+				return abs
+			}
+			return looked
+		}
+		if abs, err := filepath.Abs(arg0); err == nil {
+			if _, statErr := os.Stat(abs); statErr == nil {
+				return abs
+			}
+		}
+	}
+	if exe, err := os.Executable(); err == nil {
+		exe = strings.TrimSuffix(exe, " (deleted)")
+		if abs, absErr := filepath.Abs(exe); absErr == nil {
+			return abs
+		}
+		return exe
+	}
+	return ""
+}
+
+func stampedBuildCommit() string {
+	if c := strings.TrimSpace(buildCommit); c != "" && c != "unknown" && !strings.HasPrefix(c, "{") {
+		return c
+	}
+	return ""
+}
+
+func detectBinaryVersion(binPath string) string {
+	if c := stampedBuildCommit(); c != "" {
+		return c
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		var rev string
+		var dirty bool
+		for _, s := range info.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				rev = s.Value
+			case "vcs.modified":
+				dirty = s.Value == "true"
+			}
+		}
+		if rev != "" {
+			if len(rev) > 12 {
+				rev = rev[:12]
+			}
+			if dirty {
+				rev += "-dirty"
+			}
+			return rev
+		}
+	}
+	if binPath != "" {
+		if f, err := os.Open(binPath); err == nil {
+			defer f.Close()
+			h := sha256.New()
+			if _, err := io.Copy(h, f); err == nil {
+				return fmt.Sprintf("%x", h.Sum(nil)[:6])
+			}
+		}
+	}
+	return "dev"
+}
+
+func currentVersion() string {
+	if c := stampedBuildCommit(); c != "" {
+		return c
+	}
+	if v := strings.TrimSpace(startupVersion); v != "" {
+		return v
+	}
+	return detectBinaryVersion(startupPath)
+}
+
+func verifyRestartTarget(ctx context.Context, path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", errors.New("restart target path is empty")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("restart target %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("restart target %s is not a regular file", path)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("restart target %s is not executable (mode %s)", path, info.Mode())
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(checkCtx, path, "--version").CombinedOutput()
+	trimmed := strings.TrimSpace(string(out))
+	if err != nil {
+		if trimmed != "" {
+			return "", fmt.Errorf("restart target %s --version failed: %w (%s)", path, err, trimmed)
+		}
+		return "", fmt.Errorf("restart target %s --version failed: %w", path, err)
+	}
+	line, _, _ := strings.Cut(trimmed, "\n")
+	ver := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "orca"))
+	return cmp.Or(ver, "unknown"), nil
+}
 
 func main() {
 	ctx, cancel := notifySignalContext(context.Background(), func() {
@@ -69,6 +193,9 @@ func Execute(
 		case "-h", "--help", "help":
 			printUsage(stdout)
 			return nil
+		case "-v", "--version", "-version", "version":
+			_, err := fmt.Fprintf(stdout, "orca %s\n", currentVersion())
+			return err
 		}
 	}
 
@@ -92,7 +219,7 @@ func Execute(
 		if err := vcfg.Validate(false); err != nil {
 			return err
 		}
-		return executeChat(ctx, cfg, posArgs, stdin, stdout, stderr, logger)
+		return executeChat(ctx, cfg, slices.Clone(args), posArgs, stdin, stdout, stderr, logger)
 	case "report":
 		if err := cfg.Validate(false); err != nil {
 			return err
@@ -185,24 +312,66 @@ func executeRun(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	return runner.Run(ctx)
 }
 
+type restartRequest struct {
+	path string
+	argv []string
+	env  []string
+}
+
+type detachedChild struct {
+	runID     string
+	storeSpec string
+}
+
+func formatDetachedRunLine(runID, storeSpec string) string {
+	if strings.TrimSpace(storeSpec) != "" {
+		return fmt.Sprintf("detached orca run %s continues on old binary; to roll: stop old process and run `orca run --run %s --store %s`", runID, runID, storeSpec)
+	}
+	return fmt.Sprintf("detached orca run %s continues on old binary; to roll: stop old process and run `orca run --run %s`", runID, runID)
+}
+
 func executeChat(
 	ctx context.Context,
 	cfg Config,
+	execArgs []string,
 	posArgs []string,
 	stdin io.Reader,
 	stdout, stderr io.Writer,
 	logger *slog.Logger,
 ) error {
+	reexec, err := runChatSession(ctx, cfg, execArgs, posArgs, stdin, stdout, stderr, logger)
+	if err != nil || reexec == nil {
+		return err
+	}
+	if err := execProcess(reexec.path, reexec.argv, reexec.env); err != nil {
+		return fmt.Errorf("restart exec %s failed (held leases preserved; run orca to reattach): %w", reexec.path, err)
+	}
+	return nil
+}
+
+func runChatSession(
+	ctx context.Context,
+	cfg Config,
+	execArgs []string,
+	posArgs []string,
+	stdin io.Reader,
+	stdout, stderr io.Writer,
+	logger *slog.Logger,
+) (*restartRequest, error) {
+	restartedFrom := strings.TrimSpace(os.Getenv(restartEnvVar))
+	if restartedFrom != "" {
+		_ = os.Unsetenv(restartEnvVar)
+	}
 	if cfg.Prompt == "" && len(posArgs) == 0 && isTerminal(stderr) {
 		// The chat screen owns the terminal; log lines written to it would
 		// tear the screen, so they go to a file.
 		path := filepath.Join(chatStoreBaseDir(cfg), "orca-chat.log")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return err
+			return nil, err
 		}
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defer f.Close()
 		_, _ = fmt.Fprintf(stderr, "orca: chat log: %s\n", path)
@@ -211,7 +380,7 @@ func executeChat(
 	clk := clock.NewRealClock()
 	runs, err := openChatRuns(cfg, clk)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = runs.Close() }()
 	// Keep the adoption holder stable across restarts and attached runs.
@@ -228,7 +397,7 @@ func executeChat(
 	}
 	st, resolvedStore, err := runs.Open(storeCfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// The backend owns the attached store from here on and closes it, and
 	// every store it later switches to, by exit.
@@ -237,15 +406,15 @@ func executeChat(
 	if frontDesk {
 		backend.FrontDesk = frontDeskRunID
 		if err := st.Runs().Create(ctx, store.Run{ID: storeCfg.RunID, Repository: cfg.Repository, Objective: ""}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-			return err
+			return nil, err
 		}
 	} else if err := ensureChatRun(ctx, st, cfg); err != nil {
-		return err
+		return nil, err
 	}
 
 	client, err := openModelClient(cfg, clk)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	logger.Info("orca chat starting",
@@ -261,7 +430,7 @@ func executeChat(
 	// A restarted chat continues the conversation it left.
 	resumed, err := concierge.Resume(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	host := newHostSwarms(cfg, st, clk)
 	backend.HostSwarms = host.importer.Discover
@@ -273,13 +442,16 @@ func executeChat(
 	}
 	adoption, adoptionOff := newAdoption(ctx, cfg, host, holder, formerHolders, st, clk, client, logger)
 	backend.Adoption, backend.AdoptionUnavailable = adoption, adoptionOff
+	var restartedRuns []adopt.Run
 	if adoption != nil {
 		defer func() {
 			if closer, ok := adoption.Driver.(interface{ Close(context.Context) error }); ok {
 				_ = closer.Close(context.WithoutCancel(ctx))
 			}
 		}()
-		if adoptErr := backend.RestartHeld(ctx); adoptErr != nil && logger != nil {
+		var adoptErr error
+		restartedRuns, adoptErr = backend.RestartHeld(ctx)
+		if adoptErr != nil && logger != nil {
 			logger.Warn("reattach adopted run failed", "error", adoptErr)
 		}
 	}
@@ -290,6 +462,7 @@ func executeChat(
 	// once that turn ends, so the turn finishes on the store it started on.
 	var pendingRunID string
 	var pendingRunStore store.Store
+	var detachedChildren []detachedChild
 	backend.Stream = func(streamCtx context.Context, text string, emit func(string)) error {
 		err := concierge.AskStream(context.WithValue(streamCtx, runStartEchoKey{}, emit), text, emit)
 		if pendingRunStore != nil {
@@ -318,6 +491,7 @@ func executeChat(
 			_ = runStore.Close()
 			return "", err
 		}
+		detachedChildren = append(detachedChildren, detachedChild{runID: runID, storeSpec: spec})
 		if pendingRunStore != nil {
 			_ = pendingRunStore.Close()
 		}
@@ -328,6 +502,51 @@ func executeChat(
 		}
 		return runID, nil
 	}
+	var reexec *restartRequest
+	backend.Restart = func(restartCtx context.Context, requestedPath string) (string, error) {
+		target := strings.TrimSpace(requestedPath)
+		if target == "" {
+			target = strings.TrimSpace(startupPath)
+		} else if !filepath.IsAbs(target) {
+			return "", fmt.Errorf("restart target %s must be an absolute path", target)
+		}
+		newVer, err := verifyRestartTarget(restartCtx, target)
+		if err != nil {
+			return "", err
+		}
+		oldVer := currentVersion()
+		lines := []string{fmt.Sprintf("restarting orca (%s -> %s): %s", oldVer, newVer, target)}
+		seenDetached := map[string]bool{}
+		for _, child := range detachedChildren {
+			seenDetached[child.runID] = true
+			lines = append(lines, formatDetachedRunLine(child.runID, child.storeSpec))
+		}
+		if listed, listErr := runs.List(restartCtx); listErr == nil {
+			now := clk.Now()
+			for i := range listed {
+				lr := &listed[i]
+				if seenDetached[lr.ID] || lr.Lease == nil || lr.Lease.Expired(now) || strings.HasPrefix(lr.Lease.HolderID, adopt.ChatHolder("")) {
+					continue
+				}
+				seenDetached[lr.ID] = true
+				spec := runs.spec
+				if spec == "" {
+					if p, pErr := store.RunDBPath(chatStoreBaseDir(cfg), lr.ID); pErr == nil {
+						spec = "sqlite:" + p
+					}
+				}
+				lines = append(lines, formatDetachedRunLine(lr.ID, spec))
+			}
+		}
+		env := append(os.Environ(), fmt.Sprintf("%s=%d", restartEnvVar, os.Getpid()))
+		reexec = &restartRequest{
+			path: target,
+			argv: append([]string{target}, execArgs...),
+			env:  env,
+		}
+		return strings.Join(lines, "\n"), nil
+	}
+	concierge.Restart = backend.Restart
 	if question != "" {
 		var d router.Decision
 		if chatui.IsNewGoal(question) {
@@ -335,7 +554,7 @@ func executeChat(
 		} else {
 			d, err = r.Route(ctx, question)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
 		echo := "→ " + string(d.Handler) + ": " + question
@@ -343,19 +562,60 @@ func executeChat(
 			echo += " (via fallback)"
 		}
 		if _, err := fmt.Fprintln(stdout, echo); err != nil {
-			return err
+			return nil, err
 		}
 		var reply strings.Builder
 		if err := backend.Dispatch(ctx, d, question, func(s string) { reply.WriteString(s) }); err != nil {
-			return err
+			return nil, err
 		}
 		_, err = fmt.Fprintln(stdout, reply.String())
-		return err
+		return nil, err
 	}
-	ui := chatui.New(ctx, storeCfg.RunID, concierge.Ask, r).WithTranscript(transcriptLines(resumed))
+	var reattachLines []string
+	reattachedSet := map[string]bool{}
+	for i := range restartedRuns {
+		r := &restartedRuns[i]
+		reattachedSet[r.ID] = true
+		reattachLines = append(reattachLines, fmt.Sprintf("reattached %s (%d lanes, driving again, pid %d)", r.ID, len(r.Lanes), os.Getpid()))
+	}
+	if !frontDesk && !reattachedSet[storeCfg.RunID] && restartedFrom != "" {
+		reattachLines = append(reattachLines, fmt.Sprintf("reattached %s (driving again, pid %d)", storeCfg.RunID, os.Getpid()))
+	} else if len(reattachLines) == 0 && restartedFrom != "" {
+		reattachLines = append(reattachLines, fmt.Sprintf("reattached %s (pid %d, version %s)", storeCfg.RunID, os.Getpid(), currentVersion()))
+	}
+	if !isTerminal(stdin) {
+		for _, line := range reattachLines {
+			if _, err := fmt.Fprintln(stdout, line); err != nil {
+				return nil, err
+			}
+		}
+	}
+	initialLines := append(transcriptLines(resumed), reattachLines...)
+	ui := chatui.New(ctx, storeCfg.RunID, concierge.Ask, r).WithTranscript(initialLines)
 	ui.Backend = backend
 	ui.Dispatch = backend.Dispatch
-	return chatui.Run(ctx, stdin, stdout, ui)
+	if err := chatui.Run(ctx, stdin, stdout, ui); err != nil {
+		return nil, err
+	}
+	if reexec != nil {
+		shutdownCtx := context.WithoutCancel(ctx)
+		var shutdownErr error
+		if adoption != nil {
+			if closer, ok := adoption.Driver.(interface{ Close(context.Context) error }); ok {
+				shutdownErr = errors.Join(shutdownErr, closer.Close(shutdownCtx))
+			}
+		}
+		shutdownErr = errors.Join(
+			shutdownErr,
+			concierge.Close(shutdownCtx),
+			backend.Close(),
+			runs.Close(),
+		)
+		if shutdownErr != nil {
+			return nil, fmt.Errorf("restart shutdown failed: %w", shutdownErr)
+		}
+	}
+	return reexec, nil
 }
 
 // wireChatConcierge connects run listing, directive routing, wakeups, held
@@ -539,7 +799,9 @@ func (r *chatRuns) Close() error {
 	if r.shared == nil {
 		return nil
 	}
-	return r.shared.Store.Close()
+	err := r.shared.Store.Close()
+	r.shared = nil
+	return err
 }
 
 // Open opens the store holding cfg.RunID: the explicit store or the run's own
