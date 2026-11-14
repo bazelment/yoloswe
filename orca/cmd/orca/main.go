@@ -239,9 +239,7 @@ func executeChat(
 	return chatui.Run(ctx, stdin, stdout, ui)
 }
 
-// ensureChatRun makes chat useful for a fresh run id. Runs are normally
-// created by `orca run`, but chat is also a valid entry point for inspecting
-// or directing a run before its controller starts.
+// ensureChatRun creates a run record when chat is the first entry point.
 func ensureChatRun(ctx context.Context, st store.Store, cfg Config) error {
 	if _, err := st.Runs().Get(ctx, cfg.RunID); err == nil {
 		return nil

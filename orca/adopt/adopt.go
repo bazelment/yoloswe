@@ -70,8 +70,7 @@ type Run struct {
 
 // Importer finds and reads run directories under <root>/.shared/subagent-swarm.
 type Importer struct {
-	// Roots defaults to the current git checkout and sibling checkout roots
-	// (where subagent-swarm-nebula puts .shared) plus $ORCA_SWARM_ROOTS.
+	// Roots defaults to the current and sibling checkouts plus $ORCA_SWARM_ROOTS.
 	Roots []string
 }
 
