@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -104,6 +106,54 @@ func TestShippedChatAdoptsAndReleasesHostSwarm(t *testing.T) {
 		if strings.Contains(string(b), "ORCHESTRATOR:") {
 			t.Fatalf("%s still carries the stand-down line: %q", n, b)
 		}
+	}
+}
+
+func TestChatAdoptionDiscoversSiblingRepos(t *testing.T) {
+	testWorkingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, nested := range []bool{false, true} {
+		t.Run(fmt.Sprint("worktrees=", nested), func(t *testing.T) {
+			parent := t.TempDir()
+			roots := []string{filepath.Join(parent, "one"), filepath.Join(parent, "two")}
+			for i := range roots {
+				if nested {
+					roots[i] = filepath.Join(roots[i], "worktrees", filepath.Base(roots[i]))
+				}
+				runDir := filepath.Join(roots[i], ".shared", "subagent-swarm", fmt.Sprintf("sibling-%d", i))
+				if err := os.MkdirAll(runDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, filepath.Join(runDir, "state.json"), `{"config":{"goal":"sibling goal"},"tasks":[]}`)
+				if out, err := exec.Command("git", "init", roots[i]).CombinedOutput(); err != nil {
+					t.Fatalf("git init: %v: %s", err, out)
+				}
+			}
+			t.Chdir(roots[0])
+			t.Setenv("ORCA_SWARM_ROOTS", "")
+			script := filepath.Join(parent, "watch_lanes.sh")
+			writeFile(t, script, "#!/bin/bash\n")
+			t.Setenv("ORCA_WATCH_LANES", script)
+			srv := httptest.NewServer(http.NotFoundHandler())
+			t.Cleanup(srv.Close)
+			t.Setenv("NEBULA_API_URL", srv.URL)
+			t.Setenv("NEBULA_TOKEN", "test-token")
+			var out, errOut bytes.Buffer
+			err := Execute(t.Context(), []string{
+				"chat", "--run", "chat-run", "--store", "memory", "--replay", filepath.Join(testWorkingDir, "testdata/concierge_status_replay.json"),
+			}, strings.NewReader("/adopt\n"), &out, &errOut)
+			if err != nil {
+				t.Fatalf("Execute chat: %v: %s", err, errOut.String())
+			}
+			for i := range roots {
+				want := fmt.Sprintf("sibling-%d: sibling goal", i)
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("/adopt output missing %q:\n%s", want, out.String())
+				}
+			}
+		})
 	}
 }
 

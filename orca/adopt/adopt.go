@@ -129,7 +129,7 @@ func (i Importer) roots() []string {
 		parent := filepath.Dir(current)
 		scanSiblings(parent)
 		if filepath.Base(parent) == "worktrees" {
-			scanSiblings(filepath.Dir(parent))
+			scanSiblings(filepath.Dir(filepath.Dir(parent)))
 		}
 	}
 	if v := os.Getenv("ORCA_SWARM_ROOTS"); v != "" {
