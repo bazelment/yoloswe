@@ -39,6 +39,8 @@ type NoteStore interface {
 type RunStore interface {
 	Create(ctx context.Context, run Run) error
 	Get(ctx context.Context, runID string) (*Run, error)
+	// List returns every run in the store, ordered by ID.
+	List(ctx context.Context) ([]Run, error)
 	UpdateObjective(ctx context.Context, runID, objective, planRef string) error
 	GetSettings(ctx context.Context, runID string) (RunSettings, error)
 	UpdateSettings(ctx context.Context, runID string, settings RunSettings) error

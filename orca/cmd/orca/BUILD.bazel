@@ -52,6 +52,7 @@ go_test(
     data = glob(["testdata/**"]),
     embed = [":orca_lib"],
     deps = [
+        "//orca/chat",
         "//orca/clock",
         "//orca/dispatcher",
         "//orca/lane",

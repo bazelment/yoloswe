@@ -241,6 +241,18 @@ func (r *memRunStore) Get(_ context.Context, runID string) (*Run, error) {
 	return &cp, nil
 }
 
+func (r *memRunStore) List(_ context.Context) ([]Run, error) {
+	s := r.s()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Run, 0, len(s.runs))
+	for _, run := range s.runs {
+		out = append(out, run.Clone())
+	}
+	slices.SortFunc(out, func(a, b Run) int { return strings.Compare(a.ID, b.ID) })
+	return out, nil
+}
+
 func (r *memRunStore) UpdateObjective(_ context.Context, runID, objective, planRef string) error {
 	s := r.s()
 	s.mu.Lock()

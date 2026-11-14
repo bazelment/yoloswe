@@ -482,6 +482,7 @@ func (r *Runner) Bootstrap(ctx context.Context) error {
 		}
 		if err := r.store.Runs().Create(ctx, store.Run{
 			ID:            runID,
+			Repository:    strings.TrimSpace(r.cfg.Repository),
 			Objective:     cmp.Or(strings.TrimSpace(r.cfg.Objective), "Orchestrate swarm run "+runID),
 			PlanRef:       strings.TrimSpace(r.cfg.PlanRef),
 			DefaultRecipe: recipe.DefaultName,

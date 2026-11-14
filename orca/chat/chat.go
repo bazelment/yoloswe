@@ -3,6 +3,7 @@ package chat
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -46,6 +47,94 @@ type Model struct {
 
 func New(ctx context.Context, runID string, ask AskFunc, r router.Router) Model {
 	return Model{ctx: ctx, runID: runID, ask: ask, router: r}
+}
+
+// IsNewGoal reports whether text talks about starting work, so chat routes it
+// to the concierge. Talking about it is not asking for it: run.start acts only
+// on IsStartRequest.
+func IsNewGoal(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	return strings.Contains(lower, "start a run") || strings.Contains(lower, "start work") || strings.HasPrefix(lower, "new goal")
+}
+
+// startPhrases open an explicit request to start a run.
+var startPhrases = []string{
+	"start a run", "start a new run", "start the run", "start run", "start work", "start working",
+	"kick off a run", "launch a run", "begin a run", "new goal", "new run",
+}
+
+// politeLeads may precede a start phrase without changing its meaning.
+var politeLeads = []string{"please", "ok", "okay", "alright", "now", "go ahead and", "let's", "lets", "kindly", "orca"}
+
+// doubtWords make a request negated, conditional or tentative.
+var doubtWords = map[string]bool{
+	"not": true, "no": true, "never": true, "don't": true, "dont": true, "doesn't": true, "won't": true,
+	"can't": true, "cannot": true, "shouldn't": true, "without": true, "hold": true, "wait": true,
+	"yet": true, "later": true, "if": true, "unless": true, "until": true, "maybe": true, "whether": true,
+}
+
+// questionLeads open a question rather than a request.
+var questionLeads = map[string]bool{
+	"how": true, "what": true, "why": true, "when": true, "where": true, "which": true, "who": true,
+	"can": true, "could": true, "would": true, "should": true, "shall": true, "will": true, "may": true,
+	"do": true, "does": true, "did": true, "is": true, "are": true,
+}
+
+func words(text string) []string {
+	lower := strings.ToLower(strings.ReplaceAll(text, "’", "'"))
+	return strings.FieldsFunc(lower, func(r rune) bool {
+		return r != '\'' && !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	})
+}
+
+// IsStartRequest reports whether text explicitly and affirmatively asks to
+// start a run: a clause opens with a start phrase ("start a run to ...",
+// "new goal: ..."), and nothing negates, conditions or questions it. When it
+// returns false the concierge asks instead of starting.
+func IsStartRequest(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" || strings.Contains(text, "?") {
+		return false
+	}
+	all := words(text)
+	if len(all) == 0 || questionLeads[all[0]] {
+		return false
+	}
+	for _, w := range all {
+		if doubtWords[w] {
+			return false
+		}
+	}
+	for _, clause := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return strings.ContainsRune(".!;:\n", r) }) {
+		c := strings.Join(words(clause), " ")
+		for trimmed := true; trimmed; {
+			trimmed = false
+			for _, lead := range politeLeads {
+				if rest, ok := strings.CutPrefix(c, lead+" "); ok {
+					c, trimmed = rest, true
+				}
+			}
+		}
+		for _, p := range startPhrases {
+			if c == p || strings.HasPrefix(c, p+" ") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// confirmations are plain answers of yes.
+var confirmations = map[string]bool{
+	"yes": true, "y": true, "yep": true, "yeah": true, "sure": true, "confirm": true, "confirmed": true,
+	"go ahead": true, "do it": true, "start it": true, "yes please": true, "please do": true,
+	"yes start it": true, "yes go ahead": true, "yes do it": true, "ok start it": true, "okay start it": true,
+}
+
+// IsConfirmation reports whether text is a plain yes, answering a question
+// such as "Shall I start a run for ...?".
+func IsConfirmation(text string) bool {
+	return confirmations[strings.Join(words(text), " ")]
 }
 
 //nolint:govet // message payload grouping
@@ -104,6 +193,9 @@ func receive(ctx context.Context, ch <-chan streamMsg) tea.Cmd {
 }
 func (m Model) route(text string) tea.Cmd {
 	return func() tea.Msg {
+		if IsNewGoal(text) {
+			return routeMsg{text: text, decision: router.Decision{Handler: router.Concierge, Confidence: 1, Backend: "goal-detection"}}
+		}
 		if m.router == nil {
 			return routeMsg{text: text, decision: router.Decision{Handler: router.Concierge, Confidence: 1}}
 		}
@@ -241,6 +333,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 func (m Model) View() tea.View {
+	runID := m.runID
+	if backend, ok := m.Backend.(*StoreBackend); ok {
+		runID = cmp.Or(backend.RunID(), runID)
+	}
 	lines := m.lines
 	if m.height > 5 && len(lines) > m.height-5 {
 		lines = lines[len(lines)-(m.height-5):]
@@ -249,7 +345,7 @@ func (m Model) View() tea.View {
 	for _, q := range m.questions {
 		questions += "\nowner question> " + q
 	}
-	return tea.NewView("orca chat — run " + m.runID + "\n" + strings.Join(lines, "\n") + questions + "\n\n" + m.status + "\n> " + m.input)
+	return tea.NewView("orca chat — run " + runID + "\n" + strings.Join(lines, "\n") + questions + "\n\n" + m.status + "\n> " + m.input)
 }
 func isTerminal(in io.Reader) bool { f, ok := in.(*os.File); return ok && term.IsTerminal(int(f.Fd())) }
 func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {

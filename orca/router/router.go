@@ -50,7 +50,7 @@ func FormatInput(text, questions string) string {
 	return text + "\nOpen questions:\n" + questions
 }
 
-const conciergeCriterion = "Questions about current run state or policy; standing rules, durable preferences or corrections; pause, resume or stop execution. Also unclear messages or mixed independent requests needing front-desk handling."
+const conciergeCriterion = "Questions about current run state or policy; standing rules, durable preferences or corrections; pause, resume or stop execution; starting a new goal or run from chat. Also unclear messages or mixed independent requests needing front-desk handling."
 const plannerCriterion = "Changes to an existing goal, plan, scope, task order, timing or acceptance criteria, including dropping work or changing duration. A one-time plan update is planner, not a standing rule."
 const dispatcherCriterion = "Do work now: assign, fund, retry, merge, review, or steer a lane or PR. Also an owner reply answering a listed open question; the Open questions block is context, not an additional request."
 

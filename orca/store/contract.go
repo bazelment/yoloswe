@@ -90,6 +90,16 @@ func testRunsAndLeases(t *testing.T, factory Factory) {
 	if got.Objective != run.Objective || got.PlanRef != run.PlanRef || got.DefaultRecipe != recipe.DefaultName {
 		t.Fatalf("Get = %+v, want objective/planRef/defaultRecipe populated", got)
 	}
+	if err := st.Runs().Create(ctx, Run{ID: "run-0", Repository: "o/r", Objective: "earlier"}); err != nil {
+		t.Fatalf("Create run-0 error: %v", err)
+	}
+	listed, err := st.Runs().List(ctx)
+	if err != nil {
+		t.Fatalf("List error: %v", err)
+	}
+	if len(listed) != 2 || listed[0].ID != "run-0" || listed[0].Repository != "o/r" || listed[1].ID != "run-1" || listed[1].Objective != run.Objective {
+		t.Fatalf("List = %+v, want run-0 then run-1", listed)
+	}
 
 	clk.Advance(5 * time.Second)
 	if err := st.Runs().UpdateObjective(ctx, "run-1", "Updated objective", "post:new-plan"); err != nil {
