@@ -198,7 +198,7 @@ func TestConciergeSwarmsToolListsHostSwarms(t *testing.T) {
 	}
 	for _, want := range []string{
 		"orca runs: none",
-		"  swarm-a: ship orca v2 | lanes: 1 (build:1) | last activity: 2026-11-14T04:38:00Z",
+		"  swarm-a: ship orca v2 | lanes: 1 (running:1; build:1) | last activity: 2026-11-14T04:38:00Z",
 		"    - chatux: phase=build status=running round=0 pr=#404",
 	} {
 		if !strings.Contains(result, want) {
@@ -357,7 +357,7 @@ func TestConciergeSwarmSummaryNamesActivityNextAndPRState(t *testing.T) {
 			t.Fatalf("swarms summary missing %q:\n%s", want, result)
 		}
 	}
-	if !strings.Contains(lines[2], "20261114-trial-m1: trial m1: slim swarm prompts | lanes: 2 (clean:1, review:1)") ||
+	if !strings.Contains(lines[2], "20261114-trial-m1: trial m1: slim swarm prompts | lanes: 2 (done:1, running:1; clean:1, review:1)") ||
 		!strings.HasSuffix(lines[2], "| format: nebula-swarm | active | driven by sess-orch") {
 		t.Fatalf("run line = %q", lines[2])
 	}
@@ -367,5 +367,314 @@ func TestConciergeSwarmSummaryNamesActivityNextAndPRState(t *testing.T) {
 	// Only the running lane's terminal is probed; the done lane's session is released.
 	if !reflect.DeepEqual(probedTerminals, []string{"term-m2-clean"}) {
 		t.Fatalf("probed terminals %v", probedTerminals)
+	}
+}
+
+func TestConciergeHeldRunAnsweredFromStoreAndLiveProbesWithoutSwarms(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(ctx, store.Run{ID: frontDeskRunID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:         "20261114-trial-m1",
+		Repository: "sycamore-labs/nebula",
+		Objective:  "trial m1: slim swarm prompts",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:         "20261110-unheld",
+		Repository: "sycamore-labs/nebula",
+		Objective:  "older unheld run still in store",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, ln := range []store.Lane{
+		{
+			RunID: "20261114-trial-m1", ID: "m1-base", ItemID: "m1-base", Title: "base prompts",
+			Status: "done", Phase: "review", Round: 1, SessionID: "sess-m1", TerminalID: "term-m1-review", PR: 5604,
+		},
+		{
+			RunID: "20261114-trial-m1", ID: "m2-default", ItemID: "m2-default", Title: "default prompts",
+			Status: "running", Phase: "clean", Round: 1, SessionID: "sess-m2", TerminalID: "term-m2-clean", PR: 5705,
+		},
+	} {
+		if err := st.Lanes().Upsert(ctx, ln); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var probedTerminals []string
+	var mu sync.Mutex
+	backend := chatui.NewStoreBackend(st, frontDeskRunID)
+	backend.FrontDesk = frontDeskRunID
+	backend.HostProbe = chatui.HostProbe{
+		TerminalState: func(_ context.Context, id string) (string, error) {
+			mu.Lock()
+			probedTerminals = append(probedTerminals, id)
+			mu.Unlock()
+			return map[string]string{"term-m2-clean": "working"}[id], nil
+		},
+		PR: func(_ context.Context, repo, _, n string) (chatui.PRStatus, error) {
+			if repo != "sycamore-labs/nebula" {
+				return chatui.PRStatus{}, fmt.Errorf("unexpected repo %q", repo)
+			}
+			switch n {
+			case "5604":
+				return chatui.PRStatus{State: "MERGED", Checks: "4 passed"}, nil
+			case "5705":
+				return chatui.PRStatus{State: "OPEN", Checks: "3 passed, 1 pending"}, nil
+			}
+			return chatui.PRStatus{}, fmt.Errorf("unexpected PR %s", n)
+		},
+	}
+
+	var requests []model.Request
+	responses := []model.Response{
+		textAnswer("The slim-prompts hold is in place."),
+		toolUse("status-1", ToolConciergeStatus, `{}`),
+		textAnswer("20261114-trial-m1 has m2-default running clean (agent working; next phase: review; PR #5705 open, 3 passed, 1 pending) and m1-base done (PR #5604 merged, 4 passed)."),
+		textAnswer("PR #5705 is open (3 passed, 1 pending) and PR #5604 is merged (4 passed)."),
+	}
+	var callIdx atomic.Int32
+	client := modelClientFunc(func(_ context.Context, req model.Request) (*model.Response, error) {
+		mu.Lock()
+		requests = append(requests, req.Clone())
+		mu.Unlock()
+		i := int(callIdx.Add(1)) - 1
+		if i >= len(responses) {
+			return nil, fmt.Errorf("unexpected model call %d", i+1)
+		}
+		return &responses[i], nil
+	})
+
+	c := NewConcierge(frontDeskRunID, st, nil, client, DefaultConciergeModel)
+	c.BindBackend(backend)
+	c.HeldRuns = func(context.Context) ([]string, error) {
+		return []string{frontDeskRunID, "20261114-trial-m1"}, nil
+	}
+	c.Swarms = func(context.Context) chatui.SwarmList {
+		t.Fatal("swarms tool must not be called for a held run")
+		return chatui.SwarmList{}
+	}
+	c.SwarmsFilter = func(context.Context, string) chatui.SwarmList {
+		t.Fatal("swarms tool must not be called for a held run")
+		return chatui.SwarmList{}
+	}
+
+	// Earlier turn about an unrelated run must not bleed into the trial-m1 turn.
+	if _, err := c.Ask(ctx, "put a hold on the slim-prompts run"); err != nil {
+		t.Fatal(err)
+	}
+
+	ans, err := c.Ask(ctx, "what is the trial-m1 swarm doing right now, what is next, and what state are its PRs in?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(ans, "slim-prompts") {
+		t.Fatalf("answer bled earlier turn: %q", ans)
+	}
+
+	// A follow-up question that does not repeat the run name keeps the
+	// active trial-m1 turn while still excluding the earlier slim-prompts turn.
+	if _, err := c.Ask(ctx, "and which PR is still open?"); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	if len(requests) < 4 {
+		t.Fatalf("expected 4 model requests, got %d", len(requests))
+	}
+	trialReq := requests[1]
+	followUpReq := requests[3]
+	mu.Unlock()
+	for _, m := range trialReq.Messages {
+		if strings.Contains(m.Text(), "slim-prompts") {
+			t.Fatalf("unrelated earlier turn bled into trial-m1 request messages: %+v", trialReq.Messages)
+		}
+	}
+	if !strings.Contains(trialReq.System, "20261114-trial-m1") {
+		t.Fatalf("system prompt did not list held run 20261114-trial-m1:\n%s", trialReq.System)
+	}
+	if strings.Contains(trialReq.System, "20261110-unheld") {
+		t.Fatalf("system prompt listed unheld run 20261110-unheld:\n%s", trialReq.System)
+	}
+	var sawTrialInFollowUp bool
+	for _, m := range followUpReq.Messages {
+		if strings.Contains(m.Text(), "slim-prompts") {
+			t.Fatalf("unrelated earlier turn bled into follow-up request messages: %+v", followUpReq.Messages)
+		}
+		if strings.Contains(m.Text(), "20261114-trial-m1") {
+			sawTrialInFollowUp = true
+		}
+	}
+	if !sawTrialInFollowUp {
+		t.Fatalf("follow-up request dropped prior trial-m1 turn: %+v", followUpReq.Messages)
+	}
+
+	items, err := st.Threads().ListItems(ctx, c.threadID, "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statusResult string
+	for i := range items {
+		if items[i].Kind == store.ItemKindToolResult && items[i].Name == ToolConciergeStatus {
+			statusResult = items[i].Content
+		}
+	}
+	if strings.Contains(statusResult, "20261110-unheld") {
+		t.Fatalf("status report included unheld run 20261110-unheld:\n%s", statusResult)
+	}
+	for _, want := range []string{
+		"Run: 20261114-trial-m1",
+		"Repository: sycamore-labs/nebula",
+		"Lanes (2 (done:1, running:1; clean:1, review:1)):",
+		"- m1-base: item=m1-base status=done phase=review round=1 session=sess-m1 terminal=term-m1-review",
+		"    now: review round 1; session=sess-m1; terminal term-m1-review (lane done, not probed)",
+		"    next: nothing (lane done)",
+		"    pr #5604 (GitHub): merged, checks: 4 passed",
+		"- m2-default: item=m2-default status=running phase=clean round=1 session=sess-m2 terminal=term-m2-clean",
+		"    now: clean round 1; session=sess-m2; terminal term-m2-clean agent=working",
+		"    next: next phase: review",
+		"    pr #5705 (GitHub): open, checks: 3 passed, 1 pending",
+		"Running now: m2-default (clean, agent working)",
+	} {
+		if !strings.Contains(statusResult, want) {
+			t.Fatalf("held run status report missing %q:\n%s", want, statusResult)
+		}
+	}
+	if !reflect.DeepEqual(probedTerminals, []string{"term-m2-clean"}) {
+		t.Fatalf("probed terminals = %v, want [term-m2-clean]", probedTerminals)
+	}
+}
+
+func TestConciergeSwarmsToolWithRunFilter(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(ctx, store.Run{ID: frontDeskRunID}); err != nil {
+		t.Fatal(err)
+	}
+	backend := chatui.NewStoreBackend(st, frontDeskRunID)
+	backend.HostSwarms = func(context.Context) ([]adopt.Run, error) {
+		var runs []adopt.Run
+		for i := range 20 {
+			id := fmt.Sprintf("20261110-old-%02d", i)
+			runs = append(runs, adopt.Run{
+				ID: id, Goal: "old goal " + id, State: adopt.RunFinished,
+				LastActivity: "2026-11-10T01:00:00Z",
+				Lanes:        []adopt.Lane{{ID: "done-lane", Phase: "review", Status: "done", PR: "100"}},
+			})
+		}
+		runs = append(runs, adopt.Run{
+			ID: "20261114-trial-m1", Goal: "trial m1: slim swarm prompts", State: adopt.RunActive,
+			Repo: "sycamore-labs/nebula", LastActivity: "2026-11-14T06:35:00Z",
+			Lanes: []adopt.Lane{{ID: "m2-default", Phase: "clean", Status: "running", Round: 1, Terminal: "term-m2", PR: "5705", Next: "review"}},
+		})
+		return runs, nil
+	}
+	backend.HostProbe = chatui.HostProbe{
+		TerminalState: func(_ context.Context, id string) (string, error) {
+			return map[string]string{"term-m2": "working"}[id], nil
+		},
+		PR: func(_ context.Context, _, _, n string) (chatui.PRStatus, error) {
+			return chatui.PRStatus{State: "OPEN", Checks: "pass (" + n + ")"}, nil
+		},
+	}
+	c := NewConcierge(frontDeskRunID, st, nil, scriptedModel(
+		toolUse("s1", ToolSwarms, `{"run":"trial-m1"}`),
+		textAnswer("trial-m1 is running m2-default."),
+	), DefaultConciergeModel)
+	c.BindBackend(backend)
+
+	ans, err := c.Ask(ctx, "what is the trial-m1 swarm doing?")
+	if err != nil || ans != "trial-m1 is running m2-default." {
+		t.Fatalf("Ask: ans=%q err=%v", ans, err)
+	}
+	items, err := st.Threads().ListItems(ctx, c.threadID, "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result string
+	for i := range items {
+		if items[i].Kind == store.ItemKindToolResult && items[i].Name == ToolSwarms {
+			result = items[i].Content
+		}
+	}
+	if !strings.Contains(result, "20261114-trial-m1") || strings.Contains(result, "20261110-old-00") {
+		t.Fatalf("filtered swarms result:\n%s", result)
+	}
+	for _, want := range []string{
+		"terminal term-m2 agent=working",
+		"next: review",
+		"pr #5705 (GitHub): open, checks: pass (5705)",
+	} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("filtered swarms result missing %q:\n%s", want, result)
+		}
+	}
+}
+
+func TestConciergeOnHoldChangeResetsHistoryAndRunTokenHelpers(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(ctx, store.Run{ID: frontDeskRunID}); err != nil {
+		t.Fatal(err)
+	}
+	backend := chatui.NewStoreBackend(st, frontDeskRunID)
+	c := NewConcierge(frontDeskRunID, st, nil, scriptedModel(
+		textAnswer("noted"),
+		textAnswer("after hold change"),
+	), DefaultConciergeModel)
+	c.BindBackend(backend)
+
+	if _, err := c.Ask(ctx, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.history) == 0 {
+		t.Fatal("expected concierge history after Ask")
+	}
+	if backend.OnHoldChange == nil {
+		t.Fatal("expected BindBackend to wire OnHoldChange")
+	}
+	backend.OnHoldChange()
+	if len(c.history) != 0 {
+		t.Fatalf("history after OnHoldChange = %+v, want empty", c.history)
+	}
+
+	for _, tc := range []struct {
+		id        string
+		wantSlug  string
+		wantDated bool
+	}{
+		{id: "20261114-trial-m1", wantDated: true, wantSlug: "trial-m1"},
+		{id: "20261113-054825-orca-v2", wantDated: true, wantSlug: "orca-v2"},
+		{id: "20261114", wantDated: false, wantSlug: ""},
+		{id: "not-a-date-run", wantDated: false, wantSlug: ""},
+		{id: "20261114-", wantDated: false, wantSlug: ""},
+	} {
+		if got := isDatedRunID(tc.id); got != tc.wantDated {
+			t.Fatalf("isDatedRunID(%q) = %v, want %v", tc.id, got, tc.wantDated)
+		}
+		if got := runSlug(tc.id); got != tc.wantSlug {
+			t.Fatalf("runSlug(%q) = %q, want %q", tc.id, got, tc.wantSlug)
+		}
+	}
+
+	known := []string{"20261114-trial-m1", "20261113-054825-orca-v2"}
+	if got := matchedRunTokens("check trial-m1 status!", known); !reflect.DeepEqual(got, []string{"trial-m1"}) {
+		t.Fatalf("matchedRunTokens slug = %v, want [trial-m1]", got)
+	}
+	if got := matchedRunTokens("inspect 20261113-054825-orca-v2?", known); !reflect.DeepEqual(got, []string{"20261113-054825-orca-v2", "orca-v2"}) {
+		t.Fatalf("matchedRunTokens full dated id = %v, want [20261113-054825-orca-v2 orca-v2]", got)
+	}
+	if got := matchedRunTokens("and what state are its PRs in?", known); len(got) != 0 {
+		t.Fatalf("matchedRunTokens follow-up without run = %v, want empty", got)
 	}
 }

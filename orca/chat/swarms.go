@@ -37,20 +37,25 @@ func HostSwarmLine(r *adopt.Run, now time.Time) string {
 	return line
 }
 
-// hostPhases counts lanes by phase.
+// hostPhases counts lanes by status and phase.
 func hostPhases(lanes []adopt.Lane) string {
-	counts := map[string]int{}
+	statuses, phases := map[string]int{}, map[string]int{}
 	for i := range lanes {
-		counts[cmp.Or(lanes[i].Phase, "-")]++
+		statuses[cmp.Or(lanes[i].Status, "-")]++
+		phases[cmp.Or(lanes[i].Phase, "-")]++
 	}
-	return countLine(len(lanes), counts)
+	return laneCounts(len(lanes), statuses, phases)
 }
 
-// countLine renders a total and sorted per-key counts.
-func countLine(total int, counts map[string]int) string {
+func laneCounts(total int, statuses, phases map[string]int) string {
 	if total == 0 {
 		return "0"
 	}
+	return fmt.Sprintf("%d (%s; %s)", total, countParts(statuses), countParts(phases))
+}
+
+// countParts renders sorted per-key counts.
+func countParts(counts map[string]int) string {
 	keys := make([]string, 0, len(counts))
 	for k := range counts {
 		keys = append(keys, k)
@@ -60,7 +65,7 @@ func countLine(total int, counts map[string]int) string {
 	for i, k := range keys {
 		parts[i] = fmt.Sprintf("%s:%d", k, counts[k])
 	}
-	return fmt.Sprintf("%d (%s)", total, strings.Join(parts, ", "))
+	return strings.Join(parts, ", ")
 }
 
 // ago renders a timestamp and its age relative to now.
@@ -99,11 +104,57 @@ type SwarmList struct {
 	// ProbeOff says which live reads were off.
 	Live     map[string]LaneLive
 	ProbeOff []string
+	// Filtered is true when Filter narrowed the list to a named run.
+	Filtered bool
+}
+
+// compactRow reports whether r renders as a one-line summary without per-lane detail.
+func (l SwarmList) compactRow(r *adopt.Run) bool {
+	return !l.Filtered && len(l.Host) > 1 && r.State != adopt.RunActive && r.State != ""
+}
+
+func (l *SwarmList) sortRecentFirst() {
+	sort.SliceStable(l.Host, func(a, b int) bool {
+		if l.Host[a].LastActivity != l.Host[b].LastActivity {
+			return l.Host[a].LastActivity > l.Host[b].LastActivity
+		}
+		return l.Host[a].ID > l.Host[b].ID
+	})
+}
+
+// Filter narrows Orca and Host runs to those whose ID or goal contains run
+// (case-insensitive). An empty run returns l sorted recent-first.
+func (l SwarmList) Filter(run string) SwarmList {
+	l.sortRecentFirst()
+	q := strings.ToLower(strings.TrimSpace(run))
+	if q == "" {
+		return l
+	}
+	l.Filtered = true
+	var orca []store.Run
+	for i := range l.Orca {
+		r := &l.Orca[i]
+		if strings.Contains(strings.ToLower(r.ID), q) || strings.Contains(strings.ToLower(r.Objective), q) {
+			orca = append(orca, *r)
+		}
+	}
+	var host []adopt.Run
+	for i := range l.Host {
+		r := &l.Host[i]
+		if strings.Contains(strings.ToLower(r.ID), q) || strings.Contains(strings.ToLower(r.Goal), q) {
+			host = append(host, *r)
+		}
+	}
+	l.Orca, l.Host = orca, host
+	return l
 }
 
 // Render lists both groups; detail adds each host lane's activity, next step
 // and PR state, and per run what is running now and what was not checked.
+// When unfiltered across multiple host swarms, non-active runs stay as compact
+// one-line rows so no run is lost in a long list.
 func (l SwarmList) Render(now time.Time, detail bool) string {
+	l.sortRecentFirst()
 	var b strings.Builder
 	switch {
 	case l.OrcaErr != nil:
@@ -126,7 +177,7 @@ func (l SwarmList) Render(now time.Time, detail bool) string {
 		for i := range l.Host {
 			r := &l.Host[i]
 			b.WriteString("  " + HostSwarmLine(r, now) + "\n")
-			if !detail {
+			if !detail || l.compactRow(r) {
 				continue
 			}
 			l.renderHostDetail(&b, r)

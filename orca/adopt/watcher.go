@@ -83,7 +83,21 @@ func (w ScriptWatcher) Running(ctx context.Context, runDir string) ([]int, error
 
 // Stop sends SIGTERM, then SIGKILL after StopTimeout, and waits for exit.
 func (w ScriptWatcher) Stop(ctx context.Context, pids []int) error {
-	return stopPIDs(ctx, pids, w.StopTimeout)
+	return stopPIDs(ctx, pids, w.StopTimeout, nil)
+}
+
+func procAlive(pid int) bool {
+	if err := syscall.Kill(pid, 0); err != nil {
+		return errors.Is(err, syscall.EPERM)
+	}
+	if stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
+		if i := bytes.LastIndexByte(stat, ')'); i >= 0 {
+			if f := strings.Fields(string(stat[i+1:])); len(f) > 0 && (f[0] == "Z" || f[0] == "X") {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func waitGone(ctx context.Context, pids []int, timeout time.Duration) bool {
@@ -94,7 +108,7 @@ func waitGone(ctx context.Context, pids []int, timeout time.Duration) bool {
 	for {
 		alive := false
 		for _, pid := range pids {
-			if syscall.Kill(pid, 0) == nil {
+			if procAlive(pid) {
 				alive = true
 			}
 		}

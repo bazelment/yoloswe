@@ -321,8 +321,8 @@ func newer(a, b *Run) bool {
 	return a.ID > b.ID
 }
 
-// sortRuns keeps Discover's id order.
-func sortRuns(runs []Run) { sort.Slice(runs, func(a, b int) bool { return runs[a].ID < runs[b].ID }) }
+// sortRuns orders runs most recent first.
+func sortRuns(runs []Run) { sort.Slice(runs, func(a, b int) bool { return newer(&runs[a], &runs[b]) }) }
 
 func clip(s string, n int) string {
 	if len(s) <= n {

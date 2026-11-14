@@ -81,6 +81,9 @@ func (l *SwarmList) Probe(ctx context.Context, p HostProbe) {
 	sem := make(chan struct{}, 4)
 	for i := range l.Host {
 		r := &l.Host[i]
+		if l.compactRow(r) {
+			continue
+		}
 		for j := range r.Lanes {
 			ln := r.Lanes[j]
 			wg.Add(1)

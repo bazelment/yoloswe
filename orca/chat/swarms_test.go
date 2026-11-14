@@ -59,8 +59,8 @@ func TestRunsListsOrcaRunsAndHostSwarms(t *testing.T) {
 		"orca runs (1; /runs <id> attaches):",
 		"  run-1: fix the flaky test",
 		"host swarms (2; /adopt <id> takes one over):",
+		"  20261113-054825-orca-v2: ship orca v2 | lanes: 3 (done:1, running:2; build:2, review:1) | last activity: 2026-11-14T04:38:00Z (4m0s ago) | orchestrator: claude | format: subagent-swarm-nebula | active",
 		"  20261112-090000-docs: refresh docs | lanes: 0 | last activity: 2026-11-13T02:42:00Z (26h0m0s ago) | orchestrator: claude | format: subagent-swarm-nebula | finished",
-		"  20261113-054825-orca-v2: ship orca v2 | lanes: 3 (build:2, review:1) | last activity: 2026-11-14T04:38:00Z (4m0s ago) | orchestrator: claude | format: subagent-swarm-nebula | active",
 	}, "\n")
 	if got != want {
 		t.Fatalf("/runs =\n%s\nwant\n%s", got, want)
@@ -74,6 +74,11 @@ func TestRunsListsOrcaRunsAndHostSwarms(t *testing.T) {
 		if !slices.Contains(strings.Split(detail, "\n"), line) {
 			t.Fatalf("detail missing %q:\n%s", line, detail)
 		}
+	}
+
+	filtered := b.Swarms(t.Context()).Filter("orca-v2").Render(swarmNow, true)
+	if !strings.Contains(filtered, "20261113-054825-orca-v2") || strings.Contains(filtered, "20261112-090000-docs") {
+		t.Fatalf("filtered swarms =\n%s", filtered)
 	}
 }
 
@@ -119,7 +124,7 @@ func TestStatusShowsRunGoalLanesQuestionsAndCost(t *testing.T) {
 	}
 	want := strings.Join([]string{
 		"goal: ship chat | run: run",
-		"lanes: 3 (build:2, review:1)",
+		"lanes: 3 (running:3; build:2, review:1)",
 		"open questions: 1",
 		"  q-1: Merge now? (lane lane-b)",
 		"held runs: run (attached)",
@@ -127,6 +132,38 @@ func TestStatusShowsRunGoalLanesQuestionsAndCost(t *testing.T) {
 	}, "\n")
 	if got != want {
 		t.Fatalf("/status =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestStatusLineCountsLanesByStatusAndPhase(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(ctx, store.Run{ID: "20261114-trial-m1", Objective: "trial m1"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 6 {
+		status := store.LaneStatus("done")
+		if i >= 4 {
+			status = "running"
+		}
+		if err := st.Lanes().Upsert(ctx, store.Lane{
+			RunID:  "20261114-trial-m1",
+			ID:     "lane-" + string(rune('a'+i)),
+			Phase:  "review",
+			Status: status,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := NewStoreBackend(st, "20261114-trial-m1")
+	s, err := b.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(s.Status, "lanes: 6 (done:4, running:2; review:6)") {
+		t.Fatalf("status line = %q, want lanes counted by status (done:4, running:2) and phase (review:6)", s.Status)
 	}
 }
 
@@ -288,5 +325,68 @@ func TestHostSwarmSaysNothingRunsOnlyWhenChecked(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSwarmsRecentFirstCompactRowsAndFilter(t *testing.T) {
+	t.Parallel()
+	var runs []adopt.Run
+	for i := range 20 {
+		id := "20261110-old-" + string(rune('a'+i))
+		runs = append(runs, adopt.Run{
+			ID:           id,
+			Goal:         "old run " + id,
+			State:        adopt.RunFinished,
+			LastActivity: swarmNow.Add(-time.Duration(20-i) * time.Hour).Format(time.RFC3339),
+			Lanes: []adopt.Lane{
+				{ID: "lane-1", Phase: "review", Status: "done", PR: "100"},
+				{ID: "lane-2", Phase: "review", Status: "done", PR: "101"},
+			},
+		})
+	}
+	runs = append(runs, adopt.Run{
+		ID:           "20261114-trial-m1",
+		Goal:         "trial m1",
+		State:        adopt.RunActive,
+		LastActivity: swarmNow.Add(-2 * time.Minute).Format(time.RFC3339),
+		Lanes: []adopt.Lane{
+			{ID: "m1-a", Phase: "review", Status: "done", PR: "410"},
+			{ID: "m1-b", Phase: "review", Status: "running", PR: "411", LastEvent: "reviewing PR #411", Next: "merge"},
+		},
+	})
+	l := SwarmList{Host: runs}
+	probedPRs := 0
+	l.Probe(t.Context(), HostProbe{
+		PR: func(_ context.Context, _, _, num string) (PRStatus, error) {
+			probedPRs++
+			return PRStatus{State: "OPEN", Checks: "pass (" + num + ")"}, nil
+		},
+	})
+	out := l.Render(swarmNow, true)
+	lines := strings.Split(out, "\n")
+	if len(lines) < 3 || !strings.Contains(lines[2], "20261114-trial-m1:") {
+		t.Fatalf("expected newest active run first, got:\n%s", out)
+	}
+	for _, r := range runs {
+		if !strings.Contains(out, r.ID) {
+			t.Fatalf("long swarms list lost run %s:\n%s", r.ID, out)
+		}
+	}
+	if strings.Contains(out, "pr #100") {
+		t.Fatalf("expected non-active runs in multi-run list to render compact rows without per-lane bloat:\n%s", out)
+	}
+	if probedPRs != 2 {
+		t.Fatalf("expected Probe on unfiltered list to probe only active run's 2 PRs, probed %d", probedPRs)
+	}
+
+	filtered := l.Filter("20261110-old-a")
+	filtered.Probe(t.Context(), HostProbe{
+		PR: func(_ context.Context, _, _, num string) (PRStatus, error) {
+			return PRStatus{State: "MERGED", Checks: num}, nil
+		},
+	})
+	fout := filtered.Render(swarmNow, true)
+	if !strings.Contains(fout, "20261110-old-a") || !strings.Contains(fout, "pr #100 (GitHub): merged, checks: 100") || strings.Contains(fout, "20261114-trial-m1") {
+		t.Fatalf("filtered run should render full detail for matched run only, got:\n%s", fout)
 	}
 }

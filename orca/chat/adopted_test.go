@@ -132,8 +132,8 @@ func TestLanesListsAdoptedRunLanes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(s.Status, "lanes: 2 (") || !strings.Contains(s.Status, "adopted: "+adoptedRun) {
-		t.Fatalf("status = %q, want the adopted run's two lanes counted", s.Status)
+	if !strings.Contains(s.Status, "lanes: 2 (done:1, running:1; review:1, swe:1)") || !strings.Contains(s.Status, "adopted: "+adoptedRun) {
+		t.Fatalf("status = %q, want the adopted run's two lanes counted by status and phase", s.Status)
 	}
 }
 
