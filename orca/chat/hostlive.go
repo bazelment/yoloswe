@@ -34,7 +34,7 @@ type PRStatus struct {
 
 func (p PRStatus) String() string {
 	s := strings.ToLower(cmp.Or(p.State, "unknown"))
-	if p.Draft && p.State == "OPEN" {
+	if p.Draft && strings.EqualFold(p.State, "OPEN") {
 		s = "open draft"
 	}
 	if p.Checks != "" {
