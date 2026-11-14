@@ -59,8 +59,8 @@ func TestRunsListsOrcaRunsAndHostSwarms(t *testing.T) {
 		"orca runs (1; /runs <id> attaches):",
 		"  run-1: fix the flaky test",
 		"host swarms (2; /adopt <id> takes one over):",
-		"  20261112-090000-docs: refresh docs | lanes: 0 | last activity: 2026-11-13T02:42:00Z (26h0m0s ago) | orchestrator: claude",
-		"  20261113-054825-orca-v2: ship orca v2 | lanes: 3 (build:2, review:1) | last activity: 2026-11-14T04:38:00Z (4m0s ago) | orchestrator: claude",
+		"  20261112-090000-docs: refresh docs | lanes: 0 | last activity: 2026-11-13T02:42:00Z (26h0m0s ago) | orchestrator: claude | format: subagent-swarm-nebula | finished",
+		"  20261113-054825-orca-v2: ship orca v2 | lanes: 3 (build:2, review:1) | last activity: 2026-11-14T04:38:00Z (4m0s ago) | orchestrator: claude | format: subagent-swarm-nebula | active",
 	}, "\n")
 	if got != want {
 		t.Fatalf("/runs =\n%s\nwant\n%s", got, want)
@@ -230,5 +230,63 @@ func TestReadlineKeysEditInput(t *testing.T) {
 		if m.input != tc.want || m.cursor != tc.cursor {
 			t.Errorf("%s: input %q cursor %d, want %q cursor %d", tc.name, m.input, m.cursor, tc.want, tc.cursor)
 		}
+	}
+}
+
+// TestHostSwarmSaysNothingRunsOnlyWhenChecked: the summary claims nothing
+// runs only when every lane is finished or its terminal was checked idle and
+// the orchestrator has no newer run; otherwise it says what it did not check.
+func TestHostSwarmSaysNothingRunsOnlyWhenChecked(t *testing.T) {
+	t.Parallel()
+	running := adopt.Lane{ID: "m2-default", Phase: "clean", Status: "running", Round: 1, Terminal: "term-m2"}
+	done := adopt.Lane{ID: "m1-base", Phase: "review", Status: "done", Round: 1, Terminal: "term-m1", PR: "5604"}
+	idle := HostProbe{TerminalState: func(context.Context, string) (string, error) { return "idle", nil }}
+	working := HostProbe{TerminalState: func(context.Context, string) (string, error) { return "working", nil }}
+	for _, tc := range []struct {
+		name  string
+		run   adopt.Run
+		probe *HostProbe
+		want  []string
+		never []string
+	}{
+		{name: "all finished", run: adopt.Run{ID: "r", State: adopt.RunFinished, Lanes: []adopt.Lane{done}}, probe: &idle,
+			want:  []string{"    running now: nothing: every lane is finished or its terminal checked idle, and the orchestrator has no newer run", "        pr #5604: GitHub state not checked"},
+			never: []string{"not checked: "}},
+		{name: "running lane checked idle", run: adopt.Run{ID: "r", State: adopt.RunActive, Lanes: []adopt.Lane{running}}, probe: &idle,
+			want: []string{"    running now: nothing: every lane is finished or its terminal checked idle, and the orchestrator has no newer run"}},
+		{name: "running lane working", run: adopt.Run{ID: "r", State: adopt.RunActive, Lanes: []adopt.Lane{running, done}}, probe: &working,
+			want: []string{"    running now: m2-default (clean, agent working)"}},
+		{name: "not probed", run: adopt.Run{ID: "r", State: adopt.RunActive, Lanes: []adopt.Lane{running}},
+			want:  []string{"    running now: unknown for m2-default", "    not checked: terminal agent states and PR states (no live probe)"},
+			never: []string{"running now: nothing"}},
+		{name: "probe off", run: adopt.Run{ID: "r", State: adopt.RunActive, Unchecked: []string{"Nebula run orchestrator (no Nebula client)"}, Lanes: []adopt.Lane{running}},
+			probe: &HostProbe{Off: []string{"lane terminal agent states (no Nebula client)"}},
+			want:  []string{"    running now: unknown for m2-default", "    not checked: Nebula run orchestrator (no Nebula client); lane terminal agent states (no Nebula client)"},
+			never: []string{"running now: nothing"}},
+		{name: "superseded", run: adopt.Run{ID: "old", State: adopt.RunSuperseded, SupersededBy: "20261114-trial-m1", DrivenBy: "sess-orch", Lanes: []adopt.Lane{running}}, probe: &idle,
+			want:  []string{"    state: superseded by 20261114-trial-m1 (its orchestrator now drives that run) | driven by: sess-orch | step loop: none running", "    running now: nothing here; orchestrator sess-orch moved on to run 20261114-trial-m1, ask about that run"},
+			never: []string{"every lane is finished"}},
+		{name: "live step loop", run: adopt.Run{ID: "r", State: adopt.RunActive, Loop: "pids 7,8 in tmux 0:1.0", Lanes: []adopt.Lane{running}}, probe: &idle,
+			want: []string{"    running now: the step loop (pids 7,8 in tmux 0:1.0)"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			l := SwarmList{Host: []adopt.Run{tc.run}}
+			if tc.probe != nil {
+				l.Probe(t.Context(), *tc.probe)
+			}
+			out := l.Render(swarmNow, true)
+			lines := strings.Split(out, "\n")
+			for _, w := range tc.want {
+				if !slices.Contains(lines, w) {
+					t.Fatalf("missing %q:\n%s", w, out)
+				}
+			}
+			for _, n := range tc.never {
+				if strings.Contains(out, n) {
+					t.Fatalf("says %q:\n%s", n, out)
+				}
+			}
+		})
 	}
 }

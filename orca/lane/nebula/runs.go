@@ -21,6 +21,18 @@ func (d *Driver) RunOrchestrator(ctx context.Context, runID string) (string, err
 	return v.Label, nil
 }
 
+// RunOrchestratorSession returns the session Nebula records as runID's
+// orchestrator ("" when none joined).
+func (d *Driver) RunOrchestratorSession(ctx context.Context, runID string) (string, error) {
+	var v struct {
+		Session string `json:"orchestratorSessionId"`
+	}
+	if err := d.doJSON(ctx, http.MethodGet, "/api/code-runs/"+url.PathEscape(runID), nil, &v); err != nil {
+		return "", fmt.Errorf("nebula run %q: %w", runID, err)
+	}
+	return v.Session, nil
+}
+
 // SetRunOrchestrator sets runID's external orchestrator label.
 func (d *Driver) SetRunOrchestrator(ctx context.Context, runID, label string) error {
 	if err := d.doJSON(ctx, http.MethodPut, "/api/code-runs/"+url.PathEscape(runID), runLabel{Label: label}, nil); err != nil {

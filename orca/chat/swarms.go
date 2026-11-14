@@ -15,6 +15,22 @@ import (
 func HostSwarmLine(r *adopt.Run, now time.Time) string {
 	line := fmt.Sprintf("%s: %s | lanes: %s | last activity: %s | orchestrator: %s",
 		r.ID, cmp.Or(strings.TrimSpace(r.Goal), "(no goal)"), hostPhases(r.Lanes), ago(r.LastActivity, now), cmp.Or(r.Orchestrator, "-"))
+	if r.Format != "" {
+		line += " | format: " + r.Format
+	}
+	switch r.State {
+	case adopt.RunSuperseded:
+		line += " | superseded by " + r.SupersededBy
+	case "":
+	default:
+		line += " | " + r.State
+	}
+	if r.DrivenBy != "" {
+		line += " | driven by " + r.DrivenBy
+	}
+	if r.Loop != "" {
+		line += " | loop: " + r.Loop
+	}
 	if r.Holder != "" {
 		line += " | held by " + r.Holder
 	}
@@ -79,9 +95,14 @@ type SwarmList struct {
 	HostErr error
 	// HostOff, when set, says why host swarms are not listed.
 	HostOff string
+	// Live holds what Probe read per host lane; nil when not probed.
+	// ProbeOff says which live reads were off.
+	Live     map[string]LaneLive
+	ProbeOff []string
 }
 
-// Render lists both groups; detail adds each host lane.
+// Render lists both groups; detail adds each host lane's activity, next step
+// and PR state, and per run what is running now and what was not checked.
 func (l SwarmList) Render(now time.Time, detail bool) string {
 	var b strings.Builder
 	switch {
@@ -108,11 +129,7 @@ func (l SwarmList) Render(now time.Time, detail bool) string {
 			if !detail {
 				continue
 			}
-			for j := range r.Lanes {
-				ln := &r.Lanes[j]
-				fmt.Fprintf(&b, "    - %s: phase=%s status=%s round=%d pr=%s %s\n",
-					ln.ID, cmp.Or(ln.Phase, "-"), cmp.Or(ln.Status, "-"), ln.Round, prRef(ln.PR), ln.Title)
-			}
+			l.renderHostDetail(&b, r)
 		}
 		if l.HostErr != nil {
 			fmt.Fprintf(&b, "  unreadable: %v\n", l.HostErr)

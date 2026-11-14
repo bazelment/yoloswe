@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/bazelment/yoloswe/orca/adopt"
+	chatui "github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/dispatcher"
@@ -13,25 +14,67 @@ import (
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
-// newAdoption wires /adopt and /release to the real adapters: the Nebula API
-// client for the run label and watch_lanes.sh plus OS signals for the host
-// watcher. Each adopted run gets its own dispatcher on client. When an
-// adapter cannot be built it returns the one-line reason chat shows instead.
-func newAdoption(ctx context.Context, cfg Config, st store.Store, clk clock.Clock, client model.ModelClient, logger *slog.Logger) (*adopt.Service, string) {
-	lanes, err := nebula.New(nebula.Config{APIURL: cfg.NebulaAPIURL, Token: cfg.NebulaToken, Events: driverEventStore{st.Events()}, Clock: clk})
-	if err != nil {
-		return nil, "Nebula API client: " + err.Error() + " (set NEBULA_API_URL and NEBULA_TOKEN)"
+// hostSwarms is how chat sees this machine's host swarms: one importer for
+// both run formats, the loop controller /adopt stops, and the live reads the
+// concierge's swarm summaries use.
+type hostSwarms struct {
+	// client is nil without Nebula credentials; off then says why.
+	client   *nebula.Driver
+	off      string
+	importer adopt.Importer
+	watcher  adopt.FormatWatcher
+	probe    chatui.HostProbe
+}
+
+// newHostSwarms wires discovery to the real adapters: the Nebula API for run
+// orchestrators and terminal states, /proc and tmux for live step loops,
+// watch_lanes.sh and swarm_nebula.sh for the host loops, gh for PR state.
+func newHostSwarms(cfg Config, st store.Store, clk clock.Clock) hostSwarms {
+	var h hostSwarms
+	h.watcher = adopt.FormatWatcher{
+		SubagentMissing: "watch_lanes.sh not found (install subagent-swarm-nebula or set ORCA_WATCH_LANES)",
+		NebulaMissing:   "swarm_nebula.sh not found (install nebula-swarm or set ORCA_NEBULA_SWARM_SH)",
+		Panes:           adopt.TmuxPanes,
 	}
-	script := adopt.FindWatchScript()
-	if script == "" {
-		return nil, "watch_lanes.sh not found (install subagent-swarm-nebula or set ORCA_WATCH_LANES)"
+	if script := adopt.FindWatchScript(); script != "" {
+		h.watcher.Subagent = adopt.ScriptWatcher{Script: script}
+	}
+	// The step loop is found from /proc even when swarm_nebula.sh is not
+	// installed here; only restarting it on release needs the script.
+	h.watcher.Nebula = adopt.StepLoopWatcher{Script: adopt.FindSwarmScript()}
+	h.importer.Loops = h.watcher
+	client, err := nebula.New(nebula.Config{APIURL: cfg.NebulaAPIURL, Token: cfg.NebulaToken, Events: driverEventStore{st.Events()}, Clock: clk})
+	if err != nil {
+		h.off = "Nebula API client: " + err.Error() + " (set NEBULA_API_URL and NEBULA_TOKEN)"
+		h.probe.Off = append(h.probe.Off, "lane terminal agent states (no Nebula client)")
+	} else {
+		h.client = client
+		h.importer.Orchestrators = client
+		h.probe.TerminalState = client.TerminalAgentState
+	}
+	if ghAvailable() {
+		h.probe.PR = ghPRStatus
+	} else {
+		h.probe.Off = append(h.probe.Off, "PR states (gh not on PATH)")
+	}
+	return h
+}
+
+// newAdoption wires /adopt and /release to the real adapters: the Nebula API
+// client for the run label and the format's loop controller for the host
+// watcher or step loop. Each adopted run gets its own dispatcher on client.
+// When an adapter cannot be built it returns the one-line reason chat shows
+// instead.
+func newAdoption(ctx context.Context, cfg Config, h hostSwarms, st store.Store, clk clock.Clock, client model.ModelClient, logger *slog.Logger) (*adopt.Service, string) {
+	if h.client == nil {
+		return nil, h.off
 	}
 	return &adopt.Service{
-		Importer: adopt.Importer{},
-		Labeler:  lanes,
-		Watcher:  adopt.ScriptWatcher{Script: script},
+		Importer: h.importer,
+		Labeler:  h.client,
+		Watcher:  h.watcher,
 		Holder:   adopt.ChatHolder(cfg.RunID),
-		Driver:   adopt.NewControllers(ctx, st, lanes, clk, adoptedDispatchers(cfg, st, lanes, clk, client, logger)),
+		Driver:   adopt.NewControllers(ctx, st, h.client, clk, adoptedDispatchers(cfg, st, h.client, clk, client, logger)),
 	}, ""
 }
 

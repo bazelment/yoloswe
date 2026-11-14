@@ -4,6 +4,7 @@ go_library(
     name = "chat",
     srcs = [
         "chat.go",
+        "hostlive.go",
         "lineedit.go",
         "store.go",
         "swarms.go",

@@ -5,6 +5,8 @@ go_library(
     srcs = [
         "adopt.go",
         "controller.go",
+        "nebulaswarm.go",
+        "steploop.go",
         "watcher.go",
     ],
     importpath = "github.com/bazelment/yoloswe/orca/adopt",
@@ -20,7 +22,10 @@ go_library(
 
 go_test(
     name = "adopt_test",
-    srcs = ["adopt_test.go"],
+    srcs = [
+        "adopt_test.go",
+        "nebulaswarm_test.go",
+    ],
     embed = [":adopt"],
     deps = ["//orca/recipe"],
 )

@@ -83,21 +83,7 @@ func (w ScriptWatcher) Running(ctx context.Context, runDir string) ([]int, error
 
 // Stop sends SIGTERM, then SIGKILL after StopTimeout, and waits for exit.
 func (w ScriptWatcher) Stop(ctx context.Context, pids []int) error {
-	timeout := w.StopTimeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
-		for _, pid := range pids {
-			if err := syscall.Kill(pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
-				return fmt.Errorf("signal watcher %d: %w", pid, err)
-			}
-		}
-		if waitGone(ctx, pids, timeout) {
-			return nil
-		}
-	}
-	return fmt.Errorf("watcher pids %v survived SIGKILL", pids)
+	return stopPIDs(ctx, pids, w.StopTimeout)
 }
 
 func waitGone(ctx context.Context, pids []int, timeout time.Duration) bool {

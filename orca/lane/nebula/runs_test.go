@@ -45,3 +45,31 @@ func TestRunOrchestratorLabelRoundTrip(t *testing.T) {
 		t.Fatalf("calls = %q, want %q", calls, want)
 	}
 }
+
+func TestRunOrchestratorSession(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/code-runs/session-run":
+			_, _ = io.WriteString(w, `{"id":"session-run","orchestrator":"swarm orchestrator","orchestratorSessionId":"sess-orch"}`)
+		case "/api/code-runs/host-run":
+			// A host (tmux) orchestrator joins no session.
+			_, _ = io.WriteString(w, `{"id":"host-run","orchestrator":""}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	drv, err := nebula.New(nebula.Config{APIURL: srv.URL, Token: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for run, want := range map[string]string{"session-run": "sess-orch", "host-run": ""} {
+		if got, err := drv.RunOrchestratorSession(context.Background(), run); err != nil || got != want {
+			t.Fatalf("%s: RunOrchestratorSession = %q, %v; want %q", run, got, err, want)
+		}
+	}
+	if _, err := drv.RunOrchestratorSession(context.Background(), "missing"); err == nil {
+		t.Fatal("missing run: want an error")
+	}
+}

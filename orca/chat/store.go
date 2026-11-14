@@ -45,7 +45,9 @@ type StoreBackend struct {
 	AdoptionUnavailable string
 	// HostSwarms lists this machine's host swarms for /runs; nil falls back
 	// to Adoption.
-	HostSwarms func() ([]adopt.Run, error)
+	HostSwarms func(context.Context) ([]adopt.Run, error)
+	// HostProbe reads live lane terminal and PR state for LiveSwarms.
+	HostProbe HostProbe
 	// FrontDesk is the run of a chat opened without one. No controller runs
 	// it, so a Planner or Dispatcher instruction sent while attached to it
 	// goes to a run whose controller this chat holds, else to the one run a
@@ -597,21 +599,31 @@ func (b *StoreBackend) Swarms(ctx context.Context) SwarmList {
 	}
 	switch {
 	case b.HostSwarms != nil:
-		l.Host, l.HostErr = b.HostSwarms()
+		l.Host, l.HostErr = b.HostSwarms(ctx)
 	case b.Adoption != nil:
-		l.Host, l.HostErr = b.Adoption.List()
+		l.Host, l.HostErr = b.Adoption.List(ctx)
 	default:
 		l.HostOff = cmp.Or(b.AdoptionUnavailable, "no host swarm discovery configured")
 	}
 	return l
 }
 
+// LiveSwarms is Swarms with each host lane's terminal agent state and PR
+// state read live through HostProbe.
+func (b *StoreBackend) LiveSwarms(ctx context.Context) SwarmList {
+	l := b.Swarms(ctx)
+	if l.HostOff == "" {
+		l.Probe(ctx, b.HostProbe)
+	}
+	return l
+}
+
 // RunIDs lists host runs available to /adopt.
-func (b *StoreBackend) RunIDs(context.Context) ([]string, error) {
+func (b *StoreBackend) RunIDs(ctx context.Context) ([]string, error) {
 	if b.Adoption == nil {
 		return nil, nil
 	}
-	rs, err := b.Adoption.List()
+	rs, err := b.Adoption.List(ctx)
 	ids := make([]string, 0, len(rs))
 	for i := range rs {
 		ids = append(ids, rs[i].ID)
@@ -642,7 +654,7 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 			return "adoption unavailable: " + b.AdoptionUnavailable, nil
 		}
 		if len(fields) == 1 {
-			rs, err := b.Adoption.List()
+			rs, err := b.Adoption.List(ctx)
 			var out []string
 			for i := range rs {
 				out = append(out, HostSwarmLine(&rs[i], b.now()))

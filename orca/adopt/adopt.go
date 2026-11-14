@@ -1,12 +1,13 @@
-// Package adopt hands a host-run swarm (a subagent-swarm-nebula run directory)
-// over to orca chat and back, attaching its lanes to the controller.
+// Package adopt hands a host-run swarm (a subagent-swarm-nebula or nebula-swarm
+// run directory) over to orca chat and back, attaching its lanes to the
+// controller.
 //
 // The handover is one protocol, recorded write-ahead in a lease journal inside
 // the run directory so every step is idempotent and a rerun after a crash
 // finishes it:
 //
-//	adopt:   1 lease  2 import  3 stand-down line  4 Nebula label  5 stop watcher  6 drive
-//	release: 6 stop and checkpoint  5 restart watcher  4 restore label  3 drop line  2 drop import  1 drop lease
+//	adopt:   1 lease  2 import  3 stand-down line  4 Nebula label  5 stop watcher or step loop  6 drive
+//	release: 6 stop and checkpoint  5 restart watcher or step loop  4 restore label  3 drop line  2 drop import  1 drop lease
 //
 // A failed adopt step undoes the completed steps in reverse and drops the
 // lease; a failed release step re-applies the release steps it completed and
@@ -54,23 +55,54 @@ func ChatHolder(chatRunID string) string { return "orca-chat:" + chatRunID }
 // Lane is one ledger lane with the ownership of its current round.
 type Lane struct {
 	ID, Title, Branch, Phase, Status string
-	// Session, Terminal and ReportPath belong to the lane's newest spawn
-	// (<lane>.<phase>.spawn.json); ReportPath is empty until that round reports.
+	// Session, Terminal and ReportPath belong to the lane's current round
+	// (subagent-swarm-nebula: its newest <lane>.<phase>.spawn.json;
+	// nebula-swarm: the ledger's terminal for the phase and round and
+	// reports/<lane>.<phase>.r<round>.md). ReportPath is empty until that
+	// round reports.
 	Session, Terminal, ReportPath, PR string
-	Round                             int
+	// TerminalState is the ledger's last recorded terminal state (nebula-swarm).
+	TerminalState string
+	// Report is the latest report's Outcome line; LastEvent the lane's newest
+	// EVENTS line; Next what the run files say comes next for the lane.
+	Report, LastEvent, Next string
+	Round                   int
 }
 
 // Run is a host swarm run directory.
 type Run struct {
 	ID, Dir, Goal, Orchestrator, LastActivity string
+	// Format is FormatSubagentSwarm or FormatNebulaSwarm.
+	Format string
 	// Holder is the orca lease holder, empty when no orca holds the run.
 	Holder string
-	Lanes  []Lane
+	// DrivenBy is the orchestrator driving the run now: Nebula's run
+	// orchestrator session when read, else the ledger's
+	// orchestrator_session_id, else the tmux pane of its live step loop.
+	DrivenBy string
+	// State is RunActive, RunFinished or RunSuperseded; SupersededBy names
+	// the newer run the same orchestrator session drives.
+	State, SupersededBy string
+	// Loop describes the live step loop or watcher processes ("" when none).
+	Loop string
+	// Repo is the run's owner/repo when the run records it.
+	Repo string
+	// Progress and Escalations are PROGRESS.md and ESCALATIONS.md, clipped.
+	Progress, Escalations string
+	// Unchecked lists what discovery could not check for this run.
+	Unchecked []string
+	Lanes     []Lane
 }
 
-// Importer finds and reads run directories under <root>/.shared/subagent-swarm.
+// Importer finds and reads run directories: <root>/.shared/subagent-swarm/<run>
+// (subagent-swarm-nebula) and <root>/<run> (nebula-swarm, as in ~/.swarm).
 type Importer struct {
-	// Roots defaults to the current and sibling checkouts plus $ORCA_SWARM_ROOTS.
+	// Orchestrators, when set, reads which session Nebula records as each
+	// run's orchestrator; Loops finds each run's live step loop or watcher.
+	Orchestrators RunOrchestrators
+	Loops         LoopFinder
+	// Roots defaults to the current and sibling checkouts, ~/.swarm,
+	// $SW_HOME and $ORCA_SWARM_ROOTS.
 	Roots []string
 }
 
@@ -132,6 +164,13 @@ func (i Importer) roots() []string {
 			scanSiblings(filepath.Dir(filepath.Dir(parent)))
 		}
 	}
+	if home, err := os.UserHomeDir(); err == nil {
+		appendRoot(filepath.Join(home, ".swarm"))
+	}
+	if v := os.Getenv("SW_HOME"); v != "" {
+		appendRoot(v)
+		appendRoot(filepath.Join(v, ".swarm"))
+	}
 	if v := os.Getenv("ORCA_SWARM_ROOTS"); v != "" {
 		for _, root := range filepath.SplitList(v) {
 			appendRoot(root)
@@ -140,32 +179,45 @@ func (i Importer) roots() []string {
 	return out
 }
 
+// runDirs lists each root's subagent-swarm-nebula runs, its nebula-swarm
+// runs (direct children) and the root itself when it is a nebula-swarm run.
 func (i Importer) runDirs() []string {
 	seen := map[string]bool{}
 	var out []string
+	add := func(dir string) {
+		if !seen[dir] {
+			seen[dir] = true
+			out = append(out, dir)
+		}
+	}
 	for _, root := range i.roots() {
 		base := filepath.Join(root, ".shared", "subagent-swarm")
-		ents, err := os.ReadDir(base)
-		if err != nil {
-			continue
-		}
+		ents, _ := os.ReadDir(base)
 		for _, ent := range ents {
 			dir := filepath.Join(base, ent.Name())
-			if !ent.IsDir() || seen[dir] {
-				continue
+			if ent.IsDir() && fileExists(filepath.Join(dir, "state.json")) {
+				add(dir)
 			}
-			if _, err := os.Stat(filepath.Join(dir, "state.json")); err == nil {
-				seen[dir] = true
-				out = append(out, dir)
+		}
+		if isNebulaSwarmDir(root) {
+			add(root)
+			continue
+		}
+		ents, _ = os.ReadDir(root)
+		for _, ent := range ents {
+			dir := filepath.Join(root, ent.Name())
+			if ent.IsDir() && isNebulaSwarmDir(dir) {
+				add(dir)
 			}
 		}
 	}
 	return out
 }
 
-// Discover reads every run under the roots. Runs that fail to read are
-// reported in the joined error next to the runs that did.
-func (i Importer) Discover() ([]Run, error) {
+// Discover reads every run under the roots, says which orchestrator session
+// drives each now and whether a newer run superseded it. Runs that fail to
+// read are reported in the joined error next to the runs that did.
+func (i Importer) Discover(ctx context.Context) ([]Run, error) {
 	var out []Run
 	var errs []error
 	for _, dir := range i.runDirs() {
@@ -174,9 +226,30 @@ func (i Importer) Discover() ([]Run, error) {
 			errs = append(errs, err)
 			continue
 		}
+		if i.Orchestrators == nil {
+			r.Unchecked = append(r.Unchecked, "Nebula run orchestrator (no Nebula client)")
+		} else if sid, err := i.Orchestrators.RunOrchestratorSession(ctx, r.ID); err != nil {
+			r.Unchecked = append(r.Unchecked, "Nebula run orchestrator: "+err.Error())
+		} else if sid != "" {
+			r.DrivenBy = sid
+		}
+		if i.Loops == nil {
+			r.Unchecked = append(r.Unchecked, "step loop/watcher processes")
+		} else if pids, err := i.Loops.Running(ctx, dir); err != nil {
+			r.Unchecked = append(r.Unchecked, "step loop/watcher processes: "+err.Error())
+		} else if len(pids) > 0 {
+			var pane string
+			r.Loop, pane = i.Loops.Describe(ctx, pids)
+			// A host orchestrator joins no Nebula session; its tmux pane is
+			// what drives the run.
+			if r.DrivenBy == "" && pane != "" {
+				r.DrivenBy = "tmux " + pane
+			}
+		}
 		out = append(out, r)
 	}
-	sort.Slice(out, func(a, b int) bool { return out[a].ID < out[b].ID })
+	classify(out)
+	sortRuns(out)
 	return out, errors.Join(errs...)
 }
 
@@ -214,7 +287,8 @@ type ledgerLane struct {
 
 type ledger struct {
 	Config struct {
-		Goal string `json:"goal"`
+		Goal   string      `json:"goal"`
+		Phases []hostPhase `json:"phases"`
 	} `json:"config"`
 	Tasks []ledgerLane `json:"tasks"`
 }
@@ -226,20 +300,46 @@ func Read(dir string) (Run, error) {
 	if err != nil {
 		return Run{}, fmt.Errorf("read ledger: %w", err)
 	}
-	var st ledger
-	if err := json.Unmarshal(b, &st); err != nil {
-		return Run{}, fmt.Errorf("parse %s: %w", filepath.Join(dir, "state.json"), err)
-	}
-	r := Run{ID: filepath.Base(dir), Dir: dir, Goal: st.Config.Goal, LastActivity: lastActivity(dir)}
+	r := Run{ID: filepath.Base(dir), Dir: dir, LastActivity: lastActivity(dir), Format: detectFormat(dir, b)}
 	if j, err := readJournal(filepath.Join(dir, leaseFile)); err == nil {
 		r.Holder = j.Holder
 	}
 	r.Orchestrator = orchestrator(dir, r.Holder)
-	for i := range st.Tasks {
-		r.Lanes = append(r.Lanes, importLane(dir, &st.Tasks[i]))
+	r.Repo = repoSlug(dir)
+	r.Progress = clip(stripMarker(readText(filepath.Join(dir, "PROGRESS.md"))), 1500)
+	r.Escalations = clip(stripMarker(readText(filepath.Join(dir, "ESCALATIONS.md"))), 1500)
+	if r.Format == FormatNebulaSwarm {
+		if err := readNebulaSwarm(dir, b, &r); err != nil {
+			return Run{}, err
+		}
+	} else {
+		var st ledger
+		if err := json.Unmarshal(b, &st); err != nil {
+			return Run{}, fmt.Errorf("parse %s: %w", filepath.Join(dir, "state.json"), err)
+		}
+		r.Goal = st.Config.Goal
+		for i := range st.Tasks {
+			r.Lanes = append(r.Lanes, importLane(dir, &st.Tasks[i]))
+		}
+		annotateLanes(dir, &r, st.Config.Phases)
 	}
 	sort.Slice(r.Lanes, func(a, b int) bool { return r.Lanes[a].ID < r.Lanes[b].ID })
+	r.State = RunFinished
+	if runLive(&r) {
+		r.State = RunActive
+	}
 	return r, nil
+}
+
+// stripMarker drops orca's stand-down lines and surrounding blank space.
+func stripMarker(s string) string {
+	var keep []string
+	for _, line := range strings.Split(s, "\n") {
+		if !strings.HasPrefix(line, markerPrefix) {
+			keep = append(keep, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(keep, "\n"))
 }
 
 type spawnFile struct {
@@ -345,9 +445,10 @@ type Labeler interface {
 	SetRunOrchestrator(ctx context.Context, runID, label string) error
 }
 
-// Watcher controls the host orchestrator's watch_lanes.sh processes.
+// Watcher controls the host orchestrator's loop processes: watch_lanes.sh
+// for a subagent-swarm-nebula run, the sw_step loop for a nebula-swarm run.
 type Watcher interface {
-	// Running returns the pids of the run's armed watchers and bridges.
+	// Running returns the pids of the run's armed watchers, loops and bridges.
 	Running(ctx context.Context, runDir string) ([]int, error)
 	Stop(ctx context.Context, pids []int) error
 	Start(ctx context.Context, runDir string) error
@@ -385,7 +486,7 @@ type journal struct {
 }
 
 // List returns the discoverable host runs.
-func (s *Service) List() ([]Run, error) { return s.Importer.Discover() }
+func (s *Service) List(ctx context.Context) ([]Run, error) { return s.Importer.Discover(ctx) }
 
 // Adopted returns the ids of the runs this holder leases.
 func (s *Service) Adopted() ([]string, error) {

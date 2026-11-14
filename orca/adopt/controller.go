@@ -394,8 +394,8 @@ func (d *Controllers) Close(ctx context.Context) error {
 	}
 	d.mu.Unlock()
 	var errs []error
-	for _, r := range runs {
-		errs = append(errs, d.Stop(ctx, r))
+	for i := range runs {
+		errs = append(errs, d.Stop(ctx, runs[i]))
 	}
 	return errors.Join(errs...)
 }
@@ -407,25 +407,29 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	}
 	var st struct {
 		Tasks []struct {
-			Sessions    map[string]string `json:"sessions"`
-			ID          string            `json:"id"`
-			PRHead      string            `json:"pr_head"`
-			ApprovalSHA string            `json:"approval_sha"`
-			MergeSHA    string            `json:"merge_sha"`
-			Checks      string            `json:"checks"`
-			BaseCommit  string            `json:"fork_sha"`
-			Worktree    string            `json:"worktree"`
-			Brief       string            `json:"brief"`
-			Priority    store.Priority    `json:"priority"`
-			DependsOn   []string          `json:"depends_on"`
+			Sessions map[string]string `json:"sessions"`
+			// Terminals is nebula-swarm's phase -> round -> terminal id.
+			Terminals   map[string]map[string]string `json:"terminals"`
+			ID          string                       `json:"id"`
+			PRHead      string                       `json:"pr_head"`
+			ApprovalSHA string                       `json:"approval_sha"`
+			MergeSHA    string                       `json:"merge_sha"`
+			Checks      string                       `json:"checks"`
+			BaseCommit  string                       `json:"fork_sha"`
+			Worktree    string                       `json:"worktree"`
+			Brief       string                       `json:"brief"`
+			Priority    store.Priority               `json:"priority"`
+			DependsOn   []string                     `json:"depends_on"`
 		} `json:"tasks"`
 		Config struct {
 			MergePolicy *recipe.MergePolicy `json:"merge_policy"`
 			MergeRule   string              `json:"merge_rule"`
-			Base        string              `json:"base"`
-			Target      string              `json:"target"`
-			Phases      []hostPhase         `json:"phases"`
-			NoPR        bool                `json:"no_pr"`
+			// Merge is nebula-swarm's merge authority: none or a merge method.
+			Merge  string      `json:"merge"`
+			Base   string      `json:"base"`
+			Target string      `json:"target"`
+			Phases []hostPhase `json:"phases"`
+			NoPR   bool        `json:"no_pr"`
 		} `json:"config"`
 	}
 	if err := json.Unmarshal(b, &st); err != nil {
@@ -437,6 +441,9 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	workflow.Name = "adopted"
 	if st.Config.MergePolicy != nil {
 		workflow.MergePolicy = *st.Config.MergePolicy
+	} else if r.Format == FormatNebulaSwarm && (st.Config.Merge == "" || st.Config.Merge == "none") {
+		// A nebula-swarm run without merge authority leaves its PRs to a person.
+		workflow.MergePolicy.Mode = recipe.MergeModeManual
 	}
 	if st.Config.Target != "" {
 		workflow.MergePolicy.TargetBranch = st.Config.Target
@@ -516,6 +523,10 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			}
 		}
 		status := lane.Status(imported.Status)
+		if imported.Status == nsNeedsHuman {
+			// A nebula-swarm lane parked for its owner; checkpoint writes it back.
+			status = lane.StatusBlocked
+		}
 		if !status.Valid() {
 			return workflow, nil, nil, fmt.Errorf("lane %s: unsupported host status %q", imported.ID, imported.Status)
 		}
@@ -546,6 +557,18 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 				}
 				items = append(items, store.BacklogItem{ID: ln.ID, RunID: r.ID, LaneID: ln.ID, Title: ln.Title, Description: mission, Priority: priority, Status: status, DependsOn: task.DependsOn})
 				ln.PRHead, ln.ApprovalSHA, ln.MergeSHA, ln.Checks, ln.BaseCommit, ln.Worktree = task.PRHead, task.ApprovalSHA, task.MergeSHA, task.Checks, task.BaseCommit, task.Worktree
+				for phase, rounds := range task.Terminals {
+					for round, id := range rounds {
+						n, err := strconv.Atoi(round)
+						if err != nil || id == "" {
+							continue
+						}
+						if ln.Terminals == nil {
+							ln.Terminals = map[string]string{}
+						}
+						ln.Terminals[lane.PhaseRoundKey(phase, n)] = id
+					}
+				}
 				for key, terminal := range task.Sessions {
 					if id, ok := strings.CutPrefix(terminal, "nebula:"); ok {
 						if ln.Terminals == nil {
@@ -566,7 +589,9 @@ func hostMission(dir, id, brief string) (string, error) {
 	if err := validatePathComponent("task id", id); err != nil {
 		return "", err
 	}
-	paths := []string{filepath.Join(dir, "missions", id+".md"), filepath.Join(dir, "briefs", id+".mission.md")}
+	paths := []string{filepath.Join(dir, "missions", id+".md"), filepath.Join(dir, "briefs", id+".mission.md"),
+		// nebula-swarm keeps the lane's assignment as its swe brief or prompt.
+		filepath.Join(dir, id+".swe.brief"), filepath.Join(dir, id+".swe.prompt")}
 	if brief != "" {
 		resolved, err := resolveBriefPath(dir, brief)
 		if err != nil {
@@ -668,6 +693,7 @@ func checkpoint(dir string, lanes []lane.Lane) error {
 	if err := json.Unmarshal(doc["tasks"], &tasks); err != nil {
 		return err
 	}
+	nebulaSwarm := detectFormat(dir, b) == FormatNebulaSwarm
 	for i := range lanes {
 		ln := &lanes[i]
 		if err := validatePathComponent("lane id", ln.ID); err != nil {
@@ -684,6 +710,12 @@ func checkpoint(dir string, lanes []lane.Lane) error {
 				return err
 			}
 			if id != ln.ID {
+				continue
+			}
+			if nebulaSwarm {
+				if err := checkpointNebulaSwarm(task, ln); err != nil {
+					return err
+				}
 				continue
 			}
 			fields := map[string]any{"phase": ln.Phase, "round": ln.Round, "status": ln.Status, "nebula_session": ln.SessionID, "nebula_terminal": ln.TerminalID, "pr": ln.PR, "pr_head": ln.PRHead, "approval_sha": ln.ApprovalSHA, "merge_sha": ln.MergeSHA, "checks": ln.Checks, "fork_sha": ln.BaseCommit}
@@ -728,4 +760,37 @@ func checkpoint(dir string, lanes []lane.Lane) error {
 		return err
 	}
 	return writeAtomic(path, append(b, '\n'))
+}
+
+// nsNeedsHuman is nebula-swarm's status of a lane parked for its owner.
+const nsNeedsHuman = "needs-human"
+
+// checkpointNebulaSwarm writes a lane back in nebula-swarm's ledger fields:
+// its session, the terminal of its phase and round, and its PR state.
+func checkpointNebulaSwarm(task map[string]json.RawMessage, ln *lane.Lane) error {
+	var prev string
+	_ = json.Unmarshal(task["status"], &prev)
+	status := string(ln.Status)
+	if prev == nsNeedsHuman && ln.Status == lane.StatusBlocked {
+		status = nsNeedsHuman
+	}
+	round := max(ln.Round, 1)
+	fields := map[string]any{"phase": ln.Phase, "round": round, "status": status, "session_id": ln.SessionID, "pr": ln.PR, "pr_head": ln.PRHead, "approval_sha": ln.ApprovalSHA, "merge_sha": ln.MergeSHA, "checks": ln.Checks, "fork_sha": ln.BaseCommit}
+	for k, v := range fields {
+		task[k], _ = json.Marshal(v)
+	}
+	terminals := map[string]map[string]string{}
+	if raw := task["terminals"]; len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &terminals); err != nil {
+			return err
+		}
+	}
+	if ln.Phase != "" && ln.TerminalID != "" {
+		if terminals[ln.Phase] == nil {
+			terminals[ln.Phase] = map[string]string{}
+		}
+		terminals[ln.Phase][strconv.Itoa(round)] = ln.TerminalID
+	}
+	task["terminals"], _ = json.Marshal(terminals)
+	return nil
 }
