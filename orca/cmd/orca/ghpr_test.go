@@ -11,9 +11,8 @@ import (
 func TestParseGHPR(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name, json string
-		want       chatui.PRStatus
-		text       string
+		name, json, text string
+		want             chatui.PRStatus
 	}{
 		{name: "merged", json: `{"state":"MERGED","isDraft":false,"statusCheckRollup":[
 {"__typename":"CheckRun","name":"Lint","status":"COMPLETED","conclusion":"SUCCESS"},
