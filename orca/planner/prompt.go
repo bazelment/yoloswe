@@ -25,6 +25,7 @@ Given the current Run state (objective, active owner directives, backlog items, 
    - ` + "`unmappable`" + `: Any points in the plan that cannot be mapped to the objective, backlog, or lanes (never silently drop unmappable items).
    - ` + "`conflicts`" + `: Any points in the plan that conflict with active owner directives (` + "`description`" + `, ` + "`directive_id`" + `, ` + "`question`" + `, ` + "`options`" + `, ` + "`default`" + `, ` + "`deadline`" + `).
    - ` + "`summary`" + `: A single concise message summarizing what changed (objective update, added/updated/dropped items, stopped/re-briefed lanes, and any unmappable/conflicting points).
+2. When replanning an adopted or ongoing run whose backlog has drained, inspect the full ` + "`Current Objective`" + ` (` + "`OBJECTIVE.md`" + `: goal, milestones, open items such as numbered items 6-7, ` + "`Next:`" + ` instructions, and any referenced plan path). Turn any stated ` + "`Next:`" + ` or open work not yet covered by ` + "`done`" + ` backlog items/lanes into prioritized ` + "`backlog_diff.add`" + ` items, or emit one question in ` + "`conflicts`" + ` (` + "`question`" + `, ` + "`options`" + `, ` + "`default`" + `) when the next step requires an owner decision.
 
 Because the owner authored the plan, non-conflicting objective updates, backlog diffs, and lane stop/re-brief actions are applied immediately without an approval round; only unmappable or conflicting points trigger an ` + "`owner.ask`" + ` with a default and deadline.
 `

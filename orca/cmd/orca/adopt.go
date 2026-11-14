@@ -76,8 +76,15 @@ func newAdoption(ctx context.Context, cfg Config, h hostSwarms, holder string, f
 		return nil, h.off
 	}
 	prProbe := adoptedPRProbe(h, st)
-	ctrls := adopt.NewControllers(ctx, st, h.client, clk, adoptedDispatchers(cfg, st, h.client, clk, client, logger, prProbe))
+	var pln *Planner
+	if client != nil {
+		pln = NewPlanner(st, clk, roleClient(client, cfg, "planner"), cfg.Models.Planner, logger)
+	}
+	ctrls := adopt.NewControllers(ctx, st, h.client, clk, adoptedDispatchers(cfg, st, h.client, clk, client, logger, prProbe, pln))
 	ctrls.PRProbe = prProbe
+	if pln != nil {
+		ctrls.Planner = pln.HandlePlannerRequest
+	}
 	return &adopt.Service{
 		Importer:           h.importer,
 		Labeler:            h.client,
@@ -139,19 +146,24 @@ func adoptedPRProbe(h hostSwarms, st store.Store) controller.PRProbe {
 
 // adoptedDispatchers gives each adopted run the dispatcher `orca run` uses,
 // so owner instructions and escalations on that run are judged.
-func adoptedDispatchers(cfg Config, st store.Store, lanes *nebula.Driver, clk clock.Clock, client model.ModelClient, logger *slog.Logger, prProbe controller.PRProbe) adopt.JudgeFactory {
+func adoptedDispatchers(cfg Config, st store.Store, lanes *nebula.Driver, clk clock.Clock, client model.ModelClient, logger *slog.Logger, prProbe controller.PRProbe, pln *Planner) adopt.JudgeFactory {
 	if client == nil {
 		return nil
 	}
 	return func(_ string, answer func(context.Context, string, string, string) error) controller.Judge {
-		disp := dispatcher.New(dispatcher.Config{
+		dcfg := dispatcher.Config{
 			Model:          cfg.Models.Dispatcher,
 			Provider:       cfg.Models.Roles["dispatcher"].Provider,
 			PromptVersion:  dispatcher.SystemPromptVersion,
 			HardBatchModel: cfg.Models.DispatcherHard,
 			Logger:         logger,
 			PRProbe:        prProbe,
-		}, st, lanes, clk, roleClient(client, cfg, "dispatcher"))
+		}
+		if pln != nil {
+			dcfg.OnPlannerRequest = pln.HandlePlannerRequest
+			dcfg.RecipeCompiler = pln
+		}
+		disp := dispatcher.New(dcfg, st, lanes, clk, roleClient(client, cfg, "dispatcher"))
 		disp.SetOwnerAnswer(answer)
 		return disp
 	}

@@ -54,7 +54,9 @@ When the owner states a new goal or asks to start work, call run.start with the 
 You are the front desk for unclear or mixed messages: clarify with one question only if you must; otherwise save rules with memory.submit and forward plan changes or orders with directive.submit. Use run.control to pause, resume or stop execution. Use run.settings to tune concurrency and stall timeout.
 Each answer must address only the question asked; never open with or repeat status or conclusions from earlier, unrelated turns or other runs.
 Answer the owner's questions accurately and concisely using read-only Store tools (status, lane.show, decisions.since, pr.ci). For runs this chat holds (including adopted runs), answer from the Store and live probes via status, lane.show, or pr.ci—do not call swarms for a held run. For questions about other swarms on this machine, call swarms once (pass the run filter when asking about a specific swarm) and answer from it.
-	Never invent facts not present in the Store. Owner corrections become memory.submit proposals saved immediately with a source quote; memory.undo reverts the last change.`
+Never conflate activity (how many lanes finished or PRs merged) with progress toward the goal: build progress and "have we met the goal?" answers from the run's full Objective (goal, plan milestones, open items, and Next: work), naming what is met (with lane/PR evidence), what is open, and what is Next:. Never say the goal is met while any milestone, open item, or Next: step in the Objective remains open.
+In an adopted-run context, "hold" / "keep the hold" means orca's lease on the run (as opposed to /release), NOT a hold on spawning lanes; never record a standing rule blocking new work unless the owner states that rule plainly.
+Never invent facts not present in the Store. Owner corrections become memory.submit proposals saved immediately with a source quote; memory.undo reverts the last change.`
 
 type ConciergeStatusParams struct {
 	RunID          string `json:"run_id,omitempty" jsonschema:"description=Optional run ID to inspect"`
@@ -1287,6 +1289,8 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 			d.ID, d.Kind, d.Source, cmp.Or(d.Scope, "run"), d.Text)
 	}
 
+	memorychat.WriteStandingRulesSection(&b, memorychat.ListStandingRules(ctx, c.store, runID, c.clock.Now().UTC()))
+
 	fmt.Fprintf(&b, "\nMetrics: %s\n", metrics.Summary())
 	return b.String(), nil
 }
@@ -1763,6 +1767,10 @@ func (c *Concierge) handleDirectiveSubmit(
 		}
 	}
 
+	if err := memorychat.ValidateDirectiveText(kind, text, quote); err != nil {
+		return directiveReceipt{}, "", err
+	}
+
 	dirID := c.nextID("dir-concierge")
 	dir := store.Directive{
 		ID:        dirID,
@@ -1778,8 +1786,10 @@ func (c *Concierge) handleDirectiveSubmit(
 	if err := c.store.Directives().Add(ctx, dir); err != nil {
 		return directiveReceipt{}, "", err
 	}
-	echo := "directive is time-limited"
-	if expiresAt == nil {
+	echo := "directive saved"
+	if expiresAt != nil {
+		echo = "directive is time-limited"
+	} else if kind == store.DirectiveStanding {
 		var err error
 		memoryScope := dir.Scope
 		if memoryScope != "owner" && memoryScope != "repo" && memoryScope != "run" {

@@ -116,11 +116,82 @@ type Run struct {
 	Repo string
 	// RepoID is the run's Nebula repository id when the run records one.
 	RepoID string `json:",omitempty"`
+	// Objective is OBJECTIVE.md, with the stand-down marker stripped.
+	// PlanPath is the plan file path or ref named in OBJECTIVE.md / PROGRESS.md.
+	// Next is the stated Next: work from OBJECTIVE.md (or PROGRESS.md).
+	Objective, PlanPath, Next string
 	// Progress and Escalations are PROGRESS.md and ESCALATIONS.md, clipped.
 	Progress, Escalations string
 	// Unchecked lists what discovery could not check for this run.
 	Unchecked []string
 	Lanes     []Lane
+}
+
+// FullObjective returns the complete run objective combining Goal, the full
+// OBJECTIVE.md content (milestones, open items, plan references), PlanPath,
+// and Next: work so the store, planner, and concierge see the whole objective
+// rather than a one-line summary.
+func (r Run) FullObjective() string {
+	goal := strings.TrimSpace(r.Goal)
+	obj := strings.TrimSpace(r.Objective)
+	if r.Dir != "" && obj != "" {
+		obj = sanitizeObjectivePlanLines(r.Dir, obj)
+	}
+	switch {
+	case obj == "":
+		obj = goal
+	case goal != "" && !strings.Contains(strings.ToLower(obj), strings.ToLower(goal)):
+		obj = "Goal: " + goal + "\n\n" + obj
+	}
+	if plan := strings.TrimSpace(r.PlanPath); plan != "" && !strings.Contains(obj, plan) {
+		if obj != "" {
+			obj += "\n"
+		}
+		obj += "Plan: " + plan
+	}
+	if next := strings.TrimSpace(r.Next); next != "" && !strings.Contains(obj, next) {
+		if obj != "" {
+			obj += "\n"
+		}
+		obj += "Next: " + next
+	}
+	return strings.TrimSpace(obj)
+}
+
+func sanitizeObjectivePlanLines(dir, obj string) string {
+	lines := strings.Split(obj, "\n")
+	keep := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if m := explicitPlanLineRE.FindStringSubmatch(line); len(m) == 2 {
+			if resolveCandidatePlanPath(dir, m[1]) == "" {
+				continue
+			}
+		}
+		keep = append(keep, line)
+	}
+	return strings.TrimSpace(strings.Join(keep, "\n"))
+}
+
+func isEmptyNextText(s string) bool {
+	switch strings.ToLower(strings.Trim(strings.TrimSpace(s), ".")) {
+	case "", "none", "n/a", "nil", "done", "complete", "completed", "nothing", "-":
+		return true
+	default:
+		return false
+	}
+}
+
+// HasNextWork reports whether the run's objective/progress states open Next:
+// work or unchecked items beyond the currently imported lanes.
+func (r Run) HasNextWork() bool {
+	next := strings.TrimSpace(r.Next)
+	if next == "" && r.Objective != "" {
+		next = strings.TrimSpace(extractNextSection(r.Objective))
+	}
+	if !isEmptyNextText(next) {
+		return true
+	}
+	return strings.Contains(r.Objective, "- [ ]")
 }
 
 // Importer finds and reads run directories: <root>/.shared/subagent-swarm/<run>
@@ -337,6 +408,7 @@ func Read(dir string) (Run, error) {
 	}
 	r.Orchestrator = orchestrator(dir, r.Holder)
 	r.Repo = repoSlug(dir)
+	r.Objective = stripMarker(readText(filepath.Join(dir, "OBJECTIVE.md")))
 	r.Progress = clip(stripMarker(readText(filepath.Join(dir, "PROGRESS.md"))), 1500)
 	r.Escalations = clip(stripMarker(readText(filepath.Join(dir, "ESCALATIONS.md"))), 1500)
 	if r.Format == FormatNebulaSwarm {
@@ -357,12 +429,159 @@ func Read(dir string) (Run, error) {
 		annotateLanes(dir, &r, st.Config.Phases)
 	}
 	applyRunEnvRepo(dir, &r)
+	r.PlanPath = extractPlanPath(dir, r.Objective, r.Progress)
+	r.Next = extractNextSection(r.Objective)
 	sort.Slice(r.Lanes, func(a, b int) bool { return r.Lanes[a].ID < r.Lanes[b].ID })
 	r.State = RunFinished
 	if runLive(&r) {
 		r.State = RunActive
 	}
 	return r, nil
+}
+
+var (
+	explicitPlanLineRE = regexp.MustCompile(`(?im)^\s*(?:[-*]\s*)?plan(?:\s+file|\s+path)?\s*[:=]\s*([^\s` + "`" + `"',;()<>]+)`)
+	markdownPathRE     = regexp.MustCompile(`([^\s` + "`" + `"',;()<>]+\.md)\b`)
+)
+
+func isIgnoredDocName(p string) bool {
+	switch strings.ToUpper(filepath.Base(p)) {
+	case "OBJECTIVE.MD", "PROGRESS.MD", "ESCALATIONS.MD", "CLAUDE.MD", "AGENTS.MD", "README.MD", "SKILL.MD":
+		return true
+	default:
+		return false
+	}
+}
+
+func isNebulaPostPlanRef(ref string) bool {
+	trimmed := strings.TrimSpace(ref)
+	lower := strings.ToLower(trimmed)
+	for _, prefix := range []string{"post:", "nebula://post/", "nebula:"} {
+		if strings.HasPrefix(lower, prefix) {
+			target := strings.TrimSpace(trimmed[len(prefix):])
+			return target != "" && !strings.HasPrefix(target, "-")
+		}
+	}
+	if len(trimmed) != 36 {
+		return false
+	}
+	for i := 0; i < len(trimmed); i++ {
+		c := trimmed[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func resolveCandidatePlanPath(dir, candidate string) string {
+	candidate = strings.Trim(candidate, "`\"'.,;:()")
+	if candidate == "" || isIgnoredDocName(candidate) {
+		return ""
+	}
+	if isNebulaPostPlanRef(candidate) {
+		return candidate
+	}
+	if strings.HasPrefix(strings.ToLower(candidate), "file://") {
+		candidate = strings.TrimSpace(candidate[len("file://"):])
+	}
+	if dir != "" {
+		resolved, err := resolveBriefPath(dir, candidate)
+		if err != nil || !fileExists(resolved) {
+			return ""
+		}
+		return resolved
+	}
+	if filepath.IsAbs(candidate) {
+		return ""
+	}
+	clean := filepath.Clean(candidate)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	return clean
+}
+
+func extractPlanPath(dir string, sources ...string) string {
+	for _, src := range sources {
+		if m := explicitPlanLineRE.FindStringSubmatch(src); len(m) == 2 {
+			if p := resolveCandidatePlanPath(dir, m[1]); p != "" {
+				return p
+			}
+		}
+	}
+	for _, src := range sources {
+		for _, m := range markdownPathRE.FindAllStringSubmatch(src, -1) {
+			if len(m) == 2 {
+				if p := resolveCandidatePlanPath(dir, m[1]); p != "" {
+					return p
+				}
+			}
+		}
+	}
+	if dir != "" && fileExists(filepath.Join(dir, "PLAN.md")) {
+		return filepath.Join(dir, "PLAN.md")
+	}
+	return ""
+}
+
+func extractNextSection(sources ...string) string {
+	for _, src := range sources {
+		lines := strings.Split(src, "\n")
+		for i := 0; i < len(lines); i++ {
+			trimmed := strings.TrimSpace(lines[i])
+			clean := strings.TrimLeft(trimmed, "-* \t")
+			lower := strings.ToLower(clean)
+			if strings.HasPrefix(lower, "next:") {
+				rest := strings.TrimSpace(clean[len("next:"):])
+				var parts []string
+				if rest != "" {
+					parts = append(parts, rest)
+				}
+				for j := i + 1; j < len(lines); j++ {
+					nextLine := lines[j]
+					nextTrim := strings.TrimSpace(nextLine)
+					if nextTrim == "" || strings.HasPrefix(nextTrim, "#") {
+						break
+					}
+					if strings.HasPrefix(nextLine, " ") || strings.HasPrefix(nextLine, "\t") || strings.HasPrefix(nextTrim, "- ") || strings.HasPrefix(nextTrim, "* ") {
+						parts = append(parts, nextTrim)
+						continue
+					}
+					break
+				}
+				if len(parts) > 0 {
+					return strings.Join(parts, "\n")
+				}
+			}
+			if strings.HasPrefix(trimmed, "#") {
+				heading := strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "#")))
+				if heading == "next" || strings.HasPrefix(heading, "next ") || strings.HasPrefix(heading, "next:") {
+					var parts []string
+					for j := i + 1; j < len(lines); j++ {
+						nextTrim := strings.TrimSpace(lines[j])
+						if strings.HasPrefix(nextTrim, "#") {
+							break
+						}
+						if nextTrim != "" {
+							parts = append(parts, nextTrim)
+						}
+					}
+					if len(parts) > 0 {
+						return strings.Join(parts, "\n")
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // stripMarker drops orca's stand-down lines and surrounding blank space.

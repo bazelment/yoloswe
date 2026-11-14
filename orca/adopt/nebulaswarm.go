@@ -2,14 +2,19 @@ package adopt
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/bazelment/yoloswe/orca/lane"
 )
@@ -399,4 +404,236 @@ func applyRunEnvRepo(dir string, r *Run) {
 			applyRepoValue(r, v)
 		}
 	}
+}
+
+// ledgerPhase maps an orca lane phase to a phase valid in a nebula-swarm
+// state.json config.phases list (for example keeping "review" when orca runs a
+// synthetic "integrate" phase not listed in config.phases).
+func ledgerPhase(phase string, cfgPhases []string, fallbackPhase string) string {
+	if phase == "" {
+		return fallbackPhase
+	}
+	if len(cfgPhases) == 0 || slices.Contains(cfgPhases, phase) {
+		return phase
+	}
+	if fallbackPhase != "" && slices.Contains(cfgPhases, fallbackPhase) {
+		return fallbackPhase
+	}
+	return cfgPhases[len(cfgPhases)-1]
+}
+
+type nsTaskMeta struct {
+	Terminals      map[string]map[string]string `json:"terminals"`
+	ReviewRoundCap *int                         `json:"review_round_cap"`
+	ID             string                       `json:"id"`
+	Status         string                       `json:"status"`
+	Phase          string                       `json:"phase"`
+	SessionID      string                       `json:"session_id"`
+	TerminalState  string                       `json:"terminal_state"`
+	Verdict        string                       `json:"verdict"`
+	Round          int                          `json:"round"`
+}
+
+func readNebulaSwarmLedgerMeta(dir string) ([]string, int, map[string]nsTaskMeta, error) {
+	b, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	var st struct {
+		Tasks  []nsTaskMeta `json:"tasks"`
+		Config struct {
+			Phases    []hostPhase `json:"phases"`
+			MaxRounds int         `json:"max_rounds"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(b, &st); err != nil {
+		return nil, 0, nil, err
+	}
+	phases := make([]string, 0, len(st.Config.Phases))
+	for _, p := range st.Config.Phases {
+		if p.Name != "" {
+			phases = append(phases, p.Name)
+		}
+	}
+	tasks := make(map[string]nsTaskMeta, len(st.Tasks))
+	for _, t := range st.Tasks {
+		tasks[t.ID] = t
+	}
+	return phases, st.Config.MaxRounds, tasks, nil
+}
+
+const ledgerHelperTimeout = 5 * time.Second
+
+// writeNebulaSwarmLaneWithHelper updates one lane in dir/state.json using the
+// nebula-swarm skill's ledger.py helper when available.
+func writeNebulaSwarmLaneWithHelper(ctx context.Context, dir string, ln lane.Lane, scriptOverride *string) (bool, error) {
+	script := ""
+	if scriptOverride != nil {
+		script = *scriptOverride
+	} else {
+		script = FindLedgerScript()
+	}
+	if script == "" {
+		return false, nil
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return false, err
+	}
+	cfgPhases, cfgMaxRounds, tasks, err := readNebulaSwarmLedgerMeta(absDir)
+	if err != nil {
+		return false, err
+	}
+	helperCtx, cancel := context.WithTimeout(ctx, ledgerHelperTimeout)
+	defer cancel()
+	meta, exists := tasks[ln.ID]
+	if !exists {
+		branch := cmp.Or(strings.TrimSpace(ln.Branch), fmt.Sprintf("swarm-lane/%s/%s", ln.RunID, ln.ID))
+		title := cmp.Or(strings.TrimSpace(ln.Title), ln.ID)
+		addArgs := []string{script, "add", absDir, "--id", ln.ID, "--title", title, "--branch", branch}
+		if out, err := exec.CommandContext(helperCtx, "python3", addArgs...).CombinedOutput(); err != nil {
+			return false, fmt.Errorf("ledger.py add %s: %w (%s)", ln.ID, err, strings.TrimSpace(string(out)))
+		}
+	}
+	status := string(ln.Status)
+	if meta.Status == nsNeedsHuman && ln.Status == lane.StatusBlocked {
+		status = nsNeedsHuman
+	}
+	effPhase := ledgerPhase(ln.Phase, cfgPhases, meta.Phase)
+	round := max(ln.Round, 1)
+	cap := max(cfgMaxRounds, 2)
+	if meta.ReviewRoundCap != nil && *meta.ReviewRoundCap > 0 {
+		cap = *meta.ReviewRoundCap
+	}
+
+	args := []string{script, "set", absDir, "--id", ln.ID}
+	if status != "" {
+		args = append(args, "--status", status)
+	}
+	if effPhase != "" && (len(cfgPhases) == 0 || slices.Contains(cfgPhases, effPhase)) {
+		args = append(args, "--phase", effPhase)
+	}
+	if round > cap {
+		args = append(args, "--review-round-cap", strconv.Itoa(round))
+	}
+	args = append(args, "--round", strconv.Itoa(round))
+	if ln.SessionID != "" {
+		if meta.SessionID == "" {
+			args = append(args, "--session-id", ln.SessionID)
+		} else if meta.SessionID != ln.SessionID {
+			args = append(args, "--adopt-session-id", ln.SessionID)
+		}
+	}
+	if ln.TerminalID != "" && effPhase == ln.Phase && effPhase != "" {
+		existingTerm := meta.Terminals[effPhase][strconv.Itoa(round)]
+		if existingTerm != "" && existingTerm != ln.TerminalID {
+			return false, nil
+		}
+		if existingTerm == "" {
+			args = append(args, "--terminal-id", ln.TerminalID)
+		}
+	}
+	if ln.PR > 0 {
+		args = append(args, "--pr", strconv.Itoa(ln.PR))
+	}
+	if ln.PRHead != "" {
+		args = append(args, "--pr-head", ln.PRHead)
+	}
+	if ln.ApprovalSHA != "" {
+		args = append(args, "--approval-sha", ln.ApprovalSHA)
+		if meta.Verdict == "" {
+			args = append(args, "--verdict", "pass")
+		}
+	}
+	if ln.MergeSHA != "" {
+		args = append(args, "--merge-sha", ln.MergeSHA)
+	}
+	if ln.Status.Terminal() && meta.TerminalState != "" {
+		args = append(args, "--terminal-state", "")
+	}
+	if out, err := exec.CommandContext(helperCtx, "python3", args...).CombinedOutput(); err != nil {
+		return false, fmt.Errorf("ledger.py set %s: %w (%s)", ln.ID, err, strings.TrimSpace(string(out)))
+	}
+	return true, nil
+}
+
+// appendNebulaSwarmEvents appends one EVENTS line per transition between prev
+// and cur in nebula-swarm's tab-separated format (<UTC>\t<lane>\t<kind>\t<detail>).
+func appendNebulaSwarmEvents(dir string, now time.Time, prev *lane.Lane, cur lane.Lane, cfgPhases []string) error {
+	ts := now.UTC().Format(time.RFC3339)
+	type evLine struct {
+		kind, detail string
+	}
+	var lines []evLine
+
+	oldPhase := ""
+	if prev != nil {
+		oldPhase = ledgerPhase(prev.Phase, cfgPhases, "")
+	}
+	newPhase := ledgerPhase(cur.Phase, cfgPhases, oldPhase)
+
+	if prev == nil {
+		if newPhase != "" && cur.TerminalID != "" && cur.Phase == newPhase {
+			lines = append(lines, evLine{kind: "started", detail: newPhase + " " + cur.TerminalID})
+		}
+	} else {
+		if oldPhase != "" && newPhase != "" && oldPhase != newPhase {
+			lines = append(lines, evLine{kind: "phase", detail: oldPhase + " -> " + newPhase})
+		}
+		if cur.TerminalID != "" && cur.TerminalID != prev.TerminalID && cur.Phase == newPhase && newPhase != "" {
+			lines = append(lines, evLine{kind: "started", detail: newPhase + " " + cur.TerminalID})
+		}
+		if cur.ApprovalSHA != "" && cur.ApprovalSHA != prev.ApprovalSHA {
+			lines = append(lines, evLine{kind: "verdict", detail: "pass"})
+		}
+		wasMerged := prev.Status == lane.StatusDone && (prev.PR > 0 || prev.MergeSHA != "")
+		isMerged := cur.Status == lane.StatusDone && (cur.PR > 0 || cur.MergeSHA != "")
+		if isMerged && (!wasMerged || (cur.MergeSHA != "" && cur.MergeSHA != prev.MergeSHA)) {
+			var detail string
+			switch {
+			case cur.PR > 0 && cur.MergeSHA != "":
+				detail = fmt.Sprintf("#%d %s", cur.PR, cur.MergeSHA)
+			case cur.PR > 0:
+				detail = fmt.Sprintf("#%d", cur.PR)
+			default:
+				detail = cur.MergeSHA
+			}
+			lines = append(lines, evLine{kind: "merged", detail: detail})
+		} else if cur.Status != prev.Status && prev.Status != "" && cur.Status != "" {
+			lines = append(lines, evLine{kind: "status", detail: string(prev.Status) + " -> " + string(cur.Status)})
+		}
+	}
+
+	if len(lines) == 0 {
+		return nil
+	}
+
+	lock, err := os.OpenFile(filepath.Join(dir, "EVENTS.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := lockLedgerFile(lock); err != nil {
+		return err
+	}
+	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
+
+	f, err := os.OpenFile(filepath.Join(dir, "EVENTS"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(ts)
+		b.WriteByte('\t')
+		b.WriteString(cur.ID)
+		b.WriteByte('\t')
+		b.WriteString(l.kind)
+		b.WriteByte('\t')
+		b.WriteString(l.detail)
+		b.WriteByte('\n')
+	}
+	_, err = f.WriteString(b.String())
+	return err
 }

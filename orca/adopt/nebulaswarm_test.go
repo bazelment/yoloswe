@@ -24,6 +24,7 @@ import (
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/lane/nebula"
 	"github.com/bazelment/yoloswe/orca/model"
+	"github.com/bazelment/yoloswe/orca/planner"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -46,7 +47,7 @@ func writeNebulaSwarmRun(t *testing.T, root, id, orch string, last time.Time) st
 {"name":"review","kind":"claude","model":"sonnet","effort":"high","prompt":"","chain":[{"kind":"claude","model":"sonnet","effort":"high"}]}]},
 "tasks":[
 {"id":"m1-base","title":"base prompts","branch":"swarm-lane/` + id + `/m1-base","priority":"p1","status":"done","phase":"review","round":1,"session_id":"sess-m1","terminals":{"swe":{"1":"term-m1-swe"},"review":{"1":"term-m1-review"}},"pr":5604,"pr_head":"aaa","approval_sha":"aaa","merge_sha":"mmm","terminal_state":"","verdict":"pass"},
-{"id":"m2-default","title":"default prompts","branch":"swarm-lane/` + id + `/m2-default","priority":"p1","status":"running","phase":"clean","round":1,"session_id":"sess-m2","terminals":{"swe":{"1":"term-m2-swe"},"clean":{"1":"term-m2-clean"}},"pr":5705,"pr_head":"bbb","terminal_state":"working","verdict":""}]}
+{"id":"m2-default","title":"default prompts","branch":"swarm-lane/` + id + `/m2-default","priority":"p1","status":"running","phase":"clean","round":1,"session_id":"sess-m2","terminals":{"swe":{"1":"term-m2-swe"},"clean":{"1":"term-m2-clean"}},"pr":5705,"pr_head":"bbb","merge_sha":"","terminal_state":"working","verdict":""}]}
 `,
 		"OBJECTIVE.md":                 "# " + id + "\n\nGoal: trial m1: slim prompts.\n",
 		"PROGRESS.md":                  "Merged: m1-base #5604.\nNext: m2-default review after clean; then merge train.\n",
@@ -800,6 +801,645 @@ func TestNebulaSwarmReviewReportRecognised(t *testing.T) {
 	}
 }
 
+func TestNebulaSwarmLiveWriteBackOnMergeAndTransition(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"fallback_checkpoint", "ledger_py_helper"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			root := filepath.Join(t.TempDir(), ".swarm")
+			dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+			// Enable merge authority on the run so review -> integrate -> merged runs under orca.
+			statePath := filepath.Join(dir, "state.json")
+			write(t, statePath, strings.Replace(readText(statePath), `"merge":"none"`, `"merge":"squash"`, 1))
+
+			var helperLogPath string
+			var scriptOverride string
+			if mode == "ledger_py_helper" {
+				helperLogPath = filepath.Join(t.TempDir(), "ledger-calls.log")
+				scriptOverride = filepath.Join(t.TempDir(), "fake_ledger.py")
+				write(t, scriptOverride, fmt.Sprintf(`#!/usr/bin/env python3
+import json, pathlib, sys
+log_path = pathlib.Path(%q)
+with log_path.open("a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\n")
+cmd = sys.argv[1]
+run_dir = pathlib.Path(sys.argv[2])
+state_file = run_dir / "state.json"
+doc = json.loads(state_file.read_text())
+args = sys.argv[3:]
+kv = {}
+i = 0
+while i < len(args):
+    kv[args[i]] = args[i+1]
+    i += 2
+lane_id = kv["--id"]
+if cmd == "add":
+    doc.setdefault("tasks", []).append({"id": lane_id, "title": kv.get("--title", lane_id), "branch": kv.get("--branch", "")})
+elif cmd == "set":
+    for t in doc.get("tasks", []):
+        if t.get("id") != lane_id:
+            continue
+        if "--status" in kv:
+            t["status"] = kv["--status"]
+        if "--phase" in kv:
+            t["phase"] = kv["--phase"]
+        if "--round" in kv:
+            t["round"] = int(kv["--round"])
+        if "--pr" in kv:
+            t["pr"] = int(kv["--pr"])
+        if "--pr-head" in kv:
+            t["pr_head"] = kv["--pr-head"]
+        if "--approval-sha" in kv:
+            t["approval_sha"] = kv["--approval-sha"]
+        if "--verdict" in kv:
+            t["verdict"] = kv["--verdict"]
+        if "--merge-sha" in kv:
+            t["merge_sha"] = kv["--merge-sha"]
+        if "--terminal-state" in kv:
+            t["terminal_state"] = kv["--terminal-state"]
+        if "--terminal-id" in kv and t.get("phase"):
+            terms = t.setdefault("terminals", {})
+            terms.setdefault(t["phase"], {})[str(t.get("round", 1))] = kv["--terminal-id"]
+state_file.write_text(json.dumps(doc, indent=2) + "\n")
+`, helperLogPath))
+			}
+
+			clk := clock.NewFakeClock(time.Date(2026, 11, 14, 6, 36, 0, 0, time.UTC))
+			st := store.NewMemoryStore(clk)
+			t.Cleanup(func() { _ = st.Close() })
+			drv := lane.NewFakeDriver()
+
+			controllers := NewControllers(
+				t.Context(),
+				st,
+				drv,
+				clk,
+				func(string, func(context.Context, string, string, string) error) controller.Judge {
+					return controller.NewFakeJudge()
+				},
+			)
+			controllers.ledgerScript = &scriptOverride
+			var prMerged atomic.Bool
+			controllers.PRProbe = func(_ context.Context, _, _ string, pr int) (controller.PRStatus, error) {
+				if pr == 5705 && prMerged.Load() {
+					return controller.PRStatus{
+						State:    "MERGED",
+						MergeSHA: "999aaaa",
+						Number:   5705,
+					}, nil
+				}
+				return controller.PRStatus{State: "OPEN", Number: pr}, nil
+			}
+
+			label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+			s := nsService(root, loop, label)
+			s.Driver = controllers
+			r, err := s.Adopt(t.Context(), nsRun)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+			// Advance clean -> review while orca holds the run.
+			write(t, filepath.Join(dir, "reports", "m2-default.clean.done"), "Outcome: done\nHEAD: bbb\nPR: 5705\n")
+			drv.Emit(lane.Event{
+				RunID:      nsRun,
+				LaneID:     "m2-default",
+				TerminalID: "term-m2-clean",
+				Kind:       lane.EventTurnEndedNoReport,
+				Text:       "clean finished",
+			})
+
+			waitFor(t, func() bool {
+				got, err := st.Lanes().Get(t.Context(), nsRun, "m2-default")
+				return err == nil && got.Phase == recipe.PhaseReview && got.Status == lane.StatusRunning
+			})
+
+			// Without releasing the run, state.json and EVENTS must already reflect the transition to review.
+			midRun, err := Read(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if m2 := midRun.Lanes[1]; m2.Phase != "review" || m2.Status != "running" {
+				t.Fatalf("live state.json after clean->review = %+v, want phase=review status=running", m2)
+			}
+			if events := readText(filepath.Join(dir, "EVENTS")); !strings.Contains(events, "\tm2-default\tphase\tclean -> review\n") {
+				t.Fatalf("EVENTS missing clean -> review transition:\n%s", events)
+			}
+
+			gotReview, err := st.Lanes().Get(t.Context(), nsRun, "m2-default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Finish review with pass, then let PRProbe reconcile the merged PR (#5705 -> 999aaaa).
+			prMerged.Store(true)
+			write(t, filepath.Join(dir, "reports", "m2-default.review.r1.md"), "Outcome: done\nHEAD: fb6c5bae\nPR: 5705\nVerdict: pass\n")
+			drv.Emit(lane.Event{
+				RunID:      nsRun,
+				LaneID:     "m2-default",
+				TerminalID: gotReview.TerminalID,
+				Kind:       lane.EventTurnEndedNoReport,
+				Text:       "review passed and PR merged",
+			})
+
+			waitFor(t, func() bool {
+				got, err := st.Lanes().Get(t.Context(), nsRun, "m2-default")
+				return err == nil && got.Status == lane.StatusDone && got.MergeSHA == "999aaaa"
+			})
+
+			// While orca still holds the run (before /release), state.json and EVENTS must reflect the merge.
+			rawState := readText(statePath)
+			if !strings.Contains(rawState, `"merge_sha": "999aaaa"`) && !strings.Contains(rawState, `"merge_sha":"999aaaa"`) {
+				t.Fatalf("state.json missing merge_sha 999aaaa while held:\n%s", rawState)
+			}
+			afterMerge, err := Read(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if m2 := afterMerge.Lanes[1]; m2.Status != "done" || m2.Phase != "review" {
+				t.Fatalf("m2-default after merge = %+v, want status=done phase=review", m2)
+			}
+			events := readText(filepath.Join(dir, "EVENTS"))
+			if !strings.Contains(events, "\tm2-default\tmerged\t#5705 999aaaa\n") {
+				t.Fatalf("EVENTS missing merged line for m2-default:\n%s", events)
+			}
+			if mode == "ledger_py_helper" {
+				calls := readText(helperLogPath)
+				if !strings.Contains(calls, "--merge-sha 999aaaa") {
+					t.Fatalf("expected ledger.py helper to be invoked with --merge-sha 999aaaa, got:\n%s", calls)
+				}
+			}
+		})
+	}
+}
+
+func TestAdoptedRunObjectiveNextWorkTriggersPlannerAndRefreshes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("creates_backlog_item_and_refreshes_objective", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), ".swarm")
+		last := time.Date(2026, 11, 14, 18, 52, 0, 0, time.UTC)
+		dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", last)
+
+		// All imported lanes are already done (empty/drained open backlog), while OBJECTIVE.md has Next: work.
+		write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"M1 trial of slim-prompt trial mode ... 2 real code lanes","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"squash",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high"},{"name":"review","kind":"claude","model":"sonnet","effort":"high"}]},
+"tasks":[
+{"id":"m2-gaps2","title":"m2 gaps2","branch":"swarm-lane/20261114-trial-m1/m2-gaps2","priority":"p1","status":"done","phase":"review","round":1,"session_id":"sess-m2","terminals":{"review":{"1":"term-m2-review"}},"pr":5786,"pr_head":"bbb","approval_sha":"bbb","merge_sha":"999aaaa","terminal_state":"","verdict":"pass"}]}
+`)
+		write(t, filepath.Join(dir, "PLAN.md"), "# Slim Prompt Trial Plan\n\n- M1: slim prompt trial\n- M2: hand interventions 6-7\n- M4: lane_metrics day vs baseline\n")
+		objectiveBody := "# 20261114-trial-m1\n\n" +
+			"Goal: Validate slim-prompt trial mode through M4 and eliminate hand interventions.\n" +
+			"Plan: PLAN.md\n\n" +
+			"Milestones:\n" +
+			"- [x] M1: slim-prompt trial (PR #5604, #5786 merged)\n" +
+			"- [ ] 6. Fix adopt write-back to state.json and EVENTS\n" +
+			"- [ ] 7. Fix adopt planner handoff on drained backlog\n" +
+			"- [ ] M4: lane_metrics day vs baseline\n\n" +
+			"Next: when #5786 merges, staff a lane for 6-7 if not covered; then M4 (lane_metrics day vs baseline), update PLAN.md log and the Nebula post\n"
+		write(t, filepath.Join(dir, "OBJECTIVE.md"), objectiveBody)
+
+		clk := clock.NewFakeClock(last)
+		st := store.NewMemoryStore(clk)
+		t.Cleanup(func() { _ = st.Close() })
+		drv := lane.NewFakeDriver()
+
+		recArgs, err := json.Marshal(planner.Reconciliation{
+			Summary:   "Added m2-items-6-7 from OBJECTIVE.md Next: work.",
+			Objective: "Shortened multi-line summary\nLine 2 that must not overwrite adopted OBJECTIVE.md",
+			BacklogDiff: planner.BacklogDiff{
+				Add: []planner.BacklogAddItem{
+					{
+						ID:          "m2-items-6-7",
+						Title:       "Cover hand interventions 6-7 from OBJECTIVE.md",
+						Description: "Staff a lane for items 6-7 after #5786 merged, before M4.",
+						Priority:    "p1",
+						Order:       1,
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		readPlanArgs, err := json.Marshal(map[string]string{
+			"plan_ref": filepath.Join(dir, "PLAN.md"),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fakeClient := model.NewFakeClient(
+			model.Response{
+				ID:         "msg_read_plan",
+				Model:      planner.DefaultModel,
+				StopReason: model.StopReasonToolUse,
+				Message: model.NewAssistantMessage(
+					model.NewToolUseBlock("tu_read_plan", planner.ToolReadPlan, readPlanArgs),
+				),
+			},
+			model.Response{
+				ID:         "msg_plan_next",
+				Model:      planner.DefaultModel,
+				StopReason: model.StopReasonToolUse,
+				Message: model.NewAssistantMessage(
+					model.NewToolUseBlock("tu_plan_1", planner.ToolSubmitReconciliation, recArgs),
+				),
+			},
+			model.Response{
+				ID:         "msg_plan_next_done",
+				Model:      planner.DefaultModel,
+				StopReason: model.StopReasonEndTurn,
+				Message:    model.NewAssistantMessage(model.NewTextBlock("Added m2-items-6-7 to backlog.")),
+			},
+		)
+		pln := planner.New(planner.Config{}, st, drv, clk, fakeClient)
+
+		controllers := NewControllers(t.Context(), st, drv, clk, nil)
+		controllers.Planner = pln.OnPlannerRequest
+		label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+		s := nsService(root, loop, label)
+		s.Driver = controllers
+
+		r, err := s.Adopt(t.Context(), nsRun)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+		// 1. Verify the full objective (including milestones, plan path, and Next:) was imported into the store.
+		storedRun, err := st.Runs().Get(t.Context(), nsRun)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{
+			"Validate slim-prompt trial mode through M4",
+			"6. Fix adopt write-back to state.json and EVENTS",
+			"7. Fix adopt planner handoff on drained backlog",
+			"Next: when #5786 merges, staff a lane for 6-7 if not covered",
+			"PLAN.md",
+		} {
+			if !strings.Contains(storedRun.Objective, want) {
+				t.Fatalf("storedRun.Objective missing %q:\n%s", want, storedRun.Objective)
+			}
+		}
+
+		// 2. Verify the planner received the full objective, read PLAN.md via read.plan, and created the backlog item.
+		if len(fakeClient.Requests) < 2 {
+			t.Fatalf("expected >= 2 planner model calls, got %d", len(fakeClient.Requests))
+		}
+		plannerPrompt := fakeClient.Requests[0].Messages[0].Text()
+		for _, want := range []string{
+			"when #5786 merges, staff a lane for 6-7 if not covered",
+			"6. Fix adopt write-back to state.json and EVENTS",
+			"PLAN.md",
+		} {
+			if !strings.Contains(plannerPrompt, want) {
+				t.Fatalf("planner prompt missing %q:\n%s", want, plannerPrompt)
+			}
+		}
+		readPlanResult := fakeClient.Requests[1].Messages[2].Content[0]
+		if readPlanResult.IsError || !strings.Contains(readPlanResult.Content, "Slim Prompt Trial Plan") {
+			t.Fatalf("expected read.plan on resolved PLAN.md to succeed, got is_error=%v content=%q", readPlanResult.IsError, readPlanResult.Content)
+		}
+		if strings.Contains(storedRun.Objective, "Shortened multi-line summary") {
+			t.Fatalf("expected adopted run Objective to be preserved against multi-line planner replacement, got:\n%s", storedRun.Objective)
+		}
+		item, err := st.Backlog().Get(t.Context(), nsRun, "m2-items-6-7")
+		if err != nil || item.Status != store.BacklogOpen {
+			t.Fatalf("expected open backlog item m2-items-6-7 created by planner, got %+v, err=%v", item, err)
+		}
+
+		// 3. Modify OBJECTIVE.md on disk and verify the stored objective refreshes.
+		updatedObj := strings.Replace(objectiveBody, "M4: lane_metrics day vs baseline", "M4: lane_metrics day vs baseline (with p95 latency)", 1)
+		write(t, filepath.Join(dir, "OBJECTIVE.md"), updatedObj)
+		if _, err := controllers.RefreshObjective(t.Context(), nsRun); err != nil {
+			t.Fatal(err)
+		}
+		refreshedRun, err := st.Runs().Get(t.Context(), nsRun)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(refreshedRun.Objective, "with p95 latency") {
+			t.Fatalf("refreshedRun.Objective did not pick up OBJECTIVE.md update:\n%s", refreshedRun.Objective)
+		}
+	})
+
+	t.Run("asks_owner_question_when_drained_after_merge", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), ".swarm")
+		last := time.Date(2026, 11, 14, 18, 52, 0, 0, time.UTC)
+		dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", last)
+		write(t, filepath.Join(dir, "OBJECTIVE.md"),
+			"# 20261114-trial-m1\n\n"+
+				"Goal: Finish M2 and decide whether to run M4 on staging or prod.\n"+
+				"Next: when #5705 merges, ask owner whether M4 should run against staging or prod.\n")
+
+		clk := clock.NewFakeClock(last)
+		st := store.NewMemoryStore(clk)
+		t.Cleanup(func() { _ = st.Close() })
+		drv := lane.NewFakeDriver()
+
+		recArgs, err := json.Marshal(planner.Reconciliation{
+			Summary: "Needs owner decision for M4 target environment.",
+			Conflicts: []planner.ConflictPoint{
+				{
+					ID:          "ask-m4-env",
+					Description: "Next step in OBJECTIVE.md requires choosing M4 target environment.",
+					Question:    "Should M4 lane_metrics run against staging or prod?",
+					Options:     []string{"staging", "prod"},
+					Default:     "staging",
+				},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fakeClient := model.NewFakeClient(
+			model.Response{
+				ID:         "msg_plan_ask",
+				Model:      planner.DefaultModel,
+				StopReason: model.StopReasonToolUse,
+				Message: model.NewAssistantMessage(
+					model.NewToolUseBlock("tu_plan_ask", planner.ToolSubmitReconciliation, recArgs),
+				),
+			},
+			model.Response{
+				ID:         "msg_plan_ask_done",
+				Model:      planner.DefaultModel,
+				StopReason: model.StopReasonEndTurn,
+				Message:    model.NewAssistantMessage(model.NewTextBlock("Asked owner about staging vs prod.")),
+			},
+		)
+		pln := planner.New(planner.Config{}, st, drv, clk, fakeClient)
+
+		var prMerged atomic.Bool
+		controllers := NewControllers(t.Context(), st, drv, clk, nil)
+		controllers.Planner = pln.OnPlannerRequest
+		controllers.PRProbe = func(_ context.Context, _, _ string, pr int) (controller.PRStatus, error) {
+			if pr == 5705 && prMerged.Load() {
+				return controller.PRStatus{State: "MERGED", MergeSHA: "999aaaa", Number: 5705}, nil
+			}
+			return controller.PRStatus{State: "OPEN", Number: pr}, nil
+		}
+		label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+		s := nsService(root, loop, label)
+		s.Driver = controllers
+
+		r, err := s.Adopt(t.Context(), nsRun)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+		// While m2-default is still running, the planner has not been called yet.
+		if len(fakeClient.Requests) != 0 {
+			t.Fatalf("expected 0 planner calls while m2-default is still running, got %d", len(fakeClient.Requests))
+		}
+
+		// Merge #5705 so m2-default finishes and the backlog drains.
+		prMerged.Store(true)
+		drv.Emit(lane.Event{
+			RunID:      nsRun,
+			LaneID:     "m2-default",
+			TerminalID: "term-m2-clean",
+			Kind:       lane.EventTurnEndedNoReport,
+			Text:       "PR #5705 merged",
+		})
+
+		waitFor(t, func() bool {
+			dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: nsRun, ActiveOnly: true})
+			if err != nil {
+				return false
+			}
+			for i := range dirs {
+				if strings.HasPrefix(dirs[i].Ref, "owner_ask:") && strings.Contains(dirs[i].Text, "staging or prod") {
+					return true
+				}
+			}
+			return false
+		})
+	})
+
+	t.Run("planner_error_does_not_retry_until_objective_changes", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), ".swarm")
+		last := time.Date(2026, 11, 14, 18, 52, 0, 0, time.UTC)
+		dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", last)
+		write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"M1 trial","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"squash",
+"phases":[{"name":"swe","kind":"claude"},{"name":"review","kind":"claude"}]},
+"tasks":[{"id":"m2-gaps2","title":"m2 gaps2","branch":"swarm-lane/20261114-trial-m1/m2-gaps2","priority":"p1","status":"done","phase":"review","round":1,"session_id":"sess-m2","terminals":{"review":{"1":"term-m2-review"}},"pr":5786,"pr_head":"bbb","approval_sha":"bbb","merge_sha":"999aaaa","terminal_state":"","verdict":"pass"}]}`)
+		write(t, filepath.Join(dir, "OBJECTIVE.md"), "# 20261114-trial-m1\n\nGoal: Complete M1-M4.\nNext: staff items 6-7.\n")
+
+		clk := clock.NewFakeClock(last)
+		st := store.NewMemoryStore(clk)
+		t.Cleanup(func() { _ = st.Close() })
+		drv := lane.NewFakeDriver()
+
+		var plannerCalls atomic.Int32
+		controllers := NewControllers(t.Context(), st, drv, clk, nil)
+		controllers.Planner = func(_ context.Context, _, _, _ string) error {
+			plannerCalls.Add(1)
+			return errors.New("gateway 502")
+		}
+		label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+		s := nsService(root, loop, label)
+		s.Driver = controllers
+		r, err := s.Adopt(t.Context(), nsRun)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+		if got := plannerCalls.Load(); got != 1 {
+			t.Fatalf("plannerCalls on adopt = %d, want 1", got)
+		}
+		// Repeated planNextWorkIfDrained calls with unchanged OBJECTIVE.md must not re-trigger the failing planner.
+		if _, err := controllers.planNextWorkIfDrained(t.Context(), nsRun, "backlog_drained"); err != nil {
+			t.Fatal(err)
+		}
+		if got := plannerCalls.Load(); got != 1 {
+			t.Fatalf("plannerCalls after unchanged planNextWorkIfDrained = %d, want 1 (no unbounded retry)", got)
+		}
+		// Updating OBJECTIVE.md changes the planKey and allows a fresh planner invocation.
+		write(t, filepath.Join(dir, "OBJECTIVE.md"), "# 20261114-trial-m1\n\nGoal: Complete M1-M4.\nNext: staff items 6-7 and M4.\n")
+		_, _ = controllers.planNextWorkIfDrained(t.Context(), nsRun, "backlog_drained")
+		if got := plannerCalls.Load(); got != 2 {
+			t.Fatalf("plannerCalls after OBJECTIVE.md change = %d, want 2", got)
+		}
+	})
+}
+
+func TestAdoptedRunPlannerHeartbeatsLeaseWhileRunning(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), ".swarm")
+	start := time.Date(2026, 11, 14, 18, 52, 0, 0, time.UTC)
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", start)
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"M1 trial","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"squash",
+"phases":[{"name":"swe","kind":"claude"},{"name":"review","kind":"claude"}]},
+"tasks":[{"id":"m2-gaps2","title":"m2 gaps2","branch":"swarm-lane/20261114-trial-m1/m2-gaps2","priority":"p1","status":"done","phase":"review","round":1,"session_id":"sess-m2","terminals":{"review":{"1":"term-m2-review"}},"pr":5786,"pr_head":"bbb","approval_sha":"bbb","merge_sha":"999aaaa","terminal_state":"","verdict":"pass"}]}`)
+	write(t, filepath.Join(dir, "OBJECTIVE.md"), "# 20261114-trial-m1\n\nGoal: Complete M1-M4.\nNext: when #5786 merges, staff a lane for items 6-7.\n")
+
+	clk := clock.NewFakeClock(start)
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+
+	controllers := NewControllers(t.Context(), st, drv, clk, nil)
+	var plannerCalled atomic.Bool
+	controllers.Planner = func(ctx context.Context, runID, _, _ string) error {
+		plannerCalled.Store(true)
+		// Advance the clock past DefaultLeaseTTL in heartbeat steps while inside the blocking Planner call.
+		for range 4 {
+			clk.Advance(controller.DefaultHeartbeatInterval)
+			wantExpiry := clk.Now().Add(controller.DefaultLeaseTTL)
+			// Wait for the keepLease goroutine to process the ticker fire and extend ExpiresAt.
+			waitFor(t, func() bool {
+				got, err := st.Runs().Get(ctx, runID)
+				return err == nil && got.Lease != nil && got.Lease.ExpiresAt.Equal(wantExpiry)
+			})
+		}
+		// While the planner is still running after > DefaultLeaseTTL, a competing holder must be rejected.
+		if _, err := st.Runs().AcquireLease(ctx, runID, "competing-holder", controller.DefaultLeaseTTL); !errors.Is(err, store.ErrLeaseHeld) {
+			t.Errorf("competing AcquireLease during slow planner call = %v, want ErrLeaseHeld", err)
+		}
+		return nil
+	}
+
+	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+	s := nsService(root, loop, label)
+	s.Driver = controllers
+	r, err := s.Adopt(t.Context(), nsRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+	if !plannerCalled.Load() {
+		t.Fatal("expected Planner to be called on adopt of drained run with Next: work")
+	}
+}
+
+func TestAdoptObjectiveAndCheckpointHelpers(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	planFile := filepath.Join(dir, "docs", "my-plan.md")
+	if err := os.MkdirAll(filepath.Dir(planFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, planFile, "# Plan\n")
+
+	// 1. OBJECTIVE.md > 8,000 bytes is preserved in full without truncation.
+	padding := strings.Repeat("Detailed milestone context line.\n", 300) // > 9,600 bytes
+	longObj := "# Goal\n" + padding + "Plan: docs/my-plan.md\nNext: staff m4-metrics after m2 merges\n"
+	write(t, filepath.Join(dir, "OBJECTIVE.md"), longObj)
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"short config goal","phases":[{"name":"swe"},{"name":"review"}]},"tasks":[]}`)
+
+	r, err := Read(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Objective) <= 8000 {
+		t.Fatalf("expected unclipped Objective > 8000 bytes, got %d bytes", len(r.Objective))
+	}
+	if r.PlanPath != planFile {
+		t.Fatalf("PlanPath = %q, want %q", r.PlanPath, planFile)
+	}
+	if r.Next != "staff m4-metrics after m2 merges" {
+		t.Fatalf("Next = %q, want %q", r.Next, "staff m4-metrics after m2 merges")
+	}
+	if !r.HasNextWork() {
+		t.Fatal("expected HasNextWork() = true")
+	}
+	if full := r.FullObjective(); !strings.Contains(full, "Next: staff m4-metrics after m2 merges") || !strings.Contains(full, planFile) {
+		t.Fatalf("FullObjective missing expected sections:\n%s", full)
+	}
+	if gotRef := planner.ExtractObjectivePlanRef(r.FullObjective()); gotRef != planFile {
+		t.Fatalf("ExtractObjectivePlanRef(FullObjective) = %q, want resolved %q", gotRef, planFile)
+	}
+	if !planner.MatchesObjectivePlanRef(r.FullObjective(), planFile) || !planner.MatchesObjectivePlanRef(r.FullObjective(), "docs/my-plan.md") {
+		t.Fatalf("MatchesObjectivePlanRef rejected valid plan ref in FullObjective:\n%s", r.FullObjective())
+	}
+
+	// 1b. Unconfined Plan: paths (/etc/passwd or ../escape) are rejected by extractPlanPath and stripped by FullObjective.
+	if got := extractPlanPath(dir, "Plan: /etc/passwd\n"); got != "" {
+		t.Fatalf("extractPlanPath(/etc/passwd) = %q, want empty", got)
+	}
+	if got := extractPlanPath(dir, "Plan: ../../escape.md\n"); got != "" {
+		t.Fatalf("extractPlanPath(../../escape.md) = %q, want empty", got)
+	}
+	if got := extractPlanPath(dir, "Plan: post:286c9d4f-9da3-4787-aa66-bd97aa21f947\n"); got != "post:286c9d4f-9da3-4787-aa66-bd97aa21f947" {
+		t.Fatalf("extractPlanPath(nebula post) = %q", got)
+	}
+	if got := extractPlanPath(dir, "See Plan: foo.md\n- Plan: bar.md\nNext: update Plan: log\n"); got != "" {
+		t.Fatalf("extractPlanPath matched prose/list lines: %q", got)
+	}
+	unconfinedRun := Run{
+		Dir:       dir,
+		Objective: "# Goal\nPlan: /etc/passwd\nPlan: ../outside.md\nNext: staff m4\n",
+	}
+	if full := unconfinedRun.FullObjective(); strings.Contains(full, "/etc/passwd") || strings.Contains(full, "../outside.md") {
+		t.Fatalf("FullObjective failed to strip unconfined Plan: lines:\n%s", full)
+	}
+
+	// 2. HasNextWork returns false for "none" / "done" / "n/a" / "complete" and true for unchecked checkboxes and multi-line Next:.
+	for _, doneNext := range []string{"none", "done.", "N/A", "complete", "completed"} {
+		rDone := Run{Objective: "Goal: finished\nNext: " + doneNext + "\n", Next: extractNextSection("Goal: finished\nNext: " + doneNext + "\n")}
+		if rDone.HasNextWork() {
+			t.Fatalf("expected HasNextWork() = false for Next: %s, got true (Next=%q)", doneNext, rDone.Next)
+		}
+	}
+	multiNext := extractNextSection("Goal: g\nNext:\n- step 1\n- step 2\n\nMilestones:\n- [x] M1\n")
+	if multiNext != "- step 1\n- step 2" {
+		t.Fatalf("extractNextSection(multi-line) = %q, want %q", multiNext, "- step 1\n- step 2")
+	}
+	rCheckbox := Run{Objective: "# Run\n- [x] M1\n- [ ] M2 open\n"}
+	if !rCheckbox.HasNextWork() {
+		t.Fatal("expected HasNextWork() = true when objective has unchecked item")
+	}
+
+	// 3. ledgerPhase maps synthetic phase (e.g. "integrate") to fallback or last configured phase.
+	if got := ledgerPhase("integrate", []string{"swe", "review"}, "review"); got != "review" {
+		t.Fatalf("ledgerPhase(integrate, [swe,review], review) = %q, want review", got)
+	}
+	if got := ledgerPhase("integrate", []string{"swe", "review"}, ""); got != "review" {
+		t.Fatalf("ledgerPhase(integrate, [swe,review], '') = %q, want review", got)
+	}
+
+	// 4. checkpoint !found branch for subagent-swarm writes sessions and spawn.json, and lockLedgerFile retries under brief contention.
+	lockFile, err := os.OpenFile(filepath.Join(dir, "state.json.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lockLedgerFile(lockFile); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		_ = lockFile.Close()
+	}()
+	newLane := lane.Lane{
+		ID:         "new-lane",
+		RunID:      "run-1",
+		Title:      "New lane",
+		Branch:     "swarm-lane/run-1/new-lane",
+		Phase:      "swe",
+		Round:      1,
+		Status:     lane.StatusRunning,
+		SessionID:  "sess-new",
+		TerminalID: "term-new",
+		Terminals:  map[string]string{"swe": "term-new"},
+	}
+	if err := checkpoint(dir, []lane.Lane{newLane}); err != nil {
+		t.Fatalf("checkpoint with new lane under brief lock contention failed: %v", err)
+	}
+	if !fileExists(filepath.Join(dir, "new-lane.swe.spawn.json")) {
+		t.Fatal("expected checkpoint(!found) for subagent-swarm to write new-lane.swe.spawn.json")
+	}
+	if stateAfter := readText(filepath.Join(dir, "state.json")); !strings.Contains(stateAfter, `"nebula:term-new"`) {
+		t.Fatalf("expected checkpoint(!found) to record sessions map, got:\n%s", stateAfter)
+	}
+}
+
 func TestAdoptedNebulaSwarmSpawnUsesConfigRepo(t *testing.T) {
 	t.Parallel()
 	const wantRepoID = "2a19e6e7-939e-44b2-a80f-8980030efc50"
@@ -1166,6 +1806,7 @@ func TestAdoptedBriefCitingObjectiveInlinesItems(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	controllers.Wake(nsRun)
 	waitFor(t, func() bool {
 		return len(drv.Spawns) == 2
 	})
@@ -1256,7 +1897,11 @@ func TestAdoptedWrongRepoLaneReportRespawnsInsteadOfSteering(t *testing.T) {
 	})
 
 	waitFor(t, func() bool {
-		return len(drv.Releases) == 1 && len(drv.Spawns) == 1
+		if len(drv.Releases) != 1 || len(drv.Spawns) != 1 {
+			return false
+		}
+		got, err := st.Lanes().Get(t.Context(), nsRun, "m2-gaps3")
+		return err == nil && got.Status == lane.StatusRunning && got.SessionID != "018a40a9"
 	})
 	if drv.Releases[0] != "018a40a9" {
 		t.Fatalf("released session = %q, want 018a40a9", drv.Releases[0])
