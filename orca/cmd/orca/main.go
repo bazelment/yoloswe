@@ -359,10 +359,10 @@ func executeChat(
 	return chatui.Run(ctx, stdin, stdout, ui)
 }
 
-// resumedLines bounds the earlier conversation a restarted chat shows.
+// resumedLines bounds displayed resumed history.
 const resumedLines = 6
 
-// transcriptLines renders the tail of a resumed conversation for the chat view.
+// transcriptLines renders the tail of resumed history.
 func transcriptLines(history []model.Message) []string {
 	if len(history) == 0 {
 		return nil

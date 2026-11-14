@@ -37,10 +37,9 @@ const (
 	ToolRunStart            = "run.start"
 	ToolSwarms              = "swarms"
 	DefaultConciergeMaxTurn = 6
-	// conciergeHistoryMessages bounds the earlier messages a resumed thread
-	// carries into the next turn.
+	// conciergeHistoryMessages bounds resumed thread history.
 	conciergeHistoryMessages = 40
-	// swarmsReadBytes bounds the swarms tool result.
+	// swarmsReadBytes bounds the swarms tool output.
 	swarmsReadBytes = 12000
 )
 
@@ -173,8 +172,7 @@ func (c *Concierge) ensureThread(ctx context.Context) (string, error) {
 	return th.ID, nil
 }
 
-// Resume continues the run's most recent concierge thread, so a restarted chat
-// keeps its conversation, and returns that thread's earlier messages.
+// Resume continues the most recent concierge thread and returns its history.
 func (c *Concierge) Resume(ctx context.Context) ([]model.Message, error) {
 	threads, err := c.store.Threads().ListThreads(ctx, store.ThreadFilter{RunID: c.runID, Role: store.ThreadRoleConcierge})
 	if err != nil || len(threads) == 0 {
@@ -400,10 +398,8 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 // budgetPrompt asks for an answer once the tool budget is spent.
 const budgetPrompt = "Your tool budget for this question is spent. Answer the owner now, using only the tool results above; say plainly what you could not check."
 
-// budgetAnswer answers the owner after the tool loop spent its turns: one
-// last model call without tools over this turn's tool results, or, when that
-// yields no text, the results themselves. turn holds the messages the loop
-// added after the owner's question.
+// budgetAnswer asks once without tools after the loop spends its turns, then
+// falls back to reporting the collected results.
 func (c *Concierge) budgetAnswer(ctx context.Context, req model.Request, question string, turn []model.Message) (string, model.Usage) {
 	results := toolResults(turn)
 	if c.Logger != nil {
@@ -443,8 +439,7 @@ func (c *Concierge) budgetAnswer(ctx context.Context, req model.Request, questio
 	return b.String(), usage
 }
 
-// toolResults renders each tool result in msgs as "[tool] result", newest
-// last, without repeating an identical one.
+// toolResults renders unique tool results in encounter order.
 func toolResults(msgs []model.Message) []string {
 	names := map[string]string{}
 	seen := map[string]struct{}{}
@@ -470,8 +465,7 @@ func toolResults(msgs []model.Message) []string {
 	return out
 }
 
-// plainHistory keeps the text of earlier messages, dropping tool blocks so a
-// request without tools stays well formed.
+// plainHistory removes tool blocks from earlier messages.
 func plainHistory(msgs []model.Message) []model.Message {
 	var out []model.Message
 	for i := range msgs {
@@ -488,7 +482,7 @@ func plainHistory(msgs []model.Message) []model.Message {
 	return out
 }
 
-// clipText bounds s to n bytes on a rune boundary.
+// clipText bounds s to n bytes without splitting a rune.
 func clipText(s string, n int) string {
 	if len(s) <= n {
 		return s

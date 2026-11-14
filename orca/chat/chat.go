@@ -68,7 +68,7 @@ type Model struct {
 	busy                 bool
 	width, height        int
 	streamLine           int
-	// cursor is the byte offset of the input cursor.
+	// cursor is the input cursor's byte offset.
 	cursor int
 	// hints are rendered below the prompt.
 	hints []string
@@ -78,7 +78,7 @@ func New(ctx context.Context, runID string, ask AskFunc, r router.Router) Model 
 	return Model{ctx: ctx, runID: runID, ask: ask, router: r}
 }
 
-// WithTranscript shows lines of an earlier conversation above the new one.
+// WithTranscript adds earlier conversation lines above new input.
 func (m Model) WithTranscript(lines []string) Model {
 	m.lines = append(m.lines, lines...)
 	return m

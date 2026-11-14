@@ -8,10 +8,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// setInput replaces the input and puts the cursor at its end.
+// setInput replaces input and moves the cursor to its end.
 func (m *Model) setInput(s string) { m.input, m.cursor = s, len(s) }
 
-// insert types s at the cursor.
+// insert places s at the cursor.
 func (m *Model) insert(s string) {
 	m.clampCursor()
 	m.input = m.input[:m.cursor] + s + m.input[m.cursor:]
@@ -20,11 +20,7 @@ func (m *Model) insert(s string) {
 
 func (m *Model) clampCursor() { m.cursor = min(max(m.cursor, 0), len(m.input)) }
 
-// edit applies a key to the input with the usual readline bindings: Ctrl-A/E
-// and Home/End move to the start/end, Ctrl-B/F and the arrows move by a
-// character, Ctrl-U and Ctrl-K kill to the start/end, Ctrl-W and
-// Alt-Backspace kill the previous word, Backspace/Ctrl-H and Delete/Ctrl-D
-// delete a character. Any other key with text types it.
+// edit applies readline-style movement, deletion, and insertion keys.
 func (m *Model) edit(k tea.KeyPressMsg) {
 	m.clampCursor()
 	before, after := m.input[:m.cursor], m.input[m.cursor:]
@@ -59,7 +55,7 @@ func (m *Model) edit(k tea.KeyPressMsg) {
 	}
 }
 
-// inputView renders the input with the cursor in reverse video.
+// inputView renders input with the cursor highlighted.
 func (m Model) inputView() string {
 	m.clampCursor()
 	before, after := m.input[:m.cursor], m.input[m.cursor:]

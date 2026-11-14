@@ -897,15 +897,14 @@ func WithOnToolCall(fn func(turn int, call ToolCall, result ContentBlock)) ToolL
 	}
 }
 
-// WithToolCallLog logs every tool call the loop dispatches at INFO on logger:
-// the actor, tool, an argument summary, the result size and any error.
+// WithToolCallLog logs each dispatched tool call at INFO.
 func WithToolCallLog(logger *slog.Logger, actor string) ToolLoopOption {
 	return func(c *toolLoopConfig) {
 		c.logger, c.actor = logger, actor
 	}
 }
 
-// toolLogArgsBytes bounds the argument summary and error text in tool-call logs.
+// toolLogArgsBytes bounds logged arguments and errors.
 const toolLogArgsBytes = 200
 
 func logToolCall(cfg *toolLoopConfig, turn int, call ToolCall, res ContentBlock, elapsed time.Duration) {
