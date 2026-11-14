@@ -1067,27 +1067,12 @@ func (c *Controller) reconcilePlannedLanes(ctx context.Context) error {
 
 	for i := range planned {
 		ln := planned[i]
-		if ln.ItemID != "" {
-			item, err := c.store.Backlog().Get(ctx, c.cfg.RunID, ln.ItemID)
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
-				return err
-			}
-			if item != nil {
-				ready := true
-				for _, id := range item.DependsOn {
-					dependency, err := c.store.Backlog().Get(ctx, c.cfg.RunID, id)
-					if err != nil && !errors.Is(err, store.ErrNotFound) {
-						return err
-					}
-					if dependency == nil || dependency.Status != store.BacklogDone {
-						ready = false
-						break
-					}
-				}
-				if !ready {
-					continue
-				}
-			}
+		ready, err := c.dependenciesReady(ctx, ln.ItemID)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			continue
 		}
 		r, err := c.resolveRecipe(ctx, &ln)
 		if err != nil {
@@ -1112,6 +1097,32 @@ func (c *Controller) reconcilePlannedLanes(ctx context.Context) error {
 		activeCount++
 	}
 	return nil
+}
+
+func (c *Controller) dependenciesReady(ctx context.Context, itemID string) (bool, error) {
+	if itemID == "" {
+		return true, nil
+	}
+	item, err := c.store.Backlog().Get(ctx, c.cfg.RunID, itemID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return true, nil
+		}
+		return false, err
+	}
+	for _, dependencyID := range item.DependsOn {
+		dependency, err := c.store.Backlog().Get(ctx, c.cfg.RunID, dependencyID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return false, nil
+			}
+			return false, err
+		}
+		if dependency.Status != store.BacklogDone {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (c *Controller) detectStalls(ctx context.Context) error {
