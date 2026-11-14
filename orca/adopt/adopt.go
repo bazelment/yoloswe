@@ -1,12 +1,12 @@
 // Package adopt hands a host-run swarm (a subagent-swarm-nebula run directory)
-// over to orca chat and back without creating work.
+// over to orca chat and back, attaching its lanes to the controller.
 //
 // The handover is one protocol, recorded write-ahead in a lease journal inside
 // the run directory so every step is idempotent and a rerun after a crash
 // finishes it:
 //
-//	adopt:   1 lease  2 import  3 stand-down line  4 Nebula label  5 stop watcher
-//	release: 5 restart watcher  4 restore label  3 drop line  2 drop import  1 drop lease
+//	adopt:   1 lease  2 import  3 stand-down line  4 Nebula label  5 stop watcher  6 drive
+//	release: 6 stop and checkpoint  5 restart watcher  4 restore label  3 drop line  2 drop import  1 drop lease
 //
 // A failed adopt step undoes the completed steps in reverse and drops the
 // lease; a failed release step re-applies the release steps it completed and
@@ -206,6 +206,9 @@ func importLane(dir string, l *ledgerLane) Lane {
 	if phase == "" {
 		phase = l.Phase
 	}
+	if x.Phase == "" {
+		x.Phase = phase
+	}
 	report := ""
 	if p := filepath.Join(dir, l.ID+"."+phase+".md"); phase != "" && fileExists(p) {
 		x.ReportPath = p
@@ -303,11 +306,19 @@ type Watcher interface {
 type Service struct {
 	Labeler Labeler
 	Watcher Watcher
+	Driver  RunDriver
 	Now     func() time.Time
 	// fault, when set by tests, fails the named step before it acts.
 	fault    func(step string) error
 	Holder   string
 	Importer Importer
+}
+
+// RunDriver drives imported lanes while orca owns the host run. Stop must
+// quiesce the controller and persist its lanes before the watcher restarts.
+type RunDriver interface {
+	Start(context.Context, Run) error
+	Stop(context.Context, Run) error
 }
 
 // journal is the lease file: who holds the run and what each completed
@@ -352,7 +363,7 @@ func (s *Service) Adopt(ctx context.Context, id string) (Run, error) {
 		return Run{}, err
 	}
 	if j.State == stateAdopted && j.Import != nil {
-		return *j.Import, nil
+		return s.drive(ctx, dir)
 	}
 	j.State = stateAdopting
 	if err := s.forward(ctx, dir, id, j, 2); err != nil {
@@ -361,7 +372,20 @@ func (s *Service) Adopt(ctx context.Context, id string) (Run, error) {
 		}
 		return Run{}, fmt.Errorf("adopt %s: %w (handover undone)", id, err)
 	}
-	return *j.Import, nil
+	return s.drive(ctx, dir)
+}
+
+func (s *Service) drive(ctx context.Context, dir string) (Run, error) {
+	r, err := Read(dir)
+	if err != nil {
+		return Run{}, err
+	}
+	if s.Driver != nil {
+		if err := s.Driver.Start(ctx, r); err != nil {
+			return Run{}, fmt.Errorf("start adopted run %s: %w (lease kept; retry /adopt or /release)", r.ID, err)
+		}
+	}
+	return r, nil
 }
 
 // Release hands run id back to its host orchestrator.
@@ -385,8 +409,24 @@ func (s *Service) Release(ctx context.Context, id string) error {
 	if j.Holder != s.Holder {
 		return fmt.Errorf("%w: %s is held by %s", ErrLeaseNotHeld, id, j.Holder)
 	}
+	if s.Driver != nil {
+		r, err := Read(dir)
+		if err != nil {
+			return err
+		}
+		if err := s.Driver.Stop(ctx, r); err != nil {
+			return fmt.Errorf("checkpoint adopted run %s: %w (adoption kept)", id, errors.Join(err, s.Driver.Start(ctx, r)))
+		}
+	}
 	j.State = stateReleasing
 	if err := s.save(dir, j); err != nil {
+		if s.Driver != nil {
+			r, rerr := Read(dir)
+			if rerr == nil {
+				rerr = s.Driver.Start(ctx, r)
+			}
+			err = errors.Join(err, rerr)
+		}
 		return err
 	}
 	next, err := s.unwind(ctx, dir, id, j)
@@ -404,6 +444,15 @@ func (s *Service) Release(ctx context.Context, id string) error {
 	}
 	if werr := writeAtomic(p, orig); werr != nil {
 		return fmt.Errorf("release %s: %w; restoring the lease failed: %v", id, err, werr)
+	}
+	if s.Driver != nil {
+		r, rerr := Read(dir)
+		if rerr == nil {
+			rerr = s.Driver.Start(ctx, r)
+		}
+		if rerr != nil {
+			return fmt.Errorf("release %s: %w; restart controller: %v", id, err, rerr)
+		}
 	}
 	return fmt.Errorf("release %s: %w (adoption kept)", id, err)
 }
@@ -535,7 +584,7 @@ func (s *Service) mark(dir string, j *journal) error {
 		if s.Now != nil {
 			now = s.Now()
 		}
-		j.Marker = fmt.Sprintf("%s%s (%s). Claude sessions: do not act on this run; run /release in orca to hand back.\n", markerPrefix, now.UTC().Format(time.RFC3339), s.Holder)
+		j.Marker = fmt.Sprintf("%s%s (%s). Claude sessions: do not act on this run; run /release in orca to hand back.\n", markerPrefix, now.UTC().Format(time.RFC3339Nano), s.Holder)
 		j.Created = nil
 		for _, n := range handoverFiles {
 			if !fileExists(filepath.Join(dir, n)) {

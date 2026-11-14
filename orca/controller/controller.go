@@ -1403,6 +1403,9 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 	if err != nil {
 		return store.EventClassJudgment, nil
 	}
+	if rep.TerminalID != "" && ln.TerminalID != "" && rep.TerminalID != ln.TerminalID {
+		return store.EventClassAuto, nil
+	}
 	if strings.TrimSpace(rep.Summary) != "" {
 		_, err := c.store.Notes().Append(ctx, store.RunNote{ID: "report-" + ev.ID, RunID: c.cfg.RunID, TaskID: cmp.Or(ln.ItemID, ln.ID), Phase: rep.Phase, Text: rep.Summary})
 		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {

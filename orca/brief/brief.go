@@ -105,6 +105,13 @@ type memoryDriver struct {
 	store store.Store
 }
 
+func (d *memoryDriver) ReleaseSession(ctx context.Context, sessionID string, force ...bool) error {
+	if releaser, ok := d.LaneDriver.(lane.SessionReleaser); ok {
+		return releaser.ReleaseSession(ctx, sessionID, force...)
+	}
+	return nil
+}
+
 func (d *memoryDriver) render(ctx context.Context, runID, laneID, text string) (string, error) {
 	memories, err := d.store.Memories().List(ctx, store.MemoryFilter{RunID: runID})
 	if err != nil {

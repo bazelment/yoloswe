@@ -968,6 +968,9 @@ func TestRunnerStartsLiveWatches(t *testing.T) {
 	if err != nil || ln.Status != lane.StatusDone {
 		t.Fatalf("Watch progression: %+v %v", ln, err)
 	}
+	if len(drv.Releases) != 1 || drv.Releases[0] != ln.SessionID {
+		t.Fatalf("completed lane session releases = %v, want [%s]", drv.Releases, ln.SessionID)
+	}
 	before, _ := st.Events().List(t.Context(), store.EventFilter{RunID: "watch-run"})
 	box.Inject(mailbox.Message{LaneID: "worker", Body: "mailbox inbound"})
 	runnerWaitFor(t, func() bool {
