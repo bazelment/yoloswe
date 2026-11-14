@@ -848,3 +848,117 @@ func TestSwarmsRecentFirstCompactRowsAndFilter(t *testing.T) {
 		t.Fatalf("filtered run should render full detail for matched run only, got:\n%s", fout)
 	}
 }
+
+func TestSnapshotCachesPRProbeAndReleasesLockBeforeProbing(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	clk := clock.NewFakeClock(swarmNow)
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	if err := st.Runs().Create(ctx, store.Run{ID: "run-1", Repository: "org/repo", Objective: "ship status"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(ctx, store.Lane{
+		RunID: "run-1", ID: "lane-a", Phase: "review", Status: "running", Round: 1, PR: 401,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	blockProbe := make(chan struct{})
+	close(blockProbe)
+	probeEntered := make(chan struct{}, 4)
+
+	b := NewStoreBackend(st, "run-1")
+	b.Now = clk.Now
+	b.HostProbe = HostProbe{
+		PR: func(_ context.Context, _, _, _ string) (PRStatus, error) {
+			n := calls.Add(1)
+			probeEntered <- struct{}{}
+			<-blockProbe
+			if n == 1 {
+				return PRStatus{Number: 401, State: "OPEN", Checks: "1 passed"}, nil
+			}
+			return PRStatus{Number: 401, State: "MERGED"}, nil
+		},
+	}
+
+	s1, err := b.Snapshot(ctx)
+	if err != nil || !strings.Contains(s1.Status, "PR #401 (open, checks: 1 passed)") {
+		t.Fatalf("first snapshot = %+v, %v", s1, err)
+	}
+	// Second snapshot within TTL reuses cached PR summary without calling HostProbe.PR.
+	clk.Advance(10 * time.Second)
+	s2, err := b.Snapshot(ctx)
+	if err != nil || !strings.Contains(s2.Status, "PR #401 (open, checks: 1 passed)") {
+		t.Fatalf("second snapshot = %+v, %v", s2, err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("HostProbe.PR calls within TTL = %d, want 1", got)
+	}
+
+	// Expire TTL and hold the probe open to verify Snapshot does not hold b.mu across HostProbe.PR.
+	clk.Advance(25 * time.Second)
+	blockProbe = make(chan struct{})
+	snapDone := make(chan Snapshot, 1)
+	go func() {
+		s, snapErr := b.Snapshot(ctx)
+		if snapErr != nil {
+			t.Errorf("concurrent Snapshot error: %v", snapErr)
+		}
+		snapDone <- s
+	}()
+	select {
+	case <-probeEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe did not start")
+	}
+
+	// While HostProbe.PR is blocked, Attach (writer lock) and Questions (reader lock) must not block.
+	writerDone := make(chan error, 1)
+	go func() {
+		writerDone <- b.Attach(st, "run-1")
+	}()
+	select {
+	case wErr := <-writerDone:
+		if wErr != nil {
+			t.Fatalf("Attach while probe blocked: %v", wErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Attach blocked behind in-flight HostProbe.PR")
+	}
+	close(blockProbe)
+
+	s3 := <-snapDone
+	if !strings.Contains(s3.Status, "PR #401 (merged)") || calls.Load() != 2 {
+		t.Fatalf("third snapshot after TTL = %q (calls=%d), want merged and 2 calls", s3.Status, calls.Load())
+	}
+}
+
+func TestSnapshotErrorRendersInFooterAndTabsWrapToWidth(t *testing.T) {
+	t.Parallel()
+	m := New(t.Context(), "run-1", nil, nil)
+	m.width = 20
+	m.status = "goal: old"
+	next, cmd := m.Update(snapshotMsg{err: os.ErrClosed})
+	m = next.(Model)
+	if cmd != nil || len(m.lines) != 0 {
+		t.Fatalf("snapshot error should not print scrollback lines: cmd=%v lines=%v", cmd, m.lines)
+	}
+	if !strings.HasPrefix(m.status, "status error: ") {
+		t.Fatalf("snapshot error status = %q, want status error prefix", m.status)
+	}
+
+	wrapped := wrapPhysicalLines("\tindented code line that wraps", 16)
+	if len(wrapped) < 2 {
+		t.Fatalf("expected tab-expanded line to wrap at width 16, got %v", wrapped)
+	}
+	for _, row := range wrapped {
+		if strings.Contains(row, "\t") || len([]rune(row)) > 15 {
+			t.Fatalf("wrapped row %q still contains tab or exceeds effective width 15", row)
+		}
+	}
+	trunc := truncateLine("\t0123456789abcdef", 12)
+	if strings.Contains(trunc, "\t") || len([]rune(trunc)) > 11 {
+		t.Fatalf("truncated line %q (%d runes) exceeds effective width 11", trunc, len([]rune(trunc)))
+	}
+}

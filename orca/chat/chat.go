@@ -231,6 +231,10 @@ func (m *Model) requestRefresh() tea.Cmd {
 	m.refreshing = cmd != nil
 	return cmd
 }
+
+// pollInterval returns the periodic status refresh cadence (default 15s);
+// store.Store has no push notifications and controllers may run out-of-process,
+// so store mutations are observed within one poll interval or on turn end.
 func (m Model) pollInterval() time.Duration {
 	if m.PollInterval > 0 {
 		return m.PollInterval
@@ -402,9 +406,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case snapshotMsg:
 		m.refreshing = false
 		if x.err != nil {
-			errLine := "error: " + x.err.Error()
-			m.lines = append(m.lines, errLine)
-			return m, m.printLines(errLine)
+			m.status = "status error: " + x.err.Error()
+			return m, nil
 		}
 		m.status = x.snapshot.Status
 		m.questions = x.snapshot.Questions
@@ -608,17 +611,28 @@ func (m Model) statusFooter() string {
 	}
 	return "\n" + strings.Join(out, "\n")
 }
+func expandTabs(s string) string {
+	return strings.ReplaceAll(s, "\t", "    ")
+}
+func effectiveWidth(width int) int {
+	if width > 1 {
+		return width - 1
+	}
+	return width
+}
 func wrapPhysicalLines(s string, width int) []string {
+	s = expandTabs(s)
 	if width <= 1 {
 		return strings.Split(s, "\n")
 	}
-	return strings.Split(runewidth.Wrap(s, width-1), "\n")
+	return strings.Split(runewidth.Wrap(s, effectiveWidth(width)), "\n")
 }
 func truncateLine(s string, width int) string {
+	s = expandTabs(s)
 	if width <= 0 {
 		return s
 	}
-	return runewidth.Truncate(s, width, "…")
+	return runewidth.Truncate(s, effectiveWidth(width), "…")
 }
 func isTerminal(in io.Reader) bool { f, ok := in.(*os.File); return ok && term.IsTerminal(int(f.Fd())) }
 func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {
@@ -627,6 +641,16 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {
 	m.ctx = ctx
 	if isTerminal(in) {
 		m.poll = true
+		if m.width <= 0 {
+			for _, rw := range []any{out, in} {
+				if f, ok := rw.(*os.File); ok {
+					if w, _, err := term.GetSize(int(f.Fd())); err == nil && w > 0 {
+						m.width = w
+						break
+					}
+				}
+			}
+		}
 		final, err := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out), tea.WithContext(ctx)).Run()
 		if err == nil {
 			if fm, ok := final.(Model); ok && fm.restarting {
