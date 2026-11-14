@@ -198,7 +198,7 @@ type spawnFile struct {
 
 func importLane(dir string, l *ledgerLane) Lane {
 	x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: l.Status, Round: l.Round}
-	phase, sp := newestSpawn(dir, l.ID)
+	phase, sp := newestSpawn(dir, l.ID, l.Phase)
 	// The ledger records a terminal restart after spawn.json was written, so
 	// its session and terminal are the newer ones when set.
 	x.Session = firstNonEmpty(l.NebulaSession, sp.SessionID)
@@ -222,7 +222,17 @@ func importLane(dir string, l *ledgerLane) Lane {
 // newestSpawn returns the phase and contents of the lane's most recently
 // written <lane>.<phase>.spawn.json; a rework round rewrites the file of its
 // phase, so the newest one is the current round.
-func newestSpawn(dir, laneID string) (string, spawnFile) {
+
+func newestSpawn(dir, laneID, currentPhase string) (string, spawnFile) {
+	if currentPhase != "" {
+		p := filepath.Join(dir, laneID+"."+currentPhase+".spawn.json")
+		if b, err := os.ReadFile(p); err == nil {
+			var sp spawnFile
+			if json.Unmarshal(b, &sp) == nil {
+				return currentPhase, sp
+			}
+		}
+	}
 	paths, _ := filepath.Glob(filepath.Join(dir, laneID+".*.spawn.json"))
 	var phase string
 	var newest time.Time
