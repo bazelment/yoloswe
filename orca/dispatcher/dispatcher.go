@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -54,6 +55,8 @@ type Config struct {
 	RecipeCompiler   RecipeCompiler
 	OnPlannerRequest func(ctx context.Context, runID, reason, planRef string) error
 	OnOwnerAnswer    func(ctx context.Context, runID, askID, answer string) error
+	// Logger, when set, receives one INFO line per tool call.
+	Logger *slog.Logger
 	// Temperature is the sampling temperature for judgment turns. Nil omits it
 	// from the request: newer models reject the parameter outright.
 	Temperature    *float64
@@ -360,6 +363,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 		req,
 		reg,
 		model.WithMaxTurns(d.cfg.MaxTurns),
+		model.WithToolCallLog(d.cfg.Logger, ActorDispatcher),
 		model.WithOnTurn(func(turn int, resp model.Response) {
 			state.currentTurn = turn
 			state.turnUsage[turn] = resp.Usage

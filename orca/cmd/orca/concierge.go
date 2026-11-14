@@ -5,12 +5,15 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
@@ -32,14 +35,19 @@ const (
 	ToolMemoryRead          = "memory.read"
 	ToolRunSettings         = memorychat.ToolRunSettings
 	ToolRunStart            = "run.start"
+	ToolSwarms              = "swarms"
 	DefaultConciergeMaxTurn = 6
+	// conciergeHistoryMessages bounds resumed thread history.
+	conciergeHistoryMessages = 40
+	// swarmsReadBytes bounds the swarms tool output.
+	swarmsReadBytes = 12000
 )
 
 // ConciergeSystemPrompt is the system prompt for owner chat sessions.
 const ConciergeSystemPrompt = `You are the Nebula Swarm Concierge.
 When the owner states a new goal or asks to start work, call run.start with the goal text. Do not submit a generic directive for a new goal.
 You are the front desk for unclear or mixed messages: clarify with one question only if you must; otherwise save rules with memory.submit and forward plan changes or orders with directive.submit. Use run.control to pause, resume or stop execution. Use run.settings to tune concurrency and stall timeout.
-Answer the owner's questions accurately and concisely using read-only Store tools (status, lane.show, decisions.since, pr.ci).
+Answer the owner's questions accurately and concisely using read-only Store tools (status, lane.show, decisions.since, pr.ci). For questions about the swarms or runs on this machine (which are active, what each is doing), call swarms once and answer from it.
 	Never invent facts not present in the Store. Owner corrections become memory.submit proposals saved immediately with a source quote; memory.undo reverts the last change.`
 
 type ConciergeStatusParams struct {
@@ -69,6 +77,9 @@ type DirectiveSubmitParams struct {
 	Expiry string `json:"expiry,omitempty" jsonschema:"description=Optional RFC3339 timestamp or Go duration (e.g. 24h)"`
 }
 
+// SwarmsParams takes no arguments.
+type SwarmsParams struct{}
+
 type RunStartParams struct {
 	Goal string `json:"goal" jsonschema:"required,description=Goal for the new run"`
 }
@@ -90,6 +101,11 @@ type Concierge struct {
 	// the owner a question; a plain yes on the next turn confirms.
 	startAsked bool
 	RunStart   func(context.Context, string) (string, error)
+	// Swarms lists this machine's orca runs and host swarms for the swarms
+	// tool; nil leaves the tool out.
+	Swarms func(context.Context) chat.SwarmList
+	// Logger receives one INFO line per tool call and a WARN on a budget stop.
+	Logger *slog.Logger
 }
 
 // startTurn gates run.start for one owner turn.
@@ -154,6 +170,64 @@ func (c *Concierge) ensureThread(ctx context.Context) (string, error) {
 	c.threadID = th.ID
 	c.mu.Unlock()
 	return th.ID, nil
+}
+
+// Resume continues the most recent concierge thread and returns its history.
+func (c *Concierge) Resume(ctx context.Context) ([]model.Message, error) {
+	threads, err := c.store.Threads().ListThreads(ctx, store.ThreadFilter{RunID: c.runID, Role: store.ThreadRoleConcierge})
+	if err != nil || len(threads) == 0 {
+		return nil, err
+	}
+	latest := slices.MaxFunc(threads, func(a, b store.Thread) int {
+		return cmp.Or(a.UpdatedAt.Compare(b.UpdatedAt), cmp.Compare(a.ID, b.ID))
+	})
+	items, err := c.store.Threads().ListItems(ctx, latest.ID, "", 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	var history []model.Message
+	for i := range items {
+		it := &items[i]
+		if strings.TrimSpace(it.Content) == "" {
+			continue
+		}
+		switch it.Kind {
+		case store.ItemKindUserMessage:
+			history = append(history, model.NewUserMessage(it.Content))
+		case store.ItemKindAssistantMessage:
+			history = append(history, model.NewAssistantMessage(model.NewTextBlock(it.Content)))
+		}
+	}
+	history = history[max(len(history)-conciergeHistoryMessages, 0):]
+	// A failed turn can leave consecutive user messages; normalize the tail so
+	// providers that require alternating roles can accept resumed history.
+	var normalized []model.Message
+	for _, msg := range history {
+		if len(normalized) > 0 && normalized[len(normalized)-1].Role == msg.Role {
+			prev := normalized[len(normalized)-1].Text()
+			joined := strings.TrimSpace(prev + "\n" + msg.Text())
+			if msg.Role == model.RoleUser {
+				normalized[len(normalized)-1] = model.NewUserMessage(joined)
+			} else {
+				normalized[len(normalized)-1] = model.NewAssistantMessage(model.NewTextBlock(joined))
+			}
+			continue
+		}
+		normalized = append(normalized, msg)
+	}
+	history = normalized
+	if len(history) > 0 && history[0].Role == model.RoleAssistant {
+		history = history[1:]
+	}
+	if latest.Status == store.ThreadStatusArchived {
+		if err := c.store.Threads().UpdateThreadStatus(ctx, latest.ID, store.ThreadStatusIdle); err != nil {
+			return nil, err
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.threadID, c.history = latest.ID, slices.Clone(history)
+	return history, nil
 }
 
 // Close archives the Concierge conversation thread.
@@ -262,7 +336,9 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 		c.client,
 		req,
 		reg,
-		model.WithMaxTurns(DefaultConciergeMaxTurn),
+		// The last turn of the budget is kept for a forced answer.
+		model.WithMaxTurns(DefaultConciergeMaxTurn-1),
+		model.WithToolCallLog(c.Logger, ActorConcierge),
 		model.WithOnTurn(func(_ int, resp model.Response) {
 			if txt := strings.TrimSpace(resp.Text()); txt != "" {
 				if emit != nil {
@@ -304,7 +380,20 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 		usage  model.Usage
 		answer string
 	)
-	if loopRes != nil {
+	if errors.Is(loopErr, model.ErrMaxTurnsExceeded) && loopRes != nil {
+		var final model.Usage
+		answer, final = c.budgetAnswer(ctx, req, question, loopRes.Messages[len(msgs):])
+		usage, loopErr = loopRes.Usage.Add(final), nil
+		if emit != nil {
+			emit(answer)
+		}
+		_, _ = c.store.Threads().AppendItem(cleanupCtx, store.Item{ThreadID: threadID, TurnID: turnID, Kind: store.ItemKindAssistantMessage, Content: answer})
+		// The transcript ends on an unanswered tool call; keep the turn as
+		// plain text so the next request is well formed.
+		c.mu.Lock()
+		c.history = append(slices.Clone(msgs), model.NewAssistantMessage(model.NewTextBlock(answer)))
+		c.mu.Unlock()
+	} else if loopRes != nil {
 		usage = loopRes.Usage
 		answer = strings.TrimSpace(loopRes.Response.Text())
 		c.mu.Lock()
@@ -324,6 +413,108 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 		return answer, err
 	}
 	return answer, nil
+}
+
+// budgetPrompt asks for an answer once the tool budget is spent.
+const budgetPrompt = "Your tool budget for this question is spent. Answer the owner now, using only the tool results above; say plainly what you could not check."
+
+// budgetAnswer asks once without tools after the loop spends its turns, then
+// falls back to reporting the collected results.
+func (c *Concierge) budgetAnswer(ctx context.Context, req model.Request, question string, turn []model.Message) (string, model.Usage) {
+	results := toolResults(turn)
+	if c.Logger != nil {
+		c.Logger.Warn("concierge turn budget spent", "turns", DefaultConciergeMaxTurn-1, "tool_results", len(results))
+	}
+	var prompt strings.Builder
+	fmt.Fprintf(&prompt, "Owner question: %s\n\nTool results so far:\n", question)
+	for _, r := range results {
+		prompt.WriteString(r + "\n")
+	}
+	if len(results) == 0 {
+		prompt.WriteString("(none)\n")
+	}
+	prompt.WriteString("\n" + budgetPrompt)
+	final := req.Clone()
+	final.Tools = nil
+	final.Messages = append(plainHistory(req.Messages[:len(req.Messages)-1]), model.NewUserMessage(prompt.String()))
+	var usage model.Usage
+	resp, err := c.client.CreateMessage(ctx, final)
+	if err == nil && resp != nil {
+		usage = resp.Usage
+		if txt := strings.TrimSpace(resp.Text()); txt != "" && len(resp.ToolCalls()) == 0 {
+			return txt, usage
+		}
+	}
+	if c.Logger != nil {
+		c.Logger.Warn("concierge forced answer failed; reporting raw tool results", "error", err)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "I used my %d-turn budget before I could finish answering. What I found so far:", DefaultConciergeMaxTurn)
+	if len(results) == 0 {
+		b.WriteString(" nothing yet.")
+	}
+	for _, r := range results {
+		b.WriteString("\n" + r)
+	}
+	return b.String(), usage
+}
+
+// toolResults renders unique tool results in encounter order.
+func toolResults(msgs []model.Message) []string {
+	names := map[string]string{}
+	seen := map[string]struct{}{}
+	var out []string
+	for i := range msgs {
+		for j := range msgs[i].Content {
+			blk := &msgs[i].Content[j]
+			switch {
+			case blk.Type == model.BlockTypeToolUse:
+				names[blk.ID] = blk.Name
+			case blk.Type == model.BlockTypeToolResult:
+				limit := 2000
+				if names[blk.ToolUseID] == ToolSwarms {
+					limit = swarmsReadBytes
+				}
+				r := fmt.Sprintf("[%s] %s", cmp.Or(names[blk.ToolUseID], "tool"), clipText(strings.TrimSpace(blk.Content), limit))
+				if blk.IsError {
+					r = fmt.Sprintf("[%s] error: %s", cmp.Or(names[blk.ToolUseID], "tool"), clipText(strings.TrimSpace(blk.Content), 300))
+				}
+				if _, ok := seen[r]; !ok {
+					seen[r] = struct{}{}
+					out = append(out, r)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// plainHistory removes tool blocks from earlier messages.
+func plainHistory(msgs []model.Message) []model.Message {
+	var out []model.Message
+	for i := range msgs {
+		txt := strings.TrimSpace(msgs[i].Text())
+		if txt == "" {
+			continue
+		}
+		if msgs[i].Role == model.RoleAssistant {
+			out = append(out, model.NewAssistantMessage(model.NewTextBlock(txt)))
+		} else {
+			out = append(out, model.NewUserMessage(txt))
+		}
+	}
+	return out
+}
+
+// clipText bounds s to n bytes without splitting a rune.
+func clipText(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "...[truncated]"
 }
 
 // RunInteractive runs an interactive terminal chat loop reading questions from in and writing answers to out.
@@ -424,6 +615,15 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 			return c.FormatStatusReport(ctx)
 		},
 	)
+
+	if c.Swarms != nil {
+		model.AddTool[SwarmsParams](reg, ToolSwarms,
+			"List every swarm on this machine: orca runs and host swarms, each with its goal, lanes by phase and status, last activity and orchestrator",
+			func(ctx context.Context, _ SwarmsParams) (string, error) {
+				return clipText(c.Swarms(ctx).Render(c.clock.Now(), true), swarmsReadBytes), nil
+			},
+		)
+	}
 
 	model.AddTool[ConciergeLaneShowParams](reg, ToolConciergeLaneShow,
 		"Show detailed state, rounds, terminals, PR/CI, and recent decisions for a lane",

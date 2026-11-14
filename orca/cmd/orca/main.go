@@ -19,11 +19,15 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
+	"github.com/bazelment/yoloswe/orca/adopt"
 	chatui "github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/mailbox"
 	mailboxnebula "github.com/bazelment/yoloswe/orca/mailbox/nebula"
+	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/router"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -88,7 +92,7 @@ func Execute(
 		if err := vcfg.Validate(false); err != nil {
 			return err
 		}
-		return executeChat(ctx, cfg, posArgs, stdin, stdout, logger)
+		return executeChat(ctx, cfg, posArgs, stdin, stdout, stderr, logger)
 	case "report":
 		if err := cfg.Validate(false); err != nil {
 			return err
@@ -186,9 +190,24 @@ func executeChat(
 	cfg Config,
 	posArgs []string,
 	stdin io.Reader,
-	stdout io.Writer,
+	stdout, stderr io.Writer,
 	logger *slog.Logger,
 ) error {
+	if cfg.Prompt == "" && len(posArgs) == 0 && isTerminal(stderr) {
+		// The chat screen owns the terminal; log lines written to it would
+		// tear the screen, so they go to a file.
+		path := filepath.Join(chatStoreBaseDir(cfg), "orca-chat.log")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, _ = fmt.Fprintf(stderr, "orca: chat log: %s\n", path)
+		logger = newLogger(f, cfg.LogLevel, cfg.LogFormat)
+	}
 	clk := clock.NewRealClock()
 	runs, err := openChatRuns(cfg, clk)
 	if err != nil {
@@ -228,20 +247,28 @@ func executeChat(
 	}
 
 	logger.Info("orca chat starting",
-		"run_id", cfg.RunID,
+		"run_id", storeCfg.RunID,
 		"store", resolvedStore,
 		"model", cfg.Models.Concierge,
 	)
 
 	concierge := NewConcierge(storeCfg.RunID, st, clk, roleClient(client, cfg, "concierge"), cfg.Models.Concierge)
+	concierge.Logger = logger
+	concierge.Swarms = backend.Swarms
 	defer func() { _ = concierge.Close(context.WithoutCancel(ctx)) }()
+	// A restarted chat continues the conversation it left.
+	resumed, err := concierge.Resume(ctx)
+	if err != nil {
+		return err
+	}
+	backend.HostSwarms = adopt.Importer{}.Discover
 
 	question := strings.TrimSpace(cfg.Prompt)
 	if question == "" && len(posArgs) > 0 {
 		question = strings.TrimSpace(strings.Join(posArgs, " "))
 	}
 	backend.OnAttach = concierge.Attach
-	adoption, adoptionOff := newAdoption(ctx, cfg, st, clk, client)
+	adoption, adoptionOff := newAdoption(ctx, cfg, st, clk, client, logger)
 	backend.Adoption, backend.AdoptionUnavailable = adoption, adoptionOff
 	if adoption != nil {
 		defer func() {
@@ -326,10 +353,29 @@ func executeChat(
 		_, err = fmt.Fprintln(stdout, reply.String())
 		return err
 	}
-	ui := chatui.New(ctx, storeCfg.RunID, concierge.Ask, r)
+	ui := chatui.New(ctx, storeCfg.RunID, concierge.Ask, r).WithTranscript(transcriptLines(resumed))
 	ui.Backend = backend
 	ui.Dispatch = backend.Dispatch
 	return chatui.Run(ctx, stdin, stdout, ui)
+}
+
+// resumedLines bounds displayed resumed history.
+const resumedLines = 6
+
+// transcriptLines renders the tail of resumed history.
+func transcriptLines(history []model.Message) []string {
+	if len(history) == 0 {
+		return nil
+	}
+	lines := []string{fmt.Sprintf("(resumed conversation: %d earlier messages)", len(history))}
+	for _, m := range history[max(len(history)-resumedLines, 0):] {
+		prefix := "you> "
+		if m.Role == model.RoleAssistant {
+			prefix = "orca> "
+		}
+		lines = append(lines, prefix+m.Text())
+	}
+	return lines
 }
 
 // runStartEchoKey carries the chat turn's emit func to run.start.
@@ -431,8 +477,8 @@ const frontDeskRunID = "front-desk"
 
 // chatRuns is where chat finds, opens and creates runs. An explicit --store
 // (sqlite:<path> or memory) holds every run chat picks, switches to, starts or
-// keeps its front desk in; otherwise each run has its own SQLite store under
-// the store dir and the front desk lives in memory.
+// keeps its front desk in; otherwise each run, the front desk included, has
+// its own SQLite store under the store dir, as `orca run` does.
 //
 //nolint:govet // field order follows the doc
 type chatRuns struct {
@@ -483,14 +529,11 @@ func (r *chatRuns) Close() error {
 	return r.shared.Store.Close()
 }
 
-// Open opens the store holding cfg.RunID: the explicit store, a memory store
-// for the front desk, or the run's own SQLite store.
+// Open opens the store holding cfg.RunID: the explicit store or the run's own
+// SQLite store.
 func (r *chatRuns) Open(cfg Config) (store.Store, string, error) {
 	if r.shared != nil {
 		return r.shared, r.spec, nil
-	}
-	if cfg.RunID == frontDeskRunID {
-		cfg.StoreSpec = "memory"
 	}
 	return openStore(cfg, r.clk)
 }
@@ -585,6 +628,9 @@ func discoverChatRuns(ctx context.Context, cfg Config, clk clock.Clock) ([]store
 			continue
 		}
 		id := entry.Name()
+		if id == frontDeskRunID {
+			continue
+		}
 		path, pathErr := store.RunDBPath(chatStoreBaseDir(cfg), id)
 		if pathErr != nil {
 			continue
@@ -618,6 +664,11 @@ func ensureChatRun(ctx context.Context, st store.Store, cfg Config) error {
 		return err
 	}
 	return nil
+}
+
+func isTerminal(w any) bool {
+	f, ok := w.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
 }
 
 func newLogger(out io.Writer, levelStr, format string) *slog.Logger {
