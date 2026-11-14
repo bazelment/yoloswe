@@ -51,6 +51,9 @@ func laneCounts(total int, statuses, phases map[string]int) string {
 	if total == 0 {
 		return "0"
 	}
+	if len(phases) == 0 {
+		return fmt.Sprintf("%d (%s)", total, countParts(statuses))
+	}
 	return fmt.Sprintf("%d (%s; %s)", total, countParts(statuses), countParts(phases))
 }
 

@@ -496,6 +496,9 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 	}
 
 	if memoryEcho != "" {
+		if emit != nil && (loopRes == nil || strings.TrimSpace(loopRes.Response.Text()) == "") {
+			emit(memoryEcho)
+		}
 		answer = memoryEcho
 	}
 	if quoted, extra := withReceipts(answer, start.receipts); extra != "" {

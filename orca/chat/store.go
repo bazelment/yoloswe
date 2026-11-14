@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"text/tabwriter"
@@ -268,18 +269,38 @@ func (b *StoreBackend) Snapshot(ctx context.Context) (Snapshot, error) {
 	return v.snapshot(b), nil
 }
 
+// Questions returns the formatted open owner questions for all held runs.
+func (b *StoreBackend) Questions(ctx context.Context) ([]string, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	held, err := b.heldRuns(ctx)
+	if err != nil {
+		return nil, err
+	}
+	asks, err := b.asks(ctx, held)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, len(asks))
+	for i := range asks {
+		out[i] = b.question(&asks[i])
+	}
+	return out, nil
+}
+
 // runView is what the attached run and the runs it holds look like now.
 //
 //nolint:govet // field order follows the doc
 type runView struct {
-	run      *store.Run
-	held     []string
-	lanes    []heldLane
-	asks     []openAsk
-	cost     float64
-	desk     bool
-	statuses map[string]int
-	phases   map[string]int
+	run       *store.Run
+	held      []string
+	lanes     []heldLane
+	liveLanes []string
+	asks      []openAsk
+	cost      float64
+	desk      bool
+	statuses  map[string]int
+	phases    map[string]int
 }
 
 // view reads the attached run's view; the caller holds b.mu.
@@ -304,10 +325,17 @@ func (b *StoreBackend) view(ctx context.Context) (runView, error) {
 		if err != nil {
 			return runView{}, err
 		}
+		turnDecisionCost := map[string]float64{}
 		for i := range decs {
+			if decs[i].Tool == "metrics.snapshot" {
+				continue
+			}
 			v.cost += decs[i].CostUSD
+			if decs[i].TurnID != "" {
+				turnDecisionCost[decs[i].TurnID] += decs[i].CostUSD
+			}
 		}
-		threads, err := b.store.Threads().ListThreads(ctx, store.ThreadFilter{RunID: id, Role: store.ThreadRoleConcierge})
+		threads, err := b.store.Threads().ListThreads(ctx, store.ThreadFilter{RunID: id})
 		if err != nil {
 			return runView{}, err
 		}
@@ -316,35 +344,208 @@ func (b *StoreBackend) view(ctx context.Context) (runView, error) {
 			if err != nil {
 				return runView{}, err
 			}
+			var threadTurnCost float64
 			for j := range turns {
-				if !turns[j].StartedAt.Before(start) {
-					v.cost += turns[j].CostUSD
+				if turns[j].StartedAt.IsZero() || !turns[j].StartedAt.Before(start) {
+					threadTurnCost += turns[j].CostUSD
+					if rem := turns[j].CostUSD - turnDecisionCost[turns[j].ID]; rem > 0 {
+						v.cost += rem
+					}
 				}
 			}
+			if len(turns) == 0 && threads[i].CostUSD > threadTurnCost && (threads[i].UpdatedAt.IsZero() || !threads[i].UpdatedAt.Before(start)) {
+				v.cost += threads[i].CostUSD - threadTurnCost
+			}
+		}
+		evs, err := b.store.Events().List(ctx, store.EventFilter{RunID: id})
+		if err != nil {
+			return runView{}, err
+		}
+		termCost := map[string]float64{}
+		for i := range evs {
+			if (!evs[i].CreatedAt.IsZero() && evs[i].CreatedAt.Before(start)) || !strings.HasPrefix(evs[i].Source, "nebula:usage:") || len(evs[i].Payload) == 0 {
+				continue
+			}
+			var p struct {
+				Usage *struct {
+					EstimatedCostUSD float64 `json:"estimatedCostUsd"`
+				} `json:"usage"`
+				TerminalID string `json:"terminalId"`
+			}
+			if json.Unmarshal(evs[i].Payload, &p) == nil && p.Usage != nil && p.Usage.EstimatedCostUSD > 0 {
+				key := cmp.Or(p.TerminalID, evs[i].Source)
+				if p.Usage.EstimatedCostUSD > termCost[key] {
+					termCost[key] = p.Usage.EstimatedCostUSD
+				}
+			}
+		}
+		for _, c := range termCost {
+			v.cost += c
 		}
 	}
 	for i := range v.lanes {
 		v.statuses[cmp.Or(string(v.lanes[i].lane.Status), "-")]++
-		v.phases[cmp.Or(v.lanes[i].lane.Phase, "-")]++
+		if !v.lanes[i].lane.Status.Terminal() {
+			v.phases[cmp.Or(v.lanes[i].lane.Phase, "-")]++
+		}
 	}
+	v.liveLanes = b.liveLaneSummaries(ctx, v.held, v.lanes)
 	return v, nil
 }
 
-// goal names the attached run's goal, or says the chat is at the front desk.
+func (b *StoreBackend) liveLaneSummaries(ctx context.Context, held []string, lanes []heldLane) []string {
+	type runGroup struct {
+		runID string
+		items []string
+	}
+	var groups []runGroup
+	now := b.now()
+	for _, runID := range held {
+		var runLanes []store.Lane
+		for i := range lanes {
+			if lanes[i].run == runID && !lanes[i].lane.Status.Terminal() {
+				runLanes = append(runLanes, lanes[i].lane)
+			}
+		}
+		if len(runLanes) == 0 {
+			continue
+		}
+		run, _ := b.store.Runs().Get(ctx, runID)
+		hr, _ := b.ReadHostRun(runID)
+		hostLanes := make(map[string]adopt.Lane, len(hr.Lanes))
+		for i := range hr.Lanes {
+			hostLanes[hr.Lanes[i].ID] = hr.Lanes[i]
+		}
+		decs, _ := b.store.Decisions().List(ctx, store.DecisionFilter{RunID: runID})
+		items := make([]string, 0, len(runLanes))
+		for i := range runLanes {
+			l := &runLanes[i]
+			phase := cmp.Or(l.Phase, string(l.Status), "-")
+			desc := fmt.Sprintf("%s %s r%d", l.ID, phase, max(l.Round, 1))
+			if pr := b.lanePRDesc(ctx, run, hr, l); pr != "" {
+				desc += " " + pr
+			}
+			if start := lanePhaseStart(decs, hostLanes[l.ID], l); !start.IsZero() {
+				desc += " " + phaseElapsed(now.Sub(start))
+			}
+			items = append(items, desc)
+		}
+		groups = append(groups, runGroup{runID: runID, items: items})
+	}
+	out := make([]string, len(groups))
+	for i, g := range groups {
+		joined := strings.Join(g.items, ", ")
+		if len(groups) > 1 {
+			joined = g.runID + ": " + joined
+		}
+		out[i] = joined
+	}
+	return out
+}
+
+func (b *StoreBackend) lanePRDesc(ctx context.Context, run *store.Run, hr adopt.Run, l *store.Lane) string {
+	if l.PR <= 0 {
+		return ""
+	}
+	var state string
+	if b.HostProbe.PR != nil {
+		repo := hr.Repo
+		if run != nil && run.Repository != "" {
+			repo = run.Repository
+		}
+		if pr, err := b.HostProbe.PR(ctx, repo, hr.Dir, strconv.Itoa(l.PR)); err == nil && pr.State != "" {
+			state = strings.ToLower(pr.State)
+			if pr.Draft && strings.EqualFold(pr.State, "OPEN") {
+				state = "open draft"
+			}
+			if pr.Checks != "" {
+				state += ", " + pr.Checks
+			}
+		}
+	}
+	if state == "" {
+		switch {
+		case l.MergeSHA != "":
+			state = "merged"
+		case l.Checks != "":
+			state = l.Checks
+		}
+	}
+	if state != "" {
+		return fmt.Sprintf("PR #%d (%s)", l.PR, state)
+	}
+	return fmt.Sprintf("PR #%d", l.PR)
+}
+
+func lanePhaseStart(decs []store.Decision, hl adopt.Lane, l *store.Lane) time.Time {
+	var start time.Time
+	for i := range decs {
+		d := &decs[i]
+		if d.LaneID != l.ID || d.CreatedAt.IsZero() {
+			continue
+		}
+		switch d.Tool {
+		case "lane.launch", "lane.advance", "lane.rework", "lane.retry", "lane.start", "lane.resume":
+			if d.CreatedAt.After(start) {
+				start = d.CreatedAt
+			}
+		}
+	}
+	if !start.IsZero() {
+		return start
+	}
+	if first, _, _ := strings.Cut(strings.TrimSpace(hl.LastEvent), " "); first != "" {
+		if t, err := time.Parse(time.RFC3339, first); err == nil {
+			return t
+		}
+	}
+	if !l.CreatedAt.IsZero() {
+		return l.CreatedAt
+	}
+	return l.UpdatedAt
+}
+
+func phaseElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Round(time.Second)/time.Second))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Round(time.Minute)/time.Minute))
+	}
+	h := int(d / time.Hour)
+	m := int((d % time.Hour).Round(time.Minute) / time.Minute)
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh%dm", h, m)
+}
+
+// goal names the attached run's goal, the held runs, or says the chat is at the front desk.
 func (v *runView) goal() string {
 	if v.desk {
+		if len(v.held) > 1 {
+			return "adopted: " + strings.Join(v.held[1:], ", ")
+		}
 		return "front desk: no run yet"
 	}
 	return "goal: " + cmp.Or(strings.TrimSpace(v.run.Objective), "(none)")
 }
 
 func (v *runView) snapshot(b *StoreBackend) Snapshot {
-	status := v.goal()
-	if len(v.held) > 1 {
-		status += " | adopted: " + strings.Join(v.held[1:], ", ")
+	lead := v.goal()
+	if !v.desk && len(v.held) > 1 {
+		lead += " | adopted: " + strings.Join(v.held[1:], ", ")
 	}
-	status += " | lanes: " + laneCounts(len(v.lanes), v.statuses, v.phases)
-	s := Snapshot{Status: status + fmt.Sprintf(" | open questions: %d | cost today: $%.2f", len(v.asks), v.cost)}
+	totals := fmt.Sprintf("lanes: %s | open questions: %d | cost today: $%.2f",
+		laneCounts(len(v.lanes), v.statuses, v.phases), len(v.asks), v.cost)
+	status := lead + " | " + totals
+	if len(v.liveLanes) > 0 {
+		status = lead + " | " + strings.Join(v.liveLanes, " | ") + "\n" + totals
+	}
+	s := Snapshot{Status: status}
 	for i := range v.asks {
 		s.Questions = append(s.Questions, b.question(&v.asks[i]))
 	}
