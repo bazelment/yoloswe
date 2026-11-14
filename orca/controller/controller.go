@@ -1631,7 +1631,7 @@ func ReconcileLanePRState(
 	runID, actor, eventID string,
 	ln *lane.Lane,
 ) (settled bool, state string, err error) {
-	if probe == nil || ln == nil || (ln.PR <= 0 && (strings.TrimSpace(ln.Branch) == "" || ln.Status == lane.StatusPlanned)) {
+	if probe == nil || ln == nil || (ln.PR <= 0 && strings.TrimSpace(ln.Branch) == "") {
 		return false, "", nil
 	}
 	prState, err := probe(ctx, runID, ln.Branch, ln.PR)
@@ -1692,10 +1692,14 @@ func ReconcileLanePRState(
 }
 
 func (c *Controller) reconcileLanePRState(ctx context.Context, ln *lane.Lane, eventID string) (bool, error) {
-	settled, state, err := ReconcileLanePRState(ctx, c.cfg.PRProbe, c.store, c.driver, c.clock.Now(), c.cfg.RunID, ActorController, eventID, ln)
+	settled, state, err := ReconcileLanePRState(ctx, c.cfg.PRProbe, c.store, nil, c.clock.Now(), c.cfg.RunID, ActorController, eventID, ln)
 	if !settled {
 		return false, err
 	}
+	if stopErr := c.stopCurrentTerminal(ctx, ln, "pr_"+strings.ToLower(state)); stopErr != nil {
+		c.noteStopFailure(ctx, ln, stopErr)
+	}
+	c.tryRelease(ctx, ln)
 	delete(c.pendingVerdicts, ln.ID)
 	delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
 	if err != nil {

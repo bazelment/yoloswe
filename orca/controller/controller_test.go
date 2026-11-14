@@ -2234,4 +2234,35 @@ func TestControllerMergedPRBeforeRetry(t *testing.T) {
 	if err != nil || closedItem.Status != store.BacklogDropped {
 		t.Fatalf("closed PR backlog item = %+v, err = %v; want dropped", closedItem, err)
 	}
+
+	// Verify a planned lane with a Branch (PR == 0) whose PR is already MERGED
+	// settles before spawning any terminal.
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{
+		ID:     "m2-planned-merged",
+		ItemID: "m2-planned-merged",
+		RunID:  "run-1",
+		Status: lane.StatusPlanned,
+		Phase:  "swe",
+		Round:  1,
+		Branch: "swarm-lane/trial-m1/m2-planned-merged",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctrlPlanned := controller.New(controller.Config{
+		RunID: "run-1",
+		PRProbe: func(_ context.Context, runID, branch string, _ int) (controller.PRStatus, error) {
+			if runID == "run-1" && branch == "swarm-lane/trial-m1/m2-planned-merged" {
+				return controller.PRStatus{Number: 5707, State: "MERGED", MergeSHA: "merged-sha-5707"}, nil
+			}
+			return controller.PRStatus{State: "OPEN"}, nil
+		},
+	}, st, drv, clk, judge)
+	mustStep(t, ctrlPlanned)
+	plannedLn, err := st.Lanes().Get(t.Context(), "run-1", "m2-planned-merged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plannedLn.Status != lane.StatusDone || plannedLn.PR != 5707 || plannedLn.MergeSHA != "merged-sha-5707" {
+		t.Fatalf("planned merged lane = %+v, want StatusDone PR=5707 MergeSHA=merged-sha-5707", plannedLn)
+	}
 }

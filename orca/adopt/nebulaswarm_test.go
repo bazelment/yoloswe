@@ -629,6 +629,13 @@ func TestFakeClaudeStepEntryPointRefusesWhileOrcaLeaseLive(t *testing.T) {
 	if holder, held := HeldByOrca(standDownDir); held {
 		t.Fatalf("HeldByOrca(buried marker) = (%q, true), want false", holder)
 	}
+	// When the journal is in stateReleasing, HeldByOrca is authoritative and
+	// returns false even while the stand-down marker is still on line 1.
+	write(t, filepath.Join(standDownDir, "OBJECTIVE.md"), "ORCHESTRATOR: orca since 2026-11-14T05:40:00Z (orca-chat:front-desk) — stand down; do not dispatch or merge.\n# Goal\n")
+	write(t, filepath.Join(standDownDir, ".orca-lease.json"), `{"holder":"orca-chat:front-desk","state":"releasing"}`)
+	if holder, held := HeldByOrca(standDownDir); held {
+		t.Fatalf("HeldByOrca(releasing journal with marker) = (%q, true), want false", holder)
+	}
 
 	if err := s.Release(t.Context(), nsRun); err != nil {
 		t.Fatal(err)
@@ -775,10 +782,12 @@ func TestNebulaSwarmReviewReportRecognised(t *testing.T) {
 		t.Fatalf("unexpected retry/spawn after review pass: PhaseStarts=%+v", drv.PhaseStarts)
 	}
 
-	// Another Controllers instance on the same store must fail with store.ErrLeaseHeld
-	// while the first controller holds the non-expired run lease.
+	// Another chat's Controllers instance on the same store must fail with
+	// store.ErrLeaseHeld while the first chat holds the non-expired run lease.
 	competing := NewControllers(t.Context(), st, drv, clk, nil)
-	if err := competing.Start(t.Context(), r); !errors.Is(err, store.ErrLeaseHeld) {
+	rOther := r
+	rOther.Holder = "orca-chat:other-chat"
+	if err := competing.Start(t.Context(), rOther); !errors.Is(err, store.ErrLeaseHeld) {
 		t.Fatalf("competing Controllers.Start = %v, want store.ErrLeaseHeld", err)
 	}
 }

@@ -95,7 +95,7 @@ func loopVerifyInterval() time.Duration {
 			return d
 		}
 	}
-	return time.Second
+	return 0
 }
 
 func adoptedPRProbe(h hostSwarms, st store.Store) controller.PRProbe {

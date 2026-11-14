@@ -122,9 +122,18 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	if err := d.store.Runs().Create(ctx, store.Run{ID: r.ID, Repository: r.Repo, Objective: r.Goal, DefaultRecipe: workflow.Name}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		return err
 	}
-	holder := fmt.Sprintf("%s:%p", r.Holder, d)
+	holder := cmp.Or(strings.TrimSpace(r.Holder), fmt.Sprintf("orca-adopt:%p", d))
 	if _, err := d.store.Runs().AcquireLease(ctx, r.ID, holder, controller.DefaultLeaseTTL); err != nil {
-		return err
+		if errors.Is(err, store.ErrLeaseHeld) {
+			if existing, gErr := d.store.Runs().Get(ctx, r.ID); gErr == nil && existing.Lease != nil &&
+				(existing.Lease.HolderID == ChatHolder("") || strings.HasPrefix(existing.Lease.HolderID, ChatHolder("")+":")) {
+				_ = d.store.Runs().ReleaseLease(ctx, r.ID, existing.Lease.HolderID)
+				_, err = d.store.Runs().AcquireLease(ctx, r.ID, holder, controller.DefaultLeaseTTL)
+			}
+		}
+		if err != nil {
+			return err
+		}
 	}
 	started := false
 	defer func() {

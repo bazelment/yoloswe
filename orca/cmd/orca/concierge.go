@@ -853,13 +853,6 @@ func (c *Concierge) resolveTargetRun(ctx context.Context, text string) (string, 
 	return c.runID, nil
 }
 
-func (c *Concierge) defaultTargetRun(ctx context.Context, text string) string {
-	if target, err := c.resolveTargetRun(ctx, text); err == nil {
-		return target
-	}
-	return c.runID
-}
-
 // clipText bounds s to n bytes without splitting a rune.
 func clipText(s string, n int) string {
 	if len(s) <= n {
@@ -1613,7 +1606,10 @@ func (c *Concierge) handleDecisionsSince(ctx context.Context, p ConciergeDecisio
 		}
 	}
 	if runID == "" {
-		runID = c.defaultTargetRun(ctx, quote)
+		var err error
+		if runID, err = c.resolveTargetRun(ctx, quote); err != nil {
+			return "", err
+		}
 	}
 	filter := store.DecisionFilter{
 		RunID:    runID,

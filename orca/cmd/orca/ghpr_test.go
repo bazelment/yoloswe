@@ -32,4 +32,7 @@ func TestParseGHPR(t *testing.T) {
 			t.Fatalf("%s: got %+v (%q), %v; want %+v (%q)", tc.name, got, got.String(), err, tc.want, tc.text)
 		}
 	}
+	if _, err := ghPRStatus(t.Context(), "owner/repo", "", "-flag"); err == nil {
+		t.Fatal("expected ghPRStatus to reject flag-prefixed target")
+	}
 }

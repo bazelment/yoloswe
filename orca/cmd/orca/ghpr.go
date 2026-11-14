@@ -20,6 +20,10 @@ func ghAvailable() bool { _, err := exec.LookPath("gh"); return err == nil }
 // ghPRStatus reads a PR's state, draft flag and head checks with `gh pr view`.
 // Without repo, gh resolves the repository from the checkout at dir.
 func ghPRStatus(ctx context.Context, repo, dir, number string) (chatui.PRStatus, error) {
+	number = strings.TrimSpace(number)
+	if number == "" || strings.HasPrefix(number, "-") {
+		return chatui.PRStatus{}, fmt.Errorf("invalid PR target %q", number)
+	}
 	ctx, cancel := context.WithTimeout(ctx, ghPRTimeout)
 	defer cancel()
 	args := []string{"pr", "view", number, "--json", "number,state,isDraft,mergeCommit,statusCheckRollup"}

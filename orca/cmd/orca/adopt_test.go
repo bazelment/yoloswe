@@ -27,10 +27,6 @@ import (
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
-func init() {
-	_ = os.Setenv("ORCA_LOOP_VERIFY_INTERVAL", "25ms")
-}
-
 // The shipped chat adopts, persists, and releases a host swarm lease.
 func TestShippedChatAdoptsAndReleasesHostSwarm(t *testing.T) {
 	for _, tc := range []struct {

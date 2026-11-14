@@ -494,8 +494,8 @@ type Service struct {
 	Former   []string
 	Importer Importer
 	// LoopVerifyInterval is the pause before re-checking that no step loop
-	// restarted after stopWatcher stops a running loop. Zero uses
-	// defaultLoopVerifyInterval.
+	// restarted after stopWatcher stops a running loop (or when explicitly set
+	// > 0). Zero uses defaultLoopVerifyInterval when WatcherPIDs were stopped.
 	LoopVerifyInterval time.Duration
 }
 
@@ -776,6 +776,10 @@ func (s *Service) forward(ctx context.Context, dir, id string, j *journal, from 
 // unwind undoes steps 5..1 from the journal. It returns the step that failed
 // (0 when all succeeded), leaving the journal to describe what remains.
 func (s *Service) unwind(ctx context.Context, dir, id string, j *journal) (int, error) {
+	if j.State != stateReleasing {
+		j.State = stateReleasing
+		_ = s.save(dir, j)
+	}
 	steps := []func() error{
 		1: func() error {
 			if err := s.check("release:lease"); err != nil {
