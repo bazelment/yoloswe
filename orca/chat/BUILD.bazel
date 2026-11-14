@@ -24,7 +24,6 @@ go_test(
     srcs = ["chat_test.go"],
     embed = [":chat"],
     deps = [
-        "//orca/adopt",
         "//orca/concierge",
         "//orca/dispatcher",
         "//orca/mailbox",

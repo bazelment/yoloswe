@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 go_library(
     name = "orca_lib",
     srcs = [
+        "adopt.go",
         "chat_stream.go",
         "concierge.go",
         "config.go",
@@ -44,6 +45,7 @@ go_binary(
 go_test(
     name = "orca_test",
     srcs = [
+        "adopt_test.go",
         "chat_stream_test.go",
         "main_test.go",
     ],

@@ -20,18 +20,17 @@ import (
 //
 //nolint:govet
 type StoreBackend struct {
-	Store           store.Store
-	RunID           string
-	Stream          func(context.Context, string, func(string)) error
-	Now             func() time.Time
-	memory          concierge.MemoryEditor
-	lastDirective   string
-	Adoption        adopt.Service
-	AdoptionEnabled bool
-	// AdoptionRunID is the host swarm currently handed to this chat. It is
-	// deliberately separate from RunID: chat may continue on its own run while
-	// operating an adopted swarm.
-	AdoptionRunID string
+	Store         store.Store
+	RunID         string
+	Stream        func(context.Context, string, func(string)) error
+	Now           func() time.Time
+	memory        concierge.MemoryEditor
+	lastDirective string
+	// Adoption hands host swarms to this chat; its lease holder is stable
+	// across chat restarts, so /release finds the adopted run after one.
+	// When nil, AdoptionUnavailable says why /adopt and /release are off.
+	Adoption            *adopt.Service
+	AdoptionUnavailable string
 }
 
 func (b *StoreBackend) now() time.Time {
@@ -142,50 +141,52 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 	}
 	switch strings.ToLower(fields[0]) {
 	case "/adopt":
-		if !b.AdoptionEnabled {
-			return "adoption unavailable: labeler and process adapters are not configured", nil
+		if b.Adoption == nil {
+			return "adoption unavailable: " + b.AdoptionUnavailable, nil
 		}
 		if len(fields) == 1 {
-			rs, e := b.Adoption.List()
-			if e != nil {
-				return "", e
-			}
+			rs, err := b.Adoption.List()
 			var out []string
 			for _, r := range rs {
 				out = append(out, fmt.Sprintf("%s: %s | lanes=%d | last=%s | orchestrator=%s", r.ID, r.Goal, len(r.Lanes), r.LastActivity, r.Orchestrator))
 			}
+			if err != nil {
+				out = append(out, "unreadable runs: "+err.Error())
+			}
+			if len(out) == 0 {
+				return "no host swarm runs found", nil
+			}
 			return strings.Join(out, "\n"), nil
 		}
-		b.Adoption.Handover.HolderID = b.RunID
-		r, e := b.Adoption.Adopt(fields[1])
+		r, e := b.Adoption.Adopt(ctx, fields[1])
 		if e != nil {
 			return "", e
 		}
-		b.AdoptionRunID = r.ID
-		return "adopted " + r.ID, nil
+		return fmt.Sprintf("adopted %s (%d lanes imported)", r.ID, len(r.Lanes)), nil
 	case "/release":
-		if !b.AdoptionEnabled {
-			return "adoption unavailable: labeler and process adapters are not configured", nil
+		if b.Adoption == nil {
+			return "adoption unavailable: " + b.AdoptionUnavailable, nil
 		}
-		b.Adoption.Handover.HolderID = b.RunID
-		target := b.AdoptionRunID
-		if target == "" {
-			rs, e := b.Adoption.List()
+		var target string
+		if len(fields) > 1 {
+			target = fields[1]
+		} else {
+			ids, e := b.Adoption.Adopted()
 			if e != nil {
 				return "", e
 			}
-			if e := b.Adoption.ReleaseOwned(rs); e != nil {
-				return "", e
+			switch len(ids) {
+			case 0:
+				return "no adopted swarm", nil
+			case 1:
+				target = ids[0]
+			default:
+				return "several adopted swarms; name one: /release " + strings.Join(ids, " | "), nil
 			}
-			return "released adopted swarm", nil
 		}
-		if target == "" {
-			return "no adopted swarm", nil
-		}
-		if e := b.Adoption.Release(target); e != nil {
+		if e := b.Adoption.Release(ctx, target); e != nil {
 			return "", e
 		}
-		b.AdoptionRunID = ""
 		return "released " + target, nil
 	case "/status":
 		s, e := b.Snapshot(ctx)
@@ -245,7 +246,7 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 		}
 		return b.memory.Undo(ctx, b.Store)
 	default:
-		return "commands: /status /lanes /asks /memory /plan /log <trace> /pause /resume /stop /undo /adopt [run-id] /release", nil
+		return "commands: /status /lanes /asks /memory /plan /log <trace> /pause /resume /stop /undo /adopt [run-id] /release [run-id]", nil
 	}
 }
 func pretty(v any, err error) (string, error) {

@@ -1,557 +1,720 @@
-// Package adopt imports and hands over host-run Nebula swarms without creating work.
+// Package adopt hands a host-run swarm (a subagent-swarm-nebula run directory)
+// over to orca chat and back without creating work.
+//
+// The handover is one protocol, recorded write-ahead in a lease journal inside
+// the run directory so every step is idempotent and a rerun after a crash
+// finishes it:
+//
+//	adopt:   1 lease  2 import  3 stand-down line  4 Nebula label  5 stop watcher
+//	release: 5 restart watcher  4 restore label  3 drop line  2 drop import  1 drop lease
+//
+// A failed adopt step undoes the completed steps in reverse and drops the
+// lease; a failed release step re-applies the release steps it completed and
+// restores the journal, so either way the prior state is left as it was.
 package adopt
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
-
-	swarmstate "github.com/bazelment/yoloswe/swarm-queen/state"
 )
 
-//nolint:govet // imported ledger shape prioritizes readable fields
+const (
+	leaseFile    = ".orca-lease.json"
+	markerPrefix = "ORCHESTRATOR: orca since "
+	orcaLabel    = "orca"
+
+	stateAdopting  = "adopting"
+	stateAdopted   = "adopted"
+	stateReleasing = "releasing"
+)
+
+// handoverFiles carry the stand-down line Claude orchestrators read first.
+var handoverFiles = []string{"OBJECTIVE.md", "PROGRESS.md"}
+
+var (
+	ErrLeaseHeld    = errors.New("run is leased by another orca")
+	ErrLeaseNotHeld = errors.New("run is not leased by this orca")
+	ErrRunNotFound  = errors.New("swarm run not found")
+)
+
+// ChatHolder is the lease holder id of the chat attached to chatRunID. It
+// depends only on the chat's run id, so it survives a chat restart.
+func ChatHolder(chatRunID string) string { return "orca-chat:" + chatRunID }
+
+// Lane is one ledger lane with the ownership of its current round.
 type Lane struct {
 	ID, Title, Branch, Phase, Status string
-	Round                            int
-	Session, Terminal, PR            string
-	Sessions                         map[string]string
-	Terminals                        map[string]string
-	Reports, Notes                   string
+	// Session, Terminal and ReportPath belong to the lane's newest spawn
+	// (<lane>.<phase>.spawn.json); ReportPath is empty until that round reports.
+	Session, Terminal, ReportPath, PR string
+	Round                             int
 }
+
+// Run is a host swarm run directory.
 type Run struct {
-	ID, Dir, Goal, Objective, Orchestrator, LastActivity string
-	Lanes                                                []Lane
+	ID, Dir, Goal, Orchestrator, LastActivity string
+	// Holder is the orca lease holder, empty when no orca holds the run.
+	Holder string
+	Lanes  []Lane
 }
 
-//nolint:govet
+// Importer finds and reads run directories under <root>/.shared/subagent-swarm.
 type Importer struct {
+	// Roots defaults to the current git checkout's root (where
+	// subagent-swarm-nebula puts .shared) plus $ORCA_SWARM_ROOTS.
 	Roots []string
-	Now   func() time.Time
 }
 
-func (i Importer) ReadOnly(dir string) (Run, error) { return i.read(dir) }
-func (i Importer) read(dir string) (Run, error) {
-	st, err := swarmstate.NewStore(dir).Read()
-	if err != nil {
-		return Run{}, err
+func (i Importer) roots() []string {
+	if len(i.Roots) > 0 {
+		return i.Roots
 	}
-	id := filepath.Base(dir)
-	r := Run{ID: id, Dir: dir, Goal: st.Config.Goal, Objective: readText(filepath.Join(dir, "OBJECTIVE.md"))}
-	r.Orchestrator = orchestrator(r.Objective, readText(filepath.Join(dir, "PROGRESS.md")))
-	for _, l := range st.Lanes {
-		if l == nil {
+	var out []string
+	if b, err := exec.Command("git", "rev-parse", "--path-format=absolute", "--git-common-dir").Output(); err == nil {
+		out = append(out, filepath.Dir(strings.TrimSpace(string(b))))
+	}
+	if v := os.Getenv("ORCA_SWARM_ROOTS"); v != "" {
+		out = append(out, filepath.SplitList(v)...)
+	}
+	return out
+}
+
+func (i Importer) runDirs() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, root := range i.roots() {
+		base := filepath.Join(root, ".shared", "subagent-swarm")
+		ents, err := os.ReadDir(base)
+		if err != nil {
 			continue
 		}
-		x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: string(l.Status), Round: l.Round, Notes: strings.Join(l.Notes, "\n"), Sessions: map[string]string{}}
-		for k, v := range l.Sessions {
-			x.Sessions[k] = v
-		}
-		x.Session = canonicalSession(l)
-		spawn := laneSpawn(dir, l.ID, l.Phase)
-		if x.Session == "" {
-			x.Session = spawn.Session
-		}
-		x.Reports, x.Terminal = laneFiles(dir, l)
-		if x.Terminal == "" {
-			x.Terminal = spawn.Terminal
-		}
-		x.Terminals = laneTerminals(dir, l.ID)
-		if l.PR > 0 {
-			x.PR = fmt.Sprint(l.PR)
-		} else if spawn.PR != "" {
-			x.PR = spawn.PR
-		} else {
-			x.PR = prNumber(x.Reports + "\n" + readText(filepath.Join(dir, "ledger.md")))
-		}
-		r.Lanes = append(r.Lanes, x)
-	}
-	sort.Slice(r.Lanes, func(a, b int) bool { return r.Lanes[a].ID < r.Lanes[b].ID })
-	r.LastActivity = lastActivity(dir)
-	return r, nil
-}
-
-type spawnOwnership struct{ Session, Terminal, PR string }
-
-func laneSpawn(dir, laneID, phase string) spawnOwnership {
-	p := filepath.Join(dir, laneID+"."+phase+".spawn.json")
-	b, err := os.ReadFile(p)
-	if err != nil {
-		return spawnOwnership{}
-	}
-	var v struct {
-		SessionID   string          `json:"session_id"`
-		TerminalID  string          `json:"terminal_id"`
-		TerminalURL string          `json:"terminal_url"`
-		PR          json.RawMessage `json:"pr"`
-		PRNumber    json.RawMessage `json:"pr_number"`
-		PullRequest json.RawMessage `json:"pull_request"`
-	}
-	if json.Unmarshal(b, &v) != nil {
-		return spawnOwnership{}
-	}
-	term := v.TerminalID
-	if term == "" {
-		term = v.TerminalURL
-	}
-	var pr string
-	if len(v.PR) == 0 {
-		v.PR = v.PRNumber
-	}
-	if len(v.PR) == 0 {
-		v.PR = v.PullRequest
-	}
-	if len(v.PR) > 0 {
-		var n int
-		if json.Unmarshal(v.PR, &n) == nil && n > 0 {
-			pr = fmt.Sprint(n)
-		}
-		if pr == "" {
-			_ = json.Unmarshal(v.PR, &pr)
-		}
-	}
-	return spawnOwnership{Session: v.SessionID, Terminal: term, PR: pr}
-}
-
-func laneTerminals(dir, laneID string) map[string]string {
-	out := map[string]string{}
-	paths, _ := filepath.Glob(filepath.Join(dir, laneID+".*.spawn.json"))
-	for _, p := range paths {
-		var v struct {
-			SessionID   string `json:"session_id"`
-			TerminalID  string `json:"terminal_id"`
-			TerminalURL string `json:"terminal_url"`
-		}
-		b, err := os.ReadFile(p)
-		if err != nil || json.Unmarshal(b, &v) != nil {
-			continue
-		}
-		phase := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), laneID+"."), ".spawn.json")
-		if v.TerminalID != "" {
-			out[phase] = v.TerminalID
-		} else if v.TerminalURL != "" {
-			out[phase] = v.TerminalURL
+		for _, ent := range ents {
+			dir := filepath.Join(base, ent.Name())
+			if !ent.IsDir() || seen[dir] {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(dir, "state.json")); err == nil {
+				seen[dir] = true
+				out = append(out, dir)
+			}
 		}
 	}
 	return out
 }
-func canonicalSession(l *swarmstate.Lane) string {
-	if s, ok := l.SessionFor(l.Phase, l.Round); ok {
-		return s
-	}
-	if s := l.Sessions[l.Phase]; s != "" {
-		return s
-	}
-	var best string
-	bestRound := -1
-	for _, a := range l.Attempts() {
-		if a.Phase == l.Phase && a.Round > bestRound {
-			best, bestRound = a.Session, a.Round
-		}
-	}
-	return best
-}
+
+// Discover reads every run under the roots. Runs that fail to read are
+// reported in the joined error next to the runs that did.
 func (i Importer) Discover() ([]Run, error) {
-	roots := i.Roots
-	if len(roots) == 0 {
-		if cwd, e := os.Getwd(); e == nil {
-			roots = []string{filepath.Dir(cwd)}
-		}
-		if v := os.Getenv("ORCA_SWARM_ROOTS"); v != "" {
-			roots = append(roots, strings.Split(v, string(os.PathListSeparator))...)
-		}
-	}
-	seen := map[string]bool{}
 	var out []Run
-	for _, root := range roots {
-		ents, e := os.ReadDir(filepath.Join(root, ".shared", "subagent-swarm"))
-		if e != nil {
+	var errs []error
+	for _, dir := range i.runDirs() {
+		r, err := Read(dir)
+		if err != nil {
+			errs = append(errs, err)
 			continue
 		}
-		for _, ent := range ents {
-			if !ent.IsDir() {
-				continue
-			}
-			d := filepath.Join(root, ".shared", "subagent-swarm", ent.Name())
-			if seen[d] {
-				continue
-			}
-			if _, e = os.Stat(filepath.Join(d, "state.json")); e != nil {
-				continue
-			}
-			r, e := i.read(d)
-			if e == nil {
-				seen[d] = true
-				out = append(out, r)
-			}
-		}
+		out = append(out, r)
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].ID < out[b].ID })
-	return out, nil
+	return out, errors.Join(errs...)
 }
-func laneFiles(dir string, l *swarmstate.Lane) (string, string) {
-	pat := filepath.Join(dir, l.ID+"."+l.Phase+".md")
-	b, _ := os.ReadFile(pat)
-	report := string(b)
-	if report == "" {
-		ms, _ := filepath.Glob(filepath.Join(dir, l.ID+"."+l.Phase+".*.md"))
-		for _, p := range ms {
-			bb, _ := os.ReadFile(p)
-			report += string(bb) + "\n"
+
+// Find returns the directory of run id.
+func (i Importer) Find(id string) (string, error) {
+	if id == "" || id != filepath.Base(id) || id == "." || id == ".." {
+		return "", fmt.Errorf("%w: %q", ErrRunNotFound, id)
+	}
+	var found []string
+	for _, dir := range i.runDirs() {
+		if filepath.Base(dir) == id {
+			found = append(found, dir)
 		}
 	}
-	sp, _ := filepath.Glob(filepath.Join(dir, l.ID+"."+l.Phase+".spawn.json"))
-	term := ""
-	if len(sp) > 0 {
-		var v struct {
-			TerminalID  string `json:"terminal_id"`
-			TerminalURL string `json:"terminal_url"`
-			SessionID   string `json:"session_id"`
-		}
-		if b, e := os.ReadFile(sp[0]); e == nil {
-			_ = json.Unmarshal(b, &v)
-			term = v.TerminalID
-			if term == "" {
-				term = v.TerminalURL
-			}
-		}
+	switch len(found) {
+	case 0:
+		return "", fmt.Errorf("%w: %q", ErrRunNotFound, id)
+	case 1:
+		return found[0], nil
 	}
-	return report, strings.TrimSpace(term)
+	return "", fmt.Errorf("run %q is ambiguous: %s", id, strings.Join(found, ", "))
 }
-func readText(p string) string { b, _ := os.ReadFile(p); return string(b) }
-func orchestrator(s ...string) string {
-	for _, x := range s {
-		for _, line := range strings.Split(x, "\n") {
-			if strings.HasPrefix(line, "ORCHESTRATOR:") {
-				return strings.TrimSpace(strings.TrimPrefix(line, "ORCHESTRATOR:"))
+
+type ledgerLane struct {
+	ID             string `json:"id"`
+	Title          string `json:"title"`
+	Branch         string `json:"branch"`
+	Phase          string `json:"phase"`
+	Status         string `json:"status"`
+	NebulaSession  string `json:"nebula_session"`
+	NebulaTerminal string `json:"nebula_terminal"`
+	PR             int    `json:"pr"`
+	Round          int    `json:"round"`
+}
+
+type ledger struct {
+	Config struct {
+		Goal string `json:"goal"`
+	} `json:"config"`
+	Tasks []ledgerLane `json:"tasks"`
+}
+
+// Read imports the ledger (state.json) of one run directory and each lane's
+// current round from its newest spawn file and report.
+func Read(dir string) (Run, error) {
+	b, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		return Run{}, fmt.Errorf("read ledger: %w", err)
+	}
+	var st ledger
+	if err := json.Unmarshal(b, &st); err != nil {
+		return Run{}, fmt.Errorf("parse %s: %w", filepath.Join(dir, "state.json"), err)
+	}
+	r := Run{ID: filepath.Base(dir), Dir: dir, Goal: st.Config.Goal, LastActivity: lastActivity(dir)}
+	if j, err := readJournal(filepath.Join(dir, leaseFile)); err == nil {
+		r.Holder = j.Holder
+	}
+	r.Orchestrator = orchestrator(dir, r.Holder)
+	for i := range st.Tasks {
+		r.Lanes = append(r.Lanes, importLane(dir, &st.Tasks[i]))
+	}
+	sort.Slice(r.Lanes, func(a, b int) bool { return r.Lanes[a].ID < r.Lanes[b].ID })
+	return r, nil
+}
+
+type spawnFile struct {
+	SessionID  string `json:"session_id"`
+	TerminalID string `json:"terminal_id"`
+}
+
+func importLane(dir string, l *ledgerLane) Lane {
+	x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: l.Status, Round: l.Round}
+	phase, sp := newestSpawn(dir, l.ID)
+	// The ledger records a terminal restart after spawn.json was written, so
+	// its session and terminal are the newer ones when set.
+	x.Session = firstNonEmpty(l.NebulaSession, sp.SessionID)
+	x.Terminal = firstNonEmpty(l.NebulaTerminal, sp.TerminalID)
+	if phase == "" {
+		phase = l.Phase
+	}
+	report := ""
+	if p := filepath.Join(dir, l.ID+"."+phase+".md"); phase != "" && fileExists(p) {
+		x.ReportPath = p
+		report = readText(p)
+	}
+	if l.PR > 0 {
+		x.PR = fmt.Sprint(l.PR)
+	} else if m := prLine.FindStringSubmatch(report); m != nil {
+		x.PR = m[1]
+	}
+	return x
+}
+
+// newestSpawn returns the phase and contents of the lane's most recently
+// written <lane>.<phase>.spawn.json; a rework round rewrites the file of its
+// phase, so the newest one is the current round.
+func newestSpawn(dir, laneID string) (string, spawnFile) {
+	paths, _ := filepath.Glob(filepath.Join(dir, laneID+".*.spawn.json"))
+	var phase string
+	var newest time.Time
+	var out spawnFile
+	for _, p := range paths {
+		ph := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), laneID+"."), ".spawn.json")
+		info, err := os.Stat(p)
+		if err != nil || strings.Contains(ph, ".") || (!info.ModTime().After(newest) && phase != "") {
+			continue
+		}
+		var sp spawnFile
+		if b, err := os.ReadFile(p); err != nil || json.Unmarshal(b, &sp) != nil {
+			continue
+		}
+		phase, newest, out = ph, info.ModTime(), sp
+	}
+	return phase, out
+}
+
+var prLine = regexp.MustCompile(`(?m)^\s*PR:\s*#?(\d+)\s*$`)
+
+func orchestrator(dir, holder string) string {
+	if holder != "" {
+		return orcaLabel
+	}
+	for _, n := range handoverFiles {
+		for _, line := range strings.Split(readText(filepath.Join(dir, n)), "\n") {
+			if v, ok := strings.CutPrefix(line, "ORCHESTRATOR:"); ok {
+				return strings.TrimSpace(v)
 			}
 		}
 	}
 	return "claude"
 }
+
 func lastActivity(dir string) string {
+	ents, _ := os.ReadDir(dir)
 	var best time.Time
-	_ = filepath.Walk(dir, func(p string, info os.FileInfo, e error) error {
-		if e == nil && info.ModTime().After(best) {
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), leaseFile) {
+			continue
+		}
+		if info, err := e.Info(); err == nil && info.ModTime().After(best) {
 			best = info.ModTime()
 		}
-		return nil
-	})
+	}
 	if best.IsZero() {
 		return ""
 	}
 	return best.UTC().Format(time.RFC3339)
 }
 
-var prRE = regexp.MustCompile(`(?i)(?:PR|pull request)\s*[:#]?\s*(\d+)`)
-
-func prNumber(s string) string {
-	m := prRE.FindStringSubmatch(s)
-	if len(m) > 1 {
-		return m[1]
-	}
-	return ""
+// Labeler reads and sets the Nebula run's external orchestrator label.
+type Labeler interface {
+	RunOrchestrator(ctx context.Context, runID string) (string, error)
+	SetRunOrchestrator(ctx context.Context, runID, label string) error
 }
 
-type Labeler interface{ SetOrchestrator(string, string) error }
-type ProcessControl interface {
-	StopWatcher(string) error
-	StartWatcher(string) error
+// Watcher controls the host orchestrator's watch_lanes.sh processes.
+type Watcher interface {
+	// Running returns the pids of the run's armed watchers and bridges.
+	Running(ctx context.Context, runDir string) ([]int, error)
+	Stop(ctx context.Context, pids []int) error
+	Start(ctx context.Context, runDir string) error
 }
 
-//nolint:govet
-type Handover struct {
+// Service adopts and releases host runs on behalf of one lease holder.
+type Service struct {
 	Labeler Labeler
-	Process ProcessControl
-	Host    string
-	PID     int
+	Watcher Watcher
 	Now     func() time.Time
-	// HolderID is stable across chat process restarts. When unset the host/PID
-	// identity preserves the command-line behavior used by older callers.
-	HolderID string
+	// fault, when set by tests, fails the named step before it acts.
+	fault    func(step string) error
+	Holder   string
+	Importer Importer
 }
 
-var ErrLeaseHeld = errors.New("run is leased by another orca")
-var ErrLeaseNotHeld = errors.New("run is not leased by this orca")
-var ErrAdaptersUnavailable = errors.New("adoption requires labeler and process adapters")
-
-type lease struct {
-	Holder               string `json:"holder"`
-	PreviousOrchestrator string `json:"previous_orchestrator,omitempty"`
+// journal is the lease file: who holds the run and what each completed
+// handover step changed, written before the step acts.
+type journal struct {
+	PrevLabel   *string  `json:"previous_label,omitempty"`
+	Import      *Run     `json:"import,omitempty"`
+	Holder      string   `json:"holder"`
+	State       string   `json:"state"`
+	Marker      string   `json:"marker,omitempty"`
+	Created     []string `json:"marker_created,omitempty"`
+	WatcherPIDs []int    `json:"watcher_pids,omitempty"`
+	WatcherStep bool     `json:"watcher_step,omitempty"`
 }
 
-func (h Handover) Adopt(r Run) error {
-	p := filepath.Join(r.Dir, ".orca-lease.json")
-	f, e := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if e != nil {
-		if errors.Is(e, os.ErrExist) {
-			b, readErr := os.ReadFile(p)
-			var current lease
-			if readErr == nil && json.Unmarshal(b, &current) == nil && current.Holder == h.holder() {
-				return nil
-			}
-			return ErrLeaseHeld
-		}
-		return e
-	}
-	holder := h.holder()
-	if e = json.NewEncoder(f).Encode(lease{Holder: holder, PreviousOrchestrator: previousOrchestrator(r.Orchestrator)}); e != nil {
-		_ = f.Close()
-		_ = os.Remove(p)
-		return e
-	}
-	_ = f.Close()
-	original := map[string]fileSnapshot{}
-	for _, n := range []string{"OBJECTIVE.md", "PROGRESS.md"} {
-		original[n] = snapshotFile(filepath.Join(r.Dir, n))
-	}
-	labelled, stopped := false, false
-	rollback := func(cause error) error {
-		for n, b := range original {
-			_ = restoreFile(filepath.Join(r.Dir, n), b)
-		}
-		if stopped && h.Process != nil {
-			_ = h.Process.StartWatcher(r.Dir)
-		}
-		if labelled && h.Labeler != nil {
-			_ = h.Labeler.SetOrchestrator(r.ID, previousOrchestrator(r.Orchestrator))
-		}
-		_ = os.Remove(p)
-		return cause
-	}
-	if e = h.setLabel(r.ID, "orca"); e != nil {
-		return rollback(e)
-	}
-	labelled = true
-	if e = h.stop(r.Dir); e != nil {
-		return rollback(e)
-	}
-	stopped = true
-	now := time.Now().UTC()
-	if h.Now != nil {
-		now = h.Now().UTC()
-	}
-	marker := fmt.Sprintf("ORCHESTRATOR: orca since %s (%s). Claude sessions: do not act on this run; run /release in orca to hand back.\n", now.Format(time.RFC3339), holder)
-	for _, n := range []string{"OBJECTIVE.md", "PROGRESS.md"} {
-		if e := prepend(filepath.Join(r.Dir, n), marker); e != nil {
-			return rollback(e)
+// List returns the discoverable host runs.
+func (s *Service) List() ([]Run, error) { return s.Importer.Discover() }
+
+// Adopted returns the ids of the runs this holder leases.
+func (s *Service) Adopted() ([]string, error) {
+	var ids []string
+	for _, dir := range s.Importer.runDirs() {
+		if j, err := readJournal(filepath.Join(dir, leaseFile)); err == nil && j.Holder == s.Holder {
+			ids = append(ids, filepath.Base(dir))
 		}
 	}
-	return nil
-}
-func (h Handover) Release(r Run) error {
-	p := filepath.Join(r.Dir, ".orca-lease.json")
-	b, e := os.ReadFile(p)
-	if e != nil {
-		if errors.Is(e, os.ErrNotExist) {
-			return ErrLeaseNotHeld
-		}
-		return e
-	}
-	var current lease
-	if e := json.Unmarshal(b, &current); e != nil {
-		return e
-	}
-	if current.Holder != h.holder() {
-		return ErrLeaseNotHeld
-	}
-	previous := current.PreviousOrchestrator
-	if previous == "" {
-		previous = previousOrchestrator(r.Orchestrator)
-	}
-	original := map[string]fileSnapshot{}
-	for _, n := range []string{"OBJECTIVE.md", "PROGRESS.md"} {
-		original[n] = snapshotFile(filepath.Join(r.Dir, n))
-	}
-	labelled, started := false, false
-	rollback := func(cause error) error {
-		for n, b := range original {
-			_ = restoreFile(filepath.Join(r.Dir, n), b)
-		}
-		if started && h.Process != nil {
-			_ = h.Process.StopWatcher(r.Dir)
-		}
-		if labelled && h.Labeler != nil {
-			_ = h.Labeler.SetOrchestrator(r.ID, "orca")
-		}
-		return cause
-	}
-	if e := h.setLabel(r.ID, previous); e != nil {
-		return rollback(e)
-	}
-	labelled = true
-	if e := h.start(r.Dir); e != nil {
-		return rollback(e)
-	}
-	started = true
-	for _, n := range []string{"OBJECTIVE.md", "PROGRESS.md"} {
-		if e := removeMarker(filepath.Join(r.Dir, n)); e != nil {
-			return rollback(e)
-		}
-	}
-	if e := os.Remove(p); e != nil {
-		return rollback(e)
-	}
-	return nil
+	sort.Strings(ids)
+	return ids, nil
 }
 
-type fileSnapshot struct {
-	exists bool
-	data   []byte
-}
-
-func snapshotFile(p string) fileSnapshot {
-	_, err := os.Stat(p)
+// Adopt takes run id over from its host orchestrator.
+func (s *Service) Adopt(ctx context.Context, id string) (Run, error) {
+	if s.Holder == "" {
+		return Run{}, errors.New("adopt: lease holder id is required")
+	}
+	dir, err := s.Importer.Find(id)
 	if err != nil {
-		return fileSnapshot{}
+		return Run{}, err
 	}
-	b, err := os.ReadFile(p)
+	j, err := s.takeLease(dir)
 	if err != nil {
-		return fileSnapshot{exists: true}
+		return Run{}, err
 	}
-	return fileSnapshot{exists: true, data: append([]byte(nil), b...)}
+	if j.State == stateAdopted && j.Import != nil {
+		return *j.Import, nil
+	}
+	j.State = stateAdopting
+	if err := s.forward(ctx, dir, id, j, 2); err != nil {
+		if _, uerr := s.unwind(ctx, dir, id, j); uerr != nil {
+			return Run{}, fmt.Errorf("adopt %s: %w; undo incomplete (%v), lease kept: rerun /adopt or /release", id, err, uerr)
+		}
+		return Run{}, fmt.Errorf("adopt %s: %w (handover undone)", id, err)
+	}
+	return *j.Import, nil
 }
-func restoreFile(p string, s fileSnapshot) error {
-	if !s.exists {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+
+// Release hands run id back to its host orchestrator.
+func (s *Service) Release(ctx context.Context, id string) error {
+	dir, err := s.Importer.Find(id)
+	if err != nil {
+		return err
+	}
+	p := filepath.Join(dir, leaseFile)
+	orig, err := os.ReadFile(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: %s", ErrLeaseNotHeld, id)
+	}
+	if err != nil {
+		return err
+	}
+	j, err := parseJournal(orig)
+	if err != nil {
+		return err
+	}
+	if j.Holder != s.Holder {
+		return fmt.Errorf("%w: %s is held by %s", ErrLeaseNotHeld, id, j.Holder)
+	}
+	j.State = stateReleasing
+	if err := s.save(dir, j); err != nil {
+		return err
+	}
+	next, err := s.unwind(ctx, dir, id, j)
+	if err == nil {
+		return nil
+	}
+	// Re-apply the release steps that completed, newest first, from the
+	// original journal (same stand-down line, same previous label), then
+	// restore the journal exactly as it was before /release.
+	if next < 5 {
+		j0, _ := parseJournal(orig)
+		if rerr := s.forward(ctx, dir, id, j0, next+1); rerr != nil {
+			return fmt.Errorf("release %s: %w; restoring the adoption failed (%v), lease kept: rerun /release", id, err, rerr)
+		}
+	}
+	if werr := writeAtomic(p, orig); werr != nil {
+		return fmt.Errorf("release %s: %w; restoring the lease failed: %v", id, err, werr)
+	}
+	return fmt.Errorf("release %s: %w (adoption kept)", id, err)
+}
+
+func (s *Service) takeLease(dir string) (*journal, error) {
+	p := filepath.Join(dir, leaseFile)
+	j := &journal{Holder: s.Holder, State: stateAdopting}
+	b, err := json.Marshal(j)
+	if err != nil {
+		return nil, err
+	}
+	// Link publishes the complete journal only if no lease exists, so a crash
+	// never leaves a half-written lease.
+	tmp := p + ".new"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return nil, err
+	}
+	err = os.Link(tmp, p)
+	_ = os.Remove(tmp)
+	if err == nil {
+		return j, nil
+	}
+	if !errors.Is(err, os.ErrExist) {
+		return nil, err
+	}
+	cur, err := readJournal(p)
+	if err != nil {
+		return nil, err
+	}
+	if cur.Holder != s.Holder {
+		return nil, fmt.Errorf("%w: %s", ErrLeaseHeld, cur.Holder)
+	}
+	return cur, nil
+}
+
+// forward applies adopt steps from..5 and marks the run adopted.
+func (s *Service) forward(ctx context.Context, dir, id string, j *journal, from int) error {
+	steps := []func() error{
+		2: func() error { return s.importRun(dir, j) },
+		3: func() error { return s.mark(dir, j) },
+		4: func() error { return s.label(ctx, dir, id, j) },
+		5: func() error { return s.stopWatcher(ctx, dir, j) },
+	}
+	for n := from; n <= 5; n++ {
+		if err := steps[n](); err != nil {
 			return err
 		}
-		return nil
 	}
-	if s.data == nil {
-		return nil
-	}
-	return os.WriteFile(p, s.data, 0644)
+	j.State = stateAdopted
+	return s.save(dir, j)
 }
 
-func previousOrchestrator(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexAny(s, " \t\r\n"); i >= 0 {
-		s = s[:i]
+// unwind undoes steps 5..1 from the journal. It returns the step that failed
+// (0 when all succeeded), leaving the journal to describe what remains.
+func (s *Service) unwind(ctx context.Context, dir, id string, j *journal) (int, error) {
+	steps := []func() error{
+		1: func() error {
+			if err := s.check("release:lease"); err != nil {
+				return err
+			}
+			return removeIfExists(filepath.Join(dir, leaseFile))
+		},
+		2: func() error { return s.unimport(dir, j) },
+		3: func() error { return s.unmark(dir, j) },
+		4: func() error { return s.unlabel(ctx, dir, id, j) },
+		5: func() error { return s.startWatcher(ctx, dir, j) },
 	}
-	if s == "" || s == "orca" {
-		return "claude"
+	for n := 5; n >= 1; n-- {
+		if err := steps[n](); err != nil {
+			return n, err
+		}
 	}
-	return s
+	return 0, nil
 }
-func prepend(p, s string) error {
-	b, e := os.ReadFile(p)
-	if os.IsNotExist(e) {
-		b = nil
-		e = nil
-	}
-	if e != nil {
-		return e
-	}
-	if strings.HasPrefix(string(b), "ORCHESTRATOR: orca since ") {
+
+func (s *Service) check(step string) error {
+	if s.fault == nil {
 		return nil
 	}
-	return os.WriteFile(p, append([]byte(s), b...), 0644)
+	return s.fault(step)
 }
-func removeMarker(p string) error {
-	b, e := os.ReadFile(p)
-	if os.IsNotExist(e) {
+
+func (s *Service) importRun(dir string, j *journal) error {
+	if err := s.check("adopt:import"); err != nil {
+		return err
+	}
+	if j.Import != nil {
 		return nil
 	}
-	if e != nil {
-		return e
+	r, err := Read(dir)
+	if err != nil {
+		return err
 	}
-	lines := strings.SplitAfter(string(b), "\n")
-	if len(lines) > 0 && strings.HasPrefix(lines[0], "ORCHESTRATOR: orca since ") {
-		return os.WriteFile(p, []byte(strings.Join(lines[1:], "")), 0644)
+	r.Holder, r.Orchestrator = s.Holder, orcaLabel
+	j.Import = &r
+	return s.save(dir, j)
+}
+
+func (s *Service) unimport(dir string, j *journal) error {
+	if err := s.check("release:import"); err != nil {
+		return err
+	}
+	if j.Import == nil {
+		return nil
+	}
+	j.Import = nil
+	return s.save(dir, j)
+}
+
+func (s *Service) mark(dir string, j *journal) error {
+	if err := s.check("adopt:marker"); err != nil {
+		return err
+	}
+	if j.Marker == "" {
+		now := time.Now()
+		if s.Now != nil {
+			now = s.Now()
+		}
+		j.Marker = fmt.Sprintf("%s%s (%s). Claude sessions: do not act on this run; run /release in orca to hand back.\n", markerPrefix, now.UTC().Format(time.RFC3339), s.Holder)
+		j.Created = nil
+		for _, n := range handoverFiles {
+			if !fileExists(filepath.Join(dir, n)) {
+				j.Created = append(j.Created, n)
+			}
+		}
+		if err := s.save(dir, j); err != nil {
+			return err
+		}
+	}
+	for _, n := range handoverFiles {
+		p := filepath.Join(dir, n)
+		b, err := os.ReadFile(p)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if strings.HasPrefix(string(b), j.Marker) {
+			continue
+		}
+		if err := writeAtomic(p, append([]byte(j.Marker), b...)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
-func hostname() string { h, _ := os.Hostname(); return h }
 
-func (h Handover) holder() string {
-	if h.HolderID != "" {
-		return h.HolderID
+func (s *Service) unmark(dir string, j *journal) error {
+	if err := s.check("release:marker"); err != nil {
+		return err
 	}
-	if h.Host != "" || h.PID != 0 {
-		return fmt.Sprintf("%s/%d", h.Host, h.PID)
-	}
-	return fmt.Sprintf("%s/%d", hostname(), os.Getpid())
-}
-func (h Handover) setLabel(id, value string) error {
-	if h.Labeler == nil {
+	if j.Marker == "" {
 		return nil
 	}
-	return h.Labeler.SetOrchestrator(id, value)
-}
-func (h Handover) stop(dir string) error {
-	if h.Process == nil {
-		return nil
-	}
-	return h.Process.StopWatcher(dir)
-}
-func (h Handover) start(dir string) error {
-	if h.Process == nil {
-		return nil
-	}
-	return h.Process.StartWatcher(dir)
-}
-
-type Service struct {
-	Importer Importer
-	Handover Handover
-}
-
-func (s Service) List() ([]Run, error) { return s.Importer.Discover() }
-func (s Service) Adopt(id string) (Run, error) {
-	if s.Handover.Labeler == nil || s.Handover.Process == nil {
-		return Run{}, ErrAdaptersUnavailable
-	}
-	rs, e := s.Importer.Discover()
-	if e != nil {
-		return Run{}, e
-	}
-	for _, r := range rs {
-		if r.ID == id {
-			if adoptErr := s.Handover.Adopt(r); adoptErr != nil {
-				return Run{}, adoptErr
-			}
-			return r, nil
-		}
-	}
-	return Run{}, fmt.Errorf("run %q not found", id)
-}
-func (s Service) Release(id string) error {
-	if s.Handover.Labeler == nil || s.Handover.Process == nil {
-		return ErrAdaptersUnavailable
-	}
-	rs, e := s.Importer.Discover()
-	if e != nil {
-		return e
-	}
-	for _, r := range rs {
-		if r.ID == id {
-			return s.Handover.Release(r)
-		}
-	}
-	return fmt.Errorf("run %q not found", id)
-}
-
-// ReleaseOwned hands back the run leased by this stable holder after a chat
-// restart. The caller supplies the runs it imported before issuing /release.
-func (s Service) ReleaseOwned(runs []Run) error {
-	if s.Handover.Labeler == nil || s.Handover.Process == nil {
-		return ErrAdaptersUnavailable
-	}
-	for _, r := range runs {
-		b, err := os.ReadFile(filepath.Join(r.Dir, ".orca-lease.json"))
-		if err != nil {
+	for _, n := range handoverFiles {
+		p := filepath.Join(dir, n)
+		b, err := os.ReadFile(p)
+		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		var l lease
-		if json.Unmarshal(b, &l) == nil && l.Holder == s.Handover.holder() {
-			return s.Handover.Release(r)
+		if err != nil {
+			return err
+		}
+		rest, ok := strings.CutPrefix(string(b), j.Marker)
+		switch {
+		case !ok:
+		case rest == "" && slices.Contains(j.Created, n):
+			err = os.Remove(p)
+		default:
+			err = writeAtomic(p, []byte(rest))
+		}
+		if err != nil {
+			return err
 		}
 	}
-	return ErrLeaseNotHeld
+	j.Marker, j.Created = "", nil
+	return s.save(dir, j)
+}
+
+func (s *Service) label(ctx context.Context, dir, id string, j *journal) error {
+	if err := s.check("adopt:label"); err != nil {
+		return err
+	}
+	if j.PrevLabel == nil {
+		cur, err := s.Labeler.RunOrchestrator(ctx, id)
+		if err != nil {
+			return err
+		}
+		j.PrevLabel = &cur
+		if err := s.save(dir, j); err != nil {
+			return err
+		}
+	}
+	return s.Labeler.SetRunOrchestrator(ctx, id, orcaLabel)
+}
+
+func (s *Service) unlabel(ctx context.Context, dir, id string, j *journal) error {
+	if err := s.check("release:label"); err != nil {
+		return err
+	}
+	if j.PrevLabel == nil {
+		return nil
+	}
+	// A label write that never landed needs no restore.
+	if cur, err := s.Labeler.RunOrchestrator(ctx, id); err != nil || cur != *j.PrevLabel {
+		if err := s.Labeler.SetRunOrchestrator(ctx, id, *j.PrevLabel); err != nil {
+			return err
+		}
+	}
+	j.PrevLabel = nil
+	return s.save(dir, j)
+}
+
+func (s *Service) stopWatcher(ctx context.Context, dir string, j *journal) error {
+	if err := s.check("adopt:watcher"); err != nil {
+		return err
+	}
+	if !j.WatcherStep {
+		pids, err := s.Watcher.Running(ctx, dir)
+		if err != nil {
+			return err
+		}
+		j.WatcherPIDs, j.WatcherStep = pids, true
+		if err := s.save(dir, j); err != nil {
+			return err
+		}
+	}
+	// A watcher that exits can leave a bridge behind, so stop until none runs.
+	for range 3 {
+		pids, err := s.Watcher.Running(ctx, dir)
+		if err != nil || len(pids) == 0 {
+			return err
+		}
+		if err := s.Watcher.Stop(ctx, pids); err != nil {
+			return err
+		}
+	}
+	if pids, err := s.Watcher.Running(ctx, dir); err != nil || len(pids) > 0 {
+		return errors.Join(err, fmt.Errorf("watcher still running: %v", pids))
+	}
+	return nil
+}
+
+func (s *Service) startWatcher(ctx context.Context, dir string, j *journal) error {
+	if err := s.check("release:watcher"); err != nil {
+		return err
+	}
+	if !j.WatcherStep {
+		return nil
+	}
+	if len(j.WatcherPIDs) > 0 {
+		pids, err := s.Watcher.Running(ctx, dir)
+		if err != nil {
+			return err
+		}
+		if len(pids) == 0 {
+			if err := s.Watcher.Start(ctx, dir); err != nil {
+				return err
+			}
+		}
+	}
+	j.WatcherPIDs, j.WatcherStep = nil, false
+	return s.save(dir, j)
+}
+
+func (s *Service) save(dir string, j *journal) error {
+	b, err := json.MarshalIndent(j, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(dir, leaseFile), append(b, '\n'))
+}
+
+func readJournal(p string) (*journal, error) {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	return parseJournal(b)
+}
+
+func parseJournal(b []byte) (*journal, error) {
+	var j journal
+	if err := json.Unmarshal(b, &j); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", leaseFile, err)
+	}
+	return &j, nil
+}
+
+// writeAtomic replaces p, keeping its mode when it exists.
+func writeAtomic(p string, b []byte) error {
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(p); err == nil {
+		mode = info.Mode().Perm()
+	}
+	tmp := p + ".orca-tmp"
+	if err := os.WriteFile(tmp, b, mode); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func removeIfExists(p string) error {
+	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
+
+func readText(p string) string { b, _ := os.ReadFile(p); return string(b) }
+
+func firstNonEmpty(v ...string) string {
+	for _, s := range v {
+		if s != "" {
+			return s
+		}
+	}
+	return ""
 }
