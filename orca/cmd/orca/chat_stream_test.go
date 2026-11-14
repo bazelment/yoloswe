@@ -85,3 +85,18 @@ func TestConciergeStreamsBeforeResponseCompletes(t *testing.T) {
 		})
 	}
 }
+
+func TestChatStreamEmitsFinalAnswerAfterWhitespaceToolTurn(t *testing.T) {
+	t.Parallel()
+	var emitted []string
+	_, stream := withChatStream(context.Background(), func(s string) {
+		emitted = append(emitted, s)
+	})
+	// Turn 1 streams only whitespace before a tool call, so OnTurn does not call complete.
+	stream.text("\n  \n")
+	// Turn 2 completes with a final answer without delta chunks (e.g. non-SSE or budget answer).
+	stream.complete("final 2206-token concierge reply")
+	if len(emitted) != 1 || emitted[0] != "final 2206-token concierge reply" {
+		t.Fatalf("emitted = %q, want [\"final 2206-token concierge reply\"]", emitted)
+	}
+}
