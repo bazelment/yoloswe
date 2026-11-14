@@ -256,6 +256,10 @@ func sameAdoptionGeneration(storedPlanRef, currentMarker string) bool {
 }
 
 func (d *Controllers) Stop(ctx context.Context, r Run) error {
+	return d.stop(ctx, r, true)
+}
+
+func (d *Controllers) stop(ctx context.Context, r Run, releaseLease bool) error {
 	d.mu.Lock()
 	s := d.starting[r.ID]
 	d.mu.Unlock()
@@ -278,8 +282,10 @@ func (d *Controllers) Stop(ctx context.Context, r Run) error {
 	if err := checkpoint(r.Dir, current); err != nil {
 		return err
 	}
-	if err := cr.controller.ReleaseLease(ctx); err != nil {
-		return err
+	if releaseLease {
+		if err := cr.controller.ReleaseLease(ctx); err != nil {
+			return err
+		}
 	}
 	delete(d.runs, r.ID)
 	return nil
@@ -432,7 +438,7 @@ func (d *Controllers) Close(ctx context.Context) error {
 	d.mu.Unlock()
 	var errs []error
 	for i := range runs {
-		errs = append(errs, d.Stop(ctx, runs[i]))
+		errs = append(errs, d.stop(ctx, runs[i], false))
 	}
 	return errors.Join(errs...)
 }

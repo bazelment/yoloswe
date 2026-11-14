@@ -41,7 +41,7 @@ type Command struct{ Name, Args string }
 var Commands = []Command{
 	{"/runs", "[run-id]"}, {"/status", ""}, {"/lanes", ""}, {"/asks", ""}, {"/memory", ""}, {"/plan", ""},
 	{"/log", "<trace>"}, {"/pause", ""}, {"/resume", ""}, {"/stop", ""}, {"/undo", ""},
-	{"/adopt", "[run-id]"}, {"/release", "[run-id]"}, {"/exit", ""},
+	{"/adopt", "[run-id]"}, {"/release", "[run-id]"}, {"/restart", ""}, {"/exit", ""},
 }
 
 func (c Command) usage() string { return strings.TrimSpace(c.Name + " " + c.Args) }
@@ -57,6 +57,7 @@ func commandUsage() string {
 //nolint:govet
 type Model struct {
 	poll                 bool
+	restarting           bool
 	questions            []string
 	ctx                  context.Context
 	ask                  AskFunc
@@ -192,6 +193,7 @@ type routeMsg struct {
 type commandMsg struct {
 	text string
 	err  error
+	quit bool
 }
 
 //nolint:govet // message payload grouping
@@ -301,6 +303,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.lines = append(m.lines, x.text)
 		}
+		if x.quit {
+			m.restarting = true
+			return m, tea.Quit
+		}
 		return m, m.refresh()
 	case routeMsg:
 		if x.err != nil {
@@ -360,12 +366,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lines = append(m.lines, "you> "+text)
 		m.busy = true
 		if strings.HasPrefix(text, "/") {
+			fields := strings.Fields(text)
+			isRestart := len(fields) > 0 && strings.EqualFold(fields[0], "/restart")
 			return m, func() tea.Msg {
 				if m.Backend == nil {
 					return commandMsg{err: fmt.Errorf("no run attached")}
 				}
 				s, e := m.Backend.Command(m.ctx, text)
-				return commandMsg{s, e}
+				return commandMsg{text: s, err: e, quit: isRestart && e == nil}
 			}
 		}
 		return m, m.route(text)
@@ -487,7 +495,12 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {
 	m.ctx = ctx
 	if isTerminal(in) {
 		m.poll = true
-		_, err := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out), tea.WithContext(ctx)).Run()
+		final, err := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out), tea.WithContext(ctx)).Run()
+		if err == nil {
+			if fm, ok := final.(Model); ok && fm.restarting && len(fm.lines) > 0 {
+				_, _ = fmt.Fprintln(out, fm.lines[len(fm.lines)-1])
+			}
+		}
 		return err
 	}
 	// Scripts use the same update/command path as the terminal.
@@ -518,6 +531,9 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {
 			if _, err := fmt.Fprintln(out, s); err != nil {
 				return err
 			}
+		}
+		if m.restarting {
+			return nil
 		}
 	}
 	return scanner.Err()

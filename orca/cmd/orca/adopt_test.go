@@ -15,6 +15,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -656,3 +658,356 @@ func TestAdoptedPRProbeResolvesRunRepoDirAndMergeSHA(t *testing.T) {
 		t.Fatalf("lane after reconcile = %+v, want StatusDone and MergeSHA=merged-oid-5705", ln)
 	}
 }
+
+func writeFakeOrcaBinary(t *testing.T, path, version string, exitCode int) {
+	t.Helper()
+	tmp := path + ".tmp"
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo \"orca %s\"\n  exit %d\nfi\nexit 0\n", version, exitCode)
+	if err := os.WriteFile(tmp, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRestartExecsStartupPathWithSameArgvAndReplacedBinary(t *testing.T) {
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "orca")
+	writeFakeOrcaBinary(t, binPath, "commit-old-111", 0)
+
+	origPath, origVer, origCommit, origExec := startupPath, startupVersion, buildCommit, execProcess
+	t.Cleanup(func() {
+		startupPath, startupVersion, buildCommit, execProcess = origPath, origVer, origCommit, origExec
+	})
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	resolved := resolveStartupPath([]string{"orca"})
+	if resolved != binPath {
+		t.Fatalf("resolveStartupPath(orca) = %q, want %q", resolved, binPath)
+	}
+	startupPath = resolved
+	startupVersion = "commit-old-111"
+	buildCommit = ""
+
+	oldStat, err := os.Stat(binPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldIno := oldStat.Sys().(*syscall.Stat_t).Ino
+
+	// Replace the binary on disk (rm + mv to a new inode) before /restart.
+	if err := os.Remove(binPath); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeOrcaBinary(t, binPath, "commit-new-222", 0)
+	newStat, err := os.Stat(binPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newIno := newStat.Sys().(*syscall.Stat_t).Ino
+
+	var gotPath string
+	var gotArgv, gotEnv []string
+	var execIno uint64
+	execProcess = func(path string, argv []string, env []string) error {
+		gotPath = path
+		gotArgv = slices.Clone(argv)
+		gotEnv = slices.Clone(env)
+		st, statErr := os.Stat(path)
+		if statErr != nil {
+			return statErr
+		}
+		execIno = st.Sys().(*syscall.Stat_t).Ino
+		return nil
+	}
+
+	storeDir := t.TempDir()
+	// Also record a live detached `orca run` child in the store to verify /restart reports it.
+	detachedID := "run-detached-1"
+	detachedDB, err := store.RunDBPath(storeDir, detachedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detachedStore, err := store.OpenSQLite(detachedDB, clock.NewRealClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := detachedStore.Runs().Create(t.Context(), store.Run{ID: detachedID, Repository: "bazelment/yoloswe", Objective: "detached goal"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := detachedStore.Runs().AcquireLease(t.Context(), detachedID, "orca-host-999", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	_ = detachedStore.Close()
+
+	args := []string{"chat", "--store-dir", storeDir, "--repo", "bazelment/yoloswe", "--replay", "testdata/concierge_status_replay.json"}
+	var out, errOut bytes.Buffer
+	if err := Execute(t.Context(), args, strings.NewReader("/restart\n/status\n"), &out, &errOut); err != nil {
+		t.Fatalf("Execute /restart: %v\nstderr:\n%s", err, errOut.String())
+	}
+	if gotPath != binPath {
+		t.Fatalf("exec path = %q, want %q", gotPath, binPath)
+	}
+	wantArgv := append([]string{binPath}, args...)
+	if !slices.Equal(gotArgv, wantArgv) {
+		t.Fatalf("exec argv = %q, want %q", gotArgv, wantArgv)
+	}
+	if execIno != newIno || (oldIno != newIno && execIno == oldIno) {
+		t.Fatalf("exec inode = %d, want new inode %d (old %d)", execIno, newIno, oldIno)
+	}
+	if !slices.ContainsFunc(gotEnv, func(kv string) bool { return strings.HasPrefix(kv, restartEnvVar+"=") }) {
+		t.Fatalf("exec env missing %s", restartEnvVar)
+	}
+	for _, want := range []string{
+		"restarting orca (commit-old-111 -> commit-new-222): " + binPath,
+		"detached orca run " + detachedID + " continues on old binary; to roll: stop old process and run `orca run --run " + detachedID,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("restart output missing %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "you> /status") {
+		t.Fatalf("chat processed input after /restart:\n%s", out.String())
+	}
+}
+
+func TestRestartTargetFailingVersionCheckLeavesChatRunning(t *testing.T) {
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "orca")
+	writeFakeOrcaBinary(t, binPath, "broken-build", 1)
+
+	origPath, origVer, origExec := startupPath, startupVersion, execProcess
+	t.Cleanup(func() {
+		startupPath, startupVersion, execProcess = origPath, origVer, origExec
+	})
+	startupPath = binPath
+	startupVersion = "commit-good"
+	execCalled := false
+	execProcess = func(string, []string, []string) error {
+		execCalled = true
+		return nil
+	}
+
+	storeDir := t.TempDir()
+	args := []string{"chat", "--store-dir", storeDir, "--repo", "bazelment/yoloswe", "--replay", "testdata/concierge_status_replay.json"}
+	var out, errOut bytes.Buffer
+	if err := Execute(t.Context(), args, strings.NewReader("/restart\n/status\n/exit\n"), &out, &errOut); err != nil {
+		t.Fatalf("Execute: %v\nstderr:\n%s", err, errOut.String())
+	}
+	if execCalled {
+		t.Fatal("execProcess called when --version check failed")
+	}
+	for _, want := range []string{
+		"error: restart target " + binPath + " --version failed",
+		"you> /status",
+		"front desk: no run yet | run: front-desk",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestRestartTwiceInProcessPreservesHeldLeasesAndControllers(t *testing.T) {
+	root := t.TempDir()
+	const runID = "20261114-trial-m1"
+	dir := filepath.Join(root, ".shared", "subagent-swarm", runID)
+	if err := os.MkdirAll(filepath.Join(dir, "missions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish review","target":"release","merge_rule":"Use merge queue."},"tasks":[{"id":"a","title":"A","branch":"lane-a","phase":"review","status":"running","round":1,"pr":42,"sessions":{"review":"nebula:imported-review"}}]}`)
+	writeFile(t, filepath.Join(dir, "missions", "a.md"), "Keep held lease across restarts.")
+	writeFile(t, filepath.Join(dir, "a.review.spawn.json"), `{"session_id":"imported-session","terminal_id":"imported-review"}`)
+	script := filepath.Join(root, "watch_lanes.sh")
+	writeFile(t, script, "#!/bin/bash\necho 'armed: none'\necho 'bridges: none'\nexit 1\n")
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ORCA_SWARM_ROOTS", root)
+	t.Setenv("ORCA_WATCH_LANES", script)
+
+	reportReady := make(chan struct{})
+	spawnEntered := make(chan struct{})
+	allowSpawnFinish := make(chan struct{})
+	var spawnOnce, releaseOnce sync.Once
+	var integrateSpawns atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/code-runs/"+runID:
+			_, _ = io.WriteString(w, `{"id":"`+runID+`","externalOrchestratorLabel":"claude"}`)
+		case r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		case r.URL.Path == "/api/code-terminals/imported-review/phase-report":
+			select {
+			case <-reportReady:
+				_, _ = io.WriteString(w, `{"terminalId":"imported-review","outcome":"done","head":"reviewed-head","pr":42,"body":"Outcome: done\nHEAD: reviewed-head\nPR: 42"}`)
+			default:
+				http.NotFound(w, r)
+			}
+		case r.URL.Path == "/api/code-sessions/imported-session/terminals" && r.Method == http.MethodPost:
+			integrateSpawns.Add(1)
+			spawnOnce.Do(func() { close(spawnEntered) })
+			<-allowSpawnFinish
+			_, _ = io.WriteString(w, `{"id":"integrate-terminal"}`)
+		case r.URL.Path == "/api/code-terminals/integrate-terminal/phase-report":
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	binPath := filepath.Join(root, "orca")
+	writeFakeOrcaBinary(t, binPath, "commit-v2", 0)
+
+	origPath, origVer, origExec := startupPath, startupVersion, execProcess
+	t.Cleanup(func() {
+		startupPath, startupVersion, execProcess = origPath, origVer, origExec
+	})
+	startupPath = binPath
+	startupVersion = "commit-v1"
+
+	cfgPath := filepath.Join(root, "orca.json")
+	cfg, _ := json.Marshal(map[string]string{"nebula_api_url": srv.URL, "nebula_token": "test-token"})
+	writeFile(t, cfgPath, string(cfg))
+	storeDir := filepath.Join(root, "store")
+
+	var exchanges []model.RecordedExchange
+	exchanges = append(exchanges,
+		model.RecordedExchange{Response: textAnswer(`{"handler":"concierge","confidence":0.9}`)},
+		model.RecordedExchange{Response: toolUse("call-dir-1", ToolDirectiveSubmit, `{"kind":"instruction","text":"Hold integrate after restart."}`)},
+		model.RecordedExchange{Response: textAnswer("Recorded directive after two restarts.")},
+	)
+	replayPath := filepath.Join(root, "directive_replay.json")
+	if err := model.SaveRecording(replayPath, exchanges); err != nil {
+		t.Fatal(err)
+	}
+
+	baseArgs := []string{"chat", "--config", cfgPath, "--store-dir", storeDir, "--repo", "bazelment/yoloswe", "--replay", replayPath}
+
+	var restarts int
+	var out2, out3 bytes.Buffer
+	execProcess = func(path string, argv []string, env []string) error {
+		restarts++
+		for _, kv := range env {
+			if k, v, ok := strings.Cut(kv, "="); ok && k == restartEnvVar {
+				_ = os.Setenv(k, v)
+			}
+		}
+		startupVersion = "commit-v2"
+		switch restarts {
+		case 1:
+			// Second session re-attaches and immediately restarts again.
+			return Execute(t.Context(), argv[1:], strings.NewReader("/restart\n"), &out2, io.Discard)
+		case 2:
+			// Third session re-attaches and sends an instruction to the held run.
+			return Execute(t.Context(), argv[1:], strings.NewReader("hold integrate after restart\n/exit\n"), &out3, io.Discard)
+		default:
+			return fmt.Errorf("unexpected restart %d", restarts)
+		}
+	}
+
+	in, input := io.Pipe()
+	defer in.Close()
+	defer input.Close()
+	adopted := make(chan struct{})
+	var adoptOnce sync.Once
+	var out1 bytes.Buffer
+	writer1 := writerFunc(func(p []byte) (int, error) {
+		n, err := out1.Write(p)
+		if strings.Contains(out1.String(), "adopted "+runID) {
+			adoptOnce.Do(func() { close(adopted) })
+		}
+		if strings.Contains(out1.String(), "restarting orca") {
+			releaseOnce.Do(func() { close(allowSpawnFinish) })
+		}
+		return n, err
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- Execute(t.Context(), baseArgs, in, writer1, io.Discard)
+	}()
+
+	if _, err := io.WriteString(input, "/adopt "+runID+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-adopted:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("did not adopt run; out1=%q", out1.String())
+	}
+
+	// Trigger review report so the controller starts spawning the integrate phase,
+	// then send /restart while the phase spawn HTTP call is in flight.
+	close(reportReady)
+	select {
+	case <-spawnEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("controller did not enter phase spawn")
+	}
+	if _, err := io.WriteString(input, "/restart\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = input.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Execute across 2 restarts failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("restart chain timed out")
+	}
+
+	if restarts != 2 {
+		t.Fatalf("restarts = %d, want 2", restarts)
+	}
+	if got := integrateSpawns.Load(); got != 1 {
+		t.Fatalf("integrate phase spawns = %d, want 1 (no duplicate spawn across restarts)", got)
+	}
+	for i, out := range []string{out2.String(), out3.String()} {
+		want := "reattached " + runID + " (1 lanes, driving again"
+		if !strings.Contains(out, want) {
+			t.Fatalf("restart #%d output missing %q:\n%s", i+1, want, out)
+		}
+	}
+	if !strings.Contains(out3.String(), "Recorded directive after two restarts.") {
+		t.Fatalf("third session output missing directive confirmation:\n%s", out3.String())
+	}
+
+	// Verify both the handover lease and the SQLite run lease survived with the same stable holder.
+	var lease struct{ Holder string }
+	if err := json.Unmarshal([]byte(readFile(t, filepath.Join(dir, ".orca-lease.json"))), &lease); err != nil || lease.Holder != "orca-chat:"+frontDeskRunID {
+		t.Fatalf("handover lease holder = %q (%v), want orca-chat:%s", lease.Holder, err, frontDeskRunID)
+	}
+	dbPath, err := store.RunDBPath(storeDir, frontDeskRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.OpenSQLite(dbPath, clock.NewRealClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	storedRun, err := st.Runs().Get(t.Context(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedRun.Lease == nil || storedRun.Lease.HolderID != "orca-chat:"+frontDeskRunID {
+		t.Fatalf("SQLite run lease after 2 restarts = %+v, want holder orca-chat:%s", storedRun.Lease, frontDeskRunID)
+	}
+	storedLane, err := st.Lanes().Get(t.Context(), runID, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedLane.Phase != "integrate" || storedLane.TerminalID != "integrate-terminal" {
+		t.Fatalf("lane after in-flight spawn and 2 restarts = %+v, want phase=integrate terminal=integrate-terminal", storedLane)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
