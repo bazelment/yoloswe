@@ -3,6 +3,7 @@ package chat
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -47,9 +48,6 @@ type Model struct {
 func New(ctx context.Context, runID string, ask AskFunc, r router.Router) Model {
 	return Model{ctx: ctx, runID: runID, ask: ask, router: r}
 }
-
-// SetRunID changes the run shown in the chat header after a front-desk attach.
-func (m *Model) SetRunID(runID string) { m.runID = runID }
 
 // IsNewGoal reports whether text asks the concierge to start work.
 func IsNewGoal(text string) bool {
@@ -254,8 +252,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 func (m Model) View() tea.View {
 	runID := m.runID
-	if backend, ok := m.Backend.(*StoreBackend); ok && backend.RunID != "" {
-		runID = backend.RunID
+	if backend, ok := m.Backend.(*StoreBackend); ok {
+		runID = cmp.Or(backend.RunID(), runID)
 	}
 	lines := m.lines
 	if m.height > 5 && len(lines) > m.height-5 {

@@ -167,29 +167,32 @@ func (m RoleModels) withDefaults(provider string) RoleModels {
 
 // Config holds the runtime configuration for orca `run` and `chat`.
 type Config struct {
-	ModelProvider       string        `json:"model_provider,omitempty"`
-	Models              RoleModels    `json:"models"`
-	RunID               string        `json:"run_id,omitempty"`
-	Goal                string        `json:"goal,omitempty"`
-	Objective           string        `json:"objective,omitempty"`
-	PlanRef             string        `json:"plan_ref,omitempty"`
-	Plan                string        `json:"plan,omitempty"`
-	Repository          string        `json:"repository,omitempty"`
-	StoreSpec           string        `json:"store,omitempty"`
-	StoreBaseDir        string        `json:"store_base_dir,omitempty"`
-	DriverKind          string        `json:"driver,omitempty"`
-	LLMGatewayURL       string        `json:"llm_gateway_url,omitempty"`
-	NebulaAPIURL        string        `json:"nebula_api_url,omitempty"`
-	NebulaToken         string        `json:"nebula_token,omitempty"`
-	HolderID            string        `json:"holder_id,omitempty"`
-	ReplayPath          string        `json:"replay_path,omitempty"`
-	RecordPath          string        `json:"record_path,omitempty"`
-	FakeScenarioPath    string        `json:"fake_scenario_path,omitempty"`
-	LogLevel            string        `json:"log_level,omitempty"`
-	LogFormat           string        `json:"log_format,omitempty"`
-	Prompt              string        `json:"prompt,omitempty"`
-	ReportDay           string        `json:"report_day,omitempty"`
-	RecipeFiles         []string      `json:"recipe_files,omitempty"`
+	ModelProvider    string     `json:"model_provider,omitempty"`
+	Models           RoleModels `json:"models"`
+	RunID            string     `json:"run_id,omitempty"`
+	Goal             string     `json:"goal,omitempty"`
+	Objective        string     `json:"objective,omitempty"`
+	PlanRef          string     `json:"plan_ref,omitempty"`
+	Plan             string     `json:"plan,omitempty"`
+	Repository       string     `json:"repository,omitempty"`
+	StoreSpec        string     `json:"store,omitempty"`
+	StoreBaseDir     string     `json:"store_base_dir,omitempty"`
+	DriverKind       string     `json:"driver,omitempty"`
+	LLMGatewayURL    string     `json:"llm_gateway_url,omitempty"`
+	NebulaAPIURL     string     `json:"nebula_api_url,omitempty"`
+	NebulaToken      string     `json:"nebula_token,omitempty"`
+	HolderID         string     `json:"holder_id,omitempty"`
+	ReplayPath       string     `json:"replay_path,omitempty"`
+	RecordPath       string     `json:"record_path,omitempty"`
+	FakeScenarioPath string     `json:"fake_scenario_path,omitempty"`
+	LogLevel         string     `json:"log_level,omitempty"`
+	LogFormat        string     `json:"log_format,omitempty"`
+	Prompt           string     `json:"prompt,omitempty"`
+	ReportDay        string     `json:"report_day,omitempty"`
+	RecipeFiles      []string   `json:"recipe_files,omitempty"`
+	// launchArgs are the command-line flags a controller launched from this
+	// invocation inherits; see controllerFlags.
+	launchArgs          []string
 	LeaseTTL            time.Duration `json:"lease_ttl,omitempty"`
 	HeartbeatInterval   time.Duration `json:"heartbeat_interval,omitempty"`
 	PollInterval        time.Duration `json:"poll_interval,omitempty"`
@@ -504,6 +507,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	if err := fs.Parse(args); err != nil {
 		return Config{}, nil, err
 	}
+	launchArgs := controllerFlags(fs, args[:len(args)-len(fs.Args())])
 	cfg.RecipeFiles = recipes
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
@@ -563,7 +567,43 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	if (cmdName == "run" || cmdName == "chat") && strings.TrimSpace(cfg.Repository) == "" {
 		cfg.Repository = inferRepository()
 	}
+	cfg.launchArgs = launchArgs
 	return cfg.withDefaults(), fs.Args(), nil
+}
+
+// perInvocationFlags name the run, its goal and store, and this process's own
+// I/O; a controller launched from chat gets its own values for them.
+var perInvocationFlags = map[string]bool{
+	"run": true, "goal": true, "objective": true, "plan": true, "plan-ref": true,
+	"store": true, "repo": true, "prompt": true, "day": true, "replay": true, "record": true,
+}
+
+// controllerFlags returns the flag tokens of parsed (already accepted by fs)
+// that a controller launched from this invocation inherits: everything that
+// selects configuration, such as --config, models, providers and driver.
+func controllerFlags(fs *flag.FlagSet, parsed []string) []string {
+	var out []string
+	for i := 0; i < len(parsed); i++ {
+		tok := parsed[i]
+		if tok == "--" || !strings.HasPrefix(tok, "-") {
+			break
+		}
+		name, _, inline := strings.Cut(strings.TrimLeft(tok, "-"), "=")
+		n := 1
+		if f := fs.Lookup(name); f != nil && !inline && !isBoolFlag(f) && i+1 < len(parsed) {
+			n = 2
+		}
+		if !perInvocationFlags[name] {
+			out = append(out, parsed[i:i+n]...)
+		}
+		i += n - 1
+	}
+	return out
+}
+
+func isBoolFlag(f *flag.Flag) bool {
+	b, ok := f.Value.(interface{ IsBoolFlag() bool })
+	return ok && b.IsBoolFlag()
 }
 
 func inferRepository() string {

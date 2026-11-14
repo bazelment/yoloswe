@@ -51,11 +51,12 @@ func Execute(
 	stdin io.Reader,
 	stdout, stderr io.Writer,
 ) error {
+	// Only a bare `orca` opens chat; flags without a subcommand keep meaning
+	// `orca run`.
 	subcmd := "run"
 	rest := args
 	if len(args) == 0 {
 		subcmd = "chat"
-		rest = nil
 	} else {
 		switch args[0] {
 		case "run", "chat", "report", "export":
@@ -64,10 +65,6 @@ func Execute(
 		case "-h", "--help", "help":
 			printUsage(stdout)
 			return nil
-		default:
-			if strings.HasPrefix(args[0], "-") {
-				subcmd = "chat"
-			}
 		}
 	}
 
@@ -207,7 +204,10 @@ func executeChat(
 	if err != nil {
 		return err
 	}
-	defer func() { _ = st.Close() }()
+	// The backend owns the attached store from here on and closes it, and
+	// every store it later switches to, by exit.
+	backend := chatui.NewStoreBackend(st, storeCfg.RunID)
+	defer func() { _ = backend.Close() }()
 	if frontDesk {
 		if err := st.Runs().Create(ctx, store.Run{ID: storeCfg.RunID, Repository: cfg.Repository, Objective: ""}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			return err
@@ -232,34 +232,27 @@ func executeChat(
 	if question == "" && len(posArgs) > 0 {
 		question = strings.TrimSpace(strings.Join(posArgs, " "))
 	}
+	backend.OnAttach = concierge.Attach
+	backend.Adoption, backend.AdoptionUnavailable = newAdoption(cfg)
 	routerSel := cfg.Models.Roles["router"]
-	routingLog := router.StoreLogger{Store: st, RunID: storeCfg.RunID, Model: routerSel.Model, Provider: routerSel.Provider}
+	routingLog := attachedRoutingLog{backend: backend, model: routerSel.Model, provider: routerSel.Provider}
 	r := router.Select(roleClient(client, cfg, "router"), routerSel.Model, os.Getenv("ORCA_GEMINI_API_KEY"), os.Getenv("GEMINI_DECISIONS_BASE_URL"), routingLog)
-	adoption, adoptionOff := newAdoption(cfg)
+	// run.start runs inside a concierge stream turn; the new run is attached
+	// once that turn ends, so the turn finishes on the store it started on.
 	var pendingRunID string
 	var pendingRunStore store.Store
-	backend := &chatui.StoreBackend{Store: st, RunID: storeCfg.RunID, Adoption: adoption, AdoptionUnavailable: adoptionOff}
 	backend.Stream = func(streamCtx context.Context, text string, emit func(string)) error {
-		err := concierge.AskStream(streamCtx, text, emit)
+		err := concierge.AskStream(context.WithValue(streamCtx, runStartEchoKey{}, emit), text, emit)
 		if pendingRunStore != nil {
-			backend.Store, backend.RunID = pendingRunStore, pendingRunID
-			concierge.Attach(pendingRunStore, pendingRunID)
+			runStore, runID := pendingRunStore, pendingRunID
 			pendingRunStore, pendingRunID = nil, ""
+			err = errors.Join(err, backend.Attach(runStore, runID))
 		}
 		return err
 	}
-	attach := func(runID string, runStore store.Store) {
-		backend.Store, backend.RunID = runStore, runID
-		concierge.Attach(runStore, runID)
-	}
 	backend.ListRuns = func(ctx context.Context) ([]store.Run, error) { return discoverChatRuns(ctx, cfg, clk) }
-	backend.SwitchRun = func(ctx context.Context, runID string) error {
-		runStore, err := openDiscoveredRun(cfg, runID, clk)
-		if err != nil {
-			return err
-		}
-		attach(runID, runStore)
-		return nil
+	backend.OpenRun = func(_ context.Context, runID string) (store.Store, error) {
+		return openDiscoveredRun(cfg, runID, clk)
 	}
 	concierge.RunStart = func(ctx context.Context, goal string) (string, error) {
 		runID := nextUniqueID("run", clk)
@@ -271,11 +264,15 @@ func executeChat(
 			_ = runStore.Close()
 			return "", err
 		}
+		if pendingRunStore != nil {
+			_ = pendingRunStore.Close()
+		}
 		pendingRunID, pendingRunStore = runID, runStore
+		// Echo through the turn's stream so the chat view renders it.
+		if emit, ok := ctx.Value(runStartEchoKey{}).(func(string)); ok {
+			emit(fmt.Sprintf("Starting run %s for: %s (say stop to cancel)\n", runID, goal))
+		}
 		return runID, nil
-	}
-	concierge.OnRunStart = func(runID, goal string) {
-		_, _ = fmt.Fprintf(stdout, "Starting run %s for: %s (say stop to cancel)\n", runID, goal)
 	}
 	if question != "" {
 		var d router.Decision
@@ -302,43 +299,73 @@ func executeChat(
 		return err
 	}
 	ui := chatui.New(ctx, storeCfg.RunID, concierge.Ask, r)
-	ui.SetRunID(backend.RunID)
 	ui.Backend = backend
 	ui.Dispatch = backend.Dispatch
 	return chatui.Run(ctx, stdin, stdout, ui)
 }
 
+// runStartEchoKey carries the chat turn's emit func to run.start.
+type runStartEchoKey struct{}
+
+// attachedRoutingLog records routing decisions on the run chat is attached
+// to when the decision is made.
+type attachedRoutingLog struct {
+	backend         *chatui.StoreBackend
+	model, provider string
+}
+
+func (l attachedRoutingLog) LogRouting(ctx context.Context, text string, d router.Decision) error {
+	return l.backend.WithRun(func(st store.Store, runID string) error {
+		return router.StoreLogger{Store: st, RunID: runID, Model: l.model, Provider: l.provider}.LogRouting(ctx, text, d)
+	})
+}
+
 func launchDetachedRun(ctx context.Context, cfg Config, runID, goal string) error {
-	exe, err := os.Executable()
+	cmd, runDir, err := detachedRunCommand(cfg, runID, goal)
 	if err != nil {
 		return err
 	}
-	path, err := store.RunDBPath(cfg.StoreBaseDir, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(filepath.Join(runDir, "orca.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	logFile, err := os.OpenFile(filepath.Join(filepath.Dir(path), "orca.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	args := []string{"run", "--run", runID, "--goal", goal, "--store", "sqlite:" + path}
-	if cfg.Repository != "" {
-		args = append(args, "--repo", cfg.Repository)
-	}
-	if cfg.DriverKind != "" {
-		args = append(args, "--driver", cfg.DriverKind)
-	}
-	cmd := exec.CommandContext(context.WithoutCancel(ctx), exe, args...)
-	cmd.Dir, cmd.Stdout, cmd.Stderr = filepath.Dir(path), logFile, logFile
+	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		return err
 	}
 	go func() { _ = cmd.Wait(); _ = logFile.Close() }()
 	return nil
+}
+
+// detachedRunCommand builds the `orca run` controller for a run started from
+// chat. The controller inherits the chat's configuration flags and runs in its
+// own session, so the chat's terminal signals do not reach it. It keeps the
+// chat's working directory, so relative paths in inherited flags (--config,
+// --store-dir, ...) still resolve. runDir holds the run's store and log.
+func detachedRunCommand(cfg Config, runID, goal string) (cmd *exec.Cmd, runDir string, err error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, "", err
+	}
+	path, err := store.RunDBPath(chatStoreBaseDir(cfg), runID)
+	if err != nil {
+		return nil, "", err
+	}
+	if path, err = filepath.Abs(path); err != nil {
+		return nil, "", err
+	}
+	args := append([]string{"run"}, cfg.launchArgs...)
+	args = append(args, "--run", runID, "--goal", goal, "--store", "sqlite:"+path, "--driver", cfg.DriverKind)
+	if cfg.Repository != "" {
+		args = append(args, "--repo", cfg.Repository)
+	}
+	cmd = exec.Command(exe, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	return cmd, filepath.Dir(path), nil
 }
 
 // runLauncher is injectable for deterministic tests.
@@ -497,8 +524,8 @@ func notifySignalContext(parent context.Context, forceExit func()) (context.Cont
 
 func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, `Usage:
-  orca [flags]                             Start or reattach to owner chat
-  orca run --goal "<text>" [--standing] [--repo <owner/name>] [flags]
-  orca chat --run <id> [--store sqlite:<path>|nebula] [--prompt "<question>"] [flags]`)
+  orca                                     Start or reattach to owner chat
+  orca [run] --goal "<text>" [--standing] [--repo <owner/name>] [flags]
+  orca chat [--run <id>] [--store sqlite:<path>|nebula] [--prompt "<question>"] [flags]`)
 	_, _ = fmt.Fprintln(w, "  orca report --run <id> [--day YYYY-MM-DD] [flags]\n  orca export --run <id> [flags]")
 }

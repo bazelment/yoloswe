@@ -3,9 +3,12 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -140,7 +143,7 @@ func TestStoreStatusSlashAndInlineAnswer(t *testing.T) {
 	if _, err := st.Decisions().Append(ctx, store.Decision{RunID: "run", Actor: "router", Category: store.DecisionJudgment, Tool: "routing", TraceID: "trace-1", Output: "logged-route"}); err != nil {
 		t.Fatal(err)
 	}
-	b := &StoreBackend{Store: st, RunID: "run"}
+	b := NewStoreBackend(st, "run")
 	r := routeFunc(func(context.Context, string) (router.Decision, error) {
 		return router.Decision{Handler: router.Dispatcher, Confidence: 1}, nil
 	})
@@ -191,9 +194,13 @@ func TestThreeHandlersDispatch(t *testing.T) {
 	if err := st.Runs().Create(t.Context(), store.Run{ID: "run"}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.Runs().AcquireLease(t.Context(), "run", "controller", time.Hour); err != nil {
+		t.Fatal(err)
+	}
 	streamed := ""
 	var acknowledgements []string
-	b := &StoreBackend{Store: st, RunID: "run", Stream: func(_ context.Context, s string, emit func(string)) error { streamed = s; emit("answer"); return nil }}
+	b := NewStoreBackend(st, "run")
+	b.Stream = func(_ context.Context, s string, emit func(string)) error { streamed = s; emit("answer"); return nil }
 	for _, h := range []router.Handler{router.Concierge, router.Planner, router.Dispatcher} {
 		if err := b.Dispatch(t.Context(), router.Decision{Handler: h}, string(h), func(s string) { acknowledgements = append(acknowledgements, s) }); err != nil {
 			t.Fatal(err)
@@ -230,7 +237,7 @@ func TestOpenQuestionReplyReachesDispatcherSnapshot(t *testing.T) {
 	if err := st.Directives().Add(t.Context(), store.Directive{ID: "ask", RunID: "run", Ref: "owner_ask:ask-1", Text: `{"id":"ask-1","question":"A or B?"}`, Kind: store.DirectiveInstruction, Status: store.DirectiveActive}); err != nil {
 		t.Fatal(err)
 	}
-	b := &StoreBackend{Store: st, RunID: "run"}
+	b := NewStoreBackend(st, "run")
 	r := routeFunc(func(_ context.Context, input string) (router.Decision, error) {
 		if input != "go with B\nOpen questions:\nask-1: A or B?" {
 			t.Errorf("input=%q", input)
@@ -273,7 +280,7 @@ func TestPauseViaConciergeTool(t *testing.T) {
 	if err := st.Runs().Create(t.Context(), store.Run{ID: "run"}); err != nil {
 		t.Fatal(err)
 	}
-	b := &StoreBackend{Store: st, RunID: "run"}
+	b := NewStoreBackend(st, "run")
 	client := model.NewFakeClient(
 		model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("pause", concierge.ToolRunControl, json.RawMessage(`{"action":"pause"}`)))},
 		model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock("run paused"))},
@@ -304,5 +311,132 @@ func TestPauseViaConciergeTool(t *testing.T) {
 	}
 	if len(dirs) != 1 || dirs[0].Ref != "chat:control" || dirs[0].Text != "pause" {
 		t.Fatal(dirs)
+	}
+}
+
+// closeCounting records Close on a store.
+type closeCounting struct {
+	store.Store
+	closed atomic.Int32
+}
+
+func (c *closeCounting) Close() error { c.closed.Add(1); return c.Store.Close() }
+
+func newRunStore(t *testing.T, run store.Run, leased bool) *closeCounting {
+	t.Helper()
+	st := &closeCounting{Store: store.NewMemoryStore(nil)}
+	if err := st.Runs().Create(t.Context(), run); err != nil {
+		t.Fatal(err)
+	}
+	if leased {
+		if _, err := st.Runs().AcquireLease(t.Context(), run.ID, "controller", time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return st
+}
+
+// TestRunsSwitchUnderPollAndView switches runs while the poll loop and View
+// read the backend; under the race detector it fails if the switch is not
+// owned by the backend's lock.
+func TestRunsSwitchUnderPollAndView(t *testing.T) {
+	t.Parallel()
+	first := newRunStore(t, store.Run{ID: "run-a", Objective: "first"}, true)
+	second := newRunStore(t, store.Run{ID: "run-b", Objective: "second"}, true)
+	b := NewStoreBackend(first, "run-a")
+	b.ListRuns = func(context.Context) ([]store.Run, error) { return []store.Run{{ID: "run-a"}, {ID: "run-b"}}, nil }
+	b.OpenRun = func(_ context.Context, id string) (store.Store, error) {
+		if id != "run-b" {
+			t.Errorf("OpenRun(%q)", id)
+		}
+		return second, nil
+	}
+	var attached []string
+	b.OnAttach = func(_ store.Store, id string) { attached = append(attached, id) }
+	m := New(t.Context(), "run-a", nil, nil)
+	m.Backend = b
+
+	stop, polled, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		once := sync.OnceFunc(func() { close(polled) })
+		for {
+			select {
+			case <-stop:
+				done <- nil
+				return
+			default:
+			}
+			_ = m.View()
+			if msg, ok := m.refresh()().(snapshotMsg); !ok || msg.err != nil {
+				done <- fmt.Errorf("poll snapshot: %+v", msg)
+				return
+			}
+			once()
+		}
+	}()
+	<-polled
+	got, err := b.Command(t.Context(), "/runs run-b")
+	close(stop)
+	if pollErr := <-done; pollErr != nil {
+		t.Fatal(pollErr)
+	}
+	if err != nil || got != "attached to run run-b" {
+		t.Fatalf("/runs run-b = %q, %v", got, err)
+	}
+	if first.closed.Load() != 1 || second.closed.Load() != 0 {
+		t.Fatalf("closed first=%d second=%d, want 1 0", first.closed.Load(), second.closed.Load())
+	}
+	if strings.Join(attached, ",") != "run-b" || b.RunID() != "run-b" {
+		t.Fatalf("attached=%v RunID=%q", attached, b.RunID())
+	}
+	if v := m.View().Content; !strings.HasPrefix(v, "orca chat — run run-b\n") {
+		t.Fatalf("view header = %q", v)
+	}
+	if s, err := b.Snapshot(t.Context()); err != nil || !strings.HasPrefix(s.Status, "goal: second") {
+		t.Fatalf("snapshot after switch = %+v, %v", s, err)
+	}
+	if err := b.Close(); err != nil || second.closed.Load() != 1 {
+		t.Fatalf("Close = %v, second closed %d", err, second.closed.Load())
+	}
+}
+
+func TestRunsRejectsRunsDiscoveryDoesNotOffer(t *testing.T) {
+	t.Parallel()
+	first := newRunStore(t, store.Run{ID: "run-a", Objective: "first"}, true)
+	b := NewStoreBackend(first, "run-a")
+	b.ListRuns = func(context.Context) ([]store.Run, error) { return []store.Run{{ID: "run-a"}}, nil }
+	b.OpenRun = func(_ context.Context, id string) (store.Store, error) {
+		t.Errorf("OpenRun(%q) for a run discovery did not offer", id)
+		return nil, fmt.Errorf("unexpected")
+	}
+	if _, err := b.Command(t.Context(), "/runs run-elsewhere"); err == nil || err.Error() != `no run "run-elsewhere" for this repository; /runs lists them` {
+		t.Fatalf("err = %v", err)
+	}
+	if b.RunID() != "run-a" || first.closed.Load() != 0 {
+		t.Fatalf("RunID=%q closed=%d", b.RunID(), first.closed.Load())
+	}
+}
+
+func TestQueuedAcknowledgementNeedsLiveControllerLease(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, want string
+		leased     bool
+	}{
+		{"leased", "Queued for the dispatcher: retry lint", true},
+		{"no-controller", "Saved for the dispatcher of run run, but no controller is running it; it will act when one starts: retry lint", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := NewStoreBackend(newRunStore(t, store.Run{ID: "run"}, tc.leased), "run")
+			defer b.Close()
+			var got []string
+			if err := b.Dispatch(t.Context(), router.Decision{Handler: router.Dispatcher}, "retry lint", func(s string) { got = append(got, s) }); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(got, "\n") != tc.want {
+				t.Fatalf("ack = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

@@ -87,7 +87,6 @@ type Concierge struct {
 	memoryEditor memorychat.MemoryEditor
 	mu           sync.Mutex
 	RunStart     func(context.Context, string) (string, error)
-	OnRunStart   func(string, string)
 }
 
 // Attach selects a run for the Concierge.
@@ -350,17 +349,10 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 		if c.RunStart == nil {
 			return "", fmt.Errorf("run.start unavailable")
 		}
-		runID, err := c.RunStart(ctx, goal)
-		if err != nil {
-			return "", err
-		}
-		if c.OnRunStart != nil {
-			c.OnRunStart(runID, goal)
-		}
-		return runID, nil
+		return c.RunStart(ctx, goal)
 	})
 	model.AddTool[memorychat.RunControlParams](reg, memorychat.ToolRunControl, "Pause, resume or stop execution", func(ctx context.Context, p memorychat.RunControlParams) (string, error) {
-		backend := &chat.StoreBackend{Store: c.store, RunID: c.runID}
+		backend := chat.NewStoreBackend(c.store, c.runID)
 		return memorychat.Control(ctx, backend.Command, p)
 	})
 	model.AddTool[memorychat.RunSettingsParams](reg, memorychat.ToolRunSettings,
