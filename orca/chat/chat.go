@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/mattn/go-runewidth"
 	"golang.org/x/term"
 
 	"github.com/bazelment/yoloswe/orca/router"
@@ -57,8 +58,10 @@ func commandUsage() string {
 //nolint:govet
 type Model struct {
 	poll                 bool
+	refreshing           bool
 	restarting           bool
 	restartMessage       string
+	PollInterval         time.Duration
 	questions            []string
 	ctx                  context.Context
 	ask                  AskFunc
@@ -66,9 +69,11 @@ type Model struct {
 	Dispatch             DispatchFunc
 	Backend              Backend
 	runID, input, status string
+	streamBuf            string
 	lines                []string
-	busy                 bool
-	width, height        int
+	queued               []string
+	busy, streaming      bool
+	width                int
 	streamLine           int
 	// cursor is the input cursor's byte offset.
 	cursor int
@@ -77,7 +82,7 @@ type Model struct {
 }
 
 func New(ctx context.Context, runID string, ask AskFunc, r router.Router) Model {
-	return Model{ctx: ctx, runID: runID, ask: ask, router: r}
+	return Model{ctx: ctx, runID: runID, ask: ask, router: r, poll: true}
 }
 
 // WithTranscript adds earlier conversation lines above new input.
@@ -213,18 +218,112 @@ type streamMsg struct {
 }
 
 func (m Model) refresh() tea.Cmd {
-	if m.Backend == nil {
+	if m.Backend == nil || !m.poll {
 		return nil
 	}
 	return func() tea.Msg { s, e := m.Backend.Snapshot(m.ctx); return snapshotMsg{s, e} }
 }
+func (m *Model) requestRefresh() tea.Cmd {
+	if m.refreshing {
+		return nil
+	}
+	cmd := m.refresh()
+	m.refreshing = cmd != nil
+	return cmd
+}
+
+// pollInterval returns the periodic status refresh cadence (default 15s);
+// store.Store has no push notifications and controllers may run out-of-process,
+// so store mutations are observed within one poll interval or on turn end.
+func (m Model) pollInterval() time.Duration {
+	if m.PollInterval > 0 {
+		return m.PollInterval
+	}
+	return 15 * time.Second
+}
+func (m Model) nextPoll() tea.Cmd {
+	return tea.Tick(m.pollInterval(), func(time.Time) tea.Msg { return pollMsg{} })
+}
 func (m Model) Init() tea.Cmd {
 	if m.poll {
-		return tea.Batch(m.refresh(), poll())
+		return tea.Batch(m.printLines(m.lines...), m.refresh(), m.nextPoll())
 	}
 	return m.refresh()
 }
-func poll() tea.Cmd { return tea.Tick(time.Second, func(time.Time) tea.Msg { return pollMsg{} }) }
+func (m Model) printLines(blocks ...string) tea.Cmd {
+	if !m.poll || len(blocks) == 0 {
+		return nil
+	}
+	var rows []string
+	for _, b := range blocks {
+		rows = append(rows, wrapPhysicalLines(b, m.width)...)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	cmds := make([]tea.Cmd, 0, len(rows))
+	cmds = append(cmds, tea.Println(rows[0]))
+	for _, row := range rows[1:] {
+		cmds = append(cmds, tea.Println(row))
+	}
+	return tea.Sequence(cmds...)
+}
+func (m *Model) flushStream(done bool) []string {
+	if done {
+		m.streaming = false
+		if m.streamBuf == "" {
+			return nil
+		}
+		out := wrapPhysicalLines(m.streamBuf, m.width)
+		m.streamBuf = ""
+		return out
+	}
+	var out []string
+	if idx := strings.LastIndexByte(m.streamBuf, '\n'); idx >= 0 {
+		out = append(out, wrapPhysicalLines(m.streamBuf[:idx], m.width)...)
+		m.streamBuf = m.streamBuf[idx+1:]
+	}
+	if m.width > 1 && runewidth.StringWidth(m.streamBuf) >= m.width {
+		wrapped := wrapPhysicalLines(m.streamBuf, m.width)
+		if len(wrapped) > 1 {
+			out = append(out, wrapped[:len(wrapped)-1]...)
+			m.streamBuf = wrapped[len(wrapped)-1]
+		}
+	}
+	return out
+}
+func (m Model) submit(text string) (Model, tea.Cmd) {
+	userLine := "you> " + text
+	m.lines = append(m.lines, userLine)
+	m.busy = true
+	var runCmd tea.Cmd
+	if strings.HasPrefix(text, "/") {
+		fields := strings.Fields(text)
+		isRestart := len(fields) > 0 && strings.EqualFold(fields[0], "/restart")
+		ctx, backend := m.ctx, m.Backend
+		runCmd = func() tea.Msg {
+			if backend == nil {
+				return commandMsg{err: fmt.Errorf("no run attached")}
+			}
+			s, e := backend.Command(ctx, text)
+			return commandMsg{text: s, err: e, quit: isRestart && e == nil}
+		}
+	} else {
+		runCmd = m.route(text)
+	}
+	return m, tea.Sequence(m.printLines(userLine), runCmd)
+}
+func (m Model) finishTurn(printed ...string) (tea.Model, tea.Cmd) {
+	m.busy = false
+	var nextCmd tea.Cmd
+	if len(m.queued) > 0 {
+		next := m.queued[0]
+		m.queued = m.queued[1:]
+		m, nextCmd = m.submit(next)
+	}
+	refresh := m.requestRefresh()
+	return m, tea.Sequence(m.printLines(printed...), nextCmd, refresh)
+}
 func receive(ctx context.Context, ch <-chan streamMsg) tea.Cmd {
 	return func() tea.Msg {
 		select {
@@ -246,12 +345,22 @@ func (m Model) route(text string) tea.Cmd {
 		}
 		input := text
 		if m.Backend != nil {
-			s, err := m.Backend.Snapshot(m.ctx)
+			var questions []string
+			var err error
+			if q, ok := m.Backend.(interface {
+				Questions(context.Context) ([]string, error)
+			}); ok {
+				questions, err = q.Questions(m.ctx)
+			} else {
+				var s Snapshot
+				s, err = m.Backend.Snapshot(m.ctx)
+				questions = s.Questions
+			}
 			if err != nil {
 				return routeMsg{text: text, err: err}
 			}
-			if len(s.Questions) > 0 {
-				input = router.FormatInput(input, strings.Join(s.Questions, "\n"))
+			if len(questions) > 0 {
+				input = router.FormatInput(input, strings.Join(questions, "\n"))
 			}
 		}
 		d, e := m.router.Route(m.ctx, input)
@@ -287,34 +396,39 @@ func (m Model) dispatch(d router.Decision, text string) tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch x := msg.(type) {
 	case pollMsg:
-		return m, tea.Batch(m.refresh(), poll())
+		if !m.poll {
+			return m, nil
+		}
+		refresh := m.requestRefresh()
+		return m, tea.Batch(refresh, m.nextPoll())
 	case tea.WindowSizeMsg:
-		m.width, m.height = x.Width, x.Height
+		m.width = x.Width
 	case snapshotMsg:
+		m.refreshing = false
 		if x.err != nil {
-			m.lines = append(m.lines, "error: "+x.err.Error())
-		} else {
-			m.status = x.snapshot.Status
-			m.questions = x.snapshot.Questions
+			m.status = "status error: " + x.err.Error()
+			return m, nil
 		}
+		m.status = x.snapshot.Status
+		m.questions = x.snapshot.Questions
 	case commandMsg:
-		m.busy = false
+		out := x.text
 		if x.err != nil {
-			m.lines = append(m.lines, "error: "+x.err.Error())
-		} else {
-			m.lines = append(m.lines, x.text)
+			out = "error: " + x.err.Error()
 		}
+		m.lines = append(m.lines, out)
 		if x.quit {
+			m.busy = false
 			m.restarting = true
 			m.restartMessage = x.text
 			return m, tea.Quit
 		}
-		return m, m.refresh()
+		return m.finishTurn(out)
 	case routeMsg:
 		if x.err != nil {
-			m.busy = false
-			m.lines = append(m.lines, "error: "+x.err.Error())
-			return m, nil
+			errLine := "error: " + x.err.Error()
+			m.lines = append(m.lines, errLine)
+			return m.finishTurn(errLine)
 		}
 		echo := "→ " + string(x.decision.Handler) + ": " + x.text
 		if x.decision.Fallback {
@@ -322,19 +436,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lines = append(m.lines, echo, "orca> ")
 		m.streamLine = len(m.lines) - 1
-		return m, m.dispatch(x.decision, x.text)
+		m.streaming = true
+		m.streamBuf = "orca> "
+		return m, tea.Sequence(m.printLines(echo), m.dispatch(x.decision, x.text))
 	case streamMsg:
 		if x.text != "" {
 			m.lines[m.streamLine] += x.text
+			m.streamBuf += x.text
 		}
 		if x.done {
-			m.busy = false
+			printed := m.flushStream(true)
 			if x.err != nil {
-				m.lines = append(m.lines, "error: "+x.err.Error())
+				errLine := "error: " + x.err.Error()
+				m.lines = append(m.lines, errLine)
+				printed = append(printed, errLine)
 			}
-			return m, m.refresh()
+			return m.finishTurn(printed...)
 		}
-		return m, receive(m.ctx, x.ch)
+		printed := m.flushStream(false)
+		return m, tea.Sequence(m.printLines(printed...), receive(m.ctx, x.ch))
 	case runIDsMsg:
 		if x.input == m.input {
 			m.completeArg(x.ids, x.err)
@@ -353,9 +473,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.hints = nil
-		if m.busy {
-			return m, nil
-		}
 		text := strings.TrimSpace(m.input)
 		m.setInput("")
 		if text == "" {
@@ -365,24 +482,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "exit", "quit", "/exit", "/quit":
 			return m, tea.Quit
 		}
-		m.lines = append(m.lines, "you> "+text)
-		m.busy = true
-		if strings.HasPrefix(text, "/") {
-			fields := strings.Fields(text)
-			isRestart := len(fields) > 0 && strings.EqualFold(fields[0], "/restart")
-			return m, func() tea.Msg {
-				if m.Backend == nil {
-					return commandMsg{err: fmt.Errorf("no run attached")}
-				}
-				s, e := m.Backend.Command(m.ctx, text)
-				return commandMsg{text: s, err: e, quit: isRestart && e == nil}
-			}
+		if m.busy {
+			m.queued = append(m.queued, text)
+			return m, nil
 		}
-		return m, m.route(text)
+		return m.submit(text)
 	case tea.PasteMsg:
-		if !m.busy {
-			m.insert(x.Content)
-		}
+		m.insert(x.Content)
+		m.hints = commandHints(m.input)
 		return m, nil
 	}
 	return m, nil
@@ -476,19 +583,56 @@ func (m Model) View() tea.View {
 	if backend, ok := m.Backend.(*StoreBackend); ok {
 		runID = cmp.Or(backend.RunID(), runID)
 	}
-	lines := m.lines
-	if m.height > 5 && len(lines) > m.height-5 {
-		lines = lines[len(lines)-(m.height-5):]
+	stream := ""
+	if m.streaming && m.streamBuf != "" {
+		stream = "\n" + truncateLine(m.streamBuf, m.width)
 	}
 	questions := ""
 	for _, q := range m.questions {
-		questions += "\nowner question> " + q
+		questions += "\n" + truncateLine("owner question> "+q, m.width)
 	}
 	hints := ""
 	if len(m.hints) > 0 {
-		hints = "\n  " + strings.Join(m.hints, "  ")
+		hints = "\n" + truncateLine("  "+strings.Join(m.hints, "  "), m.width)
 	}
-	return tea.NewView("orca chat — run " + runID + "\n" + strings.Join(lines, "\n") + questions + "\n\n" + m.status + "\n> " + m.inputView() + hints)
+	return tea.NewView("orca chat — run " + runID + stream + questions + "\n\n> " + m.inputView() + hints + m.statusFooter())
+}
+func (m Model) statusFooter() string {
+	if m.status == "" {
+		return ""
+	}
+	raw := strings.Split(m.status, "\n")
+	if len(raw) > 2 {
+		raw = raw[:2]
+	}
+	out := make([]string, len(raw))
+	for i, line := range raw {
+		out[i] = "\x1b[2m" + truncateLine(line, m.width) + "\x1b[22m"
+	}
+	return "\n" + strings.Join(out, "\n")
+}
+func expandTabs(s string) string {
+	return strings.ReplaceAll(s, "\t", "    ")
+}
+func effectiveWidth(width int) int {
+	if width > 1 {
+		return width - 1
+	}
+	return width
+}
+func wrapPhysicalLines(s string, width int) []string {
+	s = expandTabs(s)
+	if width <= 1 {
+		return strings.Split(s, "\n")
+	}
+	return strings.Split(runewidth.Wrap(s, effectiveWidth(width)), "\n")
+}
+func truncateLine(s string, width int) string {
+	s = expandTabs(s)
+	if width <= 0 {
+		return s
+	}
+	return runewidth.Truncate(s, effectiveWidth(width), "…")
 }
 func isTerminal(in io.Reader) bool { f, ok := in.(*os.File); return ok && term.IsTerminal(int(f.Fd())) }
 func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {
@@ -497,6 +641,16 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {
 	m.ctx = ctx
 	if isTerminal(in) {
 		m.poll = true
+		if m.width <= 0 {
+			for _, rw := range []any{out, in} {
+				if f, ok := rw.(*os.File); ok {
+					if w, _, err := term.GetSize(int(f.Fd())); err == nil && w > 0 {
+						m.width = w
+						break
+					}
+				}
+			}
+		}
 		final, err := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out), tea.WithContext(ctx)).Run()
 		if err == nil {
 			if fm, ok := final.(Model); ok && fm.restarting {
@@ -505,6 +659,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {
 		}
 		return err
 	}
+	m.poll = false
 	// Scripts use the same update/command path as the terminal.
 	if cmd := m.Init(); cmd != nil {
 		next, _ := m.Update(cmd())

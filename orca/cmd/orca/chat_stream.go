@@ -21,19 +21,28 @@ type chatStream struct {
 	emitted bool
 }
 
+func (s *chatStream) reset() {
+	s.mu.Lock()
+	s.emitted = false
+	s.mu.Unlock()
+}
 func (s *chatStream) text(text string) {
 	if text == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.emitted = true
-	s.emit(text)
+	if strings.TrimSpace(text) != "" {
+		s.emitted = true
+	}
+	if s.emitted {
+		s.emit(text)
+	}
 }
 func (s *chatStream) complete(text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.emitted {
+	if !s.emitted && strings.TrimSpace(text) != "" {
 		s.emit(text)
 	}
 	s.emitted = false
@@ -46,6 +55,7 @@ func (t chatTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if stream == nil {
 		return t.base.RoundTrip(req)
 	}
+	stream.reset()
 	anthropic := strings.HasSuffix(req.URL.Path, "/messages")
 	if anthropic {
 		raw, err := io.ReadAll(req.Body)

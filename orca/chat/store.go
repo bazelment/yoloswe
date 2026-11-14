@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"text/tabwriter"
@@ -65,6 +66,35 @@ type StoreBackend struct {
 	runID         string
 	memory        concierge.MemoryEditor
 	lastDirective lastDirective
+
+	cacheMu    sync.Mutex
+	prCache    map[string]cachedPR
+	usageCache map[string]runUsageCache
+}
+
+const (
+	// prCacheTTL bounds how long a successful GitHub PR status probe is reused
+	// across periodic status snapshots while a lane remains in the same phase/round.
+	prCacheTTL = 30 * time.Second
+	// snapshotPRProbeTimeout bounds a single PR probe during status refresh.
+	snapshotPRProbeTimeout = 5 * time.Second
+)
+
+//nolint:govet // cache entry grouping
+type cachedPR struct {
+	at     time.Time
+	phase  string
+	round  int
+	status PRStatus
+}
+
+//nolint:govet // cache entry grouping
+type runUsageCache struct {
+	day      time.Time
+	store    store.Store
+	termCost map[string]float64
+	afterSeq int64
+	total    float64
 }
 
 // lastDirective identifies the directive /undo revokes.
@@ -172,20 +202,27 @@ func (b *StoreBackend) ReadHostRun(id string) (adopt.Run, error) {
 // heldRuns returns the attached run followed by the adopted runs driven in
 // the attached store. The caller holds b.mu.
 func (b *StoreBackend) heldRuns(ctx context.Context) ([]string, error) {
+	runs, _, err := b.heldRunsWithRecords(ctx)
+	return runs, err
+}
+
+func (b *StoreBackend) heldRunsWithRecords(ctx context.Context) ([]string, map[string]*store.Run, error) {
 	runs := []string{b.runID}
+	byID := map[string]*store.Run{}
 	if b.Adoption == nil {
-		return runs, nil
+		return runs, byID, nil
 	}
 	ids, err := b.Adoption.Adopted()
 	for _, id := range ids {
 		if id == b.runID {
 			continue
 		}
-		if _, getErr := b.store.Runs().Get(ctx, id); getErr == nil {
+		if r, getErr := b.store.Runs().Get(ctx, id); getErr == nil {
 			runs = append(runs, id)
+			byID[id] = r
 		}
 	}
-	return runs, err
+	return runs, byID, err
 }
 
 // openAsk is an unanswered owner question.
@@ -258,103 +295,417 @@ func (b *StoreBackend) lanes(ctx context.Context, runs []string) ([]heldLane, er
 	return out, nil
 }
 
+// Snapshot reads store state and open questions under b.mu.RLock, then
+// releases b.mu before reading host-run metadata or probing GitHub PRs so
+// external probes never block Attach, Command, RunID, or Questions.
 func (b *StoreBackend) Snapshot(ctx context.Context) (Snapshot, error) {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
-	v, err := b.view(ctx)
+	v, groups, err := b.view(ctx, true)
+	var questions []string
+	if err == nil {
+		questions = make([]string, len(v.asks))
+		for i := range v.asks {
+			questions[i] = b.question(&v.asks[i])
+		}
+	}
+	b.mu.RUnlock()
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return v.snapshot(b), nil
+	v.liveLanes = b.renderLiveLanes(ctx, groups)
+	return v.snapshot(questions), nil
+}
+
+// Questions returns the formatted open owner questions for all held runs.
+func (b *StoreBackend) Questions(ctx context.Context) ([]string, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.questions(ctx)
+}
+
+// questions reads and formats open owner questions for all held runs; the caller holds b.mu.
+func (b *StoreBackend) questions(ctx context.Context) ([]string, error) {
+	held, err := b.heldRuns(ctx)
+	if err != nil {
+		return nil, err
+	}
+	asks, err := b.asks(ctx, held)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, len(asks))
+	for i := range asks {
+		out[i] = b.question(&asks[i])
+	}
+	return out, nil
 }
 
 // runView is what the attached run and the runs it holds look like now.
 //
 //nolint:govet // field order follows the doc
 type runView struct {
-	run      *store.Run
-	held     []string
-	lanes    []heldLane
-	asks     []openAsk
-	cost     float64
-	desk     bool
-	statuses map[string]int
-	phases   map[string]int
+	run       *store.Run
+	held      []string
+	lanes     []heldLane
+	liveLanes []string
+	asks      []openAsk
+	cost      float64
+	desk      bool
+	statuses  map[string]int
+	phases    map[string]int
+}
+
+//nolint:govet // snapshot live-lane input grouping
+type liveRunGroup struct {
+	now           time.Time
+	probe         HostProbe
+	decisionStart map[string]time.Time
+	runID         string
+	repo          string
+	lanes         []store.Lane
 }
 
 // view reads the attached run's view; the caller holds b.mu.
-func (b *StoreBackend) view(ctx context.Context) (runView, error) {
+func (b *StoreBackend) view(ctx context.Context, includeLive bool) (runView, []liveRunGroup, error) {
 	run, err := b.store.Runs().Get(ctx, b.runID)
 	if err != nil {
-		return runView{}, err
+		return runView{}, nil, err
 	}
 	v := runView{run: run, desk: b.frontDesk(), statuses: map[string]int{}, phases: map[string]int{}}
-	if v.held, err = b.heldRuns(ctx); err != nil {
-		return runView{}, err
+	var runsByID map[string]*store.Run
+	if v.held, runsByID, err = b.heldRunsWithRecords(ctx); err != nil {
+		return runView{}, nil, err
 	}
+	runsByID[b.runID] = run
 	if v.lanes, err = b.lanes(ctx, v.held); err != nil {
-		return runView{}, err
+		return runView{}, nil, err
 	}
 	if v.asks, err = b.asks(ctx, v.held); err != nil {
-		return runView{}, err
+		return runView{}, nil, err
 	}
-	start := b.now().UTC().Truncate(24 * time.Hour)
+	liveByRun := map[string][]store.Lane{}
+	for i := range v.lanes {
+		v.statuses[cmp.Or(string(v.lanes[i].lane.Status), "-")]++
+		if !v.lanes[i].lane.Status.Terminal() {
+			v.phases[cmp.Or(v.lanes[i].lane.Phase, "-")]++
+			if includeLive {
+				liveByRun[v.lanes[i].run] = append(liveByRun[v.lanes[i].run], v.lanes[i].lane)
+			}
+		}
+	}
+	now := b.now()
+	start := now.UTC().Truncate(24 * time.Hour)
+	var groups []liveRunGroup
 	for _, id := range v.held {
-		decs, err := b.store.Decisions().List(ctx, store.DecisionFilter{RunID: id, SinceTime: &start})
+		runLanes := liveByRun[id]
+		filter := store.DecisionFilter{RunID: id, SinceTime: &start}
+		if len(runLanes) > 0 {
+			filter.SinceTime = nil
+		}
+		decs, err := b.store.Decisions().List(ctx, filter)
 		if err != nil {
-			return runView{}, err
+			return runView{}, nil, err
+		}
+		turnDecisionCost := map[string]float64{}
+		var decisionStarts map[string]time.Time
+		if len(runLanes) > 0 {
+			decisionStarts = make(map[string]time.Time, len(runLanes))
 		}
 		for i := range decs {
-			v.cost += decs[i].CostUSD
+			d := &decs[i]
+			if d.CreatedAt.IsZero() || !d.CreatedAt.Before(start) {
+				if d.Tool != "metrics.snapshot" {
+					v.cost += d.CostUSD
+					if d.TurnID != "" {
+						turnDecisionCost[d.TurnID] += d.CostUSD
+					}
+				}
+			}
+			if decisionStarts != nil && d.LaneID != "" && !d.CreatedAt.IsZero() && isPhaseStartDecision(d.Tool) {
+				if d.CreatedAt.After(decisionStarts[d.LaneID]) {
+					decisionStarts[d.LaneID] = d.CreatedAt
+				}
+			}
 		}
-		threads, err := b.store.Threads().ListThreads(ctx, store.ThreadFilter{RunID: id, Role: store.ThreadRoleConcierge})
+		threads, err := b.store.Threads().ListThreads(ctx, store.ThreadFilter{RunID: id})
 		if err != nil {
-			return runView{}, err
+			return runView{}, nil, err
 		}
 		for i := range threads {
 			turns, err := b.store.Threads().ListTurns(ctx, threads[i].ID)
 			if err != nil {
-				return runView{}, err
+				return runView{}, nil, err
 			}
 			for j := range turns {
-				if !turns[j].StartedAt.Before(start) {
-					v.cost += turns[j].CostUSD
+				if turns[j].StartedAt.IsZero() || !turns[j].StartedAt.Before(start) {
+					if rem := turns[j].CostUSD - turnDecisionCost[turns[j].ID]; rem > 0 {
+						v.cost += rem
+					}
 				}
+			}
+			if len(turns) == 0 && (threads[i].UpdatedAt.IsZero() || !threads[i].UpdatedAt.Before(start)) {
+				v.cost += threads[i].CostUSD
+			}
+		}
+		evCost, err := b.eventCostToday(ctx, b.store, id, start)
+		if err != nil {
+			return runView{}, nil, err
+		}
+		v.cost += evCost
+		if len(runLanes) > 0 {
+			var repo string
+			if r := runsByID[id]; r != nil {
+				repo = r.Repository
+			}
+			groups = append(groups, liveRunGroup{
+				now:           now,
+				probe:         b.HostProbe,
+				decisionStart: decisionStarts,
+				runID:         id,
+				repo:          repo,
+				lanes:         runLanes,
+			})
+		}
+	}
+	return v, groups, nil
+}
+
+func (b *StoreBackend) eventCostToday(ctx context.Context, st store.Store, runID string, start time.Time) (float64, error) {
+	b.cacheMu.Lock()
+	var state runUsageCache
+	if b.usageCache != nil {
+		if prev, ok := b.usageCache[runID]; ok && prev.store == st && prev.day.Equal(start) {
+			state = prev
+		}
+	}
+	if state.termCost == nil {
+		state = runUsageCache{day: start, store: st, termCost: map[string]float64{}}
+	}
+	afterSeq := state.afterSeq
+	b.cacheMu.Unlock()
+
+	evs, err := st.Events().List(ctx, store.EventFilter{RunID: runID, AfterSeq: afterSeq})
+	if err != nil {
+		return 0, err
+	}
+	if len(evs) == 0 {
+		return state.total, nil
+	}
+
+	b.cacheMu.Lock()
+	defer b.cacheMu.Unlock()
+	if b.usageCache == nil {
+		b.usageCache = map[string]runUsageCache{}
+	}
+	cur, ok := b.usageCache[runID]
+	if !ok || cur.store != st || !cur.day.Equal(start) || cur.termCost == nil {
+		cur = runUsageCache{day: start, store: st, termCost: map[string]float64{}}
+	}
+	for i := range evs {
+		if evs[i].Seq > cur.afterSeq {
+			cur.afterSeq = evs[i].Seq
+		}
+		if (!evs[i].CreatedAt.IsZero() && evs[i].CreatedAt.Before(start)) || !strings.HasPrefix(evs[i].Source, "nebula:usage:") || len(evs[i].Payload) == 0 {
+			continue
+		}
+		var p struct {
+			Usage *struct {
+				EstimatedCostUSD float64 `json:"estimatedCostUsd"`
+			} `json:"usage"`
+			TerminalID string `json:"terminalId"`
+		}
+		if json.Unmarshal(evs[i].Payload, &p) == nil && p.Usage != nil && p.Usage.EstimatedCostUSD > 0 {
+			key := cmp.Or(p.TerminalID, evs[i].Source)
+			if p.Usage.EstimatedCostUSD > cur.termCost[key] {
+				cur.total += p.Usage.EstimatedCostUSD - cur.termCost[key]
+				cur.termCost[key] = p.Usage.EstimatedCostUSD
 			}
 		}
 	}
-	for i := range v.lanes {
-		v.statuses[cmp.Or(string(v.lanes[i].lane.Status), "-")]++
-		v.phases[cmp.Or(v.lanes[i].lane.Phase, "-")]++
-	}
-	return v, nil
+	b.usageCache[runID] = cur
+	return cur.total, nil
 }
 
-// goal names the attached run's goal, or says the chat is at the front desk.
+func (b *StoreBackend) renderLiveLanes(ctx context.Context, groups []liveRunGroup) []string {
+	if len(groups) == 0 {
+		return nil
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, snapshotPRProbeTimeout)
+	defer cancel()
+	// Each live lane writes to its own preallocated items[i] slot under wg; sem
+	// has capacity 4 so goroutines acquire a token before probing and release it
+	// before wg.Done(), and wg.Wait() completes before items is joined.
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	groupItems := make([][]string, len(groups))
+	for gi := range groups {
+		g := &groups[gi]
+		hr, _ := b.ReadHostRun(g.runID)
+		hostLanes := make(map[string]adopt.Lane, len(hr.Lanes))
+		for i := range hr.Lanes {
+			hostLanes[hr.Lanes[i].ID] = hr.Lanes[i]
+		}
+		repo := cmp.Or(g.repo, hr.Repo)
+		items := make([]string, len(g.lanes))
+		groupItems[gi] = items
+		for i := range g.lanes {
+			l := g.lanes[i]
+			hl := hostLanes[l.ID]
+			decStart := g.decisionStart[l.ID]
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				phase := cmp.Or(l.Phase, string(l.Status), "-")
+				desc := fmt.Sprintf("%s %s r%d", l.ID, phase, max(l.Round, 1))
+				if pr := b.cachedLanePRDesc(probeCtx, g.probe, g.now, repo, hr.Dir, &l); pr != "" {
+					desc += " " + pr
+				}
+				if start := resolveLanePhaseStart(decStart, hl, &l); !start.IsZero() {
+					desc += " " + phaseElapsed(g.now.Sub(start))
+				}
+				items[idx] = desc
+			}(i)
+		}
+	}
+	wg.Wait()
+	out := make([]string, len(groups))
+	for gi := range groups {
+		joined := strings.Join(groupItems[gi], ", ")
+		if len(groups) > 1 {
+			joined = groups[gi].runID + ": " + joined
+		}
+		out[gi] = joined
+	}
+	return out
+}
+
+func (b *StoreBackend) cachedLanePRDesc(ctx context.Context, probe HostProbe, now time.Time, repo, dir string, l *store.Lane) string {
+	if l.PR <= 0 {
+		return ""
+	}
+	var state string
+	if probe.PR != nil {
+		num := strconv.Itoa(l.PR)
+		key := repo + "\x00" + dir + "\x00" + num
+		var cached cachedPR
+		var hasCached, fresh bool
+		b.cacheMu.Lock()
+		if b.prCache != nil {
+			cached, hasCached = b.prCache[key]
+			if hasCached && !now.Before(cached.at) && now.Sub(cached.at) < prCacheTTL && cached.phase == l.Phase && cached.round == l.Round {
+				fresh = true
+			}
+		}
+		b.cacheMu.Unlock()
+		if fresh {
+			if cached.status.State != "" {
+				state = cached.status.String()
+			}
+		} else {
+			probeCtx, cancel := context.WithTimeout(ctx, snapshotPRProbeTimeout)
+			pr, err := probe.PR(probeCtx, repo, dir, num)
+			cancel()
+			nextStatus := cached.status
+			if err == nil && pr.State != "" {
+				nextStatus = pr
+			}
+			b.cacheMu.Lock()
+			if b.prCache == nil {
+				b.prCache = make(map[string]cachedPR)
+			}
+			b.prCache[key] = cachedPR{at: now, phase: l.Phase, round: l.Round, status: nextStatus}
+			b.cacheMu.Unlock()
+			if nextStatus.State != "" {
+				state = nextStatus.String()
+			}
+		}
+	}
+	if state == "" {
+		switch {
+		case l.MergeSHA != "":
+			state = "merged"
+		case l.Checks != "":
+			state = l.Checks
+		}
+	}
+	if state != "" {
+		return fmt.Sprintf("PR #%d (%s)", l.PR, state)
+	}
+	return fmt.Sprintf("PR #%d", l.PR)
+}
+
+func isPhaseStartDecision(tool string) bool {
+	switch tool {
+	case "lane.launch", "lane.advance", "lane.rework", "lane.retry", "lane.start", "lane.resume":
+		return true
+	}
+	return false
+}
+
+func resolveLanePhaseStart(decisionStart time.Time, hl adopt.Lane, l *store.Lane) time.Time {
+	if !decisionStart.IsZero() {
+		return decisionStart
+	}
+	if first, _, _ := strings.Cut(strings.TrimSpace(hl.LastEvent), " "); first != "" {
+		if t, err := time.Parse(time.RFC3339, first); err == nil {
+			return t
+		}
+	}
+	if !l.CreatedAt.IsZero() {
+		return l.CreatedAt
+	}
+	return l.UpdatedAt
+}
+
+func phaseElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Round(time.Second)/time.Second))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Round(time.Minute)/time.Minute))
+	}
+	h := int(d / time.Hour)
+	m := int((d % time.Hour).Round(time.Minute) / time.Minute)
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh%dm", h, m)
+}
+
+// goal names the attached run's goal, the held runs, or says the chat is at the front desk.
 func (v *runView) goal() string {
 	if v.desk {
+		if len(v.held) > 1 {
+			return "adopted: " + strings.Join(v.held[1:], ", ")
+		}
 		return "front desk: no run yet"
 	}
 	return "goal: " + cmp.Or(strings.TrimSpace(v.run.Objective), "(none)")
 }
 
-func (v *runView) snapshot(b *StoreBackend) Snapshot {
-	status := v.goal()
-	if len(v.held) > 1 {
-		status += " | adopted: " + strings.Join(v.held[1:], ", ")
+func (v *runView) snapshot(questions []string) Snapshot {
+	lead := v.goal()
+	if !v.desk && len(v.held) > 1 {
+		lead += " | adopted: " + strings.Join(v.held[1:], ", ")
 	}
-	status += " | lanes: " + laneCounts(len(v.lanes), v.statuses, v.phases)
-	s := Snapshot{Status: status + fmt.Sprintf(" | open questions: %d | cost today: $%.2f", len(v.asks), v.cost)}
-	for i := range v.asks {
-		s.Questions = append(s.Questions, b.question(&v.asks[i]))
+	totals := fmt.Sprintf("lanes: %s | open questions: %d | cost today: $%.2f",
+		laneCounts(len(v.lanes), v.statuses, v.phases), len(v.asks), v.cost)
+	status := lead + " | " + totals
+	if len(v.liveLanes) > 0 {
+		status = lead + " | " + strings.Join(v.liveLanes, " | ") + "\n" + totals
 	}
-	return s
+	return Snapshot{Status: status, Questions: questions}
 }
 
 // statusReport is /status: the run and its goal, lanes by status and phase,
 // open questions, held runs and today's cost. The caller holds b.mu.
 func (b *StoreBackend) statusReport(ctx context.Context) (string, error) {
-	v, err := b.view(ctx)
+	v, _, err := b.view(ctx, false)
 	if err != nil {
 		return "", err
 	}
@@ -868,15 +1219,14 @@ func (b *StoreBackend) runCommand(ctx context.Context, fields []string) (string,
 	case "/lanes":
 		return b.lanesTable(ctx)
 	case "/asks":
-		v, e := b.view(ctx)
+		qs, e := b.questions(ctx)
 		if e != nil {
 			return "", e
 		}
-		s := v.snapshot(b)
-		if len(s.Questions) == 0 {
+		if len(qs) == 0 {
 			return "no open questions", nil
 		}
-		return strings.Join(s.Questions, "\n"), nil
+		return strings.Join(qs, "\n"), nil
 	case "/memory":
 		v, e := b.store.Memories().List(ctx, store.MemoryFilter{RunID: b.runID})
 		return pretty(v, e)
