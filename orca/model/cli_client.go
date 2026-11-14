@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -91,7 +92,7 @@ func (c *CLIClient) CreateMessage(ctx context.Context, req Request) (*Response, 
 	}
 	args := append([]string{}, c.extra...)
 	if c.provider == "claude-cli" {
-		args = append(args, "-p", "--bare", "--no-session-persistence", "--output-format", "json", "--tools", "")
+		args = append(args, "-p", "--no-session-persistence", "--output-format", "json", "--tools", "")
 		if req.Model != "" {
 			args = append(args, "--model", req.Model)
 		}
@@ -117,6 +118,11 @@ func (c *CLIClient) CreateMessage(ctx context.Context, req Request) (*Response, 
 	}
 	defer os.RemoveAll(workDir)
 	cmd.Dir = workDir
+	if strings.ContainsRune(c.path, os.PathSeparator) && !strings.HasPrefix(c.path, string(os.PathSeparator)) {
+		if abs, err := os.Getwd(); err == nil {
+			cmd.Path = filepath.Join(abs, c.path)
+		}
+	}
 	cmd.Stdin = strings.NewReader(prompt)
 	var out bytes.Buffer
 	cmd.Stdout = &out
