@@ -247,28 +247,59 @@ type OpenQuestion struct {
 	EscalatedAskID string
 }
 
-// OpenLaneQuestions returns all unresolved lane questions in runID ordered by arrival.
-func OpenLaneQuestions(ctx context.Context, st store.Store, runID string, now time.Time) ([]OpenQuestion, error) {
+// IsAnswered reports whether the lane mail identified by msgID or eventID has
+// already been answered or closed in st.
+func IsAnswered(ctx context.Context, st store.Store, runID, msgID, eventID string) bool {
 	if st == nil || strings.TrimSpace(runID) == "" {
-		return nil, nil
+		return false
+	}
+	msgID = strings.TrimSpace(msgID)
+	eventID = strings.TrimSpace(eventID)
+	if msgID == "" && eventID == "" {
+		return false
+	}
+	answered, _ := collectAnsweredMailState(ctx, st, runID, time.Time{})
+	if (msgID != "" && answered[msgID]) || (eventID != "" && answered[eventID]) {
+		return true
+	}
+	if evs, err := st.Events().List(ctx, store.EventFilter{
+		RunID: runID,
+		Kinds: []store.EventKind{store.EventMail},
+	}); err == nil {
+		for i := range evs {
+			ev := &evs[i]
+			var msg Message
+			if len(ev.Payload) == 0 || json.Unmarshal(ev.Payload, &msg) != nil {
+				continue
+			}
+			if msgID != "" && msg.InReplyTo == msgID {
+				return true
+			}
+			if ((msgID != "" && msg.ID == msgID) || (eventID != "" && ev.ID == eventID)) && msg.IsClosedOrAnswered() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func collectAnsweredMailState(ctx context.Context, st store.Store, runID string, now time.Time) (map[string]bool, map[string]string) {
+	answered := make(map[string]bool)
+	escalatedAskID := make(map[string]string)
+	if st == nil {
+		return answered, escalatedAskID
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	evs, err := st.Events().List(ctx, store.EventFilter{
-		RunID: runID,
-		Kinds: []store.EventKind{store.EventMail},
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(evs) == 0 {
-		return nil, nil
-	}
-
-	answered := make(map[string]bool)
-	escalatedAskID := make(map[string]string)
 	if dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: runID}); err == nil {
+		heldAskIDs := make(map[string]bool)
+		for i := range dirs {
+			d := &dirs[i]
+			if ref := strings.TrimSpace(d.Ref); ref != "" && strings.HasPrefix(strings.TrimSpace(d.Text), "hold:") {
+				heldAskIDs[ref] = true
+			}
+		}
 		for i := range dirs {
 			d := &dirs[i]
 			if strings.HasPrefix(d.ID, answeredDirectivePrefix) || strings.HasPrefix(d.Ref, answeredDirectivePrefix) {
@@ -291,7 +322,7 @@ func OpenLaneQuestions(ctx context.Context, st store.Store, runID string, now ti
 				}
 				if json.Unmarshal([]byte(d.Text), &ask) == nil {
 					askID := cmp.Or(strings.TrimSpace(ask.ID), strings.TrimPrefix(d.Ref, "owner_ask:"), strings.TrimPrefix(d.ID, "owner_ask:"))
-					if d.Status == store.DirectiveHandled {
+					if d.Status == store.DirectiveHandled && !heldAskIDs[askID] {
 						if ask.ID != "" {
 							answered[ask.ID] = true
 						}
@@ -301,7 +332,7 @@ func OpenLaneQuestions(ctx context.Context, st store.Store, runID string, now ti
 						if ask.SourceMessageID != "" {
 							answered[ask.SourceMessageID] = true
 						}
-					} else if d.Status == store.DirectiveActive && (d.ExpiresAt == nil || now.Before(*d.ExpiresAt)) {
+					} else if (d.Status == store.DirectiveActive && (d.ExpiresAt == nil || now.Before(*d.ExpiresAt))) || heldAskIDs[askID] {
 						if ask.SourceMessageID != "" {
 							escalatedAskID[ask.SourceMessageID] = askID
 						}
@@ -319,10 +350,15 @@ func OpenLaneQuestions(ctx context.Context, st store.Store, runID string, now ti
 	if decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: runID}); err == nil {
 		for i := range decs {
 			dec := &decs[i]
+			res := strings.TrimSpace(dec.Result)
+			if !dec.Vetted || res == "" || strings.HasPrefix(res, "error:") || strings.HasPrefix(res, "rejected:") {
+				continue
+			}
 			if dec.Tool == "worker.question.answer" || dec.Tool == "mail.answer" {
 				var args struct {
 					MessageID string `json:"message_id"`
 					ID        string `json:"id"`
+					EventID   string `json:"event_id"`
 				}
 				if len(dec.Args) > 0 && json.Unmarshal(dec.Args, &args) == nil {
 					if args.MessageID != "" {
@@ -331,10 +367,36 @@ func OpenLaneQuestions(ctx context.Context, st store.Store, runID string, now ti
 					if args.ID != "" {
 						answered[args.ID] = true
 					}
+					if args.EventID != "" {
+						answered[args.EventID] = true
+					}
 				}
 			}
 		}
 	}
+	return answered, escalatedAskID
+}
+
+// OpenLaneQuestions returns all unresolved lane questions in runID ordered by arrival.
+func OpenLaneQuestions(ctx context.Context, st store.Store, runID string, now time.Time) ([]OpenQuestion, error) {
+	if st == nil || strings.TrimSpace(runID) == "" {
+		return nil, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	evs, err := st.Events().List(ctx, store.EventFilter{
+		RunID: runID,
+		Kinds: []store.EventKind{store.EventMail},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(evs) == 0 {
+		return nil, nil
+	}
+
+	answered, escalatedAskID := collectAnsweredMailState(ctx, st, runID, now)
 
 	type decodedMail struct {
 		ev  *store.Event

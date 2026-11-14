@@ -236,29 +236,18 @@ func (b *StoreBackend) asks(ctx context.Context, runs []string) ([]openAsk, erro
 	now := b.now()
 	var out []openAsk
 	for _, run := range runs {
-		mailCreated := map[string]time.Time{}
-		if evs, err := b.store.Events().List(ctx, store.EventFilter{
-			RunID: run,
-			Kinds: []store.EventKind{store.EventMail},
-		}); err == nil {
-			for i := range evs {
-				ev := evs[i]
-				ts := ev.CreatedAt
-				var msg mailbox.Message
-				if len(ev.Payload) > 0 && json.Unmarshal(ev.Payload, &msg) == nil {
-					msg.Normalize()
-					if msg.CreatedAt != "" {
-						if parsed, pErr := time.Parse(time.RFC3339, msg.CreatedAt); pErr == nil {
-							ts = parsed
-						}
-					}
-					if msg.ID != "" {
-						mailCreated[msg.ID] = ts
-					}
-				}
-				if ev.ID != "" {
-					mailCreated[ev.ID] = ts
-				}
+		allLaneQs, err := mailbox.OpenLaneQuestions(ctx, b.store, run, now)
+		if err != nil {
+			return nil, err
+		}
+		mailCreated := make(map[string]time.Time, len(allLaneQs)*2)
+		for i := range allLaneQs {
+			q := &allLaneQs[i]
+			if q.ID != "" && !q.CreatedAt.IsZero() {
+				mailCreated[q.ID] = q.CreatedAt
+			}
+			if q.EventID != "" && !q.CreatedAt.IsZero() {
+				mailCreated[q.EventID] = q.CreatedAt
 			}
 		}
 
@@ -287,12 +276,11 @@ func (b *StoreBackend) asks(ctx context.Context, runs []string) ([]openAsk, erro
 			out = append(out, a)
 		}
 
-		laneQs, err := mailbox.OpenUnescalatedQuestions(ctx, b.store, run, now)
-		if err != nil {
-			return nil, err
-		}
-		for i := range laneQs {
-			q := laneQs[i]
+		for i := range allLaneQs {
+			q := allLaneQs[i]
+			if q.EscalatedAskID != "" {
+				continue
+			}
 			out = append(out, openAsk{
 				run:   run,
 				scope: q.LaneID,

@@ -2008,8 +2008,14 @@ func (d *Dispatcher) resolveLaneMailTarget(
 	messageID = strings.TrimSpace(messageID)
 	laneID = strings.TrimSpace(laneID)
 	bm, ok, err := matchLaneMailSlice(extractBatchLaneMails(batchEvents), messageID, laneID, requireTarget, pred)
-	if err != nil || ok {
-		return bm, ok, err
+	if err != nil {
+		return bm, false, err
+	}
+	if ok {
+		if mailbox.IsAnswered(ctx, d.store, runID, bm.msg.ID, bm.event.ID) {
+			return batchLaneMail{}, false, fmt.Errorf("%w: lane mail %q is already answered", store.ErrInvalidArgument, cmp.Or(messageID, bm.msg.ID, bm.event.ID))
+		}
+		return bm, true, nil
 	}
 	if messageID == "" {
 		return batchLaneMail{}, false, nil
@@ -2027,7 +2033,7 @@ func (d *Dispatcher) resolveLaneMailTarget(
 			return batchLaneMail{}, false, err
 		}
 		if ok {
-			if d.isMailAnswered(ctx, runID, bm.msg.ID, bm.event.ID) {
+			if mailbox.IsAnswered(ctx, d.store, runID, bm.msg.ID, bm.event.ID) {
 				return batchLaneMail{}, false, fmt.Errorf("%w: lane mail %q is already answered", store.ErrInvalidArgument, messageID)
 			}
 			return bm, true, nil
@@ -2043,29 +2049,6 @@ func (d *Dispatcher) resolveLaneMailTarget(
 		}
 	}
 	return batchLaneMail{}, false, fmt.Errorf("%w: unknown lane mail message_id %q", store.ErrNotFound, messageID)
-}
-
-func (d *Dispatcher) isMailAnswered(ctx context.Context, runID, msgID, eventID string) bool {
-	if d.store == nil {
-		return false
-	}
-	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID})
-	if err != nil {
-		return false
-	}
-	for i := range dirs {
-		ref := dirs[i].Ref
-		if !strings.HasPrefix(ref, "answered:") {
-			continue
-		}
-		for _, part := range strings.Split(strings.TrimPrefix(ref, "answered:"), "|") {
-			part = strings.TrimSpace(part)
-			if part != "" && (part == msgID || part == eventID) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (d *Dispatcher) applyMailAnswer(
@@ -2096,20 +2079,23 @@ func (d *Dispatcher) applyMailAnswer(
 	if laneID == "" {
 		laneID = bm.msg.LaneID
 	}
-	if err := d.respondToLaneMail(ctx, runID, bm, answer); err != nil {
+	delivered, err := d.respondToLaneMail(ctx, runID, bm, answer)
+	if err != nil {
 		return "", err
 	}
-	if laneID != "" && view != nil {
+	if bm.msg.IsQuestion() && laneID != "" && view != nil {
 		if ln, ok := view.Lane(laneID); ok {
-			if drv := d.laneDriver(); drv != nil && (ln.SessionID != "" || ln.TerminalID != "") {
-				if err := drv.Steer(ctx, lane.SteerRequest{
-					RunID:      runID,
-					LaneID:     ln.ID,
-					SessionID:  ln.SessionID,
-					TerminalID: ln.TerminalID,
-					Message:    answer,
-				}); err != nil {
-					return "", err
+			if !delivered {
+				if drv := d.laneDriver(); drv != nil && (ln.SessionID != "" || ln.TerminalID != "") {
+					if err := drv.Steer(ctx, lane.SteerRequest{
+						RunID:      runID,
+						LaneID:     ln.ID,
+						SessionID:  ln.SessionID,
+						TerminalID: ln.TerminalID,
+						Message:    answer,
+					}); err != nil {
+						return "", err
+					}
 				}
 			}
 			if ln.Status == lane.StatusBlocked {
@@ -2124,20 +2110,21 @@ func (d *Dispatcher) applyMailAnswer(
 	return fmt.Sprintf("answered lane mail %s for lane %s", cmp.Or(msgID, bm.event.ID, "-"), cmp.Or(laneID, "-")), nil
 }
 
-func (d *Dispatcher) respondToLaneMail(ctx context.Context, runID string, bm batchLaneMail, answer string) error {
+func (d *Dispatcher) respondToLaneMail(ctx context.Context, runID string, bm batchLaneMail, answer string) (bool, error) {
 	answer = strings.TrimSpace(answer)
 	if answer == "" {
-		return nil
+		return false, nil
 	}
 	msg := bm.msg
 	msg.RunID = cmp.Or(msg.RunID, runID)
-	for _, box := range d.mailboxes() {
+	boxes := d.mailboxes()
+	for _, box := range boxes {
 		if err := mailbox.Respond(ctx, box, msg, answer); err != nil {
-			return err
+			return false, err
 		}
 	}
 	if err := mailbox.MarkAnswered(ctx, d.store, runID, msg.LaneID, msg.ID, bm.event.ID, answer); err != nil {
-		return err
+		return false, err
 	}
 	_, _ = d.store.Notes().Append(ctx, store.RunNote{
 		RunID:     runID,
@@ -2145,5 +2132,5 @@ func (d *Dispatcher) respondToLaneMail(ctx context.Context, runID string, bm bat
 		Text:      fmt.Sprintf("mail answer (%s): %s", cmp.Or(msg.ID, bm.event.ID), answer),
 		CreatedAt: d.clock.Now().UTC(),
 	})
-	return nil
+	return len(boxes) > 0, nil
 }

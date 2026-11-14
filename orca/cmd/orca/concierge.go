@@ -1213,6 +1213,11 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 			it.ID, it.Priority, it.Status, cmp.Or(it.LaneID, "-"), it.Title)
 	}
 
+	var unescalatedQs []mailbox.OpenQuestion
+	if c.store != nil {
+		unescalatedQs, _ = mailbox.OpenUnescalatedQuestions(ctx, c.store, runID, c.clock.Now().UTC())
+	}
+
 	fmt.Fprintf(&b, "\nLanes (%s):\n", formatStoreLaneCounts(lanes))
 	var runningNow, unknownNow []string
 	for i := range lanes {
@@ -1246,8 +1251,8 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 		}
 		b.WriteString(line + "\n")
 
-		nowParts := c.laneNowParts(ctx, runID, &ln, hl, terminalID, sessionID, live)
-		nextStep := c.laneNextStep(ctx, run, &ln, dirs, hl)
+		nowParts := c.laneNowParts(ctx, runID, &ln, hl, terminalID, sessionID, live, unescalatedQs)
+		nextStep := c.laneNextStep(ctx, run, &ln, dirs, hl, unescalatedQs)
 		fmt.Fprintf(&b, "    now: %s\n", strings.Join(nowParts, "; "))
 		fmt.Fprintf(&b, "    next: %s\n", nextStep)
 		if ln.PR > 0 {
@@ -1286,7 +1291,7 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 	if freshDirs, dErr := c.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true}); dErr == nil {
 		dirs = freshDirs
 	}
-	openQs := c.openQuestionsForRun(ctx, runID, dirs)
+	openQs := c.openQuestionsForRun(dirs, unescalatedQs)
 	if len(openQs) > 0 {
 		fmt.Fprintf(&b, "\nOpen Questions (%d):\n", len(openQs))
 		for _, q := range openQs {
@@ -1307,7 +1312,7 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 	return b.String(), nil
 }
 
-func (c *Concierge) openQuestionsForRun(ctx context.Context, runID string, dirs []store.Directive) []string {
+func (c *Concierge) openQuestionsForRun(dirs []store.Directive, laneQs []mailbox.OpenQuestion) []string {
 	if c.store == nil {
 		return nil
 	}
@@ -1326,11 +1331,9 @@ func (c *Concierge) openQuestionsForRun(ctx context.Context, runID string, dirs 
 		age := mailbox.FormatAge(now, d.CreatedAt)
 		out = append(out, fmt.Sprintf("%s: %s (lane %s; age %s)", ask.ID, ask.Question, laneID, age))
 	}
-	if laneQs, err := mailbox.OpenUnescalatedQuestions(ctx, c.store, runID, now); err == nil {
-		for i := range laneQs {
-			q := laneQs[i]
-			out = append(out, fmt.Sprintf("%s: %s (lane %s; age %s)", q.ID, q.Question, cmp.Or(q.LaneID, "run"), cmp.Or(q.Age, "0s")))
-		}
+	for i := range laneQs {
+		q := laneQs[i]
+		out = append(out, fmt.Sprintf("%s: %s (lane %s; age %s)", q.ID, q.Question, cmp.Or(q.LaneID, "run"), cmp.Or(q.Age, "0s")))
 	}
 	return out
 }
@@ -1393,6 +1396,7 @@ func (c *Concierge) laneNowParts(
 	hl adopt.Lane,
 	terminalID, sessionID string,
 	live heldLaneProbeResult,
+	laneQs []mailbox.OpenQuestion,
 ) []string {
 	parts := []string{fmt.Sprintf("%s round %d", cmp.Or(ln.Phase, "-"), max(ln.Round, 1))}
 	if sessionID != "" {
@@ -1425,15 +1429,10 @@ func (c *Concierge) laneNowParts(
 	if hl.Report != "" {
 		parts = append(parts, fmt.Sprintf("latest report %s: %s", filepath.Base(hl.ReportPath), hl.Report))
 	}
-	if c.store != nil {
-		now := c.clock.Now().UTC()
-		if laneQs, err := mailbox.OpenUnescalatedQuestions(ctx, c.store, runID, now); err == nil {
-			for i := range laneQs {
-				q := laneQs[i]
-				if q.LaneID == ln.ID {
-					parts = append(parts, fmt.Sprintf("open question %s (lane %s, age %s): %s", q.ID, ln.ID, cmp.Or(q.Age, "0s"), q.Question))
-				}
-			}
+	for i := range laneQs {
+		q := laneQs[i]
+		if q.LaneID == ln.ID {
+			parts = append(parts, fmt.Sprintf("open question %s (lane %s, age %s): %s", q.ID, ln.ID, cmp.Or(q.Age, "0s"), q.Question))
 		}
 	}
 	return parts
@@ -1445,6 +1444,7 @@ func (c *Concierge) laneNextStep(
 	ln *store.Lane,
 	dirs []store.Directive,
 	hl adopt.Lane,
+	laneQs []mailbox.OpenQuestion,
 ) string {
 	if ln.Status.Terminal() {
 		return fmt.Sprintf("nothing (lane %s)", ln.Status)
@@ -1460,14 +1460,10 @@ func (c *Concierge) laneNextStep(
 			return "awaiting owner answer"
 		}
 	}
-	if c.store != nil && run != nil {
-		if laneQs, err := mailbox.OpenUnescalatedQuestions(ctx, c.store, run.ID, now); err == nil {
-			for i := range laneQs {
-				q := laneQs[i]
-				if q.LaneID == ln.ID {
-					return fmt.Sprintf("awaiting answer to %s (lane %s, age %s): %s", q.ID, ln.ID, cmp.Or(q.Age, "0s"), q.Question)
-				}
-			}
+	for i := range laneQs {
+		q := laneQs[i]
+		if q.LaneID == ln.ID {
+			return fmt.Sprintf("awaiting answer to %s (lane %s, age %s): %s", q.ID, ln.ID, cmp.Or(q.Age, "0s"), q.Question)
 		}
 	}
 	if hl.Next != "" {
@@ -1667,14 +1663,18 @@ func (c *Concierge) handleLaneShow(ctx context.Context, runHint, laneID, quote s
 	live := probed[ln.ID]
 	sessionID := cmp.Or(ln.SessionID, hl.Session)
 	terminalID := cmp.Or(ln.TerminalID, hl.Terminal)
+	var unescalatedQs []mailbox.OpenQuestion
+	if c.store != nil {
+		unescalatedQs, _ = mailbox.OpenUnescalatedQuestions(ctx, c.store, runID, c.clock.Now().UTC())
+	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Lane %s (run=%s item=%s status=%s phase=%s round=%d attempt=%d session=%s terminal=%s recipe=%s@v%d)\n",
 		ln.ID, runID, cmp.Or(ln.ItemID, "-"), ln.Status, cmp.Or(ln.Phase, "-"), ln.Round, ln.Attempt,
 		cmp.Or(sessionID, "-"), cmp.Or(terminalID, "-"),
 		cmp.Or(ln.RecipeName, recipe.DefaultName), max(ln.RecipeVersion, 1))
-	fmt.Fprintf(&b, "Now: %s\n", strings.Join(c.laneNowParts(ctx, runID, ln, hl, terminalID, sessionID, live), "; "))
-	fmt.Fprintf(&b, "Next: %s\n", c.laneNextStep(ctx, run, ln, dirs, hl))
+	fmt.Fprintf(&b, "Now: %s\n", strings.Join(c.laneNowParts(ctx, runID, ln, hl, terminalID, sessionID, live, unescalatedQs), "; "))
+	fmt.Fprintf(&b, "Next: %s\n", c.laneNextStep(ctx, run, ln, dirs, hl, unescalatedQs))
 	fmt.Fprintf(&b, "PR: #%d branch=%s head=%s approval=%s merge=%s checks=%s\n",
 		ln.PR, cmp.Or(ln.Branch, "-"), cmp.Or(ln.PRHead, "-"), cmp.Or(ln.ApprovalSHA, "-"),
 		cmp.Or(ln.MergeSHA, "-"), cmp.Or(ln.Checks, "-"))

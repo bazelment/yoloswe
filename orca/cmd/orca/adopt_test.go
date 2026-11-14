@@ -1677,6 +1677,39 @@ func TestDispatcherLaneMailIsolationAndVetting(t *testing.T) {
 			StopReason: model.StopReasonEndTurn,
 			Message:    model.NewAssistantMessage(model.NewTextBlock("Escalated explicit message_id.")),
 		},
+		// Turn 7: reply to note n-lane-a via mail.answer — must reply via mailbox without steering or unblocking lane-a.
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("c-reply-note", dispatcher.ToolMailAnswer, json.RawMessage(`{"message_id":"n-lane-a","lane_id":"lane-a","answer":"ack note","reason":"acknowledge note"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Replied to note.")),
+		},
+		// Turn 8: answer q-lane-a-2 once.
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("c-ans-q2-1", dispatcher.ToolMailAnswer, json.RawMessage(`{"message_id":"q-lane-a-2","lane_id":"lane-a","answer":"first answer","reason":"answer q2"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Answered q2 once.")),
+		},
+		// Turn 9: attempt to answer q-lane-a-2 a second time — rejected as already answered.
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("c-ans-q2-2", dispatcher.ToolMailAnswer, json.RawMessage(`{"message_id":"q-lane-a-2","lane_id":"lane-a","answer":"duplicate answer","reason":"duplicate"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Rejected duplicate answer.")),
+		},
 	)
 
 	d := dispatcher.New(dispatcher.Config{Model: "gpt-6.1-sol"}, st, drv, clk, client)
@@ -1792,6 +1825,135 @@ func TestDispatcherLaneMailIsolationAndVetting(t *testing.T) {
 	}
 	if !foundExplicit || askExplicit.SourceMessageID != "q-lane-a" || askExplicit.SourceEventID != "mail:q-lane-a" || askExplicit.LaneID != "lane-a" {
 		t.Fatalf("expected ask-explicit to link to q-lane-a on lane-a, got found=%v ask=%+v", foundExplicit, askExplicit)
+	}
+
+	// Failed/rejected mail.answer decisions from Turn 4 must NOT remove q-lane-a from OpenLaneQuestions.
+	openAfterRejected, err := mailbox.OpenLaneQuestions(t.Context(), st, runID, clk.Now())
+	if err != nil || len(openAfterRejected) < 1 {
+		t.Fatalf("rejected mail.answer decision must not mark q-lane-a as answered, got %+v (err=%v)", openAfterRejected, err)
+	}
+	foundQLaneA := false
+	for _, q := range openAfterRejected {
+		if q.ID == "q-lane-a" {
+			foundQLaneA = true
+		}
+	}
+	if !foundQLaneA {
+		t.Fatalf("expected q-lane-a to remain in OpenLaneQuestions after rejected mail.answer, got %+v", openAfterRejected)
+	}
+
+	// Turn 7: replying to note n-lane-a must not steer or unblock lane-a.
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{
+		ID:        "lane-a",
+		RunID:     runID,
+		Title:     "Lane A",
+		Status:    lane.StatusBlocked,
+		Phase:     "swe",
+		Round:     1,
+		SessionID: "sess-a",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	steersBeforeNote := len(drv.Steers)
+	if _, err := d.Dispatch(t.Context(), runID, []store.Event{noteEv}); err != nil {
+		t.Fatalf("Dispatch turn 7 (note reply): %v", err)
+	}
+	if got := len(drv.Steers); got != steersBeforeNote {
+		t.Fatalf("note reply must not steer lane-a, steers before=%d after=%d", steersBeforeNote, got)
+	}
+	lnAfterNote, err := st.Lanes().Get(t.Context(), runID, "lane-a")
+	if err != nil || lnAfterNote.Status != lane.StatusBlocked {
+		t.Fatalf("note reply must not unblock lane-a, got status=%v err=%v", lnAfterNote.Status, err)
+	}
+
+	// Turn 8 & 9: answering q-lane-a-2 across two turns must succeed once and reject the duplicate.
+	if _, err := d.Dispatch(t.Context(), runID, nil); err != nil {
+		t.Fatalf("Dispatch turn 8 (first mail.answer): %v", err)
+	}
+	res8, err := d.Dispatch(t.Context(), runID, nil)
+	if err != nil {
+		t.Fatalf("Dispatch turn 9 (duplicate mail.answer): %v", err)
+	}
+	if got, _ := box.AnswerFor("q-lane-a-2"); got != "first answer" {
+		t.Fatalf("expected q-lane-a-2 answer to remain 'first answer', got %q", got)
+	}
+	rejectedDup := false
+	for _, dec := range res8.Decisions {
+		if dec.Tool == dispatcher.ToolMailAnswer && strings.Contains(dec.Result, "already answered") {
+			rejectedDup = true
+		}
+	}
+	if !rejectedDup {
+		t.Fatalf("expected second mail.answer on q-lane-a-2 to be rejected as already answered, decisions=%+v", res8.Decisions)
+	}
+
+	// Resolving an owner_ask for an ID-less mail event must not pass the synthetic store event ID as a Nebula message ID,
+	// and resolving an owner_ask with a "hold:" option keeps the question open in OpenLaneQuestions.
+	idlessRaw, _ := json.Marshal(mailbox.Message{
+		RunID:    runID,
+		LaneID:   "lane-b",
+		Kind:     "question",
+		Blocking: true,
+		Question: true,
+		Body:     "ID-less question?",
+	})
+	idlessEv, err := st.Events().Append(t.Context(), store.Event{
+		ID:        "mail:idless-1",
+		RunID:     runID,
+		LaneID:    "lane-b",
+		Kind:      store.EventMail,
+		Payload:   idlessRaw,
+		CreatedAt: clk.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl := controller.New(controller.Config{RunID: runID, HolderID: "h1", LeaseTTL: time.Minute}, st, drv, clk, nil, box)
+	if err := ctrl.AskOwner(t.Context(), controller.OwnerAsk{
+		ID:            "ask-idless",
+		RunID:         runID,
+		LaneID:        "lane-b",
+		Question:      "ID-less question?",
+		Options:       []string{"hold: wait", "proceed"},
+		Default:       "proceed",
+		Deadline:      clk.Now().Add(time.Hour),
+		SourceEventID: idlessEv.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctrl.AnswerOwnerAsk(t.Context(), "ask-idless", "hold: wait"); err != nil {
+		t.Fatalf("AnswerOwnerAsk hold: %v", err)
+	}
+	openAfterHold, err := mailbox.OpenLaneQuestions(t.Context(), st, runID, clk.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundHeld := false
+	for _, q := range openAfterHold {
+		if q.EventID == idlessEv.ID {
+			foundHeld = true
+		}
+	}
+	if !foundHeld {
+		t.Fatalf("expected held owner_ask question %s to remain open, got %+v", idlessEv.ID, openAfterHold)
+	}
+	if err := ctrl.AskOwner(t.Context(), controller.OwnerAsk{
+		ID:            "ask-idless-resolve",
+		RunID:         runID,
+		LaneID:        "lane-b",
+		Question:      "ID-less question?",
+		Options:       []string{"proceed"},
+		Default:       "proceed",
+		Deadline:      clk.Now().Add(time.Hour),
+		SourceEventID: idlessEv.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctrl.AnswerOwnerAsk(t.Context(), "ask-idless-resolve", "proceed"); err != nil {
+		t.Fatalf("AnswerOwnerAsk proceed on ID-less mail: %v", err)
+	}
+	if ans, ok := box.AnswerFor(idlessEv.ID); ok || ans != "" {
+		t.Fatalf("ID-less mail resolution must not call Responder.Answer with store event ID %s, got %q", idlessEv.ID, ans)
 	}
 }
 

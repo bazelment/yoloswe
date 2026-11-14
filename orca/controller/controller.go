@@ -912,7 +912,7 @@ func (c *Controller) applyOwnerAskResolution(ctx context.Context, ask OwnerAsk, 
 	}
 	if msgID != "" || srcEventID != "" {
 		if c.mailbox != nil && msgID != "" {
-			if err := mailbox.Respond(ctx, c.mailbox, mailbox.Message{ID: msgID, RunID: c.cfg.RunID, LaneID: ask.LaneID, Question: true}, steerMsg); err != nil {
+			if err := mailbox.Respond(ctx, c.mailbox, mailbox.Message{ID: msgID, RunID: c.cfg.RunID, LaneID: ask.LaneID, Question: true}, steerMsg); err != nil && !isBenignMailAnswerError(err) {
 				return err
 			}
 		}
@@ -921,6 +921,14 @@ func (c *Controller) applyOwnerAskResolution(ctx context.Context, ask OwnerAsk, 
 		}
 	}
 	return nil
+}
+
+func isBenignMailAnswerError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "404") || strings.Contains(s, "409") || strings.Contains(s, "already answered") || strings.Contains(s, "already closed")
 }
 
 func (c *Controller) resolveMailMessageID(ctx context.Context, eventID string) string {
@@ -932,11 +940,12 @@ func (c *Controller) resolveMailMessageID(ctx context.Context, eventID string) s
 					if json.Unmarshal(evs[i].Payload, &msg) == nil && strings.TrimSpace(msg.ID) != "" {
 						return strings.TrimSpace(msg.ID)
 					}
+					return ""
 				}
 			}
 		}
 	}
-	return eventID
+	return ""
 }
 
 func (c *Controller) ensureLease(ctx context.Context) error {
