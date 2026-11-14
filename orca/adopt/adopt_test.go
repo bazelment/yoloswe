@@ -290,15 +290,71 @@ func TestRerunAfterCrashFinishesHandover(t *testing.T) {
 	assertSame(t, "crash and rerun", w.snapshot(t), original)
 }
 
+// Legacy bare-chat leases remain owned after restart.
+func TestLeaseUnderFormerHolderIsOwn(t *testing.T) {
+	t.Parallel()
+	for _, reattach := range []bool{false, true} {
+		t.Run(fmt.Sprint("reattach=", reattach), func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			before := w.snapshot(t)
+			legacy := w.service()
+			legacy.Holder = ChatHolder("")
+			if _, err := legacy.Adopt(t.Context(), testRun); err != nil {
+				t.Fatal(err)
+			}
+			restarted := w.service()
+			restarted.Holder, restarted.Former = ChatHolder("front-desk"), []string{ChatHolder("")}
+			if ids, err := restarted.Adopted(); err != nil || !reflect.DeepEqual(ids, []string{testRun}) {
+				t.Fatalf("Adopted() = %v, %v", ids, err)
+			}
+			if reattach {
+				r, err := restarted.Adopt(t.Context(), testRun)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if r.Holder != restarted.Holder {
+					t.Fatalf("reattached holder = %q, want %q", r.Holder, restarted.Holder)
+				}
+				if _, err := legacy.Adopt(t.Context(), testRun); !errors.Is(err, ErrLeaseHeld) {
+					t.Fatalf("legacy holder adopt after reattach = %v, want held", err)
+				}
+			}
+			if err := restarted.Release(t.Context(), testRun); err != nil {
+				t.Fatal(err)
+			}
+			assertSame(t, "release of a former holder's lease", w.snapshot(t), before)
+		})
+	}
+}
+
 func TestLeaseHeldByAnotherHolderChangesNothing(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
 	write(t, filepath.Join(w.dir, leaseFile), `{"holder":"orca-chat:other","state":"adopted"}`+"\n")
 	before := w.snapshot(t)
-	if _, err := w.service().Adopt(t.Context(), testRun); !errors.Is(err, ErrLeaseHeld) {
-		t.Fatalf("adopt = %v", err)
+	for _, svc := range []*Service{
+		w.service(),
+		{
+			Importer: Importer{Roots: []string{w.root}},
+			Labeler:  w.label,
+			Watcher:  w.watcher,
+			Holder:   ChatHolder("front-desk"),
+			Former:   []string{ChatHolder("")},
+			Now:      w.service().Now,
+		},
+	} {
+		if ids, err := svc.Adopted(); err != nil || len(ids) != 0 {
+			t.Fatalf("Adopted() for %s = %v, %v; want none", svc.Holder, ids, err)
+		}
+		if _, err := svc.Adopt(t.Context(), testRun); !errors.Is(err, ErrLeaseHeld) {
+			t.Fatalf("adopt for %s = %v", svc.Holder, err)
+		}
+		if err := svc.Release(t.Context(), testRun); !errors.Is(err, ErrLeaseNotHeld) {
+			t.Fatalf("release for %s = %v", svc.Holder, err)
+		}
+		assertSame(t, "refused foreign lease for "+svc.Holder, w.snapshot(t), before)
 	}
-	assertSame(t, "refused adopt", w.snapshot(t), before)
 }
 
 func TestImportsCurrentRoundOfTwoLaneRun(t *testing.T) {

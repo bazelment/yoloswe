@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -20,10 +22,20 @@ import (
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
-// TestShippedChatAdoptsAndReleasesHostSwarm drives the real `orca chat`
-// entry point: with a Nebula API and watch_lanes.sh available, /adopt must be
-// enabled and must label, mark and release the host run end to end.
+// The shipped chat adopts, persists, and releases a host swarm lease.
 func TestShippedChatAdoptsAndReleasesHostSwarm(t *testing.T) {
+	for _, tc := range []struct {
+		name, holder string
+		bare         bool
+	}{
+		{name: "explicit run", holder: "orca-chat:chat-run"},
+		{name: "bare orca", holder: "orca-chat:" + frontDeskRunID, bare: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testShippedChatAdoption(t, tc.holder, tc.bare) })
+	}
+}
+
+func testShippedChatAdoption(t *testing.T, holder string, bare bool) {
 	root := t.TempDir()
 	runID := "20261113-000000-host"
 	runDir := filepath.Join(root, ".shared", "subagent-swarm", runID)
@@ -80,12 +92,15 @@ func TestShippedChatAdoptsAndReleasesHostSwarm(t *testing.T) {
 	t.Setenv("ORCA_WATCH_LANES", script)
 
 	dbPath := filepath.Join(t.TempDir(), "chat.db")
+	storeDir := t.TempDir()
+	args := []string{"chat", "--config", cfgPath, "--run", "chat-run", "--store", "sqlite:" + dbPath}
+	if bare {
+		args = []string{"chat", "--config", cfgPath, "--store-dir", storeDir, "--repo", "bazelment/yoloswe"}
+	}
+	args = append(args, "--replay", "testdata/concierge_status_replay.json")
 	chat := func(input string) string {
 		var out, errOut bytes.Buffer
-		if err := Execute(t.Context(), []string{
-			"chat", "--config", cfgPath, "--run", "chat-run", "--store", "sqlite:" + dbPath,
-			"--replay", "testdata/concierge_status_replay.json",
-		}, strings.NewReader(input), &out, &errOut); err != nil {
+		if err := Execute(t.Context(), args, strings.NewReader(input), &out, &errOut); err != nil {
 			t.Fatalf("Execute chat: %v\nstderr:\n%s", err, errOut.String())
 		}
 		return out.String()
@@ -96,6 +111,43 @@ func TestShippedChatAdoptsAndReleasesHostSwarm(t *testing.T) {
 	for _, want := range []string{runID + ": host goal", "adopted " + runID} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("chat output missing %q:\n%s", want, got)
+		}
+	}
+	var lease struct{ Holder string }
+	if err := json.Unmarshal([]byte(readFile(t, filepath.Join(runDir, ".orca-lease.json"))), &lease); err != nil || lease.Holder != holder {
+		t.Fatalf("lease holder = %q (%v), want %q", lease.Holder, err, holder)
+	}
+	if line := strings.SplitN(readFile(t, filepath.Join(runDir, "OBJECTIVE.md")), "\n", 2)[0]; !strings.Contains(line, "("+holder+")") {
+		t.Fatalf("stand-down line = %q, want holder %s", line, holder)
+	}
+	if bare {
+		// The restarted bare chat attaches this newer run, not the front desk,
+		// without claiming a lease held by an explicit --run run-later chat.
+		path, err := store.RunDBPath(storeDir, "run-later")
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, err := store.OpenSQLite(path, clock.NewRealClock())
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = errors.Join(st.Runs().Create(t.Context(), store.Run{ID: "run-later", Repository: "bazelment/yoloswe", Objective: "later"}), st.Close())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range []string{".orca-lease.json", "OBJECTIVE.md", "PROGRESS.md"} {
+			p := filepath.Join(runDir, n)
+			writeFile(t, p, strings.ReplaceAll(readFile(t, p), holder, "orca-chat:run-later"))
+		}
+		if got := chat("/release\n"); !strings.Contains(got, "no adopted swarm") {
+			t.Fatalf("bare chat released foreign explicit-run lease:\n%s", got)
+		}
+		if err := json.Unmarshal([]byte(readFile(t, filepath.Join(runDir, ".orca-lease.json"))), &lease); err != nil || lease.Holder != "orca-chat:run-later" {
+			t.Fatalf("foreign lease holder after bare chat startup = %q (%v), want orca-chat:run-later", lease.Holder, err)
+		}
+		for _, n := range []string{".orca-lease.json", "OBJECTIVE.md", "PROGRESS.md"} {
+			p := filepath.Join(runDir, n)
+			writeFile(t, p, strings.ReplaceAll(readFile(t, p), "orca-chat:run-later", holder))
 		}
 	}
 	if got := chat("/release\n"); !strings.Contains(got, "released "+runID) {
@@ -195,10 +247,32 @@ func TestChatAdoptionListsRunsFromMultipleRepoRoots(t *testing.T) {
 	}
 }
 
+func readFile(t *testing.T, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 func writeFile(t *testing.T, p, s string) {
 	t.Helper()
 	if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBareChatHolderIsStable(t *testing.T) {
+	t.Parallel()
+	for _, run := range []string{"", "  "} {
+		holder, former := chatHolder(run)
+		if holder != "orca-chat:"+frontDeskRunID || !slices.Equal(former, []string{"orca-chat:"}) {
+			t.Fatalf("chatHolder(%q) = %q, %q; want the front desk, owning the empty legacy id", run, holder, former)
+		}
+	}
+	if holder, former := chatHolder("chat-run"); holder != "orca-chat:chat-run" || former != nil {
+		t.Fatalf("chatHolder(chat-run) = %q, %q", holder, former)
 	}
 }
 
@@ -211,12 +285,12 @@ func TestChatAdoptionDisabledOnlyWithReason(t *testing.T) {
 	t.Setenv("ORCA_WATCH_LANES", filepath.Join(t.TempDir(), "missing.sh"))
 	clk := clock.NewRealClock()
 	st := store.NewMemoryStore(clk)
-	if s, why := newAdoption(t.Context(), Config{RunID: "c"}, newHostSwarms(Config{RunID: "c"}, st, clk), st, clk, nil, nil); s != nil || !strings.Contains(why, "NEBULA_API_URL") {
+	if s, why := newAdoption(t.Context(), Config{RunID: "c"}, newHostSwarms(Config{RunID: "c"}, st, clk), "orca-chat:c", nil, st, clk, nil, nil); s != nil || !strings.Contains(why, "NEBULA_API_URL") {
 		t.Fatalf("no credentials: service=%v reason=%q", s, why)
 	}
 	cfg := Config{RunID: "c", NebulaAPIURL: "http://127.0.0.1:1", NebulaToken: "t"}
 	h := newHostSwarms(cfg, st, clk)
-	if s, why := newAdoption(t.Context(), cfg, h, st, clk, nil, nil); s == nil || why != "" {
+	if s, why := newAdoption(t.Context(), cfg, h, "orca-chat:c", nil, st, clk, nil, nil); s == nil || why != "" {
 		t.Fatalf("Nebula client available: service=%v reason=%q", s, why)
 	}
 	sub := filepath.Join(t.TempDir(), ".shared", "subagent-swarm", "r")

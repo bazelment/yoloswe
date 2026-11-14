@@ -461,9 +461,16 @@ type Service struct {
 	Driver  RunDriver
 	Now     func() time.Time
 	// fault, when set by tests, fails the named step before it acts.
-	fault    func(step string) error
-	Holder   string
+	fault  func(step string) error
+	Holder string
+	// Former lists legacy holder ids still owned by this service.
+	Former   []string
 	Importer Importer
+}
+
+// owns reports whether a lease under holder belongs to this service.
+func (s *Service) owns(holder string) bool {
+	return holder == s.Holder || slices.Contains(s.Former, holder)
 }
 
 // RunDriver drives imported lanes while orca owns the host run.
@@ -492,7 +499,7 @@ func (s *Service) List(ctx context.Context) ([]Run, error) { return s.Importer.D
 func (s *Service) Adopted() ([]string, error) {
 	var ids []string
 	for _, dir := range s.Importer.runDirs() {
-		if j, err := readJournal(filepath.Join(dir, leaseFile)); err == nil && j.Holder == s.Holder {
+		if j, err := readJournal(filepath.Join(dir, leaseFile)); err == nil && s.owns(j.Holder) {
 			ids = append(ids, filepath.Base(dir))
 		}
 	}
@@ -557,7 +564,7 @@ func (s *Service) Release(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if j.Holder != s.Holder {
+	if !s.owns(j.Holder) {
 		return fmt.Errorf("%w: %s is held by %s", ErrLeaseNotHeld, id, j.Holder)
 	}
 	if s.Driver != nil {
@@ -640,8 +647,18 @@ func (s *Service) takeLease(dir string) (*journal, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cur.Holder != s.Holder {
+	if !s.owns(cur.Holder) {
 		return nil, fmt.Errorf("%w: %s", ErrLeaseHeld, cur.Holder)
+	}
+	if cur.Holder != s.Holder {
+		// Rewrite legacy leases while preserving the controller generation.
+		cur.Holder = s.Holder
+		if cur.Import != nil {
+			cur.Import.Holder = s.Holder
+		}
+		if err := s.save(dir, cur); err != nil {
+			return nil, err
+		}
 	}
 	return cur, nil
 }

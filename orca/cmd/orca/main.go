@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/bazelment/yoloswe/orca/adopt"
 	chatui "github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
@@ -213,6 +214,8 @@ func executeChat(
 		return err
 	}
 	defer func() { _ = runs.Close() }()
+	// Keep the adoption holder stable across restarts and attached runs.
+	holder, formerHolders := chatHolder(cfg.RunID)
 	if strings.TrimSpace(cfg.RunID) == "" {
 		if found, _ := runs.List(ctx); len(found) > 0 {
 			cfg.RunID = found[0].ID
@@ -253,7 +256,7 @@ func executeChat(
 
 	concierge := NewConcierge(storeCfg.RunID, st, clk, roleClient(client, cfg, "concierge"), cfg.Models.Concierge)
 	concierge.Logger = logger
-	concierge.Swarms = backend.LiveSwarms
+	wireChatConcierge(concierge, backend)
 	defer func() { _ = concierge.Close(context.WithoutCancel(ctx)) }()
 	// A restarted chat continues the conversation it left.
 	resumed, err := concierge.Resume(ctx)
@@ -269,7 +272,7 @@ func executeChat(
 		question = strings.TrimSpace(strings.Join(posArgs, " "))
 	}
 	backend.OnAttach = concierge.Attach
-	adoption, adoptionOff := newAdoption(ctx, cfg, host, st, clk, client, logger)
+	adoption, adoptionOff := newAdoption(ctx, cfg, host, holder, formerHolders, st, clk, client, logger)
 	backend.Adoption, backend.AdoptionUnavailable = adoption, adoptionOff
 	if adoption != nil {
 		defer func() {
@@ -358,6 +361,19 @@ func executeChat(
 	ui.Backend = backend
 	ui.Dispatch = backend.Dispatch
 	return chatui.Run(ctx, stdin, stdout, ui)
+}
+
+// wireChatConcierge connects run listing, directive routing, and wakeups.
+func wireChatConcierge(c *Concierge, b *chatui.StoreBackend) {
+	c.Swarms, c.OwnerRun, c.Wake = b.LiveSwarms, b.OwnerRun, b.Wake
+}
+
+// chatHolder returns the stable holder and any legacy holder ids it owns.
+func chatHolder(runID string) (holder string, former []string) {
+	if id := strings.TrimSpace(runID); id != "" {
+		return adopt.ChatHolder(id), nil
+	}
+	return adopt.ChatHolder(frontDeskRunID), []string{adopt.ChatHolder("")}
 }
 
 // resumedLines bounds displayed resumed history.

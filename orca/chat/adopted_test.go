@@ -256,6 +256,120 @@ func TestFrontDeskInstructionGoesToHeldAdoptedRun(t *testing.T) {
 	}
 }
 
+// Planner instructions follow an explicitly named held run.
+func TestPlannerInstructionNamingAdoptedRunGoesThere(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ text, want string }{
+		{"for run " + adoptedRun + ": drop the docs task", adoptedRun},
+		{"drop the docs task", chatRun},
+	} {
+		f := newAdoptedFixture(t, nil)
+		if _, err := f.store.Runs().AcquireLease(t.Context(), chatRun, "orca-run", time.Hour); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.backend.Dispatch(t.Context(), router.Decision{Handler: router.Planner}, tc.text, nil); err != nil {
+			t.Fatal(err)
+		}
+		for _, run := range []string{adoptedRun, chatRun} {
+			dirs, err := f.store.Directives().List(t.Context(), store.DirectiveFilter{RunID: run, Kinds: []store.DirectiveKind{store.DirectivePlanImport}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := run == tc.want; (len(dirs) == 1 && dirs[0].Text == tc.text) != want || len(dirs) > 1 {
+				t.Fatalf("%q: plan imports on %s = %+v, want on %s only", tc.text, run, dirs, tc.want)
+			}
+		}
+	}
+	f := newAdoptedFixture(t, nil)
+	if err := f.ctrls.Stop(t.Context(), adopt.Run{ID: adoptedRun, Dir: filepath.Join(f.root, ".shared", "subagent-swarm", adoptedRun)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.backend.Dispatch(t.Context(), router.Decision{Handler: router.Planner}, "for run "+adoptedRun+": drop the docs task", nil); err == nil || !strings.Contains(err.Error(), "adopted run "+adoptedRun+" has no live controller") {
+		t.Fatalf("inactive adopted run planner dispatch = %v, want no live controller error", err)
+	}
+}
+
+// OwnerRun resolves concierge directive targets at the front desk.
+func TestOwnerRunPicksTheRunAnInstructionIsAbout(t *testing.T) {
+	t.Parallel()
+	const second = "20261113-054825-other"
+	for _, tc := range []struct {
+		name, run, text, want, err string
+		held, stop                 []string
+	}{
+		{name: "tool names a held run", run: second, text: "hold", want: second, held: []string{adoptedRun, second}},
+		{name: "text names a held run", text: "for run " + second + ": hold", want: second, held: []string{adoptedRun, second}},
+		{name: "one held run", text: "hold", want: adoptedRun, held: []string{adoptedRun}},
+		{name: "tool names an unheld run", run: "run-elsewhere", text: "hold", err: "run run-elsewhere is not held by this chat", held: []string{adoptedRun}},
+		{name: "tool names synthetic front desk", run: chatRun, text: "hold", err: "run " + chatRun + " is not held by this chat", held: []string{adoptedRun}},
+		{name: "tool names inactive adopted run", run: second, text: "hold", err: "adopted run " + second + " has no live controller", held: []string{adoptedRun, second}, stop: []string{second}},
+		{name: "text names inactive adopted run while another is live", text: "for run " + second + ": hold", err: "adopted run " + second + " has no live controller", held: []string{adoptedRun, second}, stop: []string{second}},
+		{name: "no live controller at front desk", text: "hold", err: "no controller is running for this chat", held: []string{adoptedRun}, stop: []string{adoptedRun}},
+		{name: "several held runs, none named", text: "hold", err: "name the run", held: []string{adoptedRun, second}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAdoptedFixture(t, nil, tc.held...)
+			f.backend.FrontDesk = chatRun
+			for _, id := range tc.stop {
+				if err := f.ctrls.Stop(t.Context(), adopt.Run{ID: id, Dir: filepath.Join(f.root, ".shared", "subagent-swarm", id)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := f.backend.OwnerRun(t.Context(), tc.run, tc.text)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("OwnerRun = %q, %v; want error %q", got, err, tc.err)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("OwnerRun = %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestFrontDeskInstructionNamingOneOfSeveralLiveRuns(t *testing.T) {
+	t.Parallel()
+	clk := clock.NewFakeClock(clock.NewRealClock().Now().UTC())
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	for _, id := range []string{"front", "run-a", "run-b", "run-idle"} {
+		if err := st.Runs().Create(t.Context(), store.Run{ID: id}); err != nil {
+			t.Fatal(err)
+		}
+		if id == "front" || id == "run-idle" {
+			continue
+		}
+		if _, err := st.Runs().AcquireLease(t.Context(), id, "orca-run", time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := NewStoreBackend(st, "front")
+	b.FrontDesk, b.Now = "front", clk.Now
+	b.ListRuns = func(ctx context.Context) ([]store.Run, error) { return st.Runs().List(ctx) }
+	var ack string
+	if err := b.Dispatch(t.Context(), router.Decision{Handler: router.Dispatcher}, "for run-b: hold", func(s string) { ack = s }); err != nil {
+		t.Fatal(err)
+	}
+	if want := "Queued for the dispatcher of run run-b, whose controller is running: for run-b: hold"; ack != want {
+		t.Fatalf("ack = %q, want %q", ack, want)
+	}
+	if got := instructions(t, st, "run-b"); len(got) != 1 {
+		t.Fatalf("run-b instructions = %q", got)
+	}
+	if err := b.Dispatch(t.Context(), router.Decision{Handler: router.Dispatcher}, "for run-idle: hold", func(s string) { ack = s }); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ack, "Not queued: run run-idle has no live controller") {
+		t.Fatalf("idle run ack = %q, want refusal", ack)
+	}
+	if got := instructions(t, st, "run-idle"); len(got) != 0 {
+		t.Fatalf("run-idle instructions = %q, want none", got)
+	}
+}
+
 func instructions(t *testing.T, st store.Store, runID string) []string {
 	t.Helper()
 	dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: runID, ActiveOnly: true, Kinds: []store.DirectiveKind{store.DirectiveInstruction}})
