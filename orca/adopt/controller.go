@@ -20,8 +20,7 @@ import (
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
-// Controllers attaches host runs to the same deterministic lifecycle used for
-// orca's own lanes. Its lifetime is the chat process, not an individual command.
+// Controllers attaches host runs to orca's deterministic lane lifecycle.
 type Controllers struct {
 	ctx    context.Context
 	store  store.Store
@@ -168,7 +167,7 @@ func (d *Controllers) Stop(ctx context.Context, r Run) error {
 	return nil
 }
 
-// Close leaves the handover lease in place so another chat can resume it.
+// Close stops controllers while leaving the handover lease for another chat.
 func (d *Controllers) Close(ctx context.Context) error {
 	d.mu.Lock()
 	var runs []Run
@@ -366,8 +365,7 @@ func (a hostAgent) agent() recipe.AgentSpec {
 	return recipe.AgentSpec{Harness: kind, Model: a.Model, Effort: a.Effort}
 }
 
-// checkpoint preserves host-only task/config fields and the historical terminal
-// map. Spawn files let the resumed watcher attach to the phase orca launched.
+// checkpoint writes controller state back to the host ledger and spawn files.
 func checkpoint(dir string, lanes []lane.Lane) error {
 	lock, err := os.OpenFile(filepath.Join(dir, "state.json.lock"), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {

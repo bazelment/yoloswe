@@ -179,8 +179,7 @@ type watchTarget struct {
 	laneID, sessionID, terminalID string
 }
 
-// TrackLane attaches an imported terminal to the host-safe report polling and
-// stream fallback, including sessions whose listing has no swarm metadata.
+// TrackLane attaches an imported terminal to report polling and stream fallback.
 func (d *Driver) TrackLane(ln lane.Lane) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

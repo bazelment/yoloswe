@@ -314,8 +314,7 @@ type Service struct {
 	Importer Importer
 }
 
-// RunDriver drives imported lanes while orca owns the host run. Stop must
-// quiesce the controller and persist its lanes before the watcher restarts.
+// RunDriver drives imported lanes while orca owns the host run.
 type RunDriver interface {
 	Start(context.Context, Run) error
 	Stop(context.Context, Run) error
