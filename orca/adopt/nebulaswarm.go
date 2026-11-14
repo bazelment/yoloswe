@@ -155,8 +155,6 @@ func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
 	}
 }
 
-// latestReport is reports/<lane>.<phase>.r<round>.md, else the lane's newest
-// accepted report.
 func latestReport(dir, laneID, phase string, round int) string {
 	if phase != "" {
 		if p := filepath.Join(dir, "reports", fmt.Sprintf("%s.%s.r%d.md", laneID, phase, round)); fileExists(p) {
@@ -166,7 +164,6 @@ func latestReport(dir, laneID, phase string, round int) string {
 	paths, _ := filepath.Glob(filepath.Join(dir, "reports", laneID+".*.md"))
 	best, bestMod := "", int64(0)
 	for _, p := range paths {
-		// A glob for lane "a" also matches lane "a.b"; keep <lane>.<phase>.r<n>.md only.
 		rest := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), laneID+"."), ".md")
 		if strings.Count(rest, ".") != 1 {
 			continue

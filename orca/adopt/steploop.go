@@ -19,10 +19,7 @@ import (
 // stepBridgeMarker names the bridge loop StepLoopWatcher.Start launches.
 const stepBridgeMarker = "orca-step-bridge"
 
-// stepBridgeScript steps a released nebula-swarm run until its first
-// decision, which sw_step records in EVENTS for the host orchestrator (its
-// idle alert wakes it to re-arm its own loop), the way a watch_lanes.sh bridge
-// keeps a subagent-swarm-nebula run moving.
+// stepBridgeScript runs one released nebula-swarm tick.
 const stepBridgeScript = `source "$2" || exit
 RUN=$1
 while [[ -f $RUN/state.json ]]; do
@@ -30,14 +27,10 @@ while [[ -f $RUN/state.json ]]; do
   [[ $rc == 124 ]] || exit "$rc"
 done`
 
-// loopMarkers name a process that runs a nebula-swarm step loop: the shells
-// running sw_step or sw_wait (functions of swarm_nebula.sh), the independent
-// orchestrator watcher and orca's own bridge.
+// loopMarkers identify nebula-swarm loop processes and their descendants.
 var loopMarkers = []string{"sw_step", "sw_wait", "swarm_nebula.sh", "orchestrator_watch.sh", "term-cursors.json", stepBridgeMarker}
 
-// StepLoopWatcher controls a nebula-swarm run's sw_step loop: the processes
-// that name the run directory and run the step loop, their step-loop parent
-// shells and every descendant.
+// StepLoopWatcher controls a nebula-swarm run's sw_step loop.
 type StepLoopWatcher struct {
 	// Script is swarm_nebula.sh, which the bridge Start launches sources.
 	Script string
