@@ -179,6 +179,18 @@ type watchTarget struct {
 	laneID, sessionID, terminalID string
 }
 
+// TrackLane attaches an imported terminal to report polling and stream fallback.
+func (d *Driver) TrackLane(ln lane.Lane) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, target := range d.spawned[ln.RunID] {
+		if target.terminalID == ln.TerminalID {
+			return
+		}
+	}
+	d.spawned[ln.RunID] = append(d.spawned[ln.RunID], watchTarget{laneID: ln.ID, sessionID: ln.SessionID, terminalID: ln.TerminalID})
+}
+
 var _ lane.LaneDriver = (*Driver)(nil)
 
 func (d *Driver) ReportInstructions(runID, laneID, phase string, round int) string {
@@ -940,9 +952,7 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 		TerminalID: resp.ID,
 		StartedAt:  d.clock.Now().UTC(),
 	}
-	d.mu.Lock()
-	d.spawned[req.RunID] = append(d.spawned[req.RunID], watchTarget{laneID: req.LaneID, sessionID: result.SessionID, terminalID: result.TerminalID})
-	d.mu.Unlock()
+	d.TrackLane(lane.Lane{RunID: req.RunID, ID: req.LaneID, SessionID: result.SessionID, TerminalID: result.TerminalID})
 	return result, nil
 }
 

@@ -235,7 +235,22 @@ func executeChat(
 		question = strings.TrimSpace(strings.Join(posArgs, " "))
 	}
 	backend.OnAttach = concierge.Attach
-	backend.Adoption, backend.AdoptionUnavailable = newAdoption(cfg)
+	adoption, adoptionOff := newAdoption(ctx, cfg, st, clk)
+	backend.Adoption, backend.AdoptionUnavailable = adoption, adoptionOff
+	if adoption != nil {
+		defer func() {
+			if closer, ok := adoption.Driver.(interface{ Close(context.Context) error }); ok {
+				_ = closer.Close(context.WithoutCancel(ctx))
+			}
+		}()
+		if question == "" {
+			if ids, err := adoption.Adopted(); err == nil {
+				for _, id := range ids {
+					_, _ = adoption.Adopt(ctx, id)
+				}
+			}
+		}
+	}
 	routerSel := cfg.Models.Roles["router"]
 	routingLog := attachedRoutingLog{backend: backend, model: routerSel.Model, provider: routerSel.Provider}
 	r := router.Select(roleClient(client, cfg, "router"), routerSel.Model, os.Getenv("ORCA_GEMINI_API_KEY"), os.Getenv("GEMINI_DECISIONS_BASE_URL"), routingLog)

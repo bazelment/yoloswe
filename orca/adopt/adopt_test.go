@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bazelment/yoloswe/orca/recipe"
 )
 
 const testRun = "20261113-000000-host"
@@ -339,6 +341,68 @@ func TestImportsCurrentRoundOfTwoLaneRun(t *testing.T) {
 	}
 }
 
+func TestControllerStateRejectsBriefOutsideRunDirectory(t *testing.T) {
+	t.Parallel()
+	for _, brief := range []string{"../outside.md", "/tmp/outside.md"} {
+		t.Run(brief, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "outside.md"), []byte("secret"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{"config":{"goal":"g"},"tasks":[{"id":"a","title":"A","phase":"swe","status":"running","brief":%q}]}`, brief))
+			r, err := Read(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, _, err = controllerState(r)
+			if err == nil || !strings.Contains(err.Error(), "brief path") || !strings.Contains(err.Error(), "run directory") {
+				t.Fatalf("controllerState error = %v, want a clear run-directory brief-path error", err)
+			}
+		})
+	}
+}
+
+func TestControllerStateRejectsLedgerPathComponents(t *testing.T) {
+	t.Parallel()
+	for _, task := range []string{`{"id":"../outside","phase":"swe"}`, `{"id":"a","phase":"../outside"}`} {
+		t.Run(task, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{"config":{"goal":"g"},"tasks":[%s]}`, task))
+			r, err := Read(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, _, err = controllerState(r)
+			if err == nil || !strings.Contains(err.Error(), "single path component") {
+				t.Fatalf("controllerState error = %v, want path-component rejection", err)
+			}
+		})
+	}
+}
+
+func TestAdoptedReviewRoundCapMatchesDefault(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"g","phases":[{"name":"swe"},{"name":"review"}]},"tasks":[{"id":"a","title":"A","phase":"review","status":"running","round":3}]}`)
+	r, err := Read(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow, lanes, _, err := controllerState(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lanes) != 1 || lanes[0].Round != 3 {
+		t.Fatalf("imported lanes = %+v, want review round 3", lanes)
+	}
+	mechanical, judgment := workflow.MatchTransitions(recipe.PhaseReview, recipe.OutcomeNeedsSWE, false, lanes[0].Round)
+	if mechanical == nil || mechanical.To != recipe.TargetEscalate || len(judgment) != 0 {
+		t.Fatalf("review round 3 needs-swe transition = mechanical=%+v judgment=%+v, want escalation", mechanical, judgment)
+	}
+}
+
 const fakeWatchScript = `#!/bin/bash
 if [ "$1" = --status ]; then
   a=""; b=""
@@ -422,5 +486,51 @@ func write(t *testing.T, p, s string) {
 	t.Helper()
 	if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type runDriverFuncs struct {
+	start func(context.Context, Run) error
+	stop  func(context.Context, Run) error
+}
+
+func (d runDriverFuncs) Start(ctx context.Context, r Run) error { return d.start(ctx, r) }
+func (d runDriverFuncs) Stop(ctx context.Context, r Run) error  { return d.stop(ctx, r) }
+
+func TestFailedReleaseResumesController(t *testing.T) {
+	w := newWorld(t)
+	svc := w.service()
+	starts, stops := 0, 0
+	svc.Driver = runDriverFuncs{
+		start: func(context.Context, Run) error {
+			if w.watcher.running {
+				t.Fatal("host watcher still running at controller start")
+			}
+			starts++
+			return nil
+		},
+		stop: func(context.Context, Run) error { stops++; return nil },
+	}
+	if _, err := svc.Adopt(t.Context(), testRun); err != nil {
+		t.Fatal(err)
+	}
+	svc.fault = func(step string) error {
+		if step == "release:label" {
+			return errInjected
+		}
+		return nil
+	}
+	if err := svc.Release(t.Context(), testRun); !errors.Is(err, errInjected) {
+		t.Fatalf("release error = %v", err)
+	}
+	if starts != 2 || stops != 1 || w.watcher.running {
+		t.Fatalf("handover after failure: starts=%d stops=%d watcher=%v", starts, stops, w.watcher.running)
+	}
+	svc.fault = nil
+	if err := svc.Release(t.Context(), testRun); err != nil {
+		t.Fatal(err)
+	}
+	if stops != 2 || !w.watcher.running {
+		t.Fatalf("successful handback: stops=%d watcher=%v", stops, w.watcher.running)
 	}
 }
