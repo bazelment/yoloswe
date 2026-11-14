@@ -1375,10 +1375,30 @@ func TestAdoptObjectiveAndCheckpointHelpers(t *testing.T) {
 	}
 	unconfinedRun := Run{
 		Dir:       dir,
-		Objective: "# Goal\nPlan: /etc/passwd\nPlan: ../outside.md\nNext: staff m4\n",
+		Objective: "# Goal\nPlan: /etc/passwd\nPlan: ../outside.md\nPlan: sub/future-plan.md\nNext: staff m4\n",
 	}
-	if full := unconfinedRun.FullObjective(); strings.Contains(full, "/etc/passwd") || strings.Contains(full, "../outside.md") {
-		t.Fatalf("FullObjective failed to strip unconfined Plan: lines:\n%s", full)
+	if full := unconfinedRun.FullObjective(); strings.Contains(full, "/etc/passwd") || strings.Contains(full, "../outside.md") || !strings.Contains(full, "Plan: sub/future-plan.md") {
+		t.Fatalf("FullObjective failed to strip unconfined Plan: lines or dropped safe relative Plan: line:\n%s", full)
+	}
+	if got := extractPlanPath(dir, "Plan: sub/future-plan.md\n"); got != filepath.Join(dir, "sub", "future-plan.md") {
+		t.Fatalf("extractPlanPath(nonexistent safe relative plan) = %q, want %q", got, filepath.Join(dir, "sub", "future-plan.md"))
+	}
+	if refs := planner.ExtractObjectivePlanRefs("Plan: docs/a.md\nPlan path: docs/b.md\nPlan file: post:286c9d4f-9da3-4787-aa66-bd97aa21f947\nPlan: ../escape.md\n"); len(refs) != 3 {
+		t.Fatalf("ExtractObjectivePlanRefs returned %v, want 3 refs", refs)
+	}
+	adoptedRun := store.Run{
+		ID:        "run-adopted",
+		Objective: "# Run\nGoal: Full goal\nPlan: docs/my-plan.md\n- [x] M1\n- [ ] M2\nNext: staff M2\n",
+		PlanRef:   "ORCHESTRATOR: orca since 2026-11-14T18:18:00Z (orca-chat:front-desk)",
+	}
+	preservedObj, preservedRef := planner.PreserveAdoptedObjective(adoptedRun, "Short summary", "docs/other.md")
+	if preservedObj != adoptedRun.Objective || preservedRef != adoptedRun.PlanRef {
+		t.Fatalf("PreserveAdoptedObjective(adopted) = (%q, %q), want original objective and marker", preservedObj, preservedRef)
+	}
+	nativeRun := store.Run{ID: "run-native", Objective: "Old goal", PlanRef: "docs/old.md"}
+	nativeObj, nativeRef := planner.PreserveAdoptedObjective(nativeRun, "New goal", "docs/new.md")
+	if nativeObj != "New goal" || nativeRef != "docs/new.md" {
+		t.Fatalf("PreserveAdoptedObjective(native) = (%q, %q), want (New goal, docs/new.md)", nativeObj, nativeRef)
 	}
 
 	// 2. HasNextWork returns false for "none" / "done" / "n/a" / "complete" and true for unchecked checkboxes and multi-line Next:.
@@ -1392,9 +1412,11 @@ func TestAdoptObjectiveAndCheckpointHelpers(t *testing.T) {
 	if multiNext != "- step 1\n- step 2" {
 		t.Fatalf("extractNextSection(multi-line) = %q, want %q", multiNext, "- step 1\n- step 2")
 	}
-	rCheckbox := Run{Objective: "# Run\n- [x] M1\n- [ ] M2 open\n"}
-	if !rCheckbox.HasNextWork() {
-		t.Fatal("expected HasNextWork() = true when objective has unchecked item")
+	for _, marker := range []string{"- [ ] M2 open", "* [ ] M2 bullet", "+ [ ] M2 plus", "1. [ ] M2 numbered", "2) [ ] M2 paren"} {
+		rCheckbox := Run{Objective: "# Run\n- [x] M1\n" + marker + "\n"}
+		if !rCheckbox.HasNextWork() {
+			t.Fatalf("expected HasNextWork() = true for unchecked item %q", marker)
+		}
 	}
 
 	// 3. ledgerPhase maps synthetic phase (e.g. "integrate") to fallback or last configured phase.
@@ -1413,10 +1435,10 @@ func TestAdoptObjectiveAndCheckpointHelpers(t *testing.T) {
 	if err := lockLedgerFile(lockFile); err != nil {
 		t.Fatal(err)
 	}
-	go func() {
-		time.Sleep(40 * time.Millisecond)
+	onLockLedgerContention = func() {
 		_ = lockFile.Close()
-	}()
+	}
+	defer func() { onLockLedgerContention = nil }()
 	newLane := lane.Lane{
 		ID:         "new-lane",
 		RunID:      "run-1",
@@ -1432,11 +1454,69 @@ func TestAdoptObjectiveAndCheckpointHelpers(t *testing.T) {
 	if err := checkpoint(dir, []lane.Lane{newLane}); err != nil {
 		t.Fatalf("checkpoint with new lane under brief lock contention failed: %v", err)
 	}
+	onLockLedgerContention = nil
 	if !fileExists(filepath.Join(dir, "new-lane.swe.spawn.json")) {
 		t.Fatal("expected checkpoint(!found) for subagent-swarm to write new-lane.swe.spawn.json")
 	}
 	if stateAfter := readText(filepath.Join(dir, "state.json")); !strings.Contains(stateAfter, `"nebula:term-new"`) {
 		t.Fatalf("expected checkpoint(!found) to record sessions map, got:\n%s", stateAfter)
+	}
+
+	// 5. checkpoint !found branch for nebula-swarm seeds priority, depends_on, verdict, terminal_state, and terminals,
+	// and appendNebulaSwarmEvents emits started, verdict, status, phase, and merged TSV lines.
+	nsDir := t.TempDir()
+	write(t, filepath.Join(nsDir, "state.json"), `{"config":{"goal":"ns goal","orchestrator_session_id":"sess-orch","phases":[{"name":"swe","kind":"claude"},{"name":"review","kind":"claude"}]},"tasks":[]}`)
+	nsLane := lane.Lane{
+		ID:         "m2-new",
+		RunID:      "run-ns",
+		Title:      "M2 new lane",
+		Branch:     "swarm-lane/run-ns/m2-new",
+		Phase:      "swe",
+		Round:      1,
+		Status:     lane.StatusRunning,
+		SessionID:  "sess-ns-1",
+		TerminalID: "term-ns-1",
+	}
+	if err := checkpoint(nsDir, []lane.Lane{nsLane}); err != nil {
+		t.Fatalf("checkpoint(nebula-swarm !found): %v", err)
+	}
+	nsState := readText(filepath.Join(nsDir, "state.json"))
+	for _, wantField := range []string{`"priority": "p1"`, `"depends_on": []`, `"verdict": ""`, `"terminal_state": ""`, `"term-ns-1"`} {
+		if !strings.Contains(nsState, wantField) {
+			t.Fatalf("nebula-swarm checkpoint(!found) missing %s:\n%s", wantField, nsState)
+		}
+	}
+	t0 := time.Date(2026, 11, 14, 19, 0, 0, 0, time.UTC)
+	if err := appendNebulaSwarmEvents(nsDir, t0, nil, nsLane, []string{"swe", "review"}); err != nil {
+		t.Fatalf("appendNebulaSwarmEvents(started): %v", err)
+	}
+	blockedLane := nsLane
+	blockedLane.Status = lane.StatusBlocked
+	if err := appendNebulaSwarmEvents(nsDir, t0.Add(10*time.Second), &nsLane, blockedLane, []string{"swe", "review"}); err != nil {
+		t.Fatalf("appendNebulaSwarmEvents(status): %v", err)
+	}
+	revLane := nsLane
+	revLane.Phase = "review"
+	revLane.Status = lane.StatusDone
+	revLane.TerminalID = "term-ns-2"
+	revLane.PR = 5799
+	revLane.ApprovalSHA = "abc1234"
+	revLane.MergeSHA = "deadbeef"
+	if err := appendNebulaSwarmEvents(nsDir, t0.Add(time.Minute), &blockedLane, revLane, []string{"swe", "review"}); err != nil {
+		t.Fatalf("appendNebulaSwarmEvents(review/merged): %v", err)
+	}
+	eventsLog := readText(filepath.Join(nsDir, "EVENTS"))
+	for _, wantEvent := range []string{
+		"m2-new\tstarted\tswe term-ns-1",
+		"m2-new\tstatus\trunning -> blocked",
+		"m2-new\tphase\tswe -> review",
+		"m2-new\tstarted\treview term-ns-2",
+		"m2-new\tverdict\tpass",
+		"m2-new\tmerged\t#5799 deadbeef",
+	} {
+		if !strings.Contains(eventsLog, wantEvent) {
+			t.Fatalf("EVENTS missing %q:\n%s", wantEvent, eventsLog)
+		}
 	}
 }
 
@@ -1808,7 +1888,8 @@ func TestAdoptedBriefCitingObjectiveInlinesItems(t *testing.T) {
 	}
 	controllers.Wake(nsRun)
 	waitFor(t, func() bool {
-		return len(drv.Spawns) == 2
+		got, err := st.Lanes().Get(t.Context(), nsRun, "m2-gaps4")
+		return err == nil && got.Status == lane.StatusRunning
 	})
 	if len(drv.Spawns) != 2 || drv.Spawns[1].LaneID != "m2-gaps4" || drv.Spawns[1].RepositoryID != wantRepoID {
 		t.Fatalf("Dispatcher spawn = %+v, want m2-gaps4 with RepositoryID=%q", drv.Spawns, wantRepoID)
@@ -1897,9 +1978,6 @@ func TestAdoptedWrongRepoLaneReportRespawnsInsteadOfSteering(t *testing.T) {
 	})
 
 	waitFor(t, func() bool {
-		if len(drv.Releases) != 1 || len(drv.Spawns) != 1 {
-			return false
-		}
 		got, err := st.Lanes().Get(t.Context(), nsRun, "m2-gaps3")
 		return err == nil && got.Status == lane.StatusRunning && got.SessionID != "018a40a9"
 	})

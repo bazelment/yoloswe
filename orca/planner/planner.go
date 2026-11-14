@@ -1693,7 +1693,8 @@ func ExtractObjectivePlanRefs(objective string) []string {
 		for _, prefix := range []string{"plan path:", "plan file:", "plan:"} {
 			if strings.HasPrefix(lower, prefix) {
 				candidate := strings.TrimSpace(clean[len(prefix):])
-				candidate = strings.Trim(candidate, "`\"'.,;:()")
+				candidate = strings.TrimLeft(candidate, "`\"'(")
+				candidate = strings.TrimRight(candidate, "`\"'.,;:)")
 				if candidate == "" {
 					break
 				}

@@ -868,9 +868,43 @@ func TestConcierge_KeepTheHoldOnAdoptedRunCreatesNoStandingNoNewLanesRule(t *tes
 	if err := concierge.ValidateStandingRule("Start no new lanes until told otherwise", negatedOwnerQuote); err == nil {
 		t.Fatal("expected ValidateStandingRule to reject no-new-lanes rule when owner message only mentions it inside quotes/negation")
 	}
-	// An unrelated standing rule is allowed even when the owner quote mentions "keep the hold".
+	// An unrelated standing rule is allowed even when the owner quote mentions "keep the hold"
+	// or when the rule contains words with "hold" as a substring (e.g., "threshold", "placeholder").
 	if err := concierge.ValidateStandingRule("Always run lint before pushing.", ownerQuote); err != nil {
 		t.Fatalf("expected unrelated standing rule to be allowed alongside 'keep the hold', got: %v", err)
+	}
+	if err := concierge.ValidateStandingRule("Set stall threshold to 30m and avoid placeholder text.", ownerQuote); err != nil {
+		t.Fatalf("expected rule containing 'threshold'/'placeholder' to be allowed alongside 'keep the hold', got: %v", err)
+	}
+	// A factual dispatcher note that mentions "keep the hold" (orca lease) without claiming a work/lane block is allowed.
+	dispClientLeaseNote := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_disp_lease_note", dispatcher.ToolDirectiveNote, json.RawMessage(`{"id":"note-lease-hold","fact":"Owner asked to keep the hold (orca lease) on run 20261114-trial-m1 while m2-gaps2 finishes."}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Recorded lease note.")),
+		},
+	)
+	dispLease := dispatcher.New(dispatcher.Config{}, st, drv, clk, dispClientLeaseNote)
+	dispResLease, err := dispLease.Dispatch(ctx, adoptedRunID, []store.Event{
+		{
+			ID:      "ev-owner-lease-note",
+			RunID:   adoptedRunID,
+			Kind:    store.EventOwnerMessage,
+			Class:   store.EventClassJudgment,
+			Source:  "owner",
+			Summary: ownerQuote,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Dispatch lease note: %v", err)
+	}
+	if len(dispResLease.Rejected) != 0 {
+		t.Fatalf("expected factual lease hold note to be allowed, got Rejected=%+v", dispResLease.Rejected)
 	}
 	dispClient3 := model.NewFakeClient(
 		model.Response{

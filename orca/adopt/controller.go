@@ -56,7 +56,20 @@ type controlledRun struct {
 
 type startup struct {
 	done chan struct{}
+	cr   *controlledRun
 	err  error
+}
+
+func (d *Controllers) lookupRun(runID string) *controlledRun {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if cr := d.runs[runID]; cr != nil {
+		return cr
+	}
+	if s := d.starting[runID]; s != nil {
+		return s.cr
+	}
+	return nil
 }
 
 func NewControllers(ctx context.Context, st store.Store, driver lane.LaneDriver, clk clock.Clock, judges JudgeFactory) *Controllers {
@@ -241,12 +254,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	runCtx, cancel := context.WithCancel(d.ctx)
 	cr := &controlledRun{controller: ctrl, syncer: syncer, cancel: cancel, done: make(chan struct{}), run: r, holder: holder}
 	d.mu.Lock()
-	d.runs[r.ID] = cr
+	s.cr = cr
 	d.mu.Unlock()
 	cleanupFailedStart := func() {
-		d.mu.Lock()
-		delete(d.runs, r.ID)
-		d.mu.Unlock()
 		cancel()
 		close(cr.done)
 	}
@@ -265,6 +275,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		_ = ctrl.ReleaseLease(ctx)
 		return err
 	}
+	d.mu.Lock()
+	d.runs[r.ID] = cr
+	d.mu.Unlock()
 	started = true
 	go func() {
 		defer close(cr.done)
@@ -349,36 +362,29 @@ func (d *Controllers) stop(ctx context.Context, r Run, releaseLease bool) error 
 func (d *Controllers) judge(holder string, dispatch controller.Judge) controller.Judge {
 	return controller.JudgeFunc(func(ctx context.Context, runID string, events []store.Event) error {
 		_, _ = d.RefreshObjective(ctx, runID)
+		var err error
 		if dispatch != nil {
 			stop := d.keepLease(ctx, runID, holder)
-			err := dispatch.Judge(ctx, runID, events)
+			err = dispatch.Judge(ctx, runID, events)
 			stop()
-			d.syncRunLanes(ctx, runID)
-			if _, pErr := d.planNextWorkIfDrained(ctx, runID, "backlog_drained"); pErr != nil {
-				slog.Warn("plan next work after judge failed", "run", runID, "error", pErr)
-			}
-			if err != nil {
-				slog.Error("adopted run dispatcher failed; asking the owner about its escalations", "run", runID, "error", err)
-				return d.askOwnerOnEscalation(ctx, runID, events)
-			}
-		} else {
-			d.syncRunLanes(ctx, runID)
-			if _, pErr := d.planNextWorkIfDrained(ctx, runID, "backlog_drained"); pErr != nil {
-				slog.Warn("plan next work after judge failed", "run", runID, "error", pErr)
-			}
+		}
+		d.syncRunLanes(ctx, runID)
+		if _, pErr := d.planNextWorkIfDrained(ctx, runID, "backlog_drained"); pErr != nil {
+			slog.Warn("plan next work after judge failed", "run", runID, "error", pErr)
+		}
+		if err != nil {
+			slog.Error("adopted run dispatcher failed; asking the owner about its escalations", "run", runID, "error", err)
 		}
 		return d.askOwnerOnEscalation(ctx, runID, events)
 	})
 }
 
 func (d *Controllers) syncRunLanes(ctx context.Context, runID string) {
-	d.mu.Lock()
-	cr := d.runs[runID]
-	d.mu.Unlock()
+	cr := d.lookupRun(runID)
 	if cr == nil || cr.syncer == nil {
 		return
 	}
-	_, _ = cr.syncer.RefreshObjective(ctx, d.store.Runs())
+	_, _ = cr.syncer.RefreshObjectiveIfChanged(ctx, d.store.Runs())
 	lanes, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
 	if err != nil {
 		return
@@ -388,27 +394,25 @@ func (d *Controllers) syncRunLanes(ctx context.Context, runID string) {
 	}
 }
 
-// RefreshObjective re-reads OBJECTIVE.md from the adopted run directory and
-// updates store.Run.Objective if the file changed on disk.
+// RefreshObjective re-reads OBJECTIVE.md from the adopted run directory when
+// its stat signature changes and updates store.Run.Objective if the content changed.
 func (d *Controllers) RefreshObjective(ctx context.Context, runID string) (bool, error) {
-	d.mu.Lock()
-	cr := d.runs[runID]
-	d.mu.Unlock()
+	cr := d.lookupRun(runID)
 	if cr == nil || cr.syncer == nil {
 		return false, nil
 	}
-	return cr.syncer.RefreshObjective(ctx, d.store.Runs())
+	return cr.syncer.RefreshObjectiveIfChanged(ctx, d.store.Runs())
 }
 
 func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger string) (bool, error) {
+	cr := d.lookupRun(runID)
 	d.mu.Lock()
-	cr := d.runs[runID]
 	plannerFn := d.Planner
 	d.mu.Unlock()
 	if cr == nil || cr.syncer == nil {
 		return false, nil
 	}
-	_, _ = cr.syncer.RefreshObjective(ctx, d.store.Runs())
+	_, _ = cr.syncer.RefreshObjectiveIfChanged(ctx, d.store.Runs())
 	if plannerFn == nil {
 		return false, nil
 	}
@@ -479,7 +483,7 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 		} else {
 			_, _ = d.store.Events().Append(context.WithoutCancel(ctx), store.Event{
 				RunID:   runID,
-				Kind:    store.EventOwnerMessage,
+				Kind:    store.EventTimer,
 				Class:   store.EventClassJudgment,
 				Source:  "planner",
 				Summary: "planner next-work handoff failed: " + err.Error(),
@@ -501,7 +505,7 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 	if addedOpen {
 		_, _ = d.store.Events().Append(ctx, store.Event{
 			RunID:   runID,
-			Kind:    store.EventOwnerMessage,
+			Kind:    store.EventTimer,
 			Class:   store.EventClassJudgment,
 			Source:  "planner",
 			Urgent:  true,
@@ -1255,7 +1259,7 @@ type adoptedRunStore struct {
 }
 
 func (s *adoptedRunStore) Get(ctx context.Context, runID string) (*store.Run, error) {
-	if s.syncer != nil && runID == s.syncer.run.ID {
+	if s.syncer != nil && runID == s.syncer.runID {
 		_, _ = s.syncer.RefreshObjectiveIfChanged(ctx, s.RunStore)
 	}
 	return s.RunStore.Get(ctx, runID)
@@ -1274,8 +1278,11 @@ type adoptedLaneStore struct {
 	controllers *Controllers
 }
 
+// Upsert checkpoints the lane live to the host ledger and, when the lane reaches
+// a terminal status with no active backlog item, triggers planNextWorkIfDrained
+// (controller.stepIntegrate marks merged lanes done directly without calling judge).
 func (s *adoptedLaneStore) Upsert(ctx context.Context, ln lane.Lane) error {
-	if s.syncer != nil && ln.RunID == s.syncer.run.ID {
+	if s.syncer != nil && ln.RunID == s.syncer.runID {
 		if err := s.syncer.SyncLane(ctx, ln); err != nil {
 			slog.Warn("live checkpoint adopted lane failed", "run", ln.RunID, "lane", ln.ID, "error", err)
 		}
@@ -1305,6 +1312,8 @@ type adoptedBacklogStore struct {
 	controllers *Controllers
 }
 
+// Close triggers planNextWorkIfDrained after closing a backlog item so merges
+// handled directly by controller.stepIntegrate hand off remaining OBJECTIVE.md work.
 func (s *adoptedBacklogStore) Close(ctx context.Context, runID, itemID string, status store.BacklogStatus, actor, reason string) error {
 	if err := s.BacklogStore.Close(ctx, runID, itemID, status, actor, reason); err != nil {
 		return err
@@ -1328,6 +1337,8 @@ type runLedgerSync struct {
 	clock          clock.Clock
 	known          map[string]lane.Lane
 	ledgerScript   *string
+	runID          string
+	resolvedScript string
 	lastObjective  string
 	lastPlannedKey string
 	run            Run
@@ -1336,6 +1347,7 @@ type runLedgerSync struct {
 	progModNano    int64
 	progSize       int64
 	statReady      bool
+	scriptResolved bool
 	ioMu           sync.Mutex
 	mu             sync.Mutex
 }
@@ -1359,6 +1371,7 @@ func newRunLedgerSync(r Run, clk clock.Clock, initial []lane.Lane) *runLedgerSyn
 	objMod, objSize := fileStatSignature(filepath.Join(r.Dir, "OBJECTIVE.md"))
 	progMod, progSize := fileStatSignature(filepath.Join(r.Dir, "PROGRESS.md"))
 	return &runLedgerSync{
+		runID:         r.ID,
 		run:           r,
 		clock:         clk,
 		known:         known,
@@ -1474,6 +1487,30 @@ func lanePersistedDiff(a, b lane.Lane) bool {
 		a.BaseCommit != b.BaseCommit
 }
 
+func (s *runLedgerSync) resolveLedgerScript() *string {
+	s.mu.Lock()
+	if s.ledgerScript != nil {
+		override := s.ledgerScript
+		s.mu.Unlock()
+		return override
+	}
+	if s.scriptResolved {
+		script := s.resolvedScript
+		s.mu.Unlock()
+		return &script
+	}
+	s.mu.Unlock()
+	found := FindLedgerScript()
+	s.mu.Lock()
+	if !s.scriptResolved {
+		s.resolvedScript = found
+		s.scriptResolved = true
+	}
+	script := s.resolvedScript
+	s.mu.Unlock()
+	return &script
+}
+
 func (s *runLedgerSync) SyncLane(ctx context.Context, ln lane.Lane) error {
 	s.ioMu.Lock()
 	defer s.ioMu.Unlock()
@@ -1481,7 +1518,6 @@ func (s *runLedgerSync) SyncLane(ctx context.Context, ln lane.Lane) error {
 	s.mu.Lock()
 	prev, ok := s.known[ln.ID]
 	run := s.run
-	ledgerScript := s.ledgerScript
 	s.mu.Unlock()
 	if ok && !lanePersistedDiff(prev, ln) {
 		return nil
@@ -1493,7 +1529,7 @@ func (s *runLedgerSync) SyncLane(ctx context.Context, ln lane.Lane) error {
 	}
 	if run.Format == FormatNebulaSwarm {
 		cfgPhases, _, _, _ := readNebulaSwarmLedgerMeta(run.Dir)
-		usedHelper, err := writeNebulaSwarmLaneWithHelper(ctx, run.Dir, ln, ledgerScript)
+		usedHelper, err := writeNebulaSwarmLaneWithHelper(ctx, run.Dir, ln, s.resolveLedgerScript())
 		if err != nil {
 			slog.Warn("nebula-swarm ledger.py helper failed; falling back to direct checkpoint", "dir", run.Dir, "lane", ln.ID, "error", err)
 		}
@@ -1524,10 +1560,16 @@ func (s *runLedgerSync) SyncAll(ctx context.Context, lanes []lane.Lane) error {
 	return errors.Join(errs...)
 }
 
+// onLockLedgerContention, when set by tests, is invoked the first time
+// lockLedgerFile observes EWOULDBLOCK/EAGAIN so tests can release a held lock
+// deterministically without sleeping.
+var onLockLedgerContention func()
+
 // lockLedgerFile acquires an exclusive flock on state.json.lock, retrying
 // briefly under transient contention before returning an error.
 func lockLedgerFile(lock *os.File) error {
 	deadline := time.Now().Add(2 * time.Second)
+	notified := false
 	for {
 		err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
@@ -1535,6 +1577,10 @@ func lockLedgerFile(lock *os.File) error {
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 			return fmt.Errorf("lock host ledger: %w", err)
+		}
+		if !notified && onLockLedgerContention != nil {
+			notified = true
+			onLockLedgerContention()
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("lock host ledger: %w", err)
@@ -1655,6 +1701,11 @@ func checkpoint(dir string, lanes []lane.Lane) error {
 			task["title"], _ = json.Marshal(cmp.Or(ln.Title, ln.ID))
 			task["branch"], _ = json.Marshal(ln.Branch)
 			if nebulaSwarm {
+				task["priority"], _ = json.Marshal("p1")
+				task["depends_on"], _ = json.Marshal([]string{})
+				task["verdict"], _ = json.Marshal("")
+				task["terminal_state"], _ = json.Marshal("")
+				task["terminals"], _ = json.Marshal(map[string]map[string]string{})
 				if err := checkpointNebulaSwarm(task, ln, cfgPhases); err != nil {
 					return err
 				}

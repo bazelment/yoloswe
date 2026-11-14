@@ -163,7 +163,7 @@ func sanitizeObjectivePlanLines(dir, obj string) string {
 	keep := make([]string, 0, len(lines))
 	for _, line := range lines {
 		if m := explicitPlanLineRE.FindStringSubmatch(line); len(m) == 2 {
-			if resolveCandidatePlanPath(dir, m[1]) == "" {
+			if resolveSafePlanRef(dir, m[1]) == "" {
 				continue
 			}
 		}
@@ -181,6 +181,8 @@ func isEmptyNextText(s string) bool {
 	}
 }
 
+var uncheckedTaskItemRE = regexp.MustCompile(`(?m)^\s*(?:[-*+]|\d+[.)])\s+\[\s\]`)
+
 // HasNextWork reports whether the run's objective/progress states open Next:
 // work or unchecked items beyond the currently imported lanes.
 func (r Run) HasNextWork() bool {
@@ -191,7 +193,7 @@ func (r Run) HasNextWork() bool {
 	if !isEmptyNextText(next) {
 		return true
 	}
-	return strings.Contains(r.Objective, "- [ ]")
+	return uncheckedTaskItemRE.MatchString(r.Objective)
 }
 
 // Importer finds and reads run directories: <root>/.shared/subagent-swarm/<run>
@@ -440,7 +442,7 @@ func Read(dir string) (Run, error) {
 }
 
 var (
-	explicitPlanLineRE = regexp.MustCompile(`(?im)^\s*(?:[-*]\s*)?plan(?:\s+file|\s+path)?\s*[:=]\s*([^\s` + "`" + `"',;()<>]+)`)
+	explicitPlanLineRE = regexp.MustCompile(`(?im)^\s*plan(?:\s+file|\s+path)?\s*[:=]\s*([^\s` + "`" + `"',;()<>]+)`)
 	markdownPathRE     = regexp.MustCompile(`([^\s` + "`" + `"',;()<>]+\.md)\b`)
 )
 
@@ -481,8 +483,9 @@ func isNebulaPostPlanRef(ref string) bool {
 	return true
 }
 
-func resolveCandidatePlanPath(dir, candidate string) string {
-	candidate = strings.Trim(candidate, "`\"'.,;:()")
+func resolveSafePlanRef(dir, candidate string) string {
+	candidate = strings.TrimLeft(strings.TrimSpace(candidate), "`\"'(")
+	candidate = strings.TrimRight(candidate, "`\"'.,;:)")
 	if candidate == "" || isIgnoredDocName(candidate) {
 		return ""
 	}
@@ -494,7 +497,7 @@ func resolveCandidatePlanPath(dir, candidate string) string {
 	}
 	if dir != "" {
 		resolved, err := resolveBriefPath(dir, candidate)
-		if err != nil || !fileExists(resolved) {
+		if err != nil {
 			return ""
 		}
 		return resolved
@@ -507,6 +510,17 @@ func resolveCandidatePlanPath(dir, candidate string) string {
 		return ""
 	}
 	return clean
+}
+
+func resolveCandidatePlanPath(dir, candidate string) string {
+	resolved := resolveSafePlanRef(dir, candidate)
+	if resolved == "" {
+		return ""
+	}
+	if dir != "" && !isNebulaPostPlanRef(resolved) && !fileExists(resolved) {
+		return ""
+	}
+	return resolved
 }
 
 func extractPlanPath(dir string, sources ...string) string {
@@ -528,6 +542,13 @@ func extractPlanPath(dir string, sources ...string) string {
 	}
 	if dir != "" && fileExists(filepath.Join(dir, "PLAN.md")) {
 		return filepath.Join(dir, "PLAN.md")
+	}
+	for _, src := range sources {
+		if m := explicitPlanLineRE.FindStringSubmatch(src); len(m) == 2 {
+			if p := resolveSafePlanRef(dir, m[1]); p != "" {
+				return p
+			}
+		}
 	}
 	return ""
 }

@@ -1370,26 +1370,6 @@ func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, state
 }
 
 var (
-	dispatcherNoNewWorkRulePhrases = []string{
-		"no new lanes",
-		"start no new lanes",
-		"do not start new lanes",
-		"don't start new lanes",
-		"do not spawn",
-		"don't spawn",
-		"stop spawning",
-		"pause spawning",
-		"no additional lanes",
-		"no more lanes",
-		"hold new lanes",
-		"hold off on new lanes",
-		"block new lanes",
-		"pause new lanes",
-		"no new work",
-		"block all new work",
-		"standing owner hold",
-		"standing hold",
-	}
 	dispatcherOwnerNoNewWorkPhrases = []string{
 		"no new lanes",
 		"start no new lanes",
@@ -1408,6 +1388,10 @@ var (
 		"no new work",
 		"block all new work",
 	}
+	dispatcherNoNewWorkRulePhrases = append(slices.Clone(dispatcherOwnerNoNewWorkPhrases),
+		"standing owner hold",
+		"standing hold",
+	)
 	dispatcherNegatedNoNewWorkPrefixes = []string{
 		"not ",
 		"no ",
@@ -1500,8 +1484,7 @@ func (d *Dispatcher) validateDispatcherNoteFact(ctx context.Context, runID strin
 			break
 		}
 	}
-	mentionsLeaseHold := strings.Contains(factLower, "keep the hold")
-	if !claimsNoNewWork && !mentionsLeaseHold {
+	if !claimsNoNewWork {
 		return nil
 	}
 	var ownerSources strings.Builder
@@ -1524,12 +1507,11 @@ func (d *Dispatcher) validateDispatcherNoteFact(ctx context.Context, runID strin
 			}
 		}
 	}
-	ownerPlainlyStated := dispatcherOwnerPlainlyStatedNoNewWork(ownerSources.String())
-	if claimsNoNewWork && !ownerPlainlyStated {
+	if !dispatcherOwnerPlainlyStatedNoNewWork(ownerSources.String()) {
+		if strings.Contains(factLower, "keep the hold") {
+			return &invariantViolationError{msg: "directive.note [run]: 'keep the hold' on an adopted run means keep orca's lease on the run, not a standing rule blocking work"}
+		}
 		return &invariantViolationError{msg: "directive.note [run]: cannot block new lanes or work unless the owner stated it plainly (in an adopted run, 'hold' means orca's lease on the run)"}
-	}
-	if mentionsLeaseHold && !ownerPlainlyStated {
-		return &invariantViolationError{msg: "directive.note [run]: 'keep the hold' on an adopted run means keep orca's lease on the run, not a standing rule blocking work"}
 	}
 	return nil
 }

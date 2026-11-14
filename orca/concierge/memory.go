@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -122,26 +123,6 @@ func (e *MemoryEditor) Submit(ctx context.Context, st store.Store, runID, id, qu
 const StarterSetMemorySource = "orca starter set"
 
 var (
-	noNewWorkRulePhrases = []string{
-		"no new lanes",
-		"start no new lanes",
-		"do not start new lanes",
-		"don't start new lanes",
-		"do not spawn",
-		"don't spawn",
-		"stop spawning",
-		"pause spawning",
-		"no additional lanes",
-		"no more lanes",
-		"hold new lanes",
-		"hold off on new lanes",
-		"block new lanes",
-		"pause new lanes",
-		"no new work",
-		"block all new work",
-		"standing owner hold",
-		"standing hold",
-	}
 	plainOwnerNoNewWorkPhrases = []string{
 		"no new lanes",
 		"start no new lanes",
@@ -160,6 +141,10 @@ var (
 		"no new work",
 		"block all new work",
 	}
+	noNewWorkRulePhrases = append(slices.Clone(plainOwnerNoNewWorkPhrases),
+		"standing owner hold",
+		"standing hold",
+	)
 	negatedNoNewWorkPrefixes = []string{
 		"not ",
 		"no ",
@@ -260,6 +245,28 @@ func OwnerPlainlyStatedNoNewWork(quote string) bool {
 	return false
 }
 
+func isWordChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func containsWholeWord(s, word string) bool {
+	for start := 0; start < len(s); {
+		idx := strings.Index(s[start:], word)
+		if idx < 0 {
+			return false
+		}
+		pos := start + idx
+		end := pos + len(word)
+		leftOK := pos == 0 || !isWordChar(s[pos-1])
+		rightOK := end == len(s) || !isWordChar(s[end])
+		if leftOK && rightOK {
+			return true
+		}
+		start = pos + 1
+	}
+	return false
+}
+
 // ValidateStandingRule ensures a standing rule or directive never invents a
 // no-new-lanes / work hold unless the owner plainly stated it, and never treats
 // "keep the hold" (which means orca's lease on an adopted run) as a standing
@@ -268,7 +275,7 @@ func ValidateStandingRule(ruleText, ownerQuote string) error {
 	ruleLower := strings.ToLower(strings.TrimSpace(ruleText))
 	quoteLower := strings.ToLower(strings.TrimSpace(ownerQuote))
 	claimsNoNewWork := ClaimsNoNewWork(ruleText)
-	ruleMentionsHold := claimsNoNewWork || strings.Contains(ruleLower, "hold")
+	ruleMentionsHold := claimsNoNewWork || containsWholeWord(ruleLower, "hold")
 	quoteMentionsLeaseHold := (strings.Contains(quoteLower, "keep the hold") ||
 		strings.Contains(quoteLower, "keep hold") ||
 		strings.Contains(quoteLower, "hold on the run") ||
