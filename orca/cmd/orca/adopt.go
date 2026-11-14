@@ -64,8 +64,9 @@ func newHostSwarms(cfg Config, st store.Store, clk clock.Clock) hostSwarms {
 // client for the run label and the format's loop controller for the host
 // watcher or step loop. Each adopted run gets its own dispatcher on client.
 // When an adapter cannot be built it returns the one-line reason chat shows
-// instead.
-func newAdoption(ctx context.Context, cfg Config, h hostSwarms, st store.Store, clk clock.Clock, client model.ModelClient, logger *slog.Logger) (*adopt.Service, string) {
+// instead. holder leases the adopted runs; leases under a former holder id are
+// its own.
+func newAdoption(ctx context.Context, cfg Config, h hostSwarms, holder string, former []string, st store.Store, clk clock.Clock, client model.ModelClient, logger *slog.Logger) (*adopt.Service, string) {
 	if h.client == nil {
 		return nil, h.off
 	}
@@ -73,7 +74,8 @@ func newAdoption(ctx context.Context, cfg Config, h hostSwarms, st store.Store, 
 		Importer: h.importer,
 		Labeler:  h.client,
 		Watcher:  h.watcher,
-		Holder:   adopt.ChatHolder(cfg.RunID),
+		Holder:   holder,
+		Former:   former,
 		Driver:   adopt.NewControllers(ctx, st, h.client, clk, adoptedDispatchers(cfg, st, h.client, clk, client, logger)),
 	}, ""
 }

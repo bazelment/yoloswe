@@ -75,6 +75,7 @@ type DirectiveSubmitParams struct {
 	Ref    string `json:"ref,omitempty" jsonschema:"description=Optional plan reference or target recipe name"`
 	Scope  string `json:"scope,omitempty" jsonschema:"description=Optional lane ID or scope"`
 	Expiry string `json:"expiry,omitempty" jsonschema:"description=Optional RFC3339 timestamp or Go duration (e.g. 24h)"`
+	RunID  string `json:"run_id,omitempty" jsonschema:"description=Run the directive is about when the owner names one; defaults to the run this chat holds"`
 }
 
 // SwarmsParams takes no arguments.
@@ -104,12 +105,36 @@ type Concierge struct {
 	// Swarms lists this machine's orca runs and host swarms for the swarms
 	// tool; nil leaves the tool out.
 	Swarms func(context.Context) chat.SwarmList
+	// OwnerRun picks the run a directive is about from the run the tool
+	// names and the owner's words; nil keeps directives on the chat's run.
+	OwnerRun func(ctx context.Context, run, text string) (string, error)
+	// Wake asks the controller of a run to act on a new directive now.
+	Wake func(runID string)
 	// Logger receives one INFO line per tool call and a WARN on a budget stop.
 	Logger *slog.Logger
 }
 
-// startTurn gates run.start for one owner turn.
-type startTurn struct {
+// directiveReceipt is a directive this turn wrote and the run it is on.
+type directiveReceipt struct{ id, run string }
+
+// withReceipts tells the owner where each directive was stored when needed.
+func withReceipts(answer string, receipts []directiveReceipt) (string, string) {
+	var lines []string
+	for _, r := range receipts {
+		if !chat.Mentions(answer, r.run) {
+			lines = append(lines, fmt.Sprintf("Directive %s is saved on run %s.", r.id, r.run))
+		}
+	}
+	if len(lines) == 0 {
+		return answer, ""
+	}
+	extra := strings.Join(lines, "\n")
+	return strings.TrimSpace(answer + "\n" + extra), extra
+}
+
+// ownerTurn holds per-turn start permission and directive receipts.
+type ownerTurn struct {
+	receipts         []directiveReceipt
 	allowed, refused bool
 }
 
@@ -313,7 +338,7 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 
 	c.mu.Lock()
 	msgs := append(slices.Clone(c.history), model.NewUserMessage(question))
-	start := &startTurn{allowed: chat.IsStartRequest(question) || (c.startAsked && chat.IsConfirmation(question))}
+	start := &ownerTurn{allowed: chat.IsStartRequest(question) || (c.startAsked && chat.IsConfirmation(question))}
 	c.startAsked = false
 	c.mu.Unlock()
 
@@ -404,6 +429,13 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 
 	if memoryEcho != "" {
 		answer = memoryEcho
+	}
+	if quoted, extra := withReceipts(answer, start.receipts); extra != "" {
+		answer = quoted
+		if emit != nil {
+			emit(extra)
+		}
+		_, _ = c.store.Threads().AppendItem(cleanupCtx, store.Item{ThreadID: threadID, TurnID: turnID, Kind: store.ItemKindAssistantMessage, Content: extra})
 	}
 	if loopErr != nil {
 		_ = c.store.Threads().CompleteTurn(cleanupCtx, threadID, turnID, store.TurnStatusFailed, usage, loopErr.Error())
@@ -545,9 +577,8 @@ func (c *Concierge) RunInteractive(ctx context.Context, in io.Reader, out io.Wri
 }
 
 // buildToolRegistry builds the turn's tools. run.start launches only when
-// start allows it: an explicit start request, or a plain yes to the
-// concierge's question after a refused run.start.
-func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho *string, start *startTurn) *model.ToolRegistry {
+// start allows it: an explicit request or confirmation after a refusal.
+func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho *string, start *ownerTurn) *model.ToolRegistry {
 	reg := model.NewToolRegistry()
 	model.AddTool[RunStartParams](reg, ToolRunStart, "Start a new run for an owner goal", func(ctx context.Context, p RunStartParams) (string, error) {
 		goal := strings.TrimSpace(p.Goal)
@@ -647,7 +678,11 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 	model.AddTool[DirectiveSubmitParams](reg, ToolDirectiveSubmit,
 		"Submit a typed owner directive (standing, instruction, recipe_edit, plan_import) for the Controller/Dispatcher/Planner",
 		func(ctx context.Context, p DirectiveSubmitParams) (string, error) {
-			return c.handleDirectiveSubmit(ctx, threadID, turnID, quote, p)
+			r, out, err := c.handleDirectiveSubmit(ctx, threadID, turnID, quote, p)
+			if err == nil && start != nil {
+				start.receipts = append(start.receipts, r)
+			}
+			return out, err
 		},
 	)
 	model.AddTool[MemorySubmitParams](reg, ToolMemorySubmit, "Save an owner correction as memory", func(ctx context.Context, p MemorySubmitParams) (string, error) {
@@ -862,10 +897,10 @@ func (c *Concierge) handleDirectiveSubmit(
 	ctx context.Context,
 	threadID, turnID, quote string,
 	p DirectiveSubmitParams,
-) (string, error) {
+) (directiveReceipt, string, error) {
 	text := strings.TrimSpace(p.Text)
 	if text == "" {
-		return "", fmt.Errorf("%w: directive text is required", store.ErrInvalidArgument)
+		return directiveReceipt{}, "", fmt.Errorf("%w: directive text is required", store.ErrInvalidArgument)
 	}
 	kind := store.DirectiveKind(strings.ToLower(strings.TrimSpace(p.Kind)))
 	switch kind {
@@ -873,7 +908,18 @@ func (c *Concierge) handleDirectiveSubmit(
 	case "":
 		kind = store.DirectiveInstruction
 	default:
-		return "", fmt.Errorf("%w: invalid directive kind %q", store.ErrInvalidArgument, p.Kind)
+		return directiveReceipt{}, "", fmt.Errorf("%w: invalid directive kind %q", store.ErrInvalidArgument, p.Kind)
+	}
+	// The directive goes to the run it is about, which at the front desk is
+	// an adopted run, not the chat's own.
+	runID := c.runID
+	if c.OwnerRun != nil {
+		var err error
+		if runID, err = c.OwnerRun(ctx, p.RunID, quote+"\n"+text); err != nil {
+			return directiveReceipt{}, "", err
+		}
+	} else if named := strings.TrimSpace(p.RunID); named != "" && named != c.runID {
+		return directiveReceipt{}, "", fmt.Errorf("run %s is not this chat's run %s", named, c.runID)
 	}
 
 	now := c.clock.Now().UTC()
@@ -886,14 +932,14 @@ func (c *Concierge) handleDirectiveSubmit(
 			t := ts.UTC()
 			expiresAt = &t
 		} else {
-			return "", fmt.Errorf("%w: invalid expiry %q", store.ErrInvalidArgument, p.Expiry)
+			return directiveReceipt{}, "", fmt.Errorf("%w: invalid expiry %q", store.ErrInvalidArgument, p.Expiry)
 		}
 	}
 
 	dirID := c.nextID("dir-concierge")
 	dir := store.Directive{
 		ID:        dirID,
-		RunID:     c.runID,
+		RunID:     runID,
 		Kind:      kind,
 		Source:    store.DirectiveSourceConcierge,
 		Scope:     strings.TrimSpace(p.Scope),
@@ -903,7 +949,7 @@ func (c *Concierge) handleDirectiveSubmit(
 		Status:    store.DirectiveActive,
 	}
 	if err := c.store.Directives().Add(ctx, dir); err != nil {
-		return "", err
+		return directiveReceipt{}, "", err
 	}
 	echo := "directive is time-limited"
 	if expiresAt == nil {
@@ -912,16 +958,16 @@ func (c *Concierge) handleDirectiveSubmit(
 		if memoryScope != "owner" && memoryScope != "repo" && memoryScope != "run" {
 			memoryScope = "run"
 		}
-		echo, err = c.memoryEditor.Submit(ctx, c.store, c.runID, dir.ID, quote, MemorySubmitParams{Action: "create", ID: dir.ID, Name: "Directive: " + text, Description: text, Body: text, Scope: memoryScope})
+		echo, err = c.memoryEditor.Submit(ctx, c.store, runID, dir.ID, quote, MemorySubmitParams{Action: "create", ID: dir.ID, Name: "Directive: " + text, Description: text, Body: text, Scope: memoryScope})
 		if err != nil {
-			_ = c.store.Directives().UpdateStatus(context.WithoutCancel(ctx), c.runID, dir.ID, store.DirectiveRevoked)
-			return "", err
+			_ = c.store.Directives().UpdateStatus(context.WithoutCancel(ctx), runID, dir.ID, store.DirectiveRevoked)
+			return directiveReceipt{}, "", err
 		}
 	}
 
 	payloadBytes, _ := json.Marshal(dir)
 	if _, err := c.store.Events().Append(ctx, store.Event{
-		RunID:   c.runID,
+		RunID:   runID,
 		Kind:    store.EventOwnerMessage,
 		Class:   store.EventClassJudgment,
 		LaneID:  dir.Scope,
@@ -930,7 +976,10 @@ func (c *Concierge) handleDirectiveSubmit(
 		Payload: payloadBytes,
 		Urgent:  true,
 	}); err != nil {
-		return "", err
+		return directiveReceipt{}, "", err
+	}
+	if c.Wake != nil {
+		c.Wake(runID)
 	}
 
 	rawArgs, _ := json.Marshal(p)
@@ -942,11 +991,11 @@ func (c *Concierge) handleDirectiveSubmit(
 		TurnID:   turnID,
 		LaneID:   dir.Scope,
 		Tool:     ToolDirectiveSubmit,
-		Reason:   fmt.Sprintf("submitted %s directive", dir.Kind),
+		Reason:   fmt.Sprintf("submitted %s directive on run %s", dir.Kind, runID),
 		Result:   dir.ID,
 		Args:     rawArgs,
 		Vetted:   true,
 	})
 
-	return fmt.Sprintf("Submitted directive %s (kind=%s); %s", dir.ID, dir.Kind, echo), nil
+	return directiveReceipt{id: dir.ID, run: runID}, fmt.Sprintf("Submitted directive %s on run %s (kind=%s); %s", dir.ID, runID, dir.Kind, echo), nil
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -327,44 +328,55 @@ func (b *StoreBackend) statusReport(ctx context.Context) (string, error) {
 	return out.String(), nil
 }
 
-// target selects the held run an owner instruction for handler addresses.
-// Planner instructions stay on the attached run unless it is the front desk.
-// At the front desk it returns "" with no refusal when this chat holds no
-// live controller, and a refusal when several held runs remain ambiguous.
-// The caller holds b.mu.
-func (b *StoreBackend) target(ctx context.Context, handler router.Handler, text string) (runID, refusal string, err error) {
-	frontDesk := b.frontDesk()
-	if handler == router.Planner && !frontDesk {
-		return b.runID, "", nil
+// splitAdopted partitions adopted runs into those with a live controller and those without.
+func (b *StoreBackend) splitAdopted(adopted []string) (live, dead []string) {
+	if b.Adoption == nil {
+		return adopted, nil
 	}
+	active, ok := b.Adoption.Driver.(interface{ Active(string) bool })
+	if !ok {
+		return adopted, nil
+	}
+	for _, id := range adopted {
+		if active.Active(id) {
+			live = append(live, id)
+		} else {
+			dead = append(dead, id)
+		}
+	}
+	return live, dead
+}
+
+// liveHeld returns the non-front-desk attached run and live adopted runs, plus
+// any adopted runs without a live controller. The caller holds b.mu.
+func (b *StoreBackend) liveHeld(ctx context.Context) (runs, dead []string, err error) {
 	held, err := b.heldRuns(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Journal ownership can outlive the process that owns the controller. Do
+	// not acknowledge an instruction unless an adopted controller is live.
+	runs, dead = b.splitAdopted(held[1:])
+	if !b.frontDesk() {
+		runs = append([]string{b.runID}, runs...)
+	}
+	return runs, dead, nil
+}
+
+func errNoLiveController(id string) error {
+	return fmt.Errorf("adopted run %s has no live controller; name it after it is active", id)
+}
+
+// target selects the held run an owner instruction addresses. The caller holds b.mu.
+func (b *StoreBackend) target(ctx context.Context, text string) (runID, refusal string, err error) {
+	runs, dead, err := b.liveHeld(ctx)
 	if err != nil {
 		return "", "", err
 	}
-	adopted := held[1:]
-	// Journal ownership can outlive the process that owns the controller. Do
-	// not acknowledge an instruction unless an adopted controller is live.
-	if b.Adoption != nil {
-		if active, ok := b.Adoption.Driver.(interface{ Active(string) bool }); ok {
-			var live []string
-			for _, id := range adopted {
-				if active.Active(id) {
-					live = append(live, id)
-				}
-			}
-			if len(live) == 0 {
-				for _, id := range adopted {
-					if mentions(text, id) {
-						return "", "", fmt.Errorf("adopted run %s has no live controller; name it after it is active", id)
-					}
-				}
-			}
-			adopted = live
+	for _, id := range dead {
+		if Mentions(text, id) {
+			return "", "", errNoLiveController(id)
 		}
-	}
-	runs := adopted
-	if !frontDesk {
-		runs = append([]string{b.runID}, adopted...)
 	}
 	switch len(runs) {
 	case 0:
@@ -372,7 +384,7 @@ func (b *StoreBackend) target(ctx context.Context, handler router.Handler, text 
 	case 1:
 		return runs[0], "", nil
 	}
-	if named := slices.DeleteFunc(slices.Clone(runs), func(id string) bool { return !mentions(text, id) }); len(named) == 1 {
+	if named := named(runs, text); len(named) == 1 {
 		return named[0], "", nil
 	}
 	lanes, err := b.lanes(ctx, runs)
@@ -381,7 +393,7 @@ func (b *StoreBackend) target(ctx context.Context, handler router.Handler, text 
 	}
 	var byLane []string
 	for i := range lanes {
-		if l := &lanes[i]; mentions(text, l.lane.ID) && !slices.Contains(byLane, l.run) {
+		if l := &lanes[i]; Mentions(text, l.lane.ID) && !slices.Contains(byLane, l.run) {
 			byLane = append(byLane, l.run)
 		}
 	}
@@ -401,7 +413,7 @@ func (b *StoreBackend) target(ctx context.Context, handler router.Handler, text 
 	if len(asking) == 1 {
 		return asking[0], "", nil
 	}
-	if frontDesk {
+	if b.frontDesk() {
 		return "", fmt.Sprintf("Not queued: this chat holds runs %s; name the run in the instruction, then send it again: %s", strings.Join(runs, ", "), text), nil
 	}
 	if len(runs) == 2 {
@@ -416,8 +428,62 @@ func (b *StoreBackend) target(ctx context.Context, handler router.Handler, text 
 	return b.runID, "", nil
 }
 
-// mentions reports whether text contains id as a whole word.
-func mentions(text, id string) bool {
+// named returns the runs text mentions.
+func named(runs []string, text string) []string {
+	return slices.DeleteFunc(slices.Clone(runs), func(id string) bool { return !Mentions(text, id) })
+}
+
+// OwnerRun resolves the run for a concierge directive, validating explicit ids.
+func (b *StoreBackend) OwnerRun(ctx context.Context, run, text string) (string, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if run = strings.TrimSpace(run); run != "" {
+		runs, dead, err := b.liveHeld(ctx)
+		if err != nil {
+			return "", err
+		}
+		if slices.Contains(dead, run) {
+			return "", errNoLiveController(run)
+		}
+		if !slices.Contains(runs, run) {
+			return "", fmt.Errorf("run %s is not held by this chat (held: %s); /adopt or /runs it first", run, cmp.Or(strings.Join(runs, ", "), "none"))
+		}
+		return run, nil
+	}
+	target, refusal, err := b.target(ctx, text)
+	switch {
+	case err != nil:
+		return "", err
+	case refusal != "":
+		return "", errors.New(refusal)
+	case target != "":
+		return target, nil
+	}
+	target, refusal, err = b.frontDeskTarget(ctx, text)
+	switch {
+	case err != nil:
+		return "", err
+	case refusal != "":
+		return "", errors.New(refusal)
+	}
+	if _, err := b.store.Runs().Get(ctx, target); err != nil {
+		return "", fmt.Errorf("run %s is not held by this chat; /runs %s first", target, target)
+	}
+	return target, nil
+}
+
+// Wake asks an adopted controller driving runID to act on new events now.
+func (b *StoreBackend) Wake(runID string) {
+	if b.Adoption == nil {
+		return
+	}
+	if w, ok := b.Adoption.Driver.(interface{ Wake(string) }); ok {
+		w.Wake(runID)
+	}
+}
+
+// Mentions reports whether text contains id as a whole word.
+func Mentions(text, id string) bool {
 	if id == "" {
 		return false
 	}
@@ -458,11 +524,7 @@ func (b *StoreBackend) ownerMessage(ctx context.Context, st store.Store, runID, 
 	if _, err := st.Events().Append(ctx, store.Event{RunID: runID, Kind: store.EventOwnerMessage, Source: "owner", Summary: text, Payload: payload, Urgent: true}); err != nil {
 		return err
 	}
-	if b.Adoption != nil {
-		if w, ok := b.Adoption.Driver.(interface{ Wake(string) }); ok {
-			w.Wake(runID)
-		}
-	}
+	b.Wake(runID)
 	return nil
 }
 
@@ -482,7 +544,7 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	runID, ack, err := b.target(ctx, d.Handler, text)
+	runID, ack, err := b.target(ctx, text)
 	switch {
 	case err != nil || ack != "":
 	case runID == "":
@@ -531,32 +593,53 @@ func (b *StoreBackend) deliver(ctx context.Context, st store.Store, runID string
 	return b.live(run), nil
 }
 
-// deliverFromFrontDesk sends an instruction given at the front desk, when
-// this chat holds no live controller, to the one run ListRuns offers that a
-// live controller holds. With none, or several, it saves nothing and says so.
-func (b *StoreBackend) deliverFromFrontDesk(ctx context.Context, handler router.Handler, text string) (string, error) {
+// frontDeskTarget selects a live run from ListRuns for a front-desk instruction.
+func (b *StoreBackend) frontDeskTarget(ctx context.Context, text string) (runID, refusal string, err error) {
 	var candidates []store.Run
 	if b.ListRuns != nil {
 		listed, err := b.ListRuns(ctx)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		candidates = append(candidates, listed...)
 	}
-	var live []string
+	var live, dead []string
 	for i := range candidates {
-		if r := &candidates[i]; r.ID != b.runID && b.live(r) && !slices.Contains(live, r.ID) {
-			live = append(live, r.ID)
+		r := &candidates[i]
+		if r.ID == b.runID {
+			continue
 		}
+		if b.live(r) {
+			if !slices.Contains(live, r.ID) {
+				live = append(live, r.ID)
+			}
+		} else if Mentions(text, r.ID) && !slices.Contains(dead, r.ID) {
+			dead = append(dead, r.ID)
+		}
+	}
+	if len(dead) > 0 {
+		return "", fmt.Sprintf("Not queued: run %s has no live controller, so nothing would act on it and it was not saved. Start a run, or attach to one with /runs <id>, then send it again: %s", dead[0], text), nil
+	}
+	if named := named(live, text); len(named) > 0 {
+		live = named
 	}
 	switch len(live) {
 	case 0:
-		return fmt.Sprintf("Not queued: no controller is running for this chat, so nothing would act on it and it was not saved. Start a run, or attach to one with /runs <id>, then send it again: %s", text), nil
+		return "", fmt.Sprintf("Not queued: no controller is running for this chat, so nothing would act on it and it was not saved. Start a run, or attach to one with /runs <id>, then send it again: %s", text), nil
 	case 1:
+		return live[0], "", nil
 	default:
-		return fmt.Sprintf("Not queued: controllers are running runs %s; attach to one with /runs <id>, then send it again: %s", strings.Join(live, ", "), text), nil
+		return "", fmt.Sprintf("Not queued: controllers are running runs %s; attach to one with /runs <id>, then send it again: %s", strings.Join(live, ", "), text), nil
 	}
-	target, st := live[0], b.store
+}
+
+// deliverFromFrontDesk routes a front-desk instruction to a live held run.
+func (b *StoreBackend) deliverFromFrontDesk(ctx context.Context, handler router.Handler, text string) (string, error) {
+	target, refusal, err := b.frontDeskTarget(ctx, text)
+	if err != nil || refusal != "" {
+		return refusal, err
+	}
+	st := b.store
 	if _, err := st.Runs().Get(ctx, target); err != nil {
 		if b.OpenRun == nil {
 			return "", fmt.Errorf("run %s is not reachable from this chat", target)

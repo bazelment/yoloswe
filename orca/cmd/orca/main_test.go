@@ -228,12 +228,12 @@ func TestConciergeRunStartInvokesLauncher(t *testing.T) {
 	var got string
 	c.RunStart = func(_ context.Context, goal string) (string, error) { got = goal; return "run-new", nil }
 	call := model.ToolCall{ID: "start", Name: ToolRunStart, Input: json.RawMessage(`{"goal":"study bramble UX"}`)}
-	refused := &startTurn{}
+	refused := &ownerTurn{}
 	res := c.buildToolRegistry("thread", "turn", "study bramble UX", new(string), refused).Execute(t.Context(), call)
 	if res.IsError || res.Content != runStartRefusal || got != "" || !refused.refused {
 		t.Fatalf("unrequested run.start result=%+v goal=%q turn=%+v", res, got, refused)
 	}
-	res = c.buildToolRegistry("thread", "turn", "start a run to study bramble UX", new(string), &startTurn{allowed: true}).Execute(t.Context(), call)
+	res = c.buildToolRegistry("thread", "turn", "start a run to study bramble UX", new(string), &ownerTurn{allowed: true}).Execute(t.Context(), call)
 	if res.IsError || res.Content != "run-new" || got != "study bramble UX" {
 		t.Fatalf("run.start result=%+v goal=%q", res, got)
 	}

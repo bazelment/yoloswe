@@ -49,6 +49,7 @@ go_test(
     srcs = [
         "adopt_test.go",
         "chat_stream_test.go",
+        "concierge_directive_test.go",
         "concierge_test.go",
         "ghpr_test.go",
         "main_test.go",
@@ -59,6 +60,7 @@ go_test(
         "//orca/adopt",
         "//orca/chat",
         "//orca/clock",
+        "//orca/controller",
         "//orca/dispatcher",
         "//orca/lane",
         "//orca/mailbox",
