@@ -22,4 +22,5 @@ go_test(
     name = "adopt_test",
     srcs = ["adopt_test.go"],
     embed = [":adopt"],
+    deps = ["//orca/recipe"],
 )

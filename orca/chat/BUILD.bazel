@@ -11,6 +11,7 @@ go_library(
     deps = [
         "//orca/adopt",
         "//orca/concierge",
+        "//orca/controller",
         "//orca/mailbox",
         "//orca/router",
         "//orca/store",
@@ -21,11 +22,18 @@ go_library(
 
 go_test(
     name = "chat_test",
-    srcs = ["chat_test.go"],
+    srcs = [
+        "adopted_test.go",
+        "chat_test.go",
+    ],
     embed = [":chat"],
     deps = [
+        "//orca/adopt",
+        "//orca/clock",
         "//orca/concierge",
+        "//orca/controller",
         "//orca/dispatcher",
+        "//orca/lane",
         "//orca/mailbox",
         "//orca/model",
         "//orca/router",

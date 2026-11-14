@@ -811,6 +811,11 @@ func (c *Controller) applyOwnerAskResolution(ctx context.Context, ask OwnerAsk, 
 	if ask.LaneID == "" {
 		return nil
 	}
+	// A hold option is an explicit no-op for the blocked lane. It records the
+	// owner's choice without steering or transitioning the lane to Running.
+	if strings.HasPrefix(strings.TrimSpace(chosenOption), "hold:") {
+		return nil
+	}
 	ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ask.LaneID)
 	if err != nil {
 		return nil
