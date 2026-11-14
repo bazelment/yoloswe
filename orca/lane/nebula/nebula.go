@@ -283,8 +283,8 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				// while the report itself is already durable.
 				if rep, err := d.ReadReport(ctx, runID, target.laneID, target.terminalID); err == nil && rep != nil {
 					key := reportKey(target.terminalID, rep)
-					if reported[target.terminalID] != key {
-						reported[target.terminalID] = key
+					if _, already := reported[key]; !already {
+						reported[key] = key
 						select {
 						case out <- lane.Event{Kind: lane.EventPhaseReported, RunID: runID, LaneID: target.laneID, SessionID: target.sessionID, TerminalID: target.terminalID, Phase: rep.Phase, Report: rep, At: rep.ReportedAt}:
 						case <-ctx.Done():
