@@ -739,10 +739,6 @@ func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*Ses
 	if created.Session.ID == "" {
 		return nil, fmt.Errorf("nebula create session returned empty session id")
 	}
-	if err := d.verifySessionRepository(ctx, created.Session, repoID, repoSlug); err != nil {
-		_ = d.ReleaseSession(ctx, created.Session.ID, true)
-		return nil, err
-	}
 	settled, err := d.settleSession(ctx, created.Session)
 	if err != nil {
 		return nil, err

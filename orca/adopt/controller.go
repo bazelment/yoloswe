@@ -783,7 +783,7 @@ func (d *adoptedRunDriver) ReportInstructions(runID, laneID, phase string, round
 }
 
 func (d *adoptedRunDriver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
-	repoID, repo := d.resolveRepository(ctx, req.RepositoryID, req.Repository)
+	repoID, repo := d.resolveRepository(req.RepositoryID, req.Repository)
 	if repoID == "" && repo == "" {
 		return lane.SpawnResult{}, fmt.Errorf("spawn lane %s for adopted run %s: repository is not configured", req.LaneID, cmp.Or(req.RunID, d.run.ID))
 	}
@@ -797,7 +797,7 @@ func (d *adoptedRunDriver) SpawnSession(ctx context.Context, req lane.SpawnReque
 }
 
 func (d *adoptedRunDriver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (lane.StartPhaseResult, error) {
-	repoID, repo := d.resolveRepository(ctx, req.RepositoryID, req.Repository)
+	repoID, repo := d.resolveRepository(req.RepositoryID, req.Repository)
 	if strings.TrimSpace(req.SessionID) == "" && repoID == "" && repo == "" {
 		return lane.StartPhaseResult{}, fmt.Errorf("start phase %s on lane %s for adopted run %s: repository is not configured", req.Phase, req.LaneID, cmp.Or(req.RunID, d.run.ID))
 	}
@@ -839,16 +839,10 @@ func populateRunRepo(r *Run) {
 	}
 }
 
-func (d *adoptedRunDriver) resolveRepository(ctx context.Context, reqRepoID, reqRepo string) (repoID, repo string) {
+func (d *adoptedRunDriver) resolveRepository(reqRepoID, reqRepo string) (repoID, repo string) {
 	tmp := d.run
-	populateRunRepo(&tmp)
 	applyRepoValue(&tmp, reqRepoID)
 	applyRepoValue(&tmp, reqRepo)
-	if d.store != nil && d.run.ID != "" {
-		if stored, err := d.store.Runs().Get(ctx, d.run.ID); err == nil && stored != nil {
-			applyRepoValue(&tmp, stored.Repository)
-		}
-	}
 	if tmp.Repo == "" && tmp.RepoID != "" {
 		tmp.Repo = tmp.RepoID
 	}
