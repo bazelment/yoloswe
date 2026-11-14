@@ -146,6 +146,30 @@ func TestRepoInference_NoOriginAndNoRepoIsClearError(t *testing.T) {
 	}
 }
 
+func TestChatNewRunIDCreatesRunRecord(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "chat.db")
+	var stdout, stderr bytes.Buffer
+	err := Execute(t.Context(), []string{
+		"chat", "--run", "new-chat-run", "--store", "sqlite:" + dbPath,
+		"--replay", "testdata/concierge_status_replay.json",
+	}, strings.NewReader("/status\n"), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Execute chat: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "orca/store: not found") {
+		t.Fatalf("new run chat reported missing store record:\n%s", stdout.String())
+	}
+	st, err := store.OpenSQLite(dbPath, clock.NewRealClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	run, err := st.Runs().Get(t.Context(), "new-chat-run")
+	if err != nil || run.Objective != "Owner chat for run new-chat-run" {
+		t.Fatalf("created run = %+v, err=%v", run, err)
+	}
+}
+
 func TestConciergeRunSettingsChatPersistsOwnerWordsAndStatus(t *testing.T) {
 	ctx := t.Context()
 	clk := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
@@ -1075,6 +1099,28 @@ func TestRoleResolution(t *testing.T) {
 	defaults := Config{ModelProvider: "openai"}.withDefaults()
 	if defaults.Models.Roles["planner"].Provider == defaults.Models.Roles["critic"].Provider || defaults.Models.Dispatcher != "gpt-6.1-sol" {
 		t.Fatalf("defaults: %+v", defaults.Models)
+	}
+}
+
+func TestDefaultRoleModelsUseCurrentProviderIDs(t *testing.T) {
+	for provider, want := range map[string]map[string]string{
+		"anthropic": {
+			"planner": "claude-opus-4-6", "critic": "gpt-6.1-sol",
+			"dispatcher": "claude-sonnet-5-5", "concierge": "claude-haiku-5-5", "router": "claude-haiku-5-5",
+		},
+		"openai": {
+			"planner": "gpt-6-astra", "critic": "claude-sonnet-5-5",
+			"dispatcher": "gpt-6.1-sol", "concierge": "gpt-6.1-sol", "router": "gpt-6.1-sol",
+		},
+	} {
+		t.Run(provider, func(t *testing.T) {
+			cfg := Config{ModelProvider: provider}.withDefaults()
+			for role, want := range want {
+				if got := cfg.Models.Roles[role].Model; got != want {
+					t.Errorf("%s model = %q, want %q", role, got, want)
+				}
+			}
+		})
 	}
 }
 

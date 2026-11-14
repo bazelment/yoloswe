@@ -2,7 +2,7 @@
   "exchanges": [
     {
       "request": {
-        "model": "claude-haiku-4-5-20251001",
+        "model": "claude-haiku-5-5",
         "messages": []
       },
       "response": {
@@ -20,12 +20,12 @@
     },
     {
       "request": {
-        "model": "claude-haiku-4-5-20251001",
+        "model": "claude-haiku-5-5",
         "messages": []
       },
       "response": {
         "id": "msg-chat-1",
-        "model": "claude-haiku-4-5-20251001",
+        "model": "claude-haiku-5-5",
         "stop_reason": "tool_use",
         "message": {
           "role": "assistant",
@@ -49,12 +49,12 @@
     },
     {
       "request": {
-        "model": "claude-haiku-4-5-20251001",
+        "model": "claude-haiku-5-5",
         "messages": []
       },
       "response": {
         "id": "msg-chat-2",
-        "model": "claude-haiku-4-5-20251001",
+        "model": "claude-haiku-5-5",
         "stop_reason": "end_turn",
         "message": {
           "role": "assistant",

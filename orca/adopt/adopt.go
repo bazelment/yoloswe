@@ -70,8 +70,7 @@ type Run struct {
 
 // Importer finds and reads run directories under <root>/.shared/subagent-swarm.
 type Importer struct {
-	// Roots defaults to the current git checkout's root (where
-	// subagent-swarm-nebula puts .shared) plus $ORCA_SWARM_ROOTS.
+	// Roots defaults to the current and sibling checkouts plus $ORCA_SWARM_ROOTS.
 	Roots []string
 }
 
@@ -80,11 +79,63 @@ func (i Importer) roots() []string {
 		return i.Roots
 	}
 	var out []string
+	seen := map[string]bool{}
+	appendRoot := func(root string) {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			return
+		}
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+		if !seen[root] {
+			seen[root] = true
+			out = append(out, root)
+		}
+	}
+	scanSiblings := func(parent string) {
+		if parent == "" || parent == string(filepath.Separator) {
+			return
+		}
+		ents, err := os.ReadDir(parent)
+		if err != nil {
+			return
+		}
+		for _, ent := range ents {
+			if !ent.IsDir() {
+				continue
+			}
+			root := filepath.Join(parent, ent.Name())
+			if fileExists(filepath.Join(root, ".shared", "subagent-swarm")) {
+				appendRoot(root)
+			}
+			// Host checkouts commonly live at <repo>/worktrees/<repo>;
+			// include those sibling worktree roots as well.
+			worktrees := filepath.Join(root, "worktrees")
+			worktreeEnts, _ := os.ReadDir(worktrees)
+			for _, worktree := range worktreeEnts {
+				if worktree.IsDir() {
+					candidate := filepath.Join(worktrees, worktree.Name())
+					if fileExists(filepath.Join(candidate, ".shared", "subagent-swarm")) {
+						appendRoot(candidate)
+					}
+				}
+			}
+		}
+	}
 	if b, err := exec.Command("git", "rev-parse", "--path-format=absolute", "--git-common-dir").Output(); err == nil {
-		out = append(out, filepath.Dir(strings.TrimSpace(string(b))))
+		current := filepath.Dir(strings.TrimSpace(string(b)))
+		appendRoot(current)
+		parent := filepath.Dir(current)
+		scanSiblings(parent)
+		if filepath.Base(parent) == "worktrees" {
+			scanSiblings(filepath.Dir(filepath.Dir(parent)))
+		}
 	}
 	if v := os.Getenv("ORCA_SWARM_ROOTS"); v != "" {
-		out = append(out, filepath.SplitList(v)...)
+		for _, root := range filepath.SplitList(v) {
+			appendRoot(root)
+		}
 	}
 	return out
 }

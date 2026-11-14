@@ -421,6 +421,7 @@ var defaultPricing = func() map[string]ModelPricing {
 		"claude-sonnet-4-5-20250929": sonnet,
 		"claude-sonnet-4-20250514":   sonnet,
 		"haiku":                      haiku,
+		"claude-haiku-5-5":           haiku,
 		"claude-haiku-4-5":           haiku,
 		"claude-haiku-4-5-20251001":  haiku,
 		"claude-3-5-haiku-20241022":  haiku,
@@ -458,7 +459,7 @@ var pricingFamilies = []struct {
 }{
 	{family: "opus", fallback: "claude-opus-4-7"},
 	{family: "sonnet", fallback: "claude-sonnet-4-6"},
-	{family: "haiku", fallback: "claude-haiku-4-5-20251001"},
+	{family: "haiku", fallback: "claude-haiku-5-5"},
 }
 
 func lookupModelPricing(modelName string, pricing map[string]ModelPricing) (ModelPricing, bool) {
