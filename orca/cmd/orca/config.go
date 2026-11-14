@@ -81,34 +81,65 @@ type RoleSelection struct {
 	Effort   string `json:"effort,omitempty"`
 }
 
+func hasModelEnvironment() bool {
+	for _, name := range []string{"OPENAI_API_KEY", "NEBULA_LLM_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "LLM_GATEWAY_URL"} {
+		if strings.TrimSpace(os.Getenv(name)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func providerVendor(provider string) string {
+	switch provider {
+	case "codex-cli":
+		return "openai"
+	case "claude-cli":
+		return "anthropic"
+	default:
+		return provider
+	}
+}
+
 func (m RoleModels) withDefaults(provider string) RoleModels {
 	m.Roles = maps.Clone(m.Roles)
 	if m.Roles == nil {
 		m.Roles = map[string]RoleSelection{}
 	}
-	// Normalize an explicitly configured planner provider before selecting the
-	// critic fallback. This keeps the different-provider invariant correct for
-	// config files that use values such as "Anthropic".
+	defaultProvider := strings.ToLower(strings.TrimSpace(provider))
+	credentialless := defaultProvider == "" && !hasModelEnvironment()
+	if defaultProvider == "" {
+		defaultProvider = "openai"
+		if !hasModelEnvironment() {
+			defaultProvider = "codex-cli"
+		}
+	}
 	plannerProvider := strings.ToLower(strings.TrimSpace(m.Roles["planner"].Provider))
 	if plannerProvider == "" {
-		plannerProvider = strings.ToLower(strings.TrimSpace(provider))
-		if plannerProvider == "" {
-			plannerProvider = "openai"
-		}
+		plannerProvider = defaultProvider
 	}
 	legacy := map[string]string{"dispatcher": m.Dispatcher, "planner": m.Planner, "concierge": m.Concierge}
 	for _, role := range []string{"planner", "dispatcher", "concierge", "router", "critic"} {
 		sel := m.Roles[role]
-		fallbackProvider := cmp.Or(strings.ToLower(strings.TrimSpace(provider)), "openai")
+		fallbackProvider := defaultProvider
+		if credentialless && role != "planner" {
+			fallbackProvider = "claude-cli"
+		}
 		if role == "critic" {
 			fallbackProvider = "anthropic"
-			if plannerProvider == "anthropic" {
+			if providerVendor(plannerProvider) == "anthropic" {
 				fallbackProvider = "openai"
+			}
+			if defaultProvider == "codex-cli" || defaultProvider == "claude-cli" {
+				fallbackProvider = "claude-cli"
+				if providerVendor(plannerProvider) == "anthropic" {
+					fallbackProvider = "codex-cli"
+				}
 			}
 		}
 		sel.Provider = strings.ToLower(cmp.Or(strings.TrimSpace(sel.Provider), fallbackProvider))
 		defaultModel := DefaultOpenAIDispatcherModel
-		if sel.Provider == "anthropic" {
+		if providerVendor(sel.Provider) == "anthropic" {
 			defaultModel = DefaultDispatcherModel
 			if role == "planner" {
 				defaultModel = DefaultPlannerModel
@@ -176,7 +207,11 @@ func (c Config) HasExplicitStallTimeout() bool { return c.stallTimeoutSet }
 func (c Config) withDefaults() Config {
 	c.Objective = cmp.Or(c.Goal, c.Objective)
 	c.ModelProvider = strings.ToLower(cmp.Or(strings.TrimSpace(c.ModelProvider), strings.TrimSpace(os.Getenv("ORCH_MODEL_PROVIDER"))))
-	c.Models = c.Models.withDefaults(c.ModelProvider)
+	roleProvider := c.ModelProvider
+	if roleProvider == "" && strings.TrimSpace(c.LLMGatewayURL) != "" {
+		roleProvider = "openai"
+	}
+	c.Models = c.Models.withDefaults(roleProvider)
 	c.StoreSpec = cmp.Or(strings.TrimSpace(c.StoreSpec), DefaultStoreSpec)
 	c.DriverKind = cmp.Or(strings.ToLower(strings.TrimSpace(c.DriverKind)), DefaultDriverKind)
 	c.LLMGatewayURL = strings.TrimSpace(c.LLMGatewayURL)
@@ -223,11 +258,11 @@ func (c Config) withDefaults() Config {
 // Validate checks that c has valid required fields for command execution.
 func (c Config) Validate(requireDriver bool) error {
 	provider := strings.ToLower(strings.TrimSpace(c.ModelProvider))
-	if provider != "" && provider != "anthropic" && provider != "openai" {
-		return fmt.Errorf("orca: unsupported model provider %q (want anthropic or openai)", c.ModelProvider)
+	if provider != "" && provider != "anthropic" && provider != "openai" && provider != "claude-cli" && provider != "codex-cli" {
+		return fmt.Errorf("orca: unsupported model provider %q (want anthropic, openai, claude-cli, or codex-cli)", c.ModelProvider)
 	}
 	for role, sel := range c.Models.Roles {
-		if sel.Provider != "openai" && sel.Provider != "anthropic" {
+		if sel.Provider != "openai" && sel.Provider != "anthropic" && sel.Provider != "claude-cli" && sel.Provider != "codex-cli" {
 			return fmt.Errorf("orca: unsupported provider %q for role %s", sel.Provider, role)
 		}
 		switch sel.Effort {
@@ -236,7 +271,7 @@ func (c Config) Validate(requireDriver bool) error {
 			return fmt.Errorf("orca: unsupported effort %q for role %s", sel.Effort, role)
 		}
 	}
-	if c.Models.Roles["planner"].Provider != "" && c.Models.Roles["planner"].Provider == c.Models.Roles["critic"].Provider {
+	if c.Models.Roles["planner"].Provider != "" && providerVendor(c.Models.Roles["planner"].Provider) == providerVendor(c.Models.Roles["critic"].Provider) {
 		return errors.New("orca: critic and planner must use different providers")
 	}
 	if c.Repository != "" && (len(strings.Split(c.Repository, "/")) != 2 || strings.ContainsAny(c.Repository, " \t\n") || strings.HasPrefix(c.Repository, "/") || strings.HasSuffix(c.Repository, "/")) {
@@ -398,7 +433,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.StringVar(&cfg.StoreSpec, "store", "", "Store backend: sqlite:<path>, sqlite, memory, or nebula")
 	fs.StringVar(&cfg.StoreBaseDir, "store-dir", "", "Base directory for default per-run SQLite store (~/.swarm)")
 	fs.StringVar(&cfg.DriverKind, "driver", "", "Worker lane driver: nebula or fake (default nebula)")
-	fs.StringVar(&cfg.ModelProvider, "model-provider", "", "Model provider: anthropic or openai")
+	fs.StringVar(&cfg.ModelProvider, "model-provider", "", "Model provider: anthropic, openai, claude-cli, or codex-cli")
 	fs.StringVar(&cfg.LLMGatewayURL, "llm-gateway-url", "", "Messages API / llm-gateway base URL")
 	fs.StringVar(&cfg.Models.Dispatcher, "dispatcher-model", "", "Model for Dispatcher turns")
 	fs.StringVar(&cfg.Models.DispatcherHard, "dispatcher-hard-model", "", "Escalation model for hard Dispatcher batches")
@@ -599,7 +634,7 @@ func openModelClient(cfg Config, clk clock.Clock) (model.ModelClient, error) {
 			anthropicOpts = append(anthropicOpts, model.WithBaseURL(cfg.LLMGatewayURL))
 		}
 	}
-	clients := map[string]model.ModelClient{"openai": model.NewOpenAIClient(openOpts...), "anthropic": model.NewHTTPClient(anthropicOpts...)}
+	clients := map[string]model.ModelClient{"openai": model.NewOpenAIClient(openOpts...), "anthropic": model.NewHTTPClient(anthropicOpts...), "claude-cli": model.NewCLIClient("claude-cli"), "codex-cli": model.NewCLIClient("codex-cli")}
 	var client model.ModelClient = modelClientFunc(func(ctx context.Context, req model.Request) (*model.Response, error) {
 		provider := cmp.Or(req.Metadata["provider"], cfg.ModelProvider, "openai")
 		selected, ok := clients[provider]

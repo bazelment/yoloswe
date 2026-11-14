@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"thread-sanitized"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\"text\":\"The result is 5.\"}"}}
+{"type":"turn.completed","usage":{"input_tokens":14024,"cached_input_tokens":9088,"cache_write_input_tokens":0,"output_tokens":29,"reasoning_output_tokens":13}}
