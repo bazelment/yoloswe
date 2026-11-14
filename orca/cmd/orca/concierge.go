@@ -30,12 +30,13 @@ const (
 	ToolMemorySubmit        = "memory.submit"
 	ToolMemoryUndo          = "memory.undo"
 	ToolMemoryRead          = "memory.read"
+	ToolRunSettings         = memorychat.ToolRunSettings
 	DefaultConciergeMaxTurn = 6
 )
 
 // ConciergeSystemPrompt is the system prompt for owner chat sessions.
 const ConciergeSystemPrompt = `You are the Nebula Swarm Concierge.
-You are the front desk for unclear or mixed messages: clarify with one question only if you must; otherwise save rules with memory.submit and forward plan changes or orders with directive.submit. Use run.control to pause, resume or stop execution.
+You are the front desk for unclear or mixed messages: clarify with one question only if you must; otherwise save rules with memory.submit and forward plan changes or orders with directive.submit. Use run.control to pause, resume or stop execution. Use run.settings to tune concurrency and stall timeout.
 Answer the owner's questions accurately and concisely using read-only Store tools (status, lane.show, decisions.since, pr.ci).
 	Never invent facts not present in the Store. Owner corrections become memory.submit proposals saved immediately with a source quote; memory.undo reverts the last change.`
 
@@ -330,6 +331,45 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 		backend := &chat.StoreBackend{Store: c.store, RunID: c.runID}
 		return memorychat.Control(ctx, backend.Command, p)
 	})
+	model.AddTool[memorychat.RunSettingsParams](reg, memorychat.ToolRunSettings,
+		"Read or change live run settings", func(ctx context.Context, p memorychat.RunSettingsParams) (string, error) {
+			current, err := c.store.Runs().GetSettings(ctx, c.runID)
+			if err != nil {
+				return "", err
+			}
+			if p.Action == "get" || p.Action == "" {
+				return fmt.Sprintf("run settings: concurrency_cap=%d stall_timeout=%s paused=%t", current.ConcurrencyCap, current.StallTimeout, current.Paused), nil
+			}
+			if p.Action != "set" {
+				return "", fmt.Errorf("run.settings action must be get or set")
+			}
+			next := current
+			if p.ConcurrencyCap != nil {
+				if *p.ConcurrencyCap < 0 || *p.ConcurrencyCap > 16 {
+					return "", fmt.Errorf("run.settings concurrency cap must be 0-16")
+				}
+				next.ConcurrencyCap = *p.ConcurrencyCap
+			}
+			if p.StallTimeout != "" {
+				d, e := time.ParseDuration(p.StallTimeout)
+				if e != nil || d < 5*time.Minute || d > 24*time.Hour {
+					return "", fmt.Errorf("run.settings stall timeout must be 5m-24h")
+				}
+				next.StallTimeout = d
+			}
+			if p.Paused != nil {
+				next.Paused = *p.Paused
+			}
+			if err := c.store.Runs().UpdateSettings(ctx, c.runID, next); err != nil {
+				return "", err
+			}
+			words := cmp.Or(strings.TrimSpace(p.Words), "owner updated run settings")
+			_, err = c.store.Decisions().Append(ctx, store.Decision{ID: c.nextID("settings"), RunID: c.runID, Category: store.DecisionJudgment, Actor: ActorConcierge, Tool: memorychat.ToolRunSettings, Reason: words, Result: fmt.Sprintf("concurrency_cap=%d stall_timeout=%s paused=%t", next.ConcurrencyCap, next.StallTimeout, next.Paused), Vetted: true})
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("run settings updated: concurrency_cap=%d stall_timeout=%s paused=%t", next.ConcurrencyCap, next.StallTimeout, next.Paused), nil
+		})
 
 	model.AddTool[ConciergeStatusParams](reg, ToolConciergeStatus,
 		"Read structured run status, backlog, lanes, active directives, and decision/token/cost metrics",
@@ -419,6 +459,10 @@ func (c *Concierge) FormatStatusReport(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	settings, err := c.store.Runs().GetSettings(ctx, c.runID)
+	if err != nil {
+		return "", err
+	}
 
 	counts := make(map[store.BacklogStatus]int)
 	for i := range backlog {
@@ -428,6 +472,7 @@ func (c *Concierge) FormatStatusReport(ctx context.Context) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Run: %s\n", run.ID)
 	fmt.Fprintf(&b, "Objective: %s\n", cmp.Or(run.Objective, "(none)"))
+	fmt.Fprintf(&b, "Settings: concurrency_cap=%d stall_timeout=%s paused=%t\n", settings.ConcurrencyCap, settings.StallTimeout, settings.Paused)
 	if run.PlanRef != "" {
 		fmt.Fprintf(&b, "PlanRef: %s\n", run.PlanRef)
 	}

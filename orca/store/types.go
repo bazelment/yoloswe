@@ -127,6 +127,13 @@ type Run struct {
 	DefaultRecipe string    `json:"default_recipe,omitempty"`
 }
 
+// RunSettings holds live controller settings for a run.
+type RunSettings struct {
+	ConcurrencyCap int           `json:"concurrency_cap"`
+	StallTimeout   time.Duration `json:"stall_timeout"`
+	Paused         bool          `json:"paused"`
+}
+
 func (r Run) Clone() Run {
 	out := r
 	if r.Lease != nil {

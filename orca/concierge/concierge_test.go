@@ -62,6 +62,70 @@ func TestMemoryWorkflow_OwnerCorrectionFlowsToNextDispatcherSnapshotAndWorkerBri
 	}
 }
 
+func TestRunSettings_UpdateStatusAndRejectInvalidValues(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupSeededStore(t)
+	ctx := t.Context()
+	cap := 2
+	fake := model.NewFakeClient(
+		model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("set", concierge.ToolRunSettings, mustJSON(concierge.RunSettingsParams{Action: "set", ConcurrencyCap: &cap, StallTimeout: "1h", Words: "run at most 2 lanes at a time"})))},
+		model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock("Updated run-1 settings."))},
+	)
+	conc := concierge.New(concierge.Config{}, st, drv, clk, fake)
+	if _, err := conc.Ask(ctx, "run-1", "run at most 2 lanes at a time"); err != nil {
+		t.Fatalf("Ask settings: %v", err)
+	}
+	settings, err := st.Runs().GetSettings(ctx, "run-1")
+	if err != nil || settings.ConcurrencyCap != 2 || settings.StallTimeout != time.Hour {
+		t.Fatalf("settings=%+v err=%v", settings, err)
+	}
+	decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1"})
+	if err != nil || len(decs) == 0 || !strings.Contains(decs[len(decs)-1].Reason, "run at most 2 lanes at a time") {
+		t.Fatalf("decision words missing: %+v err=%v", decs, err)
+	}
+}
+
+func TestRunSettings_StatusShowsCurrentSettings(t *testing.T) {
+	clk, st, drv := setupSeededStore(t)
+	if err := st.Runs().UpdateSettings(t.Context(), "run-1", store.RunSettings{ConcurrencyCap: 2, StallTimeout: time.Hour}); err != nil {
+		t.Fatal(err)
+	}
+	fake := model.NewFakeClient(model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("get", concierge.ToolRunSettings, mustJSON(concierge.RunSettingsParams{Action: "get"})))}, model.Response{Message: model.NewAssistantMessage(model.NewTextBlock("run-1 settings shown."))})
+	conc := concierge.New(concierge.Config{}, st, drv, clk, fake)
+	if _, err := conc.Ask(t.Context(), "run-1", "status"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fake.Requests[1].Messages[2].Content[0].Content, "concurrency_cap=2") {
+		t.Fatalf("status output missing cap: %s", fake.Requests[1].Messages[2].Content[0].Content)
+	}
+}
+
+func TestRunSettings_InvalidValuesRejected(t *testing.T) {
+	t.Parallel()
+	for name, params := range map[string]concierge.RunSettingsParams{
+		"cap":     {Action: "set", ConcurrencyCap: intPtr(17)},
+		"timeout": {Action: "set", StallTimeout: "1m"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clk, st, drv := setupSeededStore(t)
+			fake := model.NewFakeClient(
+				model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("bad", concierge.ToolRunSettings, mustJSON(params)))},
+				model.Response{Message: model.NewAssistantMessage(model.NewTextBlock("run-1 settings rejected."))},
+			)
+			if _, err := concierge.New(concierge.Config{}, st, drv, clk, fake).Ask(t.Context(), "run-1", "set invalid settings"); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(fake.Requests[1].Messages[2].Content[0].Content, "must be") {
+				t.Fatalf("missing rejection: %s", fake.Requests[1].Messages[2].Content[0].Content)
+			}
+		})
+	}
+}
+
+func intPtr(v int) *int { return &v }
+
+func mustJSON(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
+
 func setupSeededStore(t *testing.T) (*clock.FakeClock, *store.MemoryStore, *lane.FakeDriver) {
 	t.Helper()
 	start := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)

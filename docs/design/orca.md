@@ -4,6 +4,18 @@ Reference design for the native Go swarm orchestrator harness in [`orca/`](../..
 
 ---
 
+## Usage
+
+From a GitHub checkout, the short form starts a run with sensible defaults:
+
+```text
+orca run --goal "<text>"
+```
+
+The repository is inferred from `origin`; use `--repo owner/name` to override it. Goal runs exit when settled; add `--standing` to keep one alive. `--once` remains a no-op compatibility alias.
+
+---
+
 ## 1. Problem & Motivation
 
 Long-lived chat-session orchestrators degrade over multi-day runs because they hold the control loop, state, and history inside a single growing conversation context:

@@ -11,7 +11,9 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -165,16 +167,18 @@ type Config struct {
 	ConcurrencyCap    int           `json:"concurrency_cap,omitempty"`
 	MaxSteps          int           `json:"max_steps,omitempty"`
 	Once              bool          `json:"once,omitempty"`
+	Standing          bool          `json:"standing,omitempty"`
 	FakeAutoComplete  bool          `json:"fake_auto_complete,omitempty"`
 	onceSet           bool
+	standingSet       bool
 	fakeAutoSet       bool
-	stallTimeoutSet   bool
 }
-
-func (c Config) HasExplicitStallTimeout() bool { return c.stallTimeoutSet }
 
 func (c Config) withDefaults() Config {
 	c.Objective = cmp.Or(c.Goal, c.Objective)
+	if strings.TrimSpace(c.Goal) != "" && !c.Standing {
+		c.Once = true
+	}
 	c.ModelProvider = strings.ToLower(cmp.Or(strings.TrimSpace(c.ModelProvider), strings.TrimSpace(os.Getenv("ORCH_MODEL_PROVIDER"))))
 	c.Models = c.Models.withDefaults(c.ModelProvider)
 	c.StoreSpec = cmp.Or(strings.TrimSpace(c.StoreSpec), DefaultStoreSpec)
@@ -212,7 +216,6 @@ func (c Config) withDefaults() Config {
 		}
 	}
 	if c.StallTimeout <= 0 {
-		c.stallTimeoutSet = false
 		c.StallTimeout = controller.DefaultStallTimeout
 	}
 	c.LogLevel = cmp.Or(strings.ToLower(strings.TrimSpace(c.LogLevel)), "info")
@@ -273,11 +276,11 @@ func LoadConfigFile(path string, base Config) (Config, error) {
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err == nil {
-		if _, ok := raw["stall_timeout"]; ok {
-			fileCfg.stallTimeoutSet = true
-		}
 		if _, ok := raw["once"]; ok {
 			fileCfg.onceSet = true
+		}
+		if _, ok := raw["standing"]; ok {
+			fileCfg.standingSet = true
 		}
 		if _, ok := raw["fake_auto_complete"]; ok {
 			fileCfg.fakeAutoSet = true
@@ -344,15 +347,18 @@ func mergeConfig(lower, higher Config) Config {
 	if higher.JudgmentDebounce != 0 {
 		out.JudgmentDebounce = higher.JudgmentDebounce
 	}
-	if higher.stallTimeoutSet || higher.StallTimeout != 0 {
+	if higher.StallTimeout != 0 {
 		out.StallTimeout = higher.StallTimeout
-		out.stallTimeoutSet = higher.stallTimeoutSet
 	}
 	if higher.onceSet {
 		out.Once = higher.Once
 		out.onceSet = true
 	} else if !lower.onceSet && higher.Once {
 		out.Once = true
+	}
+	if higher.standingSet {
+		out.Standing = higher.Standing
+		out.standingSet = true
 	}
 	if higher.fakeAutoSet {
 		out.FakeAutoComplete = higher.FakeAutoComplete
@@ -395,6 +401,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.StringVar(&cfg.PlanRef, "plan-ref", "", "Optional plan reference (post ID, URL, or path)")
 	fs.StringVar(&cfg.Plan, "plan", "", "Plan file or post ID to load through the Planner at startup")
 	fs.StringVar(&cfg.Repository, "repo", "", "Repository owner/name for worker drivers")
+	fs.BoolVar(&cfg.Standing, "standing", false, "Keep a goal run alive after it becomes settled")
 	fs.StringVar(&cfg.StoreSpec, "store", "", "Store backend: sqlite:<path>, sqlite, memory, or nebula")
 	fs.StringVar(&cfg.StoreBaseDir, "store-dir", "", "Base directory for default per-run SQLite store (~/.swarm)")
 	fs.StringVar(&cfg.DriverKind, "driver", "", "Worker lane driver: nebula or fake (default nebula)")
@@ -457,8 +464,8 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 			cfg.onceSet = true
 		case "fake-auto":
 			cfg.fakeAutoSet = true
-		case "stall-timeout":
-			cfg.stallTimeoutSet = true
+		case "standing":
+			cfg.standingSet = true
 		}
 	})
 
@@ -503,7 +510,37 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	if cmdName == "run" && cfg.RunID == "" && strings.TrimSpace(cmp.Or(cfg.Goal, cfg.Objective)) != "" {
 		cfg.RunID = nextUniqueID("run", clock.NewRealClock())
 	}
+	if cmdName == "run" && strings.TrimSpace(cfg.Repository) == "" {
+		cfg.Repository = inferRepository()
+	}
 	return cfg.withDefaults(), fs.Args(), nil
+}
+
+func inferRepository() string {
+	out, err := exec.Command("git", "config", "--get", "remote.origin.url").Output()
+	if err != nil {
+		return ""
+	}
+	return repositoryFromOrigin(strings.TrimSpace(string(out)))
+}
+
+func repositoryFromOrigin(u string) string {
+	u = strings.TrimSpace(u)
+	var path string
+	if strings.HasPrefix(u, "git@github.com:") {
+		path = strings.TrimPrefix(u, "git@github.com:")
+	} else if parsed, err := url.Parse(u); err == nil && parsed.Hostname() == "github.com" {
+		path = parsed.Path
+	} else {
+		return ""
+	}
+	path = strings.Trim(path, "/")
+	path = strings.TrimSuffix(path, ".git")
+	parts := strings.Split(path, "/")
+	if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+		return parts[0] + "/" + parts[1]
+	}
+	return ""
 }
 
 func parseStoreSpec(spec, baseDir, runID string) (kind, path string, err error) {
@@ -620,7 +657,6 @@ func openNebulaDriver(cfg Config, st store.Store, clk clock.Clock) (*nebula.Driv
 		Events:             driverEventStore{st.Events()},
 		APIURL:             cfg.NebulaAPIURL,
 		Token:              cfg.NebulaToken,
-		GitHubToken:        cmp.Or(os.Getenv("GITHUB_TOKEN"), os.Getenv("GH_TOKEN")),
 		RepositoryFullName: cfg.Repository,
 	})
 }

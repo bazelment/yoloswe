@@ -34,6 +34,7 @@ const (
 // Canonical tool names exposed to the Concierge model.
 const (
 	ToolRunControl      = "run.control"
+	ToolRunSettings     = "run.settings"
 	ToolStatus          = "status"
 	ToolLaneShow        = "lane.show"
 	ToolDecisionsSince  = "decisions.since"
@@ -133,6 +134,13 @@ type DirectiveSubmitParams struct {
 type RunControlParams struct {
 	Action string `json:"action" jsonschema:"required,enum=pause,enum=resume,enum=stop"`
 }
+type RunSettingsParams struct {
+	Action         string `json:"action" jsonschema:"required,enum=get,enum=set"`
+	ConcurrencyCap *int   `json:"concurrency_cap,omitempty"`
+	StallTimeout   string `json:"stall_timeout,omitempty"`
+	Paused         *bool  `json:"paused,omitempty"`
+	Words          string `json:"words,omitempty"`
+}
 
 // Control validates and runs a pause, resume or stop command.
 func Control(ctx context.Context, command func(context.Context, string) (string, error), p RunControlParams) (string, error) {
@@ -149,6 +157,7 @@ func Control(ctx context.Context, command func(context.Context, string) (string,
 
 var conciergeToolDefs = []model.ToolDefinition{
 	{Name: ToolRunControl, Description: "Pause, resume or stop execution", InputSchema: model.SchemaFor[RunControlParams]()},
+	{Name: ToolRunSettings, Description: "Read or change live run settings (concurrency cap 0-16, phase stall timeout 5m-24h, paused)", InputSchema: model.SchemaFor[RunSettingsParams]()},
 	{Name: ToolMemorySubmit, Description: "Save an owner correction immediately (create, update, delete)", InputSchema: model.SchemaFor[MemorySubmitParams]()},
 	{Name: ToolMemoryUndo, Description: "Undo or forget the last memory change", InputSchema: model.SchemaFor[MemoryUndoParams]()},
 	{Name: ToolStatus, Description: "Read run status overview including objective, lease, backlog counts, lanes, directives, and latest sequence numbers", InputSchema: model.SchemaFor[StatusParams]()},
@@ -176,7 +185,7 @@ func NormalizeToolName(name string) string {
 
 func isKnownTool(name string) bool {
 	switch name {
-	case ToolRunControl, ToolStatus, ToolLaneShow, ToolDecisionsSince, ToolBacklog, ToolDirectiveSubmit, ToolMemoryRead, ToolMemorySubmit, ToolMemoryUndo:
+	case ToolRunControl, ToolRunSettings, ToolStatus, ToolLaneShow, ToolDecisionsSince, ToolBacklog, ToolDirectiveSubmit, ToolMemoryRead, ToolMemorySubmit, ToolMemoryUndo:
 		return true
 	default:
 		return false
@@ -653,6 +662,12 @@ func (c *Concierge) handleRawToolCall(
 			command = func(ctx context.Context, cmd string) (string, error) { return c.cfg.RunControl(ctx, runID, cmd) }
 		}
 		return Control(ctx, command, p)
+	case ToolRunSettings:
+		p, err := decodeToolParams[RunSettingsParams](canonical, trimmed)
+		if err != nil {
+			return "", err
+		}
+		return c.execRunSettings(ctx, runID, p)
 	case ToolMemorySubmit:
 		p, err := decodeToolParams[MemorySubmitParams](canonical, trimmed)
 		if err != nil {
@@ -724,6 +739,7 @@ func (c *Concierge) handleRawToolCall(
 
 func (c *Concierge) execStatus(ctx context.Context, runID string, p StatusParams) (string, error) {
 	now := c.clock.Now().UTC()
+	settings, _ := c.store.Runs().GetSettings(ctx, runID)
 	run, err := c.store.Runs().Get(ctx, runID)
 	if err != nil {
 		return "", err
@@ -763,6 +779,7 @@ func (c *Concierge) execStatus(ctx context.Context, runID string, p StatusParams
 	fmt.Fprintf(&b, "Objective: %s\n", cmp.Or(strings.TrimSpace(run.Objective), "(none)"))
 	fmt.Fprintf(&b, "PlanRef: %s\n", cmp.Or(strings.TrimSpace(run.PlanRef), "(none)"))
 	fmt.Fprintf(&b, "DefaultRecipe: %s\n", cmp.Or(strings.TrimSpace(run.DefaultRecipe), recipe.DefaultName))
+	fmt.Fprintf(&b, "Settings: concurrency_cap=%d stall_timeout=%s paused=%t\n", settings.ConcurrencyCap, settings.StallTimeout, settings.Paused)
 	if run.Lease != nil {
 		fmt.Fprintf(&b, "Lease: holder=%s expires=%s expired=%t\n",
 			run.Lease.HolderID, run.Lease.ExpiresAt.UTC().Format(time.RFC3339), run.Lease.Expired(now))
@@ -840,6 +857,45 @@ func (c *Concierge) execStatus(ctx context.Context, runID string, p StatusParams
 		len(decisions), latestDecSeq, len(events), latestEvSeq)
 
 	return truncateUTF8(b.String(), c.cfg.MaxReadBytes), nil
+}
+
+func (c *Concierge) execRunSettings(ctx context.Context, runID string, p RunSettingsParams) (string, error) {
+	current, err := c.store.Runs().GetSettings(ctx, runID)
+	if err != nil {
+		return "", err
+	}
+	if p.Action == "" || p.Action == "get" {
+		return fmt.Sprintf("run settings: concurrency_cap=%d stall_timeout=%s paused=%t", current.ConcurrencyCap, current.StallTimeout, current.Paused), nil
+	}
+	if p.Action != "set" {
+		return "", fmt.Errorf("run.settings action must be get or set")
+	}
+	next := current
+	if p.ConcurrencyCap != nil {
+		if *p.ConcurrencyCap < 0 || *p.ConcurrencyCap > 16 {
+			return "", fmt.Errorf("run.settings concurrency cap must be 0-16")
+		}
+		next.ConcurrencyCap = *p.ConcurrencyCap
+	}
+	if p.StallTimeout != "" {
+		d, e := time.ParseDuration(p.StallTimeout)
+		if e != nil || d < 5*time.Minute || d > 24*time.Hour {
+			return "", fmt.Errorf("run.settings stall timeout must be 5m-24h")
+		}
+		next.StallTimeout = d
+	}
+	if p.Paused != nil {
+		next.Paused = *p.Paused
+	}
+	if err := c.store.Runs().UpdateSettings(ctx, runID, next); err != nil {
+		return "", err
+	}
+	words := cmp.Or(strings.TrimSpace(p.Words), "owner updated run settings")
+	_, err = c.store.Decisions().Append(ctx, store.Decision{ID: c.nextID("settings"), RunID: runID, Category: store.DecisionJudgment, Actor: ActorConcierge, Tool: ToolRunSettings, Reason: words, Result: fmt.Sprintf("concurrency_cap=%d stall_timeout=%s paused=%t", next.ConcurrencyCap, next.StallTimeout, next.Paused), Vetted: true})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("run settings updated: concurrency_cap=%d stall_timeout=%s paused=%t", next.ConcurrencyCap, next.StallTimeout, next.Paused), nil
 }
 
 func (c *Concierge) execLaneShow(ctx context.Context, runID string, p LaneShowParams) (string, error) {

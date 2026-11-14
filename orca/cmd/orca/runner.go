@@ -347,7 +347,7 @@ func NewRunner(
 		PollInterval:      cfg.PollInterval,
 		JudgmentDebounce:  cfg.JudgmentDebounce,
 		StallTimeout:      cfg.StallTimeout,
-		StallTimeoutSet:   cfg.HasExplicitStallTimeout(),
+		ConcurrencyCap:    cfg.ConcurrencyCap,
 	}, st, drv, clk, controller.JudgeFunc(r.judgeBatch), boxes...)
 
 	r.controller = ctrl
@@ -488,6 +488,10 @@ func (r *Runner) Bootstrap(ctx context.Context) error {
 			return err
 		}
 	}
+	settings, settingsErr := r.store.Runs().GetSettings(ctx, runID)
+	if settingsErr == nil && settings.ConcurrencyCap == 0 && settings.StallTimeout == 0 {
+		_ = r.store.Runs().UpdateSettings(ctx, runID, store.RunSettings{ConcurrencyCap: r.cfg.ConcurrencyCap, StallTimeout: r.cfg.StallTimeout})
+	}
 
 	if err := r.ensureLease(ctx); err != nil {
 		return err
@@ -596,6 +600,16 @@ func (r *Runner) bootstrapMetadataAndRecipes(ctx context.Context) error {
 func (r *Runner) Step(ctx context.Context) error {
 	if err := r.ensureLease(ctx); err != nil {
 		return err
+	}
+	if settings, err := r.store.Runs().GetSettings(ctx, r.cfg.RunID); err == nil {
+		r.cfg.ConcurrencyCap = settings.ConcurrencyCap
+		if settings.StallTimeout > 0 {
+			r.cfg.StallTimeout = settings.StallTimeout
+		}
+		r.controller.SetRuntimeSettings(settings)
+		if settings.Paused {
+			return nil
+		}
 	}
 	if err := r.controller.StartWatches(ctx); err != nil {
 		return err
@@ -823,6 +837,9 @@ func (r *Runner) IsSettledAndComplete(ctx context.Context) (bool, error) {
 }
 
 func (r *Runner) hasImmediateWork(ctx context.Context) (bool, error) {
+	if settings, err := r.store.Runs().GetSettings(ctx, r.cfg.RunID); err == nil && settings.Paused {
+		return false, nil
+	}
 	if err := r.enqueueOpenBacklogTriggerIfNeeded(ctx); err != nil {
 		return false, err
 	}

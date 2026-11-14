@@ -110,6 +110,10 @@ func Execute(
 }
 
 func executeRun(ctx context.Context, cfg Config, logger *slog.Logger) error {
+	driverKind := strings.ToLower(strings.TrimSpace(cfg.DriverKind))
+	if strings.TrimSpace(cfg.Repository) == "" && strings.TrimSpace(cfg.Goal) != "" && (driverKind == "" || driverKind == "nebula") {
+		return errors.New("orca: --repo is required when not running inside a GitHub checkout (could not infer origin)")
+	}
 	clk := clock.NewRealClock()
 	st, resolvedStore, err := openStore(cfg, clk)
 	if err != nil {
@@ -285,7 +289,7 @@ func notifySignalContext(parent context.Context, forceExit func()) (context.Cont
 
 func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, `Usage:
-  orca run --goal "<text>" [--plan <file|post-id>] [--repo <owner/name>] [--run <id>] [--store sqlite:<path>|nebula] [--driver nebula|fake] [flags]
+  orca run --goal "<text>" [--standing] [--repo <owner/name>] [flags]
   orca chat --run <id> [--store sqlite:<path>|nebula] [--prompt "<question>"] [flags]`)
 	_, _ = fmt.Fprintln(w, "  orca report --run <id> [--day YYYY-MM-DD] [flags]\n  orca export --run <id> [flags]")
 }

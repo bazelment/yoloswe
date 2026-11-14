@@ -600,6 +600,42 @@ func (r *sqliteRunStore) UpdateObjective(ctx context.Context, runID, objective, 
 	)
 }
 
+func (r *sqliteRunStore) GetSettings(ctx context.Context, runID string) (RunSettings, error) {
+	s := r.s()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out RunSettings
+	var paused int
+	err := s.db.QueryRowContext(ctx, `SELECT concurrency_cap, stall_timeout_ns, paused FROM run_settings WHERE run_id = ?`, runID).Scan(&out.ConcurrencyCap, &out.StallTimeout, &paused)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, e := getRun(ctx, s.db, runID); e != nil {
+			return out, e
+		}
+		return out, nil
+	}
+	if err != nil {
+		return out, err
+	}
+	out.Paused = paused != 0
+	return out, nil
+}
+func (r *sqliteRunStore) UpdateSettings(ctx context.Context, runID string, settings RunSettings) error {
+	s := r.s()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := getRun(ctx, s.db, runID); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO run_settings(run_id, concurrency_cap, stall_timeout_ns, paused) VALUES(?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET concurrency_cap=excluded.concurrency_cap, stall_timeout_ns=excluded.stall_timeout_ns, paused=excluded.paused`, runID, settings.ConcurrencyCap, settings.StallTimeout, boolInt(settings.Paused))
+	return err
+}
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
 func (r *sqliteRunStore) AcquireLease(ctx context.Context, runID, holderID string, ttl time.Duration) (*Lease, error) {
 	if strings.TrimSpace(holderID) == "" || ttl <= 0 {
 		return nil, fmt.Errorf("%w: holderID and positive ttl are required", ErrInvalidArgument)

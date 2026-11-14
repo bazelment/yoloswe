@@ -114,6 +114,115 @@ func TestInnerLoop_SingleLaneFakeDriverToCompletion(t *testing.T) {
 	}
 }
 
+func TestRepoInference_GitHubOrigins(t *testing.T) {
+	for _, tc := range []struct{ name, origin, want string }{
+		{"https", "https://github.com/a/b.git", "a/b"},
+		{"ssh", "git@github.com:a/b.git", "a/b"},
+		{"ssh-url", "ssh://git@github.com/a/b", "a/b"},
+		{"missing", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := repositoryFromOrigin(tc.origin); got != tc.want {
+				t.Fatalf("repositoryFromOrigin(%q) = %q, want %q", tc.origin, got, tc.want)
+			}
+		})
+	}
+	if cfg, _, err := parseFlags("run", []string{"--goal", "report", "--repo", "override/repo"}, io.Discard); err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	} else if cfg.Repository != "override/repo" {
+		t.Fatalf("--repo override = %q", cfg.Repository)
+	}
+}
+
+func TestRepoInference_NoOriginAndNoRepoIsClearError(t *testing.T) {
+	cfg := Config{RunID: "run-no-repo", Goal: "report", DriverKind: "nebula", StoreSpec: "memory"}.withDefaults()
+	if err := cfg.Validate(true); err != nil {
+		t.Fatalf("config validation unexpectedly failed before repo check: %v", err)
+	}
+	var stderr bytes.Buffer
+	err := executeRun(t.Context(), cfg, newLogger(&stderr, "error", "text"))
+	if err == nil || !strings.Contains(err.Error(), "--repo is required") || !strings.Contains(err.Error(), "could not infer origin") {
+		t.Fatalf("executeRun error = %v, want clear missing-origin error", err)
+	}
+}
+
+func TestConciergeRunSettingsChatPersistsOwnerWordsAndStatus(t *testing.T) {
+	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	defer func() { _ = st.Close() }()
+	if err := st.Runs().Create(ctx, store.Run{ID: "chat-settings", Objective: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runs().UpdateSettings(ctx, "chat-settings", store.RunSettings{ConcurrencyCap: 4, StallTimeout: 45 * time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	client := model.NewFakeClient(
+		model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("settings", ToolRunSettings, json.RawMessage(`{"action":"set","concurrency_cap":2,"words":"run at most 2 lanes at a time"}`)))},
+		model.Response{Message: model.NewAssistantMessage(model.NewTextBlock("updated"))},
+	)
+	c := NewConcierge("chat-settings", st, clk, client, DefaultConciergeModel)
+	if _, err := c.Ask(ctx, "run at most 2 lanes at a time"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Runs().GetSettings(ctx, "chat-settings")
+	if err != nil || got.ConcurrencyCap != 2 {
+		t.Fatalf("settings=%+v err=%v", got, err)
+	}
+	decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "chat-settings"})
+	if err != nil || len(decs) != 1 || decs[0].Reason != "run at most 2 lanes at a time" {
+		t.Fatalf("decisions=%+v err=%v", decs, err)
+	}
+	status, err := c.FormatStatusReport(ctx)
+	if err != nil || !strings.Contains(status, "Settings: concurrency_cap=2") {
+		t.Fatalf("status=%q err=%v", status, err)
+	}
+}
+
+func TestConciergeRunSettingsRejectsInvalidValues(t *testing.T) {
+	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	defer func() { _ = st.Close() }()
+	if err := st.Runs().Create(ctx, store.Run{ID: "chat-invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string]string{
+		"cap":     `{"action":"set","concurrency_cap":17}`,
+		"timeout": `{"action":"set","stall_timeout":"1m"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := NewConcierge("chat-invalid", st, clk, nil, DefaultConciergeModel)
+			result := c.buildToolRegistry("thread", "turn", "", nil).Execute(ctx, model.ToolCall{ID: "bad", Name: ToolRunSettings, Input: json.RawMessage(args)})
+			if !result.IsError || !strings.Contains(result.Content, "run.settings") {
+				t.Fatalf("tool result=%+v, want run.settings validation message", result)
+			}
+		})
+	}
+}
+
+func TestGoalRunDefaults_OnceStandingAndExplicitOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		once bool
+	}{
+		{"goal", []string{"--goal", "report", "--driver", "fake"}, true},
+		{"standing", []string{"--goal", "report", "--standing", "--driver", "fake", "--max-steps", "1"}, false},
+		{"explicit once", []string{"--goal", "report", "--once", "--driver", "fake"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, _, err := parseFlags("run", tc.args, io.Discard)
+			if err != nil {
+				t.Fatalf("parseFlags: %v", err)
+			}
+			if cfg.Once != tc.once {
+				t.Fatalf("Once = %t, want %t (standing=%t)", cfg.Once, tc.once, cfg.Standing)
+			}
+		})
+	}
+}
+
 func TestExecuteNebulaEnsuresRunBeforeRunnerStartup(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "startup.db")

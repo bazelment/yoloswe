@@ -19,6 +19,7 @@ import (
 type MemoryStore struct {
 	clock        clock.Clock
 	runs         map[string]*Run
+	runSettings  map[string]RunSettings
 	backlog      map[string]map[string]*BacklogItem
 	lanes        map[string]map[string]*Lane
 	directives   map[string]map[string]*Directive
@@ -45,6 +46,7 @@ func NewMemoryStore(clk clock.Clock) *MemoryStore {
 	s := &MemoryStore{
 		clock:        clk,
 		runs:         make(map[string]*Run),
+		runSettings:  make(map[string]RunSettings),
 		backlog:      make(map[string]map[string]*BacklogItem),
 		lanes:        make(map[string]map[string]*Lane),
 		directives:   make(map[string]map[string]*Directive),
@@ -250,6 +252,29 @@ func (r *memRunStore) UpdateObjective(_ context.Context, runID, objective, planR
 	run.Objective = objective
 	run.PlanRef = planRef
 	run.UpdatedAt = s.now()
+	return nil
+}
+
+func (r *memRunStore) GetSettings(_ context.Context, runID string) (RunSettings, error) {
+	s := r.s()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.runs[runID]; !ok {
+		return RunSettings{}, fmt.Errorf("%w: run %q", ErrNotFound, runID)
+	}
+	return s.runSettings[runID], nil
+}
+func (r *memRunStore) UpdateSettings(_ context.Context, runID string, settings RunSettings) error {
+	s := r.s()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.runs[runID]; !ok {
+		return fmt.Errorf("%w: run %q", ErrNotFound, runID)
+	}
+	if s.runSettings == nil {
+		s.runSettings = make(map[string]RunSettings)
+	}
+	s.runSettings[runID] = settings
 	return nil
 }
 
