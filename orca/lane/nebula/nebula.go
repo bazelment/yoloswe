@@ -1810,10 +1810,13 @@ func (d *Driver) lookupRepositoryID(ctx context.Context, target string) (string,
 func (d *Driver) verifySessionRepository(ctx context.Context, sess SessionInfo, wantRepoID, wantRepoSlug string, requireVerified bool) error {
 	gotID := strings.TrimSpace(sess.RepositoryID)
 	gotSlug := lane.NormalizeRepositorySlug(sess.GitURL)
+	var getErr error
 	if requireVerified && gotID == "" && gotSlug == "" && sess.ID != "" {
 		if detail, err := d.GetSession(ctx, sess.ID); err == nil {
 			gotID = strings.TrimSpace(detail.Session.RepositoryID)
 			gotSlug = lane.NormalizeRepositorySlug(detail.Session.GitURL)
+		} else {
+			getErr = err
 		}
 	}
 	if gotID != "" && wantRepoID != "" {
@@ -1841,7 +1844,11 @@ func (d *Driver) verifySessionRepository(ctx context.Context, sess SessionInfo, 
 		}
 	}
 	if requireVerified && (wantRepoID != "" || wantRepoSlug != "") {
-		return fmt.Errorf("nebula session %s omitted repositoryId and gitUrl; cannot verify expected repository %q", sess.ID, cmp.Or(wantRepoSlug, wantRepoID))
+		err := fmt.Errorf("nebula session %s omitted repositoryId and gitUrl; cannot verify expected repository %q", sess.ID, cmp.Or(wantRepoSlug, wantRepoID))
+		if getErr != nil {
+			return errors.Join(err, fmt.Errorf("get session %s: %w", sess.ID, getErr))
+		}
+		return err
 	}
 	return nil
 }

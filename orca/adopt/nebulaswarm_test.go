@@ -1358,3 +1358,22 @@ func TestNormalizeRepositorySlugTable(t *testing.T) {
 		}
 	}
 }
+
+func TestClipRunFileContent(t *testing.T) {
+	t.Parallel()
+	if got := clipRunFileContent("  short text\n", 100); got != "short text" {
+		t.Fatalf("under-limit clipRunFileContent = %q, want %q", got, "short text")
+	}
+	// Line-boundary cut in the second half of maxBytes.
+	lined := "line one\nline two\nline three that exceeds the limit"
+	gotLined := clipRunFileContent(lined, 22)
+	if !strings.HasPrefix(gotLined, "line one\nline two\n... (truncated ") {
+		t.Fatalf("newline-cut clipRunFileContent = %q", gotLined)
+	}
+	// Multibyte UTF-8 rune boundary safety when no newline is in the second half.
+	multibyte := "éééééééééé"
+	gotUTF8 := clipRunFileContent(multibyte, 5)
+	if !strings.HasPrefix(gotUTF8, "éé\n... (truncated ") {
+		t.Fatalf("utf8-safe clipRunFileContent = %q", gotUTF8)
+	}
+}
