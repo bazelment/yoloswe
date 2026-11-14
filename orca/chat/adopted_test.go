@@ -527,8 +527,8 @@ func TestSlashCompletion(t *testing.T) {
 	if helpOut, err := f.backend.Command(t.Context(), "/help"); err != nil || !strings.Contains(helpOut, "/restart") {
 		t.Fatalf("/help = %q, %v; want /restart listed", helpOut, err)
 	}
-	if _, err := f.backend.Command(t.Context(), "/restart /tmp/other"); err == nil || !strings.Contains(err.Error(), "usage: /restart") {
-		t.Fatalf("/restart <path> = %v, want usage error", err)
+	if _, err := f.backend.Command(t.Context(), "/restart /tmp/other"); err == nil || strings.Contains(err.Error(), "usage: /restart") {
+		t.Fatalf("/restart <path> = %v, want target validation error", err)
 	}
 	m = press(typed(m, "ad"), tab)
 	if m.input != "/adopt " {

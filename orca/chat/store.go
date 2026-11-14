@@ -58,7 +58,7 @@ type StoreBackend struct {
 	FrontDesk string
 	// Restart validates the startup binary and prepares an in-place re-exec
 	// for /restart.
-	Restart func(context.Context) (string, error)
+	Restart func(context.Context, string) (string, error)
 
 	mu            sync.RWMutex
 	store         store.Store
@@ -843,13 +843,17 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 		}
 		return "released " + target, nil
 	case "/restart":
-		if len(fields) > 1 {
+		if len(fields) > 2 {
 			return "", fmt.Errorf("usage: /restart")
 		}
 		if b.Restart == nil {
 			return "", fmt.Errorf("restart unavailable")
 		}
-		return b.Restart(ctx)
+		path := ""
+		if len(fields) == 2 {
+			path = fields[1]
+		}
+		return b.Restart(ctx, path)
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()

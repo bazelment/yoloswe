@@ -483,8 +483,13 @@ func runChatSession(
 		return runID, nil
 	}
 	var reexec *restartRequest
-	backend.Restart = func(restartCtx context.Context) (string, error) {
-		target := strings.TrimSpace(startupPath)
+	backend.Restart = func(restartCtx context.Context, requestedPath string) (string, error) {
+		target := strings.TrimSpace(requestedPath)
+		if target == "" {
+			target = strings.TrimSpace(startupPath)
+		} else if !filepath.IsAbs(target) {
+			return "", fmt.Errorf("restart target %s must be an absolute path", target)
+		}
 		newVer, err := verifyRestartTarget(restartCtx, target)
 		if err != nil {
 			return "", err

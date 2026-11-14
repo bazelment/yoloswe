@@ -132,7 +132,7 @@ type Concierge struct {
 	// Wake asks the controller of a run to act on a new directive now.
 	Wake func(runID string)
 	// Restart validates the startup binary and prepares an in-place re-exec.
-	Restart func(context.Context) (string, error)
+	Restart func(context.Context, string) (string, error)
 	// Logger receives one INFO line per tool call and a WARN on a budget stop.
 	Logger *slog.Logger
 }
@@ -878,14 +878,25 @@ func (c *Concierge) RunInteractive(ctx context.Context, in io.Reader, out io.Wri
 		if line == "" {
 			continue
 		}
-		switch strings.ToLower(line) {
+		fields := strings.Fields(line)
+		switch strings.ToLower(fields[0]) {
 		case "/exit", "/quit", "exit", "quit":
 			return nil
 		case "/restart":
 			if c.Restart == nil {
 				return fmt.Errorf("restart unavailable")
 			}
-			msg, err := c.Restart(ctx)
+			if len(fields) > 2 {
+				if _, err := fmt.Fprintln(out, "error: usage: /restart"); err != nil {
+					return err
+				}
+				continue
+			}
+			path := ""
+			if len(fields) == 2 {
+				path = fields[1]
+			}
+			msg, err := c.Restart(ctx, path)
 			if err != nil {
 				if _, werr := fmt.Fprintf(out, "error: %v\n", err); werr != nil {
 					return werr

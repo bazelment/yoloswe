@@ -58,6 +58,7 @@ func commandUsage() string {
 type Model struct {
 	poll                 bool
 	restarting           bool
+	restartMessage       string
 	questions            []string
 	ctx                  context.Context
 	ask                  AskFunc
@@ -305,6 +306,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if x.quit {
 			m.restarting = true
+			m.restartMessage = x.text
 			return m, tea.Quit
 		}
 		return m, m.refresh()
@@ -497,8 +499,8 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {
 		m.poll = true
 		final, err := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out), tea.WithContext(ctx)).Run()
 		if err == nil {
-			if fm, ok := final.(Model); ok && fm.restarting && len(fm.lines) > 0 {
-				_, _ = fmt.Fprintln(out, fm.lines[len(fm.lines)-1])
+			if fm, ok := final.(Model); ok && fm.restarting {
+				_, _ = fmt.Fprintln(out, fm.restartMessage)
 			}
 		}
 		return err
