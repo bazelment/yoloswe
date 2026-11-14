@@ -15,6 +15,8 @@ import (
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane/nebula"
+	"github.com/bazelment/yoloswe/orca/mailbox"
+	mailboxnebula "github.com/bazelment/yoloswe/orca/mailbox/nebula"
 	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -82,6 +84,7 @@ func newAdoption(ctx context.Context, cfg Config, h hostSwarms, holder string, f
 	}
 	ctrls := adopt.NewControllers(ctx, st, h.client, clk, adoptedDispatchers(cfg, st, h.client, clk, client, logger, prProbe, pln))
 	ctrls.PRProbe = prProbe
+	ctrls.Mailboxes = adoptedMailboxes(cfg, st)
 	if pln != nil {
 		ctrls.Planner = pln.HandlePlannerRequest
 	}
@@ -94,6 +97,28 @@ func newAdoption(ctx context.Context, cfg Config, h hostSwarms, holder string, f
 		Driver:             ctrls,
 		LoopVerifyInterval: loopVerifyInterval(),
 	}, ""
+}
+
+func adoptedMailboxes(cfg Config, st store.Store) func(runID string) []mailbox.Mailbox {
+	baseURL := cmp.Or(cfg.NebulaAPIURL, os.Getenv("NEBULA_API_URL"))
+	token := cmp.Or(cfg.NebulaToken, os.Getenv("NEBULA_TOKEN"))
+	if strings.TrimSpace(baseURL) == "" || strings.TrimSpace(token) == "" {
+		return nil
+	}
+	return func(runID string) []mailbox.Mailbox {
+		box, err := mailboxnebula.New(mailboxnebula.Config{
+			RunID:   runID,
+			Events:  st.Events(),
+			BaseURL: baseURL,
+			Token:   token,
+			Host:    true,
+		})
+		if err != nil {
+			slog.Warn("unable to open adopted run mailbox", "run", runID, "error", err)
+			return nil
+		}
+		return []mailbox.Mailbox{box}
+	}
 }
 
 func loopVerifyInterval() time.Duration {

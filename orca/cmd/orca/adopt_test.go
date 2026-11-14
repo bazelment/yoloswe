@@ -24,7 +24,11 @@ import (
 	chatui "github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
+	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
+	"github.com/bazelment/yoloswe/orca/mailbox"
+	mailboxfake "github.com/bazelment/yoloswe/orca/mailbox/fake"
+	mailboxnebula "github.com/bazelment/yoloswe/orca/mailbox/nebula"
 	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -1131,6 +1135,825 @@ func TestRestartShutdownFailureAbortsExecAndVersionValidation(t *testing.T) {
 		t.Fatal("execProcess called despite restart shutdown failure")
 	}
 }
+
+func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	ticker := time.NewTicker(2 * time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		if cond() {
+			return
+		}
+		select {
+		case <-timer.C:
+			t.Fatalf("condition not met within %s", timeout)
+		case <-ticker.C:
+		}
+	}
+}
+
+func TestAdoptedRunFakeMailboxQuestion(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	const runID = "20261114-trial-m1"
+	dir := filepath.Join(root, ".swarm", runID)
+	if err := os.MkdirAll(filepath.Join(dir, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"Next interventions 6 and 7 are wire-mail and dedup-reports in /workspace.","base":"main","target":"main","repo":"bazelment/yoloswe","merge":"none","phases":[{"name":"swe"},{"name":"clean"},{"name":"review"}]},"tasks":[{"id":"m2-gaps3","title":"Mail and report gaps","branch":"swarm-lane/`+runID+`/m2-gaps3","priority":"p1","status":"running","phase":"swe","round":1,"session_id":"s-gaps3","terminals":{"swe":{"1":"t-gaps3"}}}]}`)
+	writeFile(t, filepath.Join(dir, "OBJECTIVE.md"), "# Objective\nNext interventions 6 and 7 are wire-mail and dedup-reports in /workspace.\n")
+	writeFile(t, filepath.Join(dir, "PROGRESS.md"), "# Progress\n- [ ] `m2-gaps3` — Mail & report gaps\n")
+	writeFile(t, filepath.Join(dir, "EVENTS"), "2026-11-14T19:00:00Z\tm2-gaps3\tstarted\tswe t-gaps3\n")
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 12, 25, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+	box := mailboxfake.New(st.Events(), runID)
+
+	client := model.NewFakeClient(model.Response{
+		StopReason: model.StopReasonToolUse,
+		Message: model.NewAssistantMessage(
+			model.NewToolUseBlock("call-1", dispatcher.ToolMailAnswer, json.RawMessage(`{"message_id":"04547e4e","lane_id":"m2-gaps3","answer":"Interventions 6 and 7 are wire-mail and dedup-reports; target checkout is /workspace.","reason":"answer blocking host question from objective"}`)),
+		),
+	}, model.Response{
+		StopReason: model.StopReasonEndTurn,
+		Message:    model.NewAssistantMessage(model.NewTextBlock("Answered m2-gaps3 question from run objective.")),
+	})
+
+	ctrls := adopt.NewControllers(t.Context(), st, drv, clk, func(id string, answer func(context.Context, string, string, string) error) controller.Judge {
+		d := dispatcher.New(dispatcher.Config{Model: "gpt-6.1-sol", HardBatchModel: "gpt-6.1-sol"}, st, drv, clk, client)
+		d.SetOwnerAnswer(answer)
+		return d
+	})
+	ctrls.Mailboxes = func(id string) []mailbox.Mailbox {
+		if id == runID {
+			return []mailbox.Mailbox{box}
+		}
+		return nil
+	}
+	svc := &adopt.Service{
+		Importer: adopt.Importer{Roots: []string{filepath.Join(root, ".swarm")}},
+		Labeler:  noopAdoptLabeler{},
+		Watcher:  noopAdoptWatcher{},
+		Holder:   "orca-chat:front-desk",
+		Driver:   ctrls,
+	}
+	r, err := svc.Adopt(t.Context(), runID)
+	if err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	t.Cleanup(func() { _ = ctrls.Stop(context.Background(), r) })
+
+	box.Inject(mailbox.Message{
+		ID:       "04547e4e",
+		RunID:    runID,
+		LaneID:   "m2-gaps3",
+		Kind:     "question",
+		Class:    "needs-host",
+		Blocking: true,
+		Question: true,
+		Body:     "Host must provide the exact Next interventions 6 and 7 and confirm or correct the target checkout",
+	})
+
+	// Wait for the mailbox watch to append the event to store, then advance clock past debounce once.
+	advanced := false
+	waitForCondition(t, 2*time.Second, func() bool {
+		if !advanced {
+			if evs, _ := st.Events().List(t.Context(), store.EventFilter{RunID: runID, Kinds: []store.EventKind{store.EventMail}}); len(evs) > 0 {
+				advanced = true
+				clk.Advance(31 * time.Second)
+			}
+		}
+		if advanced {
+			ctrls.Wake(runID)
+		}
+		got, ok := box.AnswerFor("04547e4e")
+		return ok && got != ""
+	})
+	if err := ctrls.Stop(t.Context(), r); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if len(client.Requests) == 0 {
+		t.Fatal("expected event to reach dispatcher, got 0 dispatcher requests")
+	}
+	if got, _ := box.AnswerFor("04547e4e"); !strings.Contains(got, "Interventions 6 and 7") {
+		t.Fatalf("expected fake mailbox to record answer on message id 04547e4e, got %q (sent=%+v)", got, box.Sent())
+	}
+	openQs, err := mailbox.OpenLaneQuestions(t.Context(), st, runID, clk.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(openQs) != 0 {
+		t.Fatalf("expected answered question to leave open list, got %+v", openQs)
+	}
+}
+
+func TestAdoptedRunOpenLaneQuestionsAndEscalation(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	const runID = "20261114-trial-m1"
+	dir := filepath.Join(root, ".swarm", runID)
+	if err := os.MkdirAll(filepath.Join(dir, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"Keep main green.","base":"main","target":"main","repo":"bazelment/yoloswe","merge":"none","phases":[{"name":"swe"}]},"tasks":[{"id":"m2-gaps3","title":"Mail and report gaps","branch":"swarm-lane/`+runID+`/m2-gaps3","priority":"p1","status":"running","phase":"swe","round":1,"session_id":"s-gaps3","terminals":{"swe":{"1":"t-gaps3"}}}]}`)
+	writeFile(t, filepath.Join(dir, "OBJECTIVE.md"), "# Objective\nKeep main green.\n")
+	writeFile(t, filepath.Join(dir, "PROGRESS.md"), "# Progress\n- [ ] `m2-gaps3`\n")
+	writeFile(t, filepath.Join(dir, "EVENTS"), "2026-11-14T19:00:00Z\tm2-gaps3\tstarted\tswe t-gaps3\n")
+
+	t0 := time.Date(2026, 11, 14, 19, 12, 25, 0, time.UTC)
+	clk := clock.NewFakeClock(t0)
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Runs().Create(t.Context(), store.Run{ID: frontDeskRunID}); err != nil {
+		t.Fatal(err)
+	}
+	drv := lane.NewFakeDriver()
+
+	var (
+		ansMu     sync.Mutex
+		ansPaths  []string
+		ansBodies []string
+	)
+	nebulaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/mail":
+			_, _ = io.WriteString(w, `{"messages":[]}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/answer"):
+			var body struct {
+				Answer string `json:"answer"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			ansMu.Lock()
+			ansPaths = append(ansPaths, r.URL.Path)
+			ansBodies = append(ansBodies, body.Answer)
+			ansMu.Unlock()
+			_, _ = io.WriteString(w, `{"id":"q-open-1"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer nebulaSrv.Close()
+
+	nebBox, err := mailboxnebula.New(mailboxnebula.Config{
+		BaseURL:      nebulaSrv.URL,
+		Token:        "test-token",
+		RunID:        runID,
+		Events:       st.Events(),
+		Host:         true,
+		PollInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First turn: only the owner can answer (product scope / budget decision).
+	// Second turn: owner resolves ask-scope with "approve".
+	client := model.NewFakeClient(model.Response{
+		StopReason: model.StopReasonToolUse,
+		Message: model.NewAssistantMessage(
+			model.NewToolUseBlock("call-ask", dispatcher.ToolOwnerAsk, json.RawMessage(`{"id":"ask-scope","lane_id":"m2-gaps3","question":"Should we expand product scope and approve additional spend for the enterprise tier?","options":["approve","defer"],"default":"defer","deadline":"1h","steer_note":"Defer enterprise tier.","reason":"only the owner can decide product scope and spend"}`)),
+		),
+	}, model.Response{
+		StopReason: model.StopReasonEndTurn,
+		Message:    model.NewAssistantMessage(model.NewTextBlock("Escalated owner-only question to owner ask.")),
+	}, model.Response{
+		StopReason: model.StopReasonToolUse,
+		Message: model.NewAssistantMessage(
+			model.NewToolUseBlock("call-ans", dispatcher.ToolOwnerAnswer, json.RawMessage(`{"ask_id":"ask-scope","answer":"approve"}`)),
+		),
+	}, model.Response{
+		StopReason: model.StopReasonEndTurn,
+		Message:    model.NewAssistantMessage(model.NewTextBlock("Resolved ask-scope.")),
+	})
+
+	ctrls := adopt.NewControllers(t.Context(), st, drv, clk, func(id string, answer func(context.Context, string, string, string) error) controller.Judge {
+		d := dispatcher.New(dispatcher.Config{Model: "gpt-6.1-sol", HardBatchModel: "gpt-6.1-sol"}, st, drv, clk, client)
+		d.SetOwnerAnswer(answer)
+		return d
+	})
+	ctrls.Mailboxes = func(id string) []mailbox.Mailbox {
+		if id == runID {
+			return []mailbox.Mailbox{nebBox}
+		}
+		return nil
+	}
+	svc := &adopt.Service{
+		Importer: adopt.Importer{Roots: []string{filepath.Join(root, ".swarm")}},
+		Labeler:  noopAdoptLabeler{},
+		Watcher:  noopAdoptWatcher{},
+		Holder:   "orca-chat:front-desk",
+		Driver:   ctrls,
+	}
+	backend := chatui.NewStoreBackend(st, frontDeskRunID)
+	backend.FrontDesk = frontDeskRunID
+	backend.Adoption = svc
+	backend.Now = clk.Now
+	concierge := NewConcierge(frontDeskRunID, st, clk, nil, DefaultConciergeModel)
+	wireChatConcierge(concierge, backend)
+
+	if _, err := backend.Command(t.Context(), "/adopt "+runID); err != nil {
+		t.Fatalf("/adopt: %v", err)
+	}
+	t.Cleanup(func() { _ = ctrls.Close(context.Background()) })
+
+	// Inject a host question on lane m2-gaps3 (1m old, within 2m debounce) and check status line, /asks, and concierge before waking the controller.
+	askedAt := t0.Add(-1 * time.Minute)
+	rawMsg, _ := json.Marshal(mailbox.Message{
+		ID:        "q-open-1",
+		RunID:     runID,
+		LaneID:    "m2-gaps3",
+		Kind:      "question",
+		Class:     "needs-host",
+		Blocking:  true,
+		Question:  true,
+		CreatedAt: askedAt.Format(time.RFC3339),
+		Body:      "Should we expand product scope and approve additional spend for the enterprise tier?",
+	})
+	if _, err := st.Events().Append(t.Context(), store.Event{
+		ID:        "mail:q-open-1",
+		RunID:     runID,
+		LaneID:    "m2-gaps3",
+		Kind:      store.EventMail,
+		Source:    "nebula.mail",
+		Summary:   "Should we expand product scope and approve additional spend for the enterprise tier?",
+		Payload:   rawMsg,
+		CreatedAt: askedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := backend.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snap.Status, "open questions: 1") {
+		t.Fatalf("status line = %q, want open questions: 1", snap.Status)
+	}
+	asksOut, err := backend.Command(t.Context(), "/asks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(asksOut, "q-open-1") || !strings.Contains(asksOut, "lane m2-gaps3") || !strings.Contains(asksOut, "age 1m") {
+		t.Fatalf("/asks = %q, want question id, lane m2-gaps3, and age 1m", asksOut)
+	}
+	progressOut, err := concierge.FormatStatusReport(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(progressOut, "Open Questions (1):") || !strings.Contains(progressOut, "lane m2-gaps3") || !strings.Contains(progressOut, "age 1m") {
+		t.Fatalf("concierge progress report missing open lane question with lane and age:\n%s", progressOut)
+	}
+
+	// Advance clock past debounce and wake the controller so the dispatcher escalates the question to an owner ask.
+	clk.Advance(2 * time.Minute)
+	waitForCondition(t, 2*time.Second, func() bool {
+		ctrls.Wake(runID)
+		dirs, _ := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+		return len(dirs) > 0
+	})
+	dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	if err != nil || len(dirs) != 1 || !strings.HasPrefix(dirs[0].Ref, "owner_ask:") {
+		t.Fatalf("expected owner_ask directive for owner-only question, got %+v (err=%v)", dirs, err)
+	}
+	var escalatedAsk controller.OwnerAsk
+	if err := json.Unmarshal([]byte(dirs[0].Text), &escalatedAsk); err != nil {
+		t.Fatal(err)
+	}
+	if escalatedAsk.SourceMessageID != "q-open-1" || escalatedAsk.SourceEventID != "mail:q-open-1" {
+		t.Fatalf("expected escalated ask to preserve SourceMessageID=q-open-1 and SourceEventID=mail:q-open-1, got %+v", escalatedAsk)
+	}
+
+	// While escalated and unresolved, OpenLaneQuestions still retains the question with EscalatedAskID set,
+	// and /asks and status line still show 1 open question (not 0 and not double-counted as 2).
+	openWhileEscalated, err := mailbox.OpenLaneQuestions(t.Context(), st, runID, clk.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(openWhileEscalated) != 1 || openWhileEscalated[0].ID != "q-open-1" || openWhileEscalated[0].EscalatedAskID != "ask-scope" {
+		t.Fatalf("expected escalated question to remain in OpenLaneQuestions with EscalatedAskID=ask-scope, got %+v", openWhileEscalated)
+	}
+	snapEscalated, err := backend.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snapEscalated.Status, "open questions: 1") {
+		t.Fatalf("status line while escalated = %q, want open questions: 1", snapEscalated.Status)
+	}
+	unescalatedWhileEscalated, err := mailbox.OpenUnescalatedQuestions(t.Context(), st, runID, clk.Now())
+	if err != nil || len(unescalatedWhileEscalated) != 0 {
+		t.Fatalf("expected 0 unescalated questions while escalated, got %+v (err=%v)", unescalatedWhileEscalated, err)
+	}
+	progressEscalated, err := concierge.FormatStatusReport(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(progressEscalated, "Open Questions (1):") || strings.Contains(progressEscalated, "open question q-open-1") {
+		t.Fatalf("concierge progress report while escalated should show 1 question without duplicating q-open-1 in lane parts:\n%s", progressEscalated)
+	}
+
+	// Now resolve the owner ask via an owner message event and verify Nebula receives POST /api/mail/q-open-1/answer.
+	if _, err := st.Events().Append(t.Context(), store.Event{
+		ID:        "owner-ans-1",
+		RunID:     runID,
+		Kind:      store.EventOwnerMessage,
+		Source:    "owner",
+		Summary:   "approve",
+		Urgent:    true,
+		CreatedAt: clk.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		ctrls.Wake(runID)
+		ansMu.Lock()
+		defer ansMu.Unlock()
+		return len(ansPaths) > 0
+	})
+	ansMu.Lock()
+	gotPath := ansPaths[0]
+	gotBody := ansBodies[0]
+	ansMu.Unlock()
+	if gotPath != "/api/mail/q-open-1/answer" || gotBody != "approve" {
+		t.Fatalf("expected Nebula answer POST on /api/mail/q-open-1/answer with body approve, got path=%q body=%q", gotPath, gotBody)
+	}
+	openAfterResolve, err := mailbox.OpenLaneQuestions(t.Context(), st, runID, clk.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(openAfterResolve) != 0 {
+		t.Fatalf("expected resolved question to leave OpenLaneQuestions, got %+v", openAfterResolve)
+	}
+}
+
+func TestDispatcherLaneMailIsolationAndVetting(t *testing.T) {
+	t.Parallel()
+	const runID = "run-mail-unit"
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 20, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Runs().Create(t.Context(), store.Run{ID: runID, Objective: "Keep lanes isolated."}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{
+		ID:        "lane-a",
+		RunID:     runID,
+		Title:     "Lane A",
+		Status:    lane.StatusBlocked,
+		Phase:     "swe",
+		Round:     1,
+		SessionID: "sess-a",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{
+		ID:        "lane-b",
+		RunID:     runID,
+		Title:     "Lane B",
+		Status:    lane.StatusRunning,
+		Phase:     "swe",
+		Round:     1,
+		SessionID: "sess-b",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. ParseAction aliases and VetAction checks for mail.answer.
+	act, err := dispatcher.ParseAction("c1", dispatcher.ToolMailAnswer, json.RawMessage(`{"msg_id":"m-1","lane":"lane-a","body":"use /workspace"}`))
+	if err != nil {
+		t.Fatalf("ParseAction alias: %v", err)
+	}
+	if act.MailAnswer == nil || act.MailAnswer.MessageID != "m-1" || act.MailAnswer.LaneID != "lane-a" || act.MailAnswer.Answer != "use /workspace" {
+		t.Fatalf("unexpected parsed MailAnswer: %+v", act.MailAnswer)
+	}
+	view, err := dispatcher.LoadStateView(t.Context(), st, clk, runID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.VetAction(view, act, dispatcher.DefaultInvariants()); err != nil {
+		t.Fatalf("VetAction valid mail.answer: %v", err)
+	}
+	noTargetAct, err := dispatcher.ParseAction("c2", dispatcher.ToolMailAnswer, json.RawMessage(`{"answer":"orphan"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.VetAction(view, noTargetAct, dispatcher.DefaultInvariants()); err == nil {
+		t.Fatal("expected VetAction to reject mail.answer without message_id or lane_id")
+	}
+	unknownLaneAct, err := dispatcher.ParseAction("c3", dispatcher.ToolMailAnswer, json.RawMessage(`{"lane_id":"no-such-lane","answer":"hi"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.VetAction(view, unknownLaneAct, dispatcher.DefaultInvariants()); err == nil {
+		t.Fatal("expected VetAction to reject mail.answer for unknown lane")
+	}
+
+	// 2. Negative cases:
+	// (a) An unrelated lane.steer on lane-a must NOT close or answer lane-a's open question.
+	// (b) A directive.note in a batch with a lane note must NOT auto-reply to the lane note.
+	// (c) An owner.ask for lane-b (or run-level) must NOT link to lane-a's open question.
+	drv := lane.NewFakeDriver()
+	box := mailboxfake.New(st.Events(), runID)
+	qRaw, _ := json.Marshal(mailbox.Message{
+		ID:       "q-lane-a",
+		RunID:    runID,
+		LaneID:   "lane-a",
+		Kind:     "question",
+		Class:    "needs-host",
+		Blocking: true,
+		Question: true,
+		Body:     "Which checkout should lane-a use?",
+	})
+	qEv, err := st.Events().Append(t.Context(), store.Event{
+		ID:        "mail:q-lane-a",
+		RunID:     runID,
+		LaneID:    "lane-a",
+		Kind:      store.EventMail,
+		Class:     store.EventClassJudgment,
+		Source:    "nebula.mail",
+		Summary:   "Which checkout should lane-a use?",
+		Payload:   qRaw,
+		CreatedAt: clk.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	noteRaw, _ := json.Marshal(mailbox.Message{
+		ID:     "n-lane-a",
+		RunID:  runID,
+		LaneID: "lane-a",
+		Kind:   "note",
+		Body:   "Progress checkpoint",
+	})
+	noteEv, err := st.Events().Append(t.Context(), store.Event{
+		ID:        "mail:n-lane-a",
+		RunID:     runID,
+		LaneID:    "lane-a",
+		Kind:      store.EventMail,
+		Class:     store.EventClassJudgment,
+		Source:    "nebula.mail",
+		Summary:   "Progress checkpoint",
+		Payload:   noteRaw,
+		CreatedAt: clk.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := model.NewFakeClient(
+		// Turn 1: unrelated lane.steer on lane-a.
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("c-steer", dispatcher.ToolLaneSteer, json.RawMessage(`{"lane_id":"lane-a","note":"rebase onto main","reason":"routine rebase"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Steered lane-a to rebase.")),
+		},
+		// Turn 2: directive.note in batch with noteEv.
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("c-note", dispatcher.ToolDirectiveNote, json.RawMessage(`{"fact":"checkpoint noted","reason":"record checkpoint"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Recorded directive note.")),
+		},
+		// Turn 3: owner.ask on lane-b while qEv (lane-a) is in the batch.
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("c-ask-b", dispatcher.ToolOwnerAsk, json.RawMessage(`{"id":"ask-lane-b","lane_id":"lane-b","question":"Approve lane-b budget?","options":["yes","no"],"default":"no","deadline":"1h","reason":"budget"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Asked owner about lane-b.")),
+		},
+		// Turn 4: mail.answer with mismatched lane_id ("lane-b" for lane-a's "q-lane-a") and unknown message_id ("no-such-msg"),
+		// plus owner.ask with mismatched lane_id and unknown message_id — all must be rejected.
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("c-ans-mismatch", dispatcher.ToolMailAnswer, json.RawMessage(`{"message_id":"q-lane-a","lane_id":"lane-b","answer":"wrong lane"}`)),
+				model.NewToolUseBlock("c-ans-unknown", dispatcher.ToolMailAnswer, json.RawMessage(`{"message_id":"no-such-msg","lane_id":"lane-a","answer":"hallucinated"}`)),
+				model.NewToolUseBlock("c-ask-mismatch", dispatcher.ToolOwnerAsk, json.RawMessage(`{"id":"ask-mismatch","message_id":"q-lane-a","lane_id":"lane-b","question":"Wrong lane?","options":["yes","no"],"default":"no","deadline":"1h","reason":"mismatch"}`)),
+				model.NewToolUseBlock("c-ask-unknown", dispatcher.ToolOwnerAsk, json.RawMessage(`{"id":"ask-unknown","message_id":"no-such-msg","lane_id":"lane-a","question":"Unknown msg?","options":["yes","no"],"default":"no","deadline":"1h","reason":"unknown"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Rejected invalid mail IDs and lane mismatches.")),
+		},
+		// Turn 5: when two questions are on lane-a in the batch, mail.answer without message_id is rejected as ambiguous,
+		// and a run-level owner.ask (no lane_id or message_id) succeeds without guessing a link.
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("c-ans-ambig", dispatcher.ToolMailAnswer, json.RawMessage(`{"lane_id":"lane-a","answer":"ambiguous answer"}`)),
+				model.NewToolUseBlock("c-ask-run", dispatcher.ToolOwnerAsk, json.RawMessage(`{"id":"ask-run","question":"Run-level policy?","options":["a","b"],"default":"a","deadline":"1h","reason":"run policy"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Registered run-level ask.")),
+		},
+		// Turn 6: an owner.ask with explicit message_id links to q-lane-a even when multiple questions are in the batch.
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("c-ask-explicit", dispatcher.ToolOwnerAsk, json.RawMessage(`{"id":"ask-explicit","message_id":"q-lane-a","question":"Checkout for lane-a?","options":["main","dev"],"default":"main","deadline":"1h","reason":"explicit"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Escalated explicit message_id.")),
+		},
+	)
+
+	d := dispatcher.New(dispatcher.Config{Model: "gpt-6.1-sol"}, st, drv, clk, client)
+	d.SetMailboxes(box)
+
+	if _, err := d.Dispatch(t.Context(), runID, []store.Event{qEv}); err != nil {
+		t.Fatalf("Dispatch turn 1 (steer): %v", err)
+	}
+	if ans, ok := box.AnswerFor("q-lane-a"); ok || ans != "" {
+		t.Fatalf("unrelated lane.steer must not answer lane question, got %q", ans)
+	}
+	openQs, err := mailbox.OpenLaneQuestions(t.Context(), st, runID, clk.Now())
+	if err != nil || len(openQs) != 1 || openQs[0].ID != "q-lane-a" {
+		t.Fatalf("question must remain open after unrelated steer, got %+v (err=%v)", openQs, err)
+	}
+
+	if _, err := d.Dispatch(t.Context(), runID, []store.Event{noteEv}); err != nil {
+		t.Fatalf("Dispatch turn 2 (directive.note): %v", err)
+	}
+	if len(box.Sent()) != 0 {
+		t.Fatalf("directive.note must not auto-reply to lane notes, got sent=%+v", box.Sent())
+	}
+
+	if _, err := d.Dispatch(t.Context(), runID, []store.Event{qEv}); err != nil {
+		t.Fatalf("Dispatch turn 3 (owner.ask on lane-b): %v", err)
+	}
+	dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var askB controller.OwnerAsk
+	foundAskB := false
+	for i := range dirs {
+		if dirs[i].ID == "ask-ask-lane-b" {
+			foundAskB = true
+			if err := json.Unmarshal([]byte(dirs[i].Text), &askB); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !foundAskB {
+		t.Fatalf("expected directive ask-ask-lane-b to be created, got %+v", dirs)
+	}
+	if askB.SourceEventID != "" || askB.SourceMessageID != "" {
+		t.Fatalf("owner.ask for lane-b must not link to lane-a mail, got %+v", askB)
+	}
+
+	if _, err := d.Dispatch(t.Context(), runID, []store.Event{qEv}); err != nil {
+		t.Fatalf("Dispatch turn 4 (mismatch and unknown IDs): %v", err)
+	}
+	if ans, ok := box.AnswerFor("q-lane-a"); ok || ans != "" {
+		t.Fatalf("mismatched lane_id must not answer q-lane-a, got %q", ans)
+	}
+	if ans, ok := box.AnswerFor("no-such-msg"); ok || ans != "" {
+		t.Fatalf("unknown message_id must not be answered, got %q", ans)
+	}
+
+	q2Raw, _ := json.Marshal(mailbox.Message{
+		ID:       "q-lane-a-2",
+		RunID:    runID,
+		LaneID:   "lane-a",
+		Kind:     "question",
+		Blocking: true,
+		Question: true,
+		Body:     "Second question on lane-a?",
+	})
+	q2Ev, err := st.Events().Append(t.Context(), store.Event{
+		ID:        "mail:q-lane-a-2",
+		RunID:     runID,
+		LaneID:    "lane-a",
+		Kind:      store.EventMail,
+		Class:     store.EventClassJudgment,
+		Source:    "nebula.mail",
+		Summary:   "Second question on lane-a?",
+		Payload:   q2Raw,
+		CreatedAt: clk.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Dispatch(t.Context(), runID, []store.Event{qEv, q2Ev}); err != nil {
+		t.Fatalf("Dispatch turn 5 (ambiguous mail.answer + run-level owner.ask): %v", err)
+	}
+	if _, err := d.Dispatch(t.Context(), runID, []store.Event{qEv, q2Ev}); err != nil {
+		t.Fatalf("Dispatch turn 6 (explicit message_id owner.ask): %v", err)
+	}
+	dirsAfter5, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var askRun, askExplicit controller.OwnerAsk
+	foundRun := false
+	foundExplicit := false
+	for i := range dirsAfter5 {
+		if dirsAfter5[i].ID == "ask-ask-mismatch" || dirsAfter5[i].ID == "ask-ask-unknown" {
+			t.Fatalf("rejected owner.ask must not be persisted: %+v", dirsAfter5[i])
+		}
+		if dirsAfter5[i].ID == "ask-ask-run" {
+			foundRun = true
+			if err := json.Unmarshal([]byte(dirsAfter5[i].Text), &askRun); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if dirsAfter5[i].ID == "ask-ask-explicit" {
+			foundExplicit = true
+			if err := json.Unmarshal([]byte(dirsAfter5[i].Text), &askExplicit); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !foundRun || askRun.SourceMessageID != "" || askRun.SourceEventID != "" || askRun.LaneID != "" {
+		t.Fatalf("expected run-level ask-run to succeed without linking to lane mail, got found=%v ask=%+v", foundRun, askRun)
+	}
+	if !foundExplicit || askExplicit.SourceMessageID != "q-lane-a" || askExplicit.SourceEventID != "mail:q-lane-a" || askExplicit.LaneID != "lane-a" {
+		t.Fatalf("expected ask-explicit to link to q-lane-a on lane-a, got found=%v ask=%+v", foundExplicit, askExplicit)
+	}
+}
+
+func TestAdoptedRunRestartNoDuplicateMailOrLaneReportEvents(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	const runID = "20261114-trial-m1"
+	dir := filepath.Join(root, ".swarm", runID)
+	if err := os.MkdirAll(filepath.Join(dir, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"Verify no duplicate events on restart.","base":"main","target":"main","repo":"bazelment/yoloswe","merge":"none","phases":[{"name":"swe"},{"name":"clean"},{"name":"review"}]},"tasks":[{"id":"m2-gaps2","title":"Gaps 2","branch":"swarm-lane/`+runID+`/m2-gaps2","priority":"p1","status":"running","phase":"swe","round":1,"session_id":"s-gaps2","terminals":{"swe":{"1":"t-gaps2"}}}]}`)
+	writeFile(t, filepath.Join(dir, "OBJECTIVE.md"), "# Objective\nVerify no duplicate events on restart.\n")
+	writeFile(t, filepath.Join(dir, "PROGRESS.md"), "# Progress\n- [ ] `m2-gaps2`\n")
+	writeFile(t, filepath.Join(dir, "EVENTS"), "2026-11-14T19:00:00Z\tm2-gaps2\tstarted\tswe t-gaps2\n")
+
+	var mailCursors []string
+	var mailMu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-runs/"+runID:
+			_, _ = io.WriteString(w, `{"id":"`+runID+`","externalOrchestratorLabel":"claude"}`)
+		case r.Method == http.MethodPut && r.URL.Path == "/api/code-runs/"+runID:
+			_, _ = io.WriteString(w, `{}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[{"id":"s-gaps2","metadata":{"swarmRun":"`+runID+`","swarmLane":"m2-gaps2"},"swarmRunId":"`+runID+`","swarmLaneId":"m2-gaps2","terminals":[{"id":"t-gaps2","phase":"swe","round":1,"status":"exited","exitCode":0,"report":{"outcome":"done","headSha":"abc1234","summary":"completed swe"}}]}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions/s-gaps2":
+			_, _ = io.WriteString(w, `{"id":"s-gaps2","terminals":[{"id":"t-gaps2","status":"exited"}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions/s-gaps2/terminals":
+			_, _ = io.WriteString(w, `{"id":"t-gaps2-clean","status":"running"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-terminals/t-gaps2-clean":
+			_, _ = io.WriteString(w, `{"id":"t-gaps2-clean","status":"running"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-terminals/t-gaps2-clean/phase-report":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"code":"NO_REPORT"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-terminals/t-gaps2-clean/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-terminals/t-gaps2":
+			_, _ = io.WriteString(w, `{"id":"t-gaps2","status":"exited","exitCode":0,"report":{"outcome":"done","headSha":"abc1234","summary":"completed swe"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-terminals/t-gaps2/phase-report":
+			_, _ = io.WriteString(w, `{"terminalId":"t-gaps2","outcome":"done","head":"abc1234","body":"Outcome: done\nHEAD: abc1234\nSummary: completed swe\n"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-terminals/t-gaps2/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"type\":\"phase.reported\",\"report\":{\"outcome\":\"done\",\"head\":\"abc1234\",\"body\":\"Outcome: done\\nHEAD: abc1234\\nSummary: completed swe\\n\"}}\n\n")
+			_, _ = io.WriteString(w, "data: {\"type\":\"terminal.exited\",\"exitCode\":0}\n\n")
+		case r.Method == http.MethodGet && r.URL.Path == "/api/mail":
+			cur := r.URL.Query().Get("cursor")
+			mailMu.Lock()
+			mailCursors = append(mailCursors, cur)
+			mailMu.Unlock()
+			if cur == "cur-1" {
+				_, _ = io.WriteString(w, `{"messages":[],"nextCursor":"cur-1"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"messages":[{"id":"m-note-1","runId":"`+runID+`","lane":"m2-gaps2","kind":"note","body":"progress note"}],"nextCursor":"cur-1"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/mail":
+			_, _ = io.WriteString(w, `{"id":"reply-1"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 15, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+
+	cfg := Config{
+		RunID:        frontDeskRunID,
+		NebulaAPIURL: srv.URL,
+		NebulaToken:  "test-token",
+	}
+
+	// First session: adopt the run and let it ingest the mail event and the phase report.
+	host1 := newHostSwarms(cfg, st, clk)
+	host1.importer.Roots = []string{filepath.Join(root, ".swarm")}
+	host1.watcher = adopt.FormatWatcher{Nebula: noopAdoptWatcher{}}
+	host1.importer.Loops = host1.watcher
+	host1.probe.PR = nil
+	adoption1, why := newAdoption(t.Context(), cfg, host1, "orca-chat:front-desk", nil, st, clk, nil, nil)
+	if adoption1 == nil {
+		t.Fatalf("newAdoption failed: %s", why)
+	}
+	if _, err := adoption1.Adopt(t.Context(), runID); err != nil {
+		t.Fatalf("Adopt 1: %v", err)
+	}
+
+	waitForCondition(t, 3*time.Second, func() bool {
+		mailEvs, _ := st.Events().List(t.Context(), store.EventFilter{RunID: runID, Kinds: []store.EventKind{store.EventMail}})
+		repEvs, _ := st.Events().List(t.Context(), store.EventFilter{RunID: runID, Kinds: []store.EventKind{store.EventLaneReport}})
+		return len(mailEvs) >= 1 && len(repEvs) >= 1
+	})
+	if closer, ok := adoption1.Driver.(interface{ Close(context.Context) error }); ok {
+		if err := closer.Close(t.Context()); err != nil {
+			t.Fatalf("Close 1: %v", err)
+		}
+	}
+
+	mailBefore, _ := st.Events().List(t.Context(), store.EventFilter{RunID: runID, Kinds: []store.EventKind{store.EventMail}})
+	repBefore, _ := st.Events().List(t.Context(), store.EventFilter{RunID: runID, Kinds: []store.EventKind{store.EventLaneReport}})
+	if len(mailBefore) != 1 || len(repBefore) != 1 {
+		t.Fatalf("before restart: mail=%d lane_report=%d, want 1 and 1", len(mailBefore), len(repBefore))
+	}
+
+	// Simulate /restart: construct fresh hostSwarms and adoption service on the same store and call RestartHeld.
+	clk.Advance(time.Minute)
+	host2 := newHostSwarms(cfg, st, clk)
+	host2.importer.Roots = []string{filepath.Join(root, ".swarm")}
+	host2.watcher = adopt.FormatWatcher{Nebula: noopAdoptWatcher{}}
+	host2.importer.Loops = host2.watcher
+	host2.probe.PR = nil
+	adoption2, _ := newAdoption(t.Context(), cfg, host2, "orca-chat:front-desk", nil, st, clk, nil, nil)
+	backend2 := chatui.NewStoreBackend(st, frontDeskRunID)
+	backend2.FrontDesk = frontDeskRunID
+	backend2.Adoption = adoption2
+	restarted, err := backend2.RestartHeld(t.Context())
+	if err != nil || len(restarted) != 1 {
+		t.Fatalf("RestartHeld = %+v, err=%v", restarted, err)
+	}
+	// Wait for at least one mailbox poll after restart.
+	mailMu.Lock()
+	pollsBefore := len(mailCursors)
+	mailMu.Unlock()
+	waitForCondition(t, 3*time.Second, func() bool {
+		mailMu.Lock()
+		pollsNow := len(mailCursors)
+		mailMu.Unlock()
+		return pollsNow > pollsBefore
+	})
+	if closer, ok := adoption2.Driver.(interface{ Close(context.Context) error }); ok {
+		_ = closer.Close(t.Context())
+	}
+
+	mailAfter, _ := st.Events().List(t.Context(), store.EventFilter{RunID: runID, Kinds: []store.EventKind{store.EventMail}})
+	repAfter, _ := st.Events().List(t.Context(), store.EventFilter{RunID: runID, Kinds: []store.EventKind{store.EventLaneReport}})
+	if len(mailAfter) != 1 {
+		t.Fatalf("duplicate mail events after restart: got %d (%+v), want 1", len(mailAfter), mailAfter)
+	}
+	if len(repAfter) != 1 {
+		t.Fatalf("duplicate lane_report events after restart: got %d (%+v), want 1", len(repAfter), repAfter)
+	}
+	mailMu.Lock()
+	lastCursor := mailCursors[len(mailCursors)-1]
+	mailMu.Unlock()
+	if lastCursor != "cur-1" {
+		t.Fatalf("expected restarted mailbox watch to use saved cursor cur-1, got %q (all=%v)", lastCursor, mailCursors)
+	}
+}
+
+type noopAdoptLabeler struct{}
+
+func (noopAdoptLabeler) RunOrchestrator(context.Context, string) (string, error) {
+	return "claude", nil
+}
+func (noopAdoptLabeler) SetRunOrchestrator(context.Context, string, string) error { return nil }
+
+type noopAdoptWatcher struct{}
+
+func (noopAdoptWatcher) Running(context.Context, string) ([]int, error) { return nil, nil }
+func (noopAdoptWatcher) Stop(context.Context, []int) error              { return nil }
+func (noopAdoptWatcher) Start(context.Context, string) error            { return nil }
 
 type testLabeler struct{}
 

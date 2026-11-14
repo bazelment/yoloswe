@@ -372,6 +372,49 @@ func BuildSnapshot(
 		}
 	}
 
+	if batchHasLaneMail(events) {
+		var priorReports []string
+		if notes, nErr := st.Notes().List(ctx, store.NoteFilter{RunID: runID}); nErr == nil {
+			for i := range notes {
+				nt := notes[i]
+				if strings.TrimSpace(nt.Text) == "" {
+					continue
+				}
+				label := cmp.Or(strings.TrimSpace(nt.TaskID), "run")
+				if nt.Phase != "" {
+					label += "/" + nt.Phase
+				}
+				priorReports = append(priorReports, fmt.Sprintf("- [%s] %s\n", label, singleLine(truncateText(nt.Text, cfg.MaxItemExcerptBytes, &truncated))))
+			}
+		}
+		if repEvs, rErr := st.Events().List(ctx, store.EventFilter{RunID: runID, Kinds: []store.EventKind{store.EventLaneReport}}); rErr == nil {
+			for i := max(len(repEvs)-10, 0); i < len(repEvs); i++ {
+				rev := repEvs[i]
+				text := strings.TrimSpace(cmp.Or(rev.Summary, string(rev.Payload)))
+				if text == "" {
+					continue
+				}
+				priorReports = append(priorReports, fmt.Sprintf("- [lane=%s event=%s] %s\n", cmp.Or(rev.LaneID, "-"), cmp.Or(rev.ID, fmt.Sprintf("seq-%d", rev.Seq)), singleLine(truncateText(text, cfg.MaxItemExcerptBytes, &truncated))))
+			}
+		}
+		fmt.Fprintf(&b, "\n## Prior Reports (%d)\n", len(priorReports))
+		if len(priorReports) == 0 {
+			b.WriteString("(none)\n")
+		} else {
+			reportBudget := max(maxTotalBytes/10, 512)
+			secStart := b.Len()
+			for i, entry := range priorReports {
+				omitted := fmt.Sprintf("... (%d more prior reports omitted for token budget)\n", len(priorReports)-i)
+				if b.Len()-secStart+len(entry)+len(omitted) > reportBudget {
+					truncated = true
+					b.WriteString(omitted)
+					break
+				}
+				b.WriteString(entry)
+			}
+		}
+	}
+
 	fmt.Fprintf(&b, "\n## Judgment Event Batch (%d)\n", len(events))
 	if len(events) == 0 {
 		b.WriteString("(none)\n")

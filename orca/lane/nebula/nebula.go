@@ -243,6 +243,32 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 		seen := map[int64]bool{}
 		started := map[string]bool{}
 		reported := map[string]string{}
+		if existing, err := d.events.List(ctx, store.EventFilter{RunID: runID}); err == nil {
+			for i := range existing {
+				ev := &existing[i]
+				if ev.Source != "lane.watch" && !strings.HasPrefix(ev.Source, "nebula:terminal:") {
+					continue
+				}
+				seen[ev.Seq] = true
+				if ev.Kind == store.EventLaneReport {
+					var p StreamEventPayload
+					if json.Unmarshal(ev.Payload, &p) == nil && p.Report != nil {
+						termID := cmp.Or(p.TerminalID, p.Report.TerminalID)
+						if p.TerminalEvent != nil && termID == "" {
+							termID = p.TerminalEvent.TerminalID
+						}
+						key := reportKey(termID, p.Report)
+						reported[key] = key
+						continue
+					}
+					var rep lane.PhaseReport
+					if json.Unmarshal(ev.Payload, &rep) == nil && rep.Outcome != "" {
+						key := reportKey(rep.TerminalID, &rep)
+						reported[key] = key
+					}
+				}
+			}
+		}
 		interval := d.pollInterval
 		if interval <= 0 {
 			interval = 50 * time.Millisecond
@@ -1390,7 +1416,7 @@ func (d *Driver) consumeSSEStream(
 		if err != nil {
 			return false, err
 		}
-		if ok {
+		if ok && !hasDuplicateStreamLaneReport(ctx, events, storeEv) {
 			if _, err := events.Append(ctx, storeEv); err != nil {
 				return false, err
 			}
@@ -1601,6 +1627,48 @@ func isStopTurnOutcome(outcome string) bool {
 	default:
 		return false
 	}
+}
+
+func hasDuplicateStreamLaneReport(ctx context.Context, events store.EventStore, candidate store.Event) bool {
+	if candidate.Kind != store.EventLaneReport || events == nil {
+		return false
+	}
+	existing, err := events.List(ctx, store.EventFilter{
+		RunID:  candidate.RunID,
+		LaneID: candidate.LaneID,
+		Kinds:  []store.EventKind{store.EventLaneReport},
+	})
+	if err != nil || len(existing) == 0 {
+		return false
+	}
+	var candPayload StreamEventPayload
+	_ = json.Unmarshal(candidate.Payload, &candPayload)
+	candKey := ""
+	if candPayload.Report != nil {
+		candKey = reportKey(candPayload.TerminalID, candPayload.Report)
+	}
+	for i := range existing {
+		ev := &existing[i]
+		if ev.Source == candidate.Source && ev.Summary == candidate.Summary {
+			var p StreamEventPayload
+			if json.Unmarshal(ev.Payload, &p) == nil && p.Report != nil && candKey != "" {
+				if reportKey(p.TerminalID, p.Report) == candKey {
+					return true
+				}
+				continue
+			}
+			return true
+		}
+		if candKey != "" {
+			var rep lane.PhaseReport
+			if json.Unmarshal(ev.Payload, &rep) == nil && rep.Outcome != "" {
+				if reportKey(cmp.Or(rep.TerminalID, candPayload.TerminalID), &rep) == candKey {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // PollSessionUsage polls session terminal usage and appends stall/usage events

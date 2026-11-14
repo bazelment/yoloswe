@@ -23,6 +23,7 @@ import (
 	"github.com/bazelment/yoloswe/orca/clock"
 	memorychat "github.com/bazelment/yoloswe/orca/concierge"
 	"github.com/bazelment/yoloswe/orca/controller"
+	"github.com/bazelment/yoloswe/orca/mailbox"
 	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
@@ -1282,6 +1283,17 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 		}
 	}
 
+	if freshDirs, dErr := c.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true}); dErr == nil {
+		dirs = freshDirs
+	}
+	openQs := c.openQuestionsForRun(ctx, runID, dirs)
+	if len(openQs) > 0 {
+		fmt.Fprintf(&b, "\nOpen Questions (%d):\n", len(openQs))
+		for _, q := range openQs {
+			fmt.Fprintf(&b, "- %s\n", q)
+		}
+	}
+
 	fmt.Fprintf(&b, "\nActive Directives (%d):\n", len(dirs))
 	for i := range dirs {
 		d := dirs[i]
@@ -1293,6 +1305,34 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 
 	fmt.Fprintf(&b, "\nMetrics: %s\n", metrics.Summary())
 	return b.String(), nil
+}
+
+func (c *Concierge) openQuestionsForRun(ctx context.Context, runID string, dirs []store.Directive) []string {
+	if c.store == nil {
+		return nil
+	}
+	now := c.clock.Now().UTC()
+	var out []string
+	for i := range dirs {
+		d := &dirs[i]
+		if !strings.HasPrefix(d.Ref, "owner_ask:") || (d.ExpiresAt != nil && !now.Before(*d.ExpiresAt)) {
+			continue
+		}
+		var ask controller.OwnerAsk
+		if err := json.Unmarshal([]byte(d.Text), &ask); err != nil {
+			continue
+		}
+		laneID := cmp.Or(ask.LaneID, d.Scope, "run")
+		age := mailbox.FormatAge(now, d.CreatedAt)
+		out = append(out, fmt.Sprintf("%s: %s (lane %s; age %s)", ask.ID, ask.Question, laneID, age))
+	}
+	if laneQs, err := mailbox.OpenUnescalatedQuestions(ctx, c.store, runID, now); err == nil {
+		for i := range laneQs {
+			q := laneQs[i]
+			out = append(out, fmt.Sprintf("%s: %s (lane %s; age %s)", q.ID, q.Question, cmp.Or(q.LaneID, "run"), cmp.Or(q.Age, "0s")))
+		}
+	}
+	return out
 }
 
 func (c *Concierge) probeHeldLanes(
@@ -1385,6 +1425,17 @@ func (c *Concierge) laneNowParts(
 	if hl.Report != "" {
 		parts = append(parts, fmt.Sprintf("latest report %s: %s", filepath.Base(hl.ReportPath), hl.Report))
 	}
+	if c.store != nil {
+		now := c.clock.Now().UTC()
+		if laneQs, err := mailbox.OpenUnescalatedQuestions(ctx, c.store, runID, now); err == nil {
+			for i := range laneQs {
+				q := laneQs[i]
+				if q.LaneID == ln.ID {
+					parts = append(parts, fmt.Sprintf("open question %s (lane %s, age %s): %s", q.ID, ln.ID, cmp.Or(q.Age, "0s"), q.Question))
+				}
+			}
+		}
+	}
 	return parts
 }
 
@@ -1398,14 +1449,25 @@ func (c *Concierge) laneNextStep(
 	if ln.Status.Terminal() {
 		return fmt.Sprintf("nothing (lane %s)", ln.Status)
 	}
+	now := c.clock.Now().UTC()
 	for i := range dirs {
 		d := &dirs[i]
 		if d.Scope == ln.ID && strings.HasPrefix(d.Ref, "owner_ask:") {
 			var ask controller.OwnerAsk
 			if err := json.Unmarshal([]byte(d.Text), &ask); err == nil && ask.Question != "" {
-				return "awaiting owner answer: " + ask.Question
+				return fmt.Sprintf("awaiting owner answer (lane %s, age %s): %s", ln.ID, mailbox.FormatAge(now, d.CreatedAt), ask.Question)
 			}
 			return "awaiting owner answer"
+		}
+	}
+	if c.store != nil && run != nil {
+		if laneQs, err := mailbox.OpenUnescalatedQuestions(ctx, c.store, run.ID, now); err == nil {
+			for i := range laneQs {
+				q := laneQs[i]
+				if q.LaneID == ln.ID {
+					return fmt.Sprintf("awaiting answer to %s (lane %s, age %s): %s", q.ID, ln.ID, cmp.Or(q.Age, "0s"), q.Question)
+				}
+			}
 		}
 	}
 	if hl.Next != "" {

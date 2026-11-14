@@ -17,6 +17,7 @@ import (
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/lane"
+	"github.com/bazelment/yoloswe/orca/mailbox"
 	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
@@ -67,6 +68,7 @@ type Config struct {
 	HardBatchModel string
 	SystemPrompt   string
 	ThreadID       string
+	Mailboxes      []mailbox.Mailbox
 	Invariants     []Invariant
 	Snapshot       SnapshotConfig
 	MaxTurns       int
@@ -168,6 +170,19 @@ func (d *Dispatcher) laneDriver() lane.LaneDriver {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.driver
+}
+
+// SetMailboxes installs the run mailboxes used to answer or reply to lane mail.
+func (d *Dispatcher) SetMailboxes(boxes ...mailbox.Mailbox) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cfg.Mailboxes = slices.Clone(boxes)
+}
+
+func (d *Dispatcher) mailboxes() []mailbox.Mailbox {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.cfg.Mailboxes)
 }
 
 // Judge implements controller.Judge by executing a fresh Dispatcher turn for events.
@@ -352,10 +367,10 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	state := &turnExecState{
 		threadID:      threadID,
 		turnID:        turnID,
-		events:        events,
 		pinnedRecipes: make(map[string]recipe.Recipe),
 		turnUsage:     make(map[int]model.Usage),
 		turnUsed:      make(map[int]bool),
+		events:        events,
 		traceID:       turnID,
 		input:         snap.Text,
 	}
@@ -510,17 +525,32 @@ func (d *Dispatcher) selectModel(events []store.Event) string {
 
 // toolsForBatch drops the read.* tools from a batch that names no lane: they
 // only expand a lane's truncated excerpt, and a model offered them anyway
-// invents a lane ID.
+// invents a lane ID. mail.answer is offered only when the batch carries lane mail.
 func toolsForBatch(defs []model.ToolDefinition, events []store.Event) []model.ToolDefinition {
-	if batchNamesLane(events) {
+	hasLane := batchNamesLane(events)
+	hasLaneMail := batchHasLaneMail(events)
+	if hasLane && hasLaneMail {
 		return defs
 	}
-	return slices.DeleteFunc(slices.Clone(defs), func(def model.ToolDefinition) bool { return isReadOnlyTool(def.Name) })
+	return slices.DeleteFunc(slices.Clone(defs), func(def model.ToolDefinition) bool {
+		if !hasLane && isReadOnlyTool(def.Name) {
+			return true
+		}
+		if !hasLaneMail && def.Name == ToolMailAnswer {
+			return true
+		}
+		return false
+	})
 }
 
 // batchNamesLane reports whether any event of the batch is about a lane.
 func batchNamesLane(events []store.Event) bool {
 	return slices.ContainsFunc(events, func(ev store.Event) bool { return strings.TrimSpace(ev.LaneID) != "" })
+}
+
+// batchHasLaneMail reports whether any event in the batch is an inbound lane mail message.
+func batchHasLaneMail(events []store.Event) bool {
+	return len(extractBatchLaneMails(events)) > 0
 }
 
 func isHardBatch(events []store.Event) bool {
@@ -556,6 +586,12 @@ var dispatcherToolDefs = []model.ToolDefinition{
 	}]()},
 }
 
+var mailAnswerToolDef = model.ToolDefinition{
+	Name:        ToolMailAnswer,
+	Description: "Answer a lane mail question or reply to a lane mail note from what orca knows (run objective, backlog, prior reports). When only the owner can decide, call owner.ask instead",
+	InputSchema: model.SchemaFor[MailAnswerParams](),
+}
+
 func (d *Dispatcher) buildToolRegistry(runID string, state *turnExecState) *model.ToolRegistry {
 	reg := model.NewToolRegistry()
 	for i := range dispatcherToolDefs {
@@ -564,6 +600,9 @@ func (d *Dispatcher) buildToolRegistry(runID string, state *turnExecState) *mode
 			return d.handleRawToolCall(ctx, runID, state, def.Name, raw)
 		})
 	}
+	reg.Register(mailAnswerToolDef, func(ctx context.Context, raw json.RawMessage) (string, error) {
+		return d.handleRawToolCall(ctx, runID, state, mailAnswerToolDef.Name, raw)
+	})
 	return reg
 }
 
@@ -805,12 +844,14 @@ func (d *Dispatcher) applyVettedAction(
 		return d.applyLaneSpawn(ctx, runID, view, *act.LaneSpawn)
 	case ToolLaneSteer:
 		return d.applyLaneSteer(ctx, runID, view, *act.LaneSteer)
+	case ToolMailAnswer:
+		return d.applyMailAnswer(ctx, runID, state, view, *act.MailAnswer)
 	case ToolLaneRetry:
 		return d.applyLaneRetry(ctx, runID, view, *act.LaneRetry)
 	case ToolLaneStop:
 		return d.applyLaneStop(ctx, runID, view, *act.LaneStop)
 	case ToolOwnerAsk:
-		return d.applyOwnerAsk(ctx, runID, view, *act.OwnerAsk)
+		return d.applyOwnerAsk(ctx, runID, state, view, *act.OwnerAsk)
 	case ToolOwnerAnswer:
 		if d.cfg.OnOwnerAnswer == nil {
 			return "", errors.New("owner answer handler is not configured")
@@ -1250,7 +1291,7 @@ func (d *Dispatcher) applyLaneStop(ctx context.Context, runID string, view *Stat
 	return fmt.Sprintf("stopped lane %s (%s)", ln.ID, p.Reason), nil
 }
 
-func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, view *StateView, p OwnerAskParams) (string, error) {
+func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, state *turnExecState, view *StateView, p OwnerAskParams) (string, error) {
 	now := d.clock.Now().UTC()
 	dl, err := parseFutureTime(now, p.Deadline)
 	if err != nil {
@@ -1261,15 +1302,38 @@ func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, view *Stat
 		askID = d.nextID("ask")
 	}
 
+	var sourceEventID, sourceMessageID string
+	laneID := strings.TrimSpace(p.LaneID)
+	msgID := strings.TrimSpace(p.MessageID)
+	var batchEvents []store.Event
+	if state != nil {
+		batchEvents = state.events
+	}
+	bm, hasQuestion, matchErr := d.resolveLaneMailTarget(ctx, runID, batchEvents, msgID, laneID, false, func(m batchLaneMail) bool {
+		return m.msg.IsQuestion()
+	})
+	if matchErr != nil {
+		return "", matchErr
+	}
+	if hasQuestion {
+		sourceEventID = bm.event.ID
+		sourceMessageID = bm.msg.ID
+		if laneID == "" {
+			laneID = bm.msg.LaneID
+		}
+	}
+
 	ask := controller.OwnerAsk{
-		ID:        askID,
-		RunID:     runID,
-		LaneID:    strings.TrimSpace(p.LaneID),
-		Question:  strings.TrimSpace(p.Question),
-		Options:   slices.Clone(p.Options),
-		Default:   strings.TrimSpace(p.Default),
-		SteerNote: strings.TrimSpace(p.SteerNote),
-		Deadline:  dl,
+		ID:              askID,
+		RunID:           runID,
+		LaneID:          laneID,
+		Question:        strings.TrimSpace(p.Question),
+		Options:         slices.Clone(p.Options),
+		Default:         strings.TrimSpace(p.Default),
+		SteerNote:       strings.TrimSpace(p.SteerNote),
+		Deadline:        dl,
+		SourceEventID:   sourceEventID,
+		SourceMessageID: sourceMessageID,
 	}
 	if err := ask.Validate(); err != nil {
 		return "", err
@@ -1840,4 +1904,246 @@ func removePhaseFromRecipe(r recipe.Recipe, phaseToRemove string) recipe.Recipe 
 	}
 	r.Transitions = updatedTransitions
 	return r
+}
+
+//nolint:govet // logical field grouping
+type batchLaneMail struct {
+	event store.Event
+	msg   mailbox.Message
+}
+
+func extractBatchLaneMails(events []store.Event) []batchLaneMail {
+	var out []batchLaneMail
+	for i := range events {
+		ev := events[i]
+		if ev.Kind != store.EventMail || len(ev.Payload) == 0 {
+			continue
+		}
+		var msg mailbox.Message
+		if err := json.Unmarshal(ev.Payload, &msg); err != nil {
+			continue
+		}
+		msg.Normalize()
+		if msg.LaneID == "" && ev.LaneID != "" {
+			msg.LaneID = ev.LaneID
+		}
+		if msg.From == "owner" || msg.LaneID == "" {
+			continue
+		}
+		if msg.IsClosedOrAnswered() {
+			continue
+		}
+		out = append(out, batchLaneMail{event: ev, msg: msg})
+	}
+	return out
+}
+
+func matchLaneMailSlice(
+	mails []batchLaneMail,
+	messageID, laneID string,
+	requireTarget bool,
+	pred func(batchLaneMail) bool,
+) (batchLaneMail, bool, error) {
+	messageID = strings.TrimSpace(messageID)
+	laneID = strings.TrimSpace(laneID)
+	if messageID != "" {
+		for i := range mails {
+			bm := &mails[i]
+			if bm.msg.ID == messageID || bm.event.ID == messageID {
+				if pred != nil && !pred(*bm) {
+					return batchLaneMail{}, false, fmt.Errorf("%w: mail %q does not match expected mail kind", store.ErrInvalidArgument, messageID)
+				}
+				if laneID != "" && bm.msg.LaneID != "" && bm.msg.LaneID != laneID {
+					return batchLaneMail{}, false, fmt.Errorf("%w: mail %q belongs to lane %q, not %q", store.ErrInvalidArgument, messageID, bm.msg.LaneID, laneID)
+				}
+				return *bm, true, nil
+			}
+		}
+		return batchLaneMail{}, false, nil
+	}
+	if !requireTarget && laneID == "" {
+		return batchLaneMail{}, false, nil
+	}
+	var candidates []batchLaneMail
+	for i := range mails {
+		if pred == nil || pred(mails[i]) {
+			candidates = append(candidates, mails[i])
+		}
+	}
+	if laneID != "" {
+		var matched batchLaneMail
+		count := 0
+		for i := range candidates {
+			bm := &candidates[i]
+			if bm.msg.LaneID == laneID {
+				matched = *bm
+				count++
+			}
+		}
+		if count == 1 {
+			return matched, true, nil
+		}
+		if count > 1 && requireTarget {
+			return batchLaneMail{}, false, fmt.Errorf("%w: multiple open lane mails for lane %q in batch; specify message_id", store.ErrInvalidArgument, laneID)
+		}
+		return batchLaneMail{}, false, nil
+	}
+	if len(candidates) == 1 {
+		return candidates[0], true, nil
+	}
+	if len(candidates) > 1 && requireTarget {
+		return batchLaneMail{}, false, fmt.Errorf("%w: multiple open lane mails in batch; specify message_id or lane_id", store.ErrInvalidArgument)
+	}
+	return batchLaneMail{}, false, nil
+}
+
+func (d *Dispatcher) resolveLaneMailTarget(
+	ctx context.Context,
+	runID string,
+	batchEvents []store.Event,
+	messageID, laneID string,
+	requireTarget bool,
+	pred func(batchLaneMail) bool,
+) (batchLaneMail, bool, error) {
+	messageID = strings.TrimSpace(messageID)
+	laneID = strings.TrimSpace(laneID)
+	bm, ok, err := matchLaneMailSlice(extractBatchLaneMails(batchEvents), messageID, laneID, requireTarget, pred)
+	if err != nil || ok {
+		return bm, ok, err
+	}
+	if messageID == "" {
+		return batchLaneMail{}, false, nil
+	}
+	if d.store != nil {
+		evs, listErr := d.store.Events().List(ctx, store.EventFilter{
+			RunID: runID,
+			Kinds: []store.EventKind{store.EventMail},
+		})
+		if listErr != nil {
+			return batchLaneMail{}, false, listErr
+		}
+		bm, ok, err = matchLaneMailSlice(extractBatchLaneMails(evs), messageID, laneID, requireTarget, pred)
+		if err != nil {
+			return batchLaneMail{}, false, err
+		}
+		if ok {
+			if d.isMailAnswered(ctx, runID, bm.msg.ID, bm.event.ID) {
+				return batchLaneMail{}, false, fmt.Errorf("%w: lane mail %q is already answered", store.ErrInvalidArgument, messageID)
+			}
+			return bm, true, nil
+		}
+		for i := range evs {
+			var msg mailbox.Message
+			if len(evs[i].Payload) > 0 && json.Unmarshal(evs[i].Payload, &msg) == nil {
+				msg.Normalize()
+				if (msg.ID == messageID || evs[i].ID == messageID) && msg.IsClosedOrAnswered() {
+					return batchLaneMail{}, false, fmt.Errorf("%w: lane mail %q is already closed or answered", store.ErrInvalidArgument, messageID)
+				}
+			}
+		}
+	}
+	return batchLaneMail{}, false, fmt.Errorf("%w: unknown lane mail message_id %q", store.ErrNotFound, messageID)
+}
+
+func (d *Dispatcher) isMailAnswered(ctx context.Context, runID, msgID, eventID string) bool {
+	if d.store == nil {
+		return false
+	}
+	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID})
+	if err != nil {
+		return false
+	}
+	for i := range dirs {
+		ref := dirs[i].Ref
+		if !strings.HasPrefix(ref, "answered:") {
+			continue
+		}
+		for _, part := range strings.Split(strings.TrimPrefix(ref, "answered:"), "|") {
+			part = strings.TrimSpace(part)
+			if part != "" && (part == msgID || part == eventID) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (d *Dispatcher) applyMailAnswer(
+	ctx context.Context,
+	runID string,
+	state *turnExecState,
+	view *StateView,
+	p MailAnswerParams,
+) (string, error) {
+	msgID := strings.TrimSpace(p.MessageID)
+	laneID := strings.TrimSpace(p.LaneID)
+	answer := strings.TrimSpace(p.Answer)
+
+	var batchEvents []store.Event
+	if state != nil {
+		batchEvents = state.events
+	}
+	bm, hasMail, err := d.resolveLaneMailTarget(ctx, runID, batchEvents, msgID, laneID, true, nil)
+	if err != nil {
+		return "", err
+	}
+	if !hasMail {
+		return "", errors.New("mail.answer requires a message_id or matching lane mail in the batch")
+	}
+	if msgID == "" {
+		msgID = bm.msg.ID
+	}
+	if laneID == "" {
+		laneID = bm.msg.LaneID
+	}
+	if err := d.respondToLaneMail(ctx, runID, bm, answer); err != nil {
+		return "", err
+	}
+	if laneID != "" && view != nil {
+		if ln, ok := view.Lane(laneID); ok {
+			if drv := d.laneDriver(); drv != nil && (ln.SessionID != "" || ln.TerminalID != "") {
+				if err := drv.Steer(ctx, lane.SteerRequest{
+					RunID:      runID,
+					LaneID:     ln.ID,
+					SessionID:  ln.SessionID,
+					TerminalID: ln.TerminalID,
+					Message:    answer,
+				}); err != nil {
+					return "", err
+				}
+			}
+			if ln.Status == lane.StatusBlocked {
+				ln.Status = lane.StatusRunning
+				ln.LastEventAt = d.clock.Now().UTC()
+				if err := d.store.Lanes().Upsert(ctx, ln); err != nil {
+					return "", err
+				}
+			}
+		}
+	}
+	return fmt.Sprintf("answered lane mail %s for lane %s", cmp.Or(msgID, bm.event.ID, "-"), cmp.Or(laneID, "-")), nil
+}
+
+func (d *Dispatcher) respondToLaneMail(ctx context.Context, runID string, bm batchLaneMail, answer string) error {
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return nil
+	}
+	msg := bm.msg
+	msg.RunID = cmp.Or(msg.RunID, runID)
+	for _, box := range d.mailboxes() {
+		if err := mailbox.Respond(ctx, box, msg, answer); err != nil {
+			return err
+		}
+	}
+	if err := mailbox.MarkAnswered(ctx, d.store, runID, msg.LaneID, msg.ID, bm.event.ID, answer); err != nil {
+		return err
+	}
+	_, _ = d.store.Notes().Append(ctx, store.RunNote{
+		RunID:     runID,
+		TaskID:    msg.LaneID,
+		Text:      fmt.Sprintf("mail answer (%s): %s", cmp.Or(msg.ID, bm.event.ID), answer),
+		CreatedAt: d.clock.Now().UTC(),
+	})
+	return nil
 }

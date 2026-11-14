@@ -31,6 +31,7 @@ const (
 	ToolLaneStop       = "lane.stop"
 	ToolOwnerAsk       = "owner.ask"
 	ToolOwnerAnswer    = "owner.answer"
+	ToolMailAnswer     = "mail.answer"
 	ToolDirectiveNote  = "directive.note"
 	ToolPlannerRequest = "planner.request"
 	ToolReadLaneReport = "read.lane_report"
@@ -121,6 +122,7 @@ type LaneStopParams struct {
 type OwnerAskParams struct {
 	ID        string   `json:"id,omitempty" jsonschema:"description=Optional unique ask ID"`
 	LaneID    string   `json:"lane_id,omitempty" jsonschema:"description=Optional lane ID blocked on this question"`
+	MessageID string   `json:"message_id,omitempty" jsonschema:"description=Optional inbound mail message ID this ask escalates"`
 	Question  string   `json:"question" jsonschema:"required,description=One-sentence decision question for the owner"`
 	Default   string   `json:"default" jsonschema:"required" jsonschema_description:"Option auto-applied at deadline. If it is not already one of options it is added as an option, so a card's own stated default can be passed as is"`
 	Deadline  string   `json:"deadline" jsonschema:"required" jsonschema_description:"Deadline as RFC3339 timestamp, positive duration (30m, 2h, 7d) or UTC clock time (05:30Z = next occurrence)"`
@@ -132,6 +134,14 @@ type OwnerAskParams struct {
 type OwnerAnswerParams struct {
 	AskID  string `json:"ask_id" jsonschema:"required,description=ID of an open owner ask in the snapshot"`
 	Answer string `json:"answer" jsonschema:"required,description=The owner's answer to the ask"`
+}
+
+// MailAnswerParams holds parameters for the mail.answer tool.
+type MailAnswerParams struct {
+	MessageID string `json:"message_id,omitempty" jsonschema:"description=Inbound mail message ID to answer or reply to"`
+	LaneID    string `json:"lane_id,omitempty" jsonschema:"description=Lane ID that sent the mail"`
+	Answer    string `json:"answer" jsonschema:"required,description=Answer or reply body to send on the lane mail message"`
+	Reason    string `json:"reason,omitempty" jsonschema:"description=Optional reason for this answer"`
 }
 
 // DirectiveNoteParams holds parameters for the directive.note tool.
@@ -185,6 +195,7 @@ type ProposedAction struct {
 	LaneStop       *LaneStopParams       `json:"-"`
 	OwnerAsk       *OwnerAskParams       `json:"-"`
 	OwnerAnswer    *OwnerAnswerParams    `json:"-"`
+	MailAnswer     *MailAnswerParams     `json:"-"`
 	DirectiveNote  *DirectiveNoteParams  `json:"-"`
 	PlannerRequest *PlannerRequestParams `json:"-"`
 	ReadLaneReport *ReadLaneReportParams `json:"-"`
@@ -232,7 +243,7 @@ func isKnownTool(tool string) bool {
 	switch tool {
 	case ToolBacklogAdd, ToolBacklogUpdate, ToolBacklogReorder, ToolBacklogClose,
 		ToolLaneSpawn, ToolLaneSteer, ToolLaneRetry, ToolLaneStop,
-		ToolOwnerAsk, ToolOwnerAnswer, ToolDirectiveNote, ToolPlannerRequest,
+		ToolOwnerAsk, ToolOwnerAnswer, ToolMailAnswer, ToolDirectiveNote, ToolPlannerRequest,
 		ToolReadLaneReport, ToolReadPR, ToolReadCI:
 		return true
 	default:
@@ -241,10 +252,14 @@ func isKnownTool(tool string) bool {
 }
 
 type jsonAliases struct {
+	ID        string `json:"id"`
+	MsgID     string `json:"msg_id"`
 	Item      string `json:"item"`
 	Lane      string `json:"lane"`
 	Recipe    string `json:"recipe"`
 	Message   string `json:"message"`
+	Body      string `json:"body"`
+	Note      string `json:"note"`
 	Brief     string `json:"brief"`
 	Text      string `json:"text"`
 	ExpiresAt string `json:"expires_at"`
@@ -376,8 +391,10 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 		if err != nil {
 			return act, err
 		}
-		if p.LaneID == "" {
-			p.LaneID = decodeAliases(trimmed).Lane
+		if p.LaneID == "" || p.MessageID == "" {
+			a := decodeAliases(trimmed)
+			p.LaneID = cmp.Or(p.LaneID, a.Lane)
+			p.MessageID = cmp.Or(p.MessageID, a.MsgID)
 		}
 		p.Options, p.Default = canonicalizeAskDefault(p.Options, p.Default)
 		act.OwnerAsk = p
@@ -391,6 +408,21 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 		}
 		act.OwnerAnswer = p
 		act.Reason = strings.TrimSpace(p.Answer)
+
+	case ToolMailAnswer:
+		p, err := decodeParams[MailAnswerParams](canonical, trimmed)
+		if err != nil {
+			return act, err
+		}
+		if p.MessageID == "" || p.LaneID == "" || p.Answer == "" {
+			a := decodeAliases(trimmed)
+			p.MessageID = cmp.Or(p.MessageID, a.ID, a.MsgID)
+			p.LaneID = cmp.Or(p.LaneID, a.Lane)
+			p.Answer = cmp.Or(p.Answer, a.Body, a.Note, a.Message, a.Text)
+		}
+		act.MailAnswer = p
+		act.LaneID = p.LaneID
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Answer))
 
 	case ToolDirectiveNote:
 		p, err := decodeParams[DirectiveNoteParams](canonical, trimmed)
@@ -1012,6 +1044,12 @@ func checkLaneExists(st *StateView, act ProposedAction) error {
 				return fmt.Errorf("lane %q is not in the store", act.OwnerAsk.LaneID)
 			}
 		}
+	case ToolMailAnswer:
+		if act.MailAnswer != nil && strings.TrimSpace(act.MailAnswer.LaneID) != "" {
+			if _, ok := st.Lane(act.MailAnswer.LaneID); !ok {
+				return fmt.Errorf("lane %q is not in the store", act.MailAnswer.LaneID)
+			}
+		}
 	}
 	return nil
 }
@@ -1283,6 +1321,15 @@ func checkDirectiveAndPlannerInvariants(st *StateView, act ProposedAction) error
 		p := act.PlannerRequest
 		if p == nil || strings.TrimSpace(p.Reason) == "" {
 			return errors.New("reason is required for planner.request")
+		}
+
+	case ToolMailAnswer:
+		p := act.MailAnswer
+		if p == nil || strings.TrimSpace(p.Answer) == "" {
+			return errors.New("answer is required for mail.answer")
+		}
+		if strings.TrimSpace(p.MessageID) == "" && strings.TrimSpace(p.LaneID) == "" {
+			return errors.New("message_id or lane_id is required for mail.answer")
 		}
 	}
 	return nil

@@ -17,6 +17,7 @@ import (
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
+	"github.com/bazelment/yoloswe/orca/mailbox"
 	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
@@ -855,6 +856,14 @@ func (c *Concierge) execStatus(ctx context.Context, runID string, p StatusParams
 		)
 	}
 
+	if laneQs, err := mailbox.OpenUnescalatedQuestions(ctx, c.store, runID, now); err == nil && len(laneQs) > 0 {
+		fmt.Fprintf(&b, "\nOpen Lane Questions (%d):\n", len(laneQs))
+		for i := range laneQs {
+			q := laneQs[i]
+			fmt.Fprintf(&b, "- %s [lane=%s age=%s]: %s\n", q.ID, cmp.Or(q.LaneID, "run"), cmp.Or(q.Age, "0s"), q.Question)
+		}
+	}
+
 	fmt.Fprintf(&b, "\nActive Directives (%d):\n", len(directives))
 	for i := range directives {
 		d := directives[i]
@@ -972,6 +981,22 @@ func (c *Concierge) execLaneShow(ctx context.Context, runID string, p LaneShowPa
 			}
 			if rep.Summary != "" {
 				fmt.Fprintf(&b, "  Summary: %s\n", rep.Summary)
+			}
+		}
+	}
+
+	if laneQs, qErr := mailbox.OpenUnescalatedQuestions(ctx, c.store, runID, now); qErr == nil {
+		var openForLane []mailbox.OpenQuestion
+		for i := range laneQs {
+			if laneQs[i].LaneID == ln.ID {
+				openForLane = append(openForLane, laneQs[i])
+			}
+		}
+		if len(openForLane) > 0 {
+			fmt.Fprintf(&b, "\nOpen Lane Questions (%d):\n", len(openForLane))
+			for i := range openForLane {
+				q := openForLane[i]
+				fmt.Fprintf(&b, "- %s [lane=%s age=%s]: %s\n", q.ID, ln.ID, cmp.Or(q.Age, "0s"), q.Question)
 			}
 		}
 	}
@@ -1453,6 +1478,13 @@ func VerifyAnswerCitations(
 	for i := range recs {
 		r := recs[i]
 		addCandidate(fmt.Sprintf("%s@v%d", r.Name, r.Version))
+	}
+
+	if laneQs, qErr := mailbox.OpenLaneQuestions(ctx, st, runID, time.Now().UTC()); qErr == nil {
+		for i := range laneQs {
+			addCandidate(laneQs[i].ID)
+			addCandidate(laneQs[i].Question)
+		}
 	}
 
 	lowerAnswer := strings.ToLower(trimmed)

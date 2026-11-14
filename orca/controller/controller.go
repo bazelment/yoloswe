@@ -142,7 +142,10 @@ type Config struct {
 	StallTimeout      time.Duration
 	// StallTimeoutSet distinguishes an explicit timeout from the default.
 	StallTimeoutSet bool
-	ConcurrencyCap  int
+	// JudgeLaneMail routes inbound lane mail questions and notes to the
+	// judgment dispatcher rather than the legacy auto-ask fallback.
+	JudgeLaneMail  bool
+	ConcurrencyCap int
 }
 
 func (c Config) withDefaults() Config {
@@ -169,15 +172,16 @@ func (c Config) withDefaults() Config {
 // OwnerAsk represents a decision question posed to the owner with a mandatory
 // default option and deadline ("decide, don't ask").
 type OwnerAsk struct {
-	Deadline      time.Time `json:"deadline"`
-	ID            string    `json:"id"`
-	RunID         string    `json:"run_id,omitempty"`
-	LaneID        string    `json:"lane_id,omitempty"`
-	Question      string    `json:"question"`
-	Default       string    `json:"default"`
-	SteerNote     string    `json:"steer_note,omitempty"`
-	SourceEventID string    `json:"source_event_id,omitempty"`
-	Options       []string  `json:"options"`
+	Deadline        time.Time `json:"deadline"`
+	ID              string    `json:"id"`
+	RunID           string    `json:"run_id,omitempty"`
+	LaneID          string    `json:"lane_id,omitempty"`
+	Question        string    `json:"question"`
+	Default         string    `json:"default"`
+	SteerNote       string    `json:"steer_note,omitempty"`
+	SourceEventID   string    `json:"source_event_id,omitempty"`
+	SourceMessageID string    `json:"source_message_id,omitempty"`
+	Options         []string  `json:"options"`
 }
 
 // Validate checks that the OwnerAsk satisfies the "decide, don't ask" policy.
@@ -464,7 +468,21 @@ func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
 	}
 	// Producer timestamps and terminal identity must be retained on replay.
 	// A stable event ID prevents a replayed pulse from consuming another rung.
-	identity, _ := json.Marshal(ev)
+	// For phase reports, strip wall-clock fallback timestamps so re-polling on
+	// restart hashes to the same event ID and does not duplicate lane_report rows.
+	idEv := ev
+	if ev.Kind == lane.EventPhaseReported {
+		idEv.At = time.Time{}
+		if ev.Report != nil {
+			repCopy := *ev.Report
+			repCopy.ReportedAt = time.Time{}
+			idEv.Report = &repCopy
+		}
+		if c.hasExistingLaneReport(ctx, ev) {
+			return true
+		}
+	}
+	identity, _ := json.Marshal(idEv)
 	event := store.Event{ID: fmt.Sprintf("lane-watch-%x", sha256.Sum256(identity)), RunID: c.cfg.RunID, LaneID: ev.LaneID, Kind: kind, Source: "lane.watch", Payload: raw, Summary: ev.Text}
 	for {
 		if _, err := c.store.Events().Append(ctx, event); err == nil || errors.Is(err, store.ErrAlreadyExists) {
@@ -478,6 +496,42 @@ func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
 	}
 	c.Wake()
 	return true
+}
+
+func (c *Controller) hasExistingLaneReport(ctx context.Context, ev lane.Event) bool {
+	if ev.Report == nil || ev.LaneID == "" {
+		return false
+	}
+	evs, err := c.store.Events().List(ctx, store.EventFilter{
+		RunID:  c.cfg.RunID,
+		LaneID: ev.LaneID,
+		Kinds:  []store.EventKind{store.EventLaneReport},
+	})
+	if err != nil {
+		return false
+	}
+	wantTerm := strings.TrimSpace(cmp.Or(ev.TerminalID, ev.Report.TerminalID))
+	for i := range evs {
+		existing := &evs[i]
+		if existing.Source != "lane.watch" {
+			continue
+		}
+		var rep lane.PhaseReport
+		if len(existing.Payload) == 0 || json.Unmarshal(existing.Payload, &rep) != nil {
+			continue
+		}
+		gotTerm := strings.TrimSpace(rep.TerminalID)
+		if wantTerm != "" && gotTerm != "" && wantTerm == gotTerm &&
+			rep.Outcome == ev.Report.Outcome &&
+			rep.Phase == ev.Report.Phase &&
+			rep.Round == ev.Report.Round &&
+			rep.HeadSHA == ev.Report.HeadSHA &&
+			strings.TrimSpace(rep.Summary) == strings.TrimSpace(ev.Report.Summary) &&
+			strings.TrimSpace(rep.Raw) == strings.TrimSpace(ev.Report.Raw) {
+			return true
+		}
+	}
+	return false
 }
 
 // WatchErrors exposes stream and persistence failures while the forwarder retries.
@@ -821,40 +875,68 @@ func (c *Controller) applyOwnerAskResolution(ctx context.Context, ask OwnerAsk, 
 	if _, err := c.store.Notes().Append(ctx, store.RunNote{ID: "answer-" + ask.ID, RunID: c.cfg.RunID, TaskID: ask.LaneID, Text: "Question: " + ask.Question + "\nAnswer: " + chosenOption}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		return err
 	}
-	if ask.LaneID == "" {
-		return nil
-	}
 	// A hold option is an explicit no-op for the blocked lane. It records the
 	// owner's choice without steering or transitioning the lane to Running.
 	if strings.HasPrefix(strings.TrimSpace(chosenOption), "hold:") {
 		return nil
 	}
-	ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ask.LaneID)
-	if err != nil {
-		return nil
-	}
-	if !ln.Status.Terminal() && (ln.SessionID != "" || ln.TerminalID != "") {
-		if err := c.driver.Steer(ctx, lane.SteerRequest{
-			RunID:      c.cfg.RunID,
-			LaneID:     ln.ID,
-			SessionID:  ln.SessionID,
-			TerminalID: ln.TerminalID,
-			Message:    steerMsg,
-		}); err != nil {
-			return err
+	if ask.LaneID != "" {
+		if ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ask.LaneID); err == nil {
+			if !ln.Status.Terminal() && (ln.SessionID != "" || ln.TerminalID != "") {
+				if err := c.driver.Steer(ctx, lane.SteerRequest{
+					RunID:      c.cfg.RunID,
+					LaneID:     ln.ID,
+					SessionID:  ln.SessionID,
+					TerminalID: ln.TerminalID,
+					Message:    steerMsg,
+				}); err != nil {
+					return err
+				}
+			}
+			if ln.Status == lane.StatusBlocked {
+				ln.Status = lane.StatusRunning
+				if eventID != "" {
+					ln.LastEventID = eventID
+				}
+				ln.LastEventAt = c.clock.Now().UTC()
+				if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+					return err
+				}
+			}
 		}
 	}
-	if ln.Status == lane.StatusBlocked {
-		ln.Status = lane.StatusRunning
-		if eventID != "" {
-			ln.LastEventID = eventID
+	msgID := strings.TrimSpace(ask.SourceMessageID)
+	srcEventID := strings.TrimSpace(ask.SourceEventID)
+	if msgID == "" && srcEventID != "" {
+		msgID = c.resolveMailMessageID(ctx, srcEventID)
+	}
+	if msgID != "" || srcEventID != "" {
+		if c.mailbox != nil && msgID != "" {
+			if err := mailbox.Respond(ctx, c.mailbox, mailbox.Message{ID: msgID, RunID: c.cfg.RunID, LaneID: ask.LaneID, Question: true}, steerMsg); err != nil {
+				return err
+			}
 		}
-		ln.LastEventAt = c.clock.Now().UTC()
-		if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+		if err := mailbox.MarkAnswered(ctx, c.store, c.cfg.RunID, ask.LaneID, cmp.Or(msgID, srcEventID), cmp.Or(srcEventID, eventID), steerMsg); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (c *Controller) resolveMailMessageID(ctx context.Context, eventID string) string {
+	if c.store != nil {
+		if evs, err := c.store.Events().List(ctx, store.EventFilter{RunID: c.cfg.RunID, Kinds: []store.EventKind{store.EventMail}}); err == nil {
+			for i := range evs {
+				if evs[i].ID == eventID && len(evs[i].Payload) > 0 {
+					var msg mailbox.Message
+					if json.Unmarshal(evs[i].Payload, &msg) == nil && strings.TrimSpace(msg.ID) != "" {
+						return strings.TrimSpace(msg.ID)
+					}
+				}
+			}
+		}
+	}
+	return eventID
 }
 
 func (c *Controller) ensureLease(ctx context.Context) error {
@@ -1354,8 +1436,14 @@ func (c *Controller) handleEvent(ctx context.Context, ev *store.Event) (store.Ev
 }
 
 func (c *Controller) routeWorkerQuestion(ctx context.Context, ev *store.Event) (bool, error) {
+	if c.cfg.JudgeLaneMail {
+		return false, nil
+	}
 	var msg mailbox.Message
 	if len(ev.Payload) == 0 || json.Unmarshal(ev.Payload, &msg) != nil || !msg.Question || ev.LaneID == "" {
+		return false, nil
+	}
+	if c.cfg.AnswerQuestion == nil && strings.TrimSpace(msg.ID) != "" {
 		return false, nil
 	}
 	ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ev.LaneID)
@@ -1392,6 +1480,12 @@ func (c *Controller) routeWorkerQuestion(ctx context.Context, ev *store.Event) (
 		answer = strings.TrimSpace(answer)
 	}
 	if answer != "" {
+		if c.mailbox != nil && strings.TrimSpace(msg.ID) != "" {
+			if err := mailbox.Respond(ctx, c.mailbox, msg, answer); err != nil {
+				return false, err
+			}
+		}
+		_ = mailbox.MarkAnswered(ctx, c.store, c.cfg.RunID, ln.ID, msg.ID, ev.ID, answer)
 		if err := c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Use the task text and notes:\n" + answer}); err != nil {
 			return false, err
 		}
@@ -1427,7 +1521,7 @@ func (c *Controller) routeWorkerQuestion(ctx context.Context, ev *store.Event) (
 		if id == "" {
 			return false, errors.New("mailbox returned empty owner ask ID")
 		}
-		ask = OwnerAsk{ID: id, LaneID: ln.ID, Question: q.Ask, Options: q.Options, Default: q.Default, Deadline: q.Deadline, SourceEventID: ev.ID}
+		ask = OwnerAsk{ID: id, LaneID: ln.ID, Question: q.Ask, Options: q.Options, Default: q.Default, Deadline: q.Deadline, SourceEventID: ev.ID, SourceMessageID: strings.TrimSpace(msg.ID)}
 		if err := c.registerOwnerAsk(ctx, ask, false); err != nil {
 			return false, err
 		}
