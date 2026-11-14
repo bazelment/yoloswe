@@ -36,7 +36,7 @@ type Controllers struct {
 	clock    clock.Clock
 	judges   JudgeFactory
 	runs     map[string]*controlledRun
-	starting map[string]struct{}
+	starting map[string]*startup
 	mu       sync.Mutex
 }
 
@@ -47,8 +47,13 @@ type controlledRun struct {
 	run        Run
 }
 
+type startup struct {
+	done chan struct{}
+	err  error
+}
+
 func NewControllers(ctx context.Context, st store.Store, driver lane.LaneDriver, clk clock.Clock, judges JudgeFactory) *Controllers {
-	return &Controllers{ctx: ctx, store: st, driver: driver, clock: clk, judges: judges, runs: map[string]*controlledRun{}, starting: map[string]struct{}{}}
+	return &Controllers{ctx: ctx, store: st, driver: driver, clock: clk, judges: judges, runs: map[string]*controlledRun{}, starting: map[string]*startup{}}
 }
 
 // Wake asks an adopted controller to process pending events immediately.
@@ -77,7 +82,7 @@ func (d *Controllers) Active(runID string) bool {
 	}
 }
 
-func (d *Controllers) Start(ctx context.Context, r Run) error {
+func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	d.mu.Lock()
 	if cr := d.runs[r.ID]; cr != nil {
 		select {
@@ -88,15 +93,19 @@ func (d *Controllers) Start(ctx context.Context, r Run) error {
 			return nil
 		}
 	}
-	if _, ok := d.starting[r.ID]; ok {
+	if s, ok := d.starting[r.ID]; ok {
 		d.mu.Unlock()
-		return nil
+		<-s.done
+		return s.err
 	}
-	d.starting[r.ID] = struct{}{}
+	s := &startup{done: make(chan struct{})}
+	d.starting[r.ID] = s
 	d.mu.Unlock()
 	defer func() {
 		d.mu.Lock()
 		delete(d.starting, r.ID)
+		s.err = retErr
+		close(s.done)
 		d.mu.Unlock()
 	}()
 	journal, err := readJournal(filepath.Join(r.Dir, leaseFile))
@@ -210,6 +219,12 @@ func (d *Controllers) Start(ctx context.Context, r Run) error {
 }
 
 func (d *Controllers) Stop(ctx context.Context, r Run) error {
+	d.mu.Lock()
+	s := d.starting[r.ID]
+	d.mu.Unlock()
+	if s != nil {
+		<-s.done
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	cr := d.runs[r.ID]
@@ -363,6 +378,15 @@ func (d *Controllers) addEscalationAsk(ctx context.Context, runID string, ln *la
 
 // Close stops controllers while leaving the handover lease for another chat.
 func (d *Controllers) Close(ctx context.Context) error {
+	d.mu.Lock()
+	var starts []*startup
+	for _, s := range d.starting {
+		starts = append(starts, s)
+	}
+	d.mu.Unlock()
+	for _, s := range starts {
+		<-s.done
+	}
 	d.mu.Lock()
 	var runs []Run
 	for _, cr := range d.runs {
