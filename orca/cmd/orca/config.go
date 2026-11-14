@@ -136,43 +136,48 @@ func (m RoleModels) withDefaults(provider string) RoleModels {
 
 // Config holds the runtime configuration for orca `run` and `chat`.
 type Config struct {
-	ModelProvider     string        `json:"model_provider,omitempty"`
-	Models            RoleModels    `json:"models"`
-	RunID             string        `json:"run_id,omitempty"`
-	Goal              string        `json:"goal,omitempty"`
-	Objective         string        `json:"objective,omitempty"`
-	PlanRef           string        `json:"plan_ref,omitempty"`
-	Plan              string        `json:"plan,omitempty"`
-	Repository        string        `json:"repository,omitempty"`
-	StoreSpec         string        `json:"store,omitempty"`
-	StoreBaseDir      string        `json:"store_base_dir,omitempty"`
-	DriverKind        string        `json:"driver,omitempty"`
-	LLMGatewayURL     string        `json:"llm_gateway_url,omitempty"`
-	NebulaAPIURL      string        `json:"nebula_api_url,omitempty"`
-	NebulaToken       string        `json:"nebula_token,omitempty"`
-	HolderID          string        `json:"holder_id,omitempty"`
-	ReplayPath        string        `json:"replay_path,omitempty"`
-	RecordPath        string        `json:"record_path,omitempty"`
-	FakeScenarioPath  string        `json:"fake_scenario_path,omitempty"`
-	LogLevel          string        `json:"log_level,omitempty"`
-	LogFormat         string        `json:"log_format,omitempty"`
-	Prompt            string        `json:"prompt,omitempty"`
-	ReportDay         string        `json:"report_day,omitempty"`
-	RecipeFiles       []string      `json:"recipe_files,omitempty"`
-	LeaseTTL          time.Duration `json:"lease_ttl,omitempty"`
-	HeartbeatInterval time.Duration `json:"heartbeat_interval,omitempty"`
-	PollInterval      time.Duration `json:"poll_interval,omitempty"`
-	JudgmentDebounce  time.Duration `json:"judgment_debounce,omitempty"`
-	StallTimeout      time.Duration `json:"stall_timeout,omitempty"`
-	ConcurrencyCap    int           `json:"concurrency_cap,omitempty"`
-	MaxSteps          int           `json:"max_steps,omitempty"`
-	Once              bool          `json:"once,omitempty"`
-	Standing          bool          `json:"standing,omitempty"`
-	FakeAutoComplete  bool          `json:"fake_auto_complete,omitempty"`
-	onceSet           bool
-	standingSet       bool
-	fakeAutoSet       bool
+	ModelProvider       string        `json:"model_provider,omitempty"`
+	Models              RoleModels    `json:"models"`
+	RunID               string        `json:"run_id,omitempty"`
+	Goal                string        `json:"goal,omitempty"`
+	Objective           string        `json:"objective,omitempty"`
+	PlanRef             string        `json:"plan_ref,omitempty"`
+	Plan                string        `json:"plan,omitempty"`
+	Repository          string        `json:"repository,omitempty"`
+	StoreSpec           string        `json:"store,omitempty"`
+	StoreBaseDir        string        `json:"store_base_dir,omitempty"`
+	DriverKind          string        `json:"driver,omitempty"`
+	LLMGatewayURL       string        `json:"llm_gateway_url,omitempty"`
+	NebulaAPIURL        string        `json:"nebula_api_url,omitempty"`
+	NebulaToken         string        `json:"nebula_token,omitempty"`
+	HolderID            string        `json:"holder_id,omitempty"`
+	ReplayPath          string        `json:"replay_path,omitempty"`
+	RecordPath          string        `json:"record_path,omitempty"`
+	FakeScenarioPath    string        `json:"fake_scenario_path,omitempty"`
+	LogLevel            string        `json:"log_level,omitempty"`
+	LogFormat           string        `json:"log_format,omitempty"`
+	Prompt              string        `json:"prompt,omitempty"`
+	ReportDay           string        `json:"report_day,omitempty"`
+	RecipeFiles         []string      `json:"recipe_files,omitempty"`
+	LeaseTTL            time.Duration `json:"lease_ttl,omitempty"`
+	HeartbeatInterval   time.Duration `json:"heartbeat_interval,omitempty"`
+	PollInterval        time.Duration `json:"poll_interval,omitempty"`
+	JudgmentDebounce    time.Duration `json:"judgment_debounce,omitempty"`
+	StallTimeout        time.Duration `json:"stall_timeout,omitempty"`
+	ConcurrencyCap      int           `json:"concurrency_cap,omitempty"`
+	MaxSteps            int           `json:"max_steps,omitempty"`
+	Once                bool          `json:"once,omitempty"`
+	Standing            bool          `json:"standing,omitempty"`
+	FakeAutoComplete    bool          `json:"fake_auto_complete,omitempty"`
+	onceSet             bool
+	standingSet         bool
+	fakeAutoSet         bool
+	stallTimeoutSet     bool
+	stallTimeoutFlagSet bool
 }
+
+// HasExplicitStallTimeout reports whether --stall-timeout or its config value was set.
+func (c Config) HasExplicitStallTimeout() bool { return c.stallTimeoutSet }
 
 func (c Config) withDefaults() Config {
 	c.Objective = cmp.Or(c.Goal, c.Objective)
@@ -285,6 +290,9 @@ func LoadConfigFile(path string, base Config) (Config, error) {
 		if _, ok := raw["fake_auto_complete"]; ok {
 			fileCfg.fakeAutoSet = true
 		}
+		if _, ok := raw["stall_timeout"]; ok {
+			fileCfg.stallTimeoutSet = fileCfg.StallTimeout > 0
+		}
 	}
 	return mergeConfig(fileCfg, base), nil
 }
@@ -331,6 +339,10 @@ func mergeConfig(lower, higher Config) Config {
 	}
 	if higher.ConcurrencyCap != 0 {
 		out.ConcurrencyCap = higher.ConcurrencyCap
+	}
+	if higher.stallTimeoutFlagSet {
+		out.StallTimeout = higher.StallTimeout
+		out.stallTimeoutSet = higher.StallTimeout > 0
 	}
 	if higher.MaxSteps > 0 {
 		out.MaxSteps = higher.MaxSteps
@@ -466,6 +478,9 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 			cfg.fakeAutoSet = true
 		case "standing":
 			cfg.standingSet = true
+		case "stall-timeout":
+			cfg.stallTimeoutFlagSet = true
+			cfg.stallTimeoutSet = cfg.StallTimeout > 0
 		}
 	})
 
@@ -657,6 +672,7 @@ func openNebulaDriver(cfg Config, st store.Store, clk clock.Clock) (*nebula.Driv
 		Events:             driverEventStore{st.Events()},
 		APIURL:             cfg.NebulaAPIURL,
 		Token:              cfg.NebulaToken,
+		GitHubToken:        cmp.Or(os.Getenv("GITHUB_TOKEN"), os.Getenv("GH_TOKEN")),
 		RepositoryFullName: cfg.Repository,
 	})
 }
