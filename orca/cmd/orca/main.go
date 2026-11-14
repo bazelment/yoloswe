@@ -241,7 +241,7 @@ func executeChat(
 		question = strings.TrimSpace(strings.Join(posArgs, " "))
 	}
 	backend.OnAttach = concierge.Attach
-	adoption, adoptionOff := newAdoption(ctx, cfg, st, clk)
+	adoption, adoptionOff := newAdoption(ctx, cfg, st, clk, client)
 	backend.Adoption, backend.AdoptionUnavailable = adoption, adoptionOff
 	if adoption != nil {
 		defer func() {

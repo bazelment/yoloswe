@@ -10,10 +10,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"text/tabwriter"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/bazelment/yoloswe/orca/adopt"
 	"github.com/bazelment/yoloswe/orca/concierge"
+	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/mailbox"
 	"github.com/bazelment/yoloswe/orca/router"
 	"github.com/bazelment/yoloswe/orca/store"
@@ -42,15 +46,19 @@ type StoreBackend struct {
 	AdoptionUnavailable string
 	// FrontDesk is the run of a chat opened without one. No controller runs
 	// it, so a Planner or Dispatcher instruction sent while attached to it
-	// goes to the one run a live controller holds, or is refused.
+	// goes to a run whose controller this chat holds, else to the one run a
+	// live controller holds, or is refused.
 	FrontDesk string
 
 	mu            sync.RWMutex
 	store         store.Store
 	runID         string
 	memory        concierge.MemoryEditor
-	lastDirective string
+	lastDirective lastDirective
 }
+
+// lastDirective identifies the directive /undo revokes.
+type lastDirective struct{ run, id string }
 
 // NewStoreBackend returns a backend attached to runID in st. Close, or an
 // Attach to another store, closes st.
@@ -78,7 +86,7 @@ func (b *StoreBackend) Attach(st store.Store, runID string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	old := b.store
-	b.store, b.runID, b.lastDirective = st, runID, ""
+	b.store, b.runID, b.lastDirective = st, runID, lastDirective{}
 	if b.OnAttach != nil {
 		b.OnAttach(st, runID)
 	}
@@ -106,20 +114,98 @@ func (b *StoreBackend) now() time.Time {
 	}
 	return time.Now()
 }
-func (b *StoreBackend) asks(ctx context.Context) ([]store.Directive, error) {
-	dirs, err := b.store.Directives().List(ctx, store.DirectiveFilter{RunID: b.runID, ActiveOnly: true})
-	if err != nil {
-		return nil, err
+
+func (b *StoreBackend) frontDesk() bool { return b.FrontDesk != "" && b.runID == b.FrontDesk }
+
+// heldRuns returns the attached run followed by the adopted runs driven in
+// the attached store. The caller holds b.mu.
+func (b *StoreBackend) heldRuns(ctx context.Context) ([]string, error) {
+	runs := []string{b.runID}
+	if b.Adoption == nil {
+		return runs, nil
 	}
-	out := []store.Directive{}
-	for i := range dirs {
-		d := dirs[i]
-		if strings.HasPrefix(d.Ref, "owner_ask:") && (d.ExpiresAt == nil || b.now().Before(*d.ExpiresAt)) {
-			out = append(out, d)
+	ids, err := b.Adoption.Adopted()
+	for _, id := range ids {
+		if id == b.runID {
+			continue
+		}
+		if _, getErr := b.store.Runs().Get(ctx, id); getErr == nil {
+			runs = append(runs, id)
+		}
+	}
+	return runs, err
+}
+
+// openAsk is an unanswered owner question.
+type openAsk struct {
+	run, scope string
+	ask        controller.OwnerAsk
+}
+
+func (b *StoreBackend) asks(ctx context.Context, runs []string) ([]openAsk, error) {
+	var out []openAsk
+	for _, run := range runs {
+		dirs, err := b.store.Directives().List(ctx, store.DirectiveFilter{RunID: run, ActiveOnly: true})
+		if err != nil {
+			return nil, err
+		}
+		for i := range dirs {
+			d := &dirs[i]
+			if !strings.HasPrefix(d.Ref, "owner_ask:") || (d.ExpiresAt != nil && !b.now().Before(*d.ExpiresAt)) {
+				continue
+			}
+			a := openAsk{run: run, scope: d.Scope}
+			if err := json.Unmarshal([]byte(d.Text), &a.ask); err != nil {
+				return nil, fmt.Errorf("owner ask %s in run %s: %w", d.ID, run, err)
+			}
+			out = append(out, a)
 		}
 	}
 	return out, nil
 }
+
+// question renders an owner ask with its run, lane, choices, and default.
+func (b *StoreBackend) question(a *openAsk) string {
+	q := a.ask.ID + ": " + a.ask.Question
+	if a.run != b.runID {
+		q = "[" + a.run + "] " + q
+	}
+	var details []string
+	if l := cmp.Or(a.ask.LaneID, a.scope); l != "" {
+		details = append(details, "lane "+l)
+	}
+	if len(a.ask.Options) > 0 {
+		details = append(details, "choices: "+strings.Join(a.ask.Options, " | "))
+	}
+	if a.ask.Default != "" {
+		details = append(details, "default: "+a.ask.Default)
+	}
+	if len(details) > 0 {
+		q += " (" + strings.Join(details, "; ") + ")"
+	}
+	return q
+}
+
+//nolint:govet // row grouping
+type heldLane struct {
+	run  string
+	lane store.Lane
+}
+
+func (b *StoreBackend) lanes(ctx context.Context, runs []string) ([]heldLane, error) {
+	var out []heldLane
+	for _, run := range runs {
+		lanes, err := b.store.Lanes().List(ctx, store.LaneFilter{RunID: run})
+		if err != nil {
+			return nil, err
+		}
+		for i := range lanes {
+			out = append(out, heldLane{run: run, lane: lanes[i]})
+		}
+	}
+	return out, nil
+}
+
 func (b *StoreBackend) Snapshot(ctx context.Context) (Snapshot, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -130,55 +216,190 @@ func (b *StoreBackend) snapshot(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	lanes, err := b.store.Lanes().List(ctx, store.LaneFilter{RunID: b.runID})
+	runs, err := b.heldRuns(ctx)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	asks, err := b.asks(ctx)
+	lanes, err := b.lanes(ctx, runs)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	asks, err := b.asks(ctx, runs)
 	if err != nil {
 		return Snapshot{}, err
 	}
 	start := b.now().UTC().Truncate(24 * time.Hour)
-	decs, err := b.store.Decisions().List(ctx, store.DecisionFilter{RunID: b.runID, SinceTime: &start})
-	if err != nil {
-		return Snapshot{}, err
-	}
 	cost := 0.0
-	for i := range decs {
-		d := decs[i]
-		cost += d.CostUSD
+	for _, id := range runs {
+		decs, err := b.store.Decisions().List(ctx, store.DecisionFilter{RunID: id, SinceTime: &start})
+		if err != nil {
+			return Snapshot{}, err
+		}
+		for i := range decs {
+			cost += decs[i].CostUSD
+		}
 	}
 	counts := map[string]int{}
 	for i := range lanes {
-		l := lanes[i]
-		counts[l.Phase]++
+		counts[lanes[i].lane.Phase]++
 	}
 	phases := []string{}
 	for k, n := range counts {
-		phases = append(phases, fmt.Sprintf("%s:%d", k, n))
+		phases = append(phases, fmt.Sprintf("%s:%d", cmp.Or(k, "-"), n))
 	}
 	sort.Strings(phases)
-	s := Snapshot{Status: fmt.Sprintf("goal: %s | lanes: %d (%s) | open questions: %d | cost today: $%.2f", run.Objective, len(lanes), strings.Join(phases, ", "), len(asks), cost)}
+	status := "goal: " + run.Objective
+	if len(runs) > 1 {
+		status += " | adopted: " + strings.Join(runs[1:], ", ")
+	}
+	status += fmt.Sprintf(" | lanes: %d", len(lanes))
+	if len(phases) > 0 {
+		status += " (" + strings.Join(phases, ", ") + ")"
+	}
+	s := Snapshot{Status: status + fmt.Sprintf(" | open questions: %d | cost today: $%.2f", len(asks), cost)}
 	for i := range asks {
-		d := asks[i]
-		var q struct{ ID, Question string }
-		if err := json.Unmarshal([]byte(d.Text), &q); err != nil {
-			return Snapshot{}, err
-		}
-		s.Questions = append(s.Questions, q.ID+": "+q.Question)
+		s.Questions = append(s.Questions, b.question(&asks[i]))
 	}
 	return s, nil
 }
 
+// target selects the held run an owner instruction for handler addresses.
+// Planner instructions stay on the attached run unless it is the front desk.
+// At the front desk it returns "" with no refusal when this chat holds no
+// live controller, and a refusal when several held runs remain ambiguous.
+// The caller holds b.mu.
+func (b *StoreBackend) target(ctx context.Context, handler router.Handler, text string) (runID, refusal string, err error) {
+	frontDesk := b.frontDesk()
+	if handler == router.Planner && !frontDesk {
+		return b.runID, "", nil
+	}
+	held, err := b.heldRuns(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	adopted := held[1:]
+	// Journal ownership can outlive the process that owns the controller. Do
+	// not acknowledge an instruction unless an adopted controller is live.
+	if b.Adoption != nil {
+		if active, ok := b.Adoption.Driver.(interface{ Active(string) bool }); ok {
+			var live []string
+			for _, id := range adopted {
+				if active.Active(id) {
+					live = append(live, id)
+				}
+			}
+			if len(live) == 0 {
+				for _, id := range adopted {
+					if mentions(text, id) {
+						return "", "", fmt.Errorf("adopted run %s has no live controller; name it after it is active", id)
+					}
+				}
+			}
+			adopted = live
+		}
+	}
+	runs := adopted
+	if !frontDesk {
+		runs = append([]string{b.runID}, adopted...)
+	}
+	switch len(runs) {
+	case 0:
+		return "", "", nil
+	case 1:
+		return runs[0], "", nil
+	}
+	if named := slices.DeleteFunc(slices.Clone(runs), func(id string) bool { return !mentions(text, id) }); len(named) == 1 {
+		return named[0], "", nil
+	}
+	lanes, err := b.lanes(ctx, runs)
+	if err != nil {
+		return "", "", err
+	}
+	var byLane []string
+	for i := range lanes {
+		if l := &lanes[i]; mentions(text, l.lane.ID) && !slices.Contains(byLane, l.run) {
+			byLane = append(byLane, l.run)
+		}
+	}
+	if len(byLane) == 1 {
+		return byLane[0], "", nil
+	}
+	asks, err := b.asks(ctx, runs)
+	if err != nil {
+		return "", "", err
+	}
+	var asking []string
+	for i := range asks {
+		if run := asks[i].run; !slices.Contains(asking, run) {
+			asking = append(asking, run)
+		}
+	}
+	if len(asking) == 1 {
+		return asking[0], "", nil
+	}
+	if frontDesk {
+		return "", fmt.Sprintf("Not queued: this chat holds runs %s; name the run in the instruction, then send it again: %s", strings.Join(runs, ", "), text), nil
+	}
+	if len(runs) == 2 {
+		run, err := b.store.Runs().Get(ctx, b.runID)
+		if err != nil {
+			return "", "", err
+		}
+		if !b.live(run) {
+			return runs[1], "", nil
+		}
+	}
+	return b.runID, "", nil
+}
+
+// mentions reports whether text contains id as a whole word.
+func mentions(text, id string) bool {
+	if id == "" {
+		return false
+	}
+	idChar := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' }
+	for i := 0; ; {
+		j := strings.Index(text[i:], id)
+		if j < 0 {
+			return false
+		}
+		start, end := i+j, i+j+len(id)
+		before, _ := utf8.DecodeLastRuneInString(text[:start])
+		after, _ := utf8.DecodeRuneInString(text[end:])
+		if (start == 0 || !idChar(before)) && (end == len(text) || !idChar(after)) {
+			return true
+		}
+		i = start + 1
+	}
+}
+
 // directive adds an owner directive to runID in st. /undo revokes the last
-// one written to the attached run.
+// one written to the attached store.
 func (b *StoreBackend) directive(ctx context.Context, st store.Store, runID string, kind store.DirectiveKind, text, ref string) error {
 	id := "chat-" + rand.Text()
 	err := st.Directives().Add(ctx, store.Directive{ID: id, RunID: runID, Kind: kind, Source: store.DirectiveSourceOwner, Text: text, Ref: ref, Status: store.DirectiveActive})
-	if err == nil && st == b.store && runID == b.runID {
-		b.lastDirective = id
+	if err == nil && st == b.store {
+		b.lastDirective = lastDirective{run: runID, id: id}
 	}
 	return err
+}
+
+// ownerMessage queues an urgent dispatcher event and wakes an adopted
+// controller driving runID.
+func (b *StoreBackend) ownerMessage(ctx context.Context, st store.Store, runID, text string) error {
+	payload, err := json.Marshal(mailbox.Message{Owner: true, From: "owner", Body: text})
+	if err != nil {
+		return err
+	}
+	if _, err := st.Events().Append(ctx, store.Event{RunID: runID, Kind: store.EventOwnerMessage, Source: "owner", Summary: text, Payload: payload, Urgent: true}); err != nil {
+		return err
+	}
+	if b.Adoption != nil {
+		if w, ok := b.Adoption.Driver.(interface{ Wake(string) }); ok {
+			w.Wake(runID)
+		}
+	}
+	return nil
 }
 
 func (b *StoreBackend) live(run *store.Run) bool {
@@ -197,15 +418,20 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	var ack string
-	var err error
-	if b.FrontDesk != "" && b.runID == b.FrontDesk {
+	runID, ack, err := b.target(ctx, d.Handler, text)
+	switch {
+	case err != nil || ack != "":
+	case runID == "":
 		ack, err = b.deliverFromFrontDesk(ctx, d.Handler, text)
-	} else {
+	default:
 		var live bool
-		if live, err = b.deliver(ctx, b.store, b.runID, d.Handler, text); live {
+		live, err = b.deliver(ctx, b.store, runID, d.Handler, text)
+		switch {
+		case runID != b.runID:
+			ack = fmt.Sprintf("Queued for the %s of adopted run %s: %s", d.Handler, runID, text)
+		case live:
 			ack = fmt.Sprintf("Queued for the %s: %s", d.Handler, text)
-		} else {
+		default:
 			ack = fmt.Sprintf("Saved for the %s of run %s, but no controller is running it; it will act when one starts: %s", d.Handler, b.runID, text)
 		}
 	}
@@ -224,14 +450,13 @@ func (b *StoreBackend) deliver(ctx context.Context, st store.Store, runID string
 			return false, err
 		}
 	case router.Dispatcher:
-		msg := mailbox.Message{Owner: true, From: "owner", Body: text}
 		// Chat routing chooses the Dispatcher, but cannot infer which open ask
 		// (if any) this message answers. Let the Dispatcher decide from its
 		// snapshot and always preserve the owner message as a fresh instruction.
 		if err := b.directive(ctx, st, runID, store.DirectiveInstruction, text, ""); err != nil {
 			return false, err
 		}
-		if _, err := mailbox.AppendEvent(ctx, st.Events(), runID, msg); err != nil {
+		if err := b.ownerMessage(ctx, st, runID, text); err != nil {
 			return false, err
 		}
 	}
@@ -242,23 +467,11 @@ func (b *StoreBackend) deliver(ctx context.Context, st store.Store, runID string
 	return b.live(run), nil
 }
 
-// deliverFromFrontDesk sends an instruction given at the front desk to the
-// one run a live controller holds: a run this chat adopted (driven in the
-// attached store) or one ListRuns offers. With none, or several, it saves
-// nothing and says so.
+// deliverFromFrontDesk sends an instruction given at the front desk, when
+// this chat holds no live controller, to the one run ListRuns offers that a
+// live controller holds. With none, or several, it saves nothing and says so.
 func (b *StoreBackend) deliverFromFrontDesk(ctx context.Context, handler router.Handler, text string) (string, error) {
 	var candidates []store.Run
-	if b.Adoption != nil {
-		ids, err := b.Adoption.Adopted()
-		if err != nil {
-			return "", err
-		}
-		for _, id := range ids {
-			if run, err := b.store.Runs().Get(ctx, id); err == nil {
-				candidates = append(candidates, *run)
-			}
-		}
-	}
 	if b.ListRuns != nil {
 		listed, err := b.ListRuns(ctx)
 		if err != nil {
@@ -312,6 +525,19 @@ func (b *StoreBackend) switchRun(ctx context.Context, runs []store.Run, id strin
 		return "", err
 	}
 	return "attached to run " + id, nil
+}
+
+// RunIDs lists host runs available to /adopt.
+func (b *StoreBackend) RunIDs(context.Context) ([]string, error) {
+	if b.Adoption == nil {
+		return nil, nil
+	}
+	rs, err := b.Adoption.List()
+	ids := make([]string, 0, len(rs))
+	for i := range rs {
+		ids = append(ids, rs[i].ID)
+	}
+	return ids, err
 }
 
 func (b *StoreBackend) Command(ctx context.Context, text string) (string, error) {
@@ -401,10 +627,12 @@ func (b *StoreBackend) runCommand(ctx context.Context, fields []string) (string,
 		s, e := b.snapshot(ctx)
 		return s.Status, e
 	case "/lanes":
-		v, e := b.store.Lanes().List(ctx, store.LaneFilter{RunID: b.runID})
-		return pretty(v, e)
+		return b.lanesTable(ctx)
 	case "/asks":
 		s, e := b.snapshot(ctx)
+		if e == nil && len(s.Questions) == 0 {
+			return "no open questions", nil
+		}
 		return strings.Join(s.Questions, "\n"), e
 	case "/memory":
 		v, e := b.store.Memories().List(ctx, store.MemoryFilter{RunID: b.runID})
@@ -448,16 +676,49 @@ func (b *StoreBackend) runCommand(ctx context.Context, fields []string) (string,
 		e = b.directive(ctx, b.store, b.runID, store.DirectiveInstruction, action, "chat:control")
 		return "run " + action, e
 	case "/undo":
-		if b.lastDirective != "" {
-			e := b.store.Directives().UpdateStatus(ctx, b.runID, b.lastDirective, store.DirectiveRevoked)
-			b.lastDirective = ""
-			return "directive revoked", e
+		if last := b.lastDirective; last.id != "" {
+			b.lastDirective = lastDirective{}
+			return "directive revoked", b.store.Directives().UpdateStatus(ctx, last.run, last.id, store.DirectiveRevoked)
 		}
 		return b.memory.Undo(ctx, b.store)
 	default:
-		return "commands: /runs [run-id] /status /lanes /asks /memory /plan /log <trace> /pause /resume /stop /undo /adopt [run-id] /release [run-id]", nil
+		return "commands: " + commandUsage(), nil
 	}
 }
+
+// lanesTable renders lanes for all held runs; the caller holds b.mu.
+func (b *StoreBackend) lanesTable(ctx context.Context) (string, error) {
+	runs, err := b.heldRuns(ctx)
+	if err != nil {
+		return "", err
+	}
+	lanes, err := b.lanes(ctx, runs)
+	if err != nil {
+		return "", err
+	}
+	if len(lanes) == 0 {
+		if len(runs) == 1 {
+			return "no lanes in run " + b.runID + "; /adopt <run-id> takes over a host swarm", nil
+		}
+		return "no lanes in runs " + strings.Join(runs, ", "), nil
+	}
+	var out strings.Builder
+	w := tabwriter.NewWriter(&out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "RUN\tLANE\tPHASE\tROUND\tSTATUS\tPR")
+	for i := range lanes {
+		l := &lanes[i].lane
+		pr := "-"
+		if l.PR > 0 {
+			pr = fmt.Sprintf("#%d", l.PR)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", lanes[i].run, l.ID, cmp.Or(l.Phase, "-"), l.Round, l.Status, pr)
+	}
+	if err := w.Flush(); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(out.String(), "\n"), nil
+}
+
 func pretty(v any, err error) (string, error) {
 	if err != nil {
 		return "", err

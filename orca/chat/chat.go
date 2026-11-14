@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -29,6 +30,31 @@ type Backend interface {
 	Command(context.Context, string) (string, error)
 }
 
+// RunLister supplies run IDs for argument completion.
+type RunLister interface {
+	RunIDs(context.Context) ([]string, error)
+}
+
+// Command describes a slash command and its argument hint.
+type Command struct{ Name, Args string }
+
+// Commands lists slash commands in help order.
+var Commands = []Command{
+	{"/runs", "[run-id]"}, {"/status", ""}, {"/lanes", ""}, {"/asks", ""}, {"/memory", ""}, {"/plan", ""},
+	{"/log", "<trace>"}, {"/pause", ""}, {"/resume", ""}, {"/stop", ""}, {"/undo", ""},
+	{"/adopt", "[run-id]"}, {"/release", "[run-id]"}, {"/exit", ""},
+}
+
+func (c Command) usage() string { return strings.TrimSpace(c.Name + " " + c.Args) }
+
+func commandUsage() string {
+	out := make([]string, len(Commands))
+	for i, c := range Commands {
+		out[i] = c.usage()
+	}
+	return strings.Join(out, " ")
+}
+
 //nolint:govet
 type Model struct {
 	poll                 bool
@@ -43,6 +69,8 @@ type Model struct {
 	busy                 bool
 	width, height        int
 	streamLine           int
+	// hints are rendered below the prompt.
+	hints []string
 }
 
 func New(ctx context.Context, runID string, ask AskFunc, r router.Router) Model {
@@ -157,6 +185,13 @@ type routeMsg struct {
 type commandMsg struct {
 	text string
 	err  error
+}
+
+//nolint:govet // message payload grouping
+type runIDsMsg struct {
+	input string
+	ids   []string
+	err   error
 }
 
 //nolint:govet // message payload grouping
@@ -285,21 +320,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.refresh()
 		}
 		return m, receive(m.ctx, x.ch)
+	case runIDsMsg:
+		if x.input == m.input {
+			m.completeArg(x.ids, x.err)
+		}
+		return m, nil
 	case tea.KeyPressMsg:
 		if (x.Code == 'c' && x.Mod == tea.ModCtrl) || x.Code == tea.KeyEscape {
 			return m, tea.Quit
+		}
+		if x.Code == tea.KeyTab {
+			return m.complete()
 		}
 		if x.Code == tea.KeyBackspace {
 			if m.input != "" {
 				_, n := utf8.DecodeLastRuneInString(m.input)
 				m.input = m.input[:len(m.input)-n]
 			}
+			m.hints = commandHints(m.input)
 			return m, nil
 		}
 		if x.Code != tea.KeyEnter {
 			m.input += x.Text
+			m.hints = commandHints(m.input)
 			return m, nil
 		}
+		m.hints = nil
 		if m.busy {
 			return m, nil
 		}
@@ -332,6 +378,86 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
+
+// commandHints lists commands matching the current prefix.
+func commandHints(input string) []string {
+	if !strings.HasPrefix(input, "/") || strings.ContainsAny(input, " \t") {
+		return nil
+	}
+	var out []string
+	for _, c := range Commands {
+		if strings.HasPrefix(c.Name, strings.ToLower(input)) {
+			out = append(out, c.usage())
+		}
+	}
+	return out
+}
+
+// complete handles command and run-ID completion.
+func (m Model) complete() (tea.Model, tea.Cmd) {
+	name, arg, hasArg := strings.Cut(m.input, " ")
+	name = strings.ToLower(name)
+	if !strings.HasPrefix(name, "/") {
+		return m, nil
+	}
+	if !hasArg {
+		var names []string
+		for _, c := range Commands {
+			if strings.HasPrefix(c.Name, name) {
+				names = append(names, c.Name)
+			}
+		}
+		switch len(names) {
+		case 0:
+			m.hints = []string{"no command matches " + name}
+		case 1:
+			m.input, m.hints = names[0]+" ", nil
+		default:
+			m.input, m.hints = commonPrefix(names), commandHints(commonPrefix(names))
+		}
+		return m, nil
+	}
+	lister, ok := m.Backend.(RunLister)
+	if strings.Contains(arg, " ") || (name != "/adopt" && name != "/release") || !ok {
+		return m, nil
+	}
+	input, ctx := m.input, m.ctx
+	return m, func() tea.Msg {
+		ids, err := lister.RunIDs(ctx)
+		return runIDsMsg{input: input, ids: ids, err: err}
+	}
+}
+
+func (m *Model) completeArg(ids []string, err error) {
+	name, arg, _ := strings.Cut(m.input, " ")
+	var match []string
+	for _, id := range ids {
+		if strings.HasPrefix(id, arg) {
+			match = append(match, id)
+		}
+	}
+	switch {
+	case len(match) == 1:
+		m.input, m.hints = name+" "+match[0], nil
+	case len(match) > 1:
+		m.input, m.hints = name+" "+commonPrefix(match), match
+	case err != nil:
+		m.hints = []string{"run ids unavailable: " + err.Error()}
+	default:
+		m.hints = []string{"no host swarm run matches " + strconv.Quote(arg)}
+	}
+}
+
+func commonPrefix(s []string) string {
+	p := s[0]
+	for _, x := range s[1:] {
+		for !strings.HasPrefix(x, p) {
+			p = p[:len(p)-1]
+		}
+	}
+	return p
+}
+
 func (m Model) View() tea.View {
 	runID := m.runID
 	if backend, ok := m.Backend.(*StoreBackend); ok {
@@ -345,7 +471,11 @@ func (m Model) View() tea.View {
 	for _, q := range m.questions {
 		questions += "\nowner question> " + q
 	}
-	return tea.NewView("orca chat — run " + runID + "\n" + strings.Join(lines, "\n") + questions + "\n\n" + m.status + "\n> " + m.input)
+	hints := ""
+	if len(m.hints) > 0 {
+		hints = "\n  " + strings.Join(m.hints, "  ")
+	}
+	return tea.NewView("orca chat — run " + runID + "\n" + strings.Join(lines, "\n") + questions + "\n\n" + m.status + "\n> " + m.input + hints)
 }
 func isTerminal(in io.Reader) bool { f, ok := in.(*os.File); return ok && term.IsTerminal(int(f.Fd())) }
 func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {

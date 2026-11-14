@@ -8,10 +8,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
@@ -20,14 +22,22 @@ import (
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
+// JudgeFactory creates a dispatcher for an adopted run.
+type JudgeFactory func(runID string, answer func(ctx context.Context, runID, askID, text string) error) controller.Judge
+
+// escalationAskTTL bounds an unanswered escalation question.
+const escalationAskTTL = 24 * time.Hour
+
 // Controllers attaches host runs to orca's deterministic lane lifecycle.
 type Controllers struct {
-	ctx    context.Context
-	store  store.Store
-	driver lane.LaneDriver
-	clock  clock.Clock
-	runs   map[string]*controlledRun
-	mu     sync.Mutex
+	ctx      context.Context
+	store    store.Store
+	driver   lane.LaneDriver
+	clock    clock.Clock
+	judges   JudgeFactory
+	runs     map[string]*controlledRun
+	starting map[string]*startup
+	mu       sync.Mutex
 }
 
 type controlledRun struct {
@@ -37,21 +47,67 @@ type controlledRun struct {
 	run        Run
 }
 
-func NewControllers(ctx context.Context, st store.Store, driver lane.LaneDriver, clk clock.Clock) *Controllers {
-	return &Controllers{ctx: ctx, store: st, driver: driver, clock: clk, runs: map[string]*controlledRun{}}
+type startup struct {
+	done chan struct{}
+	err  error
 }
 
-func (d *Controllers) Start(ctx context.Context, r Run) error {
+func NewControllers(ctx context.Context, st store.Store, driver lane.LaneDriver, clk clock.Clock, judges JudgeFactory) *Controllers {
+	return &Controllers{ctx: ctx, store: st, driver: driver, clock: clk, judges: judges, runs: map[string]*controlledRun{}, starting: map[string]*startup{}}
+}
+
+// Wake asks an adopted controller to process pending events immediately.
+func (d *Controllers) Wake(runID string) {
+	d.mu.Lock()
+	cr := d.runs[runID]
+	d.mu.Unlock()
+	if cr != nil {
+		cr.controller.Wake()
+	}
+}
+
+// Active reports whether this process currently runs a controller for runID.
+func (d *Controllers) Active(runID string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	cr := d.runs[runID]
+	if cr == nil {
+		return false
+	}
+	select {
+	case <-cr.done:
+		return false
+	default:
+		return true
+	}
+}
+
+func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
+	d.mu.Lock()
 	if cr := d.runs[r.ID]; cr != nil {
 		select {
 		case <-cr.done:
 			delete(d.runs, r.ID)
 		default:
+			d.mu.Unlock()
 			return nil
 		}
 	}
+	if s, ok := d.starting[r.ID]; ok {
+		d.mu.Unlock()
+		<-s.done
+		return s.err
+	}
+	s := &startup{done: make(chan struct{})}
+	d.starting[r.ID] = s
+	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		delete(d.starting, r.ID)
+		s.err = retErr
+		close(s.done)
+		d.mu.Unlock()
+	}()
 	journal, err := readJournal(filepath.Join(r.Dir, leaseFile))
 	if err != nil {
 		return err
@@ -126,7 +182,17 @@ func (d *Controllers) Start(ctx context.Context, r Run) error {
 	if err := d.store.Runs().UpdateObjective(ctx, r.ID, r.Goal, generation); err != nil {
 		return err
 	}
-	ctrl := controller.New(controller.Config{RunID: r.ID, HolderID: holder}, d.store, d.driver, d.clock, nil)
+	var ctrl *controller.Controller
+	var dispatch controller.Judge
+	if d.judges != nil {
+		dispatch = d.judges(r.ID, func(ctx context.Context, runID, askID, text string) error {
+			if runID != r.ID {
+				return fmt.Errorf("owner answer run %q does not match adopted run %q", runID, r.ID)
+			}
+			return ctrl.AnswerOwnerAskTextFromJudge(ctx, askID, text)
+		})
+	}
+	ctrl = controller.New(controller.Config{RunID: r.ID, HolderID: holder}, d.store, d.driver, d.clock, d.judge(holder, dispatch))
 	// Fail synchronously if another process still holds the controller lease.
 	if err := ctrl.Step(ctx); err != nil {
 		return err
@@ -138,7 +204,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) error {
 		return err
 	}
 	cr := &controlledRun{controller: ctrl, cancel: cancel, done: make(chan struct{}), run: r}
+	d.mu.Lock()
 	d.runs[r.ID] = cr
+	d.mu.Unlock()
 	started = true
 	go func() {
 		defer close(cr.done)
@@ -151,6 +219,12 @@ func (d *Controllers) Start(ctx context.Context, r Run) error {
 }
 
 func (d *Controllers) Stop(ctx context.Context, r Run) error {
+	d.mu.Lock()
+	s := d.starting[r.ID]
+	d.mu.Unlock()
+	if s != nil {
+		<-s.done
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	cr := d.runs[r.ID]
@@ -174,8 +248,145 @@ func (d *Controllers) Stop(ctx context.Context, r Run) error {
 	return nil
 }
 
+// judge runs the dispatcher and exposes unresolved escalations to the owner.
+func (d *Controllers) judge(holder string, dispatch controller.Judge) controller.Judge {
+	return controller.JudgeFunc(func(ctx context.Context, runID string, events []store.Event) error {
+		if dispatch != nil {
+			stop := d.keepLease(ctx, runID, holder)
+			err := dispatch.Judge(ctx, runID, events)
+			stop()
+			if err != nil {
+				slog.Error("adopted run dispatcher failed; asking the owner about its escalations", "run", runID, "error", err)
+				return d.askOwnerOnEscalation(ctx, runID, events)
+			}
+		}
+		return d.askOwnerOnEscalation(ctx, runID, events)
+	})
+}
+
+func (d *Controllers) keepLease(ctx context.Context, runID, holder string) func() {
+	stop, done := make(chan struct{}), make(chan struct{})
+	ticker := d.clock.NewTicker(controller.DefaultHeartbeatInterval)
+	go func() {
+		defer close(done)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-ticker.C():
+				_, _ = d.store.Runs().HeartbeatLease(ctx, runID, holder, controller.DefaultLeaseTTL)
+			}
+		}
+	}()
+	return func() { close(stop); <-done }
+}
+
+// askOwnerOnEscalation creates one owner question per unresolved escalation.
+func (d *Controllers) askOwnerOnEscalation(ctx context.Context, runID string, events []store.Event) error {
+	var laneIDs []string
+	for i := range events {
+		if id := events[i].LaneID; id != "" && !slices.Contains(laneIDs, id) {
+			laneIDs = append(laneIDs, id)
+		}
+	}
+	if len(laneIDs) == 0 {
+		return nil
+	}
+	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	if err != nil {
+		return err
+	}
+	now := d.clock.Now().UTC()
+	asked := map[string]bool{}
+	for i := range dirs {
+		dir := &dirs[i]
+		if strings.HasPrefix(dir.Ref, ownerAskRef) && (dir.ExpiresAt == nil || now.Before(*dir.ExpiresAt)) {
+			asked[dir.Scope] = true
+		}
+	}
+	var errs []error
+	for _, id := range laneIDs {
+		ln, err := d.store.Lanes().Get(ctx, runID, id)
+		if err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				errs = append(errs, err)
+			}
+			continue
+		}
+		if ln.Status != lane.StatusBlocked || asked[id] {
+			continue
+		}
+		decs, err := d.store.Decisions().List(ctx, store.DecisionFilter{RunID: runID, LaneID: id})
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		var esc *store.Decision
+		for j := len(decs) - 1; j >= 0 && esc == nil; j-- {
+			if decs[j].Tool == controller.ToolLaneEscalate {
+				esc = &decs[j]
+			}
+		}
+		if esc == nil {
+			continue
+		}
+		errs = append(errs, d.addEscalationAsk(ctx, runID, ln, esc, now))
+	}
+	return errors.Join(errs...)
+}
+
+const ownerAskRef = "owner_ask:"
+
+func (d *Controllers) addEscalationAsk(ctx context.Context, runID string, ln *lane.Lane, esc *store.Decision, now time.Time) error {
+	hold := "hold: keep " + ln.ID + " blocked"
+	ask := controller.OwnerAsk{
+		ID:       fmt.Sprintf("escalation-%s-%d", ln.ID, esc.Seq),
+		RunID:    runID,
+		LaneID:   ln.ID,
+		Question: fmt.Sprintf("Lane %s escalated (%s). How should it continue?", ln.ID, esc.Reason),
+		Options:  []string{fmt.Sprintf("rework: start swe round %d", ln.Round+1), "stop: drop " + ln.ID, hold},
+		Default:  hold,
+		Deadline: now.Add(escalationAskTTL),
+	}
+	// Keep the ask scoped to the blocked lane so its default cannot change lane state.
+	if err := ask.Validate(); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(ask)
+	if err != nil {
+		return err
+	}
+	err = d.store.Directives().Add(ctx, store.Directive{
+		ID:        "ask-" + ask.ID,
+		RunID:     runID,
+		Kind:      store.DirectiveInstruction,
+		Source:    store.DirectiveSourceDispatcher,
+		Scope:     ln.ID,
+		Ref:       ownerAskRef + ask.ID,
+		Text:      string(raw),
+		ExpiresAt: &ask.Deadline,
+		Status:    store.DirectiveActive,
+	})
+	if errors.Is(err, store.ErrAlreadyExists) {
+		return nil
+	}
+	return err
+}
+
 // Close stops controllers while leaving the handover lease for another chat.
 func (d *Controllers) Close(ctx context.Context) error {
+	d.mu.Lock()
+	var starts []*startup
+	for _, s := range d.starting {
+		starts = append(starts, s)
+	}
+	d.mu.Unlock()
+	for _, s := range starts {
+		<-s.done
+	}
 	d.mu.Lock()
 	var runs []Run
 	for _, cr := range d.runs {
