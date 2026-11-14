@@ -256,7 +256,7 @@ func (b *StoreBackend) view(ctx context.Context) (runView, error) {
 		for i := range decs {
 			v.cost += decs[i].CostUSD
 		}
-		threads, err := b.store.Threads().ListThreads(ctx, store.ThreadFilter{RunID: id})
+		threads, err := b.store.Threads().ListThreads(ctx, store.ThreadFilter{RunID: id, Role: store.ThreadRoleConcierge})
 		if err != nil {
 			return runView{}, err
 		}

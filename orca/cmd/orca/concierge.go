@@ -216,6 +216,9 @@ func (c *Concierge) Resume(ctx context.Context) ([]model.Message, error) {
 		normalized = append(normalized, msg)
 	}
 	history = normalized
+	if len(history) > 0 && history[0].Role == model.RoleAssistant {
+		history = history[1:]
+	}
 	if latest.Status == store.ThreadStatusArchived {
 		if err := c.store.Threads().UpdateThreadStatus(ctx, latest.ID, store.ThreadStatusIdle); err != nil {
 			return nil, err
