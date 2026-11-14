@@ -107,6 +107,39 @@ func TestShippedChatAdoptsAndReleasesHostSwarm(t *testing.T) {
 	}
 }
 
+func TestChatAdoptionListsRunsFromMultipleRepoRoots(t *testing.T) {
+	roots := []string{t.TempDir(), t.TempDir()}
+	wants := []string{"repo-one-run", "repo-two-run"}
+	for i, root := range roots {
+		runDir := filepath.Join(root, ".shared", "subagent-swarm", wants[i])
+		if err := os.MkdirAll(runDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(runDir, "state.json"), `{"config":{"goal":"`+wants[i]+` goal"},"tasks":[]}`)
+	}
+	script := filepath.Join(t.TempDir(), "watch_lanes.sh")
+	writeFile(t, script, "#!/bin/bash\n")
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ORCA_SWARM_ROOTS", strings.Join(roots, string(os.PathListSeparator)))
+	t.Setenv("ORCA_WATCH_LANES", script)
+	t.Setenv("NEBULA_API_URL", "http://127.0.0.1:1")
+	t.Setenv("NEBULA_TOKEN", "test-token")
+	var out, errOut bytes.Buffer
+	err := Execute(t.Context(), []string{
+		"chat", "--run", "chat-run", "--store", "memory", "--replay", "testdata/concierge_status_replay.json",
+	}, strings.NewReader("/adopt\n"), &out, &errOut)
+	if err != nil {
+		t.Fatalf("Execute chat: %v\nstderr:\n%s", err, errOut.String())
+	}
+	for _, want := range wants {
+		if !strings.Contains(out.String(), want+": "+want+" goal") {
+			t.Fatalf("/adopt output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func writeFile(t *testing.T, p, s string) {
 	t.Helper()
 	if err := os.WriteFile(p, []byte(s), 0o644); err != nil {

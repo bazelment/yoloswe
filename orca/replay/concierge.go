@@ -59,7 +59,7 @@ type StoreConcierge struct {
 	dirSeq       atomic.Int64
 }
 
-const DefaultEvalModel = "claude-haiku-4-5-20251001"
+const DefaultEvalModel = "claude-haiku-5-5"
 
 func NewStoreConcierge(client model.ModelClient) *StoreConcierge {
 	return &StoreConcierge{

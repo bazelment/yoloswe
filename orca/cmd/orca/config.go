@@ -53,7 +53,7 @@ func nextUniqueID(prefix string, clk clock.Clock) string {
 const (
 	DefaultDispatcherModel       = dispatcher.DefaultModel
 	DefaultDispatcherHardModel   = dispatcher.DefaultHardBatchModel
-	DefaultConciergeModel        = "claude-haiku-4-5-20251001"
+	DefaultConciergeModel        = "claude-haiku-5-5"
 	DefaultPlannerModel          = recipe.DefaultCompilerModel
 	DefaultOpenAIDispatcherModel = "gpt-6.1-sol"
 	DefaultOpenAIConciergeModel  = "gpt-6.1-sol"

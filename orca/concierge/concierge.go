@@ -23,7 +23,7 @@ import (
 
 const (
 	ActorConcierge      = "concierge"
-	DefaultModel        = "claude-haiku-4-5-20251001"
+	DefaultModel        = "claude-haiku-5-5"
 	DefaultMaxTurns     = model.DefaultMaxTurns
 	DefaultMaxTokens    = model.DefaultMaxTokens
 	DefaultMaxReadBytes = 8192

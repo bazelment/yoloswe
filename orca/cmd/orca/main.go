@@ -21,6 +21,7 @@ import (
 	"github.com/bazelment/yoloswe/orca/mailbox"
 	mailboxnebula "github.com/bazelment/yoloswe/orca/mailbox/nebula"
 	"github.com/bazelment/yoloswe/orca/router"
+	"github.com/bazelment/yoloswe/orca/store"
 )
 
 func main() {
@@ -186,6 +187,9 @@ func executeChat(
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	if err := ensureChatRun(ctx, st, cfg); err != nil {
+		return err
+	}
 
 	client, err := openModelClient(cfg, clk)
 	if err != nil {
@@ -233,6 +237,25 @@ func executeChat(
 	ui.Backend = backend
 	ui.Dispatch = backend.Dispatch
 	return chatui.Run(ctx, stdin, stdout, ui)
+}
+
+// ensureChatRun makes chat useful for a fresh run id. Runs are normally
+// created by `orca run`, but chat is also a valid entry point for inspecting
+// or directing a run before its controller starts.
+func ensureChatRun(ctx context.Context, st store.Store, cfg Config) error {
+	if _, err := st.Runs().Get(ctx, cfg.RunID); err == nil {
+		return nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	objective := strings.TrimSpace(cmp.Or(cfg.Objective, cfg.Goal))
+	if objective == "" {
+		objective = "Owner chat for run " + cfg.RunID
+	}
+	if err := st.Runs().Create(ctx, store.Run{ID: cfg.RunID, Objective: objective, PlanRef: cfg.PlanRef}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		return err
+	}
+	return nil
 }
 
 func newLogger(out io.Writer, levelStr, format string) *slog.Logger {
