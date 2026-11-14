@@ -678,6 +678,9 @@ func TestSpawnReuseWakeAndSettleTimeout(t *testing.T) {
 	if res.SessionID != "sess-1" || res.TerminalID != "term-1" {
 		t.Fatalf("SpawnResult = %+v, want sess-1 / term-1", res)
 	}
+	if res.Branch != "swarm-lane/run-42/nebuladriver" || res.BaseBranch != "main" {
+		t.Fatalf("SpawnResult branch metadata = %+v", res)
+	}
 
 	srv.mu.Lock()
 	srv.sessions["sess-1"].Status = "sleeping"
@@ -961,6 +964,41 @@ func TestStreamEventsAndUsageCapacityIntoStore(t *testing.T) {
 	}
 	if cur.Seq != 6 {
 		t.Fatalf("cursor seq = %d, want 6", cur.Seq)
+	}
+}
+
+func TestHostWatchFindsReportWithoutSessionMetadata(t *testing.T) {
+	srv := newFakeNebulaServer(t)
+	drv, _, _ := newTestDriver(t, srv, nebula.WithPollInterval(time.Millisecond))
+	res, err := drv.SpawnSession(t.Context(), lane.SpawnRequest{RunID: "host-run", LaneID: "lane", Phase: "swe", Harness: "claude", Brief: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.mu.Lock()
+	srv.sessions[res.SessionID].Metadata = nil
+	srv.latestRep[res.TerminalID] = map[string]any{
+		"terminalId": res.TerminalID,
+		"outcome":    "done",
+		"head":       srv.sessions[res.SessionID].BaseCommit,
+		"body":       "Outcome: done\nHEAD: " + srv.sessions[res.SessionID].BaseCommit,
+	}
+	srv.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ch := drv.Watch(ctx, "host-run")
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Kind == lane.EventPhaseReported {
+				if ev.LaneID != "lane" || ev.Report == nil || ev.Report.Outcome != lane.OutcomeDone {
+					t.Fatalf("unexpected report event: %+v", ev)
+				}
+				return
+			}
+		case <-ctx.Done():
+			t.Fatal("host watch did not surface durable phase report")
+		}
 	}
 }
 

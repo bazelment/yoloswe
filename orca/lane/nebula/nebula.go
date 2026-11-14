@@ -84,6 +84,8 @@ func IsNotReady(err error) bool {
 }
 
 // Config configures a Driver. Empty APIURL and Token fall back to env vars.
+//
+//nolint:govet // configuration fields are grouped by API concern.
 type Config struct {
 	Clock              clock.Clock
 	Events             store.EventStore
@@ -94,6 +96,7 @@ type Config struct {
 	RepositoryID       string
 	RepositoryFullName string
 	CurrentSessionID   string
+	HostOrchestrator   bool
 	DefaultBaseBranch  string
 	PollInterval       time.Duration
 	SettleTimeout      time.Duration
@@ -142,7 +145,14 @@ func WithSettleTimeout(d time.Duration) Option {
 	return func(c *Config) { c.SettleTimeout = d }
 }
 
+// WithHostOrchestrator declares the run's external host mailbox.
+func WithHostOrchestrator() Option {
+	return func(c *Config) { c.HostOrchestrator = true }
+}
+
 // Driver implements lane.LaneDriver using the Nebula HTTP API.
+//
+//nolint:govet // driver state is grouped by API concern.
 type Driver struct {
 	clock        clock.Clock
 	events       store.EventStore
@@ -160,7 +170,13 @@ type Driver struct {
 	baseBranch   string
 	pollInterval time.Duration
 	settleWait   time.Duration
+	spawned      map[string][]watchTarget
+	host         bool
 	mu           sync.Mutex
+}
+
+type watchTarget struct {
+	laneID, sessionID, terminalID string
 }
 
 var _ lane.LaneDriver = (*Driver)(nil)
@@ -190,9 +206,16 @@ func (d *Driver) EnsureRun(ctx context.Context, runID string) error {
 	if err := d.doJSON(ctx, http.MethodPut, path, struct{}{}, nil); err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict && apiErr.Code == "RUN_EXISTS" {
-			return nil
+			// Continue so a host invocation also declares the mailbox on an
+			// already-created run.
+		} else {
+			return fmt.Errorf("nebula ensure run %q: %w", runID, err)
 		}
-		return fmt.Errorf("nebula ensure run %q: %w", runID, err)
+	}
+	if d.host {
+		if err := d.doJSON(ctx, http.MethodPut, path+"/swarm", map[string]string{"needsInputTo": "host"}, nil); err != nil {
+			return fmt.Errorf("nebula declare host mailbox for run %q: %w", runID, err)
+		}
 	}
 	return nil
 }
@@ -207,6 +230,7 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 		}
 		seen := map[int64]bool{}
 		started := map[string]bool{}
+		reported := map[string]string{}
 		interval := d.pollInterval
 		if interval <= 0 {
 			interval = 50 * time.Millisecond
@@ -243,6 +267,36 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 						go d.watchStream(ctx, StreamRequest{Events: d.events, RunID: runID, LaneID: laneID, SessionID: sess.ID, TerminalID: tm.ID, StopOnExit: true})
 					}
 				}
+			}
+			// Host orchestrators are not themselves code sessions, and the API
+			// may omit swarm metadata from a session listing. Keep streaming
+			// terminals returned by our own spawn calls as a fallback.
+			d.mu.Lock()
+			targets := append([]watchTarget(nil), d.spawned[runID]...)
+			d.mu.Unlock()
+			for _, target := range targets {
+				if target.terminalID == "" {
+					continue
+				}
+				// Polling the report endpoint is the host-safe fallback: an
+				// external orchestrator can miss the terminal SSE publication
+				// while the report itself is already durable.
+				if rep, err := d.ReadReport(ctx, runID, target.laneID, target.terminalID); err == nil && rep != nil {
+					key := target.terminalID + ":" + rep.Raw
+					if reported[target.terminalID] != key {
+						reported[target.terminalID] = key
+						select {
+						case out <- lane.Event{Kind: lane.EventPhaseReported, RunID: runID, LaneID: target.laneID, SessionID: target.sessionID, TerminalID: target.terminalID, Phase: rep.Phase, Report: rep, At: rep.ReportedAt}:
+						case <-ctx.Done():
+							return
+						}
+					}
+				}
+				if started[target.terminalID] {
+					continue
+				}
+				started[target.terminalID] = true
+				go d.watchStream(ctx, StreamRequest{Events: d.events, RunID: runID, LaneID: target.laneID, SessionID: target.sessionID, TerminalID: target.terminalID, StopOnExit: true})
 			}
 			evs, err := d.events.List(ctx, store.EventFilter{RunID: runID})
 			if err != nil {
@@ -433,6 +487,8 @@ func New(cfg Config, opts ...Option) (*Driver, error) {
 		baseBranch:   baseBranch,
 		pollInterval: pollInterval,
 		settleWait:   settleWait,
+		spawned:      make(map[string][]watchTarget),
+		host:         cfg.HostOrchestrator,
 	}, nil
 }
 
@@ -530,6 +586,8 @@ func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.
 	res := lane.SpawnResult{
 		SessionID:  sess.ID,
 		BaseCommit: baseCommit,
+		Branch:     cmp.Or(strings.TrimSpace(sess.WorkBranch), strings.TrimSpace(req.Branch)),
+		BaseBranch: cmp.Or(strings.TrimSpace(sess.BaseBranch), strings.TrimSpace(req.BaseBranch)),
 		StartedAt:  d.clock.Now().UTC(),
 	}
 	if req.Phase == "" && req.Harness == "" && req.Brief == "" {
@@ -857,11 +915,15 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 		return lane.StartPhaseResult{}, fmt.Errorf("nebula start terminal returned empty id")
 	}
 
-	return lane.StartPhaseResult{
+	result := lane.StartPhaseResult{
 		SessionID:  sessionID,
 		TerminalID: resp.ID,
 		StartedAt:  d.clock.Now().UTC(),
-	}, nil
+	}
+	d.mu.Lock()
+	d.spawned[req.RunID] = append(d.spawned[req.RunID], watchTarget{laneID: req.LaneID, sessionID: result.SessionID, terminalID: result.TerminalID})
+	d.mu.Unlock()
+	return result, nil
 }
 
 // Steer sends steering text into a running terminal via POST /api/code-terminals/{id}/input.

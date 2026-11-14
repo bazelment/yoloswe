@@ -329,6 +329,8 @@ type SpawnResult struct {
 	// BaseCommit is the immutable commit the backend actually started from.
 	// Drivers should populate this from the created checkout/backend response.
 	BaseCommit string `json:"base_commit,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+	BaseBranch string `json:"base_branch,omitempty"`
 }
 
 // StartPhaseRequest starts a phase terminal on an existing or new worker session.

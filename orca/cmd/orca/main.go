@@ -161,6 +161,7 @@ func executeRun(ctx context.Context, cfg Config, logger *slog.Logger) error {
 			RunID: cfg.RunID, Events: st.Events(),
 			BaseURL: cmp.Or(cfg.NebulaAPIURL, os.Getenv("NEBULA_API_URL")),
 			Token:   cmp.Or(cfg.NebulaToken, os.Getenv("NEBULA_TOKEN")),
+			Host:    strings.TrimSpace(os.Getenv("NEBULA_SESSION_ID")) == "",
 		})
 		if err != nil {
 			return err

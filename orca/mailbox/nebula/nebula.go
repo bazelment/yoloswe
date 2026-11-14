@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -20,6 +22,8 @@ type Config struct {
 	Events                store.EventStore
 	Client                *http.Client
 	PollInterval          time.Duration
+	Host                  bool
+	SessionID             string
 }
 type Mailbox struct{ c Config }
 
@@ -86,7 +90,16 @@ func (m *Mailbox) Watch(ctx context.Context) (<-chan store.Event, error) {
 		var cursor string
 		seen := make(map[string]struct{})
 		for {
-			v, err := m.req(ctx, http.MethodGet, "/api/mail?cursor="+cursor, nil)
+			q := url.Values{}
+			host := m.c.Host || (strings.TrimSpace(m.c.SessionID) == "" && strings.TrimSpace(os.Getenv("NEBULA_SESSION_ID")) == "")
+			if host {
+				q.Set("box", "host")
+				q.Set("run", m.c.RunID)
+			}
+			if cursor != "" {
+				q.Set("cursor", cursor)
+			}
+			v, err := m.req(ctx, http.MethodGet, "/api/mail?"+q.Encode(), nil)
 			if err == nil {
 				if arr, ok := v["messages"].([]any); ok {
 					pageOK := true
