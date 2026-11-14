@@ -296,6 +296,12 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	var items []store.BacklogItem
 	for i := range r.Lanes {
 		imported := &r.Lanes[i]
+		if err := validatePathComponent("lane id", imported.ID); err != nil {
+			return workflow, nil, nil, err
+		}
+		if err := validatePathComponent("lane phase", imported.Phase); err != nil {
+			return workflow, nil, nil, err
+		}
 		status := lane.Status(imported.Status)
 		if !status.Valid() {
 			return workflow, nil, nil, fmt.Errorf("lane %s: unsupported host status %q", imported.ID, imported.Status)
@@ -344,6 +350,9 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 }
 
 func hostMission(dir, id, brief string) (string, error) {
+	if err := validatePathComponent("task id", id); err != nil {
+		return "", err
+	}
 	paths := []string{filepath.Join(dir, "missions", id+".md"), filepath.Join(dir, "briefs", id+".mission.md")}
 	if brief != "" {
 		resolved, err := resolveBriefPath(dir, brief)
@@ -362,6 +371,15 @@ func hostMission(dir, id, brief string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// validatePathComponent keeps ledger-controlled names from escaping the run
+// directory when they are used to construct mission and spawn-file paths.
+func validatePathComponent(label, value string) error {
+	if value == "" || value == "." || value == ".." || strings.ContainsAny(value, `/\\`) {
+		return fmt.Errorf("%s %q must be a single path component inside the run directory", label, value)
+	}
+	return nil
 }
 
 // resolveBriefPath permits imported task briefs only when their lexical and
@@ -439,6 +457,12 @@ func checkpoint(dir string, lanes []lane.Lane) error {
 	}
 	for i := range lanes {
 		ln := &lanes[i]
+		if err := validatePathComponent("lane id", ln.ID); err != nil {
+			return err
+		}
+		if err := validatePathComponent("lane phase", ln.Phase); err != nil {
+			return err
+		}
 		for _, task := range tasks {
 			var id string
 			if err := json.Unmarshal(task["id"], &id); err != nil {

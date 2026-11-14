@@ -363,6 +363,25 @@ func TestControllerStateRejectsBriefOutsideRunDirectory(t *testing.T) {
 	}
 }
 
+func TestControllerStateRejectsLedgerPathComponents(t *testing.T) {
+	t.Parallel()
+	for _, task := range []string{`{"id":"../outside","phase":"swe"}`, `{"id":"a","phase":"../outside"}`} {
+		t.Run(task, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{"config":{"goal":"g"},"tasks":[%s]}`, task))
+			r, err := Read(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, _, err = controllerState(r)
+			if err == nil || !strings.Contains(err.Error(), "single path component") {
+				t.Fatalf("controllerState error = %v, want path-component rejection", err)
+			}
+		})
+	}
+}
+
 func TestAdoptedReviewRoundCapMatchesDefault(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
