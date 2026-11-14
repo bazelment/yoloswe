@@ -199,6 +199,23 @@ func (c *Concierge) Resume(ctx context.Context) ([]model.Message, error) {
 		}
 	}
 	history = history[max(len(history)-conciergeHistoryMessages, 0):]
+	// A failed turn can leave consecutive user messages; normalize the tail so
+	// providers that require alternating roles can accept resumed history.
+	var normalized []model.Message
+	for _, msg := range history {
+		if len(normalized) > 0 && normalized[len(normalized)-1].Role == msg.Role {
+			prev := normalized[len(normalized)-1].Text()
+			joined := strings.TrimSpace(prev + "\n" + msg.Text())
+			if msg.Role == model.RoleUser {
+				normalized[len(normalized)-1] = model.NewUserMessage(joined)
+			} else {
+				normalized[len(normalized)-1] = model.NewAssistantMessage(model.NewTextBlock(joined))
+			}
+			continue
+		}
+		normalized = append(normalized, msg)
+	}
+	history = normalized
 	if latest.Status == store.ThreadStatusArchived {
 		if err := c.store.Threads().UpdateThreadStatus(ctx, latest.ID, store.ThreadStatusIdle); err != nil {
 			return nil, err
@@ -451,7 +468,11 @@ func toolResults(msgs []model.Message) []string {
 			case blk.Type == model.BlockTypeToolUse:
 				names[blk.ID] = blk.Name
 			case blk.Type == model.BlockTypeToolResult:
-				r := fmt.Sprintf("[%s] %s", cmp.Or(names[blk.ToolUseID], "tool"), clipText(strings.TrimSpace(blk.Content), 2000))
+				limit := 2000
+				if names[blk.ToolUseID] == ToolSwarms {
+					limit = swarmsReadBytes
+				}
+				r := fmt.Sprintf("[%s] %s", cmp.Or(names[blk.ToolUseID], "tool"), clipText(strings.TrimSpace(blk.Content), limit))
 				if blk.IsError {
 					r = fmt.Sprintf("[%s] error: %s", cmp.Or(names[blk.ToolUseID], "tool"), clipText(strings.TrimSpace(blk.Content), 300))
 				}

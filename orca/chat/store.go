@@ -256,6 +256,21 @@ func (b *StoreBackend) view(ctx context.Context) (runView, error) {
 		for i := range decs {
 			v.cost += decs[i].CostUSD
 		}
+		threads, err := b.store.Threads().ListThreads(ctx, store.ThreadFilter{RunID: id})
+		if err != nil {
+			return runView{}, err
+		}
+		for i := range threads {
+			turns, err := b.store.Threads().ListTurns(ctx, threads[i].ID)
+			if err != nil {
+				return runView{}, err
+			}
+			for j := range turns {
+				if !turns[j].StartedAt.Before(start) {
+					v.cost += turns[j].CostUSD
+				}
+			}
+		}
 	}
 	for i := range v.lanes {
 		v.phases[cmp.Or(v.lanes[i].lane.Phase, "-")]++
