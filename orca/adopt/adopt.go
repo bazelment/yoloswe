@@ -406,13 +406,26 @@ func (s *Service) takeLease(dir string) (*journal, error) {
 		return nil, err
 	}
 	// Link publishes the complete journal only if no lease exists, so a crash
-	// never leaves a half-written lease.
-	tmp := p + ".new"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	// never leaves a half-written lease. Each contender needs its own staging
+	// file: a shared name lets concurrent adopters publish one another's holder.
+	tmpFile, err := os.CreateTemp(dir, ".orca-lease-*")
+	if err != nil {
+		return nil, err
+	}
+	tmp := tmpFile.Name()
+	defer os.Remove(tmp)
+	if err := tmpFile.Chmod(0o644); err != nil {
+		tmpFile.Close()
+		return nil, err
+	}
+	if _, err := tmpFile.Write(b); err != nil {
+		tmpFile.Close()
+		return nil, err
+	}
+	if err := tmpFile.Close(); err != nil {
 		return nil, err
 	}
 	err = os.Link(tmp, p)
-	_ = os.Remove(tmp)
 	if err == nil {
 		return j, nil
 	}
@@ -687,13 +700,24 @@ func writeAtomic(p string, b []byte) error {
 	if info, err := os.Stat(p); err == nil {
 		mode = info.Mode().Perm()
 	}
-	tmp := p + ".orca-tmp"
-	if err := os.WriteFile(tmp, b, mode); err != nil {
-		_ = os.Remove(tmp)
+	tmpFile, err := os.CreateTemp(filepath.Dir(p), ".orca-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := tmpFile.Name()
+	defer os.Remove(tmp)
+	if err := tmpFile.Chmod(mode); err != nil {
+		tmpFile.Close()
+		return err
+	}
+	if _, err := tmpFile.Write(b); err != nil {
+		tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, p); err != nil {
-		_ = os.Remove(tmp)
 		return err
 	}
 	return nil
