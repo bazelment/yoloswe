@@ -2110,6 +2110,8 @@ func (d *Dispatcher) applyMailAnswer(
 	return fmt.Sprintf("answered lane mail %s for lane %s", cmp.Or(msgID, bm.event.ID, "-"), cmp.Or(laneID, "-")), nil
 }
 
+const mailAnswerNotePrefix = "mail answer ("
+
 func (d *Dispatcher) respondToLaneMail(ctx context.Context, runID string, bm batchLaneMail, answer string) (bool, error) {
 	answer = strings.TrimSpace(answer)
 	if answer == "" {
@@ -2129,7 +2131,7 @@ func (d *Dispatcher) respondToLaneMail(ctx context.Context, runID string, bm bat
 	_, _ = d.store.Notes().Append(ctx, store.RunNote{
 		RunID:     runID,
 		TaskID:    msg.LaneID,
-		Text:      fmt.Sprintf("mail answer (%s): %s", cmp.Or(msg.ID, bm.event.ID), answer),
+		Text:      fmt.Sprintf("%s%s): %s", mailAnswerNotePrefix, cmp.Or(msg.ID, bm.event.ID), answer),
 		CreatedAt: d.clock.Now().UTC(),
 	})
 	return len(boxes) > 0, nil

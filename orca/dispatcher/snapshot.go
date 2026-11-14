@@ -388,7 +388,7 @@ func BuildSnapshot(
 			for i := len(notes) - 1; i >= 0; i-- {
 				nt := notes[i]
 				txt := strings.TrimSpace(nt.Text)
-				if txt == "" || strings.HasPrefix(txt, "mail answer (") {
+				if txt == "" || strings.HasPrefix(txt, mailAnswerNotePrefix) {
 					continue
 				}
 				label := cmp.Or(strings.TrimSpace(nt.TaskID), "run")

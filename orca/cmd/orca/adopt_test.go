@@ -1924,18 +1924,18 @@ func TestDispatcherLaneMailIsolationAndVetting(t *testing.T) {
 	if err := ctrl.AnswerOwnerAsk(t.Context(), "ask-idless", "hold: wait"); err != nil {
 		t.Fatalf("AnswerOwnerAsk hold: %v", err)
 	}
-	openAfterHold, err := mailbox.OpenLaneQuestions(t.Context(), st, runID, clk.Now())
+	openAfterHold, err := mailbox.OpenUnescalatedQuestions(t.Context(), st, runID, clk.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	foundHeld := false
 	for _, q := range openAfterHold {
-		if q.EventID == idlessEv.ID {
+		if q.EventID == idlessEv.ID && q.EscalatedAskID == "" {
 			foundHeld = true
 		}
 	}
 	if !foundHeld {
-		t.Fatalf("expected held owner_ask question %s to remain open, got %+v", idlessEv.ID, openAfterHold)
+		t.Fatalf("expected held owner_ask question %s to remain visible in OpenUnescalatedQuestions, got %+v", idlessEv.ID, openAfterHold)
 	}
 	if err := ctrl.AskOwner(t.Context(), controller.OwnerAsk{
 		ID:            "ask-idless-resolve",

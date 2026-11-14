@@ -247,6 +247,11 @@ type OpenQuestion struct {
 	EscalatedAskID string
 }
 
+type decodedMail struct {
+	msg Message
+	ev  store.Event
+}
+
 // IsAnswered reports whether the lane mail identified by msgID or eventID has
 // already been answered or closed in st.
 func IsAnswered(ctx context.Context, st store.Store, runID, msgID, eventID string) bool {
@@ -258,36 +263,25 @@ func IsAnswered(ctx context.Context, st store.Store, runID, msgID, eventID strin
 	if msgID == "" && eventID == "" {
 		return false
 	}
-	answered, _ := collectAnsweredMailState(ctx, st, runID, time.Time{})
-	if (msgID != "" && answered[msgID]) || (eventID != "" && answered[eventID]) {
-		return true
+	answered, _, _, err := collectAnsweredMailState(ctx, st, runID, time.Time{})
+	if err != nil {
+		return false
 	}
-	if evs, err := st.Events().List(ctx, store.EventFilter{
-		RunID: runID,
-		Kinds: []store.EventKind{store.EventMail},
-	}); err == nil {
-		for i := range evs {
-			ev := &evs[i]
-			var msg Message
-			if len(ev.Payload) == 0 || json.Unmarshal(ev.Payload, &msg) != nil {
-				continue
-			}
-			if msgID != "" && msg.InReplyTo == msgID {
-				return true
-			}
-			if ((msgID != "" && msg.ID == msgID) || (eventID != "" && ev.ID == eventID)) && msg.IsClosedOrAnswered() {
-				return true
-			}
-		}
-	}
-	return false
+	return (msgID != "" && answered[msgID]) || (eventID != "" && answered[eventID])
 }
 
-func collectAnsweredMailState(ctx context.Context, st store.Store, runID string, now time.Time) (map[string]bool, map[string]string) {
+func collectAnsweredMailState(ctx context.Context, st store.Store, runID string, now time.Time) (map[string]bool, map[string]string, []decodedMail, error) {
 	answered := make(map[string]bool)
 	escalatedAskID := make(map[string]string)
 	if st == nil {
-		return answered, escalatedAskID
+		return answered, escalatedAskID, nil, nil
+	}
+	evs, err := st.Events().List(ctx, store.EventFilter{
+		RunID: runID,
+		Kinds: []store.EventKind{store.EventMail},
+	})
+	if err != nil || len(evs) == 0 {
+		return answered, escalatedAskID, nil, err
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -332,7 +326,7 @@ func collectAnsweredMailState(ctx context.Context, st store.Store, runID string,
 						if ask.SourceMessageID != "" {
 							answered[ask.SourceMessageID] = true
 						}
-					} else if (d.Status == store.DirectiveActive && (d.ExpiresAt == nil || now.Before(*d.ExpiresAt))) || heldAskIDs[askID] {
+					} else if d.Status == store.DirectiveActive && (d.ExpiresAt == nil || now.Before(*d.ExpiresAt)) {
 						if ask.SourceMessageID != "" {
 							escalatedAskID[ask.SourceMessageID] = askID
 						}
@@ -374,7 +368,27 @@ func collectAnsweredMailState(ctx context.Context, st store.Store, runID string,
 			}
 		}
 	}
-	return answered, escalatedAskID
+	decoded := make([]decodedMail, 0, len(evs))
+	for i := range evs {
+		ev := evs[i]
+		var msg Message
+		if len(ev.Payload) == 0 || json.Unmarshal(ev.Payload, &msg) != nil {
+			continue
+		}
+		if msg.InReplyTo != "" {
+			answered[msg.InReplyTo] = true
+		}
+		if msg.IsClosedOrAnswered() {
+			if msg.ID != "" {
+				answered[msg.ID] = true
+			}
+			if ev.ID != "" {
+				answered[ev.ID] = true
+			}
+		}
+		decoded = append(decoded, decodedMail{ev: ev, msg: msg})
+	}
+	return answered, escalatedAskID, decoded, nil
 }
 
 // OpenLaneQuestions returns all unresolved lane questions in runID ordered by arrival.
@@ -385,43 +399,15 @@ func OpenLaneQuestions(ctx context.Context, st store.Store, runID string, now ti
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	evs, err := st.Events().List(ctx, store.EventFilter{
-		RunID: runID,
-		Kinds: []store.EventKind{store.EventMail},
-	})
-	if err != nil {
+	answered, escalatedAskID, decoded, err := collectAnsweredMailState(ctx, st, runID, now)
+	if err != nil || len(decoded) == 0 {
 		return nil, err
-	}
-	if len(evs) == 0 {
-		return nil, nil
-	}
-
-	answered, escalatedAskID := collectAnsweredMailState(ctx, st, runID, now)
-
-	type decodedMail struct {
-		ev  *store.Event
-		msg Message
-	}
-	decoded := make([]decodedMail, 0, len(evs))
-	for i := range evs {
-		ev := &evs[i]
-		var msg Message
-		if len(ev.Payload) == 0 || json.Unmarshal(ev.Payload, &msg) != nil {
-			continue
-		}
-		if msg.InReplyTo != "" {
-			answered[msg.InReplyTo] = true
-		}
-		if msg.ID != "" && msg.IsClosedOrAnswered() {
-			answered[msg.ID] = true
-		}
-		decoded = append(decoded, decodedMail{ev: ev, msg: msg})
 	}
 
 	seen := make(map[string]bool)
 	var out []OpenQuestion
 	for i := range decoded {
-		ev := decoded[i].ev
+		ev := &decoded[i].ev
 		msg := decoded[i].msg
 		laneID := strings.TrimSpace(cmp.Or(msg.LaneID, ev.LaneID))
 		if laneID == "" || !msg.IsQuestion() || msg.Owner {
