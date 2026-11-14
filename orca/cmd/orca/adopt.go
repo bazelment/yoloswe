@@ -1,9 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
+	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/bazelment/yoloswe/orca/adopt"
 	chatui "github.com/bazelment/yoloswe/orca/chat"
@@ -75,37 +79,61 @@ func newAdoption(ctx context.Context, cfg Config, h hostSwarms, holder string, f
 	ctrls := adopt.NewControllers(ctx, st, h.client, clk, adoptedDispatchers(cfg, st, h.client, clk, client, logger, prProbe))
 	ctrls.PRProbe = prProbe
 	return &adopt.Service{
-		Importer: h.importer,
-		Labeler:  h.client,
-		Watcher:  h.watcher,
-		Holder:   holder,
-		Former:   former,
-		Driver:   ctrls,
+		Importer:           h.importer,
+		Labeler:            h.client,
+		Watcher:            h.watcher,
+		Holder:             holder,
+		Former:             former,
+		Driver:             ctrls,
+		LoopVerifyInterval: loopVerifyInterval(),
 	}, ""
+}
+
+func loopVerifyInterval() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("ORCA_LOOP_VERIFY_INTERVAL")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+	}
+	return time.Second
 }
 
 func adoptedPRProbe(h hostSwarms, st store.Store) controller.PRProbe {
 	if h.probe.PR == nil {
 		return nil
 	}
-	return func(ctx context.Context, runID, _ string, pr int) (controller.PRStatus, error) {
+	return func(ctx context.Context, runID, branch string, pr int) (controller.PRStatus, error) {
+		target := strings.TrimSpace(branch)
+		if pr > 0 {
+			target = strconv.Itoa(pr)
+		}
+		if target == "" {
+			return controller.PRStatus{}, nil
+		}
 		var repo string
-		if st != nil {
+		if st != nil && runID != "" {
 			if run, err := st.Runs().Get(ctx, runID); err == nil && run != nil {
 				repo = run.Repository
 			}
 		}
-		runDir, _ := h.importer.Find(runID)
+		var runDir string
+		if runID != "" {
+			runDir, _ = h.importer.Find(runID)
+		}
 		if repo == "" && runDir != "" {
 			if hr, err := adopt.Read(runDir); err == nil {
 				repo = hr.Repo
 			}
 		}
-		res, err := h.probe.PR(ctx, repo, runDir, strconv.Itoa(pr))
+		res, err := h.probe.PR(ctx, repo, runDir, target)
 		if err != nil {
 			return controller.PRStatus{}, err
 		}
-		return controller.PRStatus{State: res.State}, nil
+		return controller.PRStatus{
+			State:    res.State,
+			MergeSHA: res.MergeSHA,
+			Number:   cmp.Or(res.Number, max(pr, 0)),
+		}, nil
 	}
 }
 

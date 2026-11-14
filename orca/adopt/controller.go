@@ -124,15 +124,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	holder := fmt.Sprintf("%s:%p", r.Holder, d)
 	if _, err := d.store.Runs().AcquireLease(ctx, r.ID, holder, controller.DefaultLeaseTTL); err != nil {
-		if errors.Is(err, store.ErrLeaseHeld) {
-			if curRun, gErr := d.store.Runs().Get(ctx, r.ID); gErr == nil && curRun.Lease != nil && strings.HasPrefix(curRun.Lease.HolderID, "orca-chat:") {
-				_ = d.store.Runs().ReleaseLease(ctx, r.ID, curRun.Lease.HolderID)
-				_, err = d.store.Runs().AcquireLease(ctx, r.ID, holder, controller.DefaultLeaseTTL)
-			}
-		}
-		if err != nil {
-			return err
-		}
+		return err
 	}
 	started := false
 	defer func() {
@@ -144,7 +136,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	if err != nil {
 		return err
 	}
-	resume := generation != "" && (storedRun.PlanRef == generation || strings.HasPrefix(storedRun.PlanRef, markerPrefix))
+	resume := sameAdoptionGeneration(storedRun.PlanRef, generation)
 	workflow.Version = 0
 	saved, err := d.store.Recipes().Save(ctx, workflow)
 	if err != nil {
@@ -230,6 +222,28 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		}
 	}()
 	return nil
+}
+
+func markerGeneration(marker string) string {
+	s, ok := strings.CutPrefix(strings.TrimSpace(marker), markerPrefix)
+	if !ok {
+		return ""
+	}
+	if open := strings.IndexByte(s, '('); open >= 0 {
+		return strings.TrimSpace(s[:open])
+	}
+	return strings.TrimSpace(s)
+}
+
+func sameAdoptionGeneration(storedPlanRef, currentMarker string) bool {
+	if currentMarker == "" || storedPlanRef == "" {
+		return false
+	}
+	if storedPlanRef == currentMarker {
+		return true
+	}
+	g1, g2 := markerGeneration(storedPlanRef), markerGeneration(currentMarker)
+	return g1 != "" && g1 == g2
 }
 
 func (d *Controllers) Stop(ctx context.Context, r Run) error {
@@ -833,6 +847,8 @@ func (d *adoptedRunDriver) readRunReportFile(ctx context.Context, runID, laneID,
 			filepath.Join(d.run.Dir, fmt.Sprintf("%s.%s.r%d.md", laneID, phase, round)),
 			filepath.Join(d.run.Dir, "reports", fmt.Sprintf("%s.%s.md", laneID, phase)),
 			filepath.Join(d.run.Dir, fmt.Sprintf("%s.%s.md", laneID, phase)),
+			filepath.Join(d.run.Dir, "reports", fmt.Sprintf("%s.%s.done", laneID, phase)),
+			filepath.Join(d.run.Dir, fmt.Sprintf("%s.%s.done", laneID, phase)),
 		)
 	}
 	for _, p := range candidates {

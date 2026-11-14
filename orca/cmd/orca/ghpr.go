@@ -22,7 +22,7 @@ func ghAvailable() bool { _, err := exec.LookPath("gh"); return err == nil }
 func ghPRStatus(ctx context.Context, repo, dir, number string) (chatui.PRStatus, error) {
 	ctx, cancel := context.WithTimeout(ctx, ghPRTimeout)
 	defer cancel()
-	args := []string{"pr", "view", number, "--json", "state,isDraft,statusCheckRollup"}
+	args := []string{"pr", "view", number, "--json", "number,state,isDraft,mergeCommit,statusCheckRollup"}
 	if repo != "" {
 		args = append(args, "--repo", repo)
 	}
@@ -55,14 +55,24 @@ type ghCheck struct {
 
 func parseGHPR(b []byte) (chatui.PRStatus, error) {
 	var v struct {
-		State  string    `json:"state"`
+		State       string `json:"state"`
+		MergeCommit struct {
+			OID string `json:"oid"`
+		} `json:"mergeCommit"`
 		Checks []ghCheck `json:"statusCheckRollup"`
+		Number int       `json:"number"`
 		Draft  bool      `json:"isDraft"`
 	}
 	if err := json.Unmarshal(b, &v); err != nil {
 		return chatui.PRStatus{}, fmt.Errorf("parse gh pr view: %w", err)
 	}
-	return chatui.PRStatus{State: v.State, Draft: v.Draft, Checks: summarizeChecks(v.Checks)}, nil
+	return chatui.PRStatus{
+		Number:   v.Number,
+		State:    v.State,
+		MergeSHA: v.MergeCommit.OID,
+		Draft:    v.Draft,
+		Checks:   summarizeChecks(v.Checks),
+	}, nil
 }
 
 // summarizeChecks counts checks as passed, failed or pending and names the

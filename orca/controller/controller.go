@@ -121,8 +121,8 @@ type PRStatus struct {
 	Number   int
 }
 
-// PRProbe queries the live state of a lane's pull request on GitHub.
-type PRProbe func(ctx context.Context, repo, branch string, pr int) (PRStatus, error)
+// PRProbe queries the live state of a lane's pull request on GitHub for runID.
+type PRProbe func(ctx context.Context, runID, branch string, pr int) (PRStatus, error)
 
 // Config configures a Controller instance for a single Run.
 type Config struct {
@@ -1619,30 +1619,51 @@ func (c *Controller) escalateLane(ctx context.Context, ln *lane.Lane, reason, re
 	return store.EventClassJudgment, nil
 }
 
-func (c *Controller) reconcileLanePRState(ctx context.Context, ln *lane.Lane, eventID string) (bool, error) {
-	if c.cfg.PRProbe == nil || ln == nil || (ln.PR <= 0 && strings.TrimSpace(ln.Branch) == "") {
-		return false, nil
+// ReconcileLanePRState checks whether ln's pull request is already MERGED or
+// CLOSED on GitHub. When it is, the lane's terminals/session are stopped, the
+// lane is persisted as done or failed, and its backlog item is closed.
+func ReconcileLanePRState(
+	ctx context.Context,
+	probe PRProbe,
+	st store.Store,
+	drv lane.LaneDriver,
+	now time.Time,
+	runID, actor, eventID string,
+	ln *lane.Lane,
+) (settled bool, state string, err error) {
+	if probe == nil || ln == nil || (ln.PR <= 0 && (strings.TrimSpace(ln.Branch) == "" || ln.Status == lane.StatusPlanned)) {
+		return false, "", nil
 	}
-	prState, err := c.cfg.PRProbe(ctx, "", ln.Branch, ln.PR)
+	prState, err := probe(ctx, runID, ln.Branch, ln.PR)
 	if err != nil {
-		return false, nil
+		slog.WarnContext(ctx, "probe lane PR state failed", "run_id", runID, "lane_id", ln.ID, "pr", ln.PR, "branch", ln.Branch, "error", err)
+		return false, "", nil
 	}
 	if prState.Number > 0 && ln.PR <= 0 {
 		ln.PR = prState.Number
 	}
-	state := strings.ToUpper(strings.TrimSpace(prState.State))
+	state = strings.ToUpper(strings.TrimSpace(prState.State))
 	switch state {
 	case "MERGED", "CLOSED":
 	default:
-		return false, nil
+		return false, "", nil
 	}
 
-	delete(c.pendingVerdicts, ln.ID)
-	_ = c.stopCurrentTerminal(ctx, ln, "pr "+strings.ToLower(state))
-	c.tryRelease(ctx, ln)
-	delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
+	if drv != nil {
+		if strings.TrimSpace(ln.TerminalID) != "" || strings.TrimSpace(ln.SessionID) != "" {
+			_ = drv.Stop(ctx, lane.StopRequest{
+				RunID:      runID,
+				LaneID:     ln.ID,
+				SessionID:  ln.SessionID,
+				TerminalID: ln.TerminalID,
+				Reason:     "pr " + strings.ToLower(state),
+			})
+		}
+		if r, ok := drv.(lane.SessionReleaser); ok && strings.TrimSpace(ln.SessionID) != "" {
+			_ = r.ReleaseSession(ctx, ln.SessionID)
+		}
+	}
 
-	round := max(ln.Round, 1)
 	if state == "MERGED" {
 		ln.Status = lane.StatusDone
 		ln.MergeSHA = cmp.Or(strings.TrimSpace(prState.MergeSHA), ln.MergeSHA, ln.PRHead)
@@ -1652,19 +1673,40 @@ func (c *Controller) reconcileLanePRState(ctx context.Context, ln *lane.Lane, ev
 	if eventID != "" {
 		ln.LastEventID = eventID
 	}
-	ln.LastEventAt = c.clock.Now().UTC()
-	if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+	ln.LastEventAt = now.UTC()
+	if err := st.Lanes().Upsert(ctx, *ln); err != nil {
+		return true, state, err
+	}
+
+	itemID := cmp.Or(ln.ItemID, ln.ID)
+	if itemID != "" {
+		if item, err := st.Backlog().Get(ctx, runID, itemID); err == nil && !item.Status.Terminal() {
+			backlogStatus := store.BacklogDone
+			if state == "CLOSED" {
+				backlogStatus = store.BacklogDropped
+			}
+			_ = st.Backlog().Close(ctx, runID, itemID, backlogStatus, actor, fmt.Sprintf("PR #%d %s", ln.PR, strings.ToLower(state)))
+		}
+	}
+	return true, state, nil
+}
+
+func (c *Controller) reconcileLanePRState(ctx context.Context, ln *lane.Lane, eventID string) (bool, error) {
+	settled, state, err := ReconcileLanePRState(ctx, c.cfg.PRProbe, c.store, c.driver, c.clock.Now(), c.cfg.RunID, ActorController, eventID, ln)
+	if !settled {
+		return false, err
+	}
+	delete(c.pendingVerdicts, ln.ID)
+	delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
+	if err != nil {
 		return true, err
 	}
 
+	round := max(ln.Round, 1)
 	actionKey := fmt.Sprintf("pr-state:%s:%d:%s", ln.ID, ln.PR, strings.ToLower(state))
 	result := "lane done (pr merged)"
-	backlogStatus := store.BacklogDone
-	backlogReason := fmt.Sprintf("PR #%d merged", ln.PR)
 	if state == "CLOSED" {
 		result = "lane failed (pr closed)"
-		backlogStatus = store.BacklogDropped
-		backlogReason = fmt.Sprintf("PR #%d closed", ln.PR)
 	}
 	_, _, _ = c.recordDecision(ctx, ToolLaneComplete, ln.ID,
 		fmt.Sprintf("PR #%d is %s on GitHub", ln.PR, state),
@@ -1678,12 +1720,6 @@ func (c *Controller) reconcileLanePRState(ctx context.Context, ln *lane.Lane, ev
 			Round:     round,
 		},
 	)
-	itemID := cmp.Or(ln.ItemID, ln.ID)
-	if itemID != "" {
-		if item, err := c.store.Backlog().Get(ctx, c.cfg.RunID, itemID); err == nil && !item.Status.Terminal() {
-			_ = c.store.Backlog().Close(ctx, c.cfg.RunID, itemID, backlogStatus, ActorController, backlogReason)
-		}
-	}
 	return true, nil
 }
 
@@ -1879,11 +1915,6 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 	if payload.ExitCode == 0 && (payload.Error == "" || payload.Kind == lane.EventTurnEndedNoReport || payload.Kind == lane.EventExited) {
 		if termID != "" && c.driver != nil {
 			if rep, err := c.driver.ReadReport(ctx, c.cfg.RunID, ln.ID, termID); err == nil && rep != nil && rep.Outcome.Valid() {
-				return c.handleLaneReport(ctx, ev)
-			}
-		}
-		if payload.Error != "" {
-			if rep, err := lane.ParsePhaseReport(payload.Error); err == nil && rep != nil && rep.Outcome.Valid() {
 				return c.handleLaneReport(ctx, ev)
 			}
 		}
@@ -2319,7 +2350,7 @@ func (c *Controller) startLanePhase(
 }
 
 func (c *Controller) stopCurrentTerminal(ctx context.Context, ln *lane.Lane, reason string) error {
-	if ln == nil || (strings.TrimSpace(ln.TerminalID) == "" && strings.TrimSpace(ln.SessionID) == "") {
+	if c.driver == nil || ln == nil || (strings.TrimSpace(ln.TerminalID) == "" && strings.TrimSpace(ln.SessionID) == "") {
 		return nil
 	}
 	return c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: reason})
@@ -2470,15 +2501,6 @@ func (c *Controller) extractReport(ctx context.Context, ln *lane.Lane, ev store.
 			payload.Ask = cmp.Or(payload.Ask, drvRep.Ask)
 			payload.Breaks = cmp.Or(payload.Breaks, drvRep.Breaks)
 			payload.Summary = cmp.Or(payload.Summary, drvRep.Summary)
-		}
-	}
-
-	if payload.Outcome == "" && len(ev.Payload) > 0 {
-		var exitPayload PhaseExitPayload
-		if err := json.Unmarshal(ev.Payload, &exitPayload); err == nil && exitPayload.Error != "" {
-			if parsed, pErr := lane.ParsePhaseReport(exitPayload.Error); pErr == nil {
-				payload.PhaseReport = *parsed
-			}
 		}
 	}
 

@@ -129,6 +129,9 @@ func waitGone(ctx context.Context, pids []int, timeout time.Duration) bool {
 // the run's last armed watcher, the way an exiting watcher hands off, so lane
 // steps continue until the host orchestrator re-arms its watcher.
 func (w ScriptWatcher) Start(_ context.Context, runDir string) error {
+	if holder, ok := HeldByOrca(runDir); ok {
+		return fmt.Errorf("%w: %s", ErrLeaseHeld, holder)
+	}
 	owner, _ := os.ReadFile(filepath.Join(runDir, ".watch-owner"))
 	cmd := exec.Command("bash", w.Script, "--bridge", runDir)
 	cmd.Env = append(os.Environ(), "WATCH_BRIDGE_OF="+strings.TrimSpace(string(owner)))

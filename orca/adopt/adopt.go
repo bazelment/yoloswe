@@ -56,22 +56,24 @@ func ChatHolder(chatRunID string) string { return "orca-chat:" + chatRunID }
 // journal or stand-down marker, returning the holder description when held.
 func HeldByOrca(runDir string) (string, bool) {
 	if j, err := readJournal(filepath.Join(runDir, leaseFile)); err == nil {
-		if holder := strings.TrimSpace(j.Holder); holder != "" && j.State != stateReleasing {
+		if j.State == stateReleasing {
+			return "", false
+		}
+		if holder := strings.TrimSpace(j.Holder); holder != "" {
 			return holder, true
 		}
 	}
 	for _, name := range handoverFiles {
-		for _, line := range strings.Split(readText(filepath.Join(runDir, name)), "\n") {
-			if strings.HasPrefix(line, markerPrefix) {
-				if open := strings.IndexByte(line, '('); open >= 0 {
-					if close := strings.IndexByte(line[open+1:], ')'); close >= 0 {
-						if h := strings.TrimSpace(line[open+1 : open+1+close]); h != "" {
-							return h, true
-						}
+		first, _, _ := strings.Cut(readText(filepath.Join(runDir, name)), "\n")
+		if strings.HasPrefix(first, markerPrefix) {
+			if open := strings.IndexByte(first, '('); open >= 0 {
+				if close := strings.IndexByte(first[open+1:], ')'); close >= 0 {
+					if h := strings.TrimSpace(first[open+1 : open+1+close]); h != "" {
+						return h, true
 					}
 				}
-				return strings.TrimSpace(strings.TrimPrefix(line, markerPrefix)), true
 			}
+			return strings.TrimSpace(strings.TrimPrefix(first, markerPrefix)), true
 		}
 	}
 	return "", false
@@ -491,18 +493,19 @@ type Service struct {
 	// Former lists legacy holder ids still owned by this service.
 	Former   []string
 	Importer Importer
-	// VerifyInterval is the pause before re-checking that no step loop
-	// restarted after stopWatcher. Zero uses a short default (25ms).
-	VerifyInterval time.Duration
+	// LoopVerifyInterval is the pause before re-checking that no step loop
+	// restarted after stopWatcher stops a running loop. Zero uses
+	// defaultLoopVerifyInterval.
+	LoopVerifyInterval time.Duration
 }
 
-const defaultVerifyInterval = 25 * time.Millisecond
+const defaultLoopVerifyInterval = 50 * time.Millisecond
 
-func (s *Service) verifyInterval() time.Duration {
-	if s.VerifyInterval > 0 {
-		return s.VerifyInterval
+func (s *Service) loopVerifyInterval() time.Duration {
+	if s.LoopVerifyInterval > 0 {
+		return s.LoopVerifyInterval
 	}
-	return defaultVerifyInterval
+	return defaultLoopVerifyInterval
 }
 
 // owns reports whether a lease under holder belongs to this service.
@@ -510,8 +513,8 @@ func (s *Service) owns(holder string) bool {
 	if holder == s.Holder || slices.Contains(s.Former, holder) {
 		return true
 	}
-	// Legacy empty chat holder ("orca-chat:") migrates to the active chat holder.
-	return s.Holder != "" && holder == ChatHolder("")
+	// Legacy empty chat holder ("orca-chat:") migrates to an active chat holder.
+	return strings.HasPrefix(s.Holder, ChatHolder("")) && holder == ChatHolder("")
 }
 
 // RunDriver drives imported lanes while orca owns the host run.
@@ -551,9 +554,6 @@ func (s *Service) Adopted() ([]string, error) {
 	var ids []string
 	for _, dir := range s.Importer.runDirs() {
 		if j, err := readJournal(filepath.Join(dir, leaseFile)); err == nil && s.owns(j.Holder) {
-			if s.Holder != "" && j.Holder != s.Holder {
-				_ = s.migrateJournal(dir, j)
-			}
 			ids = append(ids, filepath.Base(dir))
 		}
 	}
@@ -731,7 +731,9 @@ func (s *Service) migrateJournal(dir string, cur *journal) error {
 		content := string(b)
 		if oldMarker != "" {
 			if rest, ok := strings.CutPrefix(content, oldMarker); ok {
-				_ = writeAtomic(p, []byte(cur.Marker+rest))
+				if err := writeAtomic(p, []byte(cur.Marker+rest)); err != nil {
+					return err
+				}
 				continue
 			}
 		}
@@ -745,7 +747,9 @@ func (s *Service) migrateJournal(dir string, cur *journal) error {
 				cur.Marker = updated
 			}
 			if updated != first+"\n" {
-				_ = writeAtomic(p, []byte(updated+rest))
+				if err := writeAtomic(p, []byte(updated+rest)); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -976,12 +980,14 @@ func (s *Service) stopWatcher(ctx context.Context, dir string, j *journal) error
 	}
 	// Re-check after one loop interval to verify a scheduled tick or bounded
 	// step loop did not immediately restart a new loop under our lease.
-	timer := time.NewTimer(s.verifyInterval())
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
+	if len(j.WatcherPIDs) > 0 || s.LoopVerifyInterval > 0 {
+		timer := time.NewTimer(s.loopVerifyInterval())
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 	if pids, err := s.Watcher.Running(ctx, dir); err != nil || len(pids) > 0 {
 		if len(pids) > 0 {

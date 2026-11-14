@@ -18,10 +18,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/adopt"
+	chatui "github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
+	"github.com/bazelment/yoloswe/orca/controller"
+	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/store"
 )
+
+func init() {
+	_ = os.Setenv("ORCA_LOOP_VERIFY_INTERVAL", "25ms")
+}
 
 // The shipped chat adopts, persists, and releases a host swarm lease.
 func TestShippedChatAdoptsAndReleasesHostSwarm(t *testing.T) {
@@ -554,8 +562,7 @@ func TestRestartRestartsHeldControllers(t *testing.T) {
 		t.Fatalf("first session output missing adoption confirmation:\n%s", out1.String())
 	}
 
-	// Simulate a journal written with the old empty holder ("orca-chat:") and a
-	// stale SQLite lease left behind by an ungraceful process exit.
+	// Simulate a journal written with the old empty holder ("orca-chat:").
 	for _, n := range []string{".orca-lease.json", "OBJECTIVE.md", "PROGRESS.md"} {
 		p := filepath.Join(dir, n)
 		writeFile(t, p, strings.ReplaceAll(readFile(t, p), "orca-chat:"+frontDeskRunID, "orca-chat:"))
@@ -564,15 +571,6 @@ func TestRestartRestartsHeldControllers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.OpenSQLite(dbPath, clock.NewRealClock())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.Runs().AcquireLease(t.Context(), runID, "orca-chat:crashed-pid", time.Hour); err != nil {
-		_ = st.Close()
-		t.Fatal(err)
-	}
-	_ = st.Close()
 
 	// Replay fixture that routes to the concierge and submits a directive to the held run without a second /adopt.
 	var exchanges []model.RecordedExchange
@@ -610,5 +608,55 @@ func TestRestartRestartsHeldControllers(t *testing.T) {
 	dirs, err := st2.Directives().List(t.Context(), store.DirectiveFilter{RunID: runID})
 	if err != nil || len(dirs) != 1 || !strings.Contains(dirs[0].Text, "Hold new lanes until m2-default merges.") {
 		t.Fatalf("directives on held run after restart = %+v, err = %v", dirs, err)
+	}
+}
+
+func TestAdoptedPRProbeResolvesRunRepoDirAndMergeSHA(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	const runID = "20261114-trial-m1"
+	runDir := filepath.Join(root, ".swarm", runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(runDir, "state.json"), `{"config":{"goal":"trial m1","repo":"sycamore-labs/nebula"},"tasks":[]}`)
+	writeFile(t, filepath.Join(runDir, "EVENTS"), "")
+	writeFile(t, filepath.Join(runDir, ".repo-slug"), "sycamore-labs/nebula\n")
+
+	clk := clock.NewRealClock()
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	if err := st.Runs().Create(t.Context(), store.Run{ID: runID, Repository: "sycamore-labs/nebula", Objective: "trial m1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotRepo, gotDir, gotTarget string
+	h := hostSwarms{
+		importer: adopt.Importer{Roots: []string{filepath.Join(root, ".swarm")}},
+		probe: chatui.HostProbe{
+			PR: func(_ context.Context, repo, dir, number string) (chatui.PRStatus, error) {
+				gotRepo, gotDir, gotTarget = repo, dir, number
+				return chatui.PRStatus{Number: 5705, State: "MERGED", MergeSHA: "merged-oid-5705"}, nil
+			},
+		},
+	}
+	probe := adoptedPRProbe(h, st)
+	ln := lane.Lane{
+		ID: "m2-default", ItemID: "m2-default", RunID: runID,
+		Status: lane.StatusRunning, Phase: "review", Round: 1, PR: 5705,
+		Branch: "swarm-lane/trial-m1/m2-default",
+	}
+	if err := st.Lanes().Upsert(t.Context(), ln); err != nil {
+		t.Fatal(err)
+	}
+	settled, state, err := controller.ReconcileLanePRState(t.Context(), probe, st, nil, clk.Now(), runID, controller.ActorController, "ev-1", &ln)
+	if err != nil || !settled || state != "MERGED" {
+		t.Fatalf("ReconcileLanePRState = (%v, %q, %v), want (true, MERGED, nil)", settled, state, err)
+	}
+	if gotRepo != "sycamore-labs/nebula" || gotDir != runDir || gotTarget != "5705" {
+		t.Fatalf("probe called with repo=%q dir=%q target=%q, want sycamore-labs/nebula, %q, 5705", gotRepo, gotDir, gotTarget, runDir)
+	}
+	if ln.Status != lane.StatusDone || ln.MergeSHA != "merged-oid-5705" {
+		t.Fatalf("lane after reconcile = %+v, want StatusDone and MergeSHA=merged-oid-5705", ln)
 	}
 }

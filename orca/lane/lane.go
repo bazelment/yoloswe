@@ -249,10 +249,32 @@ func ParsePhaseReport(raw string) (*PhaseReport, error) {
 		}
 	}
 	rep.Summary = strings.Join(body, "\n")
+	reconcileVerdictOutcome(rep)
 	if !rep.Outcome.Valid() {
 		return nil, fmt.Errorf("invalid or missing phase report Outcome %q", rep.Outcome)
 	}
 	return rep, nil
+}
+
+func reconcileVerdictOutcome(rep *PhaseReport) {
+	fields := strings.Fields(strings.ToLower(rep.Verdict))
+	if len(fields) == 0 {
+		return
+	}
+	switch fields[0] {
+	case "pass":
+		if rep.Outcome == "" {
+			rep.Outcome = OutcomeDone
+		}
+	case "needs-changes", "needs_changes", "needs-swe", "needs_swe", "fail", "failed":
+		if rep.Outcome == "" || rep.Outcome == OutcomeDone {
+			rep.Outcome = OutcomeNeedsSWE
+		}
+	case "needs-human", "needs_human", "needs-input", "needs_input":
+		if rep.Outcome == "" || rep.Outcome == OutcomeDone {
+			rep.Outcome = OutcomeNeedsInput
+		}
+	}
 }
 
 func applyReportHeader(rep *PhaseReport, key, val string) bool {
@@ -316,22 +338,6 @@ func applyReportHeader(rep *PhaseReport, key, val string) bool {
 		rep.Observed = val
 	case "verdict":
 		rep.Verdict = val
-		if fields := strings.Fields(strings.ToLower(val)); len(fields) > 0 {
-			switch fields[0] {
-			case "pass":
-				if rep.Outcome == "" {
-					rep.Outcome = OutcomeDone
-				}
-			case "needs-changes", "needs_changes":
-				if rep.Outcome == "" || rep.Outcome == OutcomeDone {
-					rep.Outcome = OutcomeNeedsSWE
-				}
-			case "fail", "failed":
-				if rep.Outcome == "" {
-					rep.Outcome = OutcomeNeedsSWE
-				}
-			}
-		}
 	case "reach":
 		rep.Reach = val
 	case "reach observed":

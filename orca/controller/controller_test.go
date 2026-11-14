@@ -2176,13 +2176,62 @@ func TestControllerMergedPRBeforeRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ln.Status != lane.StatusDone {
-		t.Fatalf("lane status = %q, want %q (starts=%d steers=%d stops=%d releases=%d)", ln.Status, lane.StatusDone, len(drv.PhaseStarts), len(drv.Steers), len(drv.Stops), len(drv.Releases))
+	if ln.Status != lane.StatusDone || ln.MergeSHA != "merged-sha-5705" {
+		t.Fatalf("lane = %+v, want status=%q MergeSHA=merged-sha-5705 (starts=%d steers=%d stops=%d releases=%d)", ln, lane.StatusDone, len(drv.PhaseStarts), len(drv.Steers), len(drv.Stops), len(drv.Releases))
 	}
 	if len(drv.PhaseStarts) != 0 || len(drv.Steers) != 0 || len(drv.Spawns) != 0 {
 		t.Fatalf("merged PR lane spawned/retried: starts=%+v steers=%+v spawns=%+v", drv.PhaseStarts, drv.Steers, drv.Spawns)
 	}
 	if len(drv.Stops) == 0 && len(drv.Releases) == 0 {
 		t.Fatalf("expected merged PR lane terminals/session stopped, stops=%+v releases=%+v", drv.Stops, drv.Releases)
+	}
+
+	// Verify CLOSED PR marks lane failed and drops backlog item without spawning.
+	if err := st.Backlog().Add(t.Context(), store.BacklogItem{
+		ID:       "m2-closed",
+		RunID:    "run-1",
+		Title:    "Closed lane",
+		Priority: store.PriorityP2,
+		Status:   store.BacklogInProgress,
+		LaneID:   "m2-closed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{
+		ID:         "m2-closed",
+		ItemID:     "m2-closed",
+		RunID:      "run-1",
+		Status:     lane.StatusRunning,
+		Phase:      "review",
+		Round:      1,
+		Attempt:    1,
+		PR:         5706,
+		Branch:     "swarm-lane/trial-m1/m2-closed",
+		SessionID:  "sess-closed",
+		TerminalID: "term-closed-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctrlClosed := controller.New(controller.Config{
+		RunID: "run-1",
+		PRProbe: func(_ context.Context, runID, _ string, pr int) (controller.PRStatus, error) {
+			if runID == "run-1" && pr == 5706 {
+				return controller.PRStatus{Number: 5706, State: "CLOSED"}, nil
+			}
+			return controller.PRStatus{Number: pr, State: "OPEN"}, nil
+		},
+	}, st, drv, clk, judge)
+	appendLaneWatchEvent(t, st, "m2-closed", "term-closed-1", lane.EventExited)
+	mustStep(t, ctrlClosed)
+	closedLn, err := st.Lanes().Get(t.Context(), "run-1", "m2-closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closedLn.Status != lane.StatusFailed {
+		t.Fatalf("closed PR lane status = %q, want %q", closedLn.Status, lane.StatusFailed)
+	}
+	closedItem, err := st.Backlog().Get(t.Context(), "run-1", "m2-closed")
+	if err != nil || closedItem.Status != store.BacklogDropped {
+		t.Fatalf("closed PR backlog item = %+v, err = %v; want dropped", closedItem, err)
 	}
 }

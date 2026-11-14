@@ -564,6 +564,11 @@ func TestFakeClaudeStepEntryPointRefusesWhileOrcaLeaseLive(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), ".swarm")
 	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	script := filepath.Join(t.TempDir(), "swarm_nebula.sh")
+	write(t, script, fakeSwarmScript)
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	stepScript := filepath.Join(t.TempDir(), "fake_step.sh")
 	write(t, stepScript, fakeClaudeStepEntryScript)
 	if err := os.Chmod(stepScript, 0o755); err != nil {
@@ -590,6 +595,14 @@ func TestFakeClaudeStepEntryPointRefusesWhileOrcaLeaseLive(t *testing.T) {
 		t.Fatalf("HeldByOrca during adopt = (%q, %v), want (%q, true)", holder, held, s.Holder)
 	}
 
+	// Production StepLoopWatcher.Start and ScriptWatcher.Start also refuse via HeldByOrca.
+	if err := (StepLoopWatcher{Script: script}).Start(t.Context(), dir); !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf("StepLoopWatcher.Start while held = %v, want ErrLeaseHeld", err)
+	}
+	if err := (ScriptWatcher{Script: script}).Start(t.Context(), dir); !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf("ScriptWatcher.Start while held = %v, want ErrLeaseHeld", err)
+	}
+
 	// While orca holds the lease, the Claude step entry point refuses.
 	out, err := exec.Command(stepScript, dir, stepMarker).CombinedOutput()
 	if err == nil {
@@ -602,7 +615,8 @@ func TestFakeClaudeStepEntryPointRefusesWhileOrcaLeaseLive(t *testing.T) {
 		t.Fatalf("step marker mutated while held by orca: %q", got)
 	}
 
-	// Also verify refusal when only the stand-down line is present.
+	// Also verify refusal when only the stand-down line is present on line 1,
+	// and that a stand-down string buried on line 2 is ignored.
 	standDownDir := filepath.Join(t.TempDir(), "stand-down-only")
 	if err := os.MkdirAll(standDownDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -611,8 +625,9 @@ func TestFakeClaudeStepEntryPointRefusesWhileOrcaLeaseLive(t *testing.T) {
 	if holder, held := HeldByOrca(standDownDir); !held || holder != "orca-chat:front-desk" {
 		t.Fatalf("HeldByOrca(standDownDir) = (%q, %v), want (orca-chat:front-desk, true)", holder, held)
 	}
-	if out, err := exec.Command(stepScript, standDownDir, stepMarker).CombinedOutput(); err == nil || !strings.Contains(string(out), "refusing to step") {
-		t.Fatalf("expected refusal from stand-down line, got err=%v out=%s", err, out)
+	write(t, filepath.Join(standDownDir, "OBJECTIVE.md"), "# Goal\nORCHESTRATOR: orca since 2026-11-14T05:40:00Z (orca-chat:front-desk)\n")
+	if holder, held := HeldByOrca(standDownDir); held {
+		t.Fatalf("HeldByOrca(buried marker) = (%q, true), want false", holder)
 	}
 
 	if err := s.Release(t.Context(), nsRun); err != nil {
@@ -657,7 +672,7 @@ func TestAdoptFailsWhenStepLoopRestartsWithinInterval(t *testing.T) {
 		restartAfter: 15 * time.Millisecond,
 	}
 	s := nsService(root, loop, label)
-	s.VerifyInterval = 60 * time.Millisecond
+	s.LoopVerifyInterval = 60 * time.Millisecond
 
 	_, err := s.Adopt(t.Context(), nsRun)
 	if err == nil || !strings.Contains(err.Error(), "step loop restarted under orca lease") {
@@ -697,9 +712,9 @@ func TestNebulaSwarmReviewReportRecognised(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
 
-	// Complete clean phase via a nebula-swarm disk report and turn_ended_no_report
+	// Complete clean phase via a nebula-swarm disk report (.done file) and turn_ended_no_report
 	// so the controller advances m2-default to review round 1.
-	write(t, filepath.Join(dir, "reports", "m2-default.clean.r1.md"), "Outcome: done\nHEAD: bbb\nPR: 5705\n")
+	write(t, filepath.Join(dir, "reports", "m2-default.clean.done"), "Outcome: done\nHEAD: bbb\nPR: 5705\n")
 	drv.Emit(lane.Event{
 		RunID:      nsRun,
 		LaneID:     "m2-default",
@@ -758,5 +773,12 @@ func TestNebulaSwarmReviewReportRecognised(t *testing.T) {
 	}
 	if len(drv.PhaseStarts) != 1 {
 		t.Fatalf("unexpected retry/spawn after review pass: PhaseStarts=%+v", drv.PhaseStarts)
+	}
+
+	// Another Controllers instance on the same store must fail with store.ErrLeaseHeld
+	// while the first controller holds the non-expired run lease.
+	competing := NewControllers(t.Context(), st, drv, clk, nil)
+	if err := competing.Start(t.Context(), r); !errors.Is(err, store.ErrLeaseHeld) {
+		t.Fatalf("competing Controllers.Start = %v, want store.ErrLeaseHeld", err)
 	}
 }

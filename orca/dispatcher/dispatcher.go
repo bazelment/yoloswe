@@ -1015,55 +1015,9 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 }
 
 func (d *Dispatcher) reconcileLanePRState(ctx context.Context, runID string, ln *lane.Lane) (bool, string, error) {
-	if d.cfg.PRProbe == nil || ln == nil || (ln.PR <= 0 && strings.TrimSpace(ln.Branch) == "") {
-		return false, "", nil
-	}
-	prState, err := d.cfg.PRProbe(ctx, "", ln.Branch, ln.PR)
-	if err != nil {
-		return false, "", nil
-	}
-	if prState.Number > 0 && ln.PR <= 0 {
-		ln.PR = prState.Number
-	}
-	state := strings.ToUpper(strings.TrimSpace(prState.State))
-	switch state {
-	case "MERGED", "CLOSED":
-	default:
-		return false, "", nil
-	}
-	if d.driver != nil {
-		if strings.TrimSpace(ln.TerminalID) != "" || strings.TrimSpace(ln.SessionID) != "" {
-			_ = d.driver.Stop(ctx, lane.StopRequest{
-				RunID:      runID,
-				LaneID:     ln.ID,
-				SessionID:  ln.SessionID,
-				TerminalID: ln.TerminalID,
-				Reason:     "pr " + strings.ToLower(state),
-			})
-		}
-		if r, ok := d.driver.(lane.SessionReleaser); ok && strings.TrimSpace(ln.SessionID) != "" {
-			_ = r.ReleaseSession(ctx, ln.SessionID)
-		}
-	}
-	if state == "MERGED" {
-		ln.Status = lane.StatusDone
-		ln.MergeSHA = cmp.Or(strings.TrimSpace(prState.MergeSHA), ln.MergeSHA, ln.PRHead)
-	} else {
-		ln.Status = lane.StatusFailed
-	}
-	ln.LastEventAt = d.clock.Now().UTC()
-	if err := d.store.Lanes().Upsert(ctx, *ln); err != nil {
-		return true, "", err
-	}
-	itemID := cmp.Or(ln.ItemID, ln.ID)
-	if itemID != "" {
-		if item, err := d.store.Backlog().Get(ctx, runID, itemID); err == nil && !item.Status.Terminal() {
-			status := store.BacklogDone
-			if state == "CLOSED" {
-				status = store.BacklogDropped
-			}
-			_ = d.store.Backlog().Close(ctx, runID, itemID, status, ActorDispatcher, fmt.Sprintf("PR #%d %s", ln.PR, strings.ToLower(state)))
-		}
+	settled, state, err := controller.ReconcileLanePRState(ctx, d.cfg.PRProbe, d.store, d.driver, d.clock.Now(), runID, ActorDispatcher, "", ln)
+	if !settled || err != nil {
+		return settled, "", err
 	}
 	return true, fmt.Sprintf("lane %s PR #%d already %s; stopped terminals", ln.ID, ln.PR, strings.ToLower(state)), nil
 }

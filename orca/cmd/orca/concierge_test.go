@@ -804,4 +804,22 @@ func TestConciergeInstructionAfterUnrelatedQuestionAddressesInstruction(t *testi
 	if !strings.Contains(toolResults[ToolDirectiveSubmit], "on run 20261114-trial-m1") {
 		t.Fatalf("directive.submit did not target held run 20261114-trial-m1:\n%s", toolResults[ToolDirectiveSubmit])
 	}
+
+	// Verify an unheld run's lane is not implicitly returned by findHeldLane,
+	// and resolveTargetRun rejects ambiguous mutations when multiple runs are held.
+	if err := st.Runs().Create(ctx, store.Run{ID: "20261110-foreign", Objective: "foreign"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(ctx, store.Lane{RunID: "20261110-foreign", ID: "secret-lane", Status: "running", Phase: "swe", Round: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.findHeldLane(ctx, "", "secret-lane", "show secret-lane"); err == nil {
+		t.Fatal("expected findHeldLane to reject unheld run lane when run is not named")
+	}
+	c.HeldRuns = func(context.Context) ([]string, error) {
+		return []string{frontDeskRunID, heldRunID, "20261113-second-held"}, nil
+	}
+	if _, err := c.resolveTargetRun(ctx, "pause execution"); err == nil || !strings.Contains(err.Error(), "several runs are held") {
+		t.Fatalf("resolveTargetRun with multiple held runs = %v, want ambiguity error", err)
+	}
 }

@@ -606,15 +606,10 @@ func plainHistory(msgs []model.Message) []model.Message {
 // relevantHistory drops earlier user/assistant turns that are about a different
 // run than the current question so unrelated run status never bleeds into the
 // current answer, while keeping follow-up context for the active subject run.
-// When the owner sends a new instruction rather than a question or confirmation,
-// earlier question/answer turns are dropped so the reply addresses the instruction.
 func (c *Concierge) relevantHistory(ctx context.Context, history []model.Message, question string, held []string) []model.Message {
 	plain := plainHistory(history)
-	if len(plain) == 0 || chat.IsConfirmation(question) || asksAboutPriorConversation(question) {
+	if len(plain) == 0 || chat.IsConfirmation(question) {
 		return plain
-	}
-	if isOwnerInstruction(question) {
-		return nil
 	}
 	knownRuns := slices.Clone(held)
 	laneToRun := map[string]string{}
@@ -660,15 +655,15 @@ func (c *Concierge) relevantHistory(ctx context.Context, history []model.Message
 		if end < len(plain) && plain[i].Role == model.RoleUser && plain[end].Role == model.RoleAssistant {
 			end++
 		}
-		userLower := strings.ToLower(plain[i].Text())
-		runs := tokensForText(userLower)
-		if len(runs) == 0 && isFollowUpQuestion(plain[i].Text()) && end > i+1 {
-			runs = tokensForText(strings.ToLower(plain[i+1].Text()))
+		var turnText strings.Builder
+		for j := i; j < end; j++ {
+			turnText.WriteString(strings.ToLower(plain[j].Text()))
+			turnText.WriteByte('\n')
 		}
 		spans = append(spans, turnSpan{
 			start: i,
 			end:   end,
-			runs:  runs,
+			runs:  tokensForText(turnText.String()),
 		})
 		i = end
 	}
@@ -707,7 +702,7 @@ func (c *Concierge) relevantHistory(ctx context.Context, history []model.Message
 					break
 				}
 			}
-		case len(sp.runs) == 0 && (len(targetRuns) > 0 || !isFollowUpQuestion(question)):
+		case len(sp.runs) == 0 && len(targetRuns) > 0:
 			keep = false
 		}
 		if keep {
@@ -715,58 +710,6 @@ func (c *Concierge) relevantHistory(ctx context.Context, history []model.Message
 		}
 	}
 	return out
-}
-
-func asksAboutPriorConversation(text string) bool {
-	lower := strings.ToLower(strings.TrimSpace(text))
-	for _, phrase := range []string{"what did i ask", "earlier", "before?", "previous question", "last question"} {
-		if strings.Contains(lower, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
-func isFollowUpQuestion(text string) bool {
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
-		return false
-	}
-	lower := strings.ToLower(trimmed)
-	if lower == "thanks" || lower == "thank you" || lower == "ok" || lower == "okay" {
-		return true
-	}
-	for _, prefix := range []string{"and ", "also ", "what about ", "how about "} {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-	return strings.Contains(trimmed, "?") && len(matchedRunTokens(lower, nil)) == 0
-}
-
-func isOwnerInstruction(text string) bool {
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" || strings.Contains(trimmed, "?") || chat.IsConfirmation(trimmed) {
-		return false
-	}
-	lower := strings.ToLower(trimmed)
-	switch lower {
-	case "hello", "hi", "hey", "thanks", "thank you", "status":
-		return false
-	}
-	fields := strings.FieldsFunc(lower, func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '\'' && r != '-'
-	})
-	if len(fields) == 0 {
-		return false
-	}
-	switch fields[0] {
-	case "what", "what's", "whats", "which", "how", "how's", "hows", "where", "where's", "wheres",
-		"why", "who", "when", "is", "are", "can", "could", "would", "should", "do", "does", "did",
-		"and", "also", "status", "show", "list", "describe", "explain", "tell":
-		return false
-	}
-	return true
 }
 
 // matchedRunTokens extracts run identifiers or hyphenated run slugs mentioned
@@ -844,7 +787,7 @@ func runSlug(id string) string {
 }
 
 // heldRunIDs returns the runs currently held by this chat (attached run and any
-// adopted runs reported by HeldRuns, or inferred from Store when HeldRuns is nil).
+// adopted runs reported by HeldRuns).
 func (c *Concierge) heldRunIDs(ctx context.Context) []string {
 	var out []string
 	seen := map[string]bool{}
@@ -865,24 +808,6 @@ func (c *Concierge) heldRunIDs(ctx context.Context) []string {
 				add(id)
 			}
 		}
-	} else if c.store != nil {
-		now := c.clock.Now()
-		if runs, err := c.store.Runs().List(ctx); err == nil {
-			var nonFrontDesk []string
-			for i := range runs {
-				r := &runs[i]
-				if r.ID == "" || r.ID == frontDeskRunID {
-					continue
-				}
-				nonFrontDesk = append(nonFrontDesk, r.ID)
-				if r.DefaultRecipe == "adopted" || (r.Lease != nil && !r.Lease.Expired(now)) {
-					add(r.ID)
-				}
-			}
-			if len(out) == 0 && len(nonFrontDesk) == 1 {
-				add(nonFrontDesk[0])
-			}
-		}
 	}
 	if c.runID != "" && (c.runID != frontDeskRunID || len(out) == 0) {
 		add(c.runID)
@@ -890,7 +815,7 @@ func (c *Concierge) heldRunIDs(ctx context.Context) []string {
 	return out
 }
 
-func (c *Concierge) defaultTargetRun(ctx context.Context, text string) string {
+func (c *Concierge) resolveTargetRun(ctx context.Context, text string) (string, error) {
 	held := c.heldRunIDs(ctx)
 	var nonFront []string
 	for _, id := range held {
@@ -903,10 +828,10 @@ func (c *Concierge) defaultTargetRun(ctx context.Context, text string) string {
 		for _, id := range nonFront {
 			idLower := strings.ToLower(id)
 			if strings.Contains(lower, idLower) {
-				return id
+				return id, nil
 			}
 			if slug := runSlug(idLower); slug != "" && strings.Contains(lower, slug) {
-				return id
+				return id, nil
 			}
 		}
 		if c.store != nil {
@@ -914,15 +839,23 @@ func (c *Concierge) defaultTargetRun(ctx context.Context, text string) string {
 				if lanes, err := c.store.Lanes().List(ctx, store.LaneFilter{RunID: id}); err == nil {
 					for i := range lanes {
 						if chat.Mentions(text, lanes[i].ID) {
-							return id
+							return id, nil
 						}
 					}
 				}
 			}
 		}
-		if c.runID == frontDeskRunID || len(nonFront) == 1 {
-			return nonFront[0]
+		if len(nonFront) == 1 {
+			return nonFront[0], nil
 		}
+		return "", fmt.Errorf("several runs are held (%s); name the run", strings.Join(nonFront, ", "))
+	}
+	return c.runID, nil
+}
+
+func (c *Concierge) defaultTargetRun(ctx context.Context, text string) string {
+	if target, err := c.resolveTargetRun(ctx, text); err == nil {
+		return target
 	}
 	return c.runID
 }
@@ -986,13 +919,22 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 		return c.RunStart(ctx, goal)
 	})
 	model.AddTool[memorychat.RunControlParams](reg, memorychat.ToolRunControl, "Pause, resume or stop execution", func(ctx context.Context, p memorychat.RunControlParams) (string, error) {
-		targetRun := c.defaultTargetRun(ctx, quote)
+		targetRun, err := c.resolveTargetRun(ctx, quote)
+		if err != nil {
+			return "", err
+		}
 		backend := chat.NewStoreBackend(c.store, targetRun)
 		return memorychat.Control(ctx, backend.Command, p)
 	})
 	model.AddTool[memorychat.RunSettingsParams](reg, memorychat.ToolRunSettings,
 		"Read or change live run settings", func(ctx context.Context, p memorychat.RunSettingsParams) (string, error) {
-			targetRun := c.defaultTargetRun(ctx, quote+" "+p.Words)
+			targetRun, err := c.resolveTargetRun(ctx, quote+" "+p.Words)
+			if err != nil {
+				if p.Action != "" && p.Action != "get" {
+					return "", err
+				}
+				targetRun = c.runID
+			}
 			current, err := c.store.Runs().GetSettings(ctx, targetRun)
 			if err != nil {
 				return "", err
@@ -1095,7 +1037,10 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 		},
 	)
 	model.AddTool[MemorySubmitParams](reg, ToolMemorySubmit, "Save an owner correction as memory", func(ctx context.Context, p MemorySubmitParams) (string, error) {
-		targetRun := c.defaultTargetRun(ctx, quote)
+		targetRun, err := c.resolveTargetRun(ctx, quote)
+		if err != nil {
+			return "", err
+		}
 		echo, err := c.memoryEditor.Submit(ctx, c.store, targetRun, c.nextID("memory"), quote, p)
 		if err == nil {
 			*memoryEcho = echo
@@ -1558,11 +1503,6 @@ func (c *Concierge) findHeldLane(ctx context.Context, runHint, laneID, quote str
 			addCandidate(runID)
 		}
 	}
-	for _, runID := range allRuns {
-		if runID != frontDeskRunID {
-			addCandidate(runID)
-		}
-	}
 	addCandidate(c.runID)
 
 	for _, runID := range candidates {
@@ -1774,7 +1714,10 @@ func (c *Concierge) handleDirectiveSubmit(
 		}
 		runID = named
 	} else {
-		runID = c.defaultTargetRun(ctx, combinedText)
+		var err error
+		if runID, err = c.resolveTargetRun(ctx, combinedText); err != nil {
+			return directiveReceipt{}, "", err
+		}
 	}
 
 	now := c.clock.Now().UTC()
