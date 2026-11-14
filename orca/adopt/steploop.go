@@ -328,6 +328,9 @@ func (w StepLoopWatcher) Stop(ctx context.Context, pids []int) error {
 // Start launches a detached sw_step bridge for the run; it logs to
 // <run>/orca-step-bridge.log and exits at the run's first decision.
 func (w StepLoopWatcher) Start(_ context.Context, runDir string) error {
+	if holder, ok := HeldByOrca(runDir); ok {
+		return fmt.Errorf("%w: %s", ErrLeaseHeld, holder)
+	}
 	if w.Script == "" {
 		return errors.New("swarm_nebula.sh not found (install nebula-swarm or set ORCA_NEBULA_SWARM_SH)")
 	}
@@ -355,6 +358,9 @@ func (w StepLoopWatcher) Inspect(pids []int) *StoppedLoop {
 // bridge when Script is set and the stopped loop ran sw_step, else it
 // restarts the exact command recorded at /adopt.
 func (w StepLoopWatcher) Restart(ctx context.Context, runDir string, loop *StoppedLoop) error {
+	if holder, ok := HeldByOrca(runDir); ok {
+		return fmt.Errorf("%w: %s", ErrLeaseHeld, holder)
+	}
 	if w.Script != "" && (loop == nil || len(loop.Args) == 0 || loop.IsStepLoop || hasMarker(loop.Args)) {
 		return w.Start(ctx, runDir)
 	}

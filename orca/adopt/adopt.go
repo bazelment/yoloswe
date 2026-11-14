@@ -52,6 +52,33 @@ var (
 // depends only on the chat's run id, so it survives a chat restart.
 func ChatHolder(chatRunID string) string { return "orca-chat:" + chatRunID }
 
+// HeldByOrca reports whether runDir is currently held by an active orca lease
+// journal or stand-down marker, returning the holder description when held.
+func HeldByOrca(runDir string) (string, bool) {
+	if j, err := readJournal(filepath.Join(runDir, leaseFile)); err == nil {
+		if j.State == stateReleasing {
+			return "", false
+		}
+		if holder := strings.TrimSpace(j.Holder); holder != "" {
+			return holder, true
+		}
+	}
+	for _, name := range handoverFiles {
+		first, _, _ := strings.Cut(readText(filepath.Join(runDir, name)), "\n")
+		if strings.HasPrefix(first, markerPrefix) {
+			if open := strings.IndexByte(first, '('); open >= 0 {
+				if close := strings.IndexByte(first[open+1:], ')'); close >= 0 {
+					if h := strings.TrimSpace(first[open+1 : open+1+close]); h != "" {
+						return h, true
+					}
+				}
+			}
+			return strings.TrimSpace(strings.TrimPrefix(first, markerPrefix)), true
+		}
+	}
+	return "", false
+}
+
 // Lane is one ledger lane with the ownership of its current round.
 type Lane struct {
 	ID, Title, Branch, Phase, Status string
@@ -466,11 +493,28 @@ type Service struct {
 	// Former lists legacy holder ids still owned by this service.
 	Former   []string
 	Importer Importer
+	// LoopVerifyInterval is the pause before re-checking that no step loop
+	// restarted after stopWatcher stops a running loop (or when explicitly set
+	// > 0). Zero uses defaultLoopVerifyInterval when WatcherPIDs were stopped.
+	LoopVerifyInterval time.Duration
+}
+
+const defaultLoopVerifyInterval = 50 * time.Millisecond
+
+func (s *Service) loopVerifyInterval() time.Duration {
+	if s.LoopVerifyInterval > 0 {
+		return s.LoopVerifyInterval
+	}
+	return defaultLoopVerifyInterval
 }
 
 // owns reports whether a lease under holder belongs to this service.
 func (s *Service) owns(holder string) bool {
-	return holder == s.Holder || slices.Contains(s.Former, holder)
+	if holder == s.Holder || slices.Contains(s.Former, holder) {
+		return true
+	}
+	// Legacy empty chat holder ("orca-chat:") migrates to an active chat holder.
+	return strings.HasPrefix(s.Holder, ChatHolder("")) && holder == ChatHolder("")
 }
 
 // RunDriver drives imported lanes while orca owns the host run.
@@ -661,16 +705,55 @@ func (s *Service) takeLease(dir string) (*journal, error) {
 		return nil, fmt.Errorf("%w: %s", ErrLeaseHeld, cur.Holder)
 	}
 	if cur.Holder != s.Holder {
-		// Rewrite legacy leases while preserving the controller generation.
-		cur.Holder = s.Holder
-		if cur.Import != nil {
-			cur.Import.Holder = s.Holder
-		}
-		if err := s.save(dir, cur); err != nil {
+		if err := s.migrateJournal(dir, cur); err != nil {
 			return nil, err
 		}
 	}
 	return cur, nil
+}
+
+func (s *Service) migrateJournal(dir string, cur *journal) error {
+	oldHolder := cur.Holder
+	oldMarker := cur.Marker
+	cur.Holder = s.Holder
+	if cur.Import != nil {
+		cur.Import.Holder = s.Holder
+	}
+	if cur.Marker != "" {
+		cur.Marker = strings.ReplaceAll(cur.Marker, "("+oldHolder+")", "("+s.Holder+")")
+	}
+	for _, n := range handoverFiles {
+		p := filepath.Join(dir, n)
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		content := string(b)
+		if oldMarker != "" {
+			if rest, ok := strings.CutPrefix(content, oldMarker); ok {
+				if err := writeAtomic(p, []byte(cur.Marker+rest)); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		if strings.HasPrefix(content, markerPrefix) {
+			first, rest, hasNewline := strings.Cut(content, "\n")
+			updated := strings.ReplaceAll(first, "("+oldHolder+")", "("+s.Holder+")")
+			if hasNewline {
+				updated += "\n"
+			}
+			if cur.Marker == "" {
+				cur.Marker = updated
+			}
+			if updated != first+"\n" {
+				if err := writeAtomic(p, []byte(updated+rest)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return s.save(dir, cur)
 }
 
 // forward applies adopt steps from..5 and marks the run adopted.
@@ -693,6 +776,10 @@ func (s *Service) forward(ctx context.Context, dir, id string, j *journal, from 
 // unwind undoes steps 5..1 from the journal. It returns the step that failed
 // (0 when all succeeded), leaving the journal to describe what remains.
 func (s *Service) unwind(ctx context.Context, dir, id string, j *journal) (int, error) {
+	if j.State != stateReleasing {
+		j.State = stateReleasing
+		_ = s.save(dir, j)
+	}
 	steps := []func() error{
 		1: func() error {
 			if err := s.check("release:lease"); err != nil {
@@ -776,7 +863,16 @@ func (s *Service) mark(dir string, j *journal) error {
 		if strings.HasPrefix(string(b), j.Marker) {
 			continue
 		}
-		if err := writeAtomic(p, append([]byte(j.Marker), b...)); err != nil {
+		body := string(b)
+		for strings.HasPrefix(body, markerPrefix) {
+			_, rest, ok := strings.Cut(body, "\n")
+			if !ok {
+				body = ""
+				break
+			}
+			body = rest
+		}
+		if err := writeAtomic(p, append([]byte(j.Marker), []byte(body)...)); err != nil {
 			return err
 		}
 	}
@@ -869,8 +965,11 @@ func (s *Service) stopWatcher(ctx context.Context, dir string, j *journal) error
 	// A watcher that exits can leave a bridge behind, so stop until none runs.
 	for range 3 {
 		pids, err := s.Watcher.Running(ctx, dir)
-		if err != nil || len(pids) == 0 {
+		if err != nil {
 			return err
+		}
+		if len(pids) == 0 {
+			break
 		}
 		if j.StoppedLoop == nil {
 			j.StoppedLoop = inspectWatcherLoop(s.Watcher, pids)
@@ -882,6 +981,23 @@ func (s *Service) stopWatcher(ctx context.Context, dir string, j *journal) error
 	}
 	if pids, err := s.Watcher.Running(ctx, dir); err != nil || len(pids) > 0 {
 		return errors.Join(err, fmt.Errorf("watcher still running: %v", pids))
+	}
+	// Re-check after one loop interval to verify a scheduled tick or bounded
+	// step loop did not immediately restart a new loop under our lease.
+	if len(j.WatcherPIDs) > 0 || s.LoopVerifyInterval > 0 {
+		timer := time.NewTimer(s.loopVerifyInterval())
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	if pids, err := s.Watcher.Running(ctx, dir); err != nil || len(pids) > 0 {
+		if len(pids) > 0 {
+			_ = s.Watcher.Stop(ctx, pids)
+		}
+		return errors.Join(err, fmt.Errorf("step loop restarted under orca lease: %v", pids))
 	}
 	return nil
 }

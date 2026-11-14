@@ -57,14 +57,17 @@ Answer the owner's questions accurately and concisely using read-only Store tool
 	Never invent facts not present in the Store. Owner corrections become memory.submit proposals saved immediately with a source quote; memory.undo reverts the last change.`
 
 type ConciergeStatusParams struct {
-	IncludeMetrics bool `json:"include_metrics,omitempty" jsonschema:"description=Include decision, token, cost, and idle metrics"`
+	RunID          string `json:"run_id,omitempty" jsonschema:"description=Optional run ID to inspect"`
+	IncludeMetrics bool   `json:"include_metrics,omitempty" jsonschema:"description=Include decision, token, cost, and idle metrics"`
 }
 
 type ConciergeLaneShowParams struct {
 	LaneID string `json:"lane_id" jsonschema:"required,description=Lane ID to inspect"`
+	RunID  string `json:"run_id,omitempty" jsonschema:"description=Optional run ID that owns the lane"`
 }
 
 type ConciergeDecisionsParams struct {
+	RunID    string `json:"run_id,omitempty" jsonschema:"description=Optional run ID filter"`
 	Category string `json:"category,omitempty" jsonschema:"description=Optional category filter (auto or judgment)"`
 	LaneID   string `json:"lane_id,omitempty" jsonschema:"description=Optional lane ID filter"`
 	SinceSeq int64  `json:"since_seq,omitempty" jsonschema:"description=Return decisions with seq > since_seq"`
@@ -73,6 +76,7 @@ type ConciergeDecisionsParams struct {
 
 type ConciergePRCIParams struct {
 	LaneID string `json:"lane_id" jsonschema:"required,description=Lane ID to inspect PR and CI checks"`
+	RunID  string `json:"run_id,omitempty" jsonschema:"description=Optional run ID that owns the lane"`
 }
 
 type DirectiveSubmitParams struct {
@@ -608,6 +612,7 @@ func (c *Concierge) relevantHistory(ctx context.Context, history []model.Message
 		return plain
 	}
 	knownRuns := slices.Clone(held)
+	laneToRun := map[string]string{}
 	if c.store != nil {
 		if runs, err := c.store.Runs().List(ctx); err == nil {
 			for i := range runs {
@@ -616,6 +621,29 @@ func (c *Concierge) relevantHistory(ctx context.Context, history []model.Message
 				}
 			}
 		}
+		for _, rID := range knownRuns {
+			if rID == "" || rID == frontDeskRunID {
+				continue
+			}
+			if lanes, err := c.store.Lanes().List(ctx, store.LaneFilter{RunID: rID}); err == nil {
+				for i := range lanes {
+					laneToRun[strings.ToLower(lanes[i].ID)] = strings.ToLower(rID)
+				}
+			}
+		}
+	}
+	tokensForText := func(lower string) []string {
+		toks := matchedRunTokens(lower, knownRuns)
+		for laneID, rID := range laneToRun {
+			if chat.Mentions(lower, laneID) {
+				for _, t := range matchedRunTokens(rID, knownRuns) {
+					if !slices.Contains(toks, t) {
+						toks = append(toks, t)
+					}
+				}
+			}
+		}
+		return toks
 	}
 	type turnSpan struct {
 		runs       []string
@@ -635,12 +663,12 @@ func (c *Concierge) relevantHistory(ctx context.Context, history []model.Message
 		spans = append(spans, turnSpan{
 			start: i,
 			end:   end,
-			runs:  matchedRunTokens(turnText.String(), knownRuns),
+			runs:  tokensForText(turnText.String()),
 		})
 		i = end
 	}
 	qLower := strings.ToLower(question)
-	targetRuns := matchedRunTokens(qLower, knownRuns)
+	targetRuns := tokensForText(qLower)
 	effectiveTargets := slices.Clone(targetRuns)
 	if len(effectiveTargets) == 0 {
 		for _, id := range held {
@@ -787,6 +815,44 @@ func (c *Concierge) heldRunIDs(ctx context.Context) []string {
 	return out
 }
 
+func (c *Concierge) resolveTargetRun(ctx context.Context, text string) (string, error) {
+	held := c.heldRunIDs(ctx)
+	var nonFront []string
+	for _, id := range held {
+		if id != "" && id != frontDeskRunID {
+			nonFront = append(nonFront, id)
+		}
+	}
+	if len(nonFront) > 0 {
+		lower := strings.ToLower(text)
+		for _, id := range nonFront {
+			idLower := strings.ToLower(id)
+			if strings.Contains(lower, idLower) {
+				return id, nil
+			}
+			if slug := runSlug(idLower); slug != "" && strings.Contains(lower, slug) {
+				return id, nil
+			}
+		}
+		if c.store != nil {
+			for _, id := range nonFront {
+				if lanes, err := c.store.Lanes().List(ctx, store.LaneFilter{RunID: id}); err == nil {
+					for i := range lanes {
+						if chat.Mentions(text, lanes[i].ID) {
+							return id, nil
+						}
+					}
+				}
+			}
+		}
+		if len(nonFront) == 1 {
+			return nonFront[0], nil
+		}
+		return "", fmt.Errorf("several runs are held (%s); name the run", strings.Join(nonFront, ", "))
+	}
+	return c.runID, nil
+}
+
 // clipText bounds s to n bytes without splitting a rune.
 func clipText(s string, n int) string {
 	if len(s) <= n {
@@ -846,12 +912,23 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 		return c.RunStart(ctx, goal)
 	})
 	model.AddTool[memorychat.RunControlParams](reg, memorychat.ToolRunControl, "Pause, resume or stop execution", func(ctx context.Context, p memorychat.RunControlParams) (string, error) {
-		backend := chat.NewStoreBackend(c.store, c.runID)
+		targetRun, err := c.resolveTargetRun(ctx, quote)
+		if err != nil {
+			return "", err
+		}
+		backend := chat.NewStoreBackend(c.store, targetRun)
 		return memorychat.Control(ctx, backend.Command, p)
 	})
 	model.AddTool[memorychat.RunSettingsParams](reg, memorychat.ToolRunSettings,
 		"Read or change live run settings", func(ctx context.Context, p memorychat.RunSettingsParams) (string, error) {
-			current, err := c.store.Runs().GetSettings(ctx, c.runID)
+			targetRun, err := c.resolveTargetRun(ctx, quote+" "+p.Words)
+			if err != nil {
+				if p.Action != "" && p.Action != "get" {
+					return "", err
+				}
+				targetRun = c.runID
+			}
+			current, err := c.store.Runs().GetSettings(ctx, targetRun)
 			if err != nil {
 				return "", err
 			}
@@ -878,11 +955,11 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 			if p.Paused != nil {
 				next.Paused = *p.Paused
 			}
-			if err := c.store.Runs().UpdateSettings(ctx, c.runID, next); err != nil {
+			if err := c.store.Runs().UpdateSettings(ctx, targetRun, next); err != nil {
 				return "", err
 			}
 			words := cmp.Or(strings.TrimSpace(p.Words), "owner updated run settings")
-			_, err = c.store.Decisions().Append(ctx, store.Decision{ID: c.nextID("settings"), RunID: c.runID, Category: store.DecisionJudgment, Actor: ActorConcierge, Tool: memorychat.ToolRunSettings, Reason: words, Result: fmt.Sprintf("concurrency_cap=%d stall_timeout=%s paused=%t", next.ConcurrencyCap, next.StallTimeout, next.Paused), Vetted: true})
+			_, err = c.store.Decisions().Append(ctx, store.Decision{ID: c.nextID("settings"), RunID: targetRun, Category: store.DecisionJudgment, Actor: ActorConcierge, Tool: memorychat.ToolRunSettings, Reason: words, Result: fmt.Sprintf("concurrency_cap=%d stall_timeout=%s paused=%t", next.ConcurrencyCap, next.StallTimeout, next.Paused), Vetted: true})
 			if err != nil {
 				return "", err
 			}
@@ -891,7 +968,10 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 
 	model.AddTool[ConciergeStatusParams](reg, ToolConciergeStatus,
 		"Read structured run status, backlog, lanes, sessions, terminals, live terminal agent state, live GitHub PR state, active directives, and metrics for held runs",
-		func(ctx context.Context, _ ConciergeStatusParams) (string, error) {
+		func(ctx context.Context, p ConciergeStatusParams) (string, error) {
+			if runID := strings.TrimSpace(p.RunID); runID != "" {
+				return c.formatRunStatusReport(ctx, runID)
+			}
 			return c.FormatStatusReport(ctx)
 		},
 	)
@@ -921,19 +1001,21 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 	model.AddTool[ConciergeLaneShowParams](reg, ToolConciergeLaneShow,
 		"Show detailed state, rounds, terminals, PR/CI, and recent decisions for a lane",
 		func(ctx context.Context, p ConciergeLaneShowParams) (string, error) {
-			return c.handleLaneShow(ctx, p.LaneID)
+			return c.handleLaneShow(ctx, p.RunID, p.LaneID, quote)
 		},
 	)
 
 	model.AddTool[ConciergeDecisionsParams](reg, ToolConciergeDecisions,
 		"List decisions from the append-only DecisionStore since a sequence number",
-		c.handleDecisionsSince,
+		func(ctx context.Context, p ConciergeDecisionsParams) (string, error) {
+			return c.handleDecisionsSince(ctx, p, quote)
+		},
 	)
 
 	model.AddTool[ConciergePRCIParams](reg, ToolConciergePRCI,
 		"Read PR metadata, review approval status, and CI check status for a lane",
 		func(ctx context.Context, p ConciergePRCIParams) (string, error) {
-			return c.handlePRCI(ctx, p.LaneID)
+			return c.handlePRCI(ctx, p.RunID, p.LaneID, quote)
 		},
 	)
 
@@ -948,7 +1030,11 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 		},
 	)
 	model.AddTool[MemorySubmitParams](reg, ToolMemorySubmit, "Save an owner correction as memory", func(ctx context.Context, p MemorySubmitParams) (string, error) {
-		echo, err := c.memoryEditor.Submit(ctx, c.store, c.runID, c.nextID("memory"), quote, p)
+		targetRun, err := c.resolveTargetRun(ctx, quote)
+		if err != nil {
+			return "", err
+		}
+		echo, err := c.memoryEditor.Submit(ctx, c.store, targetRun, c.nextID("memory"), quote, p)
 		if err == nil {
 			*memoryEcho = echo
 		}
@@ -966,7 +1052,7 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 		if e != nil {
 			return "", e
 		}
-		if m.RunID != "" && m.RunID != c.runID {
+		if m.RunID != "" && m.RunID != c.runID && !slices.Contains(c.heldRunIDs(ctx), m.RunID) {
 			return "", store.ErrNotFound
 		}
 		return m.Body, nil
@@ -1361,24 +1447,93 @@ func isIdleTerminalState(state string) bool {
 	return false
 }
 
-func (c *Concierge) findHeldLane(ctx context.Context, laneID string) (string, *store.Lane, error) {
+func (c *Concierge) findHeldLane(ctx context.Context, runHint, laneID, quote string) (string, *store.Lane, error) {
 	laneID = strings.TrimSpace(laneID)
-	if ln, err := c.store.Lanes().Get(ctx, c.runID, laneID); err == nil {
-		return c.runID, ln, nil
-	}
-	for _, runID := range c.heldRunIDs(ctx) {
-		if runID == c.runID {
-			continue
+	runHint = strings.TrimSpace(runHint)
+
+	var candidates []string
+	addCandidate := func(id string) {
+		id = strings.TrimSpace(id)
+		if id != "" && !slices.Contains(candidates, id) {
+			candidates = append(candidates, id)
 		}
-		if ln, err := c.store.Lanes().Get(ctx, runID, laneID); err == nil {
-			return runID, ln, nil
+	}
+	held := c.heldRunIDs(ctx)
+	var allRuns []string
+	allRuns = append(allRuns, held...)
+	if c.store != nil {
+		if runs, err := c.store.Runs().List(ctx); err == nil {
+			for i := range runs {
+				if runs[i].ID != "" && !slices.Contains(allRuns, runs[i].ID) {
+					allRuns = append(allRuns, runs[i].ID)
+				}
+			}
+		}
+	}
+	resolveRunName := func(token string) string {
+		tLower := strings.ToLower(strings.TrimSpace(token))
+		if tLower == "" {
+			return ""
+		}
+		for _, id := range allRuns {
+			idLower := strings.ToLower(id)
+			if idLower == tLower || runSlug(idLower) == tLower {
+				return id
+			}
+		}
+		return token
+	}
+	if runHint != "" {
+		addCandidate(resolveRunName(runHint))
+	}
+	if quote != "" {
+		for _, tok := range matchedRunTokens(strings.ToLower(quote), allRuns) {
+			addCandidate(resolveRunName(tok))
+		}
+	}
+	for _, runID := range held {
+		if runID != frontDeskRunID {
+			addCandidate(runID)
+		}
+	}
+	addCandidate(c.runID)
+
+	for _, runID := range candidates {
+		if c.store != nil {
+			if ln, err := c.store.Lanes().Get(ctx, runID, laneID); err == nil {
+				return runID, ln, nil
+			}
+		}
+		if c.HostRun != nil {
+			if hr, err := c.HostRun(runID); err == nil {
+				for i := range hr.Lanes {
+					hl := &hr.Lanes[i]
+					if hl.ID == laneID {
+						prNum, _ := strconv.Atoi(hl.PR)
+						return runID, &store.Lane{
+							ID:         hl.ID,
+							RunID:      runID,
+							ItemID:     hl.ID,
+							Title:      hl.Title,
+							Branch:     hl.Branch,
+							Phase:      hl.Phase,
+							Status:     store.LaneStatus(hl.Status),
+							SessionID:  hl.Session,
+							TerminalID: hl.Terminal,
+							PR:         prNum,
+							Round:      hl.Round,
+							Attempt:    1,
+						}, nil
+					}
+				}
+			}
 		}
 	}
 	return "", nil, store.ErrNotFound
 }
 
-func (c *Concierge) handleLaneShow(ctx context.Context, laneID string) (string, error) {
-	runID, ln, err := c.findHeldLane(ctx, laneID)
+func (c *Concierge) handleLaneShow(ctx context.Context, runHint, laneID, quote string) (string, error) {
+	runID, ln, err := c.findHeldLane(ctx, runHint, laneID, quote)
 	if err != nil {
 		return "", err
 	}
@@ -1439,18 +1594,22 @@ func (c *Concierge) handleLaneShow(ctx context.Context, laneID string) (string, 
 	return b.String(), nil
 }
 
-func (c *Concierge) handleDecisionsSince(ctx context.Context, p ConciergeDecisionsParams) (string, error) {
+func (c *Concierge) handleDecisionsSince(ctx context.Context, p ConciergeDecisionsParams, quote string) (string, error) {
 	limit := p.Limit
 	if limit <= 0 {
 		limit = 25
 	}
-	runID := c.runID
+	runID := strings.TrimSpace(p.RunID)
 	if laneID := strings.TrimSpace(p.LaneID); laneID != "" {
-		if rID, _, err := c.findHeldLane(ctx, laneID); err == nil {
+		if rID, _, err := c.findHeldLane(ctx, runID, laneID, quote); err == nil {
 			runID = rID
 		}
-	} else if held := c.heldRunIDs(ctx); len(held) > 0 && runID == frontDeskRunID {
-		runID = held[0]
+	}
+	if runID == "" {
+		var err error
+		if runID, err = c.resolveTargetRun(ctx, quote); err != nil {
+			return "", err
+		}
 	}
 	filter := store.DecisionFilter{
 		RunID:    runID,
@@ -1474,8 +1633,8 @@ func (c *Concierge) handleDecisionsSince(ctx context.Context, p ConciergeDecisio
 	return b.String(), nil
 }
 
-func (c *Concierge) handlePRCI(ctx context.Context, laneID string) (string, error) {
-	runID, ln, err := c.findHeldLane(ctx, laneID)
+func (c *Concierge) handlePRCI(ctx context.Context, runHint, laneID, quote string) (string, error) {
+	runID, ln, err := c.findHeldLane(ctx, runHint, laneID, quote)
 	if err != nil {
 		return "", err
 	}
@@ -1537,14 +1696,24 @@ func (c *Concierge) handleDirectiveSubmit(
 	}
 	// The directive goes to the run it is about, which at the front desk is
 	// an adopted run, not the chat's own.
-	runID := c.runID
+	var runID string
+	combinedText := strings.TrimSpace(quote + "\n" + p.Scope + "\n" + text)
 	if c.OwnerRun != nil {
 		var err error
-		if runID, err = c.OwnerRun(ctx, p.RunID, quote+"\n"+text); err != nil {
+		if runID, err = c.OwnerRun(ctx, p.RunID, combinedText); err != nil {
 			return directiveReceipt{}, "", err
 		}
-	} else if named := strings.TrimSpace(p.RunID); named != "" && named != c.runID {
-		return directiveReceipt{}, "", fmt.Errorf("run %s is not this chat's run %s", named, c.runID)
+	} else if named := strings.TrimSpace(p.RunID); named != "" {
+		held := c.heldRunIDs(ctx)
+		if named != c.runID && !slices.Contains(held, named) {
+			return directiveReceipt{}, "", fmt.Errorf("run %s is not this chat's run %s", named, c.runID)
+		}
+		runID = named
+	} else {
+		var err error
+		if runID, err = c.resolveTargetRun(ctx, combinedText); err != nil {
+			return directiveReceipt{}, "", err
+		}
 	}
 
 	now := c.clock.Now().UTC()

@@ -14,11 +14,11 @@ func TestParseGHPR(t *testing.T) {
 		name, json, text string
 		want             chatui.PRStatus
 	}{
-		{name: "merged", json: `{"state":"MERGED","isDraft":false,"statusCheckRollup":[
+		{name: "merged", json: `{"number":5705,"state":"MERGED","isDraft":false,"mergeCommit":{"oid":"merge-oid-5705"},"statusCheckRollup":[
 {"__typename":"CheckRun","name":"Lint","status":"COMPLETED","conclusion":"SUCCESS"},
 {"__typename":"CheckRun","name":"Build and Test","status":"COMPLETED","conclusion":"SUCCESS"},
 {"__typename":"StatusContext","context":"swarm-review","state":"SUCCESS"}]}`,
-			want: chatui.PRStatus{State: "MERGED", Checks: "3 passed"}, text: "merged, checks: 3 passed"},
+			want: chatui.PRStatus{Number: 5705, State: "MERGED", MergeSHA: "merge-oid-5705", Checks: "3 passed"}, text: "merged, checks: 3 passed"},
 		{name: "open draft", json: `{"state":"OPEN","isDraft":true,"statusCheckRollup":[
 {"__typename":"CheckRun","name":"Lint","status":"COMPLETED","conclusion":"FAILURE"},
 {"__typename":"CheckRun","name":"Build and Test","status":"IN_PROGRESS","conclusion":""},
@@ -31,5 +31,8 @@ func TestParseGHPR(t *testing.T) {
 		if err != nil || got != tc.want || got.String() != tc.text {
 			t.Fatalf("%s: got %+v (%q), %v; want %+v (%q)", tc.name, got, got.String(), err, tc.want, tc.text)
 		}
+	}
+	if _, err := ghPRStatus(t.Context(), "owner/repo", "", "-flag"); err == nil {
+		t.Fatal("expected ghPRStatus to reject flag-prefixed target")
 	}
 }

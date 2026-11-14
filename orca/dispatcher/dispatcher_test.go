@@ -1622,3 +1622,53 @@ func TestSpawnReportContractAndBase(t *testing.T) {
 		})
 	}
 }
+
+func TestDispatcherReconcilesMergedAndClosedPRBeforeRetry(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Backlog().Add(ctx, store.BacklogItem{
+		ID: "m2-default", RunID: "run-1", Title: "Default", Priority: store.PriorityP1, Status: store.BacklogInProgress, LaneID: "m2-default",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ln := lane.Lane{
+		ID: "m2-default", ItemID: "m2-default", RunID: "run-1",
+		Status: lane.StatusBlocked, Phase: recipe.PhaseReview, Round: 1, PR: 5705,
+		SessionID: "sess-m2", TerminalID: "term-m2",
+	}
+	ln.RecordAttempt(recipe.PhaseReview, 1, "sess-m2", "term-m2")
+	if err := st.Lanes().Upsert(ctx, ln); err != nil {
+		t.Fatal(err)
+	}
+
+	client := model.NewFakeClient(
+		toolUseResponse(model.ToolCall{ID: "retry-1", Name: dispatcher.ToolLaneRetry, Input: json.RawMessage(`{"lane_id":"m2-default","phase":"review","round":2,"reason":"retry review"}`)}),
+		endTurnResponse("done"),
+	)
+	d := dispatcher.New(dispatcher.Config{
+		PRProbe: func(_ context.Context, runID, _ string, pr int) (controller.PRStatus, error) {
+			if runID == "run-1" && pr == 5705 {
+				return controller.PRStatus{Number: 5705, State: "MERGED", MergeSHA: "merge-sha-5705"}, nil
+			}
+			return controller.PRStatus{Number: pr, State: "OPEN"}, nil
+		},
+	}, st, drv, clk, client)
+	if _, err := d.Dispatch(ctx, "run-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Lanes().Get(ctx, "run-1", "m2-default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != lane.StatusDone || got.MergeSHA != "merge-sha-5705" {
+		t.Fatalf("lane after dispatcher retry on merged PR = %+v, want StatusDone and MergeSHA=merge-sha-5705", got)
+	}
+	if len(drv.PhaseStarts) != 0 || len(drv.Spawns) != 0 {
+		t.Fatalf("dispatcher spawned/started on merged PR: starts=%+v spawns=%+v", drv.PhaseStarts, drv.Spawns)
+	}
+	if len(drv.Stops) == 0 {
+		t.Fatalf("expected dispatcher to stop terminals on merged PR, stops=%+v", drv.Stops)
+	}
+}

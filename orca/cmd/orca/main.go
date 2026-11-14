@@ -279,12 +279,8 @@ func executeChat(
 				_ = closer.Close(context.WithoutCancel(ctx))
 			}
 		}()
-		if question == "" {
-			if ids, err := adoption.Adopted(); err == nil {
-				for _, id := range ids {
-					_, _ = adoption.Adopt(ctx, id)
-				}
-			}
+		if adoptErr := backend.RestartHeld(ctx); adoptErr != nil && logger != nil {
+			logger.Warn("reattach adopted run failed", "error", adoptErr)
 		}
 	}
 	routerSel := cfg.Models.Roles["router"]
@@ -597,7 +593,7 @@ func (r *chatRuns) List(ctx context.Context) ([]store.Run, error) {
 			return nil, err
 		}
 		for i := range all {
-			if all[i].ID != frontDeskRunID && (repo == "" || all[i].Repository == repo) {
+			if all[i].ID != frontDeskRunID && all[i].DefaultRecipe != "adopted" && (repo == "" || all[i].Repository == repo) {
 				runs = append(runs, all[i])
 			}
 		}
@@ -658,7 +654,7 @@ func discoverChatRuns(ctx context.Context, cfg Config, clk clock.Clock) ([]store
 		}
 		run, getErr := st.Runs().Get(ctx, id)
 		_ = st.Close()
-		if getErr != nil || run.Repository != repo {
+		if getErr != nil || run.DefaultRecipe == "adopted" || run.Repository != repo {
 			continue
 		}
 		runs = append(runs, *run)

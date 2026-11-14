@@ -1,8 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
+	"os"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/bazelment/yoloswe/orca/adopt"
 	chatui "github.com/bazelment/yoloswe/orca/chat"
@@ -70,19 +75,71 @@ func newAdoption(ctx context.Context, cfg Config, h hostSwarms, holder string, f
 	if h.client == nil {
 		return nil, h.off
 	}
+	prProbe := adoptedPRProbe(h, st)
+	ctrls := adopt.NewControllers(ctx, st, h.client, clk, adoptedDispatchers(cfg, st, h.client, clk, client, logger, prProbe))
+	ctrls.PRProbe = prProbe
 	return &adopt.Service{
-		Importer: h.importer,
-		Labeler:  h.client,
-		Watcher:  h.watcher,
-		Holder:   holder,
-		Former:   former,
-		Driver:   adopt.NewControllers(ctx, st, h.client, clk, adoptedDispatchers(cfg, st, h.client, clk, client, logger)),
+		Importer:           h.importer,
+		Labeler:            h.client,
+		Watcher:            h.watcher,
+		Holder:             holder,
+		Former:             former,
+		Driver:             ctrls,
+		LoopVerifyInterval: loopVerifyInterval(),
 	}, ""
+}
+
+func loopVerifyInterval() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("ORCA_LOOP_VERIFY_INTERVAL")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+func adoptedPRProbe(h hostSwarms, st store.Store) controller.PRProbe {
+	if h.probe.PR == nil {
+		return nil
+	}
+	return func(ctx context.Context, runID, branch string, pr int) (controller.PRStatus, error) {
+		target := strings.TrimSpace(branch)
+		if pr > 0 {
+			target = strconv.Itoa(pr)
+		}
+		if target == "" {
+			return controller.PRStatus{}, nil
+		}
+		var repo string
+		if st != nil && runID != "" {
+			if run, err := st.Runs().Get(ctx, runID); err == nil && run != nil {
+				repo = run.Repository
+			}
+		}
+		var runDir string
+		if runID != "" {
+			runDir, _ = h.importer.Find(runID)
+		}
+		if repo == "" && runDir != "" {
+			if hr, err := adopt.Read(runDir); err == nil {
+				repo = hr.Repo
+			}
+		}
+		res, err := h.probe.PR(ctx, repo, runDir, target)
+		if err != nil {
+			return controller.PRStatus{}, err
+		}
+		return controller.PRStatus{
+			State:    res.State,
+			MergeSHA: res.MergeSHA,
+			Number:   cmp.Or(res.Number, max(pr, 0)),
+		}, nil
+	}
 }
 
 // adoptedDispatchers gives each adopted run the dispatcher `orca run` uses,
 // so owner instructions and escalations on that run are judged.
-func adoptedDispatchers(cfg Config, st store.Store, lanes *nebula.Driver, clk clock.Clock, client model.ModelClient, logger *slog.Logger) adopt.JudgeFactory {
+func adoptedDispatchers(cfg Config, st store.Store, lanes *nebula.Driver, clk clock.Clock, client model.ModelClient, logger *slog.Logger, prProbe controller.PRProbe) adopt.JudgeFactory {
 	if client == nil {
 		return nil
 	}
@@ -93,6 +150,7 @@ func adoptedDispatchers(cfg Config, st store.Store, lanes *nebula.Driver, clk cl
 			PromptVersion:  dispatcher.SystemPromptVersion,
 			HardBatchModel: cfg.Models.DispatcherHard,
 			Logger:         logger,
+			PRProbe:        prProbe,
 		}, st, lanes, clk, roleClient(client, cfg, "dispatcher"))
 		disp.SetOwnerAnswer(answer)
 		return disp

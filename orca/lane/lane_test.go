@@ -118,3 +118,67 @@ Implemented the orch foundation module and verified store contracts.`
 		t.Fatalf("ReadReport Outcome = %q, want done", gotRep.Outcome)
 	}
 }
+
+func TestParsePhaseReportBulletedAndOrderIndependentVerdict(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		raw         string
+		wantOutcome lane.ReportOutcome
+		wantHead    string
+		wantLane    string
+		wantPhase   string
+		wantReason  string
+		wantPR      int
+		wantRound   int
+		wantErr     bool
+	}{
+		{
+			name:        "bulleted review pass",
+			raw:         "- Lane: m2-default\n- Phase: review\n- Round: r2\n- PR: #5705\n- Head-SHA: fb6c5bae\n- Verdict: pass\n- Rework-class: none\n",
+			wantOutcome: lane.OutcomeDone,
+			wantHead:    "fb6c5bae",
+			wantPR:      5705,
+			wantLane:    "m2-default",
+			wantPhase:   "review",
+			wantRound:   2,
+			wantReason:  "none",
+		},
+		{
+			name:        "verdict needs-changes before outcome done",
+			raw:         "Verdict: needs-changes\nOutcome: done\nHEAD: abc123\n",
+			wantOutcome: lane.OutcomeNeedsSWE,
+			wantHead:    "abc123",
+		},
+		{
+			name:        "outcome done before verdict needs-changes",
+			raw:         "Outcome: done\nVerdict: needs-changes\nHEAD: abc123\n",
+			wantOutcome: lane.OutcomeNeedsSWE,
+			wantHead:    "abc123",
+		},
+		{
+			name:    "free-text prose without outcome or verdict",
+			raw:     "Polished PR #5705 and pushed fb6c5bae.\nAll tests pass.",
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rep, err := lane.ParsePhaseReport(tc.raw)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got %+v", tc.raw, rep)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParsePhaseReport error: %v", err)
+			}
+			if rep.Outcome != tc.wantOutcome || rep.HeadSHA != tc.wantHead || rep.PR != tc.wantPR ||
+				rep.LaneID != tc.wantLane || rep.Phase != tc.wantPhase || rep.Round != tc.wantRound || rep.Reason != tc.wantReason {
+				t.Fatalf("got %+v, want outcome=%q head=%q pr=%d lane=%q phase=%q round=%d reason=%q",
+					rep, tc.wantOutcome, tc.wantHead, tc.wantPR, tc.wantLane, tc.wantPhase, tc.wantRound, tc.wantReason)
+			}
+		})
+	}
+}

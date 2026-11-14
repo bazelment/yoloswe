@@ -53,6 +53,7 @@ func (f RecipeCompilerFunc) CompileOverride(ctx context.Context, base recipe.Rec
 // Config configures a Dispatcher instance.
 type Config struct {
 	RecipeCompiler   RecipeCompiler
+	PRProbe          controller.PRProbe
 	OnPlannerRequest func(ctx context.Context, runID, reason, planRef string) error
 	OnOwnerAnswer    func(ctx context.Context, runID, askID, answer string) error
 	// Logger, when set, receives one INFO line per tool call.
@@ -974,6 +975,9 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		ln.Attempt = 1
 		ln.LastEventAt = now
 	}
+	if settled, msg, err := d.reconcileLanePRState(ctx, runID, &ln); settled || err != nil {
+		return msg, err
+	}
 
 	workerBrief, err := d.buildWorkerBrief(view, ln, r, firstPhase, ln.Round, p.Brief)
 	if err != nil {
@@ -1010,10 +1014,21 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		ln.ID, item.ID, ln.Phase, ln.Round, ln.RecipeName, ln.RecipeVersion), nil
 }
 
+func (d *Dispatcher) reconcileLanePRState(ctx context.Context, runID string, ln *lane.Lane) (bool, string, error) {
+	settled, state, err := controller.ReconcileLanePRState(ctx, d.cfg.PRProbe, d.store, d.driver, d.clock.Now(), runID, ActorDispatcher, "", ln)
+	if !settled || err != nil {
+		return settled, "", err
+	}
+	return true, fmt.Sprintf("lane %s PR #%d already %s; stopped terminals", ln.ID, ln.PR, strings.ToLower(state)), nil
+}
+
 func (d *Dispatcher) applyLaneSteer(ctx context.Context, runID string, view *StateView, p LaneSteerParams) (string, error) {
 	ln, ok := view.Lane(p.LaneID)
 	if !ok {
 		return "", fmt.Errorf("%w: lane %q", store.ErrNotFound, p.LaneID)
+	}
+	if settled, msg, err := d.reconcileLanePRState(ctx, runID, &ln); settled || err != nil {
+		return msg, err
 	}
 	if d.driver != nil {
 		if err := d.driver.Steer(ctx, lane.SteerRequest{
@@ -1040,6 +1055,9 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 	ln, ok := view.Lane(p.LaneID)
 	if !ok {
 		return "", fmt.Errorf("%w: lane %q", store.ErrNotFound, p.LaneID)
+	}
+	if settled, msg, err := d.reconcileLanePRState(ctx, runID, &ln); settled || err != nil {
+		return msg, err
 	}
 	r, ok := view.RecipeForLane(ln)
 	if !ok {

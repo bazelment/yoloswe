@@ -27,8 +27,12 @@ type HostProbe struct {
 type PRStatus struct {
 	// State is OPEN, MERGED or CLOSED.
 	State string
+	// MergeSHA is the merge commit OID when State is MERGED.
+	MergeSHA string
 	// Checks summarizes the head's checks, e.g. "3 passed, 1 pending".
 	Checks string
+	// Number is the pull request number when reported by GitHub.
+	Number int
 	Draft  bool
 }
 

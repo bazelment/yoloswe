@@ -13,7 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/clock"
+	"github.com/bazelment/yoloswe/orca/controller"
+	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/recipe"
+	"github.com/bazelment/yoloswe/orca/store"
 )
 
 const nsRun = "20261114-trial-m1"
@@ -513,5 +517,277 @@ func TestStepLoopProcFilterAndRestartPaths(t *testing.T) {
 	fw := FormatWatcher{NebulaMissing: "swarm_nebula.sh missing"}
 	if err := fw.Restart(t.Context(), t.TempDir(), custom); err == nil || !strings.Contains(err.Error(), "restart manually: custom-step-loop --run "+runDir) {
 		t.Fatalf("FormatWatcher.Restart error = %v, want manual restart hint", err)
+	}
+}
+
+const fakeClaudeStepEntryScript = `#!/usr/bin/env bash
+set -euo pipefail
+run_dir="${1:?run_dir}"
+step_marker="${2:?step_marker}"
+check_orca_lease() {
+  local dir="$1"
+  local lease="$dir/.orca-lease.json"
+  if [[ -f "$lease" ]]; then
+    local holder
+    holder="$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+state = str(d.get("state") or "").strip()
+holder = str(d.get("holder") or "").strip()
+if state != "releasing" and holder.startswith("orca-"):
+    print(holder)
+' "$lease")"
+    if [[ -n "$holder" ]]; then
+      echo "refusing to step: run held by orca ($holder)" >&2
+      return 1
+    fi
+  fi
+  for f in "$dir/OBJECTIVE.md" "$dir/PROGRESS.md"; do
+    [[ -f "$f" ]] || continue
+    local first
+    IFS= read -r first < "$f" || true
+    if [[ "$first" == "ORCHESTRATOR: orca since "* ]]; then
+      echo "refusing to step: $first" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+check_orca_lease "$run_dir"
+echo "stepped" >> "$step_marker"
+`
+
+func TestFakeClaudeStepEntryPointRefusesWhileOrcaLeaseLive(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	script := filepath.Join(t.TempDir(), "swarm_nebula.sh")
+	write(t, script, fakeSwarmScript)
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stepScript := filepath.Join(t.TempDir(), "fake_step.sh")
+	write(t, stepScript, fakeClaudeStepEntryScript)
+	if err := os.Chmod(stepScript, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stepMarker := filepath.Join(t.TempDir(), "steps.log")
+
+	if holder, held := HeldByOrca(dir); held {
+		t.Fatalf("HeldByOrca before adopt = (%q, true), want false", holder)
+	}
+	if out, err := exec.Command(stepScript, dir, stepMarker).CombinedOutput(); err != nil {
+		t.Fatalf("step before adopt failed: %v: %s", err, out)
+	}
+	if got := strings.TrimSpace(readText(stepMarker)); got != "stepped" {
+		t.Fatalf("step marker before adopt = %q, want stepped", got)
+	}
+
+	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+	s := nsService(root, loop, label)
+	if _, err := s.Adopt(t.Context(), nsRun); err != nil {
+		t.Fatal(err)
+	}
+	if holder, held := HeldByOrca(dir); !held || holder != s.Holder {
+		t.Fatalf("HeldByOrca during adopt = (%q, %v), want (%q, true)", holder, held, s.Holder)
+	}
+
+	// Production StepLoopWatcher.Start and ScriptWatcher.Start also refuse via HeldByOrca.
+	if err := (StepLoopWatcher{Script: script}).Start(t.Context(), dir); !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf("StepLoopWatcher.Start while held = %v, want ErrLeaseHeld", err)
+	}
+	if err := (ScriptWatcher{Script: script}).Start(t.Context(), dir); !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf("ScriptWatcher.Start while held = %v, want ErrLeaseHeld", err)
+	}
+
+	// While orca holds the lease, the Claude step entry point refuses.
+	out, err := exec.Command(stepScript, dir, stepMarker).CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected fake Claude step entry point to refuse under live orca lease, got output: %s", out)
+	}
+	if !strings.Contains(string(out), "refusing to step") || !strings.Contains(string(out), s.Holder) {
+		t.Fatalf("refusal output = %q, want holder %q", string(out), s.Holder)
+	}
+	if got := strings.TrimSpace(readText(stepMarker)); got != "stepped" {
+		t.Fatalf("step marker mutated while held by orca: %q", got)
+	}
+
+	// Also verify refusal when only the stand-down line is present on line 1,
+	// and that a stand-down string buried on line 2 is ignored.
+	standDownDir := filepath.Join(t.TempDir(), "stand-down-only")
+	if err := os.MkdirAll(standDownDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(standDownDir, "OBJECTIVE.md"), "ORCHESTRATOR: orca since 2026-11-14T05:40:00Z (orca-chat:front-desk) — stand down; do not dispatch or merge.\n# Goal\n")
+	if holder, held := HeldByOrca(standDownDir); !held || holder != "orca-chat:front-desk" {
+		t.Fatalf("HeldByOrca(standDownDir) = (%q, %v), want (orca-chat:front-desk, true)", holder, held)
+	}
+	write(t, filepath.Join(standDownDir, "OBJECTIVE.md"), "# Goal\nORCHESTRATOR: orca since 2026-11-14T05:40:00Z (orca-chat:front-desk)\n")
+	if holder, held := HeldByOrca(standDownDir); held {
+		t.Fatalf("HeldByOrca(buried marker) = (%q, true), want false", holder)
+	}
+	// When the journal is in stateReleasing, HeldByOrca is authoritative and
+	// returns false even while the stand-down marker is still on line 1.
+	write(t, filepath.Join(standDownDir, "OBJECTIVE.md"), "ORCHESTRATOR: orca since 2026-11-14T05:40:00Z (orca-chat:front-desk) — stand down; do not dispatch or merge.\n# Goal\n")
+	write(t, filepath.Join(standDownDir, ".orca-lease.json"), `{"holder":"orca-chat:front-desk","state":"releasing"}`)
+	if holder, held := HeldByOrca(standDownDir); held {
+		t.Fatalf("HeldByOrca(releasing journal with marker) = (%q, true), want false", holder)
+	}
+
+	if err := s.Release(t.Context(), nsRun); err != nil {
+		t.Fatal(err)
+	}
+	if holder, held := HeldByOrca(dir); held {
+		t.Fatalf("HeldByOrca after release = (%q, true), want false", holder)
+	}
+	if out, err := exec.Command(stepScript, dir, stepMarker).CombinedOutput(); err != nil {
+		t.Fatalf("step after release failed: %v: %s", err, out)
+	}
+	if got := strings.Count(readText(stepMarker), "stepped"); got != 2 {
+		t.Fatalf("step count after release = %d, want 2", got)
+	}
+}
+
+type restartingWatcher struct {
+	fakeWatcher
+	restartAfter time.Duration
+}
+
+func (w *restartingWatcher) Stop(ctx context.Context, pids []int) error {
+	if err := w.fakeWatcher.Stop(ctx, pids); err != nil {
+		return err
+	}
+	time.AfterFunc(w.restartAfter, func() {
+		w.mu.Lock()
+		w.running = true
+		w.mu.Unlock()
+	})
+	return nil
+}
+
+func TestAdoptFailsWhenStepLoopRestartsWithinInterval(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	before := nsSnapshot(t, dir)
+	label := &fakeLabeler{label: "claude"}
+	loop := &restartingWatcher{
+		fakeWatcher:  fakeWatcher{running: true},
+		restartAfter: 15 * time.Millisecond,
+	}
+	s := nsService(root, loop, label)
+	s.LoopVerifyInterval = 60 * time.Millisecond
+
+	_, err := s.Adopt(t.Context(), nsRun)
+	if err == nil || !strings.Contains(err.Error(), "step loop restarted under orca lease") {
+		t.Fatalf("Adopt error = %v, want step loop restarted under orca lease", err)
+	}
+	if after := nsSnapshot(t, dir); !reflect.DeepEqual(after, before) || label.label != "claude" {
+		t.Fatalf("failed adopt after loop restart left dirty state: label=%q\n got %v\nwant %v", label.label, after, before)
+	}
+}
+
+func TestNebulaSwarmReviewReportRecognised(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), ".swarm")
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
+	write(t, filepath.Join(dir, "m2-default.review.prompt"), "Run /pr-polish-nebula on PR #5705.\n")
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 6, 36, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+
+	controllers := NewControllers(
+		t.Context(),
+		st,
+		drv,
+		clk,
+		func(string, func(context.Context, string, string, string) error) controller.Judge {
+			return controller.NewFakeJudge()
+		},
+	)
+	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+	s := nsService(root, loop, label)
+	s.Driver = controllers
+	r, err := s.Adopt(t.Context(), nsRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+	// Complete clean phase via a nebula-swarm disk report (.done file) and turn_ended_no_report
+	// so the controller advances m2-default to review round 1.
+	write(t, filepath.Join(dir, "reports", "m2-default.clean.done"), "Outcome: done\nHEAD: bbb\nPR: 5705\n")
+	drv.Emit(lane.Event{
+		RunID:      nsRun,
+		LaneID:     "m2-default",
+		TerminalID: "term-m2-clean",
+		Kind:       lane.EventTurnEndedNoReport,
+		Text:       "clean finished",
+	})
+
+	waitFor(t, func() bool {
+		got, err := st.Lanes().Get(t.Context(), nsRun, "m2-default")
+		return err == nil && got.Phase == recipe.PhaseReview && got.Status == lane.StatusRunning
+	})
+	if len(drv.PhaseStarts) != 1 {
+		t.Fatalf("PhaseStarts = %+v, want 1 review start", drv.PhaseStarts)
+	}
+	reviewStart := drv.PhaseStarts[0]
+	for _, want := range []string{
+		"Run /pr-polish-nebula on PR #5705.",
+		"reports/m2-default.review.r1.md",
+		"nebula phase report --outcome",
+		"Verdict: pass | needs-changes",
+	} {
+		if !strings.Contains(reviewStart.Brief, want) {
+			t.Fatalf("nebula-swarm review brief missing %q:\n%s", want, reviewStart.Brief)
+		}
+	}
+
+	gotReviewLane, err := st.Lanes().Get(t.Context(), nsRun, "m2-default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewTermID := gotReviewLane.TerminalID
+
+	// Simulate the review terminal (codex / pr-polish) writing the run's report file
+	// with Verdict: pass and ending its turn without filing a Nebula API phase report
+	// (with turn summary text in Event.Text, which maps to PhaseExitPayload.Error).
+	write(t, filepath.Join(dir, "reports", "m2-default.review.r1.md"), "- Lane: m2-default\n- Phase: review\n- Round: 1\n- PR: #5705\n- Head-SHA: fb6c5bae\n- Verdict: pass\n- Rework-class: none\n")
+	drv.Emit(lane.Event{
+		RunID:      nsRun,
+		LaneID:     "m2-default",
+		TerminalID: reviewTermID,
+		Kind:       lane.EventTurnEndedNoReport,
+		Text:       "Polished PR #5705 and pushed fb6c5bae.",
+	})
+
+	waitFor(t, func() bool {
+		got, err := st.Lanes().Get(t.Context(), nsRun, "m2-default")
+		return err == nil && got.Status == lane.StatusDone
+	})
+	gotLane, err := st.Lanes().Get(t.Context(), nsRun, "m2-default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLane.ApprovalSHA != "fb6c5bae" || gotLane.PR != 5705 {
+		t.Fatalf("m2-default after review pass = %+v, want ApprovalSHA=fb6c5bae PR=5705", gotLane)
+	}
+	if len(drv.PhaseStarts) != 1 {
+		t.Fatalf("unexpected retry/spawn after review pass: PhaseStarts=%+v", drv.PhaseStarts)
+	}
+
+	// Another chat's Controllers instance on the same store must fail with
+	// store.ErrLeaseHeld while the first chat holds the non-expired run lease.
+	competing := NewControllers(t.Context(), st, drv, clk, nil)
+	rOther := r
+	rOther.Holder = "orca-chat:other-chat"
+	if err := competing.Start(t.Context(), rOther); !errors.Is(err, store.ErrLeaseHeld) {
+		t.Fatalf("competing Controllers.Start = %v, want store.ErrLeaseHeld", err)
 	}
 }

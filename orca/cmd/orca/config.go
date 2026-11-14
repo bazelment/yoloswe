@@ -47,7 +47,7 @@ func nextUniqueID(prefix string, clk clock.Clock) string {
 	if clk != nil {
 		ts = clk.Now().UTC().UnixNano()
 	}
-	return fmt.Sprintf("%s-%d-%s-%d", prefix, ts, processNonce, seq)
+	return fmt.Sprintf("%s-%d-%s-%06d", prefix, ts, processNonce, seq)
 }
 
 const (
