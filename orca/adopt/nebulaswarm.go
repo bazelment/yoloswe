@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/bazelment/yoloswe/orca/lane"
 )
 
 // Run directory formats.
@@ -335,19 +337,11 @@ func clip(s string, n int) string {
 
 // repoSlug is the run's owner/repo: nebula-swarm caches it in .repo-slug.
 func repoSlug(dir string) string {
-	return normalizeGitSlug(readText(filepath.Join(dir, ".repo-slug")))
-}
-
-func normalizeGitSlug(raw string) string {
-	s := strings.TrimSpace(raw)
-	for _, prefix := range []string{"https://github.com/", "http://github.com/", "ssh://git@github.com/", "git@github.com:"} {
-		if strings.HasPrefix(strings.ToLower(s), prefix) {
-			s = s[len(prefix):]
-			break
-		}
+	raw := readText(filepath.Join(dir, ".repo-slug"))
+	if !lane.IsRepositorySlug(raw) {
+		return ""
 	}
-	s = strings.TrimSuffix(s, ".git")
-	return strings.Trim(s, "/")
+	return lane.NormalizeRepositorySlug(raw)
 }
 
 func applyRepoValue(r *Run, raw string) {
@@ -355,9 +349,9 @@ func applyRepoValue(r *Run, raw string) {
 	if v == "" {
 		return
 	}
-	if slug := normalizeGitSlug(v); strings.Contains(slug, "/") {
-		if r.Repo == "" || r.Repo == r.RepoID {
-			r.Repo = slug
+	if lane.IsRepositorySlug(v) {
+		if r.Repo == "" {
+			r.Repo = lane.NormalizeRepositorySlug(v)
 		}
 		return
 	}
@@ -387,11 +381,11 @@ func applyRunEnvRepo(dir string, r *Run) {
 			if r.RepoID == "" {
 				r.RepoID = v
 			}
-		case "SNL_GH_REPO", "SNL_REPO_URL", "GITHUB_REPO", "REPO":
+		case "SNL_GH_REPO", "SNL_REPO_URL":
 			applyRepoValue(r, v)
 		}
 	}
-	if (r.ID != "" && os.Getenv("SNL_RUN_ID") == r.ID) || (dir != "" && os.Getenv("RUN") != "" && filepath.Clean(os.Getenv("RUN")) == filepath.Clean(dir)) {
+	if r.ID != "" && os.Getenv("SNL_RUN_ID") == r.ID {
 		if v := strings.TrimSpace(os.Getenv("SNL_REPO_ID")); v != "" && r.RepoID == "" {
 			r.RepoID = v
 		}

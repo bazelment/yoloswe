@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -211,6 +210,8 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: d.store}
 		if ds, ok := dispatch.(interface{ SetDriver(lane.LaneDriver) }); ok {
 			ds.SetDriver(runDriver)
+		} else if dispatch != nil {
+			slog.DebugContext(ctx, "orca/adopt: judge does not implement SetDriver; adoptedRunDriver not attached to judge", "run_id", r.ID)
 		}
 	}
 	ctrl = controller.New(controller.Config{RunID: r.ID, HolderID: holder, PRProbe: d.PRProbe}, d.store, runDriver, d.clock, d.judge(holder, dispatch))
@@ -811,31 +812,12 @@ func (d *adoptedRunDriver) StartPhaseTerminal(ctx context.Context, req lane.Star
 }
 
 func populateRunRepo(r *Run) {
-	if r == nil || r.Dir == "" {
+	if r == nil || r.Dir == "" || (r.Repo != "" && r.RepoID != "") {
 		return
 	}
-	if r.Repo == "" {
-		r.Repo = repoSlug(r.Dir)
-	}
-	if b, err := os.ReadFile(filepath.Join(r.Dir, "state.json")); err == nil {
-		var st struct {
-			Config struct {
-				Repo string `json:"repo"`
-			} `json:"config"`
-			Tasks []struct {
-				RepoURL string `json:"repo_url"`
-			} `json:"tasks"`
-		}
-		if json.Unmarshal(b, &st) == nil {
-			applyRepoValue(r, st.Config.Repo)
-			for i := range st.Tasks {
-				applyRepoValue(r, st.Tasks[i].RepoURL)
-			}
-		}
-	}
-	applyRunEnvRepo(r.Dir, r)
-	if r.Repo == "" && r.RepoID != "" {
-		r.Repo = r.RepoID
+	if loaded, err := Read(r.Dir); err == nil {
+		r.Repo = cmp.Or(r.Repo, loaded.Repo)
+		r.RepoID = cmp.Or(r.RepoID, loaded.RepoID)
 	}
 }
 
@@ -884,7 +866,7 @@ func splitReportTail(brief string) (body, tail string) {
 	return brief, ""
 }
 
-var runFileTokenPattern = regexp.MustCompile(`([A-Za-z0-9_./-]+\.(?:md|brief|prompt|txt))`)
+const maxInlinedRunFileBytes = 4096
 
 func inlineRunFileCitations(dir, laneID, brief string) string {
 	if dir == "" || strings.TrimSpace(brief) == "" {
@@ -894,13 +876,6 @@ func inlineRunFileCitations(dir, laneID, brief string) string {
 		"OBJECTIVE.md",
 		"PROGRESS.md",
 		"ESCALATIONS.md",
-		"BACKLOG.md",
-		"NOTES.md",
-		"plan.md",
-		"decisions.md",
-		"handoff.md",
-		"role.md",
-		"rubric.md",
 		"ledger.md",
 	}
 	if validatePathComponent("lane id", laneID) == nil {
@@ -910,15 +885,6 @@ func inlineRunFileCitations(dir, laneID, brief string) string {
 			laneID+".swe.brief",
 			laneID+".swe.prompt",
 		)
-	}
-	for _, m := range runFileTokenPattern.FindAllStringSubmatch(brief, -1) {
-		tok := strings.Trim(m[1], ".,;:()[]\"'`")
-		if tok == "" || strings.HasPrefix(tok, "reports/") || strings.Contains(tok, "phase-report.") {
-			continue
-		}
-		if !slices.Contains(candidates, tok) {
-			candidates = append(candidates, tok)
-		}
 	}
 
 	out := brief
@@ -936,11 +902,12 @@ func inlineRunFileCitations(dir, laneID, brief string) string {
 		if err != nil || info.IsDir() {
 			continue
 		}
-		content := stripMarker(readText(resolved))
-		if content == "" || strings.Contains(out, content) {
+		content := clip(stripMarker(readText(resolved)), maxInlinedRunFileBytes)
+		header := fmt.Sprintf("Inlined from %s:", rel)
+		if content == "" || strings.Contains(out, header) || strings.Contains(out, content) {
 			continue
 		}
-		out += fmt.Sprintf("\n\nInlined from %s:\n%s", rel, content)
+		out += fmt.Sprintf("\n\n%s\n%s", header, content)
 	}
 	return out
 }

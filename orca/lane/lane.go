@@ -695,3 +695,31 @@ func AppendReportInstructions(text, instructions string, maxBytes int) string {
 	}
 	return text + separator + instructions
 }
+
+// NormalizeRepositorySlug extracts a canonical "owner/repo" slug (or trimmed
+// identifier when not a URL/slug) from a git remote URL or repository string.
+func NormalizeRepositorySlug(raw string) string {
+	s := strings.TrimSpace(raw)
+	if schemeIdx := strings.Index(s, "://"); schemeIdx >= 0 {
+		rest := s[schemeIdx+3:]
+		if slashIdx := strings.IndexByte(rest, '/'); slashIdx >= 0 {
+			s = rest[slashIdx+1:]
+		}
+	} else if atIdx := strings.IndexByte(s, '@'); atIdx >= 0 {
+		if colonIdx := strings.IndexByte(s[atIdx+1:], ':'); colonIdx >= 0 {
+			s = s[atIdx+1+colonIdx+1:]
+		}
+	}
+	s = strings.Trim(s, "/")
+	if len(s) > 4 && strings.EqualFold(s[len(s)-4:], ".git") {
+		s = s[:len(s)-4]
+	}
+	return strings.Trim(s, "/")
+}
+
+// IsRepositorySlug reports whether raw normalizes to an "owner/repo" slug.
+func IsRepositorySlug(raw string) bool {
+	slug := NormalizeRepositorySlug(raw)
+	owner, repo, ok := strings.Cut(slug, "/")
+	return ok && owner != "" && repo != "" && !strings.Contains(repo, "/")
+}

@@ -20,8 +20,10 @@ import (
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
+	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/lane/nebula"
+	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -824,7 +826,9 @@ func TestAdoptedNebulaSwarmSpawnUsesConfigRepo(t *testing.T) {
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			gotRepoID.Store(body.RepositoryID)
-			_, _ = io.WriteString(w, `{"session":{"id":"sess-gaps3","status":"ready","repositoryId":"`+body.RepositoryID+`"}}`)
+			// Even if gitUrl points to an internal mirror or renamed slug, an exact
+			// repositoryId match short-circuits without rejecting the session.
+			_, _ = io.WriteString(w, `{"session":{"id":"sess-gaps3","status":"ready","repositoryId":"`+body.RepositoryID+`","gitUrl":"ssh://git@git.internal/mirrors/nebula.git/"}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions/sess-gaps3/terminals":
 			_, _ = io.WriteString(w, `{"id":"term-gaps3-swe"}`)
 		default:
@@ -980,6 +984,53 @@ func TestAdoptedSpawnReleasesSessionInWrongRepo(t *testing.T) {
 	if got := termStarts.Load(); got != 0 {
 		t.Fatalf("terminal starts on wrong-repo session = %d, want 0", got)
 	}
+
+	// Also verify that if Nebula omits repositoryId on the created session and
+	// only returns a gitUrl for the wrong repository, verifySessionRepository
+	// resolves gitUrl via /api/code-repositories, releases the session, and fails.
+	released.Store("")
+	srvOmittedID := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-repositories":
+			_, _ = io.WriteString(w, `{"repositories":[{"id":"`+wrongRepoID+`","fullName":"build-perf-sweeping/house-design"},{"id":"`+wantRepoID+`","fullName":"sycamore-labs/nebula"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"session":{"id":"018a40aa","status":"ready","gitUrl":"git@github.com:build-perf-sweeping/house-design.git"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/code-sessions/018a40aa/release":
+			released.Store("018a40aa")
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srvOmittedID.Close()
+
+	drvOmitted, err := nebula.New(nebula.Config{
+		APIURL: srvOmittedID.URL,
+		Token:  "test-token",
+		Clock:  clk,
+		Events: st.Events(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = drvOmitted.SpawnSession(t.Context(), lane.SpawnRequest{
+		RunID:        nsRun,
+		RepositoryID: wantRepoID,
+		LaneID:       "m2-gaps3",
+		Phase:        "swe",
+		Round:        1,
+		Harness:      "claude",
+		Brief:        "test",
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not match expected") {
+		t.Fatalf("SpawnSession with omitted repositoryId and wrong gitUrl = %v, want mismatch error", err)
+	}
+	if got, _ := released.Load().(string); got != "018a40aa" {
+		t.Fatalf("released session when repositoryId omitted = %q, want 018a40aa", got)
+	}
 }
 
 func TestAdoptedBriefCitingObjectiveInlinesItems(t *testing.T) {
@@ -993,14 +1044,34 @@ func TestAdoptedBriefCitingObjectiveInlinesItems(t *testing.T) {
 "tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
 	objectiveText := "# 20261114-trial-m1\n\n## m2-gaps3\n- Item A: strip redundant prompt preambles.\n- Item B: verify token count drops below 1200.\n"
 	write(t, filepath.Join(dir, "OBJECTIVE.md"), objectiveText)
-	write(t, filepath.Join(dir, "m2-gaps3.swe.prompt"), "Implement m2-gaps3. Read OBJECTIVE.md for the exact items.\n")
+	write(t, filepath.Join(dir, "NOTES.md"), "host-only scratch notes that must not be inlined unless allowlisted\n")
+	write(t, filepath.Join(dir, "m2-gaps3.swe.prompt"), "Implement m2-gaps3. Read OBJECTIVE.md for the exact items. Do not inline NOTES.md.\n")
 
 	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 1, 0, 0, time.UTC))
 	st := store.NewMemoryStore(clk)
 	t.Cleanup(func() { _ = st.Close() })
 	drv := lane.NewFakeDriver()
 
-	controllers := NewControllers(t.Context(), st, drv, clk, nil)
+	var disp *dispatcher.Dispatcher
+	controllers := NewControllers(t.Context(), st, drv, clk, func(_ string, answer func(context.Context, string, string, string) error) controller.Judge {
+		fakeClient := model.NewFakeClient(
+			model.Response{
+				StopReason: model.StopReasonToolUse,
+				Message: model.NewAssistantMessage(model.NewToolUseBlock(
+					"call-spawn",
+					dispatcher.ToolLaneSpawn,
+					json.RawMessage(`{"item_id":"m2-gaps4","lane_id":"m2-gaps4","brief":"Implement m2-gaps4. Read OBJECTIVE.md for the exact items. Check NOTES.md in the repo."}`),
+				)),
+			},
+			model.Response{
+				StopReason: model.StopReasonEndTurn,
+				Message:    model.NewAssistantMessage(model.NewTextBlock("spawned m2-gaps4")),
+			},
+		)
+		disp = dispatcher.New(dispatcher.Config{}, st, drv, clk, fakeClient)
+		disp.SetOwnerAnswer(answer)
+		return disp
+	})
 	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
 	s := nsService(root, loop, label)
 	s.Driver = controllers
@@ -1022,6 +1093,46 @@ func TestAdoptedBriefCitingObjectiveInlinesItems(t *testing.T) {
 			t.Fatalf("brief citing OBJECTIVE.md missing %q:\n%s", want, gotBrief)
 		}
 	}
+	if strings.Contains(gotBrief, "host-only scratch notes") {
+		t.Fatalf("brief unexpectedly inlined unallowlisted NOTES.md:\n%s", gotBrief)
+	}
+
+	// Exercise the real Dispatcher (wired via SetDriver in NewControllers)
+	// spawning a new backlog item whose brief cites OBJECTIVE.md.
+	if err := st.Backlog().Add(t.Context(), store.BacklogItem{
+		ID:       "m2-gaps4",
+		RunID:    nsRun,
+		Title:    "gaps 4",
+		Priority: store.PriorityP1,
+		Status:   store.BacklogOpen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Events().Append(t.Context(), store.Event{
+		RunID:   nsRun,
+		Kind:    store.EventOwnerMessage,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "spawn m2-gaps4",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		return len(drv.Spawns) == 2
+	})
+	if len(drv.Spawns) != 2 || drv.Spawns[1].LaneID != "m2-gaps4" || drv.Spawns[1].RepositoryID != wantRepoID {
+		t.Fatalf("Dispatcher spawn = %+v, want m2-gaps4 with RepositoryID=%q", drv.Spawns, wantRepoID)
+	}
+	dispBrief := drv.Spawns[1].Brief
+	if gotCount := strings.Count(dispBrief, "Inlined from OBJECTIVE.md:"); gotCount != 1 {
+		t.Fatalf("Dispatcher brief Inlined from OBJECTIVE.md count = %d, want 1:\n%s", gotCount, dispBrief)
+	}
+	if !strings.Contains(dispBrief, "Item A: strip redundant prompt preambles.") {
+		t.Fatalf("Dispatcher brief missing OBJECTIVE.md items:\n%s", dispBrief)
+	}
+	if strings.Contains(dispBrief, "host-only scratch notes") {
+		t.Fatalf("Dispatcher brief unexpectedly inlined NOTES.md:\n%s", dispBrief)
+	}
 }
 
 func TestAdoptedWrongRepoLaneReportRespawnsInsteadOfSteering(t *testing.T) {
@@ -1033,6 +1144,7 @@ func TestAdoptedWrongRepoLaneReportRespawnsInsteadOfSteering(t *testing.T) {
 	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"`+wantRepoID+`","orchestrator_session_id":"sess-orch","merge":"none",
 "phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
 "tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"running","phase":"swe","round":1,"session_id":"018a40a9","terminals":{"swe":{"1":"term-bad"}},"terminal_state":"working","verdict":""}]}`)
+	os.Remove(filepath.Join(dir, ".repo-slug"))
 
 	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 12, 0, 0, time.UTC))
 	st := store.NewMemoryStore(clk)
@@ -1048,6 +1160,33 @@ func TestAdoptedWrongRepoLaneReportRespawnsInsteadOfSteering(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+	// First verify that normal blocked/needs-input reports mentioning branches,
+	// cross-repo dependencies, or the run's own repo slug do NOT trigger a
+	// false-positive wrong-repo respawn.
+	drv.Emit(lane.Event{
+		RunID:      nsRun,
+		LaneID:     "m2-gaps3",
+		SessionID:  "018a40a9",
+		TerminalID: "term-bad",
+		Kind:       lane.EventPhaseReported,
+		Report: &lane.PhaseReport{
+			LaneID:     "m2-gaps3",
+			TerminalID: "term-bad",
+			Phase:      "swe",
+			Round:      1,
+			Outcome:    lane.OutcomeNeedsInput,
+			Summary:    "checked out on main and checked out to sycamore-labs/nebula; waiting on PR in another repository.",
+			Raw:        "Outcome: needs-input\nchecked out on main and checked out to sycamore-labs/nebula; waiting on PR in another repository.",
+		},
+	})
+	waitFor(t, func() bool {
+		got, err := st.Lanes().Get(t.Context(), nsRun, "m2-gaps3")
+		return err == nil && got.Status == lane.StatusBlocked
+	})
+	if len(drv.Releases) != 0 || len(drv.Spawns) != 0 {
+		t.Fatalf("false-positive wrong-repo respawn on benign report: Releases=%v Spawns=%v", drv.Releases, drv.Spawns)
+	}
 
 	// Emit the exact needs-input report from a lane spawned in the wrong repo.
 	drv.Emit(lane.Event{
@@ -1085,6 +1224,34 @@ func TestAdoptedWrongRepoLaneReportRespawnsInsteadOfSteering(t *testing.T) {
 	}
 	if gotLane.Status != lane.StatusRunning || gotLane.SessionID == "018a40a9" {
 		t.Fatalf("m2-gaps3 after wrong-repo respawn = %+v, want running on new session", gotLane)
+	}
+
+	// A second wrong-repo report in the same phase/round must NOT trigger an
+	// unbounded respawn loop; it caps at 1 automatic respawn and blocks the lane.
+	secondSession := gotLane.SessionID
+	secondTerm := gotLane.TerminalID
+	drv.Emit(lane.Event{
+		RunID:      nsRun,
+		LaneID:     "m2-gaps3",
+		SessionID:  secondSession,
+		TerminalID: secondTerm,
+		Kind:       lane.EventPhaseReported,
+		Report: &lane.PhaseReport{
+			LaneID:     "m2-gaps3",
+			TerminalID: secondTerm,
+			Phase:      "swe",
+			Round:      1,
+			Outcome:    lane.OutcomeNeedsInput,
+			Summary:    "still in the wrong repository",
+			Raw:        "Outcome: needs-input\nstill in the wrong repository",
+		},
+	})
+	waitFor(t, func() bool {
+		got, err := st.Lanes().Get(t.Context(), nsRun, "m2-gaps3")
+		return err == nil && got.Status == lane.StatusBlocked
+	})
+	if len(drv.Spawns) != 1 || len(drv.Releases) != 1 {
+		t.Fatalf("expected wrong-repo respawn cap of 1 per phase/round, got Spawns=%d Releases=%d", len(drv.Spawns), len(drv.Releases))
 	}
 }
 

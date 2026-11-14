@@ -698,7 +698,9 @@ func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*Ses
 			return nil, err
 		}
 		if err := d.verifySessionRepository(ctx, *settled, repoID, repoSlug); err != nil {
-			_ = d.ReleaseSession(ctx, settled.ID, true)
+			if relErr := d.ReleaseSession(ctx, settled.ID, true); relErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("release mismatched session %s: %w", settled.ID, relErr))
+			}
 			return nil, err
 		}
 		return settled, nil
@@ -744,7 +746,9 @@ func (d *Driver) EnsureSession(ctx context.Context, req lane.SpawnRequest) (*Ses
 		return nil, err
 	}
 	if err := d.verifySessionRepository(ctx, *settled, repoID, repoSlug); err != nil {
-		_ = d.ReleaseSession(ctx, settled.ID, true)
+		if relErr := d.ReleaseSession(ctx, settled.ID, true); relErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("release mismatched session %s: %w", settled.ID, relErr))
+		}
 		return nil, err
 	}
 	return settled, nil
@@ -795,7 +799,7 @@ func (d *Driver) matchesLaneSession(s *SessionInfo, runID, laneID, workBranch, b
 		return false
 	}
 	if s.GitURL != "" {
-		gotSlug := normalizeRepoSlug(s.GitURL)
+		gotSlug := lane.NormalizeRepositorySlug(s.GitURL)
 		if repoSlug != "" && !strings.EqualFold(gotSlug, repoSlug) {
 			return false
 		}
@@ -1733,36 +1737,20 @@ func (d *Driver) PollCapacity(ctx context.Context, events store.EventStore, runI
 	return ev, nil
 }
 
-func normalizeRepoSlug(raw string) string {
-	s := strings.TrimSpace(raw)
-	for _, prefix := range []string{"https://github.com/", "http://github.com/", "ssh://git@github.com/", "git@github.com:"} {
-		if strings.HasPrefix(strings.ToLower(s), prefix) {
-			s = s[len(prefix):]
-			break
-		}
-	}
-	s = strings.TrimSuffix(s, ".git")
-	return strings.Trim(s, "/")
-}
-
-func isRepoSlug(raw string) bool {
-	return strings.Contains(normalizeRepoSlug(raw), "/")
-}
-
 func (d *Driver) resolveTargetRepository(ctx context.Context, reqRepoID, reqRepo string) (repoID, repoSlug string, err error) {
 	reqRepoID = strings.TrimSpace(reqRepoID)
 	reqRepo = strings.TrimSpace(reqRepo)
 	if reqRepoID != "" || reqRepo != "" {
 		if reqRepoID != "" {
-			if isRepoSlug(reqRepoID) {
-				repoSlug = normalizeRepoSlug(reqRepoID)
+			if lane.IsRepositorySlug(reqRepoID) {
+				repoSlug = lane.NormalizeRepositorySlug(reqRepoID)
 			} else {
 				repoID = reqRepoID
 			}
 		}
 		if reqRepo != "" {
-			if isRepoSlug(reqRepo) {
-				repoSlug = cmp.Or(repoSlug, normalizeRepoSlug(reqRepo))
+			if lane.IsRepositorySlug(reqRepo) {
+				repoSlug = cmp.Or(repoSlug, lane.NormalizeRepositorySlug(reqRepo))
 			} else if repoID == "" {
 				repoID = reqRepo
 			}
@@ -1785,7 +1773,7 @@ func (d *Driver) resolveTargetRepository(ctx context.Context, reqRepoID, reqRepo
 		return "", "", err
 	}
 	d.mu.Lock()
-	slug := normalizeRepoSlug(d.repoFullName)
+	slug := lane.NormalizeRepositorySlug(d.repoFullName)
 	d.mu.Unlock()
 	return id, slug, nil
 }
@@ -1795,7 +1783,7 @@ func (d *Driver) lookupRepositoryID(ctx context.Context, target string) (string,
 	if target == "" {
 		return "", fmt.Errorf("nebula resolve repository id: repository is required")
 	}
-	targetSlug := normalizeRepoSlug(target)
+	targetSlug := lane.NormalizeRepositorySlug(target)
 	var resp struct {
 		Repositories []struct {
 			ID       string `json:"id"`
@@ -1808,8 +1796,8 @@ func (d *Driver) lookupRepositoryID(ctx context.Context, target string) (string,
 	}
 	for _, r := range resp.Repositories {
 		if r.ID == target ||
-			(r.FullName != "" && strings.EqualFold(normalizeRepoSlug(r.FullName), targetSlug)) ||
-			(r.GitURL != "" && strings.EqualFold(normalizeRepoSlug(r.GitURL), targetSlug)) {
+			(r.FullName != "" && strings.EqualFold(lane.NormalizeRepositorySlug(r.FullName), targetSlug)) ||
+			(r.GitURL != "" && strings.EqualFold(lane.NormalizeRepositorySlug(r.GitURL), targetSlug)) {
 			if r.ID != "" {
 				return r.ID, nil
 			}
@@ -1823,37 +1811,18 @@ func (d *Driver) verifySessionRepository(ctx context.Context, sess SessionInfo, 
 	if gotID != "" && wantRepoID != "" && gotID != wantRepoID {
 		return fmt.Errorf("nebula session %s repositoryId %q does not match expected %q", sess.ID, gotID, wantRepoID)
 	}
-	gotSlug := normalizeRepoSlug(sess.GitURL)
+	gotSlug := lane.NormalizeRepositorySlug(sess.GitURL)
 	if gotSlug != "" {
 		if wantRepoSlug != "" && !strings.EqualFold(gotSlug, wantRepoSlug) {
 			return fmt.Errorf("nebula session %s gitUrl %q does not match expected repository %q", sess.ID, sess.GitURL, wantRepoSlug)
 		}
-		if wantRepoSlug == "" && wantRepoID != "" && !strings.EqualFold(gotSlug, wantRepoID) {
-			var resp struct {
-				Repositories []struct {
-					ID       string `json:"id"`
-					FullName string `json:"fullName"`
-					GitURL   string `json:"gitUrl"`
-				} `json:"repositories"`
+		if gotID == "" && wantRepoSlug == "" && wantRepoID != "" && !strings.EqualFold(gotSlug, wantRepoID) {
+			resolvedID, err := d.lookupRepositoryID(ctx, gotSlug)
+			if err != nil {
+				return fmt.Errorf("nebula session %s verify gitUrl %q against expected repository %q: %w", sess.ID, sess.GitURL, wantRepoID, err)
 			}
-			matched := false
-			if err := d.doJSON(ctx, http.MethodGet, "/api/code-repositories", nil, &resp); err == nil {
-				for _, r := range resp.Repositories {
-					rSlug := cmp.Or(normalizeRepoSlug(r.FullName), normalizeRepoSlug(r.GitURL))
-					if r.ID == wantRepoID && rSlug != "" {
-						if strings.EqualFold(rSlug, gotSlug) {
-							matched = true
-						} else {
-							return fmt.Errorf("nebula session %s gitUrl %q does not match expected repository %q (%s)", sess.ID, sess.GitURL, rSlug, wantRepoID)
-						}
-					}
-					if rSlug != "" && strings.EqualFold(rSlug, gotSlug) && r.ID != "" && r.ID != wantRepoID {
-						return fmt.Errorf("nebula session %s gitUrl %q (repository %q) does not match expected %q", sess.ID, sess.GitURL, r.ID, wantRepoID)
-					}
-				}
-			}
-			if !matched && gotID == "" {
-				return fmt.Errorf("nebula session %s gitUrl %q does not match expected repository %q", sess.ID, sess.GitURL, wantRepoID)
+			if resolvedID != wantRepoID {
+				return fmt.Errorf("nebula session %s gitUrl %q (repository %q) does not match expected %q", sess.ID, sess.GitURL, resolvedID, wantRepoID)
 			}
 		}
 	}

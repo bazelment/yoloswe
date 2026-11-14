@@ -112,7 +112,7 @@ type Run struct {
 	State, SupersededBy string
 	// Loop describes the live step loop or watcher processes ("" when none).
 	Loop string
-	// Repo is the run's owner/repo when the run records it (or RepoID when only a Nebula repository id is recorded).
+	// Repo is the run's owner/repo when the run records it.
 	Repo string
 	// RepoID is the run's Nebula repository id when the run records one.
 	RepoID string `json:",omitempty"`
@@ -357,9 +357,6 @@ func Read(dir string) (Run, error) {
 		annotateLanes(dir, &r, st.Config.Phases)
 	}
 	applyRunEnvRepo(dir, &r)
-	if r.Repo == "" && r.RepoID != "" {
-		r.Repo = r.RepoID
-	}
 	sort.Slice(r.Lanes, func(a, b int) bool { return r.Lanes[a].ID < r.Lanes[b].ID })
 	r.State = RunFinished
 	if runLive(&r) {

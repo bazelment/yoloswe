@@ -1496,7 +1496,11 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 
 	curPhase, hasPhase := r.Phase(ln.Phase)
 	if hasPhase && (rep.Outcome == lane.OutcomeNeedsInput || rep.Outcome == lane.OutcomeBlocked) && isWrongRepoReport(rep, ev.Summary, c.runRepository(ctx)) {
-		return c.respawnWrongRepoLane(ctx, ln, r, curPhase, ev.ID, cmp.Or(rep.Reason, rep.Summary, ev.Summary))
+		if replayed, allowed := c.canRespawnWrongRepo(ln, ev.ID); replayed {
+			return store.EventClassAuto, nil
+		} else if allowed {
+			return c.respawnWrongRepoLane(ctx, ln, r, curPhase, ev.ID, cmp.Or(rep.Reason, rep.Summary, ev.Summary))
+		}
 	}
 	if hasPhase && len(curPhase.ExitContract.AllowedOutcomes) > 0 {
 		noChangeAllowed := rep.Outcome == lane.OutcomeNoChange && (curPhase.Name == recipe.PhaseSWE || curPhase.Name == recipe.PhaseClean || curPhase.Name == recipe.PhaseReview)
@@ -2441,10 +2445,6 @@ func isWrongRepoText(text, wantRepo string) bool {
 		"wrong repository",
 		"unrelated repo",
 		"unrelated repository",
-		"different repo",
-		"different repository",
-		"another repo",
-		"another repository",
 	} {
 		if strings.Contains(s, phrase) {
 			return true
@@ -2453,7 +2453,6 @@ func isWrongRepoText(text, wantRepo string) bool {
 	for _, prefix := range []string{
 		"checked out to ",
 		"checked out in ",
-		"checked out on ",
 		"workspace is in ",
 		"session is on ",
 	} {
@@ -2462,21 +2461,35 @@ func isWrongRepoText(text, wantRepo string) bool {
 			continue
 		}
 		rest := strings.TrimSpace(s[idx+len(prefix):])
-		word, _, _ := strings.Cut(rest, " ")
-		word = strings.Trim(word, ".,;:()[]\"'`")
-		if word == "" {
-			continue
-		}
-		want := strings.ToLower(strings.TrimSpace(wantRepo))
-		if want == "" {
+		if strings.Contains(rest, " instead of ") {
 			return true
 		}
-		_, wantName, hasSlash := strings.Cut(want, "/")
-		if word != want && (!hasSlash || word != wantName) {
+		word, _, _ := strings.Cut(rest, " ")
+		word = strings.Trim(word, ".,;:()[]\"'`")
+		if !lane.IsRepositorySlug(word) || !lane.IsRepositorySlug(wantRepo) {
+			continue
+		}
+		if !strings.EqualFold(lane.NormalizeRepositorySlug(word), lane.NormalizeRepositorySlug(wantRepo)) {
 			return true
 		}
 	}
 	return false
+}
+
+func wrongRepoActionKey(ln *lane.Lane) string {
+	return fmt.Sprintf("wrong-repo-respawn:%s:%s", ln.ID, ln.AttemptKey())
+}
+
+func (c *Controller) canRespawnWrongRepo(ln *lane.Lane, eventID string) (replayed bool, allowed bool) {
+	dec, ok := c.decidedActions[wrongRepoActionKey(ln)]
+	if !ok {
+		return false, true
+	}
+	var args DecisionArgs
+	if len(dec.Args) > 0 && json.Unmarshal(dec.Args, &args) == nil && eventID != "" && args.EventID == eventID {
+		return true, true
+	}
+	return false, false
 }
 
 func (c *Controller) respawnWrongRepoLane(
@@ -2489,8 +2502,8 @@ func (c *Controller) respawnWrongRepoLane(
 	round := max(ln.Round, 1)
 	attempt := max(ln.Attempt, 1)
 	oldSession := strings.TrimSpace(ln.SessionID)
-	actionKey := fmt.Sprintf("wrong-repo-respawn:%s:%s:%s", ln.ID, ln.AttemptKey(), cmp.Or(oldSession, eventID))
-	if c.hasActionDecision(actionKey) {
+	actionKey := wrongRepoActionKey(ln)
+	if replayed, allowed := c.canRespawnWrongRepo(ln, eventID); replayed || !allowed {
 		return store.EventClassAuto, nil
 	}
 	if len(phase.Agents) == 0 {
@@ -2498,11 +2511,17 @@ func (c *Controller) respawnWrongRepoLane(
 	}
 	agent := phase.Agents[min(attempt-1, len(phase.Agents)-1)]
 
-	_ = c.stopCurrentTerminal(ctx, ln, "wrong repository")
+	if err := c.stopCurrentTerminal(ctx, ln, "wrong repository"); err != nil {
+		slog.WarnContext(ctx, "orca/controller: failed to stop terminal before wrong-repo respawn",
+			"run_id", c.cfg.RunID, "lane_id", ln.ID, "terminal_id", ln.TerminalID, "err", err)
+	}
 	delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
 	if oldSession != "" {
 		if rel, ok := c.driver.(lane.SessionReleaser); ok {
-			_ = rel.ReleaseSession(ctx, oldSession, true)
+			if err := rel.ReleaseSession(ctx, oldSession, true); err != nil {
+				slog.WarnContext(ctx, "orca/controller: failed to release wrong-repo session",
+					"run_id", c.cfg.RunID, "lane_id", ln.ID, "session_id", oldSession, "err", err)
+			}
 		}
 	}
 	ln.SessionID = ""
