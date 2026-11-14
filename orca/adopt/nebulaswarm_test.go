@@ -235,6 +235,7 @@ func TestAdoptFakeStepLoopStoppedRecordedAndRestarted(t *testing.T) {
 
 	loopCmd := fmt.Sprintf(`while (( SECONDS < 600 )); do echo "$1" >> %q; sleep 180; done`, marker)
 	host := exec.Command("bash", "-c", loopCmd, "fake-step-loop", dir)
+	host.Env = append(os.Environ(), "SECRET_API_KEY=do-not-persist-in-lease")
 	if err := host.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -263,9 +264,16 @@ func TestAdoptFakeStepLoopStoppedRecordedAndRestarted(t *testing.T) {
 			t.Fatalf("loop or sleep child pid %d still alive after adopt", pid)
 		}
 	}
-	j, err := readJournal(filepath.Join(dir, leaseFile))
+	leasePath := filepath.Join(dir, leaseFile)
+	j, err := readJournal(leasePath)
 	if err != nil || len(j.WatcherPIDs) != 2 || j.StoppedLoop == nil || !strings.Contains(j.StoppedLoop.Command, dir) {
 		t.Fatalf("journal = %+v, stopped_loop = %+v, err = %v", j, j.StoppedLoop, err)
+	}
+	if rawLease := readText(leasePath); strings.Contains(rawLease, "do-not-persist-in-lease") {
+		t.Fatalf("lease file leaked process environment secret:\n%s", rawLease)
+	}
+	if info, err := os.Stat(leasePath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("lease file mode = %v, err = %v; want 0600", info, err)
 	}
 
 	if err := s.Release(t.Context(), nsRun); err != nil {
@@ -433,5 +441,77 @@ func TestRunWhoseOrchestratorMovedOnIsSuperseded(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("run states:\n got %v\nwant %v", got, want)
+	}
+}
+
+func TestStepLoopProcFilterAndRestartPaths(t *testing.T) {
+	procRoot := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	runDir := filepath.Join(home, ".swarm", "20261114-trial-m1")
+
+	writeFakeProc := func(pid, ppid int, state string, args, env []string) {
+		pdir := filepath.Join(procRoot, fmt.Sprint(pid))
+		if err := os.MkdirAll(pdir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		write(t, filepath.Join(pdir, "cmdline"), strings.Join(args, "\x00")+"\x00")
+		write(t, filepath.Join(pdir, "stat"), fmt.Sprintf("%d (proc) %s %d 1 1 0\n", pid, state, ppid))
+		if len(env) > 0 {
+			write(t, filepath.Join(pdir, "environ"), strings.Join(env, "\x00")+"\x00")
+		}
+	}
+
+	// PID 100: bash shell loop referencing ~/.swarm/20261114-trial-m1 via env.
+	writeFakeProc(100, 1, "S", []string{"bash"}, []string{
+		"RUN=~/.swarm/20261114-trial-m1",
+		"BASH_FUNC_sw_step%%=() { :; }",
+		"__CLAUDE_CC_COMMAND_TEXT=while true; do sw_step \"$RUN\"; sleep 180; done",
+	})
+	// PID 101: sleep child of PID 100.
+	writeFakeProc(101, 100, "S", []string{"sleep", "180"}, nil)
+	// PID 200: unrelated process mentioning the run dir in cmdline (must not be picked).
+	writeFakeProc(200, 1, "S", []string{"tail", "-f", runDir + "/EVENTS"}, nil)
+	// PID 201: unrelated process mentioning the run dir in environ (must not be picked).
+	writeFakeProc(201, 1, "S", []string{"python3", "worker.py"}, []string{"RUN=" + runDir})
+	// PID 300: zombie loop process (must be ignored by procTable).
+	writeFakeProc(300, 1, "Z", []string{"bash", "-c", "sw_step " + runDir}, nil)
+
+	w := StepLoopWatcher{ProcRoot: procRoot}
+	pids, err := w.Running(t.Context(), runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(pids, []int{100, 101}) {
+		t.Fatalf("Running pids = %v, want [100 101] (excluding unrelated 200, 201 and zombie 300)", pids)
+	}
+
+	stopped := w.Inspect(pids)
+	if stopped == nil || !stopped.IsStepLoop || !strings.Contains(stopped.Command, "sw_step") {
+		t.Fatalf("Inspect = %+v", stopped)
+	}
+
+	// Home-relative candidates (~, $HOME, ${HOME}) and env mentions.
+	cands := runDirCandidates(runDir)
+	for _, want := range []string{"~/.swarm/20261114-trial-m1", "$HOME/.swarm/20261114-trial-m1", "${HOME}/.swarm/20261114-trial-m1"} {
+		if !reflect.DeepEqual(mentionsDir([]string{"RUN=" + want}, want), true) || !strings.Contains(strings.Join(cands, "|"), want) {
+			t.Fatalf("runDirCandidates(%q) = %v, missing %q", runDir, cands, want)
+		}
+	}
+	if mentionsDir([]string{"PWD=" + runDir, "OLDPWD=" + runDir, "ORCA_SWARM_ROOTS=" + runDir}, runDir) {
+		t.Fatal("mentionsDir should ignore PWD, OLDPWD, and ORCA_ entries")
+	}
+
+	// Restart error when custom command cannot be started reports the manual restart command.
+	custom := &StoppedLoop{
+		Command: "custom-step-loop --run " + runDir,
+		Args:    []string{"/nonexistent-binary-for-test", "--run", runDir},
+	}
+	if err := w.Restart(t.Context(), t.TempDir(), custom); err == nil || !strings.Contains(err.Error(), "restart manually: custom-step-loop --run "+runDir) {
+		t.Fatalf("StepLoopWatcher.Restart error = %v, want manual restart hint", err)
+	}
+	fw := FormatWatcher{NebulaMissing: "swarm_nebula.sh missing"}
+	if err := fw.Restart(t.Context(), t.TempDir(), custom); err == nil || !strings.Contains(err.Error(), "restart manually: custom-step-loop --run "+runDir) {
+		t.Fatalf("FormatWatcher.Restart error = %v, want manual restart hint", err)
 	}
 }

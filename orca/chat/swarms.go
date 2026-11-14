@@ -2,7 +2,6 @@ package chat
 
 import (
 	"cmp"
-	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -105,9 +104,13 @@ type SwarmList struct {
 	// ProbeOff says which live reads were off.
 	Live     map[string]LaneLive
 	ProbeOff []string
-	probe    *HostProbe
 	// Filtered is true when Filter narrowed the list to a named run.
 	Filtered bool
+}
+
+// compactRow reports whether r renders as a one-line summary without per-lane detail.
+func (l SwarmList) compactRow(r *adopt.Run) bool {
+	return !l.Filtered && len(l.Host) > 1 && r.State != adopt.RunActive && r.State != ""
 }
 
 func (l *SwarmList) sortRecentFirst() {
@@ -143,9 +146,6 @@ func (l SwarmList) Filter(run string) SwarmList {
 		}
 	}
 	l.Orca, l.Host = orca, host
-	if l.probe != nil {
-		l.Probe(context.Background(), *l.probe)
-	}
 	return l
 }
 
@@ -177,13 +177,7 @@ func (l SwarmList) Render(now time.Time, detail bool) string {
 		for i := range l.Host {
 			r := &l.Host[i]
 			b.WriteString("  " + HostSwarmLine(r, now) + "\n")
-			if !detail {
-				continue
-			}
-			if !l.Filtered && len(l.Host) > 1 && r.State != adopt.RunActive && r.State != "" {
-				continue
-			}
-			if !l.Filtered && len(l.Host) > 1 && b.Len() > 8000 {
+			if !detail || l.compactRow(r) {
 				continue
 			}
 			l.renderHostDetail(&b, r)

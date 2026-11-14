@@ -482,10 +482,10 @@ type RunDriver interface {
 // StoppedLoop records the step-loop process /adopt stopped so /release can
 // restart it or tell the owner what to restart.
 type StoppedLoop struct {
-	Command string   `json:"command,omitempty"`
-	Dir     string   `json:"dir,omitempty"`
-	Args    []string `json:"args,omitempty"`
-	Env     []string `json:"env,omitempty"`
+	Command    string   `json:"command,omitempty"`
+	Dir        string   `json:"dir,omitempty"`
+	Args       []string `json:"args,omitempty"`
+	IsStepLoop bool     `json:"is_step_loop,omitempty"`
 }
 
 // journal is the lease file: who holds the run and what each completed
@@ -635,7 +635,7 @@ func (s *Service) takeLease(dir string) (*journal, error) {
 	}
 	tmp := tmpFile.Name()
 	defer os.Remove(tmp)
-	if err := tmpFile.Chmod(0o644); err != nil {
+	if err := tmpFile.Chmod(0o600); err != nil {
 		tmpFile.Close()
 		return nil, err
 	}
@@ -918,6 +918,9 @@ func (s *Service) startWatcher(ctx context.Context, dir string, j *journal) erro
 				startErr = r.Restart(ctx, dir, j.StoppedLoop)
 			} else {
 				startErr = s.Watcher.Start(ctx, dir)
+				if startErr != nil && j.StoppedLoop != nil && j.StoppedLoop.Command != "" {
+					startErr = fmt.Errorf("%w (restart manually: %s)", startErr, j.StoppedLoop.Command)
+				}
 			}
 			if startErr != nil {
 				return startErr
@@ -933,7 +936,7 @@ func (s *Service) save(dir string, j *journal) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(filepath.Join(dir, leaseFile), append(b, '\n'))
+	return writeAtomicMode(filepath.Join(dir, leaseFile), append(b, '\n'), 0o600)
 }
 
 func readJournal(p string) (*journal, error) {
@@ -958,6 +961,10 @@ func writeAtomic(p string, b []byte) error {
 	if info, err := os.Stat(p); err == nil {
 		mode = info.Mode().Perm()
 	}
+	return writeAtomicMode(p, b, mode)
+}
+
+func writeAtomicMode(p string, b []byte, mode os.FileMode) error {
 	tmpFile, err := os.CreateTemp(filepath.Dir(p), ".orca-tmp-*")
 	if err != nil {
 		return err

@@ -601,7 +601,7 @@ func plainHistory(msgs []model.Message) []model.Message {
 
 // relevantHistory drops earlier user/assistant turns that are about a different
 // run than the current question so unrelated run status never bleeds into the
-// current answer.
+// current answer, while keeping follow-up context for the active subject run.
 func (c *Concierge) relevantHistory(ctx context.Context, history []model.Message, question string, held []string) []model.Message {
 	plain := plainHistory(history)
 	if len(plain) == 0 || chat.IsConfirmation(question) {
@@ -617,9 +617,11 @@ func (c *Concierge) relevantHistory(ctx context.Context, history []model.Message
 			}
 		}
 	}
-	qLower := strings.ToLower(question)
-	targetRuns := matchedRunTokens(qLower, knownRuns)
-	var out []model.Message
+	type turnSpan struct {
+		runs       []string
+		start, end int
+	}
+	var spans []turnSpan
 	for i := 0; i < len(plain); {
 		end := i + 1
 		if end < len(plain) && plain[i].Role == model.RoleUser && plain[end].Role == model.RoleAssistant {
@@ -630,28 +632,54 @@ func (c *Concierge) relevantHistory(ctx context.Context, history []model.Message
 			turnText.WriteString(strings.ToLower(plain[j].Text()))
 			turnText.WriteByte('\n')
 		}
-		tLower := turnText.String()
+		spans = append(spans, turnSpan{
+			start: i,
+			end:   end,
+			runs:  matchedRunTokens(turnText.String(), knownRuns),
+		})
+		i = end
+	}
+	qLower := strings.ToLower(question)
+	targetRuns := matchedRunTokens(qLower, knownRuns)
+	effectiveTargets := slices.Clone(targetRuns)
+	if len(effectiveTargets) == 0 {
+		for _, id := range held {
+			if id == "" || id == frontDeskRunID {
+				continue
+			}
+			for _, tok := range matchedRunTokens(strings.ToLower(id), knownRuns) {
+				if !slices.Contains(effectiveTargets, tok) {
+					effectiveTargets = append(effectiveTargets, tok)
+				}
+			}
+		}
+	}
+	if len(effectiveTargets) == 0 {
+		for i := len(spans) - 1; i >= 0; i-- {
+			if len(spans[i].runs) > 0 {
+				effectiveTargets = slices.Clone(spans[i].runs)
+				break
+			}
+		}
+	}
+	var out []model.Message
+	for _, sp := range spans {
 		keep := true
-		if len(targetRuns) > 0 {
+		switch {
+		case len(sp.runs) > 0 && len(effectiveTargets) > 0:
 			keep = false
-			for _, tok := range targetRuns {
-				if strings.Contains(tLower, tok) {
+			for _, tok := range sp.runs {
+				if slices.Contains(effectiveTargets, tok) {
 					keep = true
 					break
 				}
 			}
-		} else if turnRuns := matchedRunTokens(tLower, knownRuns); len(turnRuns) > 0 {
-			for _, tok := range turnRuns {
-				if !strings.Contains(qLower, tok) {
-					keep = false
-					break
-				}
-			}
+		case len(sp.runs) == 0 && len(targetRuns) > 0:
+			keep = false
 		}
 		if keep {
-			out = append(out, plain[i:end]...)
+			out = append(out, plain[sp.start:sp.end]...)
 		}
-		i = end
 	}
 	return out
 }
@@ -731,7 +759,7 @@ func runSlug(id string) string {
 }
 
 // heldRunIDs returns the runs currently held by this chat (attached run and any
-// adopted or non-front-desk runs in Store).
+// adopted runs reported by HeldRuns).
 func (c *Concierge) heldRunIDs(ctx context.Context) []string {
 	var out []string
 	seen := map[string]bool{}
@@ -743,20 +771,13 @@ func (c *Concierge) heldRunIDs(ctx context.Context) []string {
 		}
 	}
 	if c.HeldRuns != nil {
-		if ids, err := c.HeldRuns(ctx); err == nil {
-			for _, id := range ids {
-				if id != frontDeskRunID {
-					add(id)
-				}
-			}
+		ids, err := c.HeldRuns(ctx)
+		if err != nil && c.Logger != nil {
+			c.Logger.Warn("list held runs failed", "error", err)
 		}
-	}
-	if c.store != nil {
-		if runs, err := c.store.Runs().List(ctx); err == nil {
-			for i := range runs {
-				if runs[i].ID != frontDeskRunID {
-					add(runs[i].ID)
-				}
+		for _, id := range ids {
+			if id != frontDeskRunID {
+				add(id)
 			}
 		}
 	}
@@ -885,7 +906,7 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 					list = c.SwarmsFilter(ctx, p.Run)
 				case c.Swarms != nil:
 					list = c.Swarms(ctx).Filter(p.Run)
-					if list.Live == nil {
+					if list.Live == nil || strings.TrimSpace(p.Run) != "" {
 						probe := c.hostProbe()
 						if probe.TerminalState != nil || probe.PR != nil || len(probe.Off) > 0 {
 							list.Probe(ctx, probe)

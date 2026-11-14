@@ -67,16 +67,19 @@ func FindSwarmScript() string {
 }
 
 type proc struct {
-	cwd  string
 	args []string
-	env  []string
 	ppid int
 }
 
-func procTable(root string) (map[int]proc, error) {
+func procRootDir(root string) string {
 	if root == "" {
-		root = "/proc"
+		return "/proc"
 	}
+	return root
+}
+
+func procTable(root string) (map[int]proc, error) {
+	root = procRootDir(root)
 	ents, err := os.ReadDir(root)
 	if err != nil {
 		return nil, fmt.Errorf("list processes: %w", err)
@@ -105,19 +108,25 @@ func procTable(root string) (map[int]proc, error) {
 			continue
 		}
 		ppid, _ := strconv.Atoi(fields[1])
-		var env []string
-		if envRaw, err := os.ReadFile(filepath.Join(root, e.Name(), "environ")); err == nil && len(envRaw) > 0 {
-			env = strings.Split(strings.TrimRight(string(envRaw), "\x00"), "\x00")
-		}
-		cwd, _ := os.Readlink(filepath.Join(root, e.Name(), "cwd"))
 		out[pid] = proc{
-			cwd:  cwd,
 			args: strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00"),
-			env:  env,
 			ppid: ppid,
 		}
 	}
 	return out, nil
+}
+
+func procEnv(root string, pid int) []string {
+	raw, err := os.ReadFile(filepath.Join(procRootDir(root), strconv.Itoa(pid), "environ"))
+	if err != nil || len(raw) == 0 {
+		return nil
+	}
+	return strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+}
+
+func procCwd(root string, pid int) string {
+	cwd, _ := os.Readlink(filepath.Join(procRootDir(root), strconv.Itoa(pid), "cwd"))
+	return cwd
 }
 
 func hasMarker(args []string) bool {
@@ -127,6 +136,40 @@ func hasMarker(args []string) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// hasShellLoop reports whether args contain a shell stepping loop (while/until/for with sleep).
+func hasShellLoop(args []string) bool {
+	for _, a := range args {
+		if strings.Contains(a, "sleep") && (strings.Contains(a, "while") || strings.Contains(a, "until") || strings.Contains(a, "for")) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEnvLoopSignature(env []string) bool {
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "BASH_FUNC_sw_step") || strings.HasPrefix(kv, "BASH_FUNC_sw_wait") {
+			return true
+		}
+		if v, ok := strings.CutPrefix(kv, "__CLAUDE_CC_COMMAND_TEXT="); ok && (hasMarker([]string{v}) || hasShellLoop([]string{v})) {
+			return true
+		}
+	}
+	return false
+}
+
+func isShellArgs(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	base := strings.TrimPrefix(filepath.Base(args[0]), "-")
+	switch base {
+	case "bash", "sh", "zsh", "dash", "ksh":
+		return true
 	}
 	return false
 }
@@ -205,22 +248,59 @@ func (w StepLoopWatcher) Running(_ context.Context, runDir string) ([]int, error
 	for pid := os.Getpid(); pid > 1 && !self[pid]; pid = procs[pid].ppid {
 		self[pid] = true
 	}
+	envs := map[int][]string{}
+	envOf := func(pid int) []string {
+		if env, ok := envs[pid]; ok {
+			return env
+		}
+		env := procEnv(w.ProcRoot, pid)
+		envs[pid] = env
+		return env
+	}
+	hasLoopSig := func(pid int, p proc) bool {
+		if hasMarker(p.args) || hasShellLoop(p.args) {
+			return true
+		}
+		if isShellArgs(p.args) {
+			return hasEnvLoopSignature(envOf(pid))
+		}
+		return false
+	}
+	mentionsRun := func(pid int, p proc, checkEnv bool) bool {
+		if mentionsAnyDir(p.args, dirs) {
+			return true
+		}
+		if checkEnv {
+			return mentionsAnyDir(envOf(pid), dirs)
+		}
+		return false
+	}
 	picked := map[int]bool{}
 	for pid, p := range procs {
 		if self[pid] {
 			continue
 		}
-		if !mentionsAnyDir(p.args, dirs) && !mentionsAnyDir(p.env, dirs) {
+		sig := hasLoopSig(pid, p)
+		if !mentionsRun(pid, p, sig || isShellArgs(p.args)) {
+			continue
+		}
+		// Require a step-loop signature on the process or an ancestor shell so
+		// unrelated processes that merely mention the run dir are left alone.
+		var chain []int
+		matchedLoop := sig
+		for anc := p.ppid; anc > 1 && !self[anc]; anc = procs[anc].ppid {
+			ap, ok := procs[anc]
+			if !ok || !hasLoopSig(anc, ap) {
+				break
+			}
+			matchedLoop = true
+			chain = append(chain, anc)
+		}
+		if !matchedLoop {
 			continue
 		}
 		picked[pid] = true
-		// sw_step is a shell function: the shells running it name the run
-		// only through $RUN, so take each step-loop ancestor shell too.
-		for anc := p.ppid; anc > 1 && !self[anc] && !picked[anc]; anc = procs[anc].ppid {
-			ap, ok := procs[anc]
-			if !ok || (!hasMarker(ap.args) && !hasMarker(ap.env) && !mentionsAnyDir(ap.args, dirs) && !mentionsAnyDir(ap.env, dirs)) {
-				break
-			}
+		for _, anc := range chain {
 			picked[anc] = true
 		}
 	}
@@ -275,13 +355,32 @@ func (w StepLoopWatcher) Inspect(pids []int) *StoppedLoop {
 // bridge when Script is set and the stopped loop ran sw_step, else it
 // restarts the exact command recorded at /adopt.
 func (w StepLoopWatcher) Restart(ctx context.Context, runDir string, loop *StoppedLoop) error {
-	if w.Script != "" && (loop == nil || len(loop.Args) == 0 || hasMarker(loop.Args) || hasMarker(loop.Env)) {
+	if w.Script != "" && (loop == nil || len(loop.Args) == 0 || loop.IsStepLoop || hasMarker(loop.Args)) {
 		return w.Start(ctx, runDir)
 	}
 	if loop != nil && len(loop.Args) > 0 {
 		return startRecordedLoop(runDir, loop)
 	}
 	err := w.Start(ctx, runDir)
+	if err != nil && loop != nil && loop.Command != "" {
+		return fmt.Errorf("%w (restart manually: %s)", err, loop.Command)
+	}
+	return err
+}
+
+func restartFallback(ctx context.Context, w Watcher, runDir string, loop *StoppedLoop) error {
+	if loop != nil && len(loop.Args) > 0 && !loop.IsStepLoop && !hasMarker(loop.Args) {
+		return startRecordedLoop(runDir, loop)
+	}
+	var err error
+	if w != nil {
+		err = w.Start(ctx, runDir)
+	} else {
+		err = errors.New("step loop watcher is not configured")
+	}
+	if err != nil && loop != nil && len(loop.Args) > 0 {
+		return startRecordedLoop(runDir, loop)
+	}
 	if err != nil && loop != nil && loop.Command != "" {
 		return fmt.Errorf("%w (restart manually: %s)", err, loop.Command)
 	}
@@ -307,38 +406,37 @@ func inspectStoppedLoop(procRoot string, pids []int) *StoppedLoop {
 	if !ok || len(rp.args) == 0 {
 		return nil
 	}
+	env := procEnv(procRoot, root)
 	cmd := strings.Join(rp.args, " ")
-	for _, kv := range rp.env {
+	for _, kv := range env {
 		if v, ok := strings.CutPrefix(kv, "__CLAUDE_CC_COMMAND_TEXT="); ok && v != "" {
 			cmd = v
 			break
 		}
 	}
 	return &StoppedLoop{
-		Command: cmd,
-		Dir:     rp.cwd,
-		Args:    slices.Clone(rp.args),
-		Env:     slices.Clone(rp.env),
+		Command:    cmd,
+		Dir:        procCwd(procRoot, root),
+		Args:       slices.Clone(rp.args),
+		IsStepLoop: hasMarker(rp.args) || hasEnvLoopSignature(env),
 	}
 }
 
 func startRecordedLoop(runDir string, loop *StoppedLoop) error {
 	log, err := os.OpenFile(filepath.Join(runDir, stepBridgeMarker+".log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		return fmt.Errorf("restart step loop (%s): %w", loop.Command, err)
+		return fmt.Errorf("restart step loop (%s): %w (restart manually: %s)", loop.Command, err, loop.Command)
 	}
 	defer log.Close()
 	cmd := exec.Command(loop.Args[0], loop.Args[1:]...)
 	if loop.Dir != "" && fileExists(loop.Dir) {
 		cmd.Dir = loop.Dir
 	}
-	if len(loop.Env) > 0 {
-		cmd.Env = loop.Env
-	}
+	cmd.Env = append(os.Environ(), "RUN="+runDir)
 	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("restart step loop (%s): %w", loop.Command, err)
+		return fmt.Errorf("restart step loop (%s): %w (restart manually: %s)", loop.Command, err, loop.Command)
 	}
 	go func() { _ = cmd.Wait() }()
 	return nil
@@ -439,6 +537,12 @@ func (w FormatWatcher) Inspect(pids []int) *StoppedLoop {
 func (w FormatWatcher) Restart(ctx context.Context, runDir string, loop *StoppedLoop) error {
 	x, err := w.pick(runDir)
 	if err != nil {
+		if loop != nil && len(loop.Args) > 0 {
+			return startRecordedLoop(runDir, loop)
+		}
+		if loop != nil && loop.Command != "" {
+			return fmt.Errorf("%w (restart manually: %s)", err, loop.Command)
+		}
 		return err
 	}
 	if r, ok := x.(interface {
@@ -446,7 +550,7 @@ func (w FormatWatcher) Restart(ctx context.Context, runDir string, loop *Stopped
 	}); ok {
 		return r.Restart(ctx, runDir, loop)
 	}
-	return x.Start(ctx, runDir)
+	return restartFallback(ctx, x, runDir, loop)
 }
 
 // Describe names the loop processes and the tmux pane they run in.

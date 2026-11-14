@@ -385,6 +385,13 @@ func TestConciergeHeldRunAnsweredFromStoreAndLiveProbesWithoutSwarms(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:         "20261110-unheld",
+		Repository: "sycamore-labs/nebula",
+		Objective:  "older unheld run still in store",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	for _, ln := range []store.Lane{
 		{
 			RunID: "20261114-trial-m1", ID: "m1-base", ItemID: "m1-base", Title: "base prompts",
@@ -430,6 +437,7 @@ func TestConciergeHeldRunAnsweredFromStoreAndLiveProbesWithoutSwarms(t *testing.
 		textAnswer("The slim-prompts hold is in place."),
 		toolUse("status-1", ToolConciergeStatus, `{}`),
 		textAnswer("20261114-trial-m1 has m2-default running clean (agent working; next phase: review; PR #5705 open, 3 passed, 1 pending) and m1-base done (PR #5604 merged, 4 passed)."),
+		textAnswer("PR #5705 is open (3 passed, 1 pending) and PR #5604 is merged (4 passed)."),
 	}
 	var callIdx atomic.Int32
 	client := modelClientFunc(func(_ context.Context, req model.Request) (*model.Response, error) {
@@ -445,6 +453,9 @@ func TestConciergeHeldRunAnsweredFromStoreAndLiveProbesWithoutSwarms(t *testing.
 
 	c := NewConcierge(frontDeskRunID, st, nil, client, DefaultConciergeModel)
 	c.BindBackend(backend)
+	c.HeldRuns = func(context.Context) ([]string, error) {
+		return []string{frontDeskRunID, "20261114-trial-m1"}, nil
+	}
 	c.Swarms = func(context.Context) chatui.SwarmList {
 		t.Fatal("swarms tool must not be called for a held run")
 		return chatui.SwarmList{}
@@ -467,11 +478,18 @@ func TestConciergeHeldRunAnsweredFromStoreAndLiveProbesWithoutSwarms(t *testing.
 		t.Fatalf("answer bled earlier turn: %q", ans)
 	}
 
+	// A follow-up question that does not repeat the run name keeps the
+	// active trial-m1 turn while still excluding the earlier slim-prompts turn.
+	if _, err := c.Ask(ctx, "and which PR is still open?"); err != nil {
+		t.Fatal(err)
+	}
+
 	mu.Lock()
-	if len(requests) < 2 {
-		t.Fatalf("expected at least 2 model requests, got %d", len(requests))
+	if len(requests) < 4 {
+		t.Fatalf("expected 4 model requests, got %d", len(requests))
 	}
 	trialReq := requests[1]
+	followUpReq := requests[3]
 	mu.Unlock()
 	for _, m := range trialReq.Messages {
 		if strings.Contains(m.Text(), "slim-prompts") {
@@ -480,6 +498,21 @@ func TestConciergeHeldRunAnsweredFromStoreAndLiveProbesWithoutSwarms(t *testing.
 	}
 	if !strings.Contains(trialReq.System, "20261114-trial-m1") {
 		t.Fatalf("system prompt did not list held run 20261114-trial-m1:\n%s", trialReq.System)
+	}
+	if strings.Contains(trialReq.System, "20261110-unheld") {
+		t.Fatalf("system prompt listed unheld run 20261110-unheld:\n%s", trialReq.System)
+	}
+	var sawTrialInFollowUp bool
+	for _, m := range followUpReq.Messages {
+		if strings.Contains(m.Text(), "slim-prompts") {
+			t.Fatalf("unrelated earlier turn bled into follow-up request messages: %+v", followUpReq.Messages)
+		}
+		if strings.Contains(m.Text(), "20261114-trial-m1") {
+			sawTrialInFollowUp = true
+		}
+	}
+	if !sawTrialInFollowUp {
+		t.Fatalf("follow-up request dropped prior trial-m1 turn: %+v", followUpReq.Messages)
 	}
 
 	items, err := st.Threads().ListItems(ctx, c.threadID, "", 0, 0)
@@ -491,6 +524,9 @@ func TestConciergeHeldRunAnsweredFromStoreAndLiveProbesWithoutSwarms(t *testing.
 		if items[i].Kind == store.ItemKindToolResult && items[i].Name == ToolConciergeStatus {
 			statusResult = items[i].Content
 		}
+	}
+	if strings.Contains(statusResult, "20261110-unheld") {
+		t.Fatalf("status report included unheld run 20261110-unheld:\n%s", statusResult)
 	}
 	for _, want := range []string{
 		"Run: 20261114-trial-m1",
@@ -580,5 +616,65 @@ func TestConciergeSwarmsToolWithRunFilter(t *testing.T) {
 		if !strings.Contains(result, want) {
 			t.Fatalf("filtered swarms result missing %q:\n%s", want, result)
 		}
+	}
+}
+
+func TestConciergeOnHoldChangeResetsHistoryAndRunTokenHelpers(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(ctx, store.Run{ID: frontDeskRunID}); err != nil {
+		t.Fatal(err)
+	}
+	backend := chatui.NewStoreBackend(st, frontDeskRunID)
+	c := NewConcierge(frontDeskRunID, st, nil, scriptedModel(
+		textAnswer("noted"),
+		textAnswer("after hold change"),
+	), DefaultConciergeModel)
+	c.BindBackend(backend)
+
+	if _, err := c.Ask(ctx, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.history) == 0 {
+		t.Fatal("expected concierge history after Ask")
+	}
+	if backend.OnHoldChange == nil {
+		t.Fatal("expected BindBackend to wire OnHoldChange")
+	}
+	backend.OnHoldChange()
+	if len(c.history) != 0 {
+		t.Fatalf("history after OnHoldChange = %+v, want empty", c.history)
+	}
+
+	for _, tc := range []struct {
+		id        string
+		wantSlug  string
+		wantDated bool
+	}{
+		{id: "20261114-trial-m1", wantDated: true, wantSlug: "trial-m1"},
+		{id: "20261113-054825-orca-v2", wantDated: true, wantSlug: "orca-v2"},
+		{id: "20261114", wantDated: false, wantSlug: ""},
+		{id: "not-a-date-run", wantDated: false, wantSlug: ""},
+		{id: "20261114-", wantDated: false, wantSlug: ""},
+	} {
+		if got := isDatedRunID(tc.id); got != tc.wantDated {
+			t.Fatalf("isDatedRunID(%q) = %v, want %v", tc.id, got, tc.wantDated)
+		}
+		if got := runSlug(tc.id); got != tc.wantSlug {
+			t.Fatalf("runSlug(%q) = %q, want %q", tc.id, got, tc.wantSlug)
+		}
+	}
+
+	known := []string{"20261114-trial-m1", "20261113-054825-orca-v2"}
+	if got := matchedRunTokens("check trial-m1 status!", known); !reflect.DeepEqual(got, []string{"trial-m1"}) {
+		t.Fatalf("matchedRunTokens slug = %v, want [trial-m1]", got)
+	}
+	if got := matchedRunTokens("inspect 20261113-054825-orca-v2?", known); !reflect.DeepEqual(got, []string{"20261113-054825-orca-v2", "orca-v2"}) {
+		t.Fatalf("matchedRunTokens full dated id = %v, want [20261113-054825-orca-v2 orca-v2]", got)
+	}
+	if got := matchedRunTokens("and what state are its PRs in?", known); len(got) != 0 {
+		t.Fatalf("matchedRunTokens follow-up without run = %v, want empty", got)
 	}
 }
