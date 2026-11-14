@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/bazelment/yoloswe/orca/adopt"
 	"github.com/bazelment/yoloswe/orca/clock"
@@ -16,7 +17,7 @@ import (
 // client for the run label and watch_lanes.sh plus OS signals for the host
 // watcher. Each adopted run gets its own dispatcher on client. When an
 // adapter cannot be built it returns the one-line reason chat shows instead.
-func newAdoption(ctx context.Context, cfg Config, st store.Store, clk clock.Clock, client model.ModelClient) (*adopt.Service, string) {
+func newAdoption(ctx context.Context, cfg Config, st store.Store, clk clock.Clock, client model.ModelClient, logger *slog.Logger) (*adopt.Service, string) {
 	lanes, err := nebula.New(nebula.Config{APIURL: cfg.NebulaAPIURL, Token: cfg.NebulaToken, Events: driverEventStore{st.Events()}, Clock: clk})
 	if err != nil {
 		return nil, "Nebula API client: " + err.Error() + " (set NEBULA_API_URL and NEBULA_TOKEN)"
@@ -30,13 +31,13 @@ func newAdoption(ctx context.Context, cfg Config, st store.Store, clk clock.Cloc
 		Labeler:  lanes,
 		Watcher:  adopt.ScriptWatcher{Script: script},
 		Holder:   adopt.ChatHolder(cfg.RunID),
-		Driver:   adopt.NewControllers(ctx, st, lanes, clk, adoptedDispatchers(cfg, st, lanes, clk, client)),
+		Driver:   adopt.NewControllers(ctx, st, lanes, clk, adoptedDispatchers(cfg, st, lanes, clk, client, logger)),
 	}, ""
 }
 
 // adoptedDispatchers gives each adopted run the dispatcher `orca run` uses,
 // so owner instructions and escalations on that run are judged.
-func adoptedDispatchers(cfg Config, st store.Store, lanes *nebula.Driver, clk clock.Clock, client model.ModelClient) adopt.JudgeFactory {
+func adoptedDispatchers(cfg Config, st store.Store, lanes *nebula.Driver, clk clock.Clock, client model.ModelClient, logger *slog.Logger) adopt.JudgeFactory {
 	if client == nil {
 		return nil
 	}
@@ -46,6 +47,7 @@ func adoptedDispatchers(cfg Config, st store.Store, lanes *nebula.Driver, clk cl
 			Provider:       cfg.Models.Roles["dispatcher"].Provider,
 			PromptVersion:  dispatcher.SystemPromptVersion,
 			HardBatchModel: cfg.Models.DispatcherHard,
+			Logger:         logger,
 		}, st, lanes, clk, roleClient(client, cfg, "dispatcher"))
 		disp.SetOwnerAnswer(answer)
 		return disp

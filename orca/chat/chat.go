@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"golang.org/x/term"
@@ -69,12 +68,20 @@ type Model struct {
 	busy                 bool
 	width, height        int
 	streamLine           int
+	// cursor is the byte offset of the input cursor.
+	cursor int
 	// hints are rendered below the prompt.
 	hints []string
 }
 
 func New(ctx context.Context, runID string, ask AskFunc, r router.Router) Model {
 	return Model{ctx: ctx, runID: runID, ask: ask, router: r}
+}
+
+// WithTranscript shows lines of an earlier conversation above the new one.
+func (m Model) WithTranscript(lines []string) Model {
+	m.lines = append(m.lines, lines...)
+	return m
 }
 
 // IsNewGoal reports whether text talks about starting work, so chat routes it
@@ -332,16 +339,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if x.Code == tea.KeyTab {
 			return m.complete()
 		}
-		if x.Code == tea.KeyBackspace {
-			if m.input != "" {
-				_, n := utf8.DecodeLastRuneInString(m.input)
-				m.input = m.input[:len(m.input)-n]
-			}
-			m.hints = commandHints(m.input)
-			return m, nil
-		}
 		if x.Code != tea.KeyEnter {
-			m.input += x.Text
+			m.edit(x)
 			m.hints = commandHints(m.input)
 			return m, nil
 		}
@@ -350,7 +349,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		text := strings.TrimSpace(m.input)
-		m.input = ""
+		m.setInput("")
 		if text == "" {
 			return m, nil
 		}
@@ -372,7 +371,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.route(text)
 	case tea.PasteMsg:
 		if !m.busy {
-			m.input += x.Content
+			m.insert(x.Content)
 		}
 		return m, nil
 	}
@@ -411,9 +410,11 @@ func (m Model) complete() (tea.Model, tea.Cmd) {
 		case 0:
 			m.hints = []string{"no command matches " + name}
 		case 1:
-			m.input, m.hints = names[0]+" ", nil
+			m.setInput(names[0] + " ")
+			m.hints = nil
 		default:
-			m.input, m.hints = commonPrefix(names), commandHints(commonPrefix(names))
+			m.setInput(commonPrefix(names))
+			m.hints = commandHints(m.input)
 		}
 		return m, nil
 	}
@@ -438,9 +439,11 @@ func (m *Model) completeArg(ids []string, err error) {
 	}
 	switch {
 	case len(match) == 1:
-		m.input, m.hints = name+" "+match[0], nil
+		m.setInput(name + " " + match[0])
+		m.hints = nil
 	case len(match) > 1:
-		m.input, m.hints = name+" "+commonPrefix(match), match
+		m.setInput(name + " " + commonPrefix(match))
+		m.hints = match
 	case err != nil:
 		m.hints = []string{"run ids unavailable: " + err.Error()}
 	default:
@@ -475,7 +478,7 @@ func (m Model) View() tea.View {
 	if len(m.hints) > 0 {
 		hints = "\n  " + strings.Join(m.hints, "  ")
 	}
-	return tea.NewView("orca chat — run " + runID + "\n" + strings.Join(lines, "\n") + questions + "\n\n" + m.status + "\n> " + m.input + hints)
+	return tea.NewView("orca chat — run " + runID + "\n" + strings.Join(lines, "\n") + questions + "\n\n" + m.status + "\n> " + m.inputView() + hints)
 }
 func isTerminal(in io.Reader) bool { f, ok := in.(*os.File); return ok && term.IsTerminal(int(f.Fd())) }
 func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {
@@ -503,7 +506,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {
 			return nil
 		}
 		before := len(m.lines)
-		m.input = text
+		m.setInput(text)
 		next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 		m = next.(Model)
 		for cmd != nil {

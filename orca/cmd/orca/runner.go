@@ -324,6 +324,7 @@ func NewRunner(
 		HardBatchModel:   cfg.Models.DispatcherHard,
 		RecipeCompiler:   planner,
 		OnPlannerRequest: planner.HandlePlannerRequest,
+		Logger:           logger,
 	}, st, rawDriver, clk, roleClient(client, cfg, "dispatcher"))
 
 	r := &Runner{

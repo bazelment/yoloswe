@@ -16,6 +16,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
+	"unicode/utf8"
 )
 
 var unknownPricingModels sync.Map
@@ -866,6 +868,8 @@ type ToolLoopResult struct {
 type toolLoopConfig struct {
 	onTurn     func(turn int, resp Response)
 	onToolCall func(turn int, call ToolCall, result ContentBlock)
+	logger     *slog.Logger
+	actor      string
 	maxTurns   int
 }
 
@@ -891,6 +895,42 @@ func WithOnToolCall(fn func(turn int, call ToolCall, result ContentBlock)) ToolL
 	return func(c *toolLoopConfig) {
 		c.onToolCall = fn
 	}
+}
+
+// WithToolCallLog logs every tool call the loop dispatches at INFO on logger:
+// the actor, tool, an argument summary, the result size and any error.
+func WithToolCallLog(logger *slog.Logger, actor string) ToolLoopOption {
+	return func(c *toolLoopConfig) {
+		c.logger, c.actor = logger, actor
+	}
+}
+
+// toolLogArgsBytes bounds the argument summary and error text in tool-call logs.
+const toolLogArgsBytes = 200
+
+func logToolCall(cfg *toolLoopConfig, turn int, call ToolCall, res ContentBlock, elapsed time.Duration) {
+	if cfg.logger == nil {
+		return
+	}
+	args := []any{
+		"actor", cfg.actor, "turn", turn, "tool", call.Name,
+		"args", clip(string(bytes.Join(bytes.Fields(call.Input), []byte(" "))), toolLogArgsBytes),
+		"result_bytes", len(res.Content), "elapsed_ms", elapsed.Milliseconds(),
+	}
+	if res.IsError {
+		args = append(args, "error", clip(res.Content, toolLogArgsBytes))
+	}
+	cfg.logger.Info("tool call", args...)
+}
+
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "..."
 }
 
 // RunToolLoop executes a Messages API request and repeatedly dispatches tool_use
@@ -991,7 +1031,9 @@ func RunToolLoop(
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
+			started := time.Now()
 			resBlock := reg.Dispatch(ctx, call)
+			logToolCall(&cfg, turn, call, resBlock, time.Since(started))
 			results = append(results, resBlock)
 			if cfg.onToolCall != nil {
 				cfg.onToolCall(turn, call, resBlock)

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"text/tabwriter"
@@ -44,6 +43,9 @@ type StoreBackend struct {
 	// When nil, AdoptionUnavailable says why /adopt and /release are off.
 	Adoption            *adopt.Service
 	AdoptionUnavailable string
+	// HostSwarms lists this machine's host swarms for /runs; nil falls back
+	// to Adoption.
+	HostSwarms func() ([]adopt.Run, error)
 	// FrontDesk is the run of a chat opened without one. No controller runs
 	// it, so a Planner or Dispatcher instruction sent while attached to it
 	// goes to a run whose controller this chat holds, else to the one run a
@@ -209,58 +211,103 @@ func (b *StoreBackend) lanes(ctx context.Context, runs []string) ([]heldLane, er
 func (b *StoreBackend) Snapshot(ctx context.Context) (Snapshot, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.snapshot(ctx)
+	v, err := b.view(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return v.snapshot(b), nil
 }
-func (b *StoreBackend) snapshot(ctx context.Context) (Snapshot, error) {
+
+// runView is what the attached run and the runs it holds look like now.
+//
+//nolint:govet // field order follows the doc
+type runView struct {
+	run    *store.Run
+	held   []string
+	lanes  []heldLane
+	asks   []openAsk
+	cost   float64
+	desk   bool
+	phases map[string]int
+}
+
+// view reads the attached run's view; the caller holds b.mu.
+func (b *StoreBackend) view(ctx context.Context) (runView, error) {
 	run, err := b.store.Runs().Get(ctx, b.runID)
 	if err != nil {
-		return Snapshot{}, err
+		return runView{}, err
 	}
-	runs, err := b.heldRuns(ctx)
-	if err != nil {
-		return Snapshot{}, err
+	v := runView{run: run, desk: b.frontDesk(), phases: map[string]int{}}
+	if v.held, err = b.heldRuns(ctx); err != nil {
+		return runView{}, err
 	}
-	lanes, err := b.lanes(ctx, runs)
-	if err != nil {
-		return Snapshot{}, err
+	if v.lanes, err = b.lanes(ctx, v.held); err != nil {
+		return runView{}, err
 	}
-	asks, err := b.asks(ctx, runs)
-	if err != nil {
-		return Snapshot{}, err
+	if v.asks, err = b.asks(ctx, v.held); err != nil {
+		return runView{}, err
 	}
 	start := b.now().UTC().Truncate(24 * time.Hour)
-	cost := 0.0
-	for _, id := range runs {
+	for _, id := range v.held {
 		decs, err := b.store.Decisions().List(ctx, store.DecisionFilter{RunID: id, SinceTime: &start})
 		if err != nil {
-			return Snapshot{}, err
+			return runView{}, err
 		}
 		for i := range decs {
-			cost += decs[i].CostUSD
+			v.cost += decs[i].CostUSD
 		}
 	}
-	counts := map[string]int{}
-	for i := range lanes {
-		counts[lanes[i].lane.Phase]++
+	for i := range v.lanes {
+		v.phases[cmp.Or(v.lanes[i].lane.Phase, "-")]++
 	}
-	phases := []string{}
-	for k, n := range counts {
-		phases = append(phases, fmt.Sprintf("%s:%d", cmp.Or(k, "-"), n))
+	return v, nil
+}
+
+// goal names the attached run's goal, or says the chat is at the front desk.
+func (v *runView) goal() string {
+	if v.desk {
+		return "front desk: no run yet"
 	}
-	sort.Strings(phases)
-	status := "goal: " + run.Objective
-	if len(runs) > 1 {
-		status += " | adopted: " + strings.Join(runs[1:], ", ")
+	return "goal: " + cmp.Or(strings.TrimSpace(v.run.Objective), "(none)")
+}
+
+func (v *runView) snapshot(b *StoreBackend) Snapshot {
+	status := v.goal()
+	if len(v.held) > 1 {
+		status += " | adopted: " + strings.Join(v.held[1:], ", ")
 	}
-	status += fmt.Sprintf(" | lanes: %d", len(lanes))
-	if len(phases) > 0 {
-		status += " (" + strings.Join(phases, ", ") + ")"
+	status += " | lanes: " + countLine(len(v.lanes), v.phases)
+	s := Snapshot{Status: status + fmt.Sprintf(" | open questions: %d | cost today: $%.2f", len(v.asks), v.cost)}
+	for i := range v.asks {
+		s.Questions = append(s.Questions, b.question(&v.asks[i]))
 	}
-	s := Snapshot{Status: status + fmt.Sprintf(" | open questions: %d | cost today: $%.2f", len(asks), cost)}
-	for i := range asks {
-		s.Questions = append(s.Questions, b.question(&asks[i]))
+	return s
+}
+
+// statusReport is /status: the run and its goal, lanes by phase, open
+// questions, held runs and today's cost. The caller holds b.mu.
+func (b *StoreBackend) statusReport(ctx context.Context) (string, error) {
+	v, err := b.view(ctx)
+	if err != nil {
+		return "", err
 	}
-	return s, nil
+	var out strings.Builder
+	fmt.Fprintf(&out, "%s | run: %s\n", v.goal(), b.runID)
+	fmt.Fprintf(&out, "lanes: %s\n", countLine(len(v.lanes), v.phases))
+	fmt.Fprintf(&out, "open questions: %d\n", len(v.asks))
+	for i := range v.asks {
+		fmt.Fprintf(&out, "  %s\n", b.question(&v.asks[i]))
+	}
+	switch {
+	case len(v.held) > 1:
+		fmt.Fprintf(&out, "held runs: %s (attached); adopted: %s\n", b.runID, strings.Join(v.held[1:], ", "))
+	case v.desk:
+		out.WriteString("held runs: none (/runs lists runs and host swarms)\n")
+	default:
+		fmt.Fprintf(&out, "held runs: %s (attached)\n", b.runID)
+	}
+	fmt.Fprintf(&out, "cost today: $%.2f", v.cost)
+	return out.String(), nil
 }
 
 // target selects the held run an owner instruction for handler addresses.
@@ -527,6 +574,23 @@ func (b *StoreBackend) switchRun(ctx context.Context, runs []store.Run, id strin
 	return "attached to run " + id, nil
 }
 
+// Swarms lists the orca runs ListRuns offers and this machine's host swarms.
+func (b *StoreBackend) Swarms(ctx context.Context) SwarmList {
+	var l SwarmList
+	if b.ListRuns != nil {
+		l.Orca, l.OrcaErr = b.ListRuns(ctx)
+	}
+	switch {
+	case b.HostSwarms != nil:
+		l.Host, l.HostErr = b.HostSwarms()
+	case b.Adoption != nil:
+		l.Host, l.HostErr = b.Adoption.List()
+	default:
+		l.HostOff = cmp.Or(b.AdoptionUnavailable, "no host swarm discovery configured")
+	}
+	return l
+}
+
 // RunIDs lists host runs available to /adopt.
 func (b *StoreBackend) RunIDs(context.Context) ([]string, error) {
 	if b.Adoption == nil {
@@ -547,6 +611,9 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 	}
 	switch strings.ToLower(fields[0]) {
 	case "/runs":
+		if len(fields) == 1 {
+			return b.Swarms(ctx).Render(b.now(), false), nil
+		}
 		if b.ListRuns == nil {
 			return "no run discovery configured", nil
 		}
@@ -554,18 +621,7 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 		if err != nil {
 			return "", err
 		}
-		if len(fields) > 1 {
-			return b.switchRun(ctx, runs, fields[1])
-		}
-		var out strings.Builder
-		for i := range runs {
-			run := &runs[i]
-			fmt.Fprintf(&out, "%s: %s\n", run.ID, cmp.Or(run.Objective, "(no goal)"))
-		}
-		if out.Len() == 0 {
-			return "no runs", nil
-		}
-		return strings.TrimSpace(out.String()), nil
+		return b.switchRun(ctx, runs, fields[1])
 	case "/adopt":
 		if b.Adoption == nil {
 			return "adoption unavailable: " + b.AdoptionUnavailable, nil
@@ -573,8 +629,8 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 		if len(fields) == 1 {
 			rs, err := b.Adoption.List()
 			var out []string
-			for _, r := range rs {
-				out = append(out, fmt.Sprintf("%s: %s | lanes=%d | last=%s | orchestrator=%s", r.ID, r.Goal, len(r.Lanes), r.LastActivity, r.Orchestrator))
+			for i := range rs {
+				out = append(out, HostSwarmLine(&rs[i], b.now()))
 			}
 			if err != nil {
 				out = append(out, "unreadable runs: "+err.Error())
@@ -624,16 +680,19 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 func (b *StoreBackend) runCommand(ctx context.Context, fields []string) (string, error) {
 	switch strings.ToLower(fields[0]) {
 	case "/status":
-		s, e := b.snapshot(ctx)
-		return s.Status, e
+		return b.statusReport(ctx)
 	case "/lanes":
 		return b.lanesTable(ctx)
 	case "/asks":
-		s, e := b.snapshot(ctx)
-		if e == nil && len(s.Questions) == 0 {
+		v, e := b.view(ctx)
+		if e != nil {
+			return "", e
+		}
+		s := v.snapshot(b)
+		if len(s.Questions) == 0 {
 			return "no open questions", nil
 		}
-		return strings.Join(s.Questions, "\n"), e
+		return strings.Join(s.Questions, "\n"), nil
 	case "/memory":
 		v, e := b.store.Memories().List(ctx, store.MemoryFilter{RunID: b.runID})
 		return pretty(v, e)

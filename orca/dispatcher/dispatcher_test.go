@@ -1,10 +1,12 @@
 package dispatcher_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,7 +61,8 @@ func TestOwnerAnswerResolvesSelectedAskAndSteersItsLane(t *testing.T) {
 	}
 	ctrl := controller.New(controller.Config{RunID: "run-1", HolderID: "test-controller"}, st, drv, clk, controller.NewFakeJudge())
 	fake := model.NewFakeClient(toolUseResponse(model.ToolCall{ID: "answer", Name: dispatcher.ToolOwnerAnswer, Input: json.RawMessage(`{"ask_id":"q2","answer":"go with B"}`)}), endTurnResponse("done"))
-	d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+	var logs bytes.Buffer
+	d := dispatcher.New(dispatcher.Config{Logger: slog.New(slog.NewTextHandler(&logs, nil))}, st, drv, clk, fake)
 	d.SetOwnerAnswer(func(ctx context.Context, runID, askID, answer string) error {
 		if runID != "run-1" {
 			t.Fatalf("runID=%q", runID)
@@ -94,6 +97,10 @@ func TestOwnerAnswerResolvesSelectedAskAndSteersItsLane(t *testing.T) {
 	requests := drv.Steers
 	if len(requests) != 1 || requests[0].LaneID != "lane-q2" || requests[0].Message != "go with B" {
 		t.Fatalf("steers=%+v", requests)
+	}
+	want := `level=INFO msg="tool call" actor=dispatcher turn=1 tool=` + dispatcher.ToolOwnerAnswer + ` args="{\"ask_id\":\"q2\",\"answer\":\"go with B\"}" result_bytes=`
+	if !strings.Contains(logs.String(), want) {
+		t.Fatalf("tool call log missing %q:\n%s", want, logs.String())
 	}
 }
 

@@ -33,6 +33,7 @@ go_library(
         "//orca/replay",
         "//orca/router",
         "//orca/store",
+        "@org_golang_x_term//:term",
     ],
 )
 
@@ -47,11 +48,13 @@ go_test(
     srcs = [
         "adopt_test.go",
         "chat_stream_test.go",
+        "concierge_test.go",
         "main_test.go",
     ],
     data = glob(["testdata/**"]),
     embed = [":orca_lib"],
     deps = [
+        "//orca/adopt",
         "//orca/chat",
         "//orca/clock",
         "//orca/dispatcher",

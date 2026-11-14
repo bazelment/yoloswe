@@ -327,8 +327,8 @@ func TestChatRunsListsRepositoryRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "run-one: first" {
-		t.Fatalf("/runs = %q", got)
+	if want := "orca runs (1; /runs <id> attaches):\n  run-one: first\nhost swarms: not listed: no host swarm discovery configured"; got != want {
+		t.Fatalf("/runs = %q, want %q", got, want)
 	}
 }
 
@@ -554,7 +554,7 @@ func TestChatSwitchesOnlyWithinExplicitStore(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"run-a: first\nrun-b: second\n",
+		"orca runs (2; /runs <id> attaches):\n  run-a: first | controller running\n  run-b: second\n",
 		`error: no run "run-dir" for this repository; /runs lists them`,
 		"attached to run run-b",
 		"goal: second |",
@@ -662,7 +662,7 @@ func TestChatFrontDeskDeliversToLiveControllerInExplicitStore(t *testing.T) {
 	if got := activeDirectives(t, explicit, frontDeskRunID); len(got) != 0 {
 		t.Fatalf("front desk kept directives no controller reads: %q", got)
 	}
-	if !strings.HasSuffix(stdout.String(), "you> /runs\nrun-live: live\n") {
+	if !strings.Contains(stdout.String(), "you> /runs\norca runs (1; /runs <id> attaches):\n  run-live: live | controller running\nhost swarms") {
 		t.Fatalf("/runs offered more than run-live:\n%s", stdout.String())
 	}
 }
@@ -765,7 +765,8 @@ func TestChatNegatedOrInformationalStartNeverStartsRun(t *testing.T) {
 	if len(launched) != 0 || strings.Contains(stdout.String(), "Starting run") {
 		t.Fatalf("negated/informational text started runs %q:\n%s", launched, stdout.String())
 	}
-	if entries, _ := os.ReadDir(base); len(entries) != 0 {
+	// Only the front desk keeps a store there.
+	if entries, _ := os.ReadDir(base); len(entries) != 1 || entries[0].Name() != frontDeskRunID {
 		t.Fatalf("run stores created: %v", entries)
 	}
 }

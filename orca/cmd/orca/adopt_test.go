@@ -208,17 +208,17 @@ func TestChatAdoptionDisabledOnlyWithReason(t *testing.T) {
 	t.Setenv("NEBULA_API_URL", "")
 	t.Setenv("NEBULA_TOKEN", "")
 	t.Setenv("ORCA_WATCH_LANES", filepath.Join(t.TempDir(), "missing.sh"))
-	if s, why := newAdoption(t.Context(), Config{RunID: "c"}, store.NewMemoryStore(clock.NewRealClock()), clock.NewRealClock(), nil); s != nil || !strings.Contains(why, "NEBULA_API_URL") {
+	if s, why := newAdoption(t.Context(), Config{RunID: "c"}, store.NewMemoryStore(clock.NewRealClock()), clock.NewRealClock(), nil, nil); s != nil || !strings.Contains(why, "NEBULA_API_URL") {
 		t.Fatalf("no credentials: service=%v reason=%q", s, why)
 	}
 	cfg := Config{RunID: "c", NebulaAPIURL: "http://127.0.0.1:1", NebulaToken: "t"}
-	if s, why := newAdoption(t.Context(), cfg, store.NewMemoryStore(clock.NewRealClock()), clock.NewRealClock(), nil); s != nil || !strings.Contains(why, "watch_lanes.sh not found") {
+	if s, why := newAdoption(t.Context(), cfg, store.NewMemoryStore(clock.NewRealClock()), clock.NewRealClock(), nil, nil); s != nil || !strings.Contains(why, "watch_lanes.sh not found") {
 		t.Fatalf("no watcher script: service=%v reason=%q", s, why)
 	}
 	script := filepath.Join(t.TempDir(), "watch_lanes.sh")
 	writeFile(t, script, "#!/bin/bash\n")
 	t.Setenv("ORCA_WATCH_LANES", script)
-	if s, why := newAdoption(t.Context(), cfg, store.NewMemoryStore(clock.NewRealClock()), clock.NewRealClock(), nil); s == nil || why != "" {
+	if s, why := newAdoption(t.Context(), cfg, store.NewMemoryStore(clock.NewRealClock()), clock.NewRealClock(), nil, nil); s == nil || why != "" {
 		t.Fatalf("adapters available: service=%v reason=%q", s, why)
 	}
 }
