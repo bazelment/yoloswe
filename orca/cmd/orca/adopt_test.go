@@ -202,24 +202,36 @@ func writeFile(t *testing.T, p, s string) {
 	}
 }
 
-// TestChatAdoptionDisabledOnlyWithReason: /adopt is off only when an adapter
-// cannot be built, and chat says which one.
+// TestChatAdoptionDisabledOnlyWithReason: /adopt is off only without the
+// Nebula client, and chat says why. A missing loop script fails only the
+// handover of the run format that needs it, with its reason.
 func TestChatAdoptionDisabledOnlyWithReason(t *testing.T) {
 	t.Setenv("NEBULA_API_URL", "")
 	t.Setenv("NEBULA_TOKEN", "")
 	t.Setenv("ORCA_WATCH_LANES", filepath.Join(t.TempDir(), "missing.sh"))
-	if s, why := newAdoption(t.Context(), Config{RunID: "c"}, store.NewMemoryStore(clock.NewRealClock()), clock.NewRealClock(), nil, nil); s != nil || !strings.Contains(why, "NEBULA_API_URL") {
+	clk := clock.NewRealClock()
+	st := store.NewMemoryStore(clk)
+	if s, why := newAdoption(t.Context(), Config{RunID: "c"}, newHostSwarms(Config{RunID: "c"}, st, clk), st, clk, nil, nil); s != nil || !strings.Contains(why, "NEBULA_API_URL") {
 		t.Fatalf("no credentials: service=%v reason=%q", s, why)
 	}
 	cfg := Config{RunID: "c", NebulaAPIURL: "http://127.0.0.1:1", NebulaToken: "t"}
-	if s, why := newAdoption(t.Context(), cfg, store.NewMemoryStore(clock.NewRealClock()), clock.NewRealClock(), nil, nil); s != nil || !strings.Contains(why, "watch_lanes.sh not found") {
-		t.Fatalf("no watcher script: service=%v reason=%q", s, why)
+	h := newHostSwarms(cfg, st, clk)
+	if s, why := newAdoption(t.Context(), cfg, h, st, clk, nil, nil); s == nil || why != "" {
+		t.Fatalf("Nebula client available: service=%v reason=%q", s, why)
+	}
+	sub := filepath.Join(t.TempDir(), ".shared", "subagent-swarm", "r")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(sub, "state.json"), `{"config":{},"tasks":[]}`)
+	if _, err := h.watcher.Running(t.Context(), sub); err == nil || !strings.Contains(err.Error(), "watch_lanes.sh not found") {
+		t.Fatalf("subagent-swarm run without watch_lanes.sh: %v", err)
 	}
 	script := filepath.Join(t.TempDir(), "watch_lanes.sh")
 	writeFile(t, script, "#!/bin/bash\n")
 	t.Setenv("ORCA_WATCH_LANES", script)
-	if s, why := newAdoption(t.Context(), cfg, store.NewMemoryStore(clock.NewRealClock()), clock.NewRealClock(), nil, nil); s == nil || why != "" {
-		t.Fatalf("adapters available: service=%v reason=%q", s, why)
+	if h := newHostSwarms(cfg, st, clk); h.watcher.Subagent == nil || h.importer.Orchestrators == nil || h.probe.TerminalState == nil {
+		t.Fatalf("adapters available: %+v", h)
 	}
 }
 

@@ -1,0 +1,7 @@
+{"config":{"goal":"trial m1: slim swarm prompts","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"none",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]},
+{"name":"clean","kind":"codex","model":"gpt-5.6-sol","effort":"high","prompt":"","chain":[{"kind":"codex","model":"gpt-5.6-sol","effort":"high"}]},
+{"name":"review","kind":"claude","model":"sonnet","effort":"high","prompt":"","chain":[{"kind":"claude","model":"sonnet","effort":"high"}]}]},
+"tasks":[
+{"id":"m1-base","title":"base prompts","branch":"swarm-lane/20261114-trial-m1/m1-base","priority":"p1","status":"done","phase":"review","round":1,"session_id":"sess-m1","terminals":{"swe":{"1":"term-m1-swe"},"review":{"1":"term-m1-review"}},"pr":5604,"pr_head":"aaa","approval_sha":"aaa","merge_sha":"mmm","terminal_state":"","verdict":"pass"},
+{"id":"m2-default","title":"default prompts","branch":"swarm-lane/20261114-trial-m1/m2-default","priority":"p1","status":"running","phase":"clean","round":1,"session_id":"sess-m2","terminals":{"swe":{"1":"term-m2-swe"},"clean":{"1":"term-m2-clean"}},"pr":5705,"pr_head":"bbb","terminal_state":"working","verdict":""}]}

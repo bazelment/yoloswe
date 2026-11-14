@@ -21,7 +21,6 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/bazelment/yoloswe/orca/adopt"
 	chatui "github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
@@ -254,21 +253,23 @@ func executeChat(
 
 	concierge := NewConcierge(storeCfg.RunID, st, clk, roleClient(client, cfg, "concierge"), cfg.Models.Concierge)
 	concierge.Logger = logger
-	concierge.Swarms = backend.Swarms
+	concierge.Swarms = backend.LiveSwarms
 	defer func() { _ = concierge.Close(context.WithoutCancel(ctx)) }()
 	// A restarted chat continues the conversation it left.
 	resumed, err := concierge.Resume(ctx)
 	if err != nil {
 		return err
 	}
-	backend.HostSwarms = adopt.Importer{}.Discover
+	host := newHostSwarms(cfg, st, clk)
+	backend.HostSwarms = host.importer.Discover
+	backend.HostProbe = host.probe
 
 	question := strings.TrimSpace(cfg.Prompt)
 	if question == "" && len(posArgs) > 0 {
 		question = strings.TrimSpace(strings.Join(posArgs, " "))
 	}
 	backend.OnAttach = concierge.Attach
-	adoption, adoptionOff := newAdoption(ctx, cfg, st, clk, client, logger)
+	adoption, adoptionOff := newAdoption(ctx, cfg, host, st, clk, client, logger)
 	backend.Adoption, backend.AdoptionUnavailable = adoption, adoptionOff
 	if adoption != nil {
 		defer func() {

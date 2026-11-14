@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -268,5 +271,101 @@ func TestBareChatRestartReattachesToFrontDeskStore(t *testing.T) {
 	}
 	if want := "remember the lint lane|noted|what did I ask before?|the lint lane"; strings.Join(said, "|") != want {
 		t.Fatalf("conversation = %q, want %q", strings.Join(said, "|"), want)
+	}
+}
+
+type fakeRunOrchestrators map[string]string
+
+func (f fakeRunOrchestrators) RunOrchestratorSession(_ context.Context, runID string) (string, error) {
+	return f[runID], nil
+}
+
+// noLoops finds no live step loop or watcher.
+type noLoops struct{}
+
+func (noLoops) Running(context.Context, string) ([]int, error)             { return nil, nil }
+func (noLoops) Describe(context.Context, []int) (desc string, pane string) { return "", "" }
+
+// TestConciergeSwarmSummaryNamesActivityNextAndPRState: the swarms tool reads
+// a nebula-swarm run (testdata/swarm) with fake Nebula terminal states and a
+// fake GitHub, and the summary the concierge answers from names each lane's
+// current activity, next step and real PR state.
+func TestConciergeSwarmSummaryNamesActivityNextAndPRState(t *testing.T) {
+	t.Parallel()
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(t.Context(), store.Run{ID: frontDeskRunID}); err != nil {
+		t.Fatal(err)
+	}
+	backend := chatui.NewStoreBackend(st, frontDeskRunID)
+	backend.HostSwarms = adopt.Importer{Roots: []string{filepath.Join("testdata", "swarm")}, Orchestrators: fakeRunOrchestrators{}, Loops: noLoops{}}.Discover
+	var probedTerminals []string
+	var mu sync.Mutex
+	backend.HostProbe = chatui.HostProbe{
+		TerminalState: func(_ context.Context, id string) (string, error) {
+			mu.Lock()
+			probedTerminals = append(probedTerminals, id)
+			mu.Unlock()
+			return map[string]string{"term-m2-clean": "working"}[id], nil
+		},
+		PR: func(_ context.Context, repo, _, n string) (chatui.PRStatus, error) {
+			if repo != "sycamore-labs/nebula" {
+				return chatui.PRStatus{}, fmt.Errorf("repo %q", repo)
+			}
+			switch n {
+			case "5604":
+				return chatui.PRStatus{State: "MERGED", Checks: "4 passed"}, nil
+			case "5705":
+				return chatui.PRStatus{State: "OPEN", Checks: "3 passed, 1 pending"}, nil
+			}
+			return chatui.PRStatus{}, fmt.Errorf("no PR %s", n)
+		},
+	}
+	c := NewConcierge(frontDeskRunID, st, nil, scriptedModel(
+		toolUse("a", ToolSwarms, `{}`),
+		textAnswer("20261114-trial-m1 is running m2-default (clean)."),
+	), DefaultConciergeModel)
+	c.Swarms = backend.LiveSwarms
+	if _, err := c.Ask(t.Context(), "adopt the swarm driven by claude: what is it doing now?"); err != nil {
+		t.Fatal(err)
+	}
+	items, err := st.Threads().ListItems(t.Context(), c.threadID, "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result string
+	for i := range items {
+		if items[i].Kind == store.ItemKindToolResult && items[i].Name == ToolSwarms {
+			result = items[i].Content
+		}
+	}
+	lines := strings.Split(result, "\n")
+	for _, want := range []string{
+		"    state: active | driven by: sess-orch | step loop: none running",
+		"    - m1-base: phase=review status=done round=1 pr=#5604 base prompts",
+		"        now: review round 1; terminal term-m1-review (lane done, not probed); last event: 2026-11-14T05:20:00Z merged #5604 mmm; latest report m1-base.review.r1.md: Outcome: done",
+		"        next: nothing (lane done)",
+		"        pr #5604 (GitHub): merged, checks: 4 passed",
+		"    - m2-default: phase=clean status=running round=1 pr=#5705 default prompts",
+		"        now: clean round 1; terminal term-m2-clean agent=working; ledger terminal_state=working; last event: 2026-11-14T05:35:00Z started clean term-m2-clean; latest report m2-default.swe.r1.md: Outcome: done",
+		"        next: Next: m2-default review after clean; then merge train.",
+		"        pr #5705 (GitHub): open, checks: 3 passed, 1 pending",
+		"    progress: Merged: m1-base #5604. / Next: m2-default review after clean; then merge train.",
+		"    running now: m2-default (clean, agent working)",
+	} {
+		if !slices.Contains(lines, want) {
+			t.Fatalf("swarms summary missing %q:\n%s", want, result)
+		}
+	}
+	if !strings.Contains(lines[2], "20261114-trial-m1: trial m1: slim swarm prompts | lanes: 2 (clean:1, review:1)") ||
+		!strings.HasSuffix(lines[2], "| format: nebula-swarm | active | driven by sess-orch") {
+		t.Fatalf("run line = %q", lines[2])
+	}
+	if strings.Contains(result, "not checked") || strings.Contains(result, "running now: nothing") {
+		t.Fatalf("summary with every read done claims unchecked or idle state:\n%s", result)
+	}
+	// Only the running lane's terminal is probed; the done lane's session is released.
+	if !reflect.DeepEqual(probedTerminals, []string{"term-m2-clean"}) {
+		t.Fatalf("probed terminals %v", probedTerminals)
 	}
 }

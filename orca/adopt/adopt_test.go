@@ -333,8 +333,8 @@ func TestImportsCurrentRoundOfTwoLaneRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []Lane{
-		{ID: "a", Title: "A", Branch: "ba", Phase: "swe", Status: "running", Round: 2, Session: "sess-a2", Terminal: "term-a2", ReportPath: filepath.Join(dir, "a.swe.md"), PR: "11"},
-		{ID: "b", Title: "B", Branch: "bb", Phase: "review", Status: "running", Round: 2, Session: "sess-b2", Terminal: "term-b2", PR: "22"},
+		{ID: "a", Title: "A", Branch: "ba", Phase: "swe", Status: "running", Round: 2, Session: "sess-a2", Terminal: "term-a2", ReportPath: filepath.Join(dir, "a.swe.md"), PR: "11", Report: "Outcome: done", Next: "next phase: review"},
+		{ID: "b", Title: "B", Branch: "bb", Phase: "review", Status: "running", Round: 2, Session: "sess-b2", Terminal: "term-b2", PR: "22", Next: "next: merge"},
 	}
 	if !reflect.DeepEqual(r.Lanes, want) {
 		t.Fatalf("lanes:\n got %+v\nwant %+v", r.Lanes, want)
