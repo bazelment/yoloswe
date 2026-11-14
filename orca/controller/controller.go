@@ -129,6 +129,7 @@ type Config struct {
 	StallTimeout      time.Duration
 	// StallTimeoutSet distinguishes an explicit timeout from the default.
 	StallTimeoutSet bool
+	ConcurrencyCap  int
 }
 
 func (c Config) withDefaults() Config {
@@ -272,6 +273,24 @@ type Controller struct {
 	killed             bool
 	watchStarted       bool
 	stallTimeoutSet    bool
+	runtimeSettingsSet bool
+}
+
+// SetRuntimeSettings applies live settings for subsequent controller ticks.
+func (c *Controller) SetRuntimeSettings(settings store.RunSettings) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if settings.StallTimeout > 0 {
+		c.cfg.StallTimeout = settings.StallTimeout
+		c.stallTimeoutSet = true
+	}
+	if settings.StallTimeout <= 0 && settings.ConcurrencyCap == 0 && !settings.Paused {
+		return
+	}
+	if settings.ConcurrencyCap >= 0 {
+		c.cfg.ConcurrencyCap = settings.ConcurrencyCap
+	}
+	c.runtimeSettingsSet = true
 }
 
 // New constructs a new deterministic Controller for cfg.RunID.
@@ -1052,7 +1071,11 @@ func (c *Controller) reconcilePlannedLanes(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if r.Limits.MaxConcurrentLanes > 0 && activeCount >= r.Limits.MaxConcurrentLanes {
+		cap := r.Limits.MaxConcurrentLanes
+		if c.runtimeSettingsSet {
+			cap = c.cfg.ConcurrencyCap
+		}
+		if cap > 0 && activeCount >= cap {
 			break
 		}
 		firstName := cmp.Or(ln.Phase, r.FirstPhase())
@@ -1909,12 +1932,12 @@ func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.Ev
 	round := max(ln.Round, 1)
 	attempt := max(ln.Attempt, 1)
 	actionKey := stallActionKey(ln.ID, ln.Phase, round, attempt, ln.TerminalID)
-	c.emittedStalls[actionKey] = true
 	if ln.SessionID != "" || ln.TerminalID != "" {
 		if err := c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: "phase stall timeout exceeded"}); err != nil {
 			return store.EventClassUnclassified, err
 		}
 	}
+	c.emittedStalls[actionKey] = true
 	_, already, err := c.recordDecision(ctx, ToolLaneStall, ln.ID,
 		fmt.Sprintf("lane %s stalled in phase %s (round %d, attempt %d)", ln.ID, ln.Phase, round, attempt),
 		"stopped stalled terminal",
@@ -2061,8 +2084,7 @@ func (c *Controller) startLanePhase(
 		if tool == ToolPhaseRetry {
 			if err := c.stopCurrentTerminal(ctx, ln, "replace terminal for retry"); err != nil {
 				c.noteStopFailure(ctx, ln, err)
-				// Keep the controller alive; retryStops handles this on the next tick.
-				return nil
+				return err
 			}
 			delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
 		}

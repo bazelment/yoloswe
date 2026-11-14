@@ -322,6 +322,28 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 	})
 }
 
+func TestController_RuntimeSettingsLimitNextTickSpawns(t *testing.T) {
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("lane-%d", i)
+		if err := st.Lanes().Upsert(ctx, lane.Lane{ID: id, RunID: "run-1", ItemID: id, Title: id, Status: lane.StatusPlanned, RecipeName: recipe.DefaultName}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.Runs().UpdateSettings(ctx, "run-1", store.RunSettings{ConcurrencyCap: 2, StallTimeout: time.Hour}); err != nil {
+		t.Fatal(err)
+	}
+	c := controller.New(controller.Config{RunID: "run-1", ConcurrencyCap: 8}, st, drv, clk, judge)
+	c.SetRuntimeSettings(store.RunSettings{ConcurrencyCap: 2, StallTimeout: time.Hour})
+	if err := c.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(drv.Spawns); got > 2 {
+		t.Fatalf("spawns=%d, want at most 2", got)
+	}
+}
+
 func TestControllerReportOnlySweCompletesLane(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

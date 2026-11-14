@@ -40,6 +40,8 @@ type RunStore interface {
 	Create(ctx context.Context, run Run) error
 	Get(ctx context.Context, runID string) (*Run, error)
 	UpdateObjective(ctx context.Context, runID, objective, planRef string) error
+	GetSettings(ctx context.Context, runID string) (RunSettings, error)
+	UpdateSettings(ctx context.Context, runID string, settings RunSettings) error
 	AcquireLease(ctx context.Context, runID, holderID string, ttl time.Duration) (*Lease, error)
 	HeartbeatLease(ctx context.Context, runID, holderID string, ttl time.Duration) (*Lease, error)
 	ReleaseLease(ctx context.Context, runID, holderID string) error
