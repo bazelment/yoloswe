@@ -424,3 +424,49 @@ func write(t *testing.T, p, s string) {
 		t.Fatal(err)
 	}
 }
+
+type runDriverFuncs struct {
+	start func(context.Context, Run) error
+	stop  func(context.Context, Run) error
+}
+
+func (d runDriverFuncs) Start(ctx context.Context, r Run) error { return d.start(ctx, r) }
+func (d runDriverFuncs) Stop(ctx context.Context, r Run) error  { return d.stop(ctx, r) }
+
+func TestFailedReleaseResumesController(t *testing.T) {
+	w := newWorld(t)
+	svc := w.service()
+	starts, stops := 0, 0
+	svc.Driver = runDriverFuncs{
+		start: func(context.Context, Run) error {
+			if w.watcher.running {
+				t.Fatal("host watcher still running at controller start")
+			}
+			starts++
+			return nil
+		},
+		stop: func(context.Context, Run) error { stops++; return nil },
+	}
+	if _, err := svc.Adopt(t.Context(), testRun); err != nil {
+		t.Fatal(err)
+	}
+	svc.fault = func(step string) error {
+		if step == "release:label" {
+			return errInjected
+		}
+		return nil
+	}
+	if err := svc.Release(t.Context(), testRun); !errors.Is(err, errInjected) {
+		t.Fatalf("release error = %v", err)
+	}
+	if starts != 2 || stops != 1 || w.watcher.running {
+		t.Fatalf("handover after failure: starts=%d stops=%d watcher=%v", starts, stops, w.watcher.running)
+	}
+	svc.fault = nil
+	if err := svc.Release(t.Context(), testRun); err != nil {
+		t.Fatal(err)
+	}
+	if stops != 2 || !w.watcher.running {
+		t.Fatalf("successful handback: stops=%d watcher=%v", stops, w.watcher.running)
+	}
+}

@@ -421,10 +421,7 @@ func (s *Service) Release(ctx context.Context, id string) error {
 	j.State = stateReleasing
 	if err := s.save(dir, j); err != nil {
 		if s.Driver != nil {
-			r, rerr := Read(dir)
-			if rerr == nil {
-				rerr = s.Driver.Start(ctx, r)
-			}
+			_, rerr := s.drive(ctx, dir)
 			err = errors.Join(err, rerr)
 		}
 		return err
@@ -446,10 +443,7 @@ func (s *Service) Release(ctx context.Context, id string) error {
 		return fmt.Errorf("release %s: %w; restoring the lease failed: %v", id, err, werr)
 	}
 	if s.Driver != nil {
-		r, rerr := Read(dir)
-		if rerr == nil {
-			rerr = s.Driver.Start(ctx, r)
-		}
+		_, rerr := s.drive(ctx, dir)
 		if rerr != nil {
 			return fmt.Errorf("release %s: %w; restart controller: %v", id, err, rerr)
 		}

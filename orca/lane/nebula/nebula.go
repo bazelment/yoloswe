@@ -953,9 +953,7 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 		TerminalID: resp.ID,
 		StartedAt:  d.clock.Now().UTC(),
 	}
-	d.mu.Lock()
-	d.spawned[req.RunID] = append(d.spawned[req.RunID], watchTarget{laneID: req.LaneID, sessionID: result.SessionID, terminalID: result.TerminalID})
-	d.mu.Unlock()
+	d.TrackLane(lane.Lane{RunID: req.RunID, ID: req.LaneID, SessionID: result.SessionID, TerminalID: result.TerminalID})
 	return result, nil
 }
 

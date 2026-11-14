@@ -178,7 +178,11 @@ func testAdoptTransition(t *testing.T, outcome, policy, wantPhase string, wantRo
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish review"`+policy+`},"tasks":[{"id":"a","title":"A","branch":"lane-a","phase":"review","status":"running","round":2,"pr":42,"host_only":"keep","sessions":{"review":"nebula:old-review"}}]}`)
+	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish review","target":"release","merge_rule":"Use the repository merge queue."`+policy+`},"tasks":[{"id":"a","title":"A","branch":"lane-a","phase":"review","status":"running","round":2,"pr":42,"host_only":"keep","sessions":{"review":"nebula:old-review"}}]}`)
+	if err := os.MkdirAll(filepath.Join(dir, "missions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "missions", "a.md"), "Preserve zero-copy packet handling.")
 	writeFile(t, filepath.Join(dir, "a.review.spawn.json"), `{"session_id":"imported-session","terminal_id":"imported-review"}`)
 	script := filepath.Join(root, "watch_lanes.sh")
 	writeFile(t, script, "#!/bin/bash\necho 'armed: none'\necho 'bridges: none'\nexit 1\n")
@@ -188,6 +192,7 @@ func testAdoptTransition(t *testing.T, outcome, policy, wantPhase string, wantRo
 	t.Setenv("ORCA_SWARM_ROOTS", root)
 	t.Setenv("ORCA_WATCH_LANES", script)
 	integrated := make(chan string, 1)
+	prompts := make(chan string, 1)
 	reportReady := make(chan struct{})
 	released := make(chan struct{}, 1)
 	completeReport := make(chan struct{})
@@ -216,9 +221,11 @@ func testAdoptTransition(t *testing.T, outcome, policy, wantPhase string, wantRo
 			_, _ = io.WriteString(w, `{}`)
 		case r.URL.Path == "/api/code-sessions/imported-session/terminals" && r.Method == http.MethodPost:
 			var body struct {
-				Title string `json:"title"`
+				Title  string `json:"title"`
+				Prompt string `json:"prompt"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			prompts <- body.Prompt
 			integrated <- body.Title
 			_, _ = io.WriteString(w, `{"id":"integrate-terminal"}`)
 		default:
@@ -255,6 +262,13 @@ func testAdoptTransition(t *testing.T, outcome, policy, wantPhase string, wantRo
 			want := fmt.Sprintf("a %s r%d", wantPhase, wantRound)
 			if title != want {
 				t.Fatalf("started %q, want %s", title, want)
+			}
+			prompt := <-prompts
+			if !strings.Contains(prompt, "Preserve zero-copy packet handling.") {
+				t.Fatalf("phase lost host mission: %s", prompt)
+			}
+			if wantPhase == "integrate" && (!strings.Contains(prompt, "target=release") || !strings.Contains(prompt, "Use the repository merge queue.")) {
+				t.Fatalf("integrate lost run merge rule: %s", prompt)
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("adopted mid-review lane did not advance to " + wantPhase)

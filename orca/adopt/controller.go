@@ -1,7 +1,6 @@
 package adopt
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
@@ -37,7 +35,6 @@ type controlledRun struct {
 	controller *controller.Controller
 	cancel     context.CancelFunc
 	done       chan struct{}
-	stop       chan struct{}
 	run        Run
 }
 
@@ -61,7 +58,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) error {
 		return err
 	}
 	generation := journal.Marker
-	workflow, lanes, err := controllerState(r)
+	workflow, lanes, items, err := controllerState(r)
 	if err != nil {
 		return err
 	}
@@ -83,15 +80,25 @@ func (d *Controllers) Start(ctx context.Context, r Run) error {
 		return err
 	}
 	resume := generation != "" && storedRun.PlanRef == generation
-	if err := d.store.Runs().UpdateObjective(ctx, r.ID, r.Goal, generation); err != nil {
-		return err
-	}
 	workflow.Version = 0
 	saved, err := d.store.Recipes().Save(ctx, workflow)
 	if err != nil {
 		return err
 	}
 	workflow = saved
+	for i := range items {
+		item := items[i]
+		if err := d.store.Backlog().Add(ctx, item); err != nil {
+			if !errors.Is(err, store.ErrAlreadyExists) {
+				return err
+			}
+			if !resume {
+				if err := d.store.Backlog().Update(ctx, item, controller.ActorController, "adopt host task"); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	for i := range lanes {
 		ln := &lanes[i]
 		if resume {
@@ -110,6 +117,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) error {
 			tracker.TrackLane(*ln)
 		}
 	}
+	if err := d.store.Runs().UpdateObjective(ctx, r.ID, r.Goal, generation); err != nil {
+		return err
+	}
 	ctrl := controller.New(controller.Config{RunID: r.ID, HolderID: holder}, d.store, d.driver, d.clock, nil)
 	// Fail synchronously if another process still holds the controller lease.
 	if err := ctrl.Step(ctx); err != nil {
@@ -121,43 +131,14 @@ func (d *Controllers) Start(ctx context.Context, r Run) error {
 		_ = ctrl.ReleaseLease(ctx)
 		return err
 	}
-	cr := &controlledRun{controller: ctrl, cancel: cancel, done: make(chan struct{}), stop: make(chan struct{}), run: r}
+	cr := &controlledRun{controller: ctrl, cancel: cancel, done: make(chan struct{}), run: r}
 	d.runs[r.ID] = cr
 	started = true
 	go func() {
 		defer close(cr.done)
-		// The ledger is also the host orchestrator's resume point. Checkpoint only
-		// changed lane state; quiescing Stop performs the final checkpoint.
-		ticker := d.clock.NewTicker(250 * time.Millisecond)
-		defer ticker.Stop()
-		var previous []byte
-		for {
-			if err := ctrl.Step(runCtx); err != nil && runCtx.Err() == nil {
-				slog.Error("adopted controller step", "run", r.ID, "error", err)
-			}
-			if runCtx.Err() != nil {
-				return
-			}
-			current, err := d.store.Lanes().List(runCtx, store.LaneFilter{RunID: r.ID})
-			if err == nil {
-				snapshot, _ := json.Marshal(current)
-				if !bytes.Equal(previous, snapshot) {
-					err = checkpoint(r.Dir, current)
-					if err == nil {
-						previous = snapshot
-					}
-				}
-			}
-			if err != nil {
-				slog.Error("adopted controller checkpoint", "run", r.ID, "error", err)
-			}
-			select {
-			case <-runCtx.Done():
-				return
-			case <-cr.stop:
-				return
-			case <-ticker.C():
-			}
+		defer cancel()
+		if err := ctrl.Run(runCtx); err != nil && !errors.Is(err, controller.ErrControllerStopped) && runCtx.Err() == nil {
+			slog.Error("adopted controller stopped", "run", r.ID, "error", err)
 		}
 	}()
 	return nil
@@ -170,11 +151,7 @@ func (d *Controllers) Stop(ctx context.Context, r Run) error {
 	if cr == nil {
 		return nil
 	}
-	select {
-	case <-cr.done:
-	default:
-		close(cr.stop)
-	}
+	cr.controller.Kill()
 	<-cr.done
 	cr.cancel()
 	current, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: r.ID})
@@ -206,10 +183,10 @@ func (d *Controllers) Close(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func controllerState(r Run) (recipe.Recipe, []lane.Lane, error) {
+func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, error) {
 	b, err := os.ReadFile(filepath.Join(r.Dir, "state.json"))
 	if err != nil {
-		return recipe.Recipe{}, nil, err
+		return recipe.Recipe{}, nil, nil, err
 	}
 	var st struct {
 		Tasks []struct {
@@ -221,6 +198,9 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, error) {
 			Checks      string            `json:"checks"`
 			BaseCommit  string            `json:"fork_sha"`
 			Worktree    string            `json:"worktree"`
+			Brief       string            `json:"brief"`
+			Priority    store.Priority    `json:"priority"`
+			DependsOn   []string          `json:"depends_on"`
 		} `json:"tasks"`
 		Config struct {
 			MergePolicy *recipe.MergePolicy `json:"merge_policy"`
@@ -232,7 +212,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, error) {
 		} `json:"config"`
 	}
 	if err := json.Unmarshal(b, &st); err != nil {
-		return recipe.Recipe{}, nil, err
+		return recipe.Recipe{}, nil, nil, err
 	}
 	defaultRecipe := recipe.Default()
 	workflow := defaultRecipe.Clone()
@@ -245,14 +225,14 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, error) {
 		workflow.MergePolicy.TargetBranch = st.Config.Target
 	}
 	if !workflow.MergePolicy.Mode.Valid() {
-		return workflow, nil, fmt.Errorf("invalid adopted merge mode %q", workflow.MergePolicy.Mode)
+		return workflow, nil, nil, fmt.Errorf("invalid adopted merge mode %q", workflow.MergePolicy.Mode)
 	}
 	if len(st.Config.Phases) > 0 {
 		workflow.Phases = nil
 		for _, spec := range st.Config.Phases {
 			ph, ok := defaultRecipe.Phase(spec.Name)
 			if !ok {
-				return workflow, nil, fmt.Errorf("unsupported host phase %q", spec.Name)
+				return workflow, nil, nil, fmt.Errorf("unsupported host phase %q", spec.Name)
 			}
 			if len(spec.Chain) > 0 {
 				ph.Agents = nil
@@ -297,16 +277,39 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, error) {
 		}
 	}
 	var lanes []lane.Lane
+	var items []store.BacklogItem
 	for i := range r.Lanes {
 		imported := &r.Lanes[i]
 		status := lane.Status(imported.Status)
 		if !status.Valid() {
-			return workflow, nil, fmt.Errorf("lane %s: unsupported host status %q", imported.ID, imported.Status)
+			return workflow, nil, nil, fmt.Errorf("lane %s: unsupported host status %q", imported.ID, imported.Status)
 		}
-		ln := lane.Lane{ID: imported.ID, RunID: r.ID, Title: imported.Title, Branch: imported.Branch, Status: status, RecipeName: workflow.Name, RecipeVersion: 1, BaseBranch: st.Config.Base, Attempt: 1}
+		ln := lane.Lane{ItemID: imported.ID, ID: imported.ID, RunID: r.ID, Title: imported.Title, Branch: imported.Branch, Status: status, RecipeName: workflow.Name, RecipeVersion: 1, BaseBranch: st.Config.Base, Attempt: 1}
 		ln.PR, _ = strconv.Atoi(imported.PR)
-		for _, task := range st.Tasks {
+		for j := range st.Tasks {
+			task := &st.Tasks[j]
+
 			if task.ID == ln.ID {
+				mission, err := hostMission(r.Dir, task.ID, task.Brief)
+				if err != nil {
+					return workflow, nil, nil, err
+				}
+				priority := task.Priority
+				if !priority.Valid() {
+					priority = store.PriorityP2
+				}
+				status := store.BacklogInProgress
+				switch ln.Status {
+				case lane.StatusDone:
+					status = store.BacklogDone
+				case lane.StatusFailed:
+					status = store.BacklogDropped
+				case lane.StatusPlanned:
+					status = store.BacklogOpen
+				case lane.StatusBlocked:
+					status = store.BacklogBlocked
+				}
+				items = append(items, store.BacklogItem{ID: ln.ID, RunID: r.ID, LaneID: ln.ID, Title: ln.Title, Description: mission, Priority: priority, Status: status, DependsOn: task.DependsOn})
 				ln.PRHead, ln.ApprovalSHA, ln.MergeSHA, ln.Checks, ln.BaseCommit, ln.Worktree = task.PRHead, task.ApprovalSHA, task.MergeSHA, task.Checks, task.BaseCommit, task.Worktree
 				for key, terminal := range task.Sessions {
 					if id, ok := strings.CutPrefix(terminal, "nebula:"); ok {
@@ -321,7 +324,27 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, error) {
 		ln.RecordAttempt(imported.Phase, imported.Round, imported.Session, imported.Terminal)
 		lanes = append(lanes, ln)
 	}
-	return workflow, lanes, nil
+	return workflow, lanes, items, nil
+}
+
+func hostMission(dir, id, brief string) (string, error) {
+	paths := []string{filepath.Join(dir, "missions", id+".md"), filepath.Join(dir, "briefs", id+".mission.md")}
+	if brief != "" {
+		if !filepath.IsAbs(brief) {
+			brief = filepath.Join(dir, brief)
+		}
+		paths = append(paths, brief)
+	}
+	for _, path := range paths {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			return string(b), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+	}
+	return "", nil
 }
 
 type hostAgent struct {

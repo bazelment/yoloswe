@@ -1067,6 +1067,28 @@ func (c *Controller) reconcilePlannedLanes(ctx context.Context) error {
 
 	for i := range planned {
 		ln := planned[i]
+		if ln.ItemID != "" {
+			item, err := c.store.Backlog().Get(ctx, c.cfg.RunID, ln.ItemID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+			if item != nil {
+				ready := true
+				for _, id := range item.DependsOn {
+					dependency, err := c.store.Backlog().Get(ctx, c.cfg.RunID, id)
+					if err != nil && !errors.Is(err, store.ErrNotFound) {
+						return err
+					}
+					if dependency == nil || dependency.Status != store.BacklogDone {
+						ready = false
+						break
+					}
+				}
+				if !ready {
+					continue
+				}
+			}
+		}
 		r, err := c.resolveRecipe(ctx, &ln)
 		if err != nil {
 			return err
