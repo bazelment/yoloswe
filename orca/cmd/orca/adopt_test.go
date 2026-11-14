@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/bazelment/yoloswe/orca/clock"
+	"github.com/bazelment/yoloswe/orca/store"
 )
 
 // TestShippedChatAdoptsAndReleasesHostSwarm drives the real `orca chat`
@@ -203,17 +208,215 @@ func TestChatAdoptionDisabledOnlyWithReason(t *testing.T) {
 	t.Setenv("NEBULA_API_URL", "")
 	t.Setenv("NEBULA_TOKEN", "")
 	t.Setenv("ORCA_WATCH_LANES", filepath.Join(t.TempDir(), "missing.sh"))
-	if s, why := newAdoption(Config{RunID: "c"}); s != nil || !strings.Contains(why, "NEBULA_API_URL") {
+	if s, why := newAdoption(t.Context(), Config{RunID: "c"}, store.NewMemoryStore(clock.NewRealClock()), clock.NewRealClock()); s != nil || !strings.Contains(why, "NEBULA_API_URL") {
 		t.Fatalf("no credentials: service=%v reason=%q", s, why)
 	}
 	cfg := Config{RunID: "c", NebulaAPIURL: "http://127.0.0.1:1", NebulaToken: "t"}
-	if s, why := newAdoption(cfg); s != nil || !strings.Contains(why, "watch_lanes.sh not found") {
+	if s, why := newAdoption(t.Context(), cfg, store.NewMemoryStore(clock.NewRealClock()), clock.NewRealClock()); s != nil || !strings.Contains(why, "watch_lanes.sh not found") {
 		t.Fatalf("no watcher script: service=%v reason=%q", s, why)
 	}
 	script := filepath.Join(t.TempDir(), "watch_lanes.sh")
 	writeFile(t, script, "#!/bin/bash\n")
 	t.Setenv("ORCA_WATCH_LANES", script)
-	if s, why := newAdoption(cfg); s == nil || why != "" {
+	if s, why := newAdoption(t.Context(), cfg, store.NewMemoryStore(clock.NewRealClock()), clock.NewRealClock()); s == nil || why != "" {
 		t.Fatalf("adapters available: service=%v reason=%q", s, why)
+	}
+}
+
+// The imported terminal deliberately has no swarm metadata in the session list.
+func TestAdoptMidReviewAdvances(t *testing.T) {
+	testAdoptTransition(t, "done", "", "integrate", 2, false)
+}
+
+func TestAdoptReviewNeedsSWE(t *testing.T) {
+	testAdoptTransition(t, "needs-swe", "", "swe", 3, false)
+}
+
+func TestAdoptCompletionReleasesSession(t *testing.T) {
+	testAdoptTransition(t, "done", "", "integrate", 2, true)
+}
+
+func TestAdoptManualMergeDoesNotLaunchIntegrator(t *testing.T) {
+	testAdoptTransition(t, "done", `,"merge_policy":{"mode":"manual","require_review_pass":true}`, "review", 2, true)
+}
+
+type adoptionOutput struct {
+	adopted chan struct{}
+	once    sync.Once
+}
+
+func (w *adoptionOutput) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), "adopted mid-review") {
+		w.once.Do(func() { close(w.adopted) })
+	}
+	return len(p), nil
+}
+
+func testAdoptTransition(t *testing.T, outcome, policy, wantPhase string, wantRound int, complete bool) {
+	t.Helper()
+	root := t.TempDir()
+	runID := "mid-review"
+	dir := filepath.Join(root, ".shared", "subagent-swarm", runID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish review","target":"release","merge_rule":"Use the repository merge queue."`+policy+`},"tasks":[{"id":"a","title":"A","branch":"lane-a","phase":"review","status":"running","round":2,"pr":42,"host_only":"keep","sessions":{"review":"nebula:old-review"}}]}`)
+	if err := os.MkdirAll(filepath.Join(dir, "missions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "missions", "a.md"), "Preserve zero-copy packet handling.")
+	writeFile(t, filepath.Join(dir, "a.review.spawn.json"), `{"session_id":"imported-session","terminal_id":"imported-review"}`)
+	script := filepath.Join(root, "watch_lanes.sh")
+	writeFile(t, script, "#!/bin/bash\necho 'armed: none'\necho 'bridges: none'\nexit 1\n")
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ORCA_SWARM_ROOTS", root)
+	t.Setenv("ORCA_WATCH_LANES", script)
+	integrated := make(chan string, 1)
+	prompts := make(chan string, 1)
+	reportReady := make(chan struct{})
+	released := make(chan struct{}, 1)
+	completeReport := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/code-runs/"+runID:
+			_, _ = io.WriteString(w, `{"id":"mid-review","externalOrchestratorLabel":"claude"}`)
+		case r.URL.Path == "/api/code-sessions":
+			_, _ = io.WriteString(w, `{"sessions":[]}`)
+		case r.URL.Path == "/api/code-terminals/imported-review/phase-report":
+			select {
+			case <-reportReady:
+				_ = json.NewEncoder(w).Encode(map[string]any{"terminalId": "imported-review", "outcome": outcome, "head": "reviewed-head", "pr": 42, "body": "Outcome: " + outcome + "\nHEAD: reviewed-head\nPR: 42"})
+			default:
+				http.NotFound(w, r)
+			}
+		case r.URL.Path == "/api/code-terminals/integrate-terminal/phase-report":
+			select {
+			case <-completeReport:
+				_, _ = io.WriteString(w, `{"terminalId":"integrate-terminal","outcome":"done","head":"reviewed-head","pr":42,"body":"Outcome: done\nHEAD: reviewed-head\nPR: 42"}`)
+			default:
+				http.NotFound(w, r)
+			}
+		case r.URL.Path == "/api/code-sessions/imported-session/release":
+			released <- struct{}{}
+			_, _ = io.WriteString(w, `{}`)
+		case r.URL.Path == "/api/code-sessions/imported-session/terminals" && r.Method == http.MethodPost:
+			var body struct {
+				Title  string `json:"title"`
+				Prompt string `json:"prompt"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			prompts <- body.Prompt
+			integrated <- body.Title
+			_, _ = io.WriteString(w, `{"id":"integrate-terminal"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	cfgPath := filepath.Join(root, "orca.json")
+	cfg, _ := json.Marshal(map[string]string{"nebula_api_url": srv.URL, "nebula_token": "test-token"})
+	writeFile(t, cfgPath, string(cfg))
+	in, input := io.Pipe()
+	defer in.Close()
+	defer input.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	finished := make(chan error, 1)
+	output := &adoptionOutput{adopted: make(chan struct{})}
+	runChat := func(input io.Reader) error {
+		return Execute(ctx, []string{"chat", "--config", cfgPath, "--run", "adoption-chat", "--store", "sqlite:" + filepath.Join(root, "chat.db"), "--replay", "testdata/concierge_status_replay.json"}, input, output, io.Discard)
+	}
+	go func() { finished <- runChat(in) }()
+	if _, err := io.WriteString(input, "/adopt "+runID+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-output.adopted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("chat did not adopt run")
+	}
+	close(reportReady)
+	if wantPhase != "review" {
+		select {
+		case title := <-integrated:
+			want := fmt.Sprintf("a %s r%d", wantPhase, wantRound)
+			if title != want {
+				t.Fatalf("started %q, want %s", title, want)
+			}
+			prompt := <-prompts
+			if !strings.Contains(prompt, "Preserve zero-copy packet handling.") {
+				t.Fatalf("phase lost host mission: %s", prompt)
+			}
+			if wantPhase == "integrate" && (!strings.Contains(prompt, "target=release") || !strings.Contains(prompt, "Use the repository merge queue.")) {
+				t.Fatalf("integrate lost run merge rule: %s", prompt)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("adopted mid-review lane did not advance to " + wantPhase)
+		}
+	}
+	if complete {
+		close(completeReport)
+		select {
+		case <-released:
+		case <-time.After(5 * time.Second):
+			t.Fatal("completed lane session was not released")
+		}
+	}
+	if complete {
+		if _, err := io.WriteString(input, "/release "+runID+"\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = input.Close()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("chat did not checkpoint")
+	}
+	if !complete {
+		// A new chat must attach to the advanced phase rather than the lease's
+		// original mid-review import.
+		if err := runChat(strings.NewReader("/release " + runID + "\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(integrated) != 0 {
+		t.Fatal("launched an extra phase terminal")
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st struct {
+		Tasks []struct {
+			Sessions       map[string]string
+			Phase          string
+			NebulaTerminal string `json:"nebula_terminal"`
+			HostOnly       string `json:"host_only"`
+			Status         string
+			Round          int
+		}
+	}
+	if err := json.Unmarshal(b, &st); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Tasks) != 1 || st.Tasks[0].Phase != wantPhase || st.Tasks[0].Round != wantRound || st.Tasks[0].HostOnly != "keep" {
+		t.Fatalf("released ledger: %s", b)
+	}
+	wantStatus := "running"
+	if complete {
+		wantStatus = "done"
+	}
+	wantTerminal := "integrate-terminal"
+	if wantPhase == "review" {
+		wantTerminal = "imported-review"
+	}
+	if st.Tasks[0].Status != wantStatus || st.Tasks[0].NebulaTerminal != wantTerminal || st.Tasks[0].Sessions["review"] != "nebula:old-review" || st.Tasks[0].Sessions["review2"] != "nebula:imported-review" {
+		t.Fatalf("lost handback state: %s", b)
 	}
 }

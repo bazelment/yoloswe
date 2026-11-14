@@ -212,7 +212,28 @@ func executeChat(
 	routerSel := cfg.Models.Roles["router"]
 	routingLog := router.StoreLogger{Store: st, RunID: cfg.RunID, Model: routerSel.Model, Provider: routerSel.Provider}
 	r := router.Select(roleClient(client, cfg, "router"), routerSel.Model, os.Getenv("ORCA_GEMINI_API_KEY"), os.Getenv("GEMINI_DECISIONS_BASE_URL"), routingLog)
-	adoption, adoptionOff := newAdoption(cfg)
+	adoption, adoptionOff := newAdoption(ctx, cfg, st, clk)
+	if adoption != nil {
+		defer func() {
+			if closer, ok := adoption.Driver.(interface{ Close(context.Context) error }); ok {
+				if err := closer.Close(context.WithoutCancel(ctx)); err != nil {
+					logger.Error("checkpoint adopted runs", "error", err)
+				}
+			}
+		}()
+		if question == "" {
+			ids, err := adoption.Adopted()
+			if err != nil {
+				logger.Warn("list adopted runs", "error", err)
+			} else {
+				for _, id := range ids {
+					if _, err := adoption.Adopt(ctx, id); err != nil {
+						logger.Warn("adopt run", "run_id", id, "error", err)
+					}
+				}
+			}
+		}
+	}
 	backend := &chatui.StoreBackend{Store: st, RunID: cfg.RunID, Stream: concierge.AskStream, Adoption: adoption, AdoptionUnavailable: adoptionOff}
 	if question != "" {
 		d, err := r.Route(ctx, question)

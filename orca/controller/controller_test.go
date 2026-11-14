@@ -2078,3 +2078,55 @@ func TestWatchQuietHandlingDoesNotCountAsActivity(t *testing.T) {
 		t.Fatalf("quiet bookkeeping delayed fresh terminal: steers=%+v starts=%+v", drv.Steers, drv.PhaseStarts)
 	}
 }
+
+func TestControllerIgnoresReportFromPreviousTerminal(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{ID: "a", RunID: "run-1", Status: lane.StatusRunning, Phase: "review", Round: 2, SessionID: "session", TerminalID: "current-review"}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+	appendReportEvent(t, st, "a", lane.PhaseReport{TerminalID: "old-review", Outcome: lane.OutcomeDone, HeadSHA: "old-head"})
+	if err := ctrl.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := st.Lanes().Get(t.Context(), "run-1", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ln.Phase != "review" || ln.PRHead != "" || len(drv.PhaseStarts) != 0 {
+		t.Fatalf("stale report changed lane: %+v", ln)
+	}
+}
+
+func TestControllerPlannedLaneWaitsForDependencies(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	for _, item := range []store.BacklogItem{
+		{ID: "prerequisite", RunID: "run-1", Title: "Prerequisite", Priority: store.PriorityP2, Status: store.BacklogInProgress},
+		{ID: "dependent", RunID: "run-1", Title: "Dependent", Priority: store.PriorityP2, Status: store.BacklogOpen, DependsOn: []string{"prerequisite"}},
+	} {
+		if err := st.Backlog().Add(t.Context(), item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{ID: "dependent", ItemID: "dependent", RunID: "run-1", Status: lane.StatusPlanned}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+	if err := ctrl.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(drv.Spawns) != 0 {
+		t.Fatal("started lane before its dependency completed")
+	}
+	if err := st.Backlog().Close(t.Context(), "run-1", "prerequisite", store.BacklogDone, "test", "done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctrl.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(drv.Spawns) != 1 || drv.Spawns[0].LaneID != "dependent" {
+		t.Fatalf("dependent lane not started: %+v", drv.Spawns)
+	}
+}
