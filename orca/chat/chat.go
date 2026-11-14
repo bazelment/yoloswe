@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/mattn/go-runewidth"
 	"golang.org/x/term"
 
 	"github.com/bazelment/yoloswe/orca/router"
@@ -57,10 +58,10 @@ func commandUsage() string {
 //nolint:govet
 type Model struct {
 	poll                 bool
+	refreshing           bool
 	restarting           bool
 	restartMessage       string
 	PollInterval         time.Duration
-	initAt               time.Time
 	questions            []string
 	ctx                  context.Context
 	ask                  AskFunc
@@ -72,7 +73,7 @@ type Model struct {
 	lines                []string
 	queued               []string
 	busy, streaming      bool
-	width, height        int
+	width                int
 	streamLine           int
 	// cursor is the input cursor's byte offset.
 	cursor int
@@ -81,7 +82,7 @@ type Model struct {
 }
 
 func New(ctx context.Context, runID string, ask AskFunc, r router.Router) Model {
-	return Model{ctx: ctx, runID: runID, ask: ask, router: r, poll: true, initAt: time.Now()}
+	return Model{ctx: ctx, runID: runID, ask: ask, router: r, poll: true}
 }
 
 // WithTranscript adds earlier conversation lines above new input.
@@ -222,11 +223,19 @@ func (m Model) refresh() tea.Cmd {
 	}
 	return func() tea.Msg { s, e := m.Backend.Snapshot(m.ctx); return snapshotMsg{s, e} }
 }
+func (m *Model) requestRefresh() tea.Cmd {
+	if m.refreshing {
+		return nil
+	}
+	cmd := m.refresh()
+	m.refreshing = cmd != nil
+	return cmd
+}
 func (m Model) pollInterval() time.Duration {
 	if m.PollInterval > 0 {
 		return m.PollInterval
 	}
-	return time.Second
+	return 15 * time.Second
 }
 func (m Model) nextPoll() tea.Cmd {
 	return tea.Tick(m.pollInterval(), func(time.Time) tea.Msg { return pollMsg{} })
@@ -249,16 +258,7 @@ func (m Model) printLines(blocks ...string) tea.Cmd {
 		return nil
 	}
 	cmds := make([]tea.Cmd, 0, len(rows))
-	initAt := m.initAt
-	first := tea.Println(rows[0])
-	cmds = append(cmds, func() tea.Msg {
-		if !initAt.IsZero() {
-			if wait := 20*time.Millisecond - time.Since(initAt); wait > 0 {
-				time.Sleep(wait)
-			}
-		}
-		return first()
-	})
+	cmds = append(cmds, tea.Println(rows[0]))
 	for _, row := range rows[1:] {
 		cmds = append(cmds, tea.Println(row))
 	}
@@ -279,7 +279,7 @@ func (m *Model) flushStream(done bool) []string {
 		out = append(out, wrapPhysicalLines(m.streamBuf[:idx], m.width)...)
 		m.streamBuf = m.streamBuf[idx+1:]
 	}
-	if m.width > 1 && displayWidth(m.streamBuf) >= m.width {
+	if m.width > 1 && runewidth.StringWidth(m.streamBuf) >= m.width {
 		wrapped := wrapPhysicalLines(m.streamBuf, m.width)
 		if len(wrapped) > 1 {
 			out = append(out, wrapped[:len(wrapped)-1]...)
@@ -288,7 +288,7 @@ func (m *Model) flushStream(done bool) []string {
 	}
 	return out
 }
-func (m Model) submit(text string) (tea.Model, tea.Cmd) {
+func (m Model) submit(text string) (Model, tea.Cmd) {
 	userLine := "you> " + text
 	m.lines = append(m.lines, userLine)
 	m.busy = true
@@ -315,11 +315,10 @@ func (m Model) finishTurn(printed ...string) (tea.Model, tea.Cmd) {
 	if len(m.queued) > 0 {
 		next := m.queued[0]
 		m.queued = m.queued[1:]
-		var nextModel tea.Model
-		nextModel, nextCmd = m.submit(next)
-		m = nextModel.(Model)
+		m, nextCmd = m.submit(next)
 	}
-	return m, tea.Sequence(m.printLines(printed...), nextCmd, m.refresh())
+	refresh := m.requestRefresh()
+	return m, tea.Sequence(m.printLines(printed...), nextCmd, refresh)
 }
 func receive(ctx context.Context, ch <-chan streamMsg) tea.Cmd {
 	return func() tea.Msg {
@@ -396,10 +395,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.poll {
 			return m, nil
 		}
-		return m, tea.Batch(m.refresh(), m.nextPoll())
+		refresh := m.requestRefresh()
+		return m, tea.Batch(refresh, m.nextPoll())
 	case tea.WindowSizeMsg:
-		m.width, m.height = x.Width, x.Height
+		m.width = x.Width
 	case snapshotMsg:
+		m.refreshing = false
 		if x.err != nil {
 			errLine := "error: " + x.err.Error()
 			m.lines = append(m.lines, errLine)
@@ -607,61 +608,17 @@ func (m Model) statusFooter() string {
 	}
 	return "\n" + strings.Join(out, "\n")
 }
-func runeDisplayWidth(r rune) int {
-	if r < 0x80 {
-		return 1
-	}
-	return 2
-}
-func displayWidth(s string) int {
-	w := 0
-	for _, r := range s {
-		w += runeDisplayWidth(r)
-	}
-	return w
-}
 func wrapPhysicalLines(s string, width int) []string {
-	raw := strings.Split(s, "\n")
 	if width <= 1 {
-		return raw
+		return strings.Split(s, "\n")
 	}
-	limit := width - 1
-	out := make([]string, 0, len(raw))
-	for _, line := range raw {
-		if line == "" || displayWidth(line) <= limit {
-			out = append(out, line)
-			continue
-		}
-		var b strings.Builder
-		w := 0
-		for _, r := range line {
-			rw := runeDisplayWidth(r)
-			if w > 0 && w+rw > limit {
-				out = append(out, b.String())
-				b.Reset()
-				w = 0
-			}
-			b.WriteRune(r)
-			w += rw
-		}
-		if b.Len() > 0 {
-			out = append(out, b.String())
-		}
-	}
-	return out
+	return strings.Split(runewidth.Wrap(s, width-1), "\n")
 }
 func truncateLine(s string, width int) string {
 	if width <= 0 {
 		return s
 	}
-	runes := []rune(s)
-	if len(runes) <= width {
-		return s
-	}
-	if width <= 1 {
-		return string(runes[:width])
-	}
-	return string(runes[:width-1]) + "…"
+	return runewidth.Truncate(s, width, "…")
 }
 func isTerminal(in io.Reader) bool { f, ok := in.(*os.File); return ok && term.IsTerminal(int(f.Fd())) }
 func Run(ctx context.Context, in io.Reader, out io.Writer, m Model) error {

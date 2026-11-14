@@ -344,17 +344,15 @@ func (b *StoreBackend) view(ctx context.Context) (runView, error) {
 			if err != nil {
 				return runView{}, err
 			}
-			var threadTurnCost float64
 			for j := range turns {
 				if turns[j].StartedAt.IsZero() || !turns[j].StartedAt.Before(start) {
-					threadTurnCost += turns[j].CostUSD
 					if rem := turns[j].CostUSD - turnDecisionCost[turns[j].ID]; rem > 0 {
 						v.cost += rem
 					}
 				}
 			}
-			if len(turns) == 0 && threads[i].CostUSD > threadTurnCost && (threads[i].UpdatedAt.IsZero() || !threads[i].UpdatedAt.Before(start)) {
-				v.cost += threads[i].CostUSD - threadTurnCost
+			if len(turns) == 0 && (threads[i].UpdatedAt.IsZero() || !threads[i].UpdatedAt.Before(start)) {
+				v.cost += threads[i].CostUSD
 			}
 		}
 		evs, err := b.store.Events().List(ctx, store.EventFilter{RunID: id})
@@ -454,13 +452,7 @@ func (b *StoreBackend) lanePRDesc(ctx context.Context, run *store.Run, hr adopt.
 			repo = run.Repository
 		}
 		if pr, err := b.HostProbe.PR(ctx, repo, hr.Dir, strconv.Itoa(l.PR)); err == nil && pr.State != "" {
-			state = strings.ToLower(pr.State)
-			if pr.Draft && strings.EqualFold(pr.State, "OPEN") {
-				state = "open draft"
-			}
-			if pr.Checks != "" {
-				state += ", " + pr.Checks
-			}
+			state = pr.String()
 		}
 	}
 	if state == "" {

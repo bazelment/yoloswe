@@ -291,7 +291,7 @@ func TestHeldRunStatusLineShowsLiveLanePhasePRAndCost(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("status lines = %d (%q), want 2 lines", len(lines), s.Status)
 	}
-	wantLine1 := "adopted: 20261114-trial-m1 | m2-default integrate r2 PR #5705 (open, 3 passed, 1 pending) 12m"
+	wantLine1 := "adopted: 20261114-trial-m1 | m2-default integrate r2 PR #5705 (open, checks: 3 passed, 1 pending) 12m"
 	wantLine2 := "lanes: 9 (done:7, failed:1, running:1; integrate:1) | open questions: 0 | cost today: $0.60"
 	if lines[0] != wantLine1 {
 		t.Fatalf("status line 1 = %q, want %q", lines[0], wantLine1)
