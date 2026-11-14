@@ -347,30 +347,36 @@ func (b *StoreBackend) splitAdopted(adopted []string) (live, dead []string) {
 	return live, dead
 }
 
-// target selects the held run an owner instruction addresses. The caller holds b.mu.
-func (b *StoreBackend) target(ctx context.Context, handler router.Handler, text string) (runID, refusal string, err error) {
-	frontDesk := b.frontDesk()
+// liveHeld returns the non-front-desk attached run and live adopted runs, plus
+// any adopted runs without a live controller. The caller holds b.mu.
+func (b *StoreBackend) liveHeld(ctx context.Context) (runs, dead []string, err error) {
 	held, err := b.heldRuns(ctx)
 	if err != nil {
-		return "", "", err
+		return nil, nil, err
 	}
 	// Journal ownership can outlive the process that owns the controller. Do
 	// not acknowledge an instruction unless an adopted controller is live.
-	adopted, dead := b.splitAdopted(held[1:])
+	runs, dead = b.splitAdopted(held[1:])
+	if !b.frontDesk() {
+		runs = append([]string{b.runID}, runs...)
+	}
+	return runs, dead, nil
+}
+
+func errNoLiveController(id string) error {
+	return fmt.Errorf("adopted run %s has no live controller; name it after it is active", id)
+}
+
+// target selects the held run an owner instruction addresses. The caller holds b.mu.
+func (b *StoreBackend) target(ctx context.Context, text string) (runID, refusal string, err error) {
+	runs, dead, err := b.liveHeld(ctx)
+	if err != nil {
+		return "", "", err
+	}
 	for _, id := range dead {
 		if Mentions(text, id) {
-			return "", "", fmt.Errorf("adopted run %s has no live controller; name it after it is active", id)
+			return "", "", errNoLiveController(id)
 		}
-	}
-	runs := adopted
-	if !frontDesk {
-		runs = append([]string{b.runID}, adopted...)
-	}
-	if handler == router.Planner && !frontDesk {
-		if named := named(runs, text); len(named) == 1 {
-			return named[0], "", nil
-		}
-		return b.runID, "", nil
 	}
 	switch len(runs) {
 	case 0:
@@ -407,7 +413,7 @@ func (b *StoreBackend) target(ctx context.Context, handler router.Handler, text 
 	if len(asking) == 1 {
 		return asking[0], "", nil
 	}
-	if frontDesk {
+	if b.frontDesk() {
 		return "", fmt.Sprintf("Not queued: this chat holds runs %s; name the run in the instruction, then send it again: %s", strings.Join(runs, ", "), text), nil
 	}
 	if len(runs) == 2 {
@@ -432,24 +438,19 @@ func (b *StoreBackend) OwnerRun(ctx context.Context, run, text string) (string, 
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if run = strings.TrimSpace(run); run != "" {
-		held, err := b.heldRuns(ctx)
+		runs, dead, err := b.liveHeld(ctx)
 		if err != nil {
 			return "", err
 		}
-		adopted, dead := b.splitAdopted(held[1:])
 		if slices.Contains(dead, run) {
-			return "", fmt.Errorf("adopted run %s has no live controller; name it after it is active", run)
-		}
-		runs := adopted
-		if !b.frontDesk() {
-			runs = append([]string{b.runID}, adopted...)
+			return "", errNoLiveController(run)
 		}
 		if !slices.Contains(runs, run) {
 			return "", fmt.Errorf("run %s is not held by this chat (held: %s); /adopt or /runs it first", run, cmp.Or(strings.Join(runs, ", "), "none"))
 		}
 		return run, nil
 	}
-	target, refusal, err := b.target(ctx, router.Dispatcher, text)
+	target, refusal, err := b.target(ctx, text)
 	switch {
 	case err != nil:
 		return "", err
@@ -543,7 +544,7 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	runID, ack, err := b.target(ctx, d.Handler, text)
+	runID, ack, err := b.target(ctx, text)
 	switch {
 	case err != nil || ack != "":
 	case runID == "":

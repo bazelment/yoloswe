@@ -256,16 +256,22 @@ func TestFrontDeskInstructionGoesToHeldAdoptedRun(t *testing.T) {
 	}
 }
 
-// Planner instructions follow an explicitly named held run.
+// Planner instructions follow an explicitly named held run or the single live run.
 func TestPlannerInstructionNamingAdoptedRunGoesThere(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct{ text, want string }{
-		{"for run " + adoptedRun + ": drop the docs task", adoptedRun},
-		{"drop the docs task", chatRun},
+	for _, tc := range []struct {
+		text, want    string
+		ownController bool
+	}{
+		{"for run " + adoptedRun + ": drop the docs task", adoptedRun, true},
+		{"drop the docs task", chatRun, true},
+		{"drop the docs task", adoptedRun, false},
 	} {
 		f := newAdoptedFixture(t, nil)
-		if _, err := f.store.Runs().AcquireLease(t.Context(), chatRun, "orca-run", time.Hour); err != nil {
-			t.Fatal(err)
+		if tc.ownController {
+			if _, err := f.store.Runs().AcquireLease(t.Context(), chatRun, "orca-run", time.Hour); err != nil {
+				t.Fatal(err)
+			}
 		}
 		if err := f.backend.Dispatch(t.Context(), router.Decision{Handler: router.Planner}, tc.text, nil); err != nil {
 			t.Fatal(err)
@@ -276,7 +282,7 @@ func TestPlannerInstructionNamingAdoptedRunGoesThere(t *testing.T) {
 				t.Fatal(err)
 			}
 			if want := run == tc.want; (len(dirs) == 1 && dirs[0].Text == tc.text) != want || len(dirs) > 1 {
-				t.Fatalf("%q: plan imports on %s = %+v, want on %s only", tc.text, run, dirs, tc.want)
+				t.Fatalf("%q (ownController=%t): plan imports on %s = %+v, want on %s only", tc.text, tc.ownController, run, dirs, tc.want)
 			}
 		}
 	}
@@ -294,8 +300,8 @@ func TestOwnerRunPicksTheRunAnInstructionIsAbout(t *testing.T) {
 	t.Parallel()
 	const second = "20261113-054825-other"
 	for _, tc := range []struct {
-		name, run, text, want, err string
-		held, stop                 []string
+		name, run, text, want, err, unattached string
+		held, stop, listed                     []string
 	}{
 		{name: "tool names a held run", run: second, text: "hold", want: second, held: []string{adoptedRun, second}},
 		{name: "text names a held run", text: "for run " + second + ": hold", want: second, held: []string{adoptedRun, second}},
@@ -306,6 +312,9 @@ func TestOwnerRunPicksTheRunAnInstructionIsAbout(t *testing.T) {
 		{name: "text names inactive adopted run while another is live", text: "for run " + second + ": hold", err: "adopted run " + second + " has no live controller", held: []string{adoptedRun, second}, stop: []string{second}},
 		{name: "no live controller at front desk", text: "hold", err: "no controller is running for this chat", held: []string{adoptedRun}, stop: []string{adoptedRun}},
 		{name: "several held runs, none named", text: "hold", err: "name the run", held: []string{adoptedRun, second}},
+		{name: "frontDeskTarget single live run in store", text: "hold", want: "run-live", held: []string{adoptedRun}, stop: []string{adoptedRun}, listed: []string{"run-live"}},
+		{name: "frontDeskTarget named live run in store", text: "for run-b: hold", want: "run-b", held: []string{adoptedRun}, stop: []string{adoptedRun}, listed: []string{"run-a", "run-b"}},
+		{name: "frontDeskTarget live run outside attached store", text: "hold", err: "run run-external is not held by this chat; /runs run-external first", held: []string{adoptedRun}, stop: []string{adoptedRun}, unattached: "run-external"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -315,6 +324,26 @@ func TestOwnerRunPicksTheRunAnInstructionIsAbout(t *testing.T) {
 				if err := f.ctrls.Stop(t.Context(), adopt.Run{ID: id, Dir: filepath.Join(f.root, ".shared", "subagent-swarm", id)}); err != nil {
 					t.Fatal(err)
 				}
+			}
+			var offered []store.Run
+			for _, id := range tc.listed {
+				if err := f.store.Runs().Create(t.Context(), store.Run{ID: id}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.store.Runs().AcquireLease(t.Context(), id, "orca-run", time.Hour); err != nil {
+					t.Fatal(err)
+				}
+				r, err := f.store.Runs().Get(t.Context(), id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				offered = append(offered, *r)
+			}
+			if tc.unattached != "" {
+				offered = append(offered, store.Run{ID: tc.unattached, Lease: &store.Lease{HolderID: "orca-run", ExpiresAt: f.clock.Now().Add(time.Hour)}})
+			}
+			if len(offered) > 0 {
+				f.backend.ListRuns = func(context.Context) ([]store.Run, error) { return offered, nil }
 			}
 			got, err := f.backend.OwnerRun(t.Context(), tc.run, tc.text)
 			if tc.err != "" {
