@@ -272,7 +272,17 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		}
 		workflow.Transitions = append(workflow.Transitions, recipe.Transition{From: ph.Name, To: to, On: recipe.Condition{Verdict: recipe.OutcomeDone, CIGreen: to == recipe.PhaseIntegrate && workflow.MergePolicy.RequireCIGreen}})
 		if ph.Name == recipe.PhaseReview || ph.Name == recipe.PhaseIntegrate {
-			workflow.Transitions = append(workflow.Transitions, recipe.Transition{From: ph.Name, To: recipe.PhaseSWE, On: recipe.Condition{Verdict: recipe.OutcomeNeedsSWE}, AdvanceRound: true})
+			rework := recipe.Condition{Verdict: recipe.OutcomeNeedsSWE}
+			if ph.Name == recipe.PhaseReview {
+				// Keep adopted runs on the same review -> SWE round budget as
+				// lanes spawned by orca. The ledger's imported round is the
+				// current round and must be used by this condition.
+				rework.MaxRound = 2
+			}
+			workflow.Transitions = append(workflow.Transitions, recipe.Transition{From: ph.Name, To: recipe.PhaseSWE, On: rework, AdvanceRound: true})
+			if ph.Name == recipe.PhaseReview {
+				workflow.Transitions = append(workflow.Transitions, recipe.Transition{From: ph.Name, To: recipe.TargetEscalate, On: recipe.Condition{Verdict: recipe.OutcomeNeedsSWE, MinRound: 3}})
+			}
 		}
 		if ph.Name == recipe.PhaseIntegrate {
 			ph.BriefTemplate += fmt.Sprintf("\nRun merge policy: mode=%s; target=%s; script=%s; require_review_pass=%t; require_ci_green=%t. %s", workflow.MergePolicy.Mode, workflow.MergePolicy.TargetBranch, workflow.MergePolicy.Script, workflow.MergePolicy.RequireReviewPass, workflow.MergePolicy.RequireCIGreen, st.Config.MergeRule)
@@ -336,10 +346,11 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 func hostMission(dir, id, brief string) (string, error) {
 	paths := []string{filepath.Join(dir, "missions", id+".md"), filepath.Join(dir, "briefs", id+".mission.md")}
 	if brief != "" {
-		if !filepath.IsAbs(brief) {
-			brief = filepath.Join(dir, brief)
+		resolved, err := resolveBriefPath(dir, brief)
+		if err != nil {
+			return "", err
 		}
-		paths = append(paths, brief)
+		paths = append(paths, resolved)
 	}
 	for _, path := range paths {
 		b, err := os.ReadFile(path)
@@ -351,6 +362,37 @@ func hostMission(dir, id, brief string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// resolveBriefPath permits imported task briefs only when their lexical and
+// resolved paths remain inside the host run directory. Ledger data is
+// untrusted: an absolute path or traversal must never become model context.
+func resolveBriefPath(dir, brief string) (string, error) {
+	if filepath.IsAbs(brief) {
+		return "", fmt.Errorf("brief path %q must be inside the run directory", brief)
+	}
+	clean := filepath.Clean(brief)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("brief path %q escapes the run directory", brief)
+	}
+	base, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve run directory for brief path %q: %w", brief, err)
+	}
+	candidate := filepath.Join(base, clean)
+	if resolved, err := filepath.EvalSymlinks(candidate); err == nil {
+		resolvedBase, baseErr := filepath.EvalSymlinks(base)
+		if baseErr != nil {
+			return "", fmt.Errorf("resolve run directory for brief path %q: %w", brief, baseErr)
+		}
+		rel, relErr := filepath.Rel(resolvedBase, resolved)
+		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("brief path %q escapes the run directory", brief)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("resolve brief path %q: %w", brief, err)
+	}
+	return candidate, nil
 }
 
 type hostAgent struct {

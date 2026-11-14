@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bazelment/yoloswe/orca/recipe"
 )
 
 const testRun = "20261113-000000-host"
@@ -336,6 +338,49 @@ func TestImportsCurrentRoundOfTwoLaneRun(t *testing.T) {
 	}
 	if !reflect.DeepEqual(r.Lanes, want) {
 		t.Fatalf("lanes:\n got %+v\nwant %+v", r.Lanes, want)
+	}
+}
+
+func TestControllerStateRejectsBriefOutsideRunDirectory(t *testing.T) {
+	t.Parallel()
+	for _, brief := range []string{"../outside.md", "/tmp/outside.md"} {
+		t.Run(brief, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "outside.md"), []byte("secret"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{"config":{"goal":"g"},"tasks":[{"id":"a","title":"A","phase":"swe","status":"running","brief":%q}]}`, brief))
+			r, err := Read(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, _, err = controllerState(r)
+			if err == nil || !strings.Contains(err.Error(), "brief path") || !strings.Contains(err.Error(), "run directory") {
+				t.Fatalf("controllerState error = %v, want a clear run-directory brief-path error", err)
+			}
+		})
+	}
+}
+
+func TestAdoptedReviewRoundCapMatchesDefault(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"g","phases":[{"name":"swe"},{"name":"review"}]},"tasks":[{"id":"a","title":"A","phase":"review","status":"running","round":3}]}`)
+	r, err := Read(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow, lanes, _, err := controllerState(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lanes) != 1 || lanes[0].Round != 3 {
+		t.Fatalf("imported lanes = %+v, want review round 3", lanes)
+	}
+	mechanical, judgment := workflow.MatchTransitions(recipe.PhaseReview, recipe.OutcomeNeedsSWE, false, lanes[0].Round)
+	if mechanical == nil || mechanical.To != recipe.TargetEscalate || len(judgment) != 0 {
+		t.Fatalf("review round 3 needs-swe transition = mechanical=%+v judgment=%+v, want escalation", mechanical, judgment)
 	}
 }
 
