@@ -1440,7 +1440,7 @@ func (c *Controller) stopStaleRecordedTerminals(ctx context.Context, ln *lane.La
 		}); err == nil {
 			c.stoppedTerminals[termID] = true
 			delete(c.staleStopFailures, stopKey)
-			_, _, _ = c.recordDecision(ctx, ToolPhaseRetry+".intent", ln.ID,
+			_, _, _ = c.recordDecision(ctx, ToolPhaseRetry+".stop", ln.ID,
 				"stopped stale previous-phase terminal", "stopped terminal",
 				DecisionArgs{ActionKey: "stale-stopped:" + stopKey, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: max(ln.Attempt, 1), SessionID: sessID, TerminalID: termID, StoppedTerminals: []string{termID}})
 		} else {

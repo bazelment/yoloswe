@@ -2717,6 +2717,17 @@ func TestControllerNewPhaseStopsPreviousTerminalAndRefusesInput(t *testing.T) {
 		t.Fatalf("Steer to previous phase terminal %s = %v, want ErrStaleTerminal", sweTerm, err)
 	}
 
+	// Verify that a newly constructed controller recovers StoppedTerminals from the decision store
+	// and does not issue duplicate Stop calls for already-stopped previous-phase terminals.
+	stopsBeforeRestart := len(drv.Stops)
+	ctrlRestarted := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+	if err := ctrlRestarted.Step(ctx); err != nil {
+		t.Fatalf("ctrlRestarted.Step: %v", err)
+	}
+	if len(drv.Stops) != stopsBeforeRestart {
+		t.Fatalf("restarted controller issued duplicate Stop calls: got %d, want %d", len(drv.Stops), stopsBeforeRestart)
+	}
+
 	// Verify that if stopping a previous-phase terminal fails during phase launch,
 	// stopStaleRecordedTerminals retries on subsequent steps even after the new phase
 	// has launched, and caps retries at 3 total attempts without retryStops resetting the cap.
