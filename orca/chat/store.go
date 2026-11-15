@@ -418,7 +418,6 @@ type runView struct {
 	liveLanes []string
 	asks      []openAsk
 	cost      float64
-	costLimit float64
 	costState CostGuardState
 	bgActive  bool
 	bgRole    string
@@ -559,24 +558,14 @@ func (b *StoreBackend) view(ctx context.Context, includeLive bool) (runView, []l
 			return runView{}, nil, err
 		}
 		v.cost += evCost
-		b.cacheMu.Lock()
-		if b.pendingOutcomeRuns[id] {
-			v.bgActive = true
-			v.bgRole = cmp.Or(v.bgRole, "dispatcher")
-		}
-		b.cacheMu.Unlock()
 		if settings, sErr := b.store.Runs().GetSettings(ctx, id); sErr == nil {
 			if !settings.CostGuardDisabled && settings.MaxCostPerHourUSD > 0 {
-				if v.costLimit == 0 || settings.MaxCostPerHourUSD < v.costLimit {
-					v.costLimit = settings.MaxCostPerHourUSD
+				hourly, hErr := store.HourlyRunCostUSD(ctx, b.store, id, now)
+				if hErr != nil {
+					return runView{}, nil, hErr
 				}
-				hourly, _ := store.HourlyRunCostUSD(ctx, b.store, id, now)
-				checkCost := max(hourly, v.cost)
-				switch {
-				case checkCost >= settings.MaxCostPerHourUSD:
-					v.costState = CostStateOverLimit
-				case checkCost >= 0.8*settings.MaxCostPerHourUSD && v.costState < CostStateNearLimit:
-					v.costState = CostStateNearLimit
+				if st := ClassifyCostGuard(hourly, settings.MaxCostPerHourUSD); st > v.costState {
+					v.costState = st
 				}
 			}
 			if settings.Paused {
@@ -862,7 +851,6 @@ func (v *runView) snapshot(questions []string) Snapshot {
 		BackgroundActive: v.bgActive,
 		BackgroundRole:   v.bgRole,
 		CostState:        v.costState,
-		CostLimitUSD:     v.costLimit,
 	}
 }
 
@@ -1371,6 +1359,28 @@ func (b *StoreBackend) seedSeenDispatcherRun(ctx context.Context, st store.Store
 	}
 }
 
+func (b *StoreBackend) hasRunningDispatcher(ctx context.Context, st store.Store, runID string) bool {
+	threads, err := st.Threads().ListThreads(ctx, store.ThreadFilter{RunID: runID, Role: store.ThreadRoleDispatcher})
+	if err != nil {
+		return false
+	}
+	for i := range threads {
+		if threads[i].Status == store.ThreadStatusRunning {
+			return true
+		}
+		turns, tErr := st.Threads().ListTurns(ctx, threads[i].ID)
+		if tErr != nil {
+			continue
+		}
+		for j := range turns {
+			if turns[j].Status == store.TurnStatusRunning {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st store.Store, held []string, asks []openAsk) []string {
 	b.cacheMu.Lock()
 	var runs []string
@@ -1383,12 +1393,12 @@ func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st 
 	var out []string
 	for _, runID := range runs {
 		res := b.collectDispatcherOutcomes(ctx, st, []string{runID}, true)
-		if len(res) > 0 {
+		if len(res) > 0 || !b.hasRunningDispatcher(ctx, st, runID) {
 			b.cacheMu.Lock()
 			delete(b.pendingOutcomeRuns, runID)
 			b.cacheMu.Unlock()
-			out = append(out, res...)
 		}
+		out = append(out, res...)
 	}
 	for _, runID := range held {
 		if slices.Contains(runs, runID) {
@@ -1400,6 +1410,9 @@ func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st 
 	}
 	for i := range asks {
 		a := &asks[i]
+		if strings.HasPrefix(a.ask.ID, "cost-guard-") {
+			continue
+		}
 		id := cmp.Or(a.ask.ID, a.ask.Question)
 		if id == "" {
 			continue

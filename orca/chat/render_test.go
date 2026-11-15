@@ -912,7 +912,7 @@ func TestFooterColoredSegmentsOpenPRFailingCheckAndCostGuard(t *testing.T) {
 		SpinnerFrame:     1,
 		BackgroundActive: true,
 		BackgroundRole:   "dispatcher",
-		CostLimitUSD:     5.00, // $4.50 is 90% -> near limit (amber/yellow)
+		CostState:        ClassifyCostGuard(4.50, 5.00), // $4.50/hr is 90% of $5.00/hr -> near limit (amber/yellow)
 	}, 240, true)
 	if len(lines) != 2 {
 		t.Fatalf("FormatStatusFooter lines = %d, want 2", len(lines))
@@ -942,10 +942,20 @@ func TestFooterColoredSegmentsOpenPRFailingCheckAndCostGuard(t *testing.T) {
 		}
 	}
 
-	// Over-limit cost renders bold red with 🛑; open questions: 0 renders dimmed.
+	// Normal cost renders green; over-limit cost renders bold red with 🛑; open questions: 0 renders dimmed.
+	normalLines := FormatStatusFooter(
+		"adopted: 20261114-trial-m1\nlanes: 1 (running:1; swe:1) | open questions: 0 | cost today: $1.20",
+		FooterOptions{CostState: CostStateNormal},
+		120,
+		true,
+	)
+	if normalJoined := strings.Join(normalLines, "\n"); !strings.Contains(normalJoined, "\x1b[32mcost today: $1.20\x1b[39m") {
+		t.Fatalf("normal cost not colored green:\n%q", normalJoined)
+	}
+
 	overLines := FormatStatusFooter(
 		"adopted: 20261114-trial-m1\nlanes: 1 (running:1; swe:1) | open questions: 0 | cost today: $6.10",
-		FooterOptions{CostLimitUSD: 5.00},
+		FooterOptions{CostState: ClassifyCostGuard(6.10, 5.00)},
 		120,
 		true,
 	)
@@ -967,21 +977,31 @@ func TestNoColorAndPipedOutputProducePlainText(t *testing.T) {
 	}))
 	m.width = 120
 	m.status = status
+	m.busy = true
+	m.turnHandler = "concierge"
+	m.turnStep = "thinking"
 	m.bgActive = true
 	m.bgRole = "dispatcher"
 	m.costState = CostStateOverLimit
 
-	footer := m.statusFooter()
-	if strings.Contains(footer, "\x1b[") {
-		t.Fatalf("NO_COLOR footer contains ANSI escapes: %q", footer)
+	if m.needsSpinner() {
+		t.Fatal("needsSpinner() = true under NO_COLOR, want false")
+	}
+	if cmd := m.ensureSpinner(); cmd != nil {
+		t.Fatal("ensureSpinner() returned non-nil cmd under NO_COLOR")
+	}
+	viewContent := m.View().Content
+	if strings.Contains(viewContent, "\x1b[") {
+		t.Fatalf("NO_COLOR View() contains ANSI escapes: %q", viewContent)
 	}
 	for _, emoji := range []string{"🐋", "🔨", "🧹", "🔍", "🚀", "❓", "🔶", "🛑", "⠋", "⠙", "⚡", "💬", "🧭"} {
-		if strings.Contains(footer, emoji) {
-			t.Fatalf("NO_COLOR footer contains emoji/spinner glyph %q: %q", emoji, footer)
+		if strings.Contains(viewContent, emoji) {
+			t.Fatalf("NO_COLOR View() contains emoji/spinner glyph %q: %q", emoji, viewContent)
 		}
 	}
+	m.busy = false
 
-	// Verify interactive Model under NO_COLOR emits no spinner ticks, no ANSI, and no emoji.
+	// Verify piped Run under NO_COLOR emits no spinner ticks, no ANSI, and no emoji.
 	m.Dispatch = func(turnCtx context.Context, _ router.Decision, _ string, emit func(string)) error {
 		EmitToolCall(turnCtx, "status", []byte(`{"run_id":"20261114-trial-m1"}`), "front-desk")
 		emit("**Status:** `m5-finish` is green.")
@@ -1182,7 +1202,9 @@ func TestBackgroundEventsPrintedAboveInputColored(t *testing.T) {
 	tm.Type("drafting reply")
 	waitScreen("> drafting reply")
 
-	// Emit the 4 notable background events: lane advanced, PR merged, lane question, cost guard pause.
+	// Emit the 4 notable background events: lane advanced (mentioning integrate),
+	// PR merged (mentioning failed check retry), lane question (mentioning review),
+	// and an end-to-end EnforceCostGuard pause (writing both decision and owner_ask directive).
 	if _, err := st.Decisions().Append(ctx, store.Decision{
 		RunID: "run-1", LaneID: "m5-finish", Actor: "controller", Category: store.DecisionAuto,
 		Tool: controller.ToolPhaseAdvance, Result: "advanced m5-finish from review to integrate",
@@ -1191,25 +1213,28 @@ func TestBackgroundEventsPrintedAboveInputColored(t *testing.T) {
 	}
 	if _, err := st.Decisions().Append(ctx, store.Decision{
 		RunID: "run-1", LaneID: "m5-finish", Actor: "controller", Category: store.DecisionAuto,
-		Tool: controller.ToolLaneComplete, Reason: "PR #5899 is MERGED on GitHub", Result: "lane done (pr merged)",
+		Tool: controller.ToolLaneComplete, Reason: "PR #5899 merged after failed check retry", Result: "lane done (pr merged)",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Directives().Add(ctx, store.Directive{
 		ID: "ask-bg-1", RunID: "run-1", Ref: "owner_ask:q-bg-1", Scope: "m5-finish",
-		Text: `{"id":"q-bg-1","LaneID":"m5-finish","question":"Cut release tag now?"}`,
+		Text: `{"id":"q-bg-1","LaneID":"m5-finish","question":"Cut release tag after review?"}`,
 		Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Status: store.DirectiveActive,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Decisions().Append(ctx, store.Decision{
-		RunID: "run-1", Actor: "controller", Category: store.DecisionAuto,
-		Tool: "cost.guard", Result: "paused run: hourly spend $6.20 exceeds $5.00",
+		RunID: "run-1", Actor: "dispatcher", Category: store.DecisionJudgment,
+		Tool: "lane.spawn", CostUSD: 6.20, CreatedAt: clk.Now(),
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if paused, _, _, _, err := store.EnforceCostGuard(ctx, st, "run-1", clk.Now(), 5.00); err != nil || !paused {
+		t.Fatalf("EnforceCostGuard = (%v, %v), want (true, nil)", paused, err)
+	}
 
-	waitScreen("cost guard: paused run: hourly spend $6.20 exceeds $5.00")
+	waitScreen("Cost guard paused turns for run run-1: spent $6.20 in the last hour (limit $5.00/hr).")
 	finish(t, tm)
 
 	screen := strings.Join(vt.nonEmptyLines(), "\n")
@@ -1218,15 +1243,29 @@ func TestBackgroundEventsPrintedAboveInputColored(t *testing.T) {
 		t.Fatalf("half-typed input lost after background events:\n%s", screen)
 	}
 	for _, wantAbove := range []string{
-		"🚀 lane advanced: advanced m5-finish from review to integrate",
-		"🎉 PR merged (m5-finish): PR #5899 is MERGED on GitHub",
-		"❓ lane question (m5-finish): Cut release tag now?",
-		"🛑 cost guard: paused run: hourly spend $6.20 exceeds $5.00",
+		"🔄 lane advanced: advanced m5-finish from review to integrate",
+		"🎉 PR merged (m5-finish): PR #5899 merged after failed check retry",
+		"❓ lane question (m5-finish): Cut release tag after review?",
+		"🛑 Cost guard paused turns for run run-1: spent $6.20 in the last hour (limit $5.00/hr).",
 	} {
 		idx := strings.Index(screen, wantAbove)
 		if idx < 0 || idx > promptIdx {
 			t.Fatalf("background event %q missing or not printed above input prompt:\n%s", wantAbove, screen)
 		}
+	}
+	if strings.Contains(screen, "lane question (run-1): Cost guard paused") {
+		t.Fatalf("cost-guard owner_ask directive was reported twice as a lane question:\n%s", screen)
+	}
+
+	// Verify long background outcomes wrap across physical lines at 60 cols without ellipsis truncation.
+	longOutcome := "dispatcher failed: failed to launch lane m5-finish in worktree because git rebase reported conflicting changes on render.go"
+	wrappedRows := FormatBackgroundEvent(longOutcome, 60, true)
+	if len(wrappedRows) < 2 {
+		t.Fatalf("expected long background event to wrap at 60 cols, got %d lines: %v", len(wrappedRows), wrappedRows)
+	}
+	joinedPlain := strings.Join(strings.Fields(SanitizeText(strings.Join(wrappedRows, " "))), " ")
+	if strings.Contains(joinedPlain, "…") || !strings.Contains(joinedPlain, "conflicting changes on render.go") {
+		t.Fatalf("60-col wrapped background event truncated text: %q", joinedPlain)
 	}
 }
 
@@ -1243,10 +1282,42 @@ func TestStoreBackendSnapshotBackgroundActivityAndCostGuardState(t *testing.T) {
 	if err := st.Runs().UpdateSettings(ctx, "run-cg", store.RunSettings{MaxCostPerHourUSD: 5.00}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.Runs().AcquireLease(ctx, "run-cg", "controller", 24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
 	b := NewStoreBackend(st, "run-cg")
 	b.Now = clk.Now
 
-	// Start a running dispatcher turn ($0 so far).
+	// Spend $6.00 two hours ago (still same UTC day, so daily v.cost = $6.00 > $5.00/hr limit,
+	// while trailing-hour spend is $0.00 -> CostState must stay CostStateNormal).
+	if _, err := st.Decisions().Append(ctx, store.Decision{
+		RunID: "run-cg", Actor: "dispatcher", Category: store.DecisionJudgment,
+		Tool: "lane.spawn", CostUSD: 6.00, CreatedAt: clk.Now().Add(-2 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapDailyOnly, err := b.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapDailyOnly.CostState != CostStateNormal {
+		t.Fatalf("snapDailyOnly.CostState = %v, want CostStateNormal when daily spend ($6.00) exceeds hourly limit ($5.00/hr) but trailing-hour spend is $0", snapDailyOnly.CostState)
+	}
+
+	// Queue a dispatcher instruction that yields no immediate outcome line while no thread is running:
+	// BackgroundActive must remain false (not stuck spinning on pendingOutcomeRuns).
+	if err := b.Dispatch(ctx, router.Decision{Handler: router.Dispatcher}, "check lanes", func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	snapQueuedIdle, err := b.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapQueuedIdle.BackgroundActive {
+		t.Fatalf("snapQueuedIdle.BackgroundActive = true when no dispatcher thread/turn is running")
+	}
+
+	// Start a running dispatcher turn ($0 in the trailing hour so far).
 	th, err := st.Threads().StartThread(ctx, store.Thread{
 		ID: "dispatcher-run-cg", RunID: "run-cg", Role: store.ThreadRoleDispatcher, Status: store.ThreadStatusRunning,
 	})
@@ -1254,7 +1325,7 @@ func TestStoreBackendSnapshotBackgroundActivityAndCostGuardState(t *testing.T) {
 		t.Fatal(err)
 	}
 	turn, err := st.Threads().StartTurn(ctx, store.Turn{
-		ID: "turn-bg-1", ThreadID: th.ID, RunID: "run-cg", Input: "batch",
+		ID: "turn-bg-1", ThreadID: th.ID, RunID: "run-cg", Input: "batch", StartedAt: clk.Now(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1268,7 +1339,7 @@ func TestStoreBackendSnapshotBackgroundActivityAndCostGuardState(t *testing.T) {
 		t.Fatalf("snap1 = %+v, want BackgroundActive=true role=dispatcher CostState=Normal", snap1)
 	}
 
-	// Complete the turn with $4.25 (85% of $5.00 limit -> CostStateNearLimit).
+	// Complete the turn with $4.25 (85% of $5.00/hr limit -> CostStateNearLimit).
 	if err := st.Threads().CompleteTurn(ctx, th.ID, turn.ID, store.TurnStatusCompleted, model.Usage{CostUSD: 4.25}, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -1284,9 +1355,9 @@ func TestStoreBackendSnapshotBackgroundActivityAndCostGuardState(t *testing.T) {
 		t.Fatalf("snap2 = %+v, want BackgroundActive=false CostState=CostStateNearLimit", snap2)
 	}
 
-	// Add $1.20 decision cost ($5.45 total -> CostStateOverLimit).
+	// Add $1.20 decision cost in the current hour ($5.45/hr -> CostStateOverLimit).
 	if _, err := st.Decisions().Append(ctx, store.Decision{
-		RunID: "run-cg", Actor: "dispatcher", Category: store.DecisionJudgment,
+		RunID: "run-cg", TurnID: "turn-bg-2", Actor: "dispatcher", Category: store.DecisionJudgment,
 		Tool: "lane.spawn", CostUSD: 1.20, CreatedAt: clk.Now(),
 	}); err != nil {
 		t.Fatal(err)
@@ -1316,24 +1387,23 @@ func TestAutoSpinnerTicksAdvanceFramesDuringSlowTurn(t *testing.T) {
 	}
 
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
-	var captured strings.Builder
-	waitRaw := func(substr string) {
+	var rawAll strings.Builder
+	waitScreen := func(substr string) {
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-			if strings.Contains(string(p), substr) {
-				captured.Write(p)
-				return true
-			}
-			return false
+			rawAll.Write(p)
+			probe := newFakeTerminal(80, 24)
+			probe.write(rawAll.String())
+			return strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr)
 		}, teatest.WithDuration(5*time.Second))
 	}
 
-	waitRaw("orca chat — run front-desk")
+	waitScreen("orca chat — run front-desk")
 	submit(tm, "replan m5")
-	waitRaw("⠋ 🧭 planner")
-	waitRaw("⠙ 🧭 planner")
-	waitRaw("⠹ 🧭 planner")
+	waitScreen("⠋ 🧭 planner")
+	waitScreen("⠙ 🧭 planner")
+	waitScreen("⠹ 🧭 planner")
 	close(release)
-	waitRaw("orca> Plan updated.")
+	waitScreen("orca> Plan updated.")
 	finish(t, tm)
 }

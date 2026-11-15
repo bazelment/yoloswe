@@ -183,7 +183,6 @@ func FormatUserLine(text string, width int, tty bool) []string {
 type FooterOptions struct {
 	BackgroundRole   string
 	SpinnerFrame     int
-	CostLimitUSD     float64
 	BackgroundActive bool
 	CostState        CostGuardState
 }
@@ -204,53 +203,67 @@ func phaseEmoji(phase string) (emoji string, style spanStyle) {
 	}
 }
 
+func classifyBackgroundEvent(clean string) (emoji string, style spanStyle) {
+	lower := strings.ToLower(clean)
+	switch {
+	case strings.HasPrefix(lower, "cost guard") || strings.Contains(lower, "cost.guard") || strings.Contains(lower, "paused by cost"):
+		return "🛑", styleRed | styleBold
+	case strings.HasPrefix(lower, "pr merged"):
+		return "🎉", styleMagenta | styleBold
+	case strings.HasPrefix(lower, "lane question"):
+		return "❓", styleYellow | styleBold
+	case (strings.HasPrefix(lower, "lane ") || strings.HasPrefix(lower, "lane advanced:")) && (strings.Contains(lower, " advanced:") || strings.Contains(lower, " completed:")):
+		return "🔄", styleCyan
+	case strings.HasPrefix(lower, "dispatcher failed:"):
+		return "✗", styleRed
+	case strings.HasPrefix(lower, "dispatcher:"):
+		return "⚡", styleYellow
+	case strings.Contains(lower, "merged"):
+		return "🎉", styleMagenta | styleBold
+	case strings.Contains(lower, "question") || strings.Contains(lower, "escalat") || strings.Contains(lower, "owner_ask") || strings.Contains(lower, "ask:"):
+		return "❓", styleYellow | styleBold
+	case strings.Contains(lower, "advance") || strings.Contains(lower, "phase.") || strings.Contains(lower, "lane.") || strings.Contains(lower, "rework"):
+		return "🔄", styleCyan
+	case strings.Contains(lower, "failed"):
+		return "✗", styleRed
+	default:
+		return "•", styleCyan
+	}
+}
+
 // FormatBackgroundEvent renders a notable background event (lane advanced, PR
-// merged, lane question, cost guard pause) as one colored line on a TTY or
-// plain text when piped/NO_COLOR.
+// merged, lane question, cost guard pause) as colored line(s) on a TTY or
+// plain text when piped/NO_COLOR, wrapping across physical lines at narrow widths.
 func FormatBackgroundEvent(line string, width int, tty bool) []string {
 	clean := strings.TrimSpace(sanitizeInline(line))
 	if clean == "" {
 		return nil
 	}
 	if !tty {
-		if width > 0 {
-			return []string{truncateLine(clean, width)}
+		return wrapPhysicalLines(clean, width)
+	}
+	emoji, style := classifyBackgroundEvent(clean)
+	prefix := "  " + emoji + " "
+	prefixWidth := runewidth.StringWidth(prefix)
+	bodyWidth := 0
+	if width > 0 {
+		total := effectiveWidth(width)
+		bodyWidth = max(total-prefixWidth, 10)
+		if total < prefixWidth+4 {
+			bodyWidth = max(total, 1)
 		}
-		return []string{clean}
 	}
-	lower := strings.ToLower(clean)
-	emoji := "•"
-	style := styleCyan
-	switch {
-	case strings.Contains(lower, "cost guard") || strings.Contains(lower, "cost.guard") || strings.Contains(lower, "paused by cost"):
-		emoji = "🛑"
-		style = styleRed | styleBold
-	case strings.HasPrefix(lower, "dispatcher failed:") || strings.Contains(lower, "failed"):
-		emoji = "✗"
-		style = styleRed
-	case strings.Contains(lower, "merged"):
-		emoji = "🎉"
-		style = styleMagenta | styleBold
-	case strings.Contains(lower, "question") || strings.Contains(lower, "escalat") || strings.Contains(lower, "owner_ask") || strings.Contains(lower, "ask:"):
-		emoji = "❓"
-		style = styleYellow | styleBold
-	case strings.Contains(lower, "integrate"):
-		emoji = "🚀"
-		style = styleMagenta
-	case strings.Contains(lower, "review"):
-		emoji = "🔍"
-		style = styleYellow
-	case strings.Contains(lower, "clean"):
-		emoji = "🧹"
-		style = styleBlue
-	case strings.Contains(lower, "swe"):
-		emoji = "🔨"
-		style = styleCyan
-	case strings.Contains(lower, "advance") || strings.Contains(lower, "phase.") || strings.Contains(lower, "lane.") || strings.Contains(lower, "rework") || strings.Contains(lower, "dispatcher:"):
-		emoji = "⚡"
-		style = styleCyan
+	wrapped := wrapSpans([]styledSpan{{text: clean, style: styleNone}}, bodyWidth, false)
+	indent := strings.Repeat(" ", prefixWidth)
+	out := make([]string, len(wrapped))
+	for i, w := range wrapped {
+		row := prefix + w
+		if i > 0 {
+			row = indent + w
+		}
+		out[i] = renderStyledLine(row, style, 0, true)
 	}
-	return []string{renderStyledLine("  "+emoji+" "+clean, style, width, true)}
+	return out
 }
 
 // FormatStatusFooter renders the 1- or 2-line pinned status footer with colored
@@ -366,25 +379,13 @@ func formatLanesSummarySpans(seg string) []styledSpan {
 }
 
 func formatCostSegmentSpans(seg string, opts FooterOptions) []styledSpan {
-	state := opts.CostState
-	if state == CostStateNormal && opts.CostLimitUSD > 0 {
-		rawAmt := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(seg, "cost today:")), "$")
-		if amt, err := strconv.ParseFloat(rawAmt, 64); err == nil {
-			switch {
-			case amt >= opts.CostLimitUSD:
-				state = CostStateOverLimit
-			case amt >= 0.8*opts.CostLimitUSD:
-				state = CostStateNearLimit
-			}
-		}
-	}
-	switch state {
+	switch opts.CostState {
 	case CostStateOverLimit:
 		return []styledSpan{{text: "🛑 " + seg, style: styleRed | styleBold}}
 	case CostStateNearLimit:
 		return []styledSpan{{text: "🔶 " + seg, style: styleYellow | styleBold}}
 	default:
-		return []styledSpan{{text: seg, style: styleDim}}
+		return []styledSpan{{text: seg, style: styleGreen}}
 	}
 }
 

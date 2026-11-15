@@ -47,13 +47,27 @@ const (
 	CostStateOverLimit
 )
 
+// ClassifyCostGuard classifies trailing-hour spend relative to MaxCostPerHourUSD.
+func ClassifyCostGuard(hourlySpendUSD, maxCostPerHourUSD float64) CostGuardState {
+	if maxCostPerHourUSD <= 0 {
+		return CostStateNormal
+	}
+	switch {
+	case hourlySpendUSD >= maxCostPerHourUSD:
+		return CostStateOverLimit
+	case hourlySpendUSD >= 0.8*maxCostPerHourUSD:
+		return CostStateNearLimit
+	default:
+		return CostStateNormal
+	}
+}
+
 //nolint:govet
 type Snapshot struct {
 	Status           string
 	BackgroundRole   string
 	Questions        []string
 	Outcomes         []string
-	CostLimitUSD     float64
 	BackgroundActive bool
 	CostState        CostGuardState
 }
@@ -89,18 +103,18 @@ func commandUsage() string {
 
 //nolint:govet
 type Model struct {
-	poll                 bool
-	NoColor              bool
-	initPrinted          bool
-	refreshing           bool
-	restarting           bool
-	spinnerTicking       bool
-	bgActive             bool
-	bgRole               string
-	costState            CostGuardState
-	costLimitUSD         float64
-	restartMessage       string
-	PollInterval         time.Duration
+	poll           bool
+	NoColor        bool
+	initPrinted    bool
+	refreshing     bool
+	restarting     bool
+	spinnerTicking bool
+	bgActive       bool
+	bgRole         string
+	costState      CostGuardState
+	restartMessage string
+	PollInterval   time.Duration
+	// SpinnerInterval sets the spinner frame cadence (default 110ms); negative disables automatic ticks.
 	SpinnerInterval      time.Duration
 	Now                  func() time.Time
 	turnStartedAt        time.Time
@@ -563,7 +577,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.bgActive = x.snapshot.BackgroundActive
 		m.bgRole = x.snapshot.BackgroundRole
 		m.costState = x.snapshot.CostState
-		m.costLimitUSD = x.snapshot.CostLimitUSD
 		spinCmd := m.ensureSpinner()
 		if len(x.snapshot.Outcomes) > 0 {
 			m.lines = append(m.lines, x.snapshot.Outcomes...)
@@ -787,7 +800,11 @@ func (m Model) View() tea.View {
 	if len(m.hints) > 0 {
 		hints = "\n" + truncateLine("  "+strings.Join(m.hints, "  "), m.width)
 	}
-	return tea.NewView(top.String() + "\n> " + m.inputView() + hints + m.statusFooter())
+	input := m.input
+	if m.styled() {
+		input = m.inputView()
+	}
+	return tea.NewView(top.String() + "\n> " + input + hints + m.statusFooter())
 }
 func (m Model) statusFooter() string {
 	if m.status == "" {
@@ -798,7 +815,6 @@ func (m Model) statusFooter() string {
 		BackgroundActive: m.bgActive,
 		BackgroundRole:   m.bgRole,
 		CostState:        m.costState,
-		CostLimitUSD:     m.costLimitUSD,
 	}, m.width, m.styled())
 	if len(out) == 0 {
 		return ""
