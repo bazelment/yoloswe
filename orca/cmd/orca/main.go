@@ -181,16 +181,19 @@ func Execute(
 	stdin io.Reader,
 	stdout, stderr io.Writer,
 ) error {
-	// Only a bare `orca` opens chat; flags without a subcommand keep meaning
-	// `orca run`.
+	// A bare `orca` (with or without chat flags when no --run/--goal is given)
+	// opens chat; flags with --run or --goal keep meaning `orca run`.
 	subcmd := "run"
+	explicitSubcmd := false
 	rest := args
 	if len(args) == 0 {
 		subcmd = "chat"
+		explicitSubcmd = true
 	} else {
 		switch args[0] {
 		case "run", "chat", "report", "export":
 			subcmd = args[0]
+			explicitSubcmd = true
 			rest = args[1:]
 		case "-h", "--help", "help":
 			printUsage(stdout)
@@ -204,6 +207,9 @@ func Execute(
 	cfg, posArgs, err := parseFlags(subcmd, rest, stderr)
 	if err != nil {
 		return err
+	}
+	if !explicitSubcmd && strings.TrimSpace(cfg.RunID) == "" && strings.TrimSpace(cfg.Goal) == "" && strings.TrimSpace(cfg.Objective) == "" {
+		subcmd = "chat"
 	}
 
 	logger := newLogger(stderr, cfg.LogLevel, cfg.LogFormat)

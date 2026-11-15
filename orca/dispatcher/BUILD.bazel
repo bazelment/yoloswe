@@ -26,6 +26,7 @@ go_library(
 go_test(
     name = "dispatcher_test",
     srcs = [
+        "cli_session_test.go",
         "dispatcher_test.go",
         "judgment_contract_test.go",
     ],

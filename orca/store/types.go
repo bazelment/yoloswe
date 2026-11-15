@@ -497,6 +497,7 @@ type Thread struct {
 	Goal           string       `json:"goal,omitempty"`
 	ParentThreadID string       `json:"parent_thread_id,omitempty"`
 	ForkedAtTurnID string       `json:"forked_at_turn_id,omitempty"`
+	ResumeID       string       `json:"resume_id,omitempty"`
 	Status         ThreadStatus `json:"status"`
 	QueuedSteers   []string     `json:"queued_steers,omitempty"`
 	InputTokens    int64        `json:"input_tokens"`

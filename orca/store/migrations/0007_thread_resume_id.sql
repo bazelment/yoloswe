@@ -1,0 +1,1 @@
+ALTER TABLE threads ADD COLUMN resume_id TEXT NOT NULL DEFAULT '';

@@ -50,6 +50,7 @@ type Controllers struct {
 
 //nolint:govet // field alignment
 type controlledRun struct {
+	dispatch   controller.Judge
 	controller *controller.Controller
 	syncer     *runLedgerSync
 	cancel     context.CancelFunc
@@ -281,6 +282,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	runCtx, cancel := context.WithCancel(d.ctx)
 	cr := &controlledRun{
 		controller: ctrl,
+		dispatch:   dispatch,
 		syncer:     syncer,
 		cancel:     cancel,
 		done:       make(chan struct{}),
@@ -292,6 +294,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	d.mu.Unlock()
 	cleanupFailedStart := func() {
 		cancel()
+		if closer, ok := dispatch.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
 		close(cr.done)
 	}
 	// Fail synchronously if another process still holds the controller lease.
@@ -367,6 +372,9 @@ func (d *Controllers) stop(ctx context.Context, r Run, releaseLease bool) error 
 	cr.controller.Kill()
 	<-cr.done
 	cr.cancel()
+	if closer, ok := cr.dispatch.(interface{ Close() error }); ok {
+		_ = closer.Close()
+	}
 	current, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: r.ID})
 	if err != nil {
 		return err

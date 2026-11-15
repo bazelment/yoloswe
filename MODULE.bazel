@@ -50,6 +50,7 @@ use_repo(
     "com_github_bazelment_yoloswe_logging",
     "com_github_bazelment_yoloswe_multiagent",
     "com_github_bazelment_yoloswe_notify",
+    "com_github_bazelment_yoloswe_swarm_queen",
     "com_github_bazelment_yoloswe_voice",
     "com_github_bazelment_yoloswe_wt",
     "com_github_bazelment_yoloswe_yoloswe",

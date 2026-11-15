@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -311,16 +312,31 @@ func NewRunner(
 	rawDriver := drv
 	drv = brief.WithMemories(st, drv)
 
+	backend := effectiveAgentBackend(cfg, client)
+	cfg.AgentBackend = backend
+	investigate := runInvestigateConfig(cfg)
+
 	planner := NewPlanner(st, clk, roleClient(client, cfg, "planner"), cfg.Models.Planner, logger)
 	planner.critic = roleClient(client, cfg, "critic")
 	planner.criticModel = cfg.Models.Roles["critic"].Model
 	planner.providerName = cfg.Models.Roles["planner"].Provider
 	planner.criticProvider = cfg.Models.Roles["critic"].Provider
+	planner.effort = cfg.Models.Roles["planner"].Effort
+	planner.agentBackend = backend
+	planner.llmGatewayURL = cfg.LLMGatewayURL
+	planner.investigate = investigate
+	planner.claudeBin = cfg.ClaudeBin
+	planner.codexBin = cfg.CodexBin
 
 	disp := dispatcher.New(dispatcher.Config{
+		AgentBackend:     backend,
+		Investigate:      investigate,
 		Model:            cfg.Models.Dispatcher,
 		Provider:         cfg.Models.Roles["dispatcher"].Provider,
-		PromptVersion:    dispatcher.SystemPromptVersion,
+		Effort:           cfg.Models.Roles["dispatcher"].Effort,
+		LLMGatewayURL:    cfg.LLMGatewayURL,
+		ClaudeBin:        cfg.ClaudeBin,
+		CodexBin:         cfg.CodexBin,
 		HardBatchModel:   cfg.Models.DispatcherHard,
 		RecipeCompiler:   planner,
 		OnPlannerRequest: planner.HandlePlannerRequest,
@@ -361,6 +377,17 @@ func NewRunner(
 		return ctrl.AnswerOwnerAskTextFromJudge(ctx, askID, answer)
 	})
 	return r
+}
+
+func runInvestigateConfig(cfg Config) model.InvestigateConfig {
+	var runDir string
+	if _, dbPath, err := parseStoreSpec(cfg.StoreSpec, cfg.StoreBaseDir, cfg.RunID); err == nil && dbPath != "" {
+		runDir = filepath.Dir(dbPath)
+	}
+	return model.InvestigateConfig{
+		RunDir:  runDir,
+		RepoDir: model.ResolveRunRepoDir(runDir, ""),
+	}
 }
 
 // The dispatcher interprets questions; the controller owns delivery and deadlines.
@@ -449,7 +476,7 @@ func (r *Runner) judgeBatch(ctx context.Context, runID string, events []store.Ev
 		"event_count", len(events),
 		"model", r.cfg.Models.Dispatcher,
 	)
-	if r.client == nil {
+	if r.client == nil && r.cfg.AgentBackend != model.AgentBackendCLI {
 		return nil
 	}
 	stopHeartbeat := r.keepLeaseAlive(ctx)
@@ -682,7 +709,7 @@ func (r *Runner) hasPendingPlannerDirectives(ctx context.Context) (bool, error) 
 }
 
 func (r *Runner) enqueueOpenBacklogTriggerIfNeeded(ctx context.Context) error {
-	if r.client == nil {
+	if r.client == nil && r.cfg.AgentBackend != model.AgentBackendCLI {
 		return nil
 	}
 
@@ -888,6 +915,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		"holder_id", r.cfg.HolderID,
 		"store", r.cfg.StoreSpec,
 		"driver", r.cfg.DriverKind,
+		"agent_backend", r.cfg.AgentBackend,
 		"dispatcher_model", r.cfg.Models.Dispatcher,
 		"concierge_model", r.cfg.Models.Concierge,
 		"planner_model", r.cfg.Models.Planner,
@@ -941,6 +969,12 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 func (r *Runner) shutdown(parentCtx context.Context) {
+	if r.dispatcher != nil {
+		_ = r.dispatcher.Close()
+	}
+	if r.planner != nil {
+		_ = r.planner.Close()
+	}
 	if !r.hasHeldLease() {
 		return
 	}

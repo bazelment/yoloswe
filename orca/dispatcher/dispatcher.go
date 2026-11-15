@@ -61,20 +61,28 @@ type Config struct {
 	Logger *slog.Logger
 	// Temperature is the sampling temperature for judgment turns. Nil omits it
 	// from the request: newer models reject the parameter outright.
-	Temperature    *float64
-	Model          string
-	Provider       string
-	PromptVersion  string
-	HardBatchModel string
-	SystemPrompt   string
-	ThreadID       string
-	Mailboxes      []mailbox.Mailbox
-	Invariants     []Invariant
-	Snapshot       SnapshotConfig
-	MaxTurns       int
-	MaxTokens      int
-	MaxBriefBytes  int
-	MaxReadBytes   int
+	Temperature      *float64
+	Investigate      model.InvestigateConfig
+	AgentBackend     model.AgentBackend
+	Model            string
+	Provider         string
+	Effort           string
+	LLMGatewayURL    string
+	ClaudeBin        string
+	CodexBin         string
+	PromptVersion    string
+	HardBatchModel   string
+	SystemPrompt     string
+	ThreadID         string
+	Mailboxes        []mailbox.Mailbox
+	Invariants       []Invariant
+	Snapshot         SnapshotConfig
+	MaxTurns         int
+	MaxTokens        int
+	MaxBriefBytes    int
+	MaxReadBytes     int
+	MaxSessionTokens int
+	MaxSessionTurns  int
 	// AllowMultiAction lifts the one-primary-action-per-batch contract
 	// (checkOnePrimaryAction). Production leaves it false; tests that script
 	// every tool into a single batch set it.
@@ -82,9 +90,25 @@ type Config struct {
 }
 
 func (c Config) withDefaults() Config {
+	if c.AgentBackend == "" {
+		c.AgentBackend = model.AgentBackendLoop
+	}
 	c.Model = cmp.Or(strings.TrimSpace(c.Model), DefaultModel)
 	c.HardBatchModel = cmp.Or(strings.TrimSpace(c.HardBatchModel), DefaultHardBatchModel)
-	c.SystemPrompt = cmp.Or(c.SystemPrompt, SystemPrompt)
+	if c.SystemPrompt == "" {
+		if c.AgentBackend == model.AgentBackendCLI {
+			c.SystemPrompt = CLISystemPrompt
+		} else {
+			c.SystemPrompt = SystemPrompt
+		}
+	}
+	if strings.TrimSpace(c.PromptVersion) == "" {
+		if c.AgentBackend == model.AgentBackendCLI {
+			c.PromptVersion = CLISystemPromptVersion
+		} else {
+			c.PromptVersion = SystemPromptVersion
+		}
+	}
 	if len(c.Invariants) == 0 {
 		c.Invariants = DefaultInvariants()
 	}
@@ -119,17 +143,20 @@ type BatchResult struct {
 }
 
 // Dispatcher handles debounced judgment batches from the Controller by building
-// a compact Store snapshot, running a bounded tool loop on ModelClient, vetting
-// every tool call against deterministic invariants, and logging decisions.
+// a compact Store snapshot, running a bounded tool loop on ModelClient (or a
+// long-lived CLI agent session), vetting every tool call against deterministic
+// invariants, and logging decisions.
 type Dispatcher struct {
-	store      store.Store
-	driver     lane.LaneDriver
-	clock      clock.Clock
-	client     model.ModelClient
-	lastResult *BatchResult
-	cfg        Config
-	seq        int64
-	mu         sync.Mutex
+	store           store.Store
+	driver          lane.LaneDriver
+	clock           clock.Clock
+	client          model.ModelClient
+	lastMemoryIndex map[string]string
+	sessions        model.AgentSessionMap
+	lastResult      *BatchResult
+	cfg             Config
+	seq             int64
+	mu              sync.Mutex
 }
 
 // New constructs a new Dispatcher.
@@ -144,12 +171,34 @@ func New(
 		clk = clock.NewRealClock()
 	}
 	return &Dispatcher{
-		cfg:    cfg.withDefaults(),
-		store:  st,
-		driver: drv,
-		clock:  clk,
-		client: client,
+		cfg:             cfg.withDefaults(),
+		store:           st,
+		driver:          drv,
+		clock:           clk,
+		client:          client,
+		lastMemoryIndex: make(map[string]string),
 	}
+}
+
+// Session returns the active CLI AgentSession for runID, if any.
+func (d *Dispatcher) Session(runID string) *model.AgentSession {
+	return d.sessions.Session(runID)
+}
+
+// CloseRun stops and removes the CLI AgentSession for runID, if any.
+func (d *Dispatcher) CloseRun(runID string) error {
+	d.mu.Lock()
+	delete(d.lastMemoryIndex, runID)
+	d.mu.Unlock()
+	return d.sessions.CloseRun(runID)
+}
+
+// Close stops all active CLI AgentSessions managed by this Dispatcher.
+func (d *Dispatcher) Close() error {
+	d.mu.Lock()
+	clear(d.lastMemoryIndex)
+	d.mu.Unlock()
+	return d.sessions.Close()
 }
 
 // SetOwnerAnswer installs the controller-owned resolution path for owner.answer.
@@ -315,7 +364,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	if d.store == nil {
 		return nil, errors.New("orca/dispatcher: store is required")
 	}
-	if d.client == nil {
+	if d.cfg.AgentBackend != model.AgentBackendCLI && d.client == nil {
 		return nil, errors.New("orca/dispatcher: model client is required")
 	}
 
@@ -379,85 +428,91 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	modelName := d.selectModel(events)
 	state.model = modelName
 
-	req := model.Request{
-		Model:       modelName,
-		System:      d.systemPromptWithMemories(ctx, runID),
-		Messages:    []model.Message{model.NewUserMessage(snap.Text)},
-		Tools:       toolsForBatch(reg.Definitions(), events),
-		MaxTokens:   d.cfg.MaxTokens,
-		Temperature: d.cfg.Temperature,
-	}
-
-	var followedUp bool
-	loopRes, loopErr := model.RunToolLoop(
-		ctx,
-		retryOnTruncationClient{
-			inner: d.client,
-			followUp: func(callCtx context.Context, resp *model.Response) string {
-				if followedUp {
-					return ""
-				}
-				nudge := d.followUpSpawnNudge(callCtx, runID, events, state, resp)
-				if nudge != "" {
-					followedUp = true
-				}
-				return nudge
-			},
-		},
-		req,
-		reg,
-		model.WithMaxTurns(d.cfg.MaxTurns),
-		model.WithToolCallLog(d.cfg.Logger, ActorDispatcher),
-		model.WithOnTurn(func(turn int, resp model.Response) {
-			state.currentTurn = turn
-			state.turnUsage[turn] = resp.Usage
-			if txt := strings.TrimSpace(resp.Text()); txt != "" {
-				_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
-					ThreadID: threadID,
-					TurnID:   turnID,
-					Kind:     store.ItemKindAssistantMessage,
-					Content:  txt,
-				})
-			}
-			for _, tc := range resp.ToolCalls() {
-				if !reg.Has(tc.Name) {
-					toolName := tc.Name
-					reg.Register(model.ToolDefinition{Name: toolName}, func(callCtx context.Context, raw json.RawMessage) (string, error) {
-						return d.handleRawToolCall(callCtx, runID, state, toolName, raw)
-					})
-				}
-			}
-		}),
-		model.WithOnToolCall(func(_ int, call model.ToolCall, resBlock model.ContentBlock) {
-			_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
-				ThreadID: threadID,
-				TurnID:   turnID,
-				Kind:     store.ItemKindToolCall,
-				Name:     call.Name,
-				CallID:   call.ID,
-				Payload:  call.Input,
-			})
-			_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
-				ThreadID: threadID,
-				TurnID:   turnID,
-				Kind:     store.ItemKindToolResult,
-				Name:     call.Name,
-				CallID:   call.ID,
-				Content:  resBlock.Content,
-				IsError:  resBlock.IsError,
-			})
-		}),
-	)
-
 	var (
 		usage     model.Usage
 		turnCount int
 		summary   string
+		loopErr   error
 	)
-	if loopRes != nil {
-		usage = loopRes.Usage
-		turnCount = loopRes.TurnCount
-		summary = strings.TrimSpace(loopRes.Response.Text())
+
+	if d.cfg.AgentBackend == model.AgentBackendCLI {
+		usage, turnCount, summary, loopErr = d.dispatchCLITurn(ctx, cleanupCtx, runID, threadID, turnID, modelName, snap.Text, events, state)
+	} else {
+		req := model.Request{
+			Model:       modelName,
+			System:      d.systemPromptWithMemories(ctx, runID),
+			Messages:    []model.Message{model.NewUserMessage(snap.Text)},
+			Tools:       toolsForBatch(reg.Definitions(), events),
+			MaxTokens:   d.cfg.MaxTokens,
+			Temperature: d.cfg.Temperature,
+		}
+
+		var followedUp bool
+		var loopRes *model.ToolLoopResult
+		loopRes, loopErr = model.RunToolLoop(
+			ctx,
+			retryOnTruncationClient{
+				inner: d.client,
+				followUp: func(callCtx context.Context, resp *model.Response) string {
+					if followedUp {
+						return ""
+					}
+					nudge := d.followUpSpawnNudge(callCtx, runID, events, state, resp)
+					if nudge != "" {
+						followedUp = true
+					}
+					return nudge
+				},
+			},
+			req,
+			reg,
+			model.WithMaxTurns(d.cfg.MaxTurns),
+			model.WithToolCallLog(d.cfg.Logger, ActorDispatcher),
+			model.WithOnTurn(func(turn int, resp model.Response) {
+				state.currentTurn = turn
+				state.turnUsage[turn] = resp.Usage
+				if txt := strings.TrimSpace(resp.Text()); txt != "" {
+					_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
+						ThreadID: threadID,
+						TurnID:   turnID,
+						Kind:     store.ItemKindAssistantMessage,
+						Content:  txt,
+					})
+				}
+				for _, tc := range resp.ToolCalls() {
+					if !reg.Has(tc.Name) {
+						toolName := tc.Name
+						reg.Register(model.ToolDefinition{Name: toolName}, func(callCtx context.Context, raw json.RawMessage) (string, error) {
+							return d.handleRawToolCall(callCtx, runID, state, toolName, raw)
+						})
+					}
+				}
+			}),
+			model.WithOnToolCall(func(_ int, call model.ToolCall, resBlock model.ContentBlock) {
+				_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
+					ThreadID: threadID,
+					TurnID:   turnID,
+					Kind:     store.ItemKindToolCall,
+					Name:     call.Name,
+					CallID:   call.ID,
+					Payload:  call.Input,
+				})
+				_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
+					ThreadID: threadID,
+					TurnID:   turnID,
+					Kind:     store.ItemKindToolResult,
+					Name:     call.Name,
+					CallID:   call.ID,
+					Content:  resBlock.Content,
+					IsError:  resBlock.IsError,
+				})
+			}),
+		)
+		if loopRes != nil {
+			usage = loopRes.Usage
+			turnCount = loopRes.TurnCount
+			summary = strings.TrimSpace(loopRes.Response.Text())
+		}
 	}
 
 	turnStatus := store.TurnStatusCompleted
@@ -493,12 +548,16 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	return res, nil
 }
 
-func (d *Dispatcher) systemPromptWithMemories(ctx context.Context, runID string) string {
+func (d *Dispatcher) memoryIndexSection(ctx context.Context, runID string) string {
 	ms, err := d.store.Memories().List(ctx, store.MemoryFilter{RunID: runID})
 	if err != nil {
-		return d.cfg.SystemPrompt
+		return ""
 	}
-	return d.cfg.SystemPrompt + "\n\n## Memory Index\n" + store.MemoryIndex(ms)
+	return "\n\n## Memory Index\n" + store.MemoryIndex(ms)
+}
+
+func (d *Dispatcher) systemPromptWithMemories(ctx context.Context, runID string) string {
+	return d.cfg.SystemPrompt + d.memoryIndexSection(ctx, runID)
 }
 
 func (d *Dispatcher) ensureThread(ctx context.Context, runID string) (string, error) {
@@ -618,6 +677,135 @@ func (d *Dispatcher) buildToolRegistry(runID string, state *turnExecState) *mode
 		return d.handleRawToolCall(ctx, runID, state, mailAnswerToolDef.Name, raw)
 	})
 	return reg
+}
+
+func batchAllowsTool(toolName string, events []store.Event) error {
+	if isReadOnlyTool(toolName) && !batchNamesLane(events) {
+		return fmt.Errorf("%s is only available when the judgment batch contains a lane event", toolName)
+	}
+	if toolName == ToolMailAnswer && !batchHasLaneMail(events) {
+		return fmt.Errorf("%s is only available when the judgment batch contains inbound lane mail", toolName)
+	}
+	return nil
+}
+
+// buildCLIToolRegistry registers the full Dispatcher tool superset so the
+// long-lived CLI session's MCP tool list stays constant across run-level and
+// lane-level batches (avoiding subprocess restarts), while enforcing batch-level
+// tool eligibility inside the handler.
+func (d *Dispatcher) buildCLIToolRegistry(runID string, state *turnExecState, events []store.Event) *model.ToolRegistry {
+	reg := model.NewToolRegistry()
+	defs := make([]model.ToolDefinition, 0, len(dispatcherToolDefs)+1)
+	defs = append(defs, dispatcherToolDefs...)
+	defs = append(defs, mailAnswerToolDef)
+	for i := range defs {
+		def := defs[i]
+		reg.Register(def, func(ctx context.Context, raw json.RawMessage) (string, error) {
+			if err := batchAllowsTool(def.Name, events); err != nil {
+				return "", err
+			}
+			res, err := d.handleRawToolCall(ctx, runID, state, def.Name, raw)
+			if err != nil || d.cfg.AllowMultiAction || isReadOnlyTool(def.Name) || def.Name == "memory.read" {
+				return res, err
+			}
+			if isFanOutTool(def.Name) {
+				return res + " (batch action applied; end your turn now unless combining another fan-out call [backlog_add, lane_spawn, lane_retry, directive_revoke, owner_answer] — do NOT call lane_steer, directive_note, planner_request, or owner_ask)", nil
+			}
+			return res + " (batch primary action applied; end your turn now — no further mutating calls are permitted in this batch)", nil
+		})
+	}
+	model.RegisterInvestigationTools(reg, d.cfg.Investigate)
+	return reg
+}
+
+func (d *Dispatcher) dispatchCLITurn(
+	ctx context.Context,
+	cleanupCtx context.Context,
+	runID string,
+	threadID string,
+	turnID string,
+	modelName string,
+	promptText string,
+	events []store.Event,
+	state *turnExecState,
+) (model.Usage, int, string, error) {
+	cliReg := d.buildCLIToolRegistry(runID, state, events)
+	memSection := d.memoryIndexSection(ctx, runID)
+	turnPrompt := promptText
+	if d.shouldIncludeMemoryIndex(runID, memSection) {
+		turnPrompt += memSection
+	}
+
+	turnRes, err := store.RunRoleAgentTurn(
+		ctx,
+		d.store.Threads(),
+		&d.sessions,
+		runID,
+		threadID,
+		turnID,
+		ActorDispatcher,
+		model.AgentSessionConfig{
+			Provider:         d.cfg.Provider,
+			Model:            modelName,
+			Effort:           d.cfg.Effort,
+			SystemPrompt:     d.cfg.SystemPrompt,
+			WorkDir:          model.DeterministicSessionWorkDir(cmp.Or(d.cfg.Investigate.RunDir, d.cfg.Investigate.RepoDir), runID, ActorDispatcher),
+			LLMGatewayURL:    d.cfg.LLMGatewayURL,
+			ClaudeBin:        d.cfg.ClaudeBin,
+			CodexBin:         d.cfg.CodexBin,
+			MaxSessionTokens: d.cfg.MaxSessionTokens,
+			MaxSessionTurns:  d.cfg.MaxSessionTurns,
+		},
+		model.AgentTurnRequest{
+			Prompt:       turnPrompt,
+			Model:        modelName,
+			SystemPrompt: d.cfg.SystemPrompt,
+			Registry:     cliReg,
+			MaxToolCalls: d.cfg.MaxTurns,
+		},
+		d.cfg.Logger,
+	)
+	if err != nil {
+		return model.Usage{}, 0, "", err
+	}
+	d.recordSentMemoryIndex(runID, memSection, turnRes.Rotated)
+	if turnRes.Text != "" {
+		_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
+			ThreadID: threadID,
+			TurnID:   turnID,
+			Kind:     store.ItemKindAssistantMessage,
+			Content:  turnRes.Text,
+		})
+	}
+	store.AttributeTurnUsage(cleanupCtx, d.store.Decisions(), runID, state.decisions, turnRes.Usage)
+	return turnRes.Usage, turnRes.TurnCount, turnRes.Text, nil
+}
+
+func (d *Dispatcher) shouldIncludeMemoryIndex(runID, memSection string) bool {
+	if memSection == "" {
+		return false
+	}
+	sess := d.sessions.Session(runID)
+	if sess == nil || sess.TurnCount() == 0 {
+		return true
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	last, ok := d.lastMemoryIndex[runID]
+	return !ok || last != memSection
+}
+
+func (d *Dispatcher) recordSentMemoryIndex(runID, memSection string, rotated bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.lastMemoryIndex == nil {
+		d.lastMemoryIndex = make(map[string]string)
+	}
+	if rotated && memSection == "" {
+		delete(d.lastMemoryIndex, runID)
+		return
+	}
+	d.lastMemoryIndex[runID] = memSection
 }
 
 type invariantViolationError struct {

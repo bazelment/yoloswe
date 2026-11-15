@@ -291,17 +291,35 @@ type Result struct {
 
 // Config configures a Planner instance.
 type Config struct {
-	PlanReader   PlanReader
-	Model        string
-	SystemPrompt string
-	AskDeadline  time.Duration
-	MaxTurns     int
-	MaxTokens    int
+	PlanReader       PlanReader
+	AgentBackend     model.AgentBackend
+	Provider         string
+	Model            string
+	Effort           string
+	LLMGatewayURL    string
+	ClaudeBin        string
+	CodexBin         string
+	SystemPrompt     string
+	Investigate      model.InvestigateConfig
+	AskDeadline      time.Duration
+	MaxTurns         int
+	MaxTokens        int
+	MaxSessionTokens int
+	MaxSessionTurns  int
 }
 
 func (c Config) withDefaults() Config {
+	if c.AgentBackend == "" {
+		c.AgentBackend = model.AgentBackendLoop
+	}
 	c.Model = cmp.Or(strings.TrimSpace(c.Model), DefaultModel)
-	c.SystemPrompt = cmp.Or(c.SystemPrompt, PlanImportSystemPrompt)
+	if c.SystemPrompt == "" {
+		if c.AgentBackend == model.AgentBackendCLI {
+			c.SystemPrompt = CLIPlanSystemPrompt
+		} else {
+			c.SystemPrompt = PlanImportSystemPrompt
+		}
+	}
 	if c.PlanReader == nil {
 		c.PlanReader = &DefaultPlanReader{}
 	}
@@ -317,13 +335,14 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-// Planner executes fresh-thread plan imports, replanning reconciliations, and
+// Planner executes plan imports, replanning reconciliations, and
 // natural-language recipe edits.
 type Planner struct {
 	store      store.Store
 	driver     lane.LaneDriver
 	clock      clock.Clock
 	client     model.ModelClient
+	sessions   model.AgentSessionMap
 	lastResult *Result
 	cfg        Config
 	seq        int64
@@ -348,6 +367,21 @@ func New(
 		clock:  clk,
 		client: client,
 	}
+}
+
+// Session returns the active CLI AgentSession for runID, if any.
+func (p *Planner) Session(runID string) *model.AgentSession {
+	return p.sessions.Session(runID)
+}
+
+// CloseRun stops and removes the CLI AgentSession for runID, if any.
+func (p *Planner) CloseRun(runID string) error {
+	return p.sessions.CloseRun(runID)
+}
+
+// Close stops all active CLI AgentSessions managed by this Planner.
+func (p *Planner) Close() error {
+	return p.sessions.Close()
 }
 
 // LastResult returns a copy of the most recent Planner Result.
@@ -412,6 +446,39 @@ func trailingSeqNumber(id string) int64 {
 		return 0
 	}
 	return n
+}
+
+func (p *Planner) startPlannerTurn(ctx context.Context, runID, goal string) (store.Thread, store.Turn, error) {
+	if p.cfg.AgentBackend != model.AgentBackendCLI {
+		return p.startFreshThread(ctx, runID, goal)
+	}
+	p.syncSeq(ctx, runID)
+	threadID := "planner-" + runID
+	th, err := p.store.Threads().GetThread(ctx, threadID)
+	if err != nil || th == nil {
+		started, sErr := p.store.Threads().StartThread(ctx, store.Thread{
+			ID:     threadID,
+			RunID:  runID,
+			Role:   store.ThreadRolePlanner,
+			Goal:   strings.TrimSpace(goal),
+			Status: store.ThreadStatusIdle,
+		})
+		if sErr != nil {
+			return store.Thread{}, store.Turn{}, sErr
+		}
+		th = &started
+	}
+	turnID := p.nextID(threadID + "-turn")
+	turnRec, err := p.store.Threads().StartTurn(ctx, store.Turn{
+		ID:       turnID,
+		ThreadID: threadID,
+		RunID:    runID,
+		Input:    strings.TrimSpace(goal),
+	})
+	if err != nil {
+		return store.Thread{}, store.Turn{}, err
+	}
+	return *th, turnRec, nil
 }
 
 func (p *Planner) startFreshThread(ctx context.Context, runID, goal string) (store.Thread, store.Turn, error) {
@@ -648,7 +715,7 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 	if p.store == nil {
 		return nil, errors.New("orca/planner: store is required")
 	}
-	if p.client == nil {
+	if p.cfg.AgentBackend != model.AgentBackendCLI && p.client == nil {
 		return nil, errors.New("orca/planner: model client is required")
 	}
 	start := p.clock.Now()
@@ -681,7 +748,7 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 		goal = fmt.Sprintf("Replan run %s: %s", runID, strings.TrimSpace(reason))
 	}
 
-	th, turnRec, err := p.startFreshThread(ctx, runID, goal)
+	th, turnRec, err := p.startPlannerTurn(ctx, runID, goal)
 	if err != nil {
 		return nil, err
 	}
@@ -763,62 +830,112 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 		planDoc = &doc
 		return fmt.Sprintf("Plan Ref: %s (%s)\nTitle: %s\n\n%s", doc.Ref, doc.SourceKind, doc.Title, doc.Content), nil
 	})
-
-	req := model.Request{
-		Model:     p.cfg.Model,
-		System:    p.cfg.SystemPrompt,
-		Messages:  []model.Message{model.NewUserMessage(promptText)},
-		Tools:     reg.Definitions(),
-		MaxTokens: p.cfg.MaxTokens,
-	}
-
-	loopRes, loopErr := model.RunToolLoop(
-		ctx,
-		p.client,
-		req,
-		reg,
-		model.WithMaxTurns(p.cfg.MaxTurns),
-		model.WithOnTurn(func(_ int, resp model.Response) {
-			turnUsage = resp.Usage
-			if txt := strings.TrimSpace(resp.Text()); txt != "" {
-				_, _ = p.store.Threads().AppendItem(cleanupCtx, store.Item{
-					ThreadID: th.ID,
-					TurnID:   turnRec.ID,
-					Kind:     store.ItemKindAssistantMessage,
-					Content:  txt,
-				})
-			}
-		}),
-		model.WithOnToolCall(func(_ int, call model.ToolCall, resBlock model.ContentBlock) {
-			_, _ = p.store.Threads().AppendItem(cleanupCtx, store.Item{
-				ThreadID: th.ID,
-				TurnID:   turnRec.ID,
-				Kind:     store.ItemKindToolCall,
-				Name:     call.Name,
-				CallID:   call.ID,
-				Payload:  call.Input,
-			})
-			_, _ = p.store.Threads().AppendItem(cleanupCtx, store.Item{
-				ThreadID: th.ID,
-				TurnID:   turnRec.ID,
-				Kind:     store.ItemKindToolResult,
-				Name:     call.Name,
-				CallID:   call.ID,
-				Content:  resBlock.Content,
-				IsError:  resBlock.IsError,
-			})
-		}),
-	)
-
 	var (
 		usage     model.Usage
 		turnCount int
 		modelText string
+		loopErr   error
+		loopRes   *model.ToolLoopResult
 	)
-	if loopRes != nil {
-		usage = loopRes.Usage
-		turnCount = loopRes.TurnCount
-		modelText = strings.TrimSpace(loopRes.Response.Text())
+
+	if p.cfg.AgentBackend == model.AgentBackendCLI {
+		model.RegisterInvestigationTools(reg, p.cfg.Investigate)
+		turnRes, tErr := store.RunRoleAgentTurn(
+			ctx,
+			p.store.Threads(),
+			&p.sessions,
+			runID,
+			th.ID,
+			turnRec.ID,
+			ActorPlanner,
+			model.AgentSessionConfig{
+				Provider:         p.cfg.Provider,
+				Model:            p.cfg.Model,
+				Effort:           p.cfg.Effort,
+				SystemPrompt:     p.cfg.SystemPrompt,
+				WorkDir:          model.DeterministicSessionWorkDir(cmp.Or(p.cfg.Investigate.RunDir, p.cfg.Investigate.RepoDir), runID, ActorPlanner),
+				ResumeID:         strings.TrimSpace(th.ResumeID),
+				LLMGatewayURL:    p.cfg.LLMGatewayURL,
+				ClaudeBin:        p.cfg.ClaudeBin,
+				CodexBin:         p.cfg.CodexBin,
+				MaxSessionTokens: p.cfg.MaxSessionTokens,
+				MaxSessionTurns:  p.cfg.MaxSessionTurns,
+			},
+			model.AgentTurnRequest{
+				Prompt:       promptText,
+				Model:        p.cfg.Model,
+				SystemPrompt: p.cfg.SystemPrompt,
+				Registry:     reg,
+				MaxToolCalls: p.cfg.MaxTurns,
+			},
+			nil,
+		)
+		loopErr = tErr
+		if turnRes != nil {
+			usage = turnRes.Usage
+			turnCount = turnRes.TurnCount
+			modelText = turnRes.Text
+			if modelText != "" {
+				_, _ = p.store.Threads().AppendItem(cleanupCtx, store.Item{
+					ThreadID: th.ID,
+					TurnID:   turnRec.ID,
+					Kind:     store.ItemKindAssistantMessage,
+					Content:  modelText,
+				})
+			}
+			store.AttributeTurnUsage(cleanupCtx, p.store.Decisions(), runID, decisions, usage)
+		}
+	} else {
+		req := model.Request{
+			Model:     p.cfg.Model,
+			System:    p.cfg.SystemPrompt,
+			Messages:  []model.Message{model.NewUserMessage(promptText)},
+			Tools:     reg.Definitions(),
+			MaxTokens: p.cfg.MaxTokens,
+		}
+
+		loopRes, loopErr = model.RunToolLoop(
+			ctx,
+			p.client,
+			req,
+			reg,
+			model.WithMaxTurns(p.cfg.MaxTurns),
+			model.WithOnTurn(func(_ int, resp model.Response) {
+				turnUsage = resp.Usage
+				if txt := strings.TrimSpace(resp.Text()); txt != "" {
+					_, _ = p.store.Threads().AppendItem(cleanupCtx, store.Item{
+						ThreadID: th.ID,
+						TurnID:   turnRec.ID,
+						Kind:     store.ItemKindAssistantMessage,
+						Content:  txt,
+					})
+				}
+			}),
+			model.WithOnToolCall(func(_ int, call model.ToolCall, resBlock model.ContentBlock) {
+				_, _ = p.store.Threads().AppendItem(cleanupCtx, store.Item{
+					ThreadID: th.ID,
+					TurnID:   turnRec.ID,
+					Kind:     store.ItemKindToolCall,
+					Name:     call.Name,
+					CallID:   call.ID,
+					Payload:  call.Input,
+				})
+				_, _ = p.store.Threads().AppendItem(cleanupCtx, store.Item{
+					ThreadID: th.ID,
+					TurnID:   turnRec.ID,
+					Kind:     store.ItemKindToolResult,
+					Name:     call.Name,
+					CallID:   call.ID,
+					Content:  resBlock.Content,
+					IsError:  resBlock.IsError,
+				})
+			}),
+		)
+		if loopRes != nil {
+			usage = loopRes.Usage
+			turnCount = loopRes.TurnCount
+			modelText = strings.TrimSpace(loopRes.Response.Text())
+		}
 	}
 
 	// Support single-turn responses where submit_reconciliation was emitted on an end_turn response or JSON text.

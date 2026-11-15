@@ -475,6 +475,21 @@ func testDecisions(t *testing.T, factory Factory) {
 	if len(since1) != 1 || since1[0].Seq != 2 || since1[0].Tool != "lane.spawn" {
 		t.Fatalf("List(SinceSeq=1) = %+v", since1)
 	}
+
+	if err := st.Decisions().SetUsage(ctx, "run-1", dec1.Seq, model.Usage{
+		InputTokens:  400,
+		OutputTokens: 90,
+		CostUSD:      0.015,
+	}); err != nil {
+		t.Fatalf("SetUsage(dec1) error: %v", err)
+	}
+	allDecs, err := st.Decisions().List(ctx, DecisionFilter{RunID: "run-1"})
+	if err != nil {
+		t.Fatalf("List after SetUsage error: %v", err)
+	}
+	if len(allDecs) != 2 || allDecs[0].InputTokens != 400 || allDecs[0].OutputTokens != 90 || allDecs[0].CostUSD != 0.015 {
+		t.Fatalf("decision[0] after SetUsage = %+v, want 400/90/0.015", allDecs[0])
+	}
 }
 
 func testEventsAndCursors(t *testing.T, factory Factory) {
@@ -643,6 +658,20 @@ func testThreadsTurnsAndItems(t *testing.T, factory Factory) {
 	}
 	if parentThread.InputTokens != 1000 || parentThread.OutputTokens != 200 {
 		t.Fatalf("parentThread token rollup = (%d, %d), want (1000, 200)", parentThread.InputTokens, parentThread.OutputTokens)
+	}
+
+	if err := st.Threads().SetThreadResumeID(ctx, "th-1", "  sess-resume-contract  "); err != nil {
+		t.Fatalf("SetThreadResumeID error: %v", err)
+	}
+	resumedThread, err := st.Threads().GetThread(ctx, "th-1")
+	if err != nil {
+		t.Fatalf("GetThread(th-1) after SetThreadResumeID error: %v", err)
+	}
+	if resumedThread.ResumeID != "sess-resume-contract" {
+		t.Fatalf("resumedThread.ResumeID = %q, want %q", resumedThread.ResumeID, "sess-resume-contract")
+	}
+	if err := st.Threads().SetThreadResumeID(ctx, "th-missing", "sess-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetThreadResumeID on missing thread = %v, want ErrNotFound", err)
 	}
 }
 
