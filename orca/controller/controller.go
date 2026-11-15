@@ -252,22 +252,23 @@ type LaneReportPayload struct {
 // DecisionArgs is the structured JSON payload stored in Decision.Args for
 // controller actions and idempotency checks on restart.
 type DecisionArgs struct {
-	ActionKey  string   `json:"action_key"`
-	EventID    string   `json:"event_id,omitempty"`
-	FromPhase  string   `json:"from_phase,omitempty"`
-	ToPhase    string   `json:"to_phase,omitempty"`
-	Phase      string   `json:"phase,omitempty"`
-	Verdict    string   `json:"verdict,omitempty"`
-	Harness    string   `json:"harness,omitempty"`
-	Model      string   `json:"model,omitempty"`
-	Effort     string   `json:"effort,omitempty"`
-	TerminalID string   `json:"terminal_id,omitempty"`
-	SessionID  string   `json:"session_id,omitempty"`
-	AskID      string   `json:"ask_id,omitempty"`
-	Default    string   `json:"default,omitempty"`
-	EventIDs   []string `json:"event_ids,omitempty"`
-	Round      int      `json:"round,omitempty"`
-	Attempt    int      `json:"attempt,omitempty"`
+	ActionKey        string   `json:"action_key"`
+	EventID          string   `json:"event_id,omitempty"`
+	FromPhase        string   `json:"from_phase,omitempty"`
+	ToPhase          string   `json:"to_phase,omitempty"`
+	Phase            string   `json:"phase,omitempty"`
+	Verdict          string   `json:"verdict,omitempty"`
+	Harness          string   `json:"harness,omitempty"`
+	Model            string   `json:"model,omitempty"`
+	Effort           string   `json:"effort,omitempty"`
+	TerminalID       string   `json:"terminal_id,omitempty"`
+	SessionID        string   `json:"session_id,omitempty"`
+	AskID            string   `json:"ask_id,omitempty"`
+	Default          string   `json:"default,omitempty"`
+	EventIDs         []string `json:"event_ids,omitempty"`
+	StoppedTerminals []string `json:"stopped_terminals,omitempty"`
+	Round            int      `json:"round,omitempty"`
+	Attempt          int      `json:"attempt,omitempty"`
 }
 
 type pendingVerdict struct {
@@ -300,6 +301,7 @@ type Controller struct {
 	unpushedSince      map[string]time.Time
 	releaseRetries     map[string]int
 	pendingStops       map[string]int
+	staleStopFailures  map[string]int
 	sessionHealthCache map[string]lane.SessionHealth
 	terminalStateCache map[string]terminalStateCacheEntry
 	watchErrors        chan error
@@ -367,6 +369,7 @@ func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge
 		unpushedSince:      make(map[string]time.Time),
 		releaseRetries:     make(map[string]int),
 		pendingStops:       make(map[string]int),
+		staleStopFailures:  make(map[string]int),
 		wakeCh:             make(chan struct{}, 1),
 		watchErrors:        make(chan error, 16),
 		stallTimeoutSet:    stallTimeoutSet,
@@ -1067,6 +1070,11 @@ func (c *Controller) indexDecision(d store.Decision) {
 	if args.ActionKey != "" {
 		c.decidedActions[args.ActionKey] = d
 	}
+	for _, termID := range args.StoppedTerminals {
+		if t := strings.TrimSpace(termID); t != "" {
+			c.stoppedTerminals[t] = true
+		}
+	}
 	if args.EventID != "" && d.Tool != ToolLaneStall && d.Tool != ToolLaneEscalate && d.Tool != "lane.unpushed.report" && d.Tool != "lane.health.disk" {
 		c.decidedEvents[args.EventID] = d
 	}
@@ -1397,29 +1405,11 @@ func (c *Controller) checkLaneSessions(ctx context.Context) error {
 	return nil
 }
 
-func (c *Controller) hasCurrentPhaseLaunchDecision(ln *lane.Lane) bool {
-	if ln == nil || ln.Phase == "" {
-		return false
-	}
-	round := max(ln.Round, 1)
-	attempt := max(ln.Attempt, 1)
-	for _, tool := range []string{ToolPhaseStart, ToolPhaseAdvance, ToolPhaseRework, ToolPhaseRetry} {
-		if c.hasActionDecision(phaseActionKey(tool, ln.ID, ln.Phase, round, attempt)) {
-			return true
-		}
-	}
-	if ln.Phase == recipe.PhaseIntegrate && c.hasActionDecision("integrate-launch:"+ln.ID+":"+ln.ApprovalSHA) {
-		return true
-	}
-	return false
-}
-
 func (c *Controller) stopStaleRecordedTerminals(ctx context.Context, ln *lane.Lane) {
 	if c.driver == nil || ln == nil || len(ln.Terminals) == 0 {
 		return
 	}
 	curKey := ln.AttemptKey()
-	alreadyLaunched := c.hasCurrentPhaseLaunchDecision(ln)
 	keys := make([]string, 0, len(ln.Terminals))
 	for k := range ln.Terminals {
 		keys = append(keys, k)
@@ -1430,28 +1420,31 @@ func (c *Controller) stopStaleRecordedTerminals(ctx context.Context, ln *lane.La
 		if termID == "" || termID == ln.TerminalID || k == curKey || c.stoppedTerminals[termID] {
 			continue
 		}
-		if alreadyLaunched {
-			c.stoppedTerminals[termID] = true
+		stopKey := ln.ID + ":" + termID
+		if c.staleStopFailures[stopKey] >= 3 {
 			continue
 		}
-		stopKey := "stale-stop:" + ln.ID + ":" + termID
-		if c.pendingStops[stopKey] >= 3 {
-			continue
+		sessID := ln.SessionID
+		if s := strings.TrimSpace(ln.Sessions[k]); s != "" {
+			sessID = s
 		}
 		_, _, _ = c.recordDecision(ctx, ToolPhaseRetry+".intent", ln.ID,
 			"stop stale previous-phase terminal", "stop pending",
-			DecisionArgs{ActionKey: "intent:" + stopKey, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: max(ln.Attempt, 1), SessionID: ln.SessionID, TerminalID: termID})
+			DecisionArgs{ActionKey: "intent:stale-stop:" + stopKey, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: max(ln.Attempt, 1), SessionID: sessID, TerminalID: termID})
 		if err := c.driver.Stop(ctx, lane.StopRequest{
 			RunID:      c.cfg.RunID,
 			LaneID:     ln.ID,
-			SessionID:  ln.SessionID,
+			SessionID:  sessID,
 			TerminalID: termID,
 			Reason:     "stop stale previous-phase terminal",
 		}); err == nil {
 			c.stoppedTerminals[termID] = true
-			delete(c.pendingStops, stopKey)
+			delete(c.staleStopFailures, stopKey)
+			_, _, _ = c.recordDecision(ctx, ToolPhaseRetry+".intent", ln.ID,
+				"stopped stale previous-phase terminal", "stopped terminal",
+				DecisionArgs{ActionKey: "stale-stopped:" + stopKey, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: max(ln.Attempt, 1), SessionID: sessID, TerminalID: termID, StoppedTerminals: []string{termID}})
 		} else {
-			c.pendingStops[stopKey]++
+			c.staleStopFailures[stopKey]++
 		}
 	}
 }
@@ -1698,7 +1691,7 @@ func (c *Controller) consumeEvents(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := c.advanceExpiredNudges(ctx); err != nil {
+	if err := c.advanceExpiredNudges(ctx, &urgentFlush); err != nil {
 		return err
 	}
 	if urgentFlush {
@@ -1709,7 +1702,7 @@ func (c *Controller) consumeEvents(ctx context.Context) error {
 	return nil
 }
 
-func (c *Controller) advanceExpiredNudges(ctx context.Context) error {
+func (c *Controller) advanceExpiredNudges(ctx context.Context, urgentFlush *bool) error {
 	if c.driver == nil || c.store == nil {
 		return nil
 	}
@@ -1723,7 +1716,7 @@ func (c *Controller) advanceExpiredNudges(ctx context.Context) error {
 	now := c.clock.Now().UTC()
 	for i := range running {
 		ln := running[i]
-		if c.laneIsWorkingOrBusy(ctx, ln) || c.hasActiveExpectedWait(ctx, ln.ID, now) {
+		if c.terminalIsWorkingOrUnknown(ctx, ln.TerminalID) || c.sessionIsBusy(ctx, ln) || c.hasActiveExpectedWait(ctx, ln.ID, now) {
 			continue
 		}
 		r, err := c.resolveRecipe(ctx, &ln)
@@ -1751,27 +1744,27 @@ func (c *Controller) advanceExpiredNudges(ctx context.Context) error {
 		if c.isEventHandled(evID) {
 			continue
 		}
-		ev, err := c.store.Events().Append(ctx, store.Event{
-			ID:      evID,
-			RunID:   c.cfg.RunID,
-			LaneID:  ln.ID,
-			Kind:    store.EventPhaseExit,
-			Class:   store.EventClassAuto,
-			Source:  "lane.watch",
-			Summary: fmt.Sprintf("lane %s quiet after nudge wait", ln.ID),
-			Payload: raw,
-		})
-		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		ev := store.Event{
+			ID:        evID,
+			RunID:     c.cfg.RunID,
+			LaneID:    ln.ID,
+			Kind:      store.EventPhaseExit,
+			Class:     store.EventClassAuto,
+			Source:    "lane.watch",
+			Summary:   fmt.Sprintf("lane %s quiet after nudge wait", ln.ID),
+			Payload:   raw,
+			CreatedAt: now,
+		}
+		class, err := c.handlePhaseExit(ctx, &ev)
+		if err != nil {
 			return err
 		}
-		if errors.Is(err, store.ErrAlreadyExists) {
-			continue
-		}
-		if _, err := c.handlePhaseExit(ctx, &ev); err != nil {
-			return err
-		}
-		if err := c.store.Events().SetCursor(ctx, c.cfg.RunID, c.cfg.Consumer, ev.Seq); err != nil {
-			return err
+		ev.Class = class
+		if class == store.EventClassJudgment {
+			c.enqueueJudgmentEvent(ev)
+			if urgentFlush != nil && (ev.Urgent || c.cfg.JudgmentDebounce <= 0) {
+				*urgentFlush = true
+			}
 		}
 	}
 	return nil
@@ -2489,11 +2482,16 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 			}
 
 			agent := curPhase.Agents[min(curAttempt-1, len(curPhase.Agents)-1)]
+			prevTermID := strings.TrimSpace(ln.TerminalID)
 			if err := c.stopCurrentTerminal(ctx, ln, "replace quiet terminal"); err != nil {
 				c.noteStopFailure(ctx, ln, err)
 				return store.EventClassUnclassified, err
 			}
 			delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
+			var stoppedTerminals []string
+			if prevTermID != "" {
+				stoppedTerminals = []string{prevTermID}
+			}
 			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, Repository: c.runRepository(ctx), LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: agent.Harness, Model: agent.Model, Effort: agent.Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, max(ln.Round, 1), "fresh terminal after nudge")})
 			if err != nil {
 				return store.EventClassUnclassified, err
@@ -2502,7 +2500,7 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 			if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
 				return store.EventClassUnclassified, err
 			}
-			_, _, err = c.recordDecision(ctx, ToolPhaseRetry, ln.ID, "quiet lane: fresh terminal same round", "fresh terminal", DecisionArgs{ActionKey: "restart:fresh:" + key, EventID: ev.ID, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt})
+			_, _, err = c.recordDecision(ctx, ToolPhaseRetry, ln.ID, "quiet lane: fresh terminal same round", "fresh terminal", DecisionArgs{ActionKey: "restart:fresh:" + key, EventID: ev.ID, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt, StoppedTerminals: stoppedTerminals})
 			if err != nil {
 				return store.EventClassUnclassified, err
 			}
@@ -2763,10 +2761,11 @@ func (c *Controller) startLanePhase(
 	}
 
 	var sessionID, terminalID string
+	var stoppedTerminals []string
 	repo := c.runRepository(ctx)
 	if ln.SessionID == "" {
 		if tool != ToolPhaseRetry {
-			c.stopPreviousPhaseTerminals(ctx, ln, "new phase "+phase.Name+" started")
+			stoppedTerminals = c.stopPreviousPhaseTerminals(ctx, ln, "new phase "+phase.Name+" started")
 		}
 		res, err := c.driver.SpawnSession(ctx, lane.SpawnRequest{
 			RunID:      c.cfg.RunID,
@@ -2798,13 +2797,17 @@ func (c *Controller) startLanePhase(
 		}
 	} else {
 		if tool == ToolPhaseRetry {
+			prevTermID := strings.TrimSpace(ln.TerminalID)
 			if err := c.stopCurrentTerminal(ctx, ln, "replace terminal for retry"); err != nil {
 				c.noteStopFailure(ctx, ln, err)
 				return err
 			}
 			delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
+			if prevTermID != "" {
+				stoppedTerminals = []string{prevTermID}
+			}
 		} else {
-			c.stopPreviousPhaseTerminals(ctx, ln, "new phase "+phase.Name+" started")
+			stoppedTerminals = c.stopPreviousPhaseTerminals(ctx, ln, "new phase "+phase.Name+" started")
 		}
 		res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
 			RunID:      c.cfg.RunID,
@@ -2845,16 +2848,17 @@ func (c *Controller) startLanePhase(
 	_, _, err := c.recordDecision(ctx, tool, ln.ID, reason,
 		fmt.Sprintf("%s round %d attempt %d (%s:%s)", phase.Name, round, attempt, agent.Harness, agent.Model),
 		DecisionArgs{
-			ActionKey: actionKey,
-			EventID:   eventID,
-			FromPhase: fromPhase,
-			ToPhase:   phase.Name,
-			Phase:     phase.Name,
-			Round:     round,
-			Attempt:   attempt,
-			Harness:   agent.Harness,
-			Model:     agent.Model,
-			Effort:    agent.Effort,
+			ActionKey:        actionKey,
+			EventID:          eventID,
+			FromPhase:        fromPhase,
+			ToPhase:          phase.Name,
+			Phase:            phase.Name,
+			Round:            round,
+			Attempt:          attempt,
+			Harness:          agent.Harness,
+			Model:            agent.Model,
+			Effort:           agent.Effort,
+			StoppedTerminals: stoppedTerminals,
 		},
 	)
 	if err != nil {
@@ -2877,24 +2881,31 @@ func (c *Controller) stopCurrentTerminal(ctx context.Context, ln *lane.Lane, rea
 	}
 	err := c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: reason})
 	if err == nil && strings.TrimSpace(ln.TerminalID) != "" {
-		c.stoppedTerminals[strings.TrimSpace(ln.TerminalID)] = true
+		termID := strings.TrimSpace(ln.TerminalID)
+		c.stoppedTerminals[termID] = true
+		delete(c.staleStopFailures, ln.ID+":"+termID)
 	}
 	return err
 }
 
-func (c *Controller) stopPreviousPhaseTerminals(ctx context.Context, ln *lane.Lane, reason string) {
+func (c *Controller) stopPreviousPhaseTerminals(ctx context.Context, ln *lane.Lane, reason string) []string {
 	if c.driver == nil || ln == nil {
-		return
+		return nil
 	}
 	seen := make(map[string]bool)
+	var stopped []string
 	stopOne := func(sessionID, termID string) {
 		termID = strings.TrimSpace(termID)
-		if termID == "" || seen[termID] || c.stoppedTerminals[termID] {
+		if termID == "" || seen[termID] {
 			return
 		}
 		seen[termID] = true
-		stopKey := "prev-stop:" + ln.ID + ":" + termID
-		if c.pendingStops[stopKey] >= 3 {
+		if c.stoppedTerminals[termID] {
+			stopped = append(stopped, termID)
+			return
+		}
+		stopKey := ln.ID + ":" + termID
+		if c.staleStopFailures[stopKey] >= 3 {
 			return
 		}
 		if err := c.driver.Stop(ctx, lane.StopRequest{
@@ -2905,19 +2916,27 @@ func (c *Controller) stopPreviousPhaseTerminals(ctx context.Context, ln *lane.La
 			Reason:     reason,
 		}); err == nil {
 			c.stoppedTerminals[termID] = true
-			delete(c.pendingStops, stopKey)
+			delete(c.staleStopFailures, stopKey)
+			stopped = append(stopped, termID)
 		} else {
-			c.pendingStops[stopKey]++
+			c.staleStopFailures[stopKey]++
 		}
 	}
 	stopOne(ln.SessionID, ln.TerminalID)
-	for k, termID := range ln.Terminals {
+	keys := make([]string, 0, len(ln.Terminals))
+	for k := range ln.Terminals {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		termID := ln.Terminals[k]
 		sessID := ln.SessionID
 		if s := strings.TrimSpace(ln.Sessions[k]); s != "" {
 			sessID = s
 		}
 		stopOne(sessID, termID)
 	}
+	return stopped
 }
 
 func (c *Controller) noteStopFailure(ctx context.Context, ln *lane.Lane, err error) {
@@ -2953,6 +2972,10 @@ func (c *Controller) retryStops(ctx context.Context) {
 		}
 		err = c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: "retry failed terminal stop"})
 		if err == nil {
+			if termID := strings.TrimSpace(ln.TerminalID); termID != "" {
+				c.stoppedTerminals[termID] = true
+				delete(c.staleStopFailures, ln.ID+":"+termID)
+			}
 			delete(c.pendingStops, key)
 		} else {
 			c.noteStopFailure(ctx, ln, err)

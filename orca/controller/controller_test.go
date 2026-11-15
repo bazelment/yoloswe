@@ -39,8 +39,9 @@ func setupTestEnv(t *testing.T) (*clock.FakeClock, *store.MemoryStore, *lane.Fak
 
 type lifecycleFailDriver struct {
 	*lane.FakeDriver
-	releaseFailures int
-	stopFailures    int
+	releaseFailures  int
+	stopFailures     int
+	agentStateErrors int
 }
 
 func (d *lifecycleFailDriver) ReleaseSession(ctx context.Context, id string, force ...bool) error {
@@ -57,6 +58,13 @@ func (d *lifecycleFailDriver) Stop(ctx context.Context, req lane.StopRequest) er
 		return errors.New("stop failed")
 	}
 	return d.FakeDriver.Stop(ctx, req)
+}
+func (d *lifecycleFailDriver) TerminalAgentState(ctx context.Context, terminalID string) (string, error) {
+	if d.agentStateErrors > 0 {
+		d.agentStateErrors--
+		return "", errors.New("transient terminal state error")
+	}
+	return d.FakeDriver.TerminalAgentState(ctx, terminalID)
 }
 
 func appendReportEvent(t *testing.T, st store.Store, laneID string, rep lane.PhaseReport) store.Event {
@@ -2708,13 +2716,54 @@ func TestControllerNewPhaseStopsPreviousTerminalAndRefusesInput(t *testing.T) {
 	}); !errors.Is(err, lane.ErrStaleTerminal) {
 		t.Fatalf("Steer to previous phase terminal %s = %v, want ErrStaleTerminal", sweTerm, err)
 	}
+
+	// Verify that if stopping a previous-phase terminal fails during phase launch,
+	// stopStaleRecordedTerminals retries on subsequent steps even after the new phase
+	// has launched, and caps retries at 3 total attempts without retryStops resetting the cap.
+	failDrv := &lifecycleFailDriver{FakeDriver: lane.NewFakeDriver(), stopFailures: 10}
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:         "lane-stale-retry",
+		RunID:      "run-1",
+		Status:     lane.StatusRunning,
+		Phase:      recipe.PhaseSWE,
+		Round:      1,
+		Attempt:    1,
+		SessionID:  "sess-retry-1",
+		TerminalID: "term-swe-retry-1",
+		Sessions:   map[string]string{"swe:1": "sess-retry-1"},
+		Terminals:  map[string]string{"swe:1": "term-swe-retry-1"},
+	}); err != nil {
+		t.Fatalf("Upsert lane-stale-retry: %v", err)
+	}
+	ctrlRetry := controller.New(controller.Config{RunID: "run-1"}, st, failDrv, clk, judge)
+	appendReportEvent(t, st, "lane-stale-retry", lane.PhaseReport{
+		Phase:   recipe.PhaseSWE,
+		Outcome: lane.OutcomeDone,
+		HeadSHA: "sha-retry-1",
+		PR:      43,
+	})
+	for step := 1; step <= 5; step++ {
+		if err := ctrlRetry.Step(ctx); err != nil {
+			t.Fatalf("ctrlRetry Step %d: %v", step, err)
+		}
+	}
+	stopCount := 0
+	for _, s := range failDrv.Stops {
+		if s.TerminalID == "term-swe-retry-1" {
+			stopCount++
+		}
+	}
+	if stopCount != 3 {
+		t.Fatalf("failed previous-phase terminal stop count across 5 steps = %d, want 3 (retried after launch and capped at 3)", stopCount)
+	}
 }
 
 func TestControllerStallLadderNudgeThenActivityWithinWaitAndBusyProcess(t *testing.T) {
 	t.Parallel()
 	t.Run("nudge_then_activity_within_wait_no_fresh_terminal", func(t *testing.T) {
 		t.Parallel()
-		clk, st, drv, judge := setupTestEnv(t)
+		clk, st, baseDrv, judge := setupTestEnv(t)
+		drv := &lifecycleFailDriver{FakeDriver: baseDrv}
 		ctx := t.Context()
 		saveRecipeWithTimeout(t, st, 20*time.Minute)
 		if err := st.Lanes().Upsert(ctx, lane.Lane{
@@ -2773,13 +2822,30 @@ func TestControllerStallLadderNudgeThenActivityWithinWaitAndBusyProcess(t *testi
 		}
 
 		// Once the lane stays quiet past the re-based 10m wait window (at +11m after the activity),
-		// Step advances to a fresh terminal even without a second driver EventNoActivity pulse.
+		// a transient TerminalAgentState error suppresses replacement on that tick without poisoning
+		// future ticks; the next tick advances to a fresh terminal without another driver pulse.
 		clk.Advance(3 * time.Minute)
+		drv.agentStateErrors = 1
 		if err := ctrl.Step(ctx); err != nil {
-			t.Fatalf("Step (after re-based wait window expired): %v", err)
+			t.Fatalf("Step (transient TerminalAgentState error after wait window): %v", err)
+		}
+		if len(drv.PhaseStarts) != 0 || len(drv.Stops) != 0 {
+			t.Fatalf("during transient TerminalAgentState error: starts=%d stops=%d, want 0, 0", len(drv.PhaseStarts), len(drv.Stops))
+		}
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatalf("Step (after re-based wait window expired and state probe recovered): %v", err)
 		}
 		if len(drv.PhaseStarts) != 1 || len(drv.Stops) != 1 {
 			t.Fatalf("after re-based wait window expired: starts=%d stops=%d, want 1, 1", len(drv.PhaseStarts), len(drv.Stops))
+		}
+		evs, err := st.Events().List(ctx, store.EventFilter{RunID: "run-1", LaneID: ln.ID})
+		if err != nil {
+			t.Fatalf("List events: %v", err)
+		}
+		for _, ev := range evs {
+			if strings.HasPrefix(ev.ID, "nudge-expired:") {
+				t.Fatalf("unexpected synthetic nudge-expired event persisted in store: %+v", ev)
+			}
 		}
 	})
 

@@ -1092,6 +1092,9 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 	return result, nil
 }
 
+// stopOtherSessionTerminals stops any previous active terminal for (runID, laneID)
+// and any non-shell pre-handover terminals belonging to the same lane in sessionID,
+// while preserving the host session, other lanes' sessions/terminals, and operator shells.
 func (d *Driver) stopOtherSessionTerminals(ctx context.Context, runID, laneID, sessionID, keepTerminalID string) {
 	key := driverLaneKey(runID, laneID)
 	d.mu.Lock()

@@ -1408,8 +1408,8 @@ func TestWatchUniformEventKinds(t *testing.T) {
 }
 
 func TestStartPhaseTerminalStopsPreviousAndPrehandoverTerminalsAndRefusesStaleSteer(t *testing.T) {
-	t.Parallel()
 	srv := newFakeNebulaServer(t)
+	t.Setenv(nebula.EnvSessionID, "sess-host")
 	drv, _, _ := newTestDriver(t, srv, nebula.WithAPIURL(srv.srv.URL))
 	ctx := t.Context()
 
@@ -1420,7 +1420,8 @@ func TestStartPhaseTerminalStopsPreviousAndPrehandoverTerminalsAndRefusesStaleSt
 		WorkBranch: "swarm-lane/run-1/m5-finish",
 		Metadata:   map[string]string{"swarmRun": "run-1", "swarmLane": "m5-finish"},
 	}
-	// Pre-handover terminal 19f8df22 still running idle in the session, plus an operator shell terminal.
+	// Pre-handover terminal 19f8df22 still running idle in the session, plus shell/operator terminals
+	// and a sibling terminal tagged for a different lane via SNL_GH_LANE.
 	srv.terminals["19f8df22"] = &nebula.TerminalInfo{
 		ID:            "19f8df22",
 		CodeSessionID: "sess-stale",
@@ -1431,6 +1432,50 @@ func TestStartPhaseTerminalStopsPreviousAndPrehandoverTerminalsAndRefusesStaleSt
 		ID:            "operator-shell",
 		CodeSessionID: "sess-stale",
 		Kind:          "shell",
+		Status:        "running",
+	}
+	srv.terminals["operator-bash"] = &nebula.TerminalInfo{
+		ID:            "operator-bash",
+		CodeSessionID: "sess-stale",
+		Kind:          "bash",
+		Status:        "running",
+	}
+	srv.terminals["operator-sh"] = &nebula.TerminalInfo{
+		ID:            "operator-sh",
+		CodeSessionID: "sess-stale",
+		Kind:          "sh",
+		Status:        "running",
+	}
+	srv.terminals["operator-kind"] = &nebula.TerminalInfo{
+		ID:            "operator-kind",
+		CodeSessionID: "sess-stale",
+		Kind:          "operator",
+		Status:        "running",
+	}
+	srv.terminals["other-lane-term"] = &nebula.TerminalInfo{
+		ID:            "other-lane-term",
+		CodeSessionID: "sess-stale",
+		Status:        "running",
+		Env:           map[string]string{"SNL_GH_LANE": "other-lane"},
+	}
+	srv.sessions["sess-other-lane"] = &nebula.SessionInfo{
+		ID:       "sess-other-lane",
+		Status:   "ready",
+		Metadata: map[string]string{"swarmRun": "run-1", "swarmLane": "other-lane"},
+	}
+	srv.terminals["other-sess-term"] = &nebula.TerminalInfo{
+		ID:            "other-sess-term",
+		CodeSessionID: "sess-other-lane",
+		Status:        "running",
+	}
+	srv.sessions["sess-host"] = &nebula.SessionInfo{
+		ID:       "sess-host",
+		Status:   "ready",
+		Metadata: map[string]string{"swarmRun": "run-1", "swarmLane": "m5-finish"},
+	}
+	srv.terminals["host-sess-term"] = &nebula.TerminalInfo{
+		ID:            "host-sess-term",
+		CodeSessionID: "sess-host",
 		Status:        "running",
 	}
 	srv.mu.Unlock()
@@ -1451,12 +1496,59 @@ func TestStartPhaseTerminalStopsPreviousAndPrehandoverTerminalsAndRefusesStaleSt
 	srv.mu.Lock()
 	preStatus := srv.terminals["19f8df22"].Status
 	shellStatus := srv.terminals["operator-shell"].Status
+	bashStatus := srv.terminals["operator-bash"].Status
+	shStatus := srv.terminals["operator-sh"].Status
+	opKindStatus := srv.terminals["operator-kind"].Status
+	otherLaneTermStatus := srv.terminals["other-lane-term"].Status
 	srv.mu.Unlock()
 	if preStatus != "stopped" {
 		t.Fatalf("pre-handover terminal 19f8df22 status = %q, want stopped", preStatus)
 	}
-	if shellStatus != "running" {
-		t.Fatalf("operator shell terminal status = %q, want running", shellStatus)
+	for id, got := range map[string]string{
+		"operator-shell":  shellStatus,
+		"operator-bash":   bashStatus,
+		"operator-sh":     shStatus,
+		"operator-kind":   opKindStatus,
+		"other-lane-term": otherLaneTermStatus,
+	} {
+		if got != "running" {
+			t.Fatalf("terminal %s status = %q, want running", id, got)
+		}
+	}
+
+	// Starting a phase terminal on a session whose swarmLane metadata belongs to another lane,
+	// or on the host session (currSessID), must not sweep unrelated terminals in that session.
+	if _, err := drv.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
+		RunID:     "run-1",
+		LaneID:    "lane-mismatch",
+		SessionID: "sess-other-lane",
+		Phase:     "swe",
+		Round:     1,
+		Harness:   "claude",
+		Brief:     "Mismatch session",
+	}); err != nil {
+		t.Fatalf("StartPhaseTerminal(sess-other-lane): %v", err)
+	}
+	if _, err := drv.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
+		RunID:     "run-1",
+		LaneID:    "lane-host",
+		SessionID: "sess-host",
+		Phase:     "swe",
+		Round:     1,
+		Harness:   "claude",
+		Brief:     "Host session",
+	}); err != nil {
+		t.Fatalf("StartPhaseTerminal(sess-host): %v", err)
+	}
+	srv.mu.Lock()
+	otherSessTermStatus := srv.terminals["other-sess-term"].Status
+	hostSessTermStatus := srv.terminals["host-sess-term"].Status
+	srv.mu.Unlock()
+	if otherSessTermStatus != "running" {
+		t.Fatalf("other-sess-term status = %q, want running", otherSessTermStatus)
+	}
+	if hostSessTermStatus != "running" {
+		t.Fatalf("host-sess-term status = %q, want running", hostSessTermStatus)
 	}
 
 	reviewRes, err := drv.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
@@ -1622,6 +1714,7 @@ func TestWatchWorkingTerminalAndQuietDeduplication(t *testing.T) {
 			case <-deadline.C:
 				t.Fatalf("timed out waiting for %d completed Watch polls after %d (got %d)", count, base, sessionPolls())
 			default:
+				time.Sleep(time.Millisecond)
 			}
 		}
 	}
