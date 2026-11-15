@@ -616,13 +616,18 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 	if err != nil {
 		return false, err
 	}
+	needsCloseout := shouldAutoCloseoutRun(curRun, lanes, items)
+	if !needsCloseout && (!curRun.HasNextWork() || ObjectiveIsDone(curRun.Objective)) {
+		expireHoldDirectivesIfRunDone(ctx, d.store, runID)
+		return false, nil
+	}
 	for i := range dirs {
 		dir := &dirs[i]
 		if strings.HasPrefix(dir.Ref, ownerAskRef) && (dir.ExpiresAt == nil || now.Before(*dir.ExpiresAt)) {
 			return false, nil
 		}
 	}
-	if shouldAutoCloseoutRun(curRun, lanes, items) {
+	if needsCloseout {
 		if cr.syncer.MarkClosedOut() {
 			if _, cErr := d.CloseoutRun(ctx, runID, dispatcher.RunCloseoutParams{
 				Reason: "all lanes terminal (" + trigger + "); execute remaining handover close-out steps",
@@ -635,10 +640,6 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 		return false, nil
 	}
 	if plannerFn == nil {
-		return false, nil
-	}
-	if !curRun.HasNextWork() || ObjectiveIsDone(curRun.Objective) {
-		expireHoldDirectivesIfRunDone(ctx, d.store, runID)
 		return false, nil
 	}
 	planKey := curRun.FullObjective() + "|" + strings.Join(doneSummary, ",")
@@ -1648,7 +1649,7 @@ func (d *adoptedRunDriver) UpdatePost(ctx context.Context, postID, content strin
 	if pub, ok := d.LaneDriver.(lane.PostPublisher); ok {
 		return pub.UpdatePost(ctx, postID, content)
 	}
-	return nil
+	return fmt.Errorf("republish post %s: driver does not support post updates", postID)
 }
 
 func (d *adoptedRunDriver) ReportOnlyNoWork(ctx context.Context, ln lane.Lane) (bool, error) {
@@ -2463,6 +2464,12 @@ func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params disp
 			}
 			cr.syncer.MarkSessionReleased(sid)
 		}
+	} else {
+		for _, sid := range allSessions {
+			if !alreadyReleased[sid] {
+				releaseFailed = append(releaseFailed, sid)
+			}
+		}
 	}
 	releasedList := cr.syncer.ReleasedSessions()
 	if len(releasedList) > 0 && len(releaseFailed) > 0 {
@@ -2479,6 +2486,12 @@ func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params disp
 		if vErr != nil {
 			return "", vErr
 		}
+		if filepath.Base(resolvedTarget) == "FINAL.md" {
+			if strings.TrimSpace(params.FinalMarkdown) == "" {
+				params.FinalMarkdown = params.Files[relKey]
+			}
+			continue
+		}
 		existingContent := stripMarker(readText(resolvedTarget))
 		if trimmedAdd := strings.TrimSpace(params.Files[relKey]); trimmedAdd != "" && !strings.Contains(existingContent, trimmedAdd) {
 			if _, wErr := WriteCloseoutFile(curRun.Dir, rawObj, relKey, params.Files[relKey], true); wErr != nil {
@@ -2486,6 +2499,14 @@ func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params disp
 			}
 		}
 		recordStep(fmt.Sprintf("updated %s in run directory", relKey))
+	}
+	if len(fileKeys) > 0 {
+		if refreshedObj := stripMarker(readText(objPath)); strings.TrimSpace(refreshedObj) != "" {
+			rawObj = refreshedObj
+		}
+		if refreshedProg := stripMarker(readText(progPath)); strings.TrimSpace(refreshedProg) != "" {
+			rawProg = refreshedProg
+		}
 	}
 
 	// 3. Append to plan log file (e.g. PLAN.md) if named in OBJECTIVE.md.
@@ -2514,31 +2535,39 @@ func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params disp
 	}
 
 	// 4. Build FINAL.md content and republish Nebula post before marking OBJECTIVE.md done.
-	var finalBuilder strings.Builder
-	fmt.Fprintf(&finalBuilder, "# Final Report: %s\n\n", runID)
-	fmt.Fprintf(&finalBuilder, "Outcome: %s\n", outcome)
-	fmt.Fprintf(&finalBuilder, "Completed: %s\n", ts)
-	if curRun.Goal != "" {
-		fmt.Fprintf(&finalBuilder, "Goal: %s\n", curRun.Goal)
-	}
-	finalBuilder.WriteString("\n## Merged PRs\n")
-	for _, line := range prLines {
-		finalBuilder.WriteString(line + "\n")
-	}
-	if len(releaseFailed) > 0 {
-		fmt.Fprintf(&finalBuilder, "\n## Unreleased Sessions\n- %d session(s) failed to release: %s\n", len(releaseFailed), strings.Join(releaseFailed, ", "))
-	}
-	if extra := cmp.Or(strings.TrimSpace(params.FinalMarkdown), strings.TrimSpace(params.Summary)); extra != "" {
-		finalBuilder.WriteString("\n## Summary\n")
-		finalBuilder.WriteString(extra + "\n")
+	var finalContent string
+	if explicitFinal := strings.TrimSpace(params.FinalMarkdown); explicitFinal != "" {
+		finalContent = explicitFinal + "\n"
 	} else {
-		fmt.Fprintf(&finalBuilder, "\n## Summary\nAll lanes terminal (%s). Remaining orchestrator handover steps completed; run `/release` when ready.\n", prSummary)
+		var finalBuilder strings.Builder
+		fmt.Fprintf(&finalBuilder, "# Final Report: %s\n\n", runID)
+		fmt.Fprintf(&finalBuilder, "Outcome: %s\n", outcome)
+		fmt.Fprintf(&finalBuilder, "Completed: %s\n", ts)
+		if curRun.Goal != "" {
+			fmt.Fprintf(&finalBuilder, "Goal: %s\n", curRun.Goal)
+		}
+		finalBuilder.WriteString("\n## Merged PRs\n")
+		for _, line := range prLines {
+			finalBuilder.WriteString(line + "\n")
+		}
+		if len(releaseFailed) > 0 {
+			fmt.Fprintf(&finalBuilder, "\n## Unreleased Sessions\n- %d session(s) failed to release: %s\n", len(releaseFailed), strings.Join(releaseFailed, ", "))
+		}
+		if extra := strings.TrimSpace(params.Summary); extra != "" {
+			finalBuilder.WriteString("\n## Summary\n")
+			finalBuilder.WriteString(extra + "\n")
+		} else {
+			fmt.Fprintf(&finalBuilder, "\n## Summary\nAll lanes terminal (%s). Remaining orchestrator handover steps completed; run `/release` when ready.\n", prSummary)
+		}
+		finalContent = finalBuilder.String()
 	}
-	finalContent := finalBuilder.String()
 
 	handoverText := stripMarker(readText(filepath.Join(curRun.Dir, "HANDOVER.md")))
 	postID := cmp.Or(strings.TrimSpace(params.PostID), extractCloseoutPostID(rawObj, storedObj, rawProg, handoverText, storedPlanRef))
 	if postID != "" {
+		if vErr := dispatcher.ValidateCloseoutPostID(postID, rawObj, storedObj, rawProg, handoverText, storedPlanRef); vErr != nil {
+			return "", vErr
+		}
 		postBody := strings.TrimSpace(params.PostContent)
 		if postBody == "" {
 			if planRel != "" {

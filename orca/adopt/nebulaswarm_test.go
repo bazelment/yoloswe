@@ -3052,9 +3052,33 @@ func TestCloseoutUnitHelpers(t *testing.T) {
 		if got := findPostIDInText("Plan: PLAN.md (post ac9da4cb-1234-5678-9abc-def012345678)"); got != "ac9da4cb-1234-5678-9abc-def012345678" {
 			t.Fatalf("findPostIDInText UUID = %q", got)
 		}
+		if got := findPostIDInText("İ\nPost: ac9da4cb"); got != "ac9da4cb" {
+			t.Fatalf("findPostIDInText after non-ASCII rune = %q, want ac9da4cb", got)
+		}
+		if got := findPostIDInText("- Merged #5899 (def58990) and republish plan post (ac9da4cb)"); got != "ac9da4cb" {
+			t.Fatalf("findPostIDInText with earlier merge SHA = %q, want ac9da4cb", got)
+		}
+
+		var reqCount atomic.Int32
+		var gotMethod, gotPath, gotAuth, gotMarkdown string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reqCount.Add(1)
+			gotMethod = r.Method
+			gotPath = r.URL.Path
+			gotAuth = r.Header.Get("Authorization")
+			var payload struct {
+				Content  string `json:"content"`
+				Markdown string `json:"markdown"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			gotMarkdown = payload.Markdown
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		}))
+		defer srv.Close()
 
 		nebDrv, err := nebula.New(nebula.Config{
-			APIURL: "http://127.0.0.1:1",
+			APIURL: srv.URL,
 			Token:  "test-token",
 		})
 		if err != nil {
@@ -3065,6 +3089,15 @@ func TestCloseoutUnitHelpers(t *testing.T) {
 		}
 		if err := nebDrv.UpdatePost(t.Context(), "   ", "body"); err == nil {
 			t.Fatal("expected UpdatePost to reject blank postID")
+		}
+		if reqCount.Load() != 0 {
+			t.Fatalf("expected 0 HTTP requests for rejected postIDs, got %d", reqCount.Load())
+		}
+		if err := nebDrv.UpdatePost(t.Context(), "ac9da4cb", "# Updated Plan"); err != nil {
+			t.Fatalf("UpdatePost(ac9da4cb): %v", err)
+		}
+		if gotMethod != http.MethodPut || gotPath != "/api/posts/ac9da4cb" || gotAuth != "Bearer test-token" || gotMarkdown != "# Updated Plan" {
+			t.Fatalf("UpdatePost request = (%s %s auth=%q md=%q)", gotMethod, gotPath, gotAuth, gotMarkdown)
 		}
 	})
 }

@@ -2178,6 +2178,9 @@ func ValidateCloseoutFileRef(objective, targetPath string) (string, error) {
 	case "FINAL.md", "PROGRESS.md", "OBJECTIVE.md":
 		return cleaned, nil
 	}
+	if !strings.HasSuffix(strings.ToLower(cleaned), ".md") || strings.EqualFold(filepath.Base(cleaned), "HANDOVER.md") {
+		return "", fmt.Errorf("close-out write %q must target a markdown file, not a control or handover file", raw)
+	}
 	if !closeoutObjectiveMentionsFile(objective, cleaned) {
 		return "", fmt.Errorf("close-out write %q is not named in OBJECTIVE.md", raw)
 	}
@@ -2286,8 +2289,7 @@ func FindPostIDInText(text string) string {
 	if strings.TrimSpace(text) == "" {
 		return ""
 	}
-	lower := strings.ToLower(text)
-	if idx := strings.Index(lower, "post:"); idx >= 0 {
+	if idx := indexFoldASCII(text, "post:"); idx >= 0 {
 		rest := strings.TrimSpace(text[idx+len("post:"):])
 		if tok := leadingHexToken(rest); IsLikelyPostID(tok) {
 			return tok
@@ -2295,18 +2297,46 @@ func FindPostIDInText(text string) string {
 	}
 	lines := strings.Split(text, "\n")
 	for _, line := range lines {
-		ll := strings.ToLower(line)
-		if !strings.Contains(ll, "post") && !strings.Contains(ll, "republish") {
+		postIdx := indexFoldASCII(line, "post")
+		repubIdx := indexFoldASCII(line, "republish")
+		if postIdx < 0 && repubIdx < 0 {
 			continue
 		}
-		fields := strings.FieldsFunc(line, func(r rune) bool {
-			return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F' || r == '-')
-		})
-		for _, f := range fields {
-			tok := strings.Trim(f, "-")
-			if IsLikelyPostID(tok) {
+		if postIdx >= 0 {
+			if tok := firstLikelyPostToken(line[postIdx+len("post"):]); tok != "" {
 				return tok
 			}
+		}
+		if tok := firstLikelyPostToken(line); tok != "" {
+			return tok
+		}
+	}
+	return ""
+}
+
+func indexFoldASCII(s, substr string) int {
+	if substr == "" {
+		return 0
+	}
+	if len(s) < len(substr) {
+		return -1
+	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if strings.EqualFold(s[i:i+len(substr)], substr) {
+			return i
+		}
+	}
+	return -1
+}
+
+func firstLikelyPostToken(s string) string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F' || r == '-')
+	})
+	for _, f := range fields {
+		tok := strings.Trim(f, "-")
+		if IsLikelyPostID(tok) {
+			return tok
 		}
 	}
 	return ""

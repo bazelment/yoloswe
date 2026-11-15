@@ -48,6 +48,9 @@ func (d *Driver) UpdatePost(ctx context.Context, postID, content string) error {
 	if id == "" {
 		return fmt.Errorf("nebula update post: post id is required")
 	}
+	if id == "." || id == ".." || strings.ContainsAny(id, `/\`) {
+		return fmt.Errorf("nebula update post %q: invalid post id", id)
+	}
 	body := struct {
 		Content  string `json:"content"`
 		Markdown string `json:"markdown"`

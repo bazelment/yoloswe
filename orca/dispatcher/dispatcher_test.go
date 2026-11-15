@@ -1960,6 +1960,12 @@ func TestRunCloseoutToolVettingAndExecution(t *testing.T) {
 	if err := dispatcher.ValidateCloseoutPostID("a1b2c3d4", viewDone.Run.Objective); err == nil || !strings.Contains(err.Error(), "is not named in OBJECTIVE.md") {
 		t.Fatalf("expected not-named error for a1b2c3d4, got %v", err)
 	}
+	if _, err := dispatcher.ValidateCloseoutFileRef("Inspect state.json and HANDOVER.md", "state.json"); err == nil {
+		t.Fatal("expected ValidateCloseoutFileRef to reject state.json even when mentioned in OBJECTIVE.md")
+	}
+	if _, err := dispatcher.ValidateCloseoutFileRef("Inspect state.json and HANDOVER.md", "HANDOVER.md"); err == nil {
+		t.Fatal("expected ValidateCloseoutFileRef to reject HANDOVER.md even when mentioned in OBJECTIVE.md")
+	}
 
 	if err := dispatcher.VetAction(viewDone, actClose, dispatcher.DefaultInvariants()); err != nil {
 		t.Fatalf("expected valid run.closeout to pass VetAction, got: %v", err)
