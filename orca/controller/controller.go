@@ -24,14 +24,16 @@ import (
 
 // Default configuration values for Controller.
 const (
-	DefaultConsumer          = "controller"
-	DefaultHolderID          = "controller-1"
-	DefaultLeaseTTL          = 30 * time.Second
-	DefaultHeartbeatInterval = 10 * time.Second
-	DefaultPollInterval      = 5 * time.Second
-	DefaultJudgmentDebounce  = 2 * time.Minute
-	DefaultStallTimeout      = 45 * time.Minute
-	ActorController          = "controller"
+	DefaultConsumer              = "controller"
+	DefaultHolderID              = "controller-1"
+	DefaultLeaseTTL              = 30 * time.Second
+	DefaultHeartbeatInterval     = 10 * time.Second
+	DefaultPollInterval          = 5 * time.Second
+	DefaultJudgmentDebounce      = 2 * time.Minute
+	DefaultStallTimeout          = 45 * time.Minute
+	DefaultUnpushedWorkThreshold = 45 * time.Minute
+	DefaultDiskPressurePercent   = 90
+	ActorController              = "controller"
 )
 
 // Tool names recorded in store.DecisionStore by the deterministic controller.
@@ -47,7 +49,11 @@ const (
 	ToolOwnerAskDefault  = "owner.ask.default"
 )
 
-const ownerAskRefPrefix = "owner_ask:"
+const (
+	ownerAskRefPrefix = "owner_ask:"
+	// NamedWaitRefPrefix is the directive Ref prefix for lane/run expected waits.
+	NamedWaitRefPrefix = "named-wait:"
+)
 
 // ErrControllerStopped is returned when Step or Run is called on a killed controller.
 var ErrControllerStopped = errors.New("orca/controller: controller stopped")
@@ -144,9 +150,11 @@ type Config struct {
 	StallTimeoutSet bool
 	// JudgeLaneMail routes inbound lane mail questions and notes to the
 	// judgment dispatcher rather than the legacy auto-ask fallback.
-	JudgeLaneMail     bool
-	ConcurrencyCap    int
-	MaxCostPerHourUSD float64
+	JudgeLaneMail         bool
+	ConcurrencyCap        int
+	MaxCostPerHourUSD     float64
+	UnpushedWorkThreshold time.Duration
+	DiskPressurePercent   int
 }
 
 func (c Config) withDefaults() Config {
@@ -166,6 +174,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.StallTimeout <= 0 {
 		c.StallTimeout = DefaultStallTimeout
+	}
+	if c.UnpushedWorkThreshold <= 0 {
+		c.UnpushedWorkThreshold = DefaultUnpushedWorkThreshold
+	}
+	if c.DiskPressurePercent <= 0 {
+		c.DiskPressurePercent = DefaultDiskPressurePercent
 	}
 	return c
 }
@@ -238,28 +252,34 @@ type LaneReportPayload struct {
 // DecisionArgs is the structured JSON payload stored in Decision.Args for
 // controller actions and idempotency checks on restart.
 type DecisionArgs struct {
-	ActionKey  string   `json:"action_key"`
-	EventID    string   `json:"event_id,omitempty"`
-	FromPhase  string   `json:"from_phase,omitempty"`
-	ToPhase    string   `json:"to_phase,omitempty"`
-	Phase      string   `json:"phase,omitempty"`
-	Verdict    string   `json:"verdict,omitempty"`
-	Harness    string   `json:"harness,omitempty"`
-	Model      string   `json:"model,omitempty"`
-	Effort     string   `json:"effort,omitempty"`
-	TerminalID string   `json:"terminal_id,omitempty"`
-	SessionID  string   `json:"session_id,omitempty"`
-	AskID      string   `json:"ask_id,omitempty"`
-	Default    string   `json:"default,omitempty"`
-	EventIDs   []string `json:"event_ids,omitempty"`
-	Round      int      `json:"round,omitempty"`
-	Attempt    int      `json:"attempt,omitempty"`
+	ActionKey        string   `json:"action_key"`
+	EventID          string   `json:"event_id,omitempty"`
+	FromPhase        string   `json:"from_phase,omitempty"`
+	ToPhase          string   `json:"to_phase,omitempty"`
+	Phase            string   `json:"phase,omitempty"`
+	Verdict          string   `json:"verdict,omitempty"`
+	Harness          string   `json:"harness,omitempty"`
+	Model            string   `json:"model,omitempty"`
+	Effort           string   `json:"effort,omitempty"`
+	TerminalID       string   `json:"terminal_id,omitempty"`
+	SessionID        string   `json:"session_id,omitempty"`
+	AskID            string   `json:"ask_id,omitempty"`
+	Default          string   `json:"default,omitempty"`
+	EventIDs         []string `json:"event_ids,omitempty"`
+	StoppedTerminals []string `json:"stopped_terminals,omitempty"`
+	Round            int      `json:"round,omitempty"`
+	Attempt          int      `json:"attempt,omitempty"`
 }
 
 type pendingVerdict struct {
 	verdict string
 	headSHA string
 	key     string
+}
+
+type terminalStateCacheEntry struct {
+	err   error
+	state string
 }
 
 // Controller is the deterministic orchestration loop for a single Run.
@@ -275,9 +295,15 @@ type Controller struct {
 	dispatchedEvents   map[string]store.Decision
 	pendingVerdicts    map[string]pendingVerdict
 	emittedStalls      map[string]bool
+	emittedQuiet       map[string]string
 	emittedAskExpiries map[string]bool
+	stoppedTerminals   map[string]bool
+	unpushedSince      map[string]time.Time
 	releaseRetries     map[string]int
 	pendingStops       map[string]int
+	staleStopFailures  map[string]int
+	sessionHealthCache map[string]lane.SessionHealth
+	terminalStateCache map[string]terminalStateCacheEntry
 	watchErrors        chan error
 	wakeCh             chan struct{}
 	cancelRun          context.CancelFunc
@@ -286,6 +312,8 @@ type Controller struct {
 	cfg                Config
 	lastDecisionSeq    int64
 	mu                 sync.Mutex
+	quietMu            sync.Mutex
+	cacheMu            sync.Mutex
 	leaseHeld          bool
 	initialized        bool
 	killed             bool
@@ -299,8 +327,10 @@ func (c *Controller) SetRuntimeSettings(settings store.RunSettings) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if settings.StallTimeout > 0 {
+		c.cacheMu.Lock()
 		c.cfg.StallTimeout = settings.StallTimeout
 		c.stallTimeoutSet = true
+		c.cacheMu.Unlock()
 	}
 	if settings.CostGuardDisabled {
 		c.cfg.MaxCostPerHourUSD = 0
@@ -333,9 +363,13 @@ func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge
 		dispatchedEvents:   make(map[string]store.Decision),
 		pendingVerdicts:    make(map[string]pendingVerdict),
 		emittedStalls:      make(map[string]bool),
+		emittedQuiet:       make(map[string]string),
 		emittedAskExpiries: make(map[string]bool),
+		stoppedTerminals:   make(map[string]bool),
+		unpushedSince:      make(map[string]time.Time),
 		releaseRetries:     make(map[string]int),
 		pendingStops:       make(map[string]int),
+		staleStopFailures:  make(map[string]int),
 		wakeCh:             make(chan struct{}, 1),
 		watchErrors:        make(chan error, 16),
 		stallTimeoutSet:    stallTimeoutSet,
@@ -456,6 +490,29 @@ func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
 			}
 		}
 		return true
+	}
+	if ev.Kind == lane.EventNoActivity && ev.LaneID != "" {
+		if ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ev.LaneID); err == nil && ln != nil {
+			if ln.Status != lane.StatusRunning {
+				return true
+			}
+			now := c.clock.Now().UTC()
+			if c.laneIsWorkingOrBusyUncached(ctx, *ln) || c.hasActiveExpectedWait(ctx, ln.ID, now) {
+				return true
+			}
+			r, _ := c.resolveRecipe(ctx, ln)
+			rung, waiting := c.quietLadderRungFromStore(ctx, ln, r, now)
+			quietKey := fmt.Sprintf("%s:%d:%d:%s:%d:%d:%t", ln.Phase, max(ln.Round, 1), max(ln.Attempt, 1), ln.TerminalID, ln.LastEventAt.UTC().UnixNano(), rung, waiting)
+			c.quietMu.Lock()
+			already := c.emittedQuiet[ln.ID] == quietKey
+			if !already {
+				c.emittedQuiet[ln.ID] = quietKey
+			}
+			c.quietMu.Unlock()
+			if already {
+				return true
+			}
+		}
 	}
 	kind := store.EventPhaseExit
 	var payload any
@@ -634,10 +691,24 @@ func (c *Controller) Run(ctx context.Context) error {
 	}
 }
 
+func (c *Controller) resetStepCaches(init bool) {
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	if init {
+		c.sessionHealthCache = make(map[string]lane.SessionHealth)
+		c.terminalStateCache = make(map[string]terminalStateCacheEntry)
+	} else {
+		c.sessionHealthCache = nil
+		c.terminalStateCache = nil
+	}
+}
+
 // Step executes one deterministic pass of lease maintenance, stall/expiry detection, event consumption, and judgment flushing.
 func (c *Controller) Step(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.resetStepCaches(true)
+	defer c.resetStepCaches(false)
 
 	if c.killed {
 		return ErrControllerStopped
@@ -661,6 +732,10 @@ func (c *Controller) Step(ctx context.Context) error {
 	}
 
 	if err := c.reconcilePlannedLanes(ctx); err != nil {
+		return err
+	}
+
+	if err := c.checkLaneSessions(ctx); err != nil {
 		return err
 	}
 
@@ -693,7 +768,7 @@ func (c *Controller) Wait(ctx context.Context, name, laneID string, deadline tim
 	if err := c.ensureLease(ctx); err != nil {
 		return err
 	}
-	return c.store.Directives().Add(ctx, store.Directive{ID: "wait-" + name, RunID: c.cfg.RunID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Scope: laneID, Ref: "named-wait:" + name, Text: name, ExpiresAt: &deadline, Status: store.DirectiveActive})
+	return c.store.Directives().Add(ctx, store.Directive{ID: "wait-" + name, RunID: c.cfg.RunID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Scope: laneID, Ref: NamedWaitRefPrefix + name, Text: name, ExpiresAt: &deadline, Status: store.DirectiveActive})
 }
 
 func (c *Controller) CompleteWait(ctx context.Context, name string) error {
@@ -712,7 +787,7 @@ func (c *Controller) checkNamedWaits(ctx context.Context) error {
 	}
 	for i := range dirs {
 		dir := &dirs[i]
-		if dir.Status != store.DirectiveActive || !strings.HasPrefix(dir.Ref, "named-wait:") || dir.ExpiresAt == nil || c.clock.Now().Before(*dir.ExpiresAt) {
+		if dir.Status != store.DirectiveActive || !strings.HasPrefix(dir.Ref, NamedWaitRefPrefix) || dir.ExpiresAt == nil || c.clock.Now().Before(*dir.ExpiresAt) {
 			continue
 		}
 		_, err := c.store.Events().Append(ctx, store.Event{ID: "expired-" + dir.ID, RunID: c.cfg.RunID, LaneID: dir.Scope, Kind: store.EventTimer, Class: store.EventClassJudgment, Urgent: true, Summary: "wait deadline: " + dir.Text})
@@ -995,7 +1070,12 @@ func (c *Controller) indexDecision(d store.Decision) {
 	if args.ActionKey != "" {
 		c.decidedActions[args.ActionKey] = d
 	}
-	if args.EventID != "" && d.Tool != ToolLaneStall && d.Tool != ToolLaneEscalate {
+	for _, termID := range args.StoppedTerminals {
+		if t := strings.TrimSpace(termID); t != "" {
+			c.stoppedTerminals[t] = true
+		}
+	}
+	if args.EventID != "" && d.Tool != ToolLaneStall && d.Tool != ToolLaneEscalate && d.Tool != "lane.unpushed.report" && d.Tool != "lane.health.disk" {
 		c.decidedEvents[args.EventID] = d
 	}
 	for _, evID := range args.EventIDs {
@@ -1052,6 +1132,7 @@ func (c *Controller) recordDecision(ctx context.Context, tool, laneID, reason, r
 		Vetted:       true,
 		TraceID:      args.EventID,
 		OutcomeLabel: controllerOutcomeLabel(result),
+		CreatedAt:    c.clock.Now().UTC(),
 	})
 	if err != nil {
 		return store.Decision{}, false, err
@@ -1244,17 +1325,14 @@ func (c *Controller) detectStalls(ctx context.Context) error {
 	now := c.clock.Now().UTC()
 	for i := range running {
 		ln := running[i]
+		if c.laneIsWorkingOrBusy(ctx, ln) || c.hasActiveExpectedWait(ctx, ln.ID, now) {
+			continue
+		}
 		r, err := c.resolveRecipe(ctx, &ln)
 		if err != nil {
 			return err
 		}
-		timeout := r.Limits.PhaseTimeout
-		if c.stallTimeoutSet {
-			timeout = c.cfg.StallTimeout
-		}
-		if timeout <= 0 {
-			timeout = c.cfg.StallTimeout
-		}
+		timeout := c.effectiveStallTimeout(r)
 		if timeout <= 0 {
 			continue
 		}
@@ -1270,16 +1348,13 @@ func (c *Controller) detectStalls(ctx context.Context) error {
 			continue
 		}
 
+		if rung, waiting := c.quietLadderRungFromStore(ctx, &ln, r, now); waiting || rung == 1 {
+			continue
+		}
+
 		attempt := max(ln.Attempt, 1)
 		actionKey := stallActionKey(ln.ID, ln.Phase, ln.Round, attempt, ln.TerminalID)
 		if c.hasActionDecision(actionKey) || c.emittedStalls[actionKey] {
-			continue
-		}
-		if c.terminalIsWorking(ctx, ln.TerminalID) {
-			payload, _ := json.Marshal(PhaseExitPayload{Kind: lane.EventNoActivity, TerminalID: ln.TerminalID, Phase: ln.Phase})
-			if _, err := c.store.Events().Append(ctx, store.Event{RunID: c.cfg.RunID, Kind: store.EventPhaseExit, LaneID: ln.ID, Source: "lane.watch", Payload: payload}); err != nil {
-				return err
-			}
 			continue
 		}
 		c.emittedStalls[actionKey] = true
@@ -1297,6 +1372,238 @@ func (c *Controller) detectStalls(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (c *Controller) checkLaneSessions(ctx context.Context) error {
+	if c.driver == nil {
+		return nil
+	}
+	running, err := c.store.Lanes().List(ctx, store.LaneFilter{
+		RunID:    c.cfg.RunID,
+		Statuses: []store.LaneStatus{lane.StatusRunning},
+	})
+	if err != nil {
+		return err
+	}
+	now := c.clock.Now().UTC()
+	for i := range running {
+		ln := running[i]
+		c.stopStaleRecordedTerminals(ctx, &ln)
+		if c.laneIsWorkingOrBusy(ctx, ln) && ln.LastEventAt.Before(now) {
+			ln.LastEventAt = now
+			if err := c.store.Lanes().Upsert(ctx, ln); err != nil {
+				return err
+			}
+		}
+		if err := c.checkLaneUnpushedWork(ctx, &ln, now); err != nil {
+			return err
+		}
+		if err := c.checkLaneDiskHealth(ctx, &ln); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Controller) stopStaleRecordedTerminals(ctx context.Context, ln *lane.Lane) {
+	if c.driver == nil || ln == nil || len(ln.Terminals) == 0 {
+		return
+	}
+	curKey := ln.AttemptKey()
+	keys := make([]string, 0, len(ln.Terminals))
+	for k := range ln.Terminals {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		termID := strings.TrimSpace(ln.Terminals[k])
+		if termID == "" || termID == ln.TerminalID || k == curKey || c.stoppedTerminals[termID] {
+			continue
+		}
+		stopKey := ln.ID + ":" + termID
+		if c.staleStopFailures[stopKey] >= 3 {
+			continue
+		}
+		sessID := ln.SessionID
+		if s := strings.TrimSpace(ln.Sessions[k]); s != "" {
+			sessID = s
+		}
+		_, _, _ = c.recordDecision(ctx, ToolPhaseRetry+".intent", ln.ID,
+			"stop stale previous-phase terminal", "stop pending",
+			DecisionArgs{ActionKey: "intent:stale-stop:" + stopKey, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: max(ln.Attempt, 1), SessionID: sessID, TerminalID: termID})
+		if err := c.driver.Stop(ctx, lane.StopRequest{
+			RunID:      c.cfg.RunID,
+			LaneID:     ln.ID,
+			SessionID:  sessID,
+			TerminalID: termID,
+			Reason:     "stop stale previous-phase terminal",
+		}); err == nil {
+			c.stoppedTerminals[termID] = true
+			delete(c.staleStopFailures, stopKey)
+			_, _, _ = c.recordDecision(ctx, ToolPhaseRetry+".stop", ln.ID,
+				"stopped stale previous-phase terminal", "stopped terminal",
+				DecisionArgs{ActionKey: "stale-stopped:" + stopKey, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: max(ln.Attempt, 1), SessionID: sessID, TerminalID: termID, StoppedTerminals: []string{termID}})
+		} else {
+			c.staleStopFailures[stopKey]++
+		}
+	}
+}
+
+func (c *Controller) checkLaneUnpushedWork(ctx context.Context, ln *lane.Lane, now time.Time) error {
+	gr, ok := c.driver.(lane.GitStateReader)
+	if !ok || ln == nil || (strings.TrimSpace(ln.SessionID) == "" && strings.TrimSpace(ln.TerminalID) == "") {
+		return nil
+	}
+	st, err := gr.LaneGitState(ctx, *ln)
+	if err != nil {
+		return nil
+	}
+	if !st.HasUnpushedWork() {
+		delete(c.unpushedSince, ln.ID)
+		return nil
+	}
+	oldestAt := st.OldestUnpushedAt
+	if oldestAt.IsZero() {
+		if seenAt, seen := c.unpushedSince[ln.ID]; seen {
+			oldestAt = seenAt
+		} else {
+			oldestAt = cmp.Or(ln.LastEventAt, ln.UpdatedAt, ln.CreatedAt, now)
+			c.unpushedSince[ln.ID] = oldestAt
+		}
+	}
+	threshold := c.cfg.UnpushedWorkThreshold
+	if threshold <= 0 {
+		threshold = DefaultUnpushedWorkThreshold
+	}
+	if oldestAt.IsZero() || now.Sub(oldestAt) < threshold {
+		return nil
+	}
+	age := now.Sub(oldestAt).Round(time.Minute)
+	steerKey := "unpushed:steer:" + ln.ID
+	reportKey := "unpushed:report:" + ln.ID
+	if !c.hasActionDecision(steerKey) {
+		msg := fmt.Sprintf("You have unpushed work in this lane session (%d unpushed commits, %d dirty files, oldest change %s ago). Commit and push a WIP commit to your lane branch now so a session death loses nothing.", st.UnpushedCommits, len(st.DirtyFiles), age)
+		if err := c.driver.Steer(ctx, lane.SteerRequest{
+			RunID:      c.cfg.RunID,
+			LaneID:     ln.ID,
+			SessionID:  ln.SessionID,
+			TerminalID: ln.TerminalID,
+			Message:    msg,
+		}); err != nil {
+			return err
+		}
+		_, _, err := c.recordDecision(ctx, "lane.unpushed.steer", ln.ID,
+			"unpushed work older than threshold; steered lane to push WIP",
+			"steered lane to push WIP",
+			DecisionArgs{
+				ActionKey:  steerKey,
+				Phase:      ln.Phase,
+				Round:      max(ln.Round, 1),
+				Attempt:    max(ln.Attempt, 1),
+				SessionID:  ln.SessionID,
+				TerminalID: ln.TerminalID,
+			},
+		)
+		return err
+	}
+	if !c.hasActionDecision(reportKey) {
+		summary := fmt.Sprintf("lane %s still has unpushed work after WIP steer (%d unpushed commits, %d dirty files, oldest %s ago)", ln.ID, st.UnpushedCommits, len(st.DirtyFiles), age)
+		ev, err := c.store.Events().Append(ctx, store.Event{
+			ID:      "unpushed-" + ln.ID,
+			RunID:   c.cfg.RunID,
+			LaneID:  ln.ID,
+			Kind:    store.EventStall,
+			Class:   store.EventClassJudgment,
+			Urgent:  true,
+			Source:  "lane.unpushed",
+			Summary: summary,
+		})
+		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return err
+		}
+		_, _, err = c.recordDecision(ctx, "lane.unpushed.report", ln.ID,
+			summary,
+			"reported persistent unpushed work to dispatcher",
+			DecisionArgs{
+				ActionKey:  reportKey,
+				EventID:    ev.ID,
+				Phase:      ln.Phase,
+				Round:      max(ln.Round, 1),
+				Attempt:    max(ln.Attempt, 1),
+				SessionID:  ln.SessionID,
+				TerminalID: ln.TerminalID,
+			},
+		)
+		return err
+	}
+	return nil
+}
+
+func (c *Controller) checkLaneDiskHealth(ctx context.Context, ln *lane.Lane) error {
+	hr, ok := c.driver.(lane.SessionHealthReader)
+	if !ok || ln == nil || (strings.TrimSpace(ln.SessionID) == "" && strings.TrimSpace(ln.TerminalID) == "") {
+		return nil
+	}
+	health, err := c.laneSessionHealth(ctx, *ln, hr)
+	if err != nil {
+		return nil
+	}
+	threshold := c.cfg.DiskPressurePercent
+	if threshold <= 0 {
+		threshold = DefaultDiskPressurePercent
+	}
+	if health.DiskUsedPercent < threshold {
+		return nil
+	}
+	diskKey := "disk:pressure:" + ln.ID
+	if c.hasActionDecision(diskKey) {
+		return nil
+	}
+	noteMsg := fmt.Sprintf("Session disk usage is at %d%%. Free space without dropping the build cache (remove temporary artifacts, logs, or scratch files, not the Bazel build cache) and rerun only the failed step.", health.DiskUsedPercent)
+	if err := c.driver.Steer(ctx, lane.SteerRequest{
+		RunID:      c.cfg.RunID,
+		LaneID:     ln.ID,
+		SessionID:  ln.SessionID,
+		TerminalID: ln.TerminalID,
+		Message:    noteMsg,
+	}); err != nil {
+		return err
+	}
+	_, _ = c.store.Notes().Append(ctx, store.RunNote{
+		ID:     "disk-pressure-" + ln.ID,
+		RunID:  c.cfg.RunID,
+		TaskID: cmp.Or(ln.ItemID, ln.ID),
+		Phase:  ln.Phase,
+		Text:   noteMsg,
+	})
+	summary := fmt.Sprintf("lane %s session disk pressure at %d%%; steered lane to free space without dropping build cache and rerun only the failed step", ln.ID, health.DiskUsedPercent)
+	ev, err := c.store.Events().Append(ctx, store.Event{
+		ID:      "disk-pressure-" + ln.ID,
+		RunID:   c.cfg.RunID,
+		LaneID:  ln.ID,
+		Kind:    store.EventStall,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Source:  "lane.health",
+		Summary: summary,
+	})
+	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		return err
+	}
+	_, _, err = c.recordDecision(ctx, "lane.health.disk", ln.ID,
+		summary,
+		"steered lane and alerted dispatcher",
+		DecisionArgs{
+			ActionKey:  diskKey,
+			EventID:    ev.ID,
+			Phase:      ln.Phase,
+			Round:      max(ln.Round, 1),
+			Attempt:    max(ln.Attempt, 1),
+			SessionID:  ln.SessionID,
+			TerminalID: ln.TerminalID,
+		},
+	)
+	return err
 }
 
 func (c *Controller) checkOwnerAsks(ctx context.Context) error {
@@ -1384,9 +1691,80 @@ func (c *Controller) consumeEvents(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := c.advanceExpiredNudges(ctx, &urgentFlush); err != nil {
+		return err
+	}
 	if urgentFlush {
 		if err := c.flushJudgment(ctx, "urgent bypass"); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func (c *Controller) advanceExpiredNudges(ctx context.Context, urgentFlush *bool) error {
+	if c.driver == nil || c.store == nil {
+		return nil
+	}
+	running, err := c.store.Lanes().List(ctx, store.LaneFilter{
+		RunID:    c.cfg.RunID,
+		Statuses: []store.LaneStatus{lane.StatusRunning},
+	})
+	if err != nil {
+		return err
+	}
+	now := c.clock.Now().UTC()
+	for i := range running {
+		ln := running[i]
+		if c.terminalIsWorkingOrUnknown(ctx, ln.TerminalID) || c.sessionIsBusy(ctx, ln) || c.hasActiveExpectedWait(ctx, ln.ID, now) {
+			continue
+		}
+		r, err := c.resolveRecipe(ctx, &ln)
+		if err != nil {
+			return err
+		}
+		rung, waiting := c.quietLadderRungFromStore(ctx, &ln, r, now)
+		if rung != 1 || waiting {
+			continue
+		}
+		key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
+		if c.hasActionDecision("restart:fresh:" + key) {
+			continue
+		}
+		raw, err := json.Marshal(PhaseExitPayload{
+			Kind:       lane.EventNoActivity,
+			TerminalID: ln.TerminalID,
+			Phase:      ln.Phase,
+			Error:      "nudge wait expired without activity",
+		})
+		if err != nil {
+			return err
+		}
+		evID := fmt.Sprintf("nudge-expired:%s:%d:%s", key, max(ln.Attempt, 1), ln.TerminalID)
+		if c.isEventHandled(evID) {
+			continue
+		}
+		ev := store.Event{
+			ID:        evID,
+			RunID:     c.cfg.RunID,
+			LaneID:    ln.ID,
+			Kind:      store.EventPhaseExit,
+			Class:     store.EventClassAuto,
+			Source:    "lane.watch",
+			Summary:   fmt.Sprintf("lane %s quiet after nudge wait", ln.ID),
+			Payload:   raw,
+			CreatedAt: now,
+		}
+		class, err := c.handlePhaseExit(ctx, &ev)
+		if err != nil {
+			return err
+		}
+		ev.Class = class
+		if class == store.EventClassJudgment {
+			c.enqueueJudgmentEvent(ev)
+			if urgentFlush != nil && (ev.Urgent || c.cfg.JudgmentDebounce <= 0) {
+				*urgentFlush = true
+			}
 		}
 	}
 	return nil
@@ -2056,21 +2434,24 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 	ln.LastEventID = ev.ID
 	// A quiet pulse is controller bookkeeping, not worker activity.
 	quiet := ev.Source == "lane.watch" && (payload.Kind == lane.EventNoActivity || payload.Kind == lane.EventTurnEndedNoReport)
-	if quiet && payload.Kind == lane.EventNoActivity && c.terminalIsWorking(ctx, ln.TerminalID) {
-		timeout := r.Limits.PhaseTimeout
-		if c.stallTimeoutSet {
-			timeout = c.cfg.StallTimeout
-		}
-		lastActive := ln.LastEventAt
-		if lastActive.IsZero() {
-			lastActive = ln.UpdatedAt
-		}
-		if timeout > 0 && !lastActive.IsZero() && c.clock.Now().Before(lastActive.Add(timeout)) {
+	now := c.clock.Now().UTC()
+	if quiet {
+		if c.hasActiveExpectedWait(ctx, ln.ID, now) {
 			return store.EventClassAuto, nil
 		}
-	}
-	if !quiet {
-		ln.LastEventAt = c.clock.Now().UTC()
+		if payload.Kind == lane.EventNoActivity && (c.terminalIsWorkingOrUnknown(ctx, ln.TerminalID) || c.sessionIsBusy(ctx, *ln)) {
+			return store.EventClassAuto, nil
+		}
+		if payload.Kind == lane.EventTurnEndedNoReport && c.sessionIsBusy(ctx, *ln) {
+			return store.EventClassAuto, nil
+		}
+		if payload.Kind == lane.EventNoActivity {
+			if _, waiting := c.quietLadderRungFromStore(ctx, ln, r, now); waiting {
+				return store.EventClassAuto, nil
+			}
+		}
+	} else {
+		ln.LastEventAt = now
 	}
 	if quiet {
 		key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
@@ -2101,11 +2482,16 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 			}
 
 			agent := curPhase.Agents[min(curAttempt-1, len(curPhase.Agents)-1)]
+			prevTermID := strings.TrimSpace(ln.TerminalID)
 			if err := c.stopCurrentTerminal(ctx, ln, "replace quiet terminal"); err != nil {
 				c.noteStopFailure(ctx, ln, err)
 				return store.EventClassUnclassified, err
 			}
 			delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
+			var stoppedTerminals []string
+			if prevTermID != "" {
+				stoppedTerminals = []string{prevTermID}
+			}
 			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, Repository: c.runRepository(ctx), LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: agent.Harness, Model: agent.Model, Effort: agent.Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, max(ln.Round, 1), "fresh terminal after nudge")})
 			if err != nil {
 				return store.EventClassUnclassified, err
@@ -2114,7 +2500,7 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 			if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
 				return store.EventClassUnclassified, err
 			}
-			_, _, err = c.recordDecision(ctx, ToolPhaseRetry, ln.ID, "quiet lane: fresh terminal same round", "fresh terminal", DecisionArgs{ActionKey: "restart:fresh:" + key, EventID: ev.ID, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt})
+			_, _, err = c.recordDecision(ctx, ToolPhaseRetry, ln.ID, "quiet lane: fresh terminal same round", "fresh terminal", DecisionArgs{ActionKey: "restart:fresh:" + key, EventID: ev.ID, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt, StoppedTerminals: stoppedTerminals})
 			if err != nil {
 				return store.EventClassUnclassified, err
 			}
@@ -2219,7 +2605,7 @@ func (c *Controller) pendingVerdictForLane(ctx context.Context, ln *lane.Lane) (
 }
 
 func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.EventClass, error) {
-	if ev.LaneID == "" {
+	if ev.LaneID == "" || ev.Source == "lane.unpushed" || ev.Source == "lane.health" {
 		return store.EventClassJudgment, nil
 	}
 	ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ev.LaneID)
@@ -2235,17 +2621,16 @@ func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.Ev
 		}
 		return store.EventClassAuto, nil
 	}
+	now := c.clock.Now().UTC()
+	if c.laneIsWorkingOrBusy(ctx, *ln) || c.hasActiveExpectedWait(ctx, ln.ID, now) {
+		return store.EventClassAuto, nil
+	}
 
 	round := max(ln.Round, 1)
 	attempt := max(ln.Attempt, 1)
 	actionKey := stallActionKey(ln.ID, ln.Phase, round, attempt, ln.TerminalID)
-	if ln.SessionID != "" || ln.TerminalID != "" {
-		if err := c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: "phase stall timeout exceeded"}); err != nil {
-			return store.EventClassUnclassified, err
-		}
-	}
 	c.emittedStalls[actionKey] = true
-	_, already, err := c.recordDecision(ctx, ToolLaneStall, ln.ID,
+	_, _, err = c.recordDecision(ctx, ToolLaneStall, ln.ID,
 		fmt.Sprintf("lane %s stalled in phase %s (round %d, attempt %d)", ln.ID, ln.Phase, round, attempt),
 		"stopped stalled terminal",
 		DecisionArgs{
@@ -2261,7 +2646,15 @@ func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.Ev
 	if err != nil {
 		return store.EventClassUnclassified, err
 	}
-	if !already {
+	if ln.SessionID != "" || ln.TerminalID != "" {
+		if err := c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: "phase stall timeout exceeded"}); err != nil {
+			return store.EventClassUnclassified, err
+		}
+		if strings.TrimSpace(ln.TerminalID) != "" {
+			c.stoppedTerminals[strings.TrimSpace(ln.TerminalID)] = true
+		}
+	}
+	if ln.Status != lane.StatusBlocked {
 		ln.Status = lane.StatusBlocked
 		ln.LastEventID = ev.ID
 		ln.LastEventAt = c.clock.Now().UTC()
@@ -2368,8 +2761,12 @@ func (c *Controller) startLanePhase(
 	}
 
 	var sessionID, terminalID string
+	var stoppedTerminals []string
 	repo := c.runRepository(ctx)
 	if ln.SessionID == "" {
+		if tool != ToolPhaseRetry {
+			stoppedTerminals = c.stopPreviousPhaseTerminals(ctx, ln, "new phase "+phase.Name+" started")
+		}
 		res, err := c.driver.SpawnSession(ctx, lane.SpawnRequest{
 			RunID:      c.cfg.RunID,
 			Repository: repo,
@@ -2400,11 +2797,17 @@ func (c *Controller) startLanePhase(
 		}
 	} else {
 		if tool == ToolPhaseRetry {
+			prevTermID := strings.TrimSpace(ln.TerminalID)
 			if err := c.stopCurrentTerminal(ctx, ln, "replace terminal for retry"); err != nil {
 				c.noteStopFailure(ctx, ln, err)
 				return err
 			}
 			delete(c.pendingStops, ln.ID+":"+ln.AttemptKey())
+			if prevTermID != "" {
+				stoppedTerminals = []string{prevTermID}
+			}
+		} else {
+			stoppedTerminals = c.stopPreviousPhaseTerminals(ctx, ln, "new phase "+phase.Name+" started")
 		}
 		res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
 			RunID:      c.cfg.RunID,
@@ -2445,16 +2848,17 @@ func (c *Controller) startLanePhase(
 	_, _, err := c.recordDecision(ctx, tool, ln.ID, reason,
 		fmt.Sprintf("%s round %d attempt %d (%s:%s)", phase.Name, round, attempt, agent.Harness, agent.Model),
 		DecisionArgs{
-			ActionKey: actionKey,
-			EventID:   eventID,
-			FromPhase: fromPhase,
-			ToPhase:   phase.Name,
-			Phase:     phase.Name,
-			Round:     round,
-			Attempt:   attempt,
-			Harness:   agent.Harness,
-			Model:     agent.Model,
-			Effort:    agent.Effort,
+			ActionKey:        actionKey,
+			EventID:          eventID,
+			FromPhase:        fromPhase,
+			ToPhase:          phase.Name,
+			Phase:            phase.Name,
+			Round:            round,
+			Attempt:          attempt,
+			Harness:          agent.Harness,
+			Model:            agent.Model,
+			Effort:           agent.Effort,
+			StoppedTerminals: stoppedTerminals,
 		},
 	)
 	if err != nil {
@@ -2475,7 +2879,64 @@ func (c *Controller) stopCurrentTerminal(ctx context.Context, ln *lane.Lane, rea
 	if c.driver == nil || ln == nil || (strings.TrimSpace(ln.TerminalID) == "" && strings.TrimSpace(ln.SessionID) == "") {
 		return nil
 	}
-	return c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: reason})
+	err := c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: reason})
+	if err == nil && strings.TrimSpace(ln.TerminalID) != "" {
+		termID := strings.TrimSpace(ln.TerminalID)
+		c.stoppedTerminals[termID] = true
+		delete(c.staleStopFailures, ln.ID+":"+termID)
+	}
+	return err
+}
+
+func (c *Controller) stopPreviousPhaseTerminals(ctx context.Context, ln *lane.Lane, reason string) []string {
+	if c.driver == nil || ln == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var stopped []string
+	stopOne := func(sessionID, termID string) {
+		termID = strings.TrimSpace(termID)
+		if termID == "" || seen[termID] {
+			return
+		}
+		seen[termID] = true
+		if c.stoppedTerminals[termID] {
+			stopped = append(stopped, termID)
+			return
+		}
+		stopKey := ln.ID + ":" + termID
+		if c.staleStopFailures[stopKey] >= 3 {
+			return
+		}
+		if err := c.driver.Stop(ctx, lane.StopRequest{
+			RunID:      c.cfg.RunID,
+			LaneID:     ln.ID,
+			SessionID:  strings.TrimSpace(cmp.Or(sessionID, ln.SessionID)),
+			TerminalID: termID,
+			Reason:     reason,
+		}); err == nil {
+			c.stoppedTerminals[termID] = true
+			delete(c.staleStopFailures, stopKey)
+			stopped = append(stopped, termID)
+		} else {
+			c.staleStopFailures[stopKey]++
+		}
+	}
+	stopOne(ln.SessionID, ln.TerminalID)
+	keys := make([]string, 0, len(ln.Terminals))
+	for k := range ln.Terminals {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		termID := ln.Terminals[k]
+		sessID := ln.SessionID
+		if s := strings.TrimSpace(ln.Sessions[k]); s != "" {
+			sessID = s
+		}
+		stopOne(sessID, termID)
+	}
+	return stopped
 }
 
 func (c *Controller) noteStopFailure(ctx context.Context, ln *lane.Lane, err error) {
@@ -2511,6 +2972,10 @@ func (c *Controller) retryStops(ctx context.Context) {
 		}
 		err = c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: "retry failed terminal stop"})
 		if err == nil {
+			if termID := strings.TrimSpace(ln.TerminalID); termID != "" {
+				c.stoppedTerminals[termID] = true
+				delete(c.staleStopFailures, ln.ID+":"+termID)
+			}
 			delete(c.pendingStops, key)
 		} else {
 			c.noteStopFailure(ctx, ln, err)
@@ -2700,18 +3165,206 @@ func (c *Controller) respawnWrongRepoLane(
 	return store.EventClassAuto, err
 }
 
-func (c *Controller) terminalIsWorking(ctx context.Context, terminalID string) bool {
-	if strings.TrimSpace(terminalID) == "" {
-		return false
+func (c *Controller) terminalAgentState(ctx context.Context, terminalID string, useCache bool) (string, bool, error) {
+	terminalID = strings.TrimSpace(terminalID)
+	if terminalID == "" {
+		return "", false, nil
 	}
 	reader, ok := c.driver.(lane.TerminalStateReader)
 	if !ok {
-		return false
+		return "", false, nil
+	}
+	if useCache {
+		c.cacheMu.Lock()
+		if c.terminalStateCache != nil {
+			if cached, exists := c.terminalStateCache[terminalID]; exists {
+				c.cacheMu.Unlock()
+				return cached.state, true, cached.err
+			}
+		}
+		c.cacheMu.Unlock()
 	}
 	state, err := reader.TerminalAgentState(ctx, terminalID)
-	// Unknown state is treated as working for restart safety: an API failure
-	// must never trigger a destructive replacement.
-	return err != nil || strings.EqualFold(strings.TrimSpace(state), "working")
+	if useCache {
+		c.cacheMu.Lock()
+		if c.terminalStateCache != nil {
+			c.terminalStateCache[terminalID] = terminalStateCacheEntry{state: state, err: err}
+		}
+		c.cacheMu.Unlock()
+	}
+	return state, true, err
+}
+
+func (c *Controller) terminalIsConfirmedWorking(ctx context.Context, terminalID string, useCache bool) bool {
+	state, ok, err := c.terminalAgentState(ctx, terminalID, useCache)
+	if !ok || err != nil {
+		return false
+	}
+	trimmed := strings.TrimSpace(state)
+	return strings.EqualFold(trimmed, "working") || strings.EqualFold(trimmed, "busy")
+}
+
+func (c *Controller) terminalIsWorkingOrUnknown(ctx context.Context, terminalID string) bool {
+	state, ok, err := c.terminalAgentState(ctx, terminalID, true)
+	if !ok {
+		return false
+	}
+	// Transient/unknown API errors are treated as working for destructive
+	// replacement safety, unless the terminal is confirmed not found (404).
+	if err != nil {
+		return !errors.Is(err, store.ErrNotFound)
+	}
+	trimmed := strings.TrimSpace(state)
+	return strings.EqualFold(trimmed, "working") || strings.EqualFold(trimmed, "busy")
+}
+
+func (c *Controller) sessionIsBusy(ctx context.Context, ln lane.Lane) bool {
+	if c.driver == nil || (strings.TrimSpace(ln.SessionID) == "" && strings.TrimSpace(ln.TerminalID) == "") {
+		return false
+	}
+	hr, ok := c.driver.(lane.SessionHealthReader)
+	if !ok {
+		return false
+	}
+	health, err := c.laneSessionHealth(ctx, ln, hr)
+	return err == nil && health.HasBusyProcess()
+}
+
+func (c *Controller) sessionIsBusyUncached(ctx context.Context, ln lane.Lane) bool {
+	if c.driver == nil || (strings.TrimSpace(ln.SessionID) == "" && strings.TrimSpace(ln.TerminalID) == "") {
+		return false
+	}
+	hr, ok := c.driver.(lane.SessionHealthReader)
+	if !ok {
+		return false
+	}
+	health, err := hr.LaneSessionHealth(ctx, ln)
+	return err == nil && health.HasBusyProcess()
+}
+
+func (c *Controller) laneSessionHealth(ctx context.Context, ln lane.Lane, hr lane.SessionHealthReader) (lane.SessionHealth, error) {
+	key := ln.ID
+	if key == "" {
+		key = ln.SessionID + "\x00" + ln.TerminalID
+	}
+	c.cacheMu.Lock()
+	if c.sessionHealthCache != nil {
+		if health, ok := c.sessionHealthCache[key]; ok {
+			c.cacheMu.Unlock()
+			return health, nil
+		}
+	}
+	c.cacheMu.Unlock()
+	health, err := hr.LaneSessionHealth(ctx, ln)
+	if err == nil {
+		c.cacheMu.Lock()
+		if c.sessionHealthCache != nil {
+			c.sessionHealthCache[key] = health
+		}
+		c.cacheMu.Unlock()
+	}
+	return health, err
+}
+
+func (c *Controller) laneIsWorkingOrBusy(ctx context.Context, ln lane.Lane) bool {
+	return c.terminalIsConfirmedWorking(ctx, ln.TerminalID, true) || c.sessionIsBusy(ctx, ln)
+}
+
+func (c *Controller) laneIsWorkingOrBusyUncached(ctx context.Context, ln lane.Lane) bool {
+	return c.terminalIsConfirmedWorking(ctx, ln.TerminalID, false) || c.sessionIsBusyUncached(ctx, ln)
+}
+
+func (c *Controller) hasActiveExpectedWait(ctx context.Context, laneID string, now time.Time) bool {
+	laneID = strings.TrimSpace(laneID)
+	if c.store == nil || laneID == "" {
+		return false
+	}
+	dirs, err := c.store.Directives().List(ctx, store.DirectiveFilter{
+		RunID:      c.cfg.RunID,
+		Scope:      laneID,
+		ActiveOnly: false,
+	})
+	if err != nil {
+		return false
+	}
+	for i := range dirs {
+		d := &dirs[i]
+		if d.Status != store.DirectiveActive {
+			continue
+		}
+		if strings.HasPrefix(d.Ref, ownerAskRefPrefix) {
+			return true
+		}
+		if strings.HasPrefix(d.Ref, NamedWaitRefPrefix) && (d.ExpiresAt == nil || now.Before(*d.ExpiresAt)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Controller) effectiveStallTimeout(r *recipe.Recipe) time.Duration {
+	c.cacheMu.Lock()
+	cfgTimeout := c.cfg.StallTimeout
+	explicit := c.stallTimeoutSet
+	c.cacheMu.Unlock()
+	timeout := cfgTimeout
+	if r != nil && r.Limits.PhaseTimeout > 0 && !explicit {
+		timeout = r.Limits.PhaseTimeout
+	}
+	if timeout <= 0 {
+		timeout = cfgTimeout
+	}
+	return timeout
+}
+
+func (c *Controller) nudgeWaitDuration(r *recipe.Recipe) time.Duration {
+	timeout := c.effectiveStallTimeout(r)
+	return max(timeout/2, 5*time.Minute)
+}
+
+func (c *Controller) quietLadderRungFromStore(ctx context.Context, ln *lane.Lane, r *recipe.Recipe, now time.Time) (int, bool) {
+	if ln == nil || c.store == nil {
+		return 0, false
+	}
+	key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
+	nudgeKey := "restart:nudge:" + key
+	freshKey := "restart:fresh:" + key
+
+	decs, err := c.store.Decisions().List(ctx, store.DecisionFilter{
+		RunID:  c.cfg.RunID,
+		LaneID: ln.ID,
+	})
+	if err != nil {
+		return 0, false
+	}
+	var nudgeDec, freshDec *store.Decision
+	for i := range decs {
+		var args DecisionArgs
+		if len(decs[i].Args) == 0 || json.Unmarshal(decs[i].Args, &args) != nil {
+			continue
+		}
+		switch args.ActionKey {
+		case nudgeKey:
+			nudgeDec = &decs[i]
+		case freshKey:
+			freshDec = &decs[i]
+		}
+	}
+	if nudgeDec == nil {
+		return 0, false
+	}
+	wait := c.nudgeWaitDuration(r)
+	if freshDec == nil {
+		waitStart := nudgeDec.CreatedAt
+		if ln.LastEventAt.After(waitStart) {
+			waitStart = ln.LastEventAt
+		}
+		if !waitStart.IsZero() && now.Before(waitStart.Add(wait)) {
+			return 1, true
+		}
+		return 1, false
+	}
+	return 2, false
 }
 
 func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Recipe, phase recipe.Phase, round int, extraNote string) string {

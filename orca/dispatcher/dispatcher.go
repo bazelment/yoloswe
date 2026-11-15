@@ -649,6 +649,7 @@ var dispatcherToolDefs = []model.ToolDefinition{
 	{Name: ToolLaneSteer, Description: "Send a steering note to an active or blocked lane", InputSchema: model.SchemaFor[LaneSteerParams]()},
 	{Name: ToolLaneRetry, Description: "Retry a stalled, blocked, or failed lane on a fresh round", InputSchema: model.SchemaFor[LaneRetryParams]()},
 	{Name: ToolLaneStop, Description: "Stop a non-terminal lane and mark it failed", InputSchema: model.SchemaFor[LaneStopParams]()},
+	{Name: ToolLaneWait, Description: "Record a named expected wait on a lane (e.g. cloud VM run, sweep, or merge gate) with a reason and deadline so the controller suppresses stall judgments until the deadline", InputSchema: model.SchemaFor[LaneWaitParams]()},
 	{Name: ToolOwnerAsk, Description: "Pose a decision to the owner that only the owner can make (product scope, spend, credentials, one-way/destructive policy) and that the batch presents as still open, with options, a mandatory default, and a deadline. Never use it for engineering, ordering or retry choices, or for work the owner already ordered", InputSchema: model.SchemaFor[OwnerAskParams]()},
 	{Name: ToolOwnerAnswer, Description: "If the owner's message answers one of the listed open owner asks, resolve it with that ask's id; otherwise treat the message as work", InputSchema: model.SchemaFor[OwnerAnswerParams]()},
 	{Name: ToolDirectiveNote, Description: "Persist a standing rule, preference or decision that later batches need and that no backlog item, lane or other call in this batch carries. At most one per batch, holding every point in its fact. Not a log of your own actions or questions", InputSchema: model.SchemaFor[DirectiveNoteParams]()},
@@ -936,7 +937,7 @@ func (d *Dispatcher) handleRawToolCall(
 // isFanOutTool reports whether a tool may repeat or combine within a batch:
 // the work that is naturally plural and independent per target.
 func isFanOutTool(tool string) bool {
-	return tool == ToolBacklogAdd || tool == ToolLaneSpawn || tool == ToolLaneRetry ||
+	return tool == ToolBacklogAdd || tool == ToolLaneSpawn || tool == ToolLaneRetry || tool == ToolLaneWait ||
 		tool == ToolDirectiveRevoke || tool == ToolOwnerAnswer || tool == ToolMailDismiss
 }
 
@@ -1067,6 +1068,8 @@ func (d *Dispatcher) applyVettedAction(
 		return d.applyLaneRetry(ctx, runID, view, *act.LaneRetry)
 	case ToolLaneStop:
 		return d.applyLaneStop(ctx, runID, view, *act.LaneStop)
+	case ToolLaneWait:
+		return d.applyLaneWait(ctx, runID, view, *act.LaneWait)
 	case ToolOwnerAsk:
 		return d.applyOwnerAsk(ctx, runID, state, view, *act.OwnerAsk)
 	case ToolOwnerAnswer:
@@ -1511,6 +1514,45 @@ func (d *Dispatcher) applyLaneStop(ctx context.Context, runID string, view *Stat
 		}
 	}
 	return fmt.Sprintf("stopped lane %s (%s)", ln.ID, p.Reason), nil
+}
+
+func (d *Dispatcher) applyLaneWait(ctx context.Context, runID string, view *StateView, p LaneWaitParams) (string, error) {
+	ln, ok := view.Lane(p.LaneID)
+	if !ok {
+		return "", fmt.Errorf("%w: lane %q", store.ErrNotFound, p.LaneID)
+	}
+	now := d.clock.Now().UTC()
+	dl, err := parseFutureTime(now, p.Deadline)
+	if err != nil {
+		return "", err
+	}
+	ref := controller.NamedWaitRefPrefix + ln.ID
+	if existing, listErr := d.store.Directives().List(ctx, store.DirectiveFilter{
+		RunID:      runID,
+		Scope:      ln.ID,
+		ActiveOnly: true,
+	}); listErr == nil {
+		for i := range existing {
+			if existing[i].Ref == ref {
+				_ = d.store.Directives().UpdateStatus(ctx, runID, existing[i].ID, store.DirectiveHandled)
+			}
+		}
+	}
+	dir := store.Directive{
+		ID:        d.nextID("wait"),
+		RunID:     runID,
+		Kind:      store.DirectiveInstruction,
+		Source:    store.DirectiveSourceDispatcher,
+		Scope:     ln.ID,
+		Ref:       ref,
+		Text:      strings.TrimSpace(p.Reason),
+		ExpiresAt: &dl,
+		Status:    store.DirectiveActive,
+	}
+	if err := d.store.Directives().Add(ctx, dir); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("recorded expected wait on lane %s until %s (%s)", ln.ID, dl.Format(time.RFC3339), dir.Text), nil
 }
 
 func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, state *turnExecState, view *StateView, p OwnerAskParams) (string, error) {

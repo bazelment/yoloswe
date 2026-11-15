@@ -154,35 +154,47 @@ func WithHostOrchestrator() Option {
 //
 //nolint:govet // driver state is grouped by API concern.
 type Driver struct {
-	clock        clock.Clock
-	events       store.EventStore
-	httpClient   *http.Client
-	streamClient *http.Client
-	laneLocks    map[string]*sync.Mutex
-	lastUsage    map[string]string
-	lastCapacity map[string]string
-	apiURL       string
-	token        string
-	githubToken  string
-	repoID       string
-	repoFullName string
-	currSessID   string
-	baseBranch   string
-	pollInterval time.Duration
-	settleWait   time.Duration
-	spawned      map[string][]watchTarget
-	host         bool
-	mu           sync.Mutex
+	clock            clock.Clock
+	events           store.EventStore
+	httpClient       *http.Client
+	streamClient     *http.Client
+	laneLocks        map[string]*sync.Mutex
+	lastUsage        map[string]string
+	lastCapacity     map[string]string
+	activeTerminals  map[string]string
+	stoppedTerminals map[string]bool
+	apiURL           string
+	token            string
+	githubToken      string
+	repoID           string
+	repoFullName     string
+	currSessID       string
+	baseBranch       string
+	pollInterval     time.Duration
+	settleWait       time.Duration
+	spawned          map[string][]watchTarget
+	host             bool
+	mu               sync.Mutex
 }
 
 type watchTarget struct {
 	laneID, sessionID, terminalID string
 }
 
+func driverLaneKey(runID, laneID string) string {
+	return strings.TrimSpace(runID) + "/" + strings.TrimSpace(laneID)
+}
+
 // TrackLane attaches an imported terminal to report polling and stream fallback.
 func (d *Driver) TrackLane(ln lane.Lane) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if ln.ID != "" && ln.TerminalID != "" {
+		if d.activeTerminals == nil {
+			d.activeTerminals = make(map[string]string)
+		}
+		d.activeTerminals[driverLaneKey(ln.RunID, ln.ID)] = ln.TerminalID
+	}
 	for _, target := range d.spawned[ln.RunID] {
 		if target.terminalID == ln.TerminalID {
 			return
@@ -191,7 +203,11 @@ func (d *Driver) TrackLane(ln lane.Lane) {
 	d.spawned[ln.RunID] = append(d.spawned[ln.RunID], watchTarget{laneID: ln.ID, sessionID: ln.SessionID, terminalID: ln.TerminalID})
 }
 
-var _ lane.LaneDriver = (*Driver)(nil)
+var (
+	_ lane.LaneDriver          = (*Driver)(nil)
+	_ lane.GitStateReader      = (*Driver)(nil)
+	_ lane.SessionHealthReader = (*Driver)(nil)
+)
 
 func (d *Driver) ReportInstructions(runID, laneID, phase string, round int) string {
 	return fmt.Sprintf("File the phase report in this terminal with `nebula phase report --outcome <done|no-change|needs-swe|blocked|needs-input> --stdin [--head <sha>] [--pr <n>]` (run %s, lane %s, phase %s, round %d). Pipe the report body to stdin; it must include exact `Outcome:`, `HEAD:`, and `PR:` lines; for no-change include a Reason: line. The phase is not finished until the report is filed.", runID, laneID, phase, round)
@@ -276,11 +292,38 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		last := d.clock.Now()
+		quietEmitted := false
+		quietTerminals := make(map[string]bool)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+			}
+			hasWorking := false
+			hasIdle := false
+			hasUnreportedIdle := false
+			var idleTermIDs []string
+			seenPollTerms := make(map[string]bool)
+			recordTerminalActivity := func(termID, status, agentState string) {
+				if termID == "" || seenPollTerms[termID] {
+					return
+				}
+				st := strings.ToLower(strings.TrimSpace(status))
+				if st == "stopped" || st == "failed" || st == "exited" || st == "terminated" || st == "deleted" {
+					return
+				}
+				seenPollTerms[termID] = true
+				if isWorkingAgentState(agentState) {
+					hasWorking = true
+					delete(quietTerminals, termID)
+					return
+				}
+				hasIdle = true
+				idleTermIDs = append(idleTermIDs, termID)
+				if !quietTerminals[termID] {
+					hasUnreportedIdle = true
+				}
 			}
 			var sessions []SessionInfo
 			if err := d.doJSON(ctx, http.MethodGet, "/api/code-sessions", nil, &struct {
@@ -295,13 +338,16 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 					if err != nil {
 						continue
 					}
+					laneID := sess.Metadata["swarmLane"]
 					for i := range detail.Terminals {
 						tm := &detail.Terminals[i]
+						if !d.isStaleTerminal(runID, laneID, tm.ID) {
+							recordTerminalActivity(tm.ID, tm.Status, tm.AgentState)
+						}
 						if started[tm.ID] {
 							continue
 						}
 						started[tm.ID] = true
-						laneID := sess.Metadata["swarmLane"]
 						go d.watchStream(ctx, StreamRequest{Events: d.events, RunID: runID, LaneID: laneID, SessionID: sess.ID, TerminalID: tm.ID, StopOnExit: true})
 					}
 				}
@@ -316,6 +362,11 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				if target.terminalID == "" {
 					continue
 				}
+				if !seenPollTerms[target.terminalID] && !d.isStaleTerminal(runID, target.laneID, target.terminalID) {
+					if term, err := d.GetTerminal(ctx, target.terminalID); err == nil && term != nil {
+						recordTerminalActivity(target.terminalID, term.Status, term.AgentState)
+					}
+				}
 				// Polling the report endpoint is the host-safe fallback: an
 				// external orchestrator can miss the terminal SSE publication
 				// while the report itself is already durable.
@@ -328,6 +379,9 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 						case <-ctx.Done():
 							return
 						}
+						last = d.clock.Now()
+						quietEmitted = false
+						clear(quietTerminals)
 					}
 				}
 				if started[target.terminalID] {
@@ -363,19 +417,39 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 						return
 					}
 					last = d.clock.Now()
+					quietEmitted = false
+					clear(quietTerminals)
 				}
 			}
-			if d.clock.Now().Sub(last) >= time.Minute {
+			if hasWorking && !hasIdle {
+				last = d.clock.Now()
+				quietEmitted = false
+				clear(quietTerminals)
+				continue
+			}
+			if d.clock.Now().Sub(last) >= time.Minute && (!quietEmitted || hasUnreportedIdle) {
 				select {
 				case out <- lane.Event{Kind: lane.EventNoActivity, RunID: runID, Since: last}:
 				case <-ctx.Done():
 					return
 				}
-				last = d.clock.Now()
+				quietEmitted = true
+				for _, id := range idleTermIDs {
+					quietTerminals[id] = true
+				}
 			}
 		}
 	}()
 	return out
+}
+
+func isWorkingAgentState(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "working", "busy":
+		return true
+	default:
+		return false
+	}
 }
 
 func reportKey(terminalID string, rep *lane.PhaseReport) string {
@@ -529,24 +603,26 @@ func New(cfg Config, opts ...Option) (*Driver, error) {
 	}
 
 	return &Driver{
-		clock:        clk,
-		events:       cfg.Events,
-		httpClient:   httpClient,
-		streamClient: &streamClient,
-		laneLocks:    make(map[string]*sync.Mutex),
-		lastUsage:    make(map[string]string),
-		lastCapacity: make(map[string]string),
-		apiURL:       apiURL,
-		token:        token,
-		githubToken:  strings.TrimSpace(cfg.GitHubToken),
-		repoID:       strings.TrimSpace(cfg.RepositoryID),
-		repoFullName: strings.TrimSpace(cfg.RepositoryFullName),
-		currSessID:   currSessID,
-		baseBranch:   baseBranch,
-		pollInterval: pollInterval,
-		settleWait:   settleWait,
-		spawned:      make(map[string][]watchTarget),
-		host:         cfg.HostOrchestrator,
+		clock:            clk,
+		events:           cfg.Events,
+		httpClient:       httpClient,
+		streamClient:     &streamClient,
+		laneLocks:        make(map[string]*sync.Mutex),
+		lastUsage:        make(map[string]string),
+		lastCapacity:     make(map[string]string),
+		activeTerminals:  make(map[string]string),
+		stoppedTerminals: make(map[string]bool),
+		apiURL:           apiURL,
+		token:            token,
+		githubToken:      strings.TrimSpace(cfg.GitHubToken),
+		repoID:           strings.TrimSpace(cfg.RepositoryID),
+		repoFullName:     strings.TrimSpace(cfg.RepositoryFullName),
+		currSessID:       currSessID,
+		baseBranch:       baseBranch,
+		pollInterval:     pollInterval,
+		settleWait:       settleWait,
+		spawned:          make(map[string][]watchTarget),
+		host:             cfg.HostOrchestrator,
 	}, nil
 }
 
@@ -1005,6 +1081,8 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 		return lane.StartPhaseResult{}, fmt.Errorf("nebula start terminal returned empty id")
 	}
 
+	d.stopOtherSessionTerminals(ctx, req.RunID, req.LaneID, sessionID, resp.ID)
+
 	result := lane.StartPhaseResult{
 		SessionID:  sessionID,
 		TerminalID: resp.ID,
@@ -1014,6 +1092,77 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 	return result, nil
 }
 
+// stopOtherSessionTerminals stops any previous active terminal for (runID, laneID)
+// and any non-shell pre-handover terminals belonging to the same lane in sessionID,
+// while preserving the host session, other lanes' sessions/terminals, and operator shells.
+func (d *Driver) stopOtherSessionTerminals(ctx context.Context, runID, laneID, sessionID, keepTerminalID string) {
+	key := driverLaneKey(runID, laneID)
+	d.mu.Lock()
+	if d.activeTerminals == nil {
+		d.activeTerminals = make(map[string]string)
+	}
+	if d.stoppedTerminals == nil {
+		d.stoppedTerminals = make(map[string]bool)
+	}
+	prev := d.activeTerminals[key]
+	if prev != "" && prev != keepTerminalID {
+		d.stoppedTerminals[prev] = true
+	}
+	d.activeTerminals[key] = keepTerminalID
+	currSessID := d.currSessID
+	d.mu.Unlock()
+
+	if prev != "" && prev != keepTerminalID {
+		_ = d.Stop(ctx, lane.StopRequest{RunID: runID, LaneID: laneID, SessionID: sessionID, TerminalID: prev, Reason: "superseded by new phase terminal"})
+	}
+	if sessionID == "" || (currSessID != "" && sessionID == currSessID) {
+		return
+	}
+	detail, err := d.GetSession(ctx, sessionID)
+	if err != nil || detail == nil {
+		return
+	}
+	sessLane := strings.TrimSpace(detail.Session.Metadata["swarmLane"])
+	trimmedLane := strings.TrimSpace(laneID)
+	if sessLane != "" && trimmedLane != "" && sessLane != trimmedLane {
+		return
+	}
+	for i := range detail.Terminals {
+		tm := &detail.Terminals[i]
+		if tm.ID == "" || tm.ID == keepTerminalID || tm.ID == prev {
+			continue
+		}
+		kind := strings.ToLower(strings.TrimSpace(tm.Kind))
+		if kind == "shell" || kind == "bash" || kind == "sh" || kind == "operator" {
+			continue
+		}
+		if termLane := strings.TrimSpace(tm.Env["SNL_GH_LANE"]); termLane != "" && trimmedLane != "" && termLane != trimmedLane {
+			continue
+		}
+		st := strings.ToLower(strings.TrimSpace(tm.Status))
+		if st == "running" || st == "starting" || st == "idle" || st == "" {
+			_ = d.Stop(ctx, lane.StopRequest{RunID: runID, LaneID: laneID, SessionID: sessionID, TerminalID: tm.ID, Reason: "superseded by new phase terminal"})
+		}
+	}
+}
+
+func (d *Driver) isStaleTerminal(runID, laneID, terminalID string) bool {
+	if terminalID == "" {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stoppedTerminals[terminalID] {
+		return true
+	}
+	if strings.TrimSpace(laneID) != "" {
+		if active := d.activeTerminals[driverLaneKey(runID, laneID)]; active != "" && active != terminalID {
+			return true
+		}
+	}
+	return false
+}
+
 // Steer sends steering text into a running terminal via POST /api/code-terminals/{id}/input.
 func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
 	if strings.TrimSpace(req.Message) == "" {
@@ -1021,6 +1170,9 @@ func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
 	}
 	terminalID := strings.TrimSpace(req.TerminalID)
 	sessionID := strings.TrimSpace(req.SessionID)
+	if d.isStaleTerminal(req.RunID, req.LaneID, terminalID) {
+		return fmt.Errorf("%w: %s", lane.ErrStaleTerminal, terminalID)
+	}
 	if terminalID != "" && sessionID == "" {
 		if term, err := d.GetTerminal(ctx, terminalID); err == nil {
 			sessionID = term.CodeSessionID
@@ -1033,6 +1185,9 @@ func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
 		}
 		for i := len(detail.Terminals) - 1; i >= 0; i-- {
 			t := detail.Terminals[i]
+			if d.isStaleTerminal(req.RunID, req.LaneID, t.ID) {
+				continue
+			}
 			if t.Status == "running" || t.Status == "starting" || t.Status == "" {
 				terminalID = t.ID
 				break
@@ -1041,6 +1196,9 @@ func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
 	}
 	if terminalID == "" {
 		return fmt.Errorf("%w: terminal_id is required for Steer", store.ErrInvalidArgument)
+	}
+	if d.isStaleTerminal(req.RunID, req.LaneID, terminalID) {
+		return fmt.Errorf("%w: %s", lane.ErrStaleTerminal, terminalID)
 	}
 
 	path := fmt.Sprintf("/api/code-terminals/%s/input", url.PathEscape(terminalID))
@@ -1091,14 +1249,179 @@ func (d *Driver) Stop(ctx context.Context, req lane.StopRequest) error {
 	terminalID := strings.TrimSpace(req.TerminalID)
 	sessionID := strings.TrimSpace(req.SessionID)
 	if terminalID != "" {
+		d.mu.Lock()
+		if d.stoppedTerminals == nil {
+			d.stoppedTerminals = make(map[string]bool)
+		}
+		d.stoppedTerminals[terminalID] = true
+		d.mu.Unlock()
 		path := fmt.Sprintf("/api/code-terminals/%s/stop", url.PathEscape(terminalID))
 		return d.doJSON(ctx, http.MethodPost, path, struct{}{}, nil)
 	}
 	if sessionID != "" {
+		d.mu.Lock()
+		if d.stoppedTerminals == nil {
+			d.stoppedTerminals = make(map[string]bool)
+		}
+		if req.LaneID != "" {
+			if active := d.activeTerminals[driverLaneKey(req.RunID, req.LaneID)]; active != "" {
+				d.stoppedTerminals[active] = true
+			}
+		}
+		for _, target := range d.spawned[req.RunID] {
+			if target.sessionID == sessionID && target.terminalID != "" {
+				d.stoppedTerminals[target.terminalID] = true
+			}
+		}
+		d.mu.Unlock()
 		path := fmt.Sprintf("/api/code-sessions/%s/stop-all", url.PathEscape(sessionID))
 		return d.doJSON(ctx, http.MethodPost, path, struct{}{}, nil)
 	}
 	return fmt.Errorf("%w: terminal_id or session_id is required for Stop", store.ErrInvalidArgument)
+}
+
+// ExecResult describes the output of a command executed inside a Nebula code session.
+type ExecResult struct {
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exitCode"`
+}
+
+// ExecSession executes a non-interactive command inside a Nebula code session.
+func (d *Driver) ExecSession(ctx context.Context, sessionID string, command []string) (ExecResult, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ExecResult{}, fmt.Errorf("%w: session_id is required for ExecSession", store.ErrInvalidArgument)
+	}
+	path := fmt.Sprintf("/api/code-sessions/%s/exec", url.PathEscape(sessionID))
+	body := struct {
+		Command []string `json:"command"`
+	}{Command: command}
+	var out ExecResult
+	if err := d.doJSON(ctx, http.MethodPost, path, body, &out); err != nil {
+		return ExecResult{}, err
+	}
+	return out, nil
+}
+
+// LaneGitState inspects the lane session's git working tree and unpushed commits.
+func (d *Driver) LaneGitState(ctx context.Context, ln lane.Lane) (lane.GitState, error) {
+	if strings.TrimSpace(ln.SessionID) == "" {
+		return lane.GitState{}, nil
+	}
+	branch := strings.TrimPrefix(strings.TrimSpace(ln.Branch), "origin/")
+	base := strings.TrimPrefix(cmp.Or(strings.TrimSpace(ln.BaseBranch), d.baseBranch, "main"), "origin/")
+	const script = `set -e
+base="$1"
+branch="$2"
+ref="origin/$base"
+if [ -n "$branch" ] && git rev-parse --verify "origin/$branch" >/dev/null 2>&1; then
+  ref="origin/$branch"
+fi
+count=$(git rev-list --count "$ref..HEAD" 2>/dev/null || echo 0)
+oldest=$(git log --reverse --format=%ct "$ref..HEAD" 2>/dev/null | head -n 1)
+printf "COMMITS:%s\nOLDEST_COMMIT:%s\n" "$count" "$oldest"
+git status --porcelain 2>/dev/null | while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  file=$(printf "%s" "$line" | cut -c4-)
+  case "$file" in
+    *" -> "*) file=${file##* -> } ;;
+  esac
+  if [ "$file" = ".claude/settings.local.json" ]; then
+    continue
+  fi
+  mtime=$(stat -c %Y "$file" 2>/dev/null || echo 0)
+  printf "DIRTY:%s\t%s\n" "$mtime" "$file"
+done
+`
+	res, err := d.ExecSession(ctx, ln.SessionID, []string{"sh", "-c", script, "--", base, branch})
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return lane.GitState{}, nil
+		}
+		return lane.GitState{}, err
+	}
+	return parseGitStateOutput(res.Stdout), nil
+}
+
+func parseGitStateOutput(out string) lane.GitState {
+	var st lane.GitState
+	var oldestUnix int64
+	for _, rawLine := range strings.Split(out, "\n") {
+		line := strings.TrimSpace(rawLine)
+		switch {
+		case strings.HasPrefix(line, "COMMITS:"):
+			n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "COMMITS:")))
+			if err == nil && n > 0 {
+				st.UnpushedCommits = n
+			}
+		case strings.HasPrefix(line, "OLDEST_COMMIT:"):
+			ts, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "OLDEST_COMMIT:")), 10, 64)
+			if err == nil && ts > 0 && (oldestUnix == 0 || ts < oldestUnix) {
+				oldestUnix = ts
+			}
+		case strings.HasPrefix(line, "DIRTY:"):
+			rest := strings.TrimPrefix(line, "DIRTY:")
+			mtimeStr, file, ok := strings.Cut(rest, "\t")
+			if !ok {
+				file = strings.TrimSpace(rest)
+			} else {
+				file = strings.TrimSpace(file)
+				if ts, err := strconv.ParseInt(strings.TrimSpace(mtimeStr), 10, 64); err == nil && ts > 0 && (oldestUnix == 0 || ts < oldestUnix) {
+					oldestUnix = ts
+				}
+			}
+			if file != "" && file != ".claude/settings.local.json" {
+				st.DirtyFiles = append(st.DirtyFiles, file)
+			}
+		}
+	}
+	if oldestUnix > 0 {
+		st.OldestUnpushedAt = time.Unix(oldestUnix, 0).UTC()
+	}
+	return st
+}
+
+// LaneSessionHealth inspects the lane session's disk usage and active gate/review processes.
+func (d *Driver) LaneSessionHealth(ctx context.Context, ln lane.Lane) (lane.SessionHealth, error) {
+	if strings.TrimSpace(ln.SessionID) == "" {
+		return lane.SessionHealth{}, nil
+	}
+	script := `df -P . 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print "DISK:" $5}'
+ps -eo args= 2>/dev/null | while IFS= read -r cmd; do
+  printf "PROC:%s\n" "$cmd"
+done
+`
+	res, err := d.ExecSession(ctx, ln.SessionID, []string{"sh", "-c", script})
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return lane.SessionHealth{}, nil
+		}
+		return lane.SessionHealth{}, err
+	}
+	return parseSessionHealthOutput(res.Stdout), nil
+}
+
+func parseSessionHealthOutput(out string) lane.SessionHealth {
+	var h lane.SessionHealth
+	for _, rawLine := range strings.Split(out, "\n") {
+		line := strings.TrimSpace(rawLine)
+		switch {
+		case strings.HasPrefix(line, "DISK:"):
+			pct, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "DISK:")))
+			if err == nil && pct > 0 {
+				h.DiskUsedPercent = pct
+			}
+		case strings.HasPrefix(line, "PROC:"):
+			cmd := strings.TrimSpace(strings.TrimPrefix(line, "PROC:"))
+			if lane.IsBusyProcess(cmd) {
+				h.BusyProcesses = append(h.BusyProcesses, cmd)
+			}
+		}
+	}
+	return h
 }
 
 // ReleaseSession releases a code session via POST /api/code-sessions/{id}/release.

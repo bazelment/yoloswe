@@ -125,6 +125,7 @@ type fakeNebulaServer struct { //nolint:govet // test double state is intentiona
 	reports          map[string]map[int]map[string]any
 	latestRep        map[string]map[string]any
 	sseEvents        map[string][]string
+	execStdout       map[string]string
 	calls            []recordedCall
 	capacity         nebula.CapacityStatus
 	nextSessSeq      int
@@ -139,11 +140,12 @@ type fakeNebulaServer struct { //nolint:govet // test double state is intentiona
 func newFakeNebulaServer(t *testing.T) *fakeNebulaServer {
 	t.Helper()
 	f := &fakeNebulaServer{
-		sessions:  make(map[string]*nebula.SessionInfo),
-		terminals: make(map[string]*nebula.TerminalInfo),
-		reports:   make(map[string]map[int]map[string]any),
-		latestRep: make(map[string]map[string]any),
-		sseEvents: make(map[string][]string),
+		sessions:   make(map[string]*nebula.SessionInfo),
+		terminals:  make(map[string]*nebula.TerminalInfo),
+		reports:    make(map[string]map[int]map[string]any),
+		latestRep:  make(map[string]map[string]any),
+		sseEvents:  make(map[string][]string),
+		execStdout: make(map[string]string),
 		capacity: nebula.CapacityStatus{
 			Backends: []nebula.BackendCapacity{
 				{Backend: "firecracker", Running: 4, Waiting: 0, Full: false},
@@ -313,6 +315,37 @@ func (f *fakeNebulaServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			f.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			return
+		}
+
+		if len(parts) == 2 && parts[1] == "terminals" && r.Method == http.MethodGet {
+			f.mu.Lock()
+			var terms []nebula.TerminalInfo
+			for _, tm := range f.terminals {
+				if tm.CodeSessionID == sessID {
+					terms = append(terms, *tm)
+				}
+			}
+			f.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"terminals": terms})
+			return
+		}
+
+		if len(parts) == 2 && parts[1] == "exec" && r.Method == http.MethodPost {
+			var req struct {
+				Command []string `json:"command"`
+			}
+			_ = json.Unmarshal([]byte(body), &req)
+			cmdStr := strings.Join(req.Command, " ")
+			f.mu.Lock()
+			out := f.execStdout[sessID]
+			if strings.Contains(cmdStr, "DISK:") && f.execStdout[sessID+":health"] != "" {
+				out = f.execStdout[sessID+":health"]
+			} else if strings.Contains(cmdStr, "COMMITS:") && f.execStdout[sessID+":git"] != "" {
+				out = f.execStdout[sessID+":git"]
+			}
+			f.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(nebula.ExecResult{Stdout: out, ExitCode: 0})
 			return
 		}
 
@@ -1371,5 +1404,368 @@ func TestWatchUniformEventKinds(t *testing.T) {
 				t.Fatal("timeout")
 			}
 		})
+	}
+}
+
+func TestStartPhaseTerminalStopsPreviousAndPrehandoverTerminalsAndRefusesStaleSteer(t *testing.T) {
+	srv := newFakeNebulaServer(t)
+	t.Setenv(nebula.EnvSessionID, "sess-host")
+	drv, _, _ := newTestDriver(t, srv, nebula.WithAPIURL(srv.srv.URL))
+	ctx := t.Context()
+
+	srv.mu.Lock()
+	srv.sessions["sess-stale"] = &nebula.SessionInfo{
+		ID:         "sess-stale",
+		Status:     "ready",
+		WorkBranch: "swarm-lane/run-1/m5-finish",
+		Metadata:   map[string]string{"swarmRun": "run-1", "swarmLane": "m5-finish"},
+	}
+	// Pre-handover terminal 19f8df22 still running idle in the session, plus shell/operator terminals
+	// and a sibling terminal tagged for a different lane via SNL_GH_LANE.
+	srv.terminals["19f8df22"] = &nebula.TerminalInfo{
+		ID:            "19f8df22",
+		CodeSessionID: "sess-stale",
+		Status:        "idle",
+		AgentState:    "idle",
+	}
+	srv.terminals["operator-shell"] = &nebula.TerminalInfo{
+		ID:            "operator-shell",
+		CodeSessionID: "sess-stale",
+		Kind:          "shell",
+		Status:        "running",
+	}
+	srv.terminals["operator-bash"] = &nebula.TerminalInfo{
+		ID:            "operator-bash",
+		CodeSessionID: "sess-stale",
+		Kind:          "bash",
+		Status:        "running",
+	}
+	srv.terminals["operator-sh"] = &nebula.TerminalInfo{
+		ID:            "operator-sh",
+		CodeSessionID: "sess-stale",
+		Kind:          "sh",
+		Status:        "running",
+	}
+	srv.terminals["operator-kind"] = &nebula.TerminalInfo{
+		ID:            "operator-kind",
+		CodeSessionID: "sess-stale",
+		Kind:          "operator",
+		Status:        "running",
+	}
+	srv.terminals["other-lane-term"] = &nebula.TerminalInfo{
+		ID:            "other-lane-term",
+		CodeSessionID: "sess-stale",
+		Status:        "running",
+		Env:           map[string]string{"SNL_GH_LANE": "other-lane"},
+	}
+	srv.sessions["sess-other-lane"] = &nebula.SessionInfo{
+		ID:       "sess-other-lane",
+		Status:   "ready",
+		Metadata: map[string]string{"swarmRun": "run-1", "swarmLane": "other-lane"},
+	}
+	srv.terminals["other-sess-term"] = &nebula.TerminalInfo{
+		ID:            "other-sess-term",
+		CodeSessionID: "sess-other-lane",
+		Status:        "running",
+	}
+	srv.sessions["sess-host"] = &nebula.SessionInfo{
+		ID:       "sess-host",
+		Status:   "ready",
+		Metadata: map[string]string{"swarmRun": "run-1", "swarmLane": "m5-finish"},
+	}
+	srv.terminals["host-sess-term"] = &nebula.TerminalInfo{
+		ID:            "host-sess-term",
+		CodeSessionID: "sess-host",
+		Status:        "running",
+	}
+	srv.mu.Unlock()
+
+	cleanRes, err := drv.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
+		RunID:     "run-1",
+		LaneID:    "m5-finish",
+		SessionID: "sess-stale",
+		Phase:     "clean",
+		Round:     1,
+		Harness:   "claude",
+		Brief:     "Clean phase",
+	})
+	if err != nil {
+		t.Fatalf("StartPhaseTerminal(clean): %v", err)
+	}
+
+	srv.mu.Lock()
+	preStatus := srv.terminals["19f8df22"].Status
+	shellStatus := srv.terminals["operator-shell"].Status
+	bashStatus := srv.terminals["operator-bash"].Status
+	shStatus := srv.terminals["operator-sh"].Status
+	opKindStatus := srv.terminals["operator-kind"].Status
+	otherLaneTermStatus := srv.terminals["other-lane-term"].Status
+	srv.mu.Unlock()
+	if preStatus != "stopped" {
+		t.Fatalf("pre-handover terminal 19f8df22 status = %q, want stopped", preStatus)
+	}
+	for id, got := range map[string]string{
+		"operator-shell":  shellStatus,
+		"operator-bash":   bashStatus,
+		"operator-sh":     shStatus,
+		"operator-kind":   opKindStatus,
+		"other-lane-term": otherLaneTermStatus,
+	} {
+		if got != "running" {
+			t.Fatalf("terminal %s status = %q, want running", id, got)
+		}
+	}
+
+	// Starting a phase terminal on a session whose swarmLane metadata belongs to another lane,
+	// or on the host session (currSessID), must not sweep unrelated terminals in that session.
+	if _, err := drv.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
+		RunID:     "run-1",
+		LaneID:    "lane-mismatch",
+		SessionID: "sess-other-lane",
+		Phase:     "swe",
+		Round:     1,
+		Harness:   "claude",
+		Brief:     "Mismatch session",
+	}); err != nil {
+		t.Fatalf("StartPhaseTerminal(sess-other-lane): %v", err)
+	}
+	if _, err := drv.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
+		RunID:     "run-1",
+		LaneID:    "lane-host",
+		SessionID: "sess-host",
+		Phase:     "swe",
+		Round:     1,
+		Harness:   "claude",
+		Brief:     "Host session",
+	}); err != nil {
+		t.Fatalf("StartPhaseTerminal(sess-host): %v", err)
+	}
+	srv.mu.Lock()
+	otherSessTermStatus := srv.terminals["other-sess-term"].Status
+	hostSessTermStatus := srv.terminals["host-sess-term"].Status
+	srv.mu.Unlock()
+	if otherSessTermStatus != "running" {
+		t.Fatalf("other-sess-term status = %q, want running", otherSessTermStatus)
+	}
+	if hostSessTermStatus != "running" {
+		t.Fatalf("host-sess-term status = %q, want running", hostSessTermStatus)
+	}
+
+	reviewRes, err := drv.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
+		RunID:     "run-1",
+		LaneID:    "m5-finish",
+		SessionID: "sess-stale",
+		Phase:     "review",
+		Round:     1,
+		Harness:   "codex",
+		Brief:     "Review phase",
+	})
+	if err != nil {
+		t.Fatalf("StartPhaseTerminal(review): %v", err)
+	}
+
+	srv.mu.Lock()
+	cleanStatus := srv.terminals[cleanRes.TerminalID].Status
+	reviewStatus := srv.terminals[reviewRes.TerminalID].Status
+	srv.mu.Unlock()
+	if cleanStatus != "stopped" {
+		t.Fatalf("previous phase terminal %s status = %q, want stopped", cleanRes.TerminalID, cleanStatus)
+	}
+	if reviewStatus != "running" {
+		t.Fatalf("new phase terminal %s status = %q, want running", reviewRes.TerminalID, reviewStatus)
+	}
+
+	if err := drv.Steer(ctx, lane.SteerRequest{
+		RunID:      "run-1",
+		LaneID:     "m5-finish",
+		SessionID:  "sess-stale",
+		TerminalID: cleanRes.TerminalID,
+		Message:    "input to previous phase terminal",
+	}); !errors.Is(err, lane.ErrStaleTerminal) {
+		t.Fatalf("Steer to previous phase terminal = %v, want ErrStaleTerminal", err)
+	}
+}
+
+func TestLaneGitStateAndSessionHealth(t *testing.T) {
+	t.Parallel()
+	srv := newFakeNebulaServer(t)
+	drv, _, _ := newTestDriver(t, srv, nebula.WithAPIURL(srv.srv.URL))
+	ctx := t.Context()
+
+	srv.mu.Lock()
+	srv.sessions["sess-git"] = &nebula.SessionInfo{ID: "sess-git", Status: "ready"}
+	srv.execStdout["sess-git:git"] = "COMMITS:2\nOLDEST_COMMIT:1763180000\nDIRTY:1763179000\torca/controller/controller.go\nDIRTY:1763180500\torca/lane/new.go\n"
+	srv.execStdout["sess-git:health"] = "DISK:94\nPROC:/bin/bash\nPROC:python3 review_cli --pr 419\nPROC:bazel test //orca/...\n"
+	srv.mu.Unlock()
+
+	ln := lane.Lane{
+		ID:         "lane-git",
+		RunID:      "run-1",
+		SessionID:  "sess-git",
+		Branch:     "origin/swarm-lane/run-1/lane-git$(touch /tmp/pwn)",
+		BaseBranch: "origin/main",
+	}
+
+	gs, err := drv.LaneGitState(ctx, ln)
+	if err != nil {
+		t.Fatalf("LaneGitState: %v", err)
+	}
+	if gs.UnpushedCommits != 2 || len(gs.DirtyFiles) != 2 || gs.OldestUnpushedAt != time.Unix(1763179000, 0).UTC() {
+		t.Fatalf("LaneGitState = %+v, want 2 commits, 2 dirty files, oldest 1763179000", gs)
+	}
+
+	srv.mu.Lock()
+	var gitCmd []string
+	for _, call := range srv.calls {
+		if call.Method == http.MethodPost && call.Path == "/api/code-sessions/sess-git/exec" {
+			var req struct {
+				Command []string `json:"command"`
+			}
+			if json.Unmarshal([]byte(call.Body), &req) == nil && len(req.Command) == 6 {
+				gitCmd = req.Command
+				break
+			}
+		}
+	}
+	srv.mu.Unlock()
+	if len(gitCmd) != 6 || gitCmd[3] != "--" || gitCmd[4] != "main" || gitCmd[5] != "swarm-lane/run-1/lane-git$(touch /tmp/pwn)" {
+		t.Fatalf("LaneGitState exec command = %#v, want positional ['sh','-c',script,'--','main','swarm-lane/run-1/lane-git$(touch /tmp/pwn)']", gitCmd)
+	}
+	if strings.Contains(gitCmd[2], "lane-git") || strings.Contains(gitCmd[2], "origin/origin/") {
+		t.Fatalf("LaneGitState script interpolated branch/base into shell source: %s", gitCmd[2])
+	}
+
+	health, err := drv.LaneSessionHealth(ctx, ln)
+	if err != nil {
+		t.Fatalf("LaneSessionHealth: %v", err)
+	}
+	if health.DiskUsedPercent != 94 || len(health.BusyProcesses) != 2 {
+		t.Fatalf("LaneSessionHealth = %+v, want DiskUsedPercent=94 and 2 busy processes", health)
+	}
+}
+
+func TestWatchWorkingTerminalAndQuietDeduplication(t *testing.T) {
+	t.Parallel()
+	srv := newFakeNebulaServer(t)
+	fc := clock.NewFakeClock(time.Date(2026, 11, 15, 5, 13, 0, 0, time.UTC))
+	st := store.NewMemoryStore(fc)
+	drv, err := nebula.New(
+		nebula.Config{
+			APIURL:       srv.srv.URL,
+			Token:        "test-token",
+			PollInterval: 2 * time.Millisecond,
+		},
+		nebula.WithClock(fc),
+		nebula.WithEventStore(st.Events()),
+	)
+	if err != nil {
+		t.Fatalf("nebula.New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	srv.mu.Lock()
+	srv.sessions["sess-rev"] = &nebula.SessionInfo{
+		ID:       "sess-rev",
+		Status:   "ready",
+		Metadata: map[string]string{"swarmRun": "run-watch", "swarmLane": "lane-rev"},
+	}
+	srv.mu.Unlock()
+
+	res, err := drv.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
+		RunID:     "run-watch",
+		LaneID:    "lane-rev",
+		SessionID: "sess-rev",
+		Phase:     "review",
+		Round:     1,
+		Harness:   "codex",
+		Brief:     "Review PR",
+	})
+	if err != nil {
+		t.Fatalf("StartPhaseTerminal: %v", err)
+	}
+
+	srv.mu.Lock()
+	srv.terminals[res.TerminalID].AgentState = "working"
+	srv.mu.Unlock()
+
+	ch := drv.Watch(ctx, "run-watch")
+
+	sessionPolls := func() int {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		n := 0
+		for _, c := range srv.calls {
+			if c.Method == http.MethodGet && c.Path == "/api/code-sessions" {
+				n++
+			}
+		}
+		return n
+	}
+	waitCompletedPollsAfter := func(base, count int) {
+		t.Helper()
+		deadline := time.NewTimer(5 * time.Second)
+		defer deadline.Stop()
+		// When GET /api/code-sessions has been called base+count+1 times,
+		// at least `count` full Watch iterations that started after `base` have completed.
+		for sessionPolls() < base+count+1 {
+			select {
+			case <-deadline.C:
+				t.Fatalf("timed out waiting for %d completed Watch polls after %d (got %d)", count, base, sessionPolls())
+			default:
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}
+
+	// Over 10 polls while the terminal's AgentState is "working", Watch must emit 0 EventNoActivity events.
+	for poll := 1; poll <= 10; poll++ {
+		base := sessionPolls()
+		fc.Advance(time.Minute)
+		waitCompletedPollsAfter(base, 1)
+		select {
+		case ev := <-ch:
+			t.Fatalf("poll %d: unexpected Watch event while working: %+v", poll, ev)
+		default:
+		}
+	}
+
+	// Add a second session in the same run whose terminal is idle while the first stays working:
+	// Watch must still emit EventNoActivity once for the idle terminal rather than suppressing across the run.
+	srv.mu.Lock()
+	srv.sessions["sess-idle"] = &nebula.SessionInfo{
+		ID:       "sess-idle",
+		Status:   "ready",
+		Metadata: map[string]string{"swarmRun": "run-watch", "swarmLane": "lane-idle"},
+	}
+	srv.terminals["term-idle"] = &nebula.TerminalInfo{
+		ID:            "term-idle",
+		CodeSessionID: "sess-idle",
+		Status:        "running",
+		AgentState:    "idle",
+	}
+	srv.mu.Unlock()
+	waitCompletedPollsAfter(sessionPolls(), 1)
+	fc.Advance(time.Minute)
+
+	select {
+	case ev := <-ch:
+		if ev.Kind != lane.EventNoActivity {
+			t.Fatalf("got event kind %q, want %q", ev.Kind, lane.EventNoActivity)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for EventNoActivity when sibling lane terminal is idle")
+	}
+
+	for poll := 1; poll <= 5; poll++ {
+		base := sessionPolls()
+		fc.Advance(time.Minute)
+		waitCompletedPollsAfter(base, 1)
+		select {
+		case ev := <-ch:
+			t.Fatalf("subsequent quiet poll %d emitted duplicate event: %+v", poll, ev)
+		default:
+		}
 	}
 }

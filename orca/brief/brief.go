@@ -112,6 +112,34 @@ func (d *memoryDriver) ReleaseSession(ctx context.Context, sessionID string, for
 	return nil
 }
 
+func (d *memoryDriver) ReportOnlyNoWork(ctx context.Context, ln lane.Lane) (bool, error) {
+	if rc, ok := d.LaneDriver.(lane.ReportOnlyChecker); ok {
+		return rc.ReportOnlyNoWork(ctx, ln)
+	}
+	return false, nil
+}
+
+func (d *memoryDriver) TerminalAgentState(ctx context.Context, terminalID string) (string, error) {
+	if tr, ok := d.LaneDriver.(lane.TerminalStateReader); ok {
+		return tr.TerminalAgentState(ctx, terminalID)
+	}
+	return "", nil
+}
+
+func (d *memoryDriver) LaneGitState(ctx context.Context, ln lane.Lane) (lane.GitState, error) {
+	if gr, ok := d.LaneDriver.(lane.GitStateReader); ok {
+		return gr.LaneGitState(ctx, ln)
+	}
+	return lane.GitState{}, nil
+}
+
+func (d *memoryDriver) LaneSessionHealth(ctx context.Context, ln lane.Lane) (lane.SessionHealth, error) {
+	if hr, ok := d.LaneDriver.(lane.SessionHealthReader); ok {
+		return hr.LaneSessionHealth(ctx, ln)
+	}
+	return lane.SessionHealth{}, nil
+}
+
 func (d *memoryDriver) render(ctx context.Context, runID, laneID, text string) (string, error) {
 	memories, err := d.store.Memories().List(ctx, store.MemoryFilter{RunID: runID})
 	if err != nil {
