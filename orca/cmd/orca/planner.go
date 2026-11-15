@@ -429,7 +429,7 @@ func (p *Planner) runReconciliation(
 			}
 		}
 	}
-	appliedSummary, err := p.applyReconciliation(ctx, runID, reconciled, planRef)
+	appliedSummary, err := p.applyReconciliation(ctx, p.store, runID, reconciled, planRef)
 	if err != nil {
 		return err
 	}
@@ -542,11 +542,12 @@ func (p *Planner) proposePlanCLI(ctx context.Context, runID, threadID, turnID st
 
 func (p *Planner) applyReconciliation(
 	ctx context.Context,
+	st store.Store,
 	runID string,
 	rec PlanReconciliation,
 	fallbackPlanRef string,
 ) (string, error) {
-	run, err := p.store.Runs().Get(ctx, runID)
+	run, err := st.Runs().Get(ctx, runID)
 	if err != nil {
 		return "", err
 	}
@@ -556,7 +557,7 @@ func (p *Planner) applyReconciliation(
 		cmp.Or(strings.TrimSpace(rec.PlanRef), strings.TrimSpace(fallbackPlanRef)),
 	)
 	if newObj != run.Objective || newRef != run.PlanRef {
-		if err := p.store.Runs().UpdateObjective(ctx, runID, newObj, newRef); err != nil {
+		if err := st.Runs().UpdateObjective(ctx, runID, newObj, newRef); err != nil {
 			return "", err
 		}
 	}
@@ -580,7 +581,7 @@ func (p *Planner) applyReconciliation(
 			DependsOn:   slices.Clone(spec.DependsOn),
 			Order:       i + 1,
 		}
-		if err := p.store.Backlog().Add(ctx, item); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		if err := st.Backlog().Add(ctx, item); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			return "", err
 		}
 		added++
@@ -588,7 +589,7 @@ func (p *Planner) applyReconciliation(
 
 	updated := 0
 	for _, spec := range rec.UpdateItems {
-		existing, getErr := p.store.Backlog().Get(ctx, runID, strings.TrimSpace(spec.ID))
+		existing, getErr := st.Backlog().Get(ctx, runID, strings.TrimSpace(spec.ID))
 		if getErr != nil {
 			continue
 		}
@@ -608,7 +609,7 @@ func (p *Planner) applyReconciliation(
 		if spec.DependsOn != nil {
 			cp.DependsOn = slices.Clone(spec.DependsOn)
 		}
-		if err := p.store.Backlog().Update(ctx, cp, ActorPlanner, "plan import update"); err != nil {
+		if err := st.Backlog().Update(ctx, cp, ActorPlanner, "plan import update"); err != nil {
 			return "", err
 		}
 		updated++
@@ -620,7 +621,7 @@ func (p *Planner) applyReconciliation(
 		if itemID == "" {
 			continue
 		}
-		if err := p.store.Backlog().Close(ctx, runID, itemID, store.BacklogDropped, ActorPlanner, "dropped by plan import"); err != nil && !errors.Is(err, store.ErrNotFound) {
+		if err := st.Backlog().Close(ctx, runID, itemID, store.BacklogDropped, ActorPlanner, "dropped by plan import"); err != nil && !errors.Is(err, store.ErrNotFound) {
 			return "", err
 		}
 		dropped++
@@ -658,7 +659,7 @@ func (p *Planner) applyReconciliation(
 			ExpiresAt: &dl,
 			Status:    store.DirectiveActive,
 		}
-		if err := p.store.Directives().Add(ctx, dir); err == nil {
+		if err := st.Directives().Add(ctx, dir); err == nil {
 			asksCreated++
 		}
 	}
@@ -910,10 +911,7 @@ func (p *Planner) AskStream(
 
 	var appliedSummary string
 	reg := p.buildChatToolRegistryForRun(st, *run, effectiveRef, hostRun, func(callCtx context.Context, rec PlanReconciliation) (string, error) {
-		origStore := p.store
-		p.store = st
-		sum, applyErr := p.applyReconciliation(callCtx, runID, rec, effectiveRef)
-		p.store = origStore
+		sum, applyErr := p.applyReconciliation(callCtx, st, runID, rec, effectiveRef)
 		if applyErr != nil {
 			return "", applyErr
 		}
