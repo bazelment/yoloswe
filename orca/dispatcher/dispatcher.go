@@ -1543,8 +1543,7 @@ func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, state *tur
 		if laneID == "" {
 			laneID = bm.msg.LaneID
 		}
-		if mailbox.IsQuestionObsoleteOrClosed(ctx, d.store, runID, laneID, bm.msg.ID, bm.event.ID, bm.msg.Body) ||
-			dispatcherTextJudgesQuestionStale(p.Question+" "+p.Reason) {
+		if mailbox.IsQuestionObsoleteOrClosed(ctx, d.store, runID, laneID, bm.msg.ID, bm.event.ID, bm.msg.Body) {
 			reason := cmp.Or(strings.TrimSpace(p.Reason), "stale or obsolete lane question")
 			if err := d.dismissBatchQuestion(ctx, runID, bm, reason); err != nil {
 				return "", err
@@ -2978,7 +2977,6 @@ func (d *Dispatcher) dismissStaleBatchQuestions(
 	if len(mails) == 0 {
 		return
 	}
-	judgedStale, staleReason := dispatcherJudgedBatchQuestionStale(state, summary)
 	for i := range mails {
 		bm := mails[i]
 		if !bm.msg.IsQuestion() {
@@ -2991,11 +2989,10 @@ func (d *Dispatcher) dismissStaleBatchQuestions(
 		}) {
 			continue
 		}
-		obsolete := mailbox.IsQuestionObsoleteOrClosed(ctx, d.store, runID, bm.msg.LaneID, bm.msg.ID, bm.event.ID, bm.msg.Body)
-		if !obsolete && !judgedStale {
+		if !mailbox.IsQuestionObsoleteOrClosed(ctx, d.store, runID, bm.msg.LaneID, bm.msg.ID, bm.event.ID, bm.msg.Body) {
 			continue
 		}
-		reason := cmp.Or(staleReason, strings.TrimSpace(summary), "stale or obsolete lane question")
+		reason := cmp.Or(strings.TrimSpace(summary), "stale or obsolete lane question")
 		if err := d.dismissBatchQuestion(ctx, runID, bm, reason); err != nil {
 			continue
 		}
@@ -3012,58 +3009,4 @@ func (d *Dispatcher) dismissStaleBatchQuestions(
 		}
 		_ = d.recordDecision(ctx, runID, state, act, true, fmt.Sprintf("dismissed lane mail %s for lane %s (%s)", cmp.Or(bm.msg.ID, bm.event.ID, "-"), cmp.Or(bm.msg.LaneID, "-"), reason), 0)
 	}
-}
-
-func dispatcherJudgedBatchQuestionStale(state *turnExecState, summary string) (bool, string) {
-	if state != nil {
-		for i := range state.accepted {
-			act := state.accepted[i]
-			switch act.Tool {
-			case ToolDirectiveNote:
-				txt := ""
-				if act.DirectiveNote != nil {
-					txt = strings.TrimSpace(act.DirectiveNote.Fact + " " + act.DirectiveNote.Reason)
-				}
-				if dispatcherTextJudgesQuestionStale(txt) {
-					return true, cmp.Or(strings.TrimSpace(act.Reason), txt)
-				}
-			case ToolDirectiveRevoke:
-			default:
-				return false, ""
-			}
-		}
-		if len(state.rejected) > 0 && len(state.accepted) == 0 {
-			return false, ""
-		}
-	}
-	if dispatcherTextJudgesQuestionStale(summary) {
-		return true, strings.TrimSpace(summary)
-	}
-	return false, ""
-}
-
-func dispatcherTextJudgesQuestionStale(text string) bool {
-	lower := strings.ToLower(strings.TrimSpace(text))
-	if lower == "" {
-		return false
-	}
-	for _, kw := range []string{
-		"stale",
-		"withdrawn",
-		"obsolete",
-		"already merged",
-		"already done",
-		"already resolved",
-		"already answered",
-		"already closed",
-		"superseded",
-		"moot",
-		"lane done",
-		"lane is done",
-	} {
-		if strings.Contains(lower, kw) {
-			return true
-		}
-	}
-	return false
 }

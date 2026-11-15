@@ -1145,14 +1145,8 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 			if err != nil {
 				return "", err
 			}
-			formatSettings := func(s store.RunSettings) string {
-				if s.MaxCostPerHourUSD > 0 {
-					return fmt.Sprintf("concurrency_cap=%d stall_timeout=%s paused=%t max_cost_per_hour_usd=%.2f", s.ConcurrencyCap, s.StallTimeout, s.Paused, s.MaxCostPerHourUSD)
-				}
-				return fmt.Sprintf("concurrency_cap=%d stall_timeout=%s paused=%t", s.ConcurrencyCap, s.StallTimeout, s.Paused)
-			}
 			if p.Action == "get" || p.Action == "" {
-				return "run settings: " + formatSettings(current), nil
+				return "run settings: " + current.String(), nil
 			}
 			if p.Action != "set" {
 				return "", fmt.Errorf("run.settings action must be get or set")
@@ -1183,7 +1177,7 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 			if err := c.store.Runs().UpdateSettings(ctx, targetRun, next); err != nil {
 				return "", err
 			}
-			summary := formatSettings(next)
+			summary := next.String()
 			words := cmp.Or(strings.TrimSpace(p.Words), "owner updated run settings")
 			_, err = c.store.Decisions().Append(ctx, store.Decision{ID: c.nextID("settings"), RunID: targetRun, Category: store.DecisionJudgment, Actor: ActorConcierge, Tool: memorychat.ToolRunSettings, Reason: words, Result: summary, Vetted: true})
 			if err != nil {

@@ -1553,36 +1553,7 @@ func isRunStateDone(run *store.Run, lanes []lane.Lane, backlog []store.BacklogIt
 }
 
 func isObjectiveDoneText(objective string) bool {
-	lastNext := ""
-	lines := strings.Split(objective, "\n")
-	for _, raw := range lines {
-		line := strings.TrimSpace(raw)
-		lower := strings.ToLower(line)
-		if strings.HasPrefix(lower, "next:") {
-			lastNext = strings.TrimSpace(line[len("next:"):])
-		} else if strings.Contains(lower, "run done") || strings.Contains(lower, "run complete") || strings.Contains(lower, "swarm done") {
-			if lastNext == "" {
-				lastNext = line
-			}
-		}
-	}
-	if lastNext == "" {
-		return false
-	}
-	lower := strings.ToLower(strings.TrimSpace(lastNext))
-	for _, prefix := range []string{"none", "nothing", "n/a", "done", "complete", "completed", "finished", "all done"} {
-		if lower == prefix ||
-			strings.HasPrefix(lower, prefix+".") ||
-			strings.HasPrefix(lower, prefix+",") ||
-			strings.HasPrefix(lower, prefix+";") ||
-			strings.HasPrefix(lower, prefix+":") ||
-			strings.HasPrefix(lower, prefix+" ") ||
-			strings.HasPrefix(lower, prefix+"—") ||
-			strings.HasPrefix(lower, prefix+"-") {
-			return true
-		}
-	}
-	return strings.Contains(lower, "run done") || strings.Contains(lower, "no loop armed") || strings.Contains(lower, "no open work")
+	return store.ObjectiveIsDone(objective)
 }
 
 func parseFutureTime(now time.Time, raw string) (time.Time, error) {

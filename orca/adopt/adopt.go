@@ -27,6 +27,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bazelment/yoloswe/orca/store"
 )
 
 const (
@@ -173,88 +175,27 @@ func sanitizeObjectivePlanLines(dir, obj string) string {
 }
 
 func isEmptyNextText(s string) bool {
-	trimmed := strings.TrimSpace(s)
-	if trimmed == "" {
-		return true
-	}
-	lower := strings.ToLower(trimmed)
-	if strings.Contains(lower, "run done") || strings.Contains(lower, "no open work") || strings.Contains(lower, "no remaining work") || strings.Contains(lower, "nothing left") {
-		return true
-	}
-	lead := lower
-	for _, sep := range []string{".", ";", "—", " — ", " - ", "\n", "(", ","} {
-		if before, _, ok := strings.Cut(lead, sep); ok {
-			lead = strings.TrimSpace(before)
-		}
-	}
-	lead = strings.Trim(lead, " .,-:;!()[]\"'`")
-	switch lead {
-	case "", "none", "n/a", "nil", "done", "complete", "completed", "finished", "nothing", "-", "all done", "all complete", "run done":
-		return true
-	}
-	for _, prefix := range []string{"none ", "done ", "complete ", "completed ", "finished "} {
-		if strings.HasPrefix(lead, prefix) {
-			return true
-		}
-	}
-	return false
+	return store.IsDoneOrEmptyNext(s)
 }
 
 // IsDoneOrEmptyNext reports whether a Next: value indicates there is no remaining work.
 func IsDoneOrEmptyNext(s string) bool {
-	return isEmptyNextText(s)
+	return store.IsDoneOrEmptyNext(s)
 }
 
 func hasExplicitNextSection(sources ...string) bool {
-	for _, src := range sources {
-		for _, line := range strings.Split(src, "\n") {
-			trimmed := strings.TrimSpace(line)
-			clean := strings.TrimLeft(trimmed, "-* \t")
-			lower := strings.ToLower(clean)
-			if strings.HasPrefix(lower, "next:") {
-				return true
-			}
-			if strings.HasPrefix(trimmed, "#") {
-				heading := strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "#")))
-				if heading == "next" || strings.HasPrefix(heading, "next ") || strings.HasPrefix(heading, "next:") {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	return store.HasExplicitNextSection(sources...)
 }
 
 // ObjectiveIsDone reports whether the latest Next: or status lines in md
 // declare the run done/complete with no remaining work.
 func ObjectiveIsDone(md string) bool {
-	if strings.TrimSpace(md) == "" {
-		return false
-	}
-	if hasExplicitNextSection(md) {
-		next := strings.TrimSpace(extractNextSection(md))
-		return isEmptyNextText(next)
-	}
-	lines := strings.Split(md, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		clean := strings.ToLower(strings.TrimLeft(strings.TrimSpace(lines[i]), "-*# \t"))
-		if clean == "" {
-			continue
-		}
-		if strings.Contains(clean, "run done") ||
-			strings.HasPrefix(clean, "status: done") ||
-			strings.HasPrefix(clean, "status: complete") ||
-			strings.HasPrefix(clean, "state: done") ||
-			strings.HasPrefix(clean, "state: complete") {
-			return true
-		}
-	}
-	return false
+	return store.ObjectiveIsDone(md)
 }
 
 // CurrentNextSection extracts the latest Next: line or # Next section from sources.
 func CurrentNextSection(sources ...string) string {
-	return extractNextSection(sources...)
+	return store.ExtractNextSection(sources...)
 }
 
 var uncheckedTaskItemRE = regexp.MustCompile(`(?m)^\s*(?:[-*+]|\d+[.)])\s+\[\s\]`)
@@ -638,63 +579,7 @@ func extractPlanPath(dir string, sources ...string) string {
 }
 
 func extractNextSection(sources ...string) string {
-	for _, src := range sources {
-		lines := strings.Split(src, "\n")
-		var found string
-		for i := 0; i < len(lines); i++ {
-			trimmed := strings.TrimSpace(lines[i])
-			clean := strings.TrimLeft(trimmed, "-* \t")
-			lower := strings.ToLower(clean)
-			if strings.HasPrefix(lower, "next:") {
-				rest := strings.TrimSpace(clean[len("next:"):])
-				var parts []string
-				if rest != "" {
-					parts = append(parts, rest)
-				}
-				for j := i + 1; j < len(lines); j++ {
-					nextLine := lines[j]
-					nextTrim := strings.TrimSpace(nextLine)
-					if nextTrim == "" || strings.HasPrefix(nextTrim, "#") {
-						break
-					}
-					nxtClean := strings.ToLower(strings.TrimLeft(nextTrim, "-* \t"))
-					if strings.HasPrefix(nxtClean, "next:") {
-						break
-					}
-					if strings.HasPrefix(nextLine, " ") || strings.HasPrefix(nextLine, "\t") || strings.HasPrefix(nextTrim, "- ") || strings.HasPrefix(nextTrim, "* ") {
-						parts = append(parts, nextTrim)
-						continue
-					}
-					break
-				}
-				if len(parts) > 0 {
-					found = strings.Join(parts, "\n")
-				}
-			}
-			if strings.HasPrefix(trimmed, "#") {
-				heading := strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "#")))
-				if heading == "next" || strings.HasPrefix(heading, "next ") || strings.HasPrefix(heading, "next:") {
-					var parts []string
-					for j := i + 1; j < len(lines); j++ {
-						nextTrim := strings.TrimSpace(lines[j])
-						if strings.HasPrefix(nextTrim, "#") {
-							break
-						}
-						if nextTrim != "" {
-							parts = append(parts, nextTrim)
-						}
-					}
-					if len(parts) > 0 {
-						found = strings.Join(parts, "\n")
-					}
-				}
-			}
-		}
-		if found != "" {
-			return found
-		}
-	}
-	return ""
+	return store.ExtractNextSection(sources...)
 }
 
 // stripMarker drops orca's stand-down lines and surrounding blank space.

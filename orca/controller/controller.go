@@ -292,7 +292,6 @@ type Controller struct {
 	watchStarted       bool
 	stallTimeoutSet    bool
 	runtimeSettingsSet bool
-	notifiedCostGuard  bool
 }
 
 // SetRuntimeSettings applies live settings for subsequent controller ticks.
@@ -2895,10 +2894,9 @@ func (c *Controller) flushJudgment(ctx context.Context, reason string) error {
 }
 
 func (c *Controller) notifyOwnerCostGuard(ctx context.Context, msg string) {
-	if c.notifiedCostGuard || strings.TrimSpace(msg) == "" {
+	if strings.TrimSpace(msg) == "" {
 		return
 	}
-	c.notifiedCostGuard = true
 	if c.mailbox != nil {
 		_, _ = c.mailbox.AskOwner(ctx, mailbox.Question{Ask: msg})
 	}

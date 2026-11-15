@@ -2314,4 +2314,24 @@ func TestControllerCostGuardPausesTurnsAtLimit(t *testing.T) {
 	if !settings.Paused {
 		t.Fatalf("run settings Paused = false, want true when cost guard limit is reached")
 	}
+	if settings.MaxCostPerHourUSD != 0 {
+		t.Fatalf("run settings MaxCostPerHourUSD = %.2f, want 0 (fallback limit must not overwrite run setting)", settings.MaxCostPerHourUSD)
+	}
+
+	// If the owner unpauses while still over the hourly limit, the next Step must
+	// re-pause the run and record another cost.guard decision.
+	settings.Paused = false
+	if err := st.Runs().UpdateSettings(ctx, "run-1", settings); err != nil {
+		t.Fatalf("UpdateSettings(unpause): %v", err)
+	}
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step after unpause: %v", err)
+	}
+	settingsAfter, err := st.Runs().GetSettings(ctx, "run-1")
+	if err != nil {
+		t.Fatalf("GetSettings after unpause: %v", err)
+	}
+	if !settingsAfter.Paused {
+		t.Fatalf("run settings Paused after unpause while over limit = false, want true")
+	}
 }

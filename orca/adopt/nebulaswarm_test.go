@@ -1410,6 +1410,13 @@ func TestAdoptObjectiveAndCheckpointHelpers(t *testing.T) {
 			t.Fatalf("expected HasNextWork() = false for Next: %s, got true (Next=%q)", doneNext, rDone.Next)
 		}
 	}
+	for _, activeNext := range []string{"Complete the M3 review", "Finished X; start M4", "(a) staff M4", ".github workflow fix"} {
+		obj := "Goal: active\nNext: " + activeNext + "\n"
+		rActive := Run{Objective: obj, Next: extractNextSection(obj)}
+		if !rActive.HasNextWork() {
+			t.Fatalf("expected HasNextWork() = true for Next: %s, got false (Next=%q)", activeNext, rActive.Next)
+		}
+	}
 	multiNext := extractNextSection("Goal: g\nNext:\n- step 1\n- step 2\n\nMilestones:\n- [x] M1\n")
 	if multiNext != "- step 1\n- step 2" {
 		t.Fatalf("extractNextSection(multi-line) = %q, want %q", multiNext, "- step 1\n- step 2")
@@ -2403,5 +2410,56 @@ func TestAdoptOldHostMailsZeroDispatcherTurns(t *testing.T) {
 	}
 	if holdDir.Status != store.DirectiveExpired {
 		t.Fatalf("stale hold directive status on done run = %q, want %q", holdDir.Status, store.DirectiveExpired)
+	}
+
+	// Verify that an open question from a live (running) lane and a message with
+	// missing createdAt are NOT suppressed by SetAdoptCutoff.
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{
+		ID:     "m3-live",
+		RunID:  "run-live-adopt",
+		Status: lane.StatusRunning,
+		Phase:  "swe",
+		Round:  1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var livePolls atomic.Int32
+	srvLive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/api/mail" {
+			livePolls.Add(1)
+			_, _ = io.WriteString(w, `{"messages":[
+				{"id":"mail-live-q","lane":"m3-live","question":true,"body":"open question from running lane before adopt","createdAt":"2026-11-14T23:00:00Z"},
+				{"id":"mail-no-ts","from":"host","body":"timestamp-less host message"}
+			],"nextCursor":"cur-live"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srvLive.Close()
+	boxLive, err := mailboxnebula.New(mailboxnebula.Config{
+		BaseURL:      srvLive.URL,
+		Token:        "test-token",
+		RunID:        "run-live-adopt",
+		Events:       st.Events(),
+		Host:         true,
+		PollInterval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	boxLive.SetAdoptCutoff(adoptTime, st)
+	watchCtx, cancelWatch := context.WithCancel(t.Context())
+	defer cancelWatch()
+	chLive, err := boxLive.Watch(watchCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-chLive:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for live question / timestamp-less mail event %d", i+1)
+		}
 	}
 }

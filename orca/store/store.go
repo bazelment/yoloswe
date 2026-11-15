@@ -246,6 +246,144 @@ func EstimateUsageCostUSD(modelOrRole string, inputTokens, outputTokens int64) f
 	return model.CalculateCost(modelName, model.Usage{InputTokens: inputTokens, OutputTokens: outputTokens}, nil)
 }
 
+// IsDoneOrEmptyNext reports whether a Next: value indicates there is no remaining work.
+func IsDoneOrEmptyNext(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	exact := strings.TrimRight(lower, ".! \t")
+	switch exact {
+	case "", "none", "n/a", "nil", "nothing", "-", "done", "complete", "completed", "finished",
+		"all done", "all complete", "run done", "run complete", "swarm done",
+		"no open work", "no remaining work", "nothing left", "no loop armed":
+		return true
+	}
+	for _, prefix := range []string{
+		"none.", "none;", "none:", "none —", "none -", "none (",
+		"n/a.", "n/a;", "n/a:", "n/a —", "n/a -", "n/a (",
+		"run done.", "run done:", "run done —", "run done -", "run done (",
+		"run complete.", "run complete:", "run complete —", "run complete -", "run complete (",
+		"swarm done.", "swarm done:", "swarm done —", "swarm done -", "swarm done (",
+		"no open work.", "no open work —", "no open work -",
+		"no remaining work.", "no remaining work —", "no remaining work -",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasExplicitNextSection reports whether any source contains a Next: line or # Next heading.
+func HasExplicitNextSection(sources ...string) bool {
+	for _, src := range sources {
+		for _, line := range strings.Split(src, "\n") {
+			trimmed := strings.TrimSpace(line)
+			clean := strings.TrimLeft(trimmed, "-* \t")
+			lower := strings.ToLower(clean)
+			if strings.HasPrefix(lower, "next:") {
+				return true
+			}
+			if strings.HasPrefix(trimmed, "#") {
+				heading := strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "#")))
+				if heading == "next" || strings.HasPrefix(heading, "next ") || strings.HasPrefix(heading, "next:") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ExtractNextSection returns the latest Next: line or # Next section from sources.
+func ExtractNextSection(sources ...string) string {
+	for _, src := range sources {
+		lines := strings.Split(src, "\n")
+		var found string
+		var matched bool
+		for i := 0; i < len(lines); i++ {
+			trimmed := strings.TrimSpace(lines[i])
+			clean := strings.TrimLeft(trimmed, "-* \t")
+			lower := strings.ToLower(clean)
+			if strings.HasPrefix(lower, "next:") {
+				rest := strings.TrimSpace(clean[len("next:"):])
+				var parts []string
+				if rest != "" {
+					parts = append(parts, rest)
+				}
+				for j := i + 1; j < len(lines); j++ {
+					nextLine := lines[j]
+					nextTrim := strings.TrimSpace(nextLine)
+					if nextTrim == "" || strings.HasPrefix(nextTrim, "#") {
+						break
+					}
+					nxtClean := strings.ToLower(strings.TrimLeft(nextTrim, "-* \t"))
+					if strings.HasPrefix(nxtClean, "next:") {
+						break
+					}
+					if strings.HasPrefix(nextLine, " ") || strings.HasPrefix(nextLine, "\t") || strings.HasPrefix(nextTrim, "- ") || strings.HasPrefix(nextTrim, "* ") {
+						parts = append(parts, nextTrim)
+						continue
+					}
+					break
+				}
+				found = strings.Join(parts, "\n")
+				matched = true
+			}
+			if strings.HasPrefix(trimmed, "#") {
+				heading := strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "#")))
+				if heading == "next" || strings.HasPrefix(heading, "next ") || strings.HasPrefix(heading, "next:") {
+					var parts []string
+					for j := i + 1; j < len(lines); j++ {
+						nextTrim := strings.TrimSpace(lines[j])
+						if strings.HasPrefix(nextTrim, "#") {
+							break
+						}
+						if nextTrim != "" {
+							parts = append(parts, nextTrim)
+						}
+					}
+					found = strings.Join(parts, "\n")
+					matched = true
+				}
+			}
+		}
+		if matched {
+			return found
+		}
+	}
+	return ""
+}
+
+// ObjectiveIsDone reports whether the latest Next: or status lines in md
+// declare the run done/complete with no remaining work.
+func ObjectiveIsDone(md string) bool {
+	if strings.TrimSpace(md) == "" {
+		return false
+	}
+	if HasExplicitNextSection(md) {
+		next := strings.TrimSpace(ExtractNextSection(md))
+		return IsDoneOrEmptyNext(next)
+	}
+	lines := strings.Split(md, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		clean := strings.ToLower(strings.TrimLeft(strings.TrimSpace(lines[i]), "-*# \t"))
+		if clean == "" {
+			continue
+		}
+		if strings.Contains(clean, "run done") ||
+			strings.HasPrefix(clean, "status: done") ||
+			strings.HasPrefix(clean, "status: complete") ||
+			strings.HasPrefix(clean, "state: done") ||
+			strings.HasPrefix(clean, "state: complete") {
+			return true
+		}
+	}
+	return false
+}
+
 // HourlyRunCostUSD computes the spend in USD for runID over the trailing hour
 // ending at now, deduplicating costs recorded on both Decisions and Turns.
 func HourlyRunCostUSD(ctx context.Context, st Store, runID string, now time.Time) (float64, error) {
@@ -259,7 +397,7 @@ func HourlyRunCostUSD(ctx context.Context, st Store, runID string, now time.Time
 	}
 	windowStart := now.Add(-time.Hour)
 
-	decs, err := st.Decisions().List(ctx, DecisionFilter{RunID: runID})
+	decs, err := st.Decisions().List(ctx, DecisionFilter{RunID: runID, SinceTime: &windowStart})
 	if err != nil {
 		return 0, err
 	}
@@ -293,6 +431,9 @@ func HourlyRunCostUSD(ctx context.Context, st Store, runID string, now time.Time
 	}
 	var linkedTurnExtra, unlinkedTurnCost float64
 	for i := range threads {
+		if !threads[i].UpdatedAt.IsZero() && threads[i].UpdatedAt.Before(windowStart) {
+			continue
+		}
 		turns, err := st.Threads().ListTurns(ctx, threads[i].ID)
 		if err != nil {
 			return 0, err
@@ -364,12 +505,10 @@ func EnforceCostGuard(ctx context.Context, st Store, runID string, now time.Time
 		return false, spent, limit, "", nil
 	}
 
+	wasPaused := settings.Paused
 	msg := fmt.Sprintf("Cost guard paused turns for run %s: spent $%.2f in the last hour (limit $%.2f/hr).", runID, spent, limit)
-	if !settings.Paused || settings.MaxCostPerHourUSD <= 0 {
+	if !wasPaused {
 		settings.Paused = true
-		if settings.MaxCostPerHourUSD <= 0 {
-			settings.MaxCostPerHourUSD = limit
-		}
 		if uErr := st.Runs().UpdateSettings(ctx, runID, settings); uErr != nil {
 			return true, spent, limit, msg, uErr
 		}
@@ -402,7 +541,7 @@ func EnforceCostGuard(ctx context.Context, st Store, runID string, now time.Time
 	}
 
 	windowStart := now.Add(-time.Hour)
-	existingDecs, _ := st.Decisions().List(ctx, DecisionFilter{RunID: runID})
+	existingDecs, _ := st.Decisions().List(ctx, DecisionFilter{RunID: runID, SinceTime: &windowStart})
 	alreadyRecorded := false
 	for i := range existingDecs {
 		if existingDecs[i].Tool != "cost.guard" {
@@ -413,7 +552,7 @@ func EnforceCostGuard(ctx context.Context, st Store, runID string, now time.Time
 			break
 		}
 	}
-	if !alreadyRecorded {
+	if !wasPaused || !alreadyRecorded {
 		_, _ = st.Decisions().Append(ctx, Decision{
 			RunID:     runID,
 			Actor:     "controller",
@@ -444,6 +583,7 @@ func EnforceCostGuard(ctx context.Context, st Store, runID string, now time.Time
 			Payload:   payload,
 			CreatedAt: now,
 		})
+		return true, spent, limit, msg, nil
 	}
-	return true, spent, limit, msg, nil
+	return true, spent, limit, "", nil
 }

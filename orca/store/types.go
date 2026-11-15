@@ -136,6 +136,14 @@ type RunSettings struct {
 	Paused            bool          `json:"paused"`
 }
 
+func (s RunSettings) String() string {
+	summary := fmt.Sprintf("concurrency_cap=%d stall_timeout=%s paused=%t", s.ConcurrencyCap, s.StallTimeout, s.Paused)
+	if s.MaxCostPerHourUSD > 0 {
+		summary += fmt.Sprintf(" max_cost_per_hour_usd=$%.2f", s.MaxCostPerHourUSD)
+	}
+	return summary
+}
+
 func (r Run) Clone() Run {
 	out := r
 	if r.Lease != nil {

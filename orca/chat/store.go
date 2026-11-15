@@ -1312,6 +1312,9 @@ func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st 
 		}
 	}
 	b.cacheMu.Unlock()
+	if len(runs) == 0 && b.Adoption == nil {
+		return nil
+	}
 	var out []string
 	for _, runID := range runs {
 		res := b.collectDispatcherOutcomes(ctx, st, []string{runID})

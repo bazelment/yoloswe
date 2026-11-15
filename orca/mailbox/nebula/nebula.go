@@ -135,20 +135,29 @@ func (m *Mailbox) AskOwner(ctx context.Context, q mailbox.Question) (string, err
 	return "", nil
 }
 
-func (m *Mailbox) isOlderThanAdopt(msg mailbox.Message, initialAdoptPoll bool) bool {
+func (m *Mailbox) isOlderThanAdopt(ctx context.Context, msg mailbox.Message) bool {
 	m.mu.Lock()
 	cutoff := m.adoptCutoff
+	st := m.store
 	m.mu.Unlock()
 	if cutoff.IsZero() {
 		return false
 	}
-	if ts, ok := msg.ParseCreatedAt(); ok {
-		return !ts.After(cutoff)
+	ts, ok := msg.ParseCreatedAt()
+	if !ok || ts.After(cutoff) {
+		return false
 	}
-	return initialAdoptPoll
+	if msg.IsQuestion() && !msg.IsClosedOrAnswered() && !mailbox.IsQuestionObsoleteOrClosed(ctx, st, m.c.RunID, msg.LaneID, msg.ID, "", msg.Body) {
+		if st != nil && strings.TrimSpace(msg.LaneID) != "" {
+			if ln, err := st.Lanes().Get(ctx, m.c.RunID, strings.TrimSpace(msg.LaneID)); err == nil && ln != nil && !ln.Status.Terminal() && strings.TrimSpace(ln.MergeSHA) == "" {
+				return false
+			}
+		}
+	}
+	return true
 }
 
-func (m *Mailbox) pollOnce(ctx context.Context, forceAdoptCheck bool) ([]store.Event, error) {
+func (m *Mailbox) pollOnce(ctx context.Context, _ bool) ([]store.Event, error) {
 	q := url.Values{}
 	host := m.c.Host || (strings.TrimSpace(m.c.SessionID) == "" && strings.TrimSpace(os.Getenv("NEBULA_SESSION_ID")) == "")
 	if host {
@@ -164,7 +173,6 @@ func (m *Mailbox) pollOnce(ctx context.Context, forceAdoptCheck bool) ([]store.E
 		return nil, err
 	}
 	m.mu.Lock()
-	initialAdopt := forceAdoptCheck || (!m.adoptCutoff.IsZero() && !m.adoptSynced)
 	m.adoptSynced = true
 	st := m.store
 	m.mu.Unlock()
@@ -215,7 +223,7 @@ func (m *Mailbox) pollOnce(ctx context.Context, forceAdoptCheck bool) ([]store.E
 		if !unseen[i] {
 			continue
 		}
-		if m.isOlderThanAdopt(msg, initialAdopt) {
+		if m.isOlderThanAdopt(ctx, msg) {
 			m.checkOrMarkSeen(key, true)
 			oldMsgs = append(oldMsgs, msg)
 			oldKeys = append(oldKeys, key)

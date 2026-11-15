@@ -1802,4 +1802,50 @@ func TestDispatcherStaleJudgmentDismissesQuestionAndEarlierOwnerLiftAllowsRevoke
 	if gotHold.Status != store.DirectiveRevoked {
 		t.Fatalf("hold-m4 status = %q, want %q", gotHold.Status, store.DirectiveRevoked)
 	}
+
+	// Verify that an active lane question whose wording mentions "stale" (e.g.
+	// "branch is stale, rebase?") is escalated by owner.ask rather than dismissed.
+	livePayload, _ := json.Marshal(mailbox.Message{
+		ID:       "msg-live-stale-word",
+		RunID:    "run-1",
+		LaneID:   "m2-gaps3",
+		Question: true,
+		Body:     "branch is stale, rebase onto main?",
+	})
+	liveEv, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		LaneID:  "m2-gaps3",
+		Kind:    store.EventMail,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "lane question from m2-gaps3: branch is stale, rebase onto main?",
+		Payload: livePayload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientEscalate := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("ask-live-1", dispatcher.ToolOwnerAsk, json.RawMessage(`{"id":"ask-rebase","lane_id":"m2-gaps3","question":"branch is stale, rebase onto main?","options":["rebase","keep"],"default":"rebase","deadline":"10m","reason":"lane m2-gaps3 asked whether to rebase stale branch"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Escalated rebase question to owner.")),
+		},
+	)
+	dEscalate := dispatcher.New(dispatcher.Config{
+		Mailboxes: []mailbox.Mailbox{fakeBox},
+	}, st, drv, clk, clientEscalate)
+	if _, err := dEscalate.Dispatch(ctx, "run-1", []store.Event{liveEv}); err != nil {
+		t.Fatalf("Dispatch(live question with word stale): %v", err)
+	}
+	if _, dismissed := fakeBox.Dismissed()["msg-live-stale-word"]; dismissed {
+		t.Fatalf("live question mentioning 'stale' was wrongly dismissed: %+v", fakeBox.Dismissed())
+	}
+	if _, err := st.Directives().Get(ctx, "run-1", "ask-ask-rebase"); err != nil {
+		t.Fatalf("expected escalated owner_ask directive ask-ask-rebase, got err=%v", err)
+	}
 }

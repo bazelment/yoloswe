@@ -629,7 +629,7 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 	if loopErr == nil {
 		var citeErr error
 		citedFacts, citeErr = VerifyAnswerCitations(ctx, c.store, runID, answer, state.submittedDirectives)
-		if citeErr != nil && !c.cfg.DisableCitations && state.memoryEcho == "" && c.cfg.AgentBackend != model.AgentBackendCLI {
+		if citeErr != nil && !c.cfg.DisableCitations && state.memoryEcho == "" {
 			loopErr = citeErr
 		}
 	}
@@ -873,9 +873,15 @@ func (c *Concierge) execStatus(ctx context.Context, runID string, p StatusParams
 	fmt.Fprintf(&b, "Run: %s\n", run.ID)
 	fmt.Fprintf(&b, "Now: %s\n", now.Format(time.RFC3339))
 	fmt.Fprintf(&b, "Objective: %s\n", cmp.Or(strings.TrimSpace(run.Objective), "(none)"))
+	if store.ObjectiveIsDone(run.Objective) {
+		b.WriteString("Current Status: DONE (latest Next: says run is done; no open work — ignore older Open/Next sections above)\n")
+	}
+	if curNext := store.ExtractNextSection(run.Objective); curNext != "" {
+		fmt.Fprintf(&b, "Current Next: %s\n", curNext)
+	}
 	fmt.Fprintf(&b, "PlanRef: %s\n", cmp.Or(strings.TrimSpace(run.PlanRef), "(none)"))
 	fmt.Fprintf(&b, "DefaultRecipe: %s\n", cmp.Or(strings.TrimSpace(run.DefaultRecipe), recipe.DefaultName))
-	fmt.Fprintf(&b, "Settings: concurrency_cap=%d stall_timeout=%s paused=%t\n", settings.ConcurrencyCap, settings.StallTimeout, settings.Paused)
+	fmt.Fprintf(&b, "Settings: %s\n", settings.String())
 	if run.Lease != nil {
 		fmt.Fprintf(&b, "Lease: holder=%s expires=%s expired=%t\n",
 			run.Lease.HolderID, run.Lease.ExpiresAt.UTC().Format(time.RFC3339), run.Lease.Expired(now))
@@ -966,11 +972,7 @@ func (c *Concierge) execStatus(ctx context.Context, runID string, p StatusParams
 }
 
 func formatRunSettingsSummary(s store.RunSettings) string {
-	summary := fmt.Sprintf("concurrency_cap=%d stall_timeout=%s paused=%t", s.ConcurrencyCap, s.StallTimeout, s.Paused)
-	if s.MaxCostPerHourUSD > 0 {
-		summary += fmt.Sprintf(" max_cost_per_hour_usd=$%.2f", s.MaxCostPerHourUSD)
-	}
-	return summary
+	return s.String()
 }
 
 func (c *Concierge) execRunSettings(ctx context.Context, runID string, p RunSettingsParams) (string, error) {
