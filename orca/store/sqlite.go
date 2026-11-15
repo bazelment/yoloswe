@@ -329,14 +329,21 @@ func (m *sqliteMemoryStore) Put(ctx context.Context, v MemoryEntry) (MemoryEntry
 func (m *sqliteMemoryStore) Get(ctx context.Context, scope, id string) (*MemoryEntry, error) {
 	s := m.s()
 	norm := cmp.Or(NormalizeDirectiveID(id), strings.TrimSpace(id))
-	var v MemoryEntry
-	var ca, ua string
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,description,type,scope,run_id,source,body,proposed_by,created_at,updated_at FROM memories WHERE (id=? OR id=? OR LOWER(id)=LOWER(?) OR LOWER(name)=LOWER(?)) AND (?='' OR scope=?) ORDER BY CASE WHEN id=? THEN 0 WHEN id=? THEN 1 WHEN LOWER(id)=LOWER(?) THEN 2 ELSE 3 END, id LIMIT 1`, id, norm, norm, norm, scope, scope, id, norm, norm).Scan(&v.ID, &v.Name, &v.Description, &v.Type, &v.Scope, &v.RunID, &v.Source, &v.Body, &v.ProposedBy, &ca, &ua)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w: memory %q", ErrNotFound, id)
-	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,description,type,scope,run_id,source,body,proposed_by,created_at,updated_at FROM memories WHERE (id=? OR id=? OR LOWER(id)=LOWER(?) OR LOWER(name)=LOWER(?)) AND (?='' OR scope=?) ORDER BY CASE WHEN id=? THEN 0 WHEN id=? THEN 1 WHEN LOWER(id)=LOWER(?) THEN 2 ELSE 3 END, id`, id, norm, norm, norm, scope, scope, id, norm, norm)
 	if err != nil {
 		return nil, err
+	}
+	defer rows.Close()
+	var v MemoryEntry
+	var ca, ua string
+	if !rows.Next() {
+		return nil, fmt.Errorf("%w: memory %q", ErrNotFound, id)
+	}
+	if err := rows.Scan(&v.ID, &v.Name, &v.Description, &v.Type, &v.Scope, &v.RunID, &v.Source, &v.Body, &v.ProposedBy, &ca, &ua); err != nil {
+		return nil, err
+	}
+	if rows.Next() {
+		return nil, fmt.Errorf("memory %q is ambiguous", id)
 	}
 	v.CreatedAt, _ = time.Parse(time.RFC3339Nano, ca)
 	v.UpdatedAt, _ = time.Parse(time.RFC3339Nano, ua)

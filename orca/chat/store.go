@@ -80,6 +80,8 @@ type StoreBackend struct {
 // ProposalAskIDPrefix prefixes pending action proposals stored in the open-question table.
 const ProposalAskIDPrefix = "proposal-"
 
+const proposalTTL = 15 * time.Minute
+
 type chatExchange struct {
 	owner string
 	orca  string
@@ -1156,6 +1158,9 @@ func (b *StoreBackend) recordProposalLocked(ctx context.Context, st store.Store,
 	if summary != "" && !strings.Contains(spec, summary) {
 		spec = summary + ": " + spec
 	}
+	if len(spec) > 4096 {
+		spec = spec[:4096]
+	}
 	targetRun := strings.TrimSpace(runID)
 	if targetRun == "" {
 		targetRun = b.proposalTargetRun(ctx, spec)
@@ -1181,13 +1186,14 @@ func (b *StoreBackend) recordProposalLocked(ctx context.Context, st store.Store,
 		return "", err
 	}
 	if err := st.Directives().Add(ctx, store.Directive{
-		ID:     "ask-" + askID,
-		RunID:  targetRun,
-		Kind:   store.DirectiveInstruction,
-		Source: store.DirectiveSourceConcierge,
-		Text:   string(raw),
-		Ref:    "owner_ask:" + askID,
-		Status: store.DirectiveActive,
+		ID:        "ask-" + askID,
+		RunID:     targetRun,
+		Kind:      store.DirectiveInstruction,
+		Source:    store.DirectiveSourceConcierge,
+		Text:      string(raw),
+		Ref:       "owner_ask:" + askID,
+		ExpiresAt: func() *time.Time { deadline := b.now().Add(proposalTTL); return &deadline }(),
+		Status:    store.DirectiveActive,
 	}); err != nil {
 		return "", err
 	}
@@ -1221,13 +1227,17 @@ func (b *StoreBackend) proposalTargetRun(ctx context.Context, text string) strin
 		}
 	}
 	if len(held) > 1 {
-		if b.frontDesk() {
-			return held[1]
+		if len(held) == 2 {
+			if b.frontDesk() {
+				return held[1]
+			}
+			if run, rErr := b.store.Runs().Get(ctx, b.runID); rErr == nil && !b.live(run) {
+				return held[1]
+			}
 		}
-		if run, rErr := b.store.Runs().Get(ctx, b.runID); rErr == nil && !b.live(run) {
-			return held[1]
-		}
-		return b.runID
+		// An unqualified offer is unsafe when more than one held run could
+		// receive it. Require the offer to name a unique run or lane.
+		return ""
 	}
 	if b.frontDesk() {
 		// An empty front-desk chat asking "Shall I start a run to ...?" is
@@ -1428,19 +1438,10 @@ func (b *StoreBackend) activeProposal(ctx context.Context, st store.Store, runID
 }
 
 func matchesProposal(text string) bool {
-	if IsOfferReply(text) {
-		return true
-	}
-	norm := strings.Join(words(text), " ")
-	for p := range confirmations {
-		if strings.HasPrefix(norm, p+" ") && len(words(text)) <= 8 {
-			return true
-		}
-	}
-	if HasReferentPronoun(text) && len(words(text)) <= 8 {
-		return true
-	}
-	return false
+	// Only the explicit short replies are answers to a pending offer. Do not
+	// consume negations, questions, or arbitrary pronoun-bearing messages as
+	// approvals of an action.
+	return IsOfferReply(text)
 }
 
 func (b *StoreBackend) hasNonProposalOpenAsk(ctx context.Context, st store.Store, runID string) bool {
@@ -1506,7 +1507,8 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 	switch {
 	case err != nil || ack != "":
 	case runID == "":
-		runID, stepStore, closeStepStore, ack, err = b.deliverFromFrontDesk(ctx, d.Handler, text)
+		frontDesk := b.deliverFromFrontDesk(ctx, d.Handler, text)
+		runID, stepStore, closeStepStore, ack, unresolvedBareReply, err = frontDesk.target, frontDesk.store, frontDesk.closeStore, frontDesk.ack, frontDesk.unresolvedBareReply, frontDesk.err
 		queuedDispatcher = err == nil && d.Handler == router.Dispatcher && runID != ""
 	default:
 		if d.Handler == router.Dispatcher {
@@ -1677,33 +1679,50 @@ func (b *StoreBackend) frontDeskTarget(ctx context.Context, text string) (runID,
 }
 
 // deliverFromFrontDesk routes a front-desk instruction to a live held run.
-func (b *StoreBackend) deliverFromFrontDesk(ctx context.Context, handler router.Handler, text string) (target string, st store.Store, closeStore bool, ack string, err error) {
+type frontDeskDelivery struct {
+	store               store.Store
+	err                 error
+	target, ack         string
+	closeStore          bool
+	unresolvedBareReply bool
+}
+
+func (b *StoreBackend) deliverFromFrontDesk(ctx context.Context, handler router.Handler, text string) frontDeskDelivery {
 	target, refusal, err := b.frontDeskTarget(ctx, text)
 	if err != nil || refusal != "" {
-		return "", nil, false, refusal, err
+		return frontDeskDelivery{ack: refusal, err: err}
 	}
+	var (
+		st                  store.Store
+		closeStore          bool
+		unresolvedBareReply bool
+	)
 	st = b.store
 	if _, err := st.Runs().Get(ctx, target); err != nil {
 		if b.OpenRun == nil {
-			return "", nil, false, "", fmt.Errorf("run %s is not reachable from this chat", target)
+			return frontDeskDelivery{err: fmt.Errorf("run %s is not reachable from this chat", target)}
 		}
 		if st, err = b.OpenRun(ctx, target); err != nil {
-			return "", nil, false, "", err
+			return frontDeskDelivery{err: err}
 		}
 		closeStore = true
 	}
 	if handler == router.Dispatcher {
 		b.seedSeenDispatcherRun(ctx, st, target)
+		propDir, _ := b.activeProposal(ctx, st, target)
+		hasAsk := b.hasNonProposalOpenAsk(ctx, st, target)
+		convWin := b.conversationWindow(ctx, st, target)
+		unresolvedBareReply = propDir == nil && !hasAsk && convWin == "" && IsBareConfirmationOrChitChat(text) && HasReferentPronoun(text)
 	}
 	if live, err := b.deliver(ctx, st, target, handler, text); err != nil || !live {
 		if closeStore && st != nil {
 			_ = st.Close()
 		}
 		// The lease lapsed between listing and writing.
-		return "", nil, false, fmt.Sprintf("Saved for the %s of run %s, but its controller stopped; it will act when one starts: %s", handler, target, text), err
+		return frontDeskDelivery{ack: fmt.Sprintf("Saved for the %s of run %s, but its controller stopped; it will act when one starts: %s", handler, target, text), unresolvedBareReply: unresolvedBareReply, err: err}
 	}
-	ack = fmt.Sprintf("Queued for the %s of run %s, whose controller is running: %s", handler, target, text)
-	return target, st, closeStore, ack, nil
+	ack := fmt.Sprintf("Queued for the %s of run %s, whose controller is running: %s", handler, target, text)
+	return frontDeskDelivery{target: target, store: st, closeStore: closeStore, ack: ack, unresolvedBareReply: unresolvedBareReply}
 }
 
 func (b *StoreBackend) stepAdopted(ctx context.Context, runID string) {

@@ -457,13 +457,16 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 
 	if c.AgentBackend == model.AgentBackendCLI {
 		var cliToolOutputs []string
-		icfg := c.investigateConfig(ctx)
 		sessCfg := model.AgentSessionConfig{
-			Provider:      c.Provider,
-			Model:         c.modelName,
-			Effort:        c.Effort,
-			SystemPrompt:  systemPrompt,
-			WorkDir:       model.DeterministicSessionWorkDir(cmp.Or(icfg.RunDir, c.Investigate.RunDir), cmp.Or(c.runID, threadID), ActorConcierge),
+			Provider:     c.Provider,
+			Model:        c.modelName,
+			Effort:       c.Effort,
+			SystemPrompt: systemPrompt,
+			// Keep the session directory anchored to the configured front-desk
+			// directory. investigateConfig adds held-run directories as read roots;
+			// using its promoted RunDir here would change the resume path whenever
+			// runs are adopted or released.
+			WorkDir:       model.DeterministicSessionWorkDir(c.Investigate.RunDir, cmp.Or(c.runID, threadID), ActorConcierge),
 			LLMGatewayURL: c.LLMGatewayURL,
 			ClaudeBin:     c.ClaudeBin,
 			CodexBin:      c.CodexBin,
@@ -1200,7 +1203,9 @@ func (c *Concierge) listHeldMemories(ctx context.Context, held []string) ([]stor
 	if err != nil {
 		return nil, err
 	}
-	add(global)
+	// List includes run-scoped entries when RunID is empty. Only entries with
+	// an empty owner are global and safe to expose in every held-run prompt.
+	add(slices.DeleteFunc(global, func(entry store.MemoryEntry) bool { return entry.RunID != "" }))
 	runs := append(slices.Clone(held), c.runID)
 	for _, runID := range runs {
 		if strings.TrimSpace(runID) == "" || runID == frontDeskRunID {
@@ -1348,8 +1353,23 @@ func matchLatestRoundReport(dir, rel string) string {
 	if err != nil || len(matches) == 0 {
 		return ""
 	}
-	sort.Strings(matches)
+	slices.SortFunc(matches, func(a, b string) int {
+		return cmp.Compare(roundNumber(a), roundNumber(b))
+	})
 	return matches[len(matches)-1]
+}
+
+func roundNumber(path string) int {
+	base := filepath.Base(path)
+	idx := strings.LastIndex(base, ".r")
+	if idx < 0 {
+		return -1
+	}
+	n, err := strconv.Atoi(strings.TrimSuffix(base[idx+2:], ".md"))
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 // buildToolRegistry builds the turn's tools. run.start launches only when
