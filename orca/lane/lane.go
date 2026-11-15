@@ -485,6 +485,18 @@ type SessionReleaser interface {
 	ReleaseSession(ctx context.Context, sessionID string, force ...bool) error
 }
 
+// PostUpdate records a Nebula post update performed during run close-out.
+type PostUpdate struct {
+	PostID  string
+	Content string
+}
+
+// PostPublisher is optionally implemented by drivers or clients that can
+// update a Nebula post by ID during run close-out.
+type PostPublisher interface {
+	UpdatePost(ctx context.Context, postID, content string) error
+}
+
 // ReportOnlyChecker performs a fresh remote check for report-only completion.
 // The result is true when the lane branch is absent or has no commits ahead of
 // its base branch.
@@ -568,6 +580,7 @@ type FakeDriver struct { //nolint:govet // test double state is intentionally gr
 	Steers                 []SteerRequest
 	Stops                  []StopRequest
 	Releases               []string
+	PostUpdates            []PostUpdate
 	ReportOnlyBranchExists bool
 	ReportOnlyCommitsAhead int
 	SpawnBaseCommit        string
@@ -763,6 +776,16 @@ func (f *FakeDriver) ReleaseSession(_ context.Context, sessionID string, _ ...bo
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Releases = append(f.Releases, sessionID)
+	return nil
+}
+
+func (f *FakeDriver) UpdatePost(_ context.Context, postID, content string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.PostUpdates = append(f.PostUpdates, PostUpdate{
+		PostID:  postID,
+		Content: content,
+	})
 	return nil
 }
 

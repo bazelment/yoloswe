@@ -60,6 +60,7 @@ type Config struct {
 	OnPlannerRequest func(ctx context.Context, runID, reason, planRef string) error
 	OnOwnerAnswer    func(ctx context.Context, runID, askID, answer string) error
 	LaneInspector    func(ctx context.Context, runID, laneID string, req ReadLaneParams) (string, error)
+	OnRunCloseout    func(ctx context.Context, runID string, params RunCloseoutParams) (string, error)
 	// Logger, when set, receives one INFO line per tool call.
 	Logger *slog.Logger
 	// Temperature is the sampling temperature for judgment turns. Nil omits it
@@ -214,6 +215,19 @@ func (d *Dispatcher) SetOwnerAnswer(fn func(context.Context, string, string, str
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.cfg.OnOwnerAnswer = fn
+}
+
+// SetRunCloseout installs the close-out handler for run.closeout on adopted runs.
+func (d *Dispatcher) SetRunCloseout(fn func(context.Context, string, RunCloseoutParams) (string, error)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cfg.OnRunCloseout = fn
+}
+
+func (d *Dispatcher) runCloseoutHandler() func(context.Context, string, RunCloseoutParams) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cfg.OnRunCloseout
 }
 
 // SetDriver replaces the lane driver used for spawns, retries, steers, and stops.
@@ -688,6 +702,12 @@ var mailDismissToolDef = model.ToolDefinition{
 	InputSchema: model.SchemaFor[MailDismissParams](),
 }
 
+var runCloseoutToolDef = model.ToolDefinition{
+	Name:        ToolRunCloseout,
+	Description: "Close out an adopted run once every lane and backlog item is terminal: write FINAL.md, update PROGRESS.md and OBJECTIVE.md Next:, append to a plan log file named in OBJECTIVE.md, republish a Nebula post named in OBJECTIVE.md, and release remaining lane sessions",
+	InputSchema: model.SchemaFor[RunCloseoutParams](),
+}
+
 func (d *Dispatcher) buildToolRegistry(runID string, state *turnExecState) *model.ToolRegistry {
 	reg := model.NewToolRegistry()
 	for i := range dispatcherToolDefs {
@@ -702,6 +722,11 @@ func (d *Dispatcher) buildToolRegistry(runID string, state *turnExecState) *mode
 	reg.Register(mailDismissToolDef, func(ctx context.Context, raw json.RawMessage) (string, error) {
 		return d.handleRawToolCall(ctx, runID, state, mailDismissToolDef.Name, raw)
 	})
+	if d.runCloseoutHandler() != nil {
+		reg.Register(runCloseoutToolDef, func(ctx context.Context, raw json.RawMessage) (string, error) {
+			return d.handleRawToolCall(ctx, runID, state, runCloseoutToolDef.Name, raw)
+		})
+	}
 	return reg
 }
 
@@ -721,9 +746,12 @@ func batchAllowsTool(toolName string, events []store.Event) error {
 // tool eligibility inside the handler.
 func (d *Dispatcher) buildCLIToolRegistry(runID string, state *turnExecState, events []store.Event) *model.ToolRegistry {
 	reg := model.NewToolRegistry()
-	defs := make([]model.ToolDefinition, 0, len(dispatcherToolDefs)+2)
+	defs := make([]model.ToolDefinition, 0, len(dispatcherToolDefs)+3)
 	defs = append(defs, dispatcherToolDefs...)
 	defs = append(defs, mailAnswerToolDef, mailDismissToolDef)
+	if d.runCloseoutHandler() != nil {
+		defs = append(defs, runCloseoutToolDef)
+	}
 	for i := range defs {
 		def := defs[i]
 		reg.Register(def, func(ctx context.Context, raw json.RawMessage) (string, error) {
@@ -1114,6 +1142,12 @@ func (d *Dispatcher) applyVettedAction(
 		return d.applyDirectiveRevoke(ctx, runID, state, view, *act.DirectiveRevoke)
 	case ToolPlannerRequest:
 		return d.applyPlannerRequest(ctx, runID, *act.PlannerRequest)
+	case ToolRunCloseout:
+		fn := d.runCloseoutHandler()
+		if fn == nil {
+			return "", errors.New("run closeout handler is not configured")
+		}
+		return fn(ctx, runID, *act.RunCloseout)
 	case ToolReadLaneReport:
 		return d.applyReadLaneReport(ctx, runID, view, *act.ReadLaneReport)
 	case ToolReadLane:

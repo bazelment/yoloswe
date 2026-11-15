@@ -12,7 +12,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -2471,4 +2473,598 @@ func TestAdoptOldHostMailsZeroDispatcherTurns(t *testing.T) {
 	if !strings.Contains(joined, "open question from running lane before adopt") || !strings.Contains(joined, "timestamp-less host message") {
 		t.Fatalf("live mail events = %q, want both open question and timestamp-less message", joined)
 	}
+}
+
+func TestAdoptedNebulaSwarmCloseoutWhenAllLanesTerminal(t *testing.T) {
+	t.Parallel()
+
+	t.Run("all_lanes_terminal_on_adopt_writes_final_updates_objective_post_and_releases_sessions", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), ".swarm")
+		last := time.Date(2026, 11, 15, 6, 56, 35, 0, time.UTC)
+		dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", last)
+
+		write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish trial-m1 rollout and publish final post","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"squash",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high"},{"name":"review","kind":"claude","model":"sonnet","effort":"high"}]},
+"tasks":[
+{"id":"m1-base","title":"M1 base","branch":"swarm-lane/20261114-trial-m1/m1-base","priority":"p1","status":"done","phase":"review","round":1,"session_id":"sess-m1","terminals":{"review":{"1":"term-m1-review"}},"pr":5604,"pr_head":"abc","approval_sha":"abc","merge_sha":"abc5604","terminal_state":"","verdict":"pass"},
+{"id":"m5-finish","title":"M5 finish","branch":"swarm-lane/20261114-trial-m1/m5-finish","priority":"p1","status":"done","phase":"review","round":1,"session_id":"sess-m5","terminals":{"review":{"1":"term-m5-review"}},"pr":5899,"pr_head":"def","approval_sha":"def","merge_sha":"def5899","terminal_state":"","verdict":"pass"}]}
+`)
+		write(t, filepath.Join(dir, "PLAN.md"), "# Plan\n\n## Log\n- 05:00Z m1-base merged (#5604)\n")
+		write(t, filepath.Join(dir, "OBJECTIVE.md"), `# Objective: trial-m1
+
+Goal: finish trial-m1 rollout and publish final post
+
+Plan: PLAN.md (post ac9da4cb)
+
+Next: when #5899 merges, add a line to PLAN.md log, republish the plan post (ac9da4cb), write FINAL.md and update PROGRESS.md / OBJECTIVE.md, and release the lane sessions.
+`)
+		write(t, filepath.Join(dir, "PROGRESS.md"), `# Progress (05:13Z handover)
+Remaining orchestrator steps after #5899 merges:
+- check the merge
+- add a line to the plan's PLAN.md log
+- republish the plan post (ac9da4cb)
+- write FINAL.md and update PROGRESS.md / OBJECTIVE.md, and publish them
+- release the lane sessions
+`)
+
+		clk := clock.NewFakeClock(last)
+		st := store.NewMemoryStore(clk)
+		t.Cleanup(func() { _ = st.Close() })
+		drv := lane.NewFakeDriver()
+		controllers := NewControllers(t.Context(), st, drv, clk, nil)
+		label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+		s := nsService(root, loop, label)
+		s.Driver = controllers
+
+		r, err := s.Adopt(t.Context(), nsRun)
+		if err != nil {
+			t.Fatalf("Adopt: %v", err)
+		}
+		t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+		// 1. FINAL.md written with merged PRs and outcome.
+		finalBytes, err := os.ReadFile(filepath.Join(dir, "FINAL.md"))
+		if err != nil {
+			t.Fatalf("expected FINAL.md to be written on all-lanes-terminal closeout: %v", err)
+		}
+		finalStr := string(finalBytes)
+		for _, want := range []string{"Outcome: done", "#5604", "abc5604", "#5899", "def5899"} {
+			if !strings.Contains(finalStr, want) {
+				t.Fatalf("FINAL.md missing %q:\n%s", want, finalStr)
+			}
+		}
+
+		// 2. PLAN.md log appended.
+		planStr := readText(filepath.Join(dir, "PLAN.md"))
+		for _, want := range []string{"#5604", "#5899", "20261114-trial-m1"} {
+			if !strings.Contains(planStr, want) {
+				t.Fatalf("PLAN.md missing close-out log %q:\n%s", want, planStr)
+			}
+		}
+
+		// 3. OBJECTIVE.md Next: updated to done (and stand-down marker preserved).
+		objRaw := readText(filepath.Join(dir, "OBJECTIVE.md"))
+		if !strings.HasPrefix(objRaw, markerPrefix) {
+			t.Fatalf("OBJECTIVE.md lost stand-down marker prefix:\n%s", objRaw)
+		}
+		if !ObjectiveIsDone(stripMarker(objRaw)) {
+			t.Fatalf("expected OBJECTIVE.md Next: to be marked done:\n%s", objRaw)
+		}
+		storedRun, err := st.Runs().Get(t.Context(), nsRun)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ObjectiveIsDone(storedRun.Objective) {
+			t.Fatalf("expected stored Run.Objective to be marked done:\n%s", storedRun.Objective)
+		}
+
+		// 4. Fake Nebula client sees the post update with the post ID ac9da4cb.
+		if len(drv.PostUpdates) != 1 {
+			t.Fatalf("PostUpdates = %+v, want 1 update", drv.PostUpdates)
+		}
+		if drv.PostUpdates[0].PostID != "ac9da4cb" {
+			t.Fatalf("PostUpdates[0].PostID = %q, want ac9da4cb", drv.PostUpdates[0].PostID)
+		}
+		if !strings.Contains(drv.PostUpdates[0].Content, "#5899") || !strings.Contains(drv.PostUpdates[0].Content, "Outcome: done") {
+			t.Fatalf("PostUpdates[0].Content missing merged PR or outcome:\n%s", drv.PostUpdates[0].Content)
+		}
+
+		// 5. Lane sessions released (excluding orchestrator session sess-orch).
+		if !slices.Contains(drv.Releases, "sess-m1") || !slices.Contains(drv.Releases, "sess-m5") {
+			t.Fatalf("Releases = %v, want sess-m1 and sess-m5", drv.Releases)
+		}
+		if slices.Contains(drv.Releases, "sess-orch") {
+			t.Fatalf("Releases = %v, must not release orchestrator session sess-orch", drv.Releases)
+		}
+
+		// 6. Owner sees one-line summary decisions for each close-out step and /release offer.
+		decs, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: nsRun})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var summaries []string
+		for _, d := range decs {
+			if d.Tool == dispatcher.ToolRunCloseout {
+				summaries = append(summaries, d.Result)
+			}
+		}
+		joinedDecs := strings.Join(summaries, "\n")
+		for _, want := range []string{
+			"released lane sessions",
+			"PLAN.md",
+			"FINAL.md",
+			"OBJECTIVE.md Next:",
+			"ac9da4cb",
+			"/release",
+		} {
+			if !strings.Contains(joinedDecs, want) {
+				t.Fatalf("close-out decisions missing %q:\n%s", want, joinedDecs)
+			}
+		}
+
+		// 7. Writes outside the run dir or to unnamed files are refused.
+		outsideTarget := filepath.Join(t.TempDir(), "escape.md")
+		for _, badPath := range []string{
+			"../outside.md",
+			"../../escape.md",
+			outsideTarget,
+			"UNLISTED.md",
+			"notes/secret.md",
+		} {
+			if _, err := ValidateCloseoutWrite(dir, stripMarker(objRaw), badPath); err == nil {
+				t.Fatalf("ValidateCloseoutWrite(%q) succeeded, want refusal", badPath)
+			}
+			if _, err := WriteCloseoutFile(dir, stripMarker(objRaw), badPath, "bad", false); err == nil {
+				t.Fatalf("WriteCloseoutFile(%q) succeeded, want refusal", badPath)
+			}
+			if _, err := controllers.CloseoutRun(t.Context(), nsRun, dispatcher.RunCloseoutParams{
+				Files: map[string]string{badPath: "bad"},
+			}); err == nil {
+				t.Fatalf("CloseoutRun with bad file %q succeeded, want refusal", badPath)
+			}
+		}
+		if _, err := os.Stat(outsideTarget); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("outsideTarget %s was created!", outsideTarget)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "UNLISTED.md")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("UNLISTED.md was created in run dir!")
+		}
+
+		// 8. Symlink parent traversal with a nonexistent target file is refused.
+		outsideDir := t.TempDir()
+		if err := os.Symlink(outsideDir, filepath.Join(dir, "symdir")); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+		objWithSym := stripMarker(objRaw) + "\nAlso mentions symdir/escape.md and dangling.md."
+		if err := os.Symlink(filepath.Join(outsideDir, "dangling-target.md"), filepath.Join(dir, "dangling.md")); err != nil {
+			t.Fatalf("Symlink dangling: %v", err)
+		}
+		for _, symPath := range []string{"symdir/escape.md", "dangling.md"} {
+			if _, err := ValidateCloseoutWrite(dir, objWithSym, symPath); err == nil {
+				t.Fatalf("ValidateCloseoutWrite(%q) succeeded across symlink escape, want refusal", symPath)
+			}
+			if _, err := WriteCloseoutFile(dir, objWithSym, symPath, "bad", false); err == nil {
+				t.Fatalf("WriteCloseoutFile(%q) succeeded across symlink escape, want refusal", symPath)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(outsideDir, "escape.md")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("symlink escape created %s outside run dir!", filepath.Join(outsideDir, "escape.md"))
+		}
+	})
+
+	t.Run("post_republish_failure_retries_cleanly_and_is_idempotent", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), ".swarm")
+		last := time.Date(2026, 11, 15, 7, 0, 0, 0, time.UTC)
+		dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", last)
+
+		write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish trial-m1 rollout","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"squash",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high"},{"name":"review","kind":"claude","model":"sonnet","effort":"high"}]},
+"tasks":[
+{"id":"m1-base","title":"M1 base","branch":"swarm-lane/20261114-trial-m1/m1-base","priority":"p1","status":"done","phase":"review","round":1,"session_id":"sess-m1","terminals":{"review":{"1":"term-m1-review"}},"pr":5604,"pr_head":"abc","approval_sha":"abc","merge_sha":"abc5604","terminal_state":"","verdict":"pass"},
+{"id":"m5-finish","title":"M5 finish","branch":"swarm-lane/20261114-trial-m1/m5-finish","priority":"p1","status":"done","phase":"review","round":1,"session_id":"sess-m5","terminals":{"review":{"1":"term-m5-review"}},"pr":5899,"pr_head":"def","approval_sha":"def","merge_sha":"def5899","terminal_state":"","verdict":"pass"}]}
+`)
+		write(t, filepath.Join(dir, "PLAN.md"), "# Plan\n\n## Log\n- 05:00Z m1-base merged (#5604)\n")
+		// Objective already has Next: Done, while requesting FINAL.md and post republish.
+		write(t, filepath.Join(dir, "OBJECTIVE.md"), `# Objective: trial-m1
+
+Goal: finish trial-m1 rollout
+
+Plan: PLAN.md (post ac9da4cb)
+
+Next: Done — write FINAL.md, update PLAN.md log, and republish post ac9da4cb.
+Constraints: preserve this line directly after Next.
+`)
+		write(t, filepath.Join(dir, "PROGRESS.md"), "# Progress\n- m1-base and m5-finish merged.\n")
+
+		var postAttempts atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPut && r.URL.Path == "/api/posts/ac9da4cb" {
+				attempt := postAttempts.Add(1)
+				if attempt == 1 {
+					http.Error(w, `{"error":"temporary upstream error"}`, http.StatusBadGateway)
+					return
+				}
+				b, _ := io.ReadAll(r.Body)
+				var payload struct {
+					Content  string `json:"content"`
+					Markdown string `json:"markdown"`
+				}
+				_ = json.Unmarshal(b, &payload)
+				if payload.Content == "" || payload.Content != payload.Markdown {
+					http.Error(w, "content/markdown mismatch", http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"ok":true}`)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer srv.Close()
+
+		nebDrv, err := nebula.New(nebula.Config{APIURL: srv.URL, Token: "test-token"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fakeDrv := lane.NewFakeDriver()
+		drv := &nebulaPostFakeDriver{FakeDriver: fakeDrv, pub: nebDrv}
+		clk := clock.NewFakeClock(last)
+		st := store.NewMemoryStore(clk)
+		t.Cleanup(func() { _ = st.Close() })
+		controllers := NewControllers(t.Context(), st, drv, clk, nil)
+		label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+		s := nsService(root, loop, label)
+		s.Driver = controllers
+
+		// Adopt attempts auto close-out; attempt 1 fails at UpdatePost.
+		r, err := s.Adopt(t.Context(), nsRun)
+		if err != nil {
+			t.Fatalf("Adopt: %v", err)
+		}
+		t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+		if postAttempts.Load() != 1 {
+			t.Fatalf("postAttempts after first attempt = %d, want 1", postAttempts.Load())
+		}
+		if fileExists(filepath.Join(dir, "FINAL.md")) {
+			t.Fatalf("FINAL.md must not be written when UpdatePost fails")
+		}
+
+		// Advance clock and retry via planNextWorkIfDrained: attempt 2 succeeds.
+		clk.Advance(2 * time.Minute)
+		closed, err := controllers.planNextWorkIfDrained(t.Context(), nsRun, "retry")
+		if err != nil || !closed {
+			t.Fatalf("retry planNextWorkIfDrained = (%v, %v), want (true, nil)", closed, err)
+		}
+		if postAttempts.Load() != 2 {
+			t.Fatalf("postAttempts after retry = %d, want 2", postAttempts.Load())
+		}
+		if !fileExists(filepath.Join(dir, "FINAL.md")) {
+			t.Fatalf("expected FINAL.md after retry succeeded")
+		}
+
+		// Re-running CloseoutRun again with a later clock must be idempotent (no duplicate PLAN.md or PROGRESS.md entries).
+		clk.Advance(5 * time.Minute)
+		if _, err := controllers.CloseoutRun(t.Context(), nsRun, dispatcher.RunCloseoutParams{}); err != nil {
+			t.Fatalf("second CloseoutRun: %v", err)
+		}
+		planStr := readText(filepath.Join(dir, "PLAN.md"))
+		if count := strings.Count(planStr, "20261114-trial-m1 done: merged #5604, #5899"); count != 1 {
+			t.Fatalf("PLAN.md close-out log count = %d, want 1:\n%s", count, planStr)
+		}
+		progStr := readText(filepath.Join(dir, "PROGRESS.md"))
+		if count := strings.Count(progStr, "## Close-out ("); count != 1 {
+			t.Fatalf("PROGRESS.md Close-out section count = %d, want 1:\n%s", count, progStr)
+		}
+		objStr := stripMarker(readText(filepath.Join(dir, "OBJECTIVE.md")))
+		if !strings.Contains(objStr, "Constraints: preserve this line directly after Next.") {
+			t.Fatalf("OBJECTIVE.md lost line directly following Next:\n%s", objStr)
+		}
+	})
+
+	t.Run("failed_lane_and_failed_session_release_report_partial_and_unmerged", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), ".swarm")
+		last := time.Date(2026, 11, 15, 7, 10, 0, 0, time.UTC)
+		dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", last)
+
+		write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial partial closeout","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"squash",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high"}]},
+"tasks":[
+{"id":"m1-base","title":"M1 base","branch":"swarm-lane/20261114-trial-m1/m1-base","priority":"p1","status":"done","phase":"swe","round":1,"session_id":"sess-m1","terminals":{"swe":{"1":"term-m1"}},"pr":5604,"pr_head":"abc","approval_sha":"abc","merge_sha":"abc5604","terminal_state":"","verdict":"pass"},
+{"id":"m2-broken","title":"M2 broken","branch":"swarm-lane/20261114-trial-m1/m2-broken","priority":"p1","status":"failed","phase":"swe","round":1,"session_id":"sess-m2","terminals":{"swe":{"1":"term-m2"}},"pr":5900,"pr_head":"bad","approval_sha":"","merge_sha":"","terminal_state":"","verdict":""}]}
+`)
+		write(t, filepath.Join(dir, "PLAN.md"), "# Plan\n")
+		write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: trial partial closeout\nPlan: PLAN.md\nNext: close out run and write FINAL.md\n")
+
+		clk := clock.NewFakeClock(last)
+		st := store.NewMemoryStore(clk)
+		t.Cleanup(func() { _ = st.Close() })
+		drv := &failingReleaseDriver{FakeDriver: lane.NewFakeDriver(), failSession: "sess-m2"}
+		controllers := NewControllers(t.Context(), st, drv, clk, nil)
+		label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+		s := nsService(root, loop, label)
+		s.Driver = controllers
+
+		r, err := s.Adopt(t.Context(), nsRun)
+		if err != nil {
+			t.Fatalf("Adopt: %v", err)
+		}
+		t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+		finalStr := readText(filepath.Join(dir, "FINAL.md"))
+		if !strings.Contains(finalStr, "Outcome: partial") {
+			t.Fatalf("FINAL.md should report Outcome: partial when a lane failed:\n%s", finalStr)
+		}
+		if !strings.Contains(finalStr, "m2-broken: failed (#5900, unmerged)") {
+			t.Fatalf("FINAL.md should mark failed lane PR #5900 as unmerged:\n%s", finalStr)
+		}
+		if !strings.Contains(finalStr, "1 session(s) failed to release: sess-m2") {
+			t.Fatalf("FINAL.md should list unreleased sessions:\n%s", finalStr)
+		}
+		planStr := readText(filepath.Join(dir, "PLAN.md"))
+		if strings.Contains(planStr, "#5900") {
+			t.Fatalf("PLAN.md must not list unmerged PR #5900 as merged:\n%s", planStr)
+		}
+		decs, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: nsRun})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var summaries []string
+		for _, d := range decs {
+			if d.Tool == dispatcher.ToolRunCloseout {
+				summaries = append(summaries, d.Result)
+			}
+		}
+		joined := strings.Join(summaries, "\n")
+		if !strings.Contains(joined, "released lane sessions (sess-m1); failed to release (sess-m2)") {
+			t.Fatalf("decisions should report actual released and failed sessions, got:\n%s", joined)
+		}
+	})
+
+	t.Run("last_lane_merges_while_adopted_closes_out_via_nebula_client", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), ".swarm")
+		last := time.Date(2026, 11, 15, 6, 50, 0, 0, time.UTC)
+		dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", last)
+
+		write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish trial-m1 rollout and publish final post","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"squash",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high"},{"name":"review","kind":"claude","model":"sonnet","effort":"high"}]},
+"tasks":[
+{"id":"m1-base","title":"M1 base","branch":"swarm-lane/20261114-trial-m1/m1-base","priority":"p1","status":"done","phase":"review","round":1,"session_id":"sess-m1","terminals":{"review":{"1":"term-m1-review"}},"pr":5604,"pr_head":"abc","approval_sha":"abc","merge_sha":"abc5604","terminal_state":"","verdict":"pass"},
+{"id":"m5-finish","title":"M5 finish","branch":"swarm-lane/20261114-trial-m1/m5-finish","priority":"p1","status":"running","phase":"review","round":1,"session_id":"sess-m5","terminals":{"review":{"1":"term-m5-review"}},"pr":5899,"pr_head":"def","approval_sha":"","merge_sha":"","terminal_state":"working","verdict":""}]}
+`)
+		write(t, filepath.Join(dir, "PLAN.md"), "# Plan\n\n## Log\n- 05:00Z m1-base merged (#5604)\n")
+		write(t, filepath.Join(dir, "OBJECTIVE.md"), `# Objective: trial-m1
+
+Goal: finish trial-m1 rollout and publish final post
+
+Plan: PLAN.md (post ac9da4cb)
+
+Next: when #5899 merges, add a line to PLAN.md log, republish the plan post (ac9da4cb), write FINAL.md and update PROGRESS.md / OBJECTIVE.md, and release the lane sessions.
+`)
+		write(t, filepath.Join(dir, "PROGRESS.md"), `# Progress (05:13Z handover)
+Remaining orchestrator steps after #5899 merges:
+- check the merge
+- add a line to the plan's PLAN.md log
+- republish the plan post (ac9da4cb)
+- write FINAL.md and update PROGRESS.md / OBJECTIVE.md, and publish them
+- release the lane sessions
+`)
+
+		var postIDGot, postBodyGot string
+		var srvMu sync.Mutex
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/posts/") {
+				b, _ := io.ReadAll(r.Body)
+				var payload struct {
+					Content string `json:"content"`
+				}
+				_ = json.Unmarshal(b, &payload)
+				srvMu.Lock()
+				postIDGot = strings.TrimPrefix(r.URL.Path, "/api/posts/")
+				postBodyGot = payload.Content
+				srvMu.Unlock()
+				_, _ = io.WriteString(w, `{"ok":true}`)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer srv.Close()
+
+		nebDrv, err := nebula.New(nebula.Config{
+			APIURL: srv.URL,
+			Token:  "test-token",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fakeDrv := lane.NewFakeDriver()
+		drv := &nebulaPostFakeDriver{FakeDriver: fakeDrv, pub: nebDrv}
+
+		clk := clock.NewFakeClock(last)
+		st := store.NewMemoryStore(clk)
+		t.Cleanup(func() { _ = st.Close() })
+		controllers := NewControllers(t.Context(), st, drv, clk, nil)
+		controllers.PRProbe = func(_ context.Context, _, _ string, pr int) (controller.PRStatus, error) {
+			if pr == 5899 {
+				return controller.PRStatus{
+					State:    "MERGED",
+					MergeSHA: "def5899",
+					Number:   5899,
+				}, nil
+			}
+			return controller.PRStatus{State: "OPEN", Number: pr}, nil
+		}
+		label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+		s := nsService(root, loop, label)
+		s.Driver = controllers
+
+		r, err := s.Adopt(t.Context(), nsRun)
+		if err != nil {
+			t.Fatalf("Adopt: %v", err)
+		}
+		t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+		// Before m5-finish completes, FINAL.md must not exist yet.
+		if _, err := os.Stat(filepath.Join(dir, "FINAL.md")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("FINAL.md should not exist while m5-finish is still running")
+		}
+
+		// Now m5-finish writes its review pass report and PRProbe sees #5899 merged.
+		write(t, filepath.Join(dir, "reports", "m5-finish.review.r1.md"), "Outcome: done\nHEAD: def\nPR: 5899\nVerdict: pass\n")
+		fakeDrv.Emit(lane.Event{
+			RunID:      nsRun,
+			LaneID:     "m5-finish",
+			TerminalID: "term-m5-review",
+			Kind:       lane.EventTurnEndedNoReport,
+			Text:       "review passed and PR #5899 merged",
+		})
+		waitFor(t, func() bool {
+			return fileExists(filepath.Join(dir, "FINAL.md"))
+		})
+
+		finalStr := readText(filepath.Join(dir, "FINAL.md"))
+		if !strings.Contains(finalStr, "#5899") || !strings.Contains(finalStr, "Outcome: done") {
+			t.Fatalf("FINAL.md after dynamic last-lane merge:\n%s", finalStr)
+		}
+		srvMu.Lock()
+		gotPostID := postIDGot
+		gotPostBody := postBodyGot
+		srvMu.Unlock()
+		if gotPostID != "ac9da4cb" || !strings.Contains(gotPostBody, "#5899") {
+			t.Fatalf("nebula post update = (%q, %q), want ac9da4cb with #5899", gotPostID, gotPostBody)
+		}
+		if !slices.Contains(fakeDrv.Releases, "sess-m1") || !slices.Contains(fakeDrv.Releases, "sess-m5") {
+			t.Fatalf("released sessions = %v, want sess-m1 and sess-m5", fakeDrv.Releases)
+		}
+	})
+}
+
+type nebulaPostFakeDriver struct {
+	*lane.FakeDriver
+	pub lane.PostPublisher
+}
+
+func (d *nebulaPostFakeDriver) UpdatePost(ctx context.Context, postID, content string) error {
+	return d.pub.UpdatePost(ctx, postID, content)
+}
+
+type failingReleaseDriver struct {
+	*lane.FakeDriver
+	failSession string
+}
+
+func (d *failingReleaseDriver) ReleaseSession(ctx context.Context, sessionID string, force ...bool) error {
+	if sessionID == d.failSession {
+		return errors.New("simulated release error")
+	}
+	return d.FakeDriver.ReleaseSession(ctx, sessionID, force...)
+}
+
+func TestCloseoutUnitHelpers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("replaceObjectiveNextLine_preserves_siblings_and_earlier_Next", func(t *testing.T) {
+		t.Parallel()
+		obj := "# Objective\nNext: earlier note\n\nNext: finish m5\n  - bullet child\nPlan: PLAN.md\nOwner: alice\n"
+		got := replaceObjectiveNextLine(obj, "done (FINAL.md written; run /release)")
+		if !strings.Contains(got, "Next: earlier note") {
+			t.Fatalf("earlier Next: line lost:\n%s", got)
+		}
+		if !strings.Contains(got, "Next: done (FINAL.md written; run /release)") {
+			t.Fatalf("last Next: line not replaced:\n%s", got)
+		}
+		if strings.Contains(got, "bullet child") {
+			t.Fatalf("indented child of replaced Next: should be removed:\n%s", got)
+		}
+		if !strings.Contains(got, "Plan: PLAN.md") || !strings.Contains(got, "Owner: alice") {
+			t.Fatalf("non-indented sibling lines after Next: must be preserved:\n%s", got)
+		}
+
+		headingObj := "# Objective\n\n## Next\n- step 1\n- step 2\n\n## Milestones\n- [x] M1\n"
+		gotHeading := replaceObjectiveNextLine(headingObj, "done")
+		if !strings.Contains(gotHeading, "Next: done\n") || !strings.Contains(gotHeading, "## Milestones\n- [x] M1") || strings.Contains(gotHeading, "step 1") {
+			t.Fatalf("## Next section replacement failed:\n%s", gotHeading)
+		}
+	})
+
+	t.Run("shouldAutoCloseoutRun_negative_guards", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		doneLane := []lane.Lane{{ID: "m1", Status: lane.StatusDone}}
+
+		// Stray mention in PROGRESS.md history while Next: has non-closeout work.
+		objOtherWork := "Goal: test\nNext: spawn m2-api lane\n\n## Handover (PROGRESS.md)\nPreviously wrote FINAL.md in trial-0.\n"
+		if shouldAutoCloseoutRun(Run{ID: "r1", Dir: dir, Objective: objOtherWork}, doneLane, nil) {
+			t.Fatal("shouldAutoCloseoutRun must be false when Next: does not call for closeout")
+		}
+
+		// Unchecked milestone - [ ] blocks auto-closeout.
+		objUnchecked := "Goal: test\n- [x] M1\n- [ ] M2\nNext: write FINAL.md\n"
+		if shouldAutoCloseoutRun(Run{ID: "r1", Dir: dir, Objective: objUnchecked}, doneLane, nil) {
+			t.Fatal("shouldAutoCloseoutRun must be false when an unchecked milestone remains")
+		}
+
+		// Explicit owner decision gate blocks auto-closeout.
+		objAskOwner := "Goal: test\nNext: ask owner before writing FINAL.md\n"
+		if shouldAutoCloseoutRun(Run{ID: "r1", Dir: dir, Objective: objAskOwner}, doneLane, nil) {
+			t.Fatal("shouldAutoCloseoutRun must be false when Next: says ask owner")
+		}
+
+		// Positive control: when Next: calls for writing FINAL.md and all milestones are checked, it returns true.
+		objReady := "Goal: test\n- [x] M1\nNext: write FINAL.md\n"
+		if !shouldAutoCloseoutRun(Run{ID: "r1", Dir: dir, Objective: objReady}, doneLane, nil) {
+			t.Fatal("shouldAutoCloseoutRun must be true when Next: calls for FINAL.md and all lanes/milestones are done")
+		}
+
+		// Historical HANDOVER.md / PROGRESS.md mention when Next: is done must not trigger auto-closeout.
+		write(t, filepath.Join(dir, "HANDOVER.md"), "# Notes\nPreviously wrote FINAL.md and republished post in trial-0.\n")
+		objDoneNoHandover := "Goal: test\nNext: none\n"
+		progHistorical := "# Handover\n- Previously republished FINAL.md in trial-0\n"
+		if shouldAutoCloseoutRun(Run{ID: "r1", Dir: dir, Objective: objDoneNoHandover, Progress: progHistorical}, doneLane, nil) {
+			t.Fatal("shouldAutoCloseoutRun must be false for historical HANDOVER.md / PROGRESS.md mentions when Next: is none")
+		}
+	})
+
+	t.Run("WriteCloseoutFile_preserves_stand_down_marker_in_PROGRESS", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		progPath := filepath.Join(dir, "PROGRESS.md")
+		write(t, progPath, markerPrefix+"2026-11-15T05:13:00Z (orca-1). Claude sessions: do not act on this run; run /release in orca to hand back.\n# Progress\n- 05:00Z lane m1 done\n")
+		if _, err := WriteCloseoutFile(dir, "Goal: test\n", "PROGRESS.md", "# Progress\n- 06:56Z closed out\n", false); err != nil {
+			t.Fatalf("WriteCloseoutFile: %v", err)
+		}
+		got := readText(progPath)
+		if !strings.HasPrefix(got, markerPrefix) || !strings.Contains(got, "- 06:56Z closed out") {
+			t.Fatalf("WriteCloseoutFile must preserve stand-down marker header on overwrite:\n%s", got)
+		}
+	})
+
+	t.Run("findPostIDInText_and_nebula_UpdatePost_validation", func(t *testing.T) {
+		t.Parallel()
+		if got := findPostIDInText("Plan: PLAN.md\nNext: write FINAL.md"); got != "" {
+			t.Fatalf("findPostIDInText without post id = %q, want empty", got)
+		}
+		if got := findPostIDInText("Plan: PLAN.md (post ac9da4cb-1234-5678-9abc-def012345678)"); got != "ac9da4cb-1234-5678-9abc-def012345678" {
+			t.Fatalf("findPostIDInText UUID = %q", got)
+		}
+
+		nebDrv, err := nebula.New(nebula.Config{
+			APIURL: "http://127.0.0.1:1",
+			Token:  "test-token",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := nebDrv.UpdatePost(t.Context(), "../evil", "body"); err == nil {
+			t.Fatal("expected UpdatePost to reject path traversal in postID")
+		}
+		if err := nebDrv.UpdatePost(t.Context(), "   ", "body"); err == nil {
+			t.Fatal("expected UpdatePost to reject blank postID")
+		}
+	})
 }

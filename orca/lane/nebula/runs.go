@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // runLabel is the run field `nebula run create --orchestrator-label` writes.
@@ -37,6 +38,25 @@ func (d *Driver) RunOrchestratorSession(ctx context.Context, runID string) (stri
 func (d *Driver) SetRunOrchestrator(ctx context.Context, runID, label string) error {
 	if err := d.doJSON(ctx, http.MethodPut, "/api/code-runs/"+url.PathEscape(runID), runLabel{Label: label}, nil); err != nil {
 		return fmt.Errorf("nebula label run %q: %w", runID, err)
+	}
+	return nil
+}
+
+// UpdatePost updates the markdown content of postID in Nebula.
+func (d *Driver) UpdatePost(ctx context.Context, postID, content string) error {
+	id := strings.TrimSpace(postID)
+	if id == "" {
+		return fmt.Errorf("nebula update post: post id is required")
+	}
+	body := struct {
+		Content  string `json:"content"`
+		Markdown string `json:"markdown"`
+	}{
+		Content:  content,
+		Markdown: content,
+	}
+	if err := d.doJSON(ctx, http.MethodPut, "/api/posts/"+url.PathEscape(id), body, nil); err != nil {
+		return fmt.Errorf("nebula update post %q: %w", id, err)
 	}
 	return nil
 }
