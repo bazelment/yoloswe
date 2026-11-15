@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -2621,60 +2620,7 @@ func TestEffectiveAgentBackend_PreservesCLIWithRecordingWrapper(t *testing.T) {
 }
 
 func runFakeMainPlannerClaudeCLI() {
-	streamFile := os.Getenv("FAKE_MAIN_PLANNER_CLAUDE_STREAM_FILE")
-	data, err := os.ReadFile(streamFile)
-	if err != nil {
-		os.Exit(1)
-	}
-	var lines []string
-	for _, line := range strings.Split(string(data), "\n") {
-		if trimmed := strings.TrimSpace(line); trimmed != "" {
-			lines = append(lines, trimmed)
-		}
-	}
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		inLine := strings.TrimSpace(scanner.Text())
-		if inLine == "" {
-			continue
-		}
-		var msg struct {
-			Type      string `json:"type"`
-			RequestID string `json:"request_id"`
-			Request   struct {
-				Subtype string `json:"subtype"`
-			} `json:"request"`
-		}
-		if json.Unmarshal([]byte(inLine), &msg) != nil {
-			continue
-		}
-		switch msg.Type {
-		case "control_request":
-			if msg.Request.Subtype == "initialize" {
-				fmt.Fprintf(os.Stdout, `{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{}}}`+"\n", msg.RequestID)
-			}
-		case "user":
-			for _, outLine := range lines {
-				fmt.Fprintln(os.Stdout, outLine)
-				var outEnv struct {
-					Type string `json:"type"`
-				}
-				if json.Unmarshal([]byte(outLine), &outEnv) == nil && outEnv.Type == "control_request" {
-					for scanner.Scan() {
-						respLine := strings.TrimSpace(scanner.Text())
-						var ctrlResp struct {
-							Type string `json:"type"`
-						}
-						if json.Unmarshal([]byte(respLine), &ctrlResp) == nil && ctrlResp.Type == "control_response" {
-							break
-						}
-					}
-				}
-			}
-		}
-	}
-	os.Exit(0)
+	model.RunFakeClaudeStreamCLI(os.Getenv("FAKE_MAIN_PLANNER_CLAUDE_STREAM_FILE"), "", "", "")
 }
 
 func TestMainPlanner_ProposePlanCLI(t *testing.T) {

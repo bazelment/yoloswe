@@ -382,37 +382,225 @@ func normalizeReadOnlyCommand(program string, args []string) (string, []string, 
 		return "", nil, fmt.Errorf("read.cmd: nebula %s %s is not a permitted read-only command", res, action)
 
 	case "git":
-		sub := cleanArgs[0]
-		if strings.HasPrefix(sub, "-") {
-			return "", nil, fmt.Errorf("read.cmd: git global flag %q is not permitted before subcommand", sub)
-		}
-		for _, arg := range cleanArgs[1:] {
-			if arg == "-c" || arg == "-o" || arg == "--output" || arg == "--ext-diff" || arg == "--textconv" ||
-				strings.HasPrefix(arg, "--output=") || strings.HasPrefix(arg, "--exec-path") ||
-				strings.HasPrefix(arg, "--git-dir") || strings.HasPrefix(arg, "--work-tree") ||
-				strings.HasPrefix(arg, "--config-env") {
-				return "", nil, fmt.Errorf("read.cmd: git flag %q is not permitted", arg)
-			}
-		}
-		switch sub {
-		case "status", "log", "diff", "show", "rev-parse":
-			return prog, cleanArgs, nil
-		case "branch":
-			for _, arg := range cleanArgs[1:] {
-				switch arg {
-				case "-a", "--all", "-r", "--remotes", "-v", "-vv", "--list", "-l", "--show-current":
-				default:
-					return "", nil, fmt.Errorf("read.cmd: git branch argument %q is not permitted in read-only mode", arg)
-				}
-			}
-			return prog, cleanArgs, nil
-		default:
-			return "", nil, fmt.Errorf("read.cmd: git %q is not a permitted read-only subcommand (allowed: status, log, diff, show, rev-parse, branch)", sub)
-		}
+		return normalizeGitReadOnlyCommand(prog, cleanArgs)
 
 	default:
 		return "", nil, fmt.Errorf("read.cmd: program %q is not permitted (only gh, nebula, and git are allowed)", prog)
 	}
+}
+
+func normalizeGitReadOnlyCommand(prog string, cleanArgs []string) (string, []string, error) {
+	sub := cleanArgs[0]
+	if strings.HasPrefix(sub, "-") {
+		return "", nil, fmt.Errorf("read.cmd: git global flag %q is not permitted before subcommand", sub)
+	}
+	switch sub {
+	case "status", "log", "diff", "show", "rev-parse":
+	case "branch":
+		for _, arg := range cleanArgs[1:] {
+			switch arg {
+			case "-a", "--all", "-r", "--remotes", "-v", "-vv", "--list", "-l", "--show-current":
+			default:
+				return "", nil, fmt.Errorf("read.cmd: git branch argument %q is not permitted in read-only mode", arg)
+			}
+		}
+		return prog, cleanArgs, nil
+	default:
+		return "", nil, fmt.Errorf("read.cmd: git %q is not a permitted read-only subcommand (allowed: status, log, diff, show, rev-parse, branch)", sub)
+	}
+
+	outArgs := []string{sub}
+	if sub == "diff" || sub == "show" || sub == "log" {
+		if !slices.Contains(cleanArgs[1:], "--no-ext-diff") {
+			outArgs = append(outArgs, "--no-ext-diff")
+		}
+		if !slices.Contains(cleanArgs[1:], "--no-textconv") {
+			outArgs = append(outArgs, "--no-textconv")
+		}
+	}
+
+	afterDoubleDash := false
+	expectCountValue := false
+	for _, arg := range cleanArgs[1:] {
+		if expectCountValue {
+			if !isDigitsOnly(arg) {
+				return "", nil, fmt.Errorf("read.cmd: git numeric flag value %q must be a positive integer", arg)
+			}
+			outArgs = append(outArgs, arg)
+			expectCountValue = false
+			continue
+		}
+		if !afterDoubleDash && arg == "--" {
+			afterDoubleDash = true
+			outArgs = append(outArgs, arg)
+			continue
+		}
+		if !afterDoubleDash && strings.HasPrefix(arg, "-") {
+			takesCount, ok := isAllowedGitSubcommandFlag(sub, arg)
+			if !ok {
+				return "", nil, fmt.Errorf("read.cmd: git %s flag %q is not permitted in read-only mode", sub, arg)
+			}
+			outArgs = append(outArgs, arg)
+			expectCountValue = takesCount
+			continue
+		}
+		if err := validateGitPositionalArg(arg, afterDoubleDash); err != nil {
+			return "", nil, err
+		}
+		outArgs = append(outArgs, arg)
+	}
+	if expectCountValue {
+		return "", nil, fmt.Errorf("read.cmd: git %s flag requires a numeric count argument", sub)
+	}
+	return prog, outArgs, nil
+}
+
+func isAllowedGitSubcommandFlag(sub, flag string) (takesNumericValue bool, allowed bool) {
+	switch sub {
+	case "status":
+		switch flag {
+		case "-s", "--short", "-b", "--branch", "--porcelain", "--porcelain=v1", "--porcelain=v2",
+			"-u", "--untracked-files", "--untracked-files=no", "--untracked-files=normal", "--untracked-files=all":
+			return false, true
+		}
+	case "log", "diff", "show":
+		switch flag {
+		case "-n", "--max-count":
+			return true, true
+		case "--oneline", "--stat", "--numstat", "--shortstat", "--name-only", "--name-status",
+			"-p", "-u", "--patch", "--no-patch", "-s", "--decorate", "--no-decorate", "--graph",
+			"--abbrev-commit", "--no-ext-diff", "--no-textconv", "--cached", "--staged":
+			return false, true
+		}
+		if strings.HasPrefix(flag, "-n") && isDigitsOnly(flag[2:]) {
+			return false, true
+		}
+		if strings.HasPrefix(flag, "--max-count=") && isDigitsOnly(strings.TrimPrefix(flag, "--max-count=")) {
+			return false, true
+		}
+		if strings.HasPrefix(flag, "-U") && isDigitsOnly(flag[2:]) {
+			return false, true
+		}
+		if strings.HasPrefix(flag, "--unified=") && isDigitsOnly(strings.TrimPrefix(flag, "--unified=")) {
+			return false, true
+		}
+		if len(flag) > 1 && flag[0] == '-' && isDigitsOnly(flag[1:]) {
+			return false, true
+		}
+	case "rev-parse":
+		switch flag {
+		case "--verify", "--short", "--abbrev-ref", "--symbolic-full-name", "--show-toplevel", "--is-inside-work-tree":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+func isDigitsOnly(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func containsParentTraversal(p string) bool {
+	for _, seg := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func validateGitPositionalArg(arg string, isPathspecOnly bool) error {
+	trimmed := strings.TrimSpace(arg)
+	if trimmed == "" {
+		return errors.New("read.cmd: empty git positional argument")
+	}
+	if !isPathspecOnly && strings.Contains(trimmed, ":") {
+		_, pathPart, _ := strings.Cut(trimmed, ":")
+		if pathPart == "" || filepath.IsAbs(pathPart) || strings.HasPrefix(pathPart, "~") || containsParentTraversal(pathPart) {
+			return fmt.Errorf("read.cmd: git revision path %q is outside allowed directories", arg)
+		}
+		if isSensitiveInvestigationPath(pathPart) {
+			return fmt.Errorf("read.cmd: git revision path %q is restricted (sensitive or database file)", arg)
+		}
+		return nil
+	}
+	if filepath.IsAbs(trimmed) || strings.HasPrefix(trimmed, "~") || containsParentTraversal(trimmed) {
+		return fmt.Errorf("read.cmd: git path argument %q escapes allowed run/repo directories", arg)
+	}
+	if isSensitiveInvestigationPath(trimmed) {
+		return fmt.Errorf("read.cmd: git path argument %q is restricted (sensitive or database file)", arg)
+	}
+	return nil
+}
+
+func validateGitRootConfinement(roots []string, baseDir string, args []string) error {
+	if len(roots) == 0 || len(args) == 0 {
+		return nil
+	}
+	sub := args[0]
+	root := cmp.Or(strings.TrimSpace(baseDir), roots[0])
+	afterDoubleDash := false
+	expectCountValue := false
+	for _, arg := range args[1:] {
+		if expectCountValue {
+			expectCountValue = false
+			continue
+		}
+		if !afterDoubleDash && arg == "--" {
+			afterDoubleDash = true
+			continue
+		}
+		if !afterDoubleDash && strings.HasPrefix(arg, "-") {
+			takesCount, _ := isAllowedGitSubcommandFlag(sub, arg)
+			expectCountValue = takesCount
+			continue
+		}
+		candPath := arg
+		if !afterDoubleDash && strings.Contains(arg, ":") {
+			_, candPath, _ = strings.Cut(arg, ":")
+		}
+		joined := filepath.Clean(filepath.Join(root, candPath))
+		if !isWithinAnyRoot(roots, joined) {
+			return fmt.Errorf("read.cmd: git path %q resolves outside allowed roots", arg)
+		}
+		if err := verifySymlinkConfinement(roots, joined, candPath); err != nil {
+			return err
+		}
+		if isSensitiveInvestigationPath(joined) {
+			return fmt.Errorf("read.cmd: git path %q is restricted (sensitive or database file)", arg)
+		}
+	}
+	return nil
+}
+
+func scrubbedReadCmdEnv(environ []string) []string {
+	out := make([]string, 0, len(environ)+4)
+	for _, kv := range environ {
+		k, _, _ := strings.Cut(kv, "=")
+		switch strings.ToUpper(strings.TrimSpace(k)) {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_EXTERNAL_DIFF", "GIT_INDEX_FILE",
+			"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+			"GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
+			"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_EXEC_PATH",
+			"GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_PAGER":
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_PAGER=cat",
+	)
 }
 
 func executeReadCmd(ctx context.Context, cfg InvestigateConfig, p ReadCmdParams) (string, error) {
@@ -421,6 +609,11 @@ func executeReadCmd(ctx context.Context, cfg InvestigateConfig, p ReadCmdParams)
 		return "", err
 	}
 	dir := cmp.Or(strings.TrimSpace(cfg.RepoDir), strings.TrimSpace(cfg.RunDir))
+	if prog == "git" {
+		if err := validateGitRootConfinement(cfg.allowedRoots(), dir, cleanArgs); err != nil {
+			return "", err
+		}
+	}
 	var out []byte
 	if cfg.CommandRunner != nil {
 		out, err = cfg.CommandRunner(ctx, dir, prog, cleanArgs)
@@ -431,6 +624,7 @@ func executeReadCmd(ctx context.Context, cfg InvestigateConfig, p ReadCmdParams)
 		if dir != "" {
 			cmd.Dir = dir
 		}
+		cmd.Env = scrubbedReadCmdEnv(os.Environ())
 		out, err = cmd.CombinedOutput()
 	}
 	text := strings.TrimSpace(string(out))

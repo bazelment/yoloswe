@@ -257,6 +257,13 @@ func TestValidateReadOnlyCommand(t *testing.T) {
 		{"git", "-c", "core.pager=sh", "status"},
 		{"git", "diff", "--output=/tmp/leak"},
 		{"git", "diff", "--ext-diff"},
+		{"git", "diff", "--ext"},
+		{"git", "diff", "--textconv"},
+		{"git", "diff", "--no-index", "/etc/passwd", "/dev/null"},
+		{"git", "show", "HEAD:.env"},
+		{"git", "show", "HEAD:sub/state.db"},
+		{"git", "log", "-p", "--", ".env"},
+		{"git", "diff", "../../outside"},
 		{"bash", "-c", "echo hi"},
 	}
 	for _, cmd := range denied {
@@ -447,9 +454,29 @@ func TestDeterministicSessionWorkDirAndWorkDirError(t *testing.T) {
 		t.Fatalf("DeterministicSessionWorkDir mismatch: %q vs %q", dir1, dir2)
 	}
 	base := t.TempDir()
-	underBase := model.DeterministicSessionWorkDir(base, "run-42", "planner")
-	if !strings.HasPrefix(underBase, base) {
-		t.Fatalf("DeterministicSessionWorkDir(%q) = %q, want prefix %q", base, underBase, base)
+	underBase42 := model.DeterministicSessionWorkDir(base, "run-42", "planner")
+	underBase43 := model.DeterministicSessionWorkDir(base, "run-43", "planner")
+	if !strings.HasPrefix(underBase42, base) {
+		t.Fatalf("DeterministicSessionWorkDir(%q) = %q, want prefix %q", base, underBase42, base)
+	}
+	if underBase42 == underBase43 {
+		t.Fatalf("expected distinct workdirs for different runIDs under same baseDir, got %q", underBase42)
+	}
+
+	// If WorkDir is a symlink, Turn must fail closed in ensurePrivateSessionDir.
+	symlinkTarget := t.TempDir()
+	symlinkWorkDir := filepath.Join(t.TempDir(), "sym-workdir")
+	if err := os.Symlink(symlinkTarget, symlinkWorkDir); err != nil {
+		t.Fatal(err)
+	}
+	symSess := model.NewAgentSession(model.AgentSessionConfig{
+		Provider: "claude-cli",
+		Model:    "claude-sonnet-5-5",
+		WorkDir:  symlinkWorkDir,
+	})
+	defer func() { _ = symSess.Close() }()
+	if _, err := symSess.Turn(t.Context(), model.AgentTurnRequest{Prompt: "hello"}); err == nil {
+		t.Fatal("expected error when WorkDir is a symlink, got nil")
 	}
 
 	// If WorkDir points to a regular file, Turn must surface the directory creation error.

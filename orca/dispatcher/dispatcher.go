@@ -102,7 +102,7 @@ func (c Config) withDefaults() Config {
 			c.SystemPrompt = SystemPrompt
 		}
 	}
-	if strings.TrimSpace(c.PromptVersion) == "" || (c.AgentBackend == model.AgentBackendCLI && c.PromptVersion == SystemPromptVersion) {
+	if strings.TrimSpace(c.PromptVersion) == "" {
 		if c.AgentBackend == model.AgentBackendCLI {
 			c.PromptVersion = CLISystemPromptVersion
 		} else {
@@ -147,15 +147,16 @@ type BatchResult struct {
 // long-lived CLI agent session), vetting every tool call against deterministic
 // invariants, and logging decisions.
 type Dispatcher struct {
-	store      store.Store
-	driver     lane.LaneDriver
-	clock      clock.Clock
-	client     model.ModelClient
-	sessions   model.AgentSessionMap
-	lastResult *BatchResult
-	cfg        Config
-	seq        int64
-	mu         sync.Mutex
+	store           store.Store
+	driver          lane.LaneDriver
+	clock           clock.Clock
+	client          model.ModelClient
+	lastMemoryIndex map[string]string
+	sessions        model.AgentSessionMap
+	lastResult      *BatchResult
+	cfg             Config
+	seq             int64
+	mu              sync.Mutex
 }
 
 // New constructs a new Dispatcher.
@@ -170,11 +171,12 @@ func New(
 		clk = clock.NewRealClock()
 	}
 	return &Dispatcher{
-		cfg:    cfg.withDefaults(),
-		store:  st,
-		driver: drv,
-		clock:  clk,
-		client: client,
+		cfg:             cfg.withDefaults(),
+		store:           st,
+		driver:          drv,
+		clock:           clk,
+		client:          client,
+		lastMemoryIndex: make(map[string]string),
 	}
 }
 
@@ -185,11 +187,17 @@ func (d *Dispatcher) Session(runID string) *model.AgentSession {
 
 // CloseRun stops and removes the CLI AgentSession for runID, if any.
 func (d *Dispatcher) CloseRun(runID string) error {
+	d.mu.Lock()
+	delete(d.lastMemoryIndex, runID)
+	d.mu.Unlock()
 	return d.sessions.CloseRun(runID)
 }
 
 // Close stops all active CLI AgentSessions managed by this Dispatcher.
 func (d *Dispatcher) Close() error {
+	d.mu.Lock()
+	clear(d.lastMemoryIndex)
+	d.mu.Unlock()
 	return d.sessions.Close()
 }
 
@@ -696,7 +704,14 @@ func (d *Dispatcher) buildCLIToolRegistry(runID string, state *turnExecState, ev
 			if err := batchAllowsTool(def.Name, events); err != nil {
 				return "", err
 			}
-			return d.handleRawToolCall(ctx, runID, state, def.Name, raw)
+			res, err := d.handleRawToolCall(ctx, runID, state, def.Name, raw)
+			if err != nil || d.cfg.AllowMultiAction || isReadOnlyTool(def.Name) || def.Name == "memory.read" {
+				return res, err
+			}
+			if isFanOutTool(def.Name) {
+				return res + " (batch action applied; end your turn now unless combining another fan-out call [backlog_add, lane_spawn, lane_retry, directive_revoke, owner_answer] — do NOT call lane_steer, directive_note, planner_request, or owner_ask)", nil
+			}
+			return res + " (batch primary action applied; end your turn now — no further mutating calls are permitted in this batch)", nil
 		})
 	}
 	model.RegisterInvestigationTools(reg, d.cfg.Investigate)
@@ -715,7 +730,11 @@ func (d *Dispatcher) dispatchCLITurn(
 	state *turnExecState,
 ) (model.Usage, int, string, error) {
 	cliReg := d.buildCLIToolRegistry(runID, state, events)
-	turnPrompt := promptText + d.memoryIndexSection(ctx, runID)
+	memSection := d.memoryIndexSection(ctx, runID)
+	turnPrompt := promptText
+	if d.shouldIncludeMemoryIndex(runID, memSection) {
+		turnPrompt += memSection
+	}
 
 	turnRes, err := store.RunRoleAgentTurn(
 		ctx,
@@ -730,7 +749,7 @@ func (d *Dispatcher) dispatchCLITurn(
 			Model:            modelName,
 			Effort:           d.cfg.Effort,
 			SystemPrompt:     d.cfg.SystemPrompt,
-			WorkDir:          model.DeterministicSessionWorkDir(d.cfg.Investigate.RunDir, runID, ActorDispatcher),
+			WorkDir:          model.DeterministicSessionWorkDir(cmp.Or(d.cfg.Investigate.RunDir, d.cfg.Investigate.RepoDir), runID, ActorDispatcher),
 			LLMGatewayURL:    d.cfg.LLMGatewayURL,
 			ClaudeBin:        d.cfg.ClaudeBin,
 			CodexBin:         d.cfg.CodexBin,
@@ -749,6 +768,7 @@ func (d *Dispatcher) dispatchCLITurn(
 	if err != nil {
 		return model.Usage{}, 0, "", err
 	}
+	d.recordSentMemoryIndex(runID, memSection, turnRes.Rotated)
 	if turnRes.Text != "" {
 		_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
 			ThreadID: threadID,
@@ -759,6 +779,33 @@ func (d *Dispatcher) dispatchCLITurn(
 	}
 	store.AttributeTurnUsage(cleanupCtx, d.store.Decisions(), runID, state.decisions, turnRes.Usage)
 	return turnRes.Usage, turnRes.TurnCount, turnRes.Text, nil
+}
+
+func (d *Dispatcher) shouldIncludeMemoryIndex(runID, memSection string) bool {
+	if memSection == "" {
+		return false
+	}
+	sess := d.sessions.Session(runID)
+	if sess == nil || sess.TurnCount() == 0 {
+		return true
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	last, ok := d.lastMemoryIndex[runID]
+	return !ok || last != memSection
+}
+
+func (d *Dispatcher) recordSentMemoryIndex(runID, memSection string, rotated bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.lastMemoryIndex == nil {
+		d.lastMemoryIndex = make(map[string]string)
+	}
+	if rotated && memSection == "" {
+		delete(d.lastMemoryIndex, runID)
+		return
+	}
+	d.lastMemoryIndex[runID] = memSection
 }
 
 type invariantViolationError struct {

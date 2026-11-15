@@ -853,7 +853,7 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 				Model:            p.cfg.Model,
 				Effort:           p.cfg.Effort,
 				SystemPrompt:     p.cfg.SystemPrompt,
-				WorkDir:          model.DeterministicSessionWorkDir(p.cfg.Investigate.RunDir, runID, ActorPlanner),
+				WorkDir:          model.DeterministicSessionWorkDir(cmp.Or(p.cfg.Investigate.RunDir, p.cfg.Investigate.RepoDir), runID, ActorPlanner),
 				ResumeID:         strings.TrimSpace(th.ResumeID),
 				LLMGatewayURL:    p.cfg.LLMGatewayURL,
 				ClaudeBin:        p.cfg.ClaudeBin,

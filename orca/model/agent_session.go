@@ -1,10 +1,12 @@
 package model
 
 import (
+	"bufio"
 	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
@@ -76,19 +79,25 @@ type AgentSessionConfig struct {
 	MaxSessionTurns  int
 }
 
-// DeterministicSessionWorkDir returns a stable working directory path for a
-// (runID, role) CLI agent session so `claude --resume <id>` resolves the same
-// project conversation directory across process restarts and re-adoptions.
+// DeterministicSessionWorkDir returns a stable, isolated working directory path
+// for a (runID, role) CLI agent session so `claude --resume <id>` resolves the
+// same project conversation directory across process restarts and re-adoptions.
 func DeterministicSessionWorkDir(baseDir, runID, role string) string {
+	runSeg := sanitizePathSegment(cmp.Or(strings.TrimSpace(runID), "default"))
 	roleSeg := sanitizePathSegment(cmp.Or(strings.TrimSpace(role), "agent"))
 	if trimmedBase := strings.TrimSpace(baseDir); trimmedBase != "" {
 		if abs, err := filepath.Abs(trimmedBase); err == nil {
 			trimmedBase = abs
 		}
-		return filepath.Join(filepath.Clean(trimmedBase), ".orca-sessions", roleSeg)
+		return filepath.Join(filepath.Clean(trimmedBase), ".orca-sessions", runSeg, roleSeg)
 	}
-	runSeg := sanitizePathSegment(cmp.Or(strings.TrimSpace(runID), "default"))
-	return filepath.Join(os.TempDir(), "orca-agent-sessions", runSeg, roleSeg)
+	if cacheDir, err := os.UserCacheDir(); err == nil && strings.TrimSpace(cacheDir) != "" {
+		return filepath.Join(filepath.Clean(cacheDir), "orca", "agent-sessions", runSeg, roleSeg)
+	}
+	if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
+		return filepath.Join(filepath.Clean(homeDir), ".orca", "agent-sessions", runSeg, roleSeg)
+	}
+	return filepath.Join(os.TempDir(), fmt.Sprintf("orca-agent-sessions-%d", os.Getuid()), runSeg, roleSeg)
 }
 
 func sanitizePathSegment(raw string) string {
@@ -470,8 +479,8 @@ func (s *AgentSession) ensureMCPServerLocked() (string, error) {
 func (s *AgentSession) ensureWorkDirLocked() (string, error) {
 	if wd := strings.TrimSpace(s.cfg.WorkDir); wd != "" {
 		clean := filepath.Clean(wd)
-		if err := os.MkdirAll(clean, 0o700); err != nil {
-			return "", fmt.Errorf("orca/model: create session workdir %q: %w", clean, err)
+		if err := ensurePrivateSessionDir(clean); err != nil {
+			return "", err
 		}
 		return clean, nil
 	}
@@ -482,11 +491,62 @@ func (s *AgentSession) ensureWorkDirLocked() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("orca/model: create temp session workdir: %w", err)
 	}
+	if err := ensurePrivateSessionDir(dir); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", err
+	}
 	s.tempWorkDir = dir
 	return dir, nil
 }
 
+func ensurePrivateSessionDir(clean string) error {
+	if err := os.MkdirAll(clean, 0o700); err != nil {
+		return fmt.Errorf("orca/model: create session workdir %q: %w", clean, err)
+	}
+	fi, err := os.Lstat(clean)
+	if err != nil {
+		return fmt.Errorf("orca/model: stat session workdir %q: %w", clean, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return fmt.Errorf("orca/model: session workdir %q must be a real directory, not a symlink or file", clean)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		uid := os.Getuid()
+		if uid >= 0 && st.Uid != uint32(uid) {
+			return fmt.Errorf("orca/model: session workdir %q is owned by uid %d, want %d", clean, st.Uid, uid)
+		}
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(clean, 0o700); err != nil {
+			return fmt.Errorf("orca/model: chmod session workdir %q to 0700: %w", clean, err)
+		}
+		fi, err = os.Lstat(clean)
+		if err != nil {
+			return fmt.Errorf("orca/model: restat session workdir %q: %w", clean, err)
+		}
+		if fi.Mode().Perm()&0o077 != 0 {
+			return fmt.Errorf("orca/model: session workdir %q has unsafe permissions %#o", clean, fi.Mode().Perm())
+		}
+	}
+	return nil
+}
+
 const codexToolConfinementInstruction = "\n\nTool Confinement: Invoke ONLY the `orca` MCP server tools (`mcp__orca__*`). Never invoke built-in shell or filesystem tools."
+
+var codexDisabledBuiltinFeatures = []string{
+	"shell_tool",
+	"unified_exec",
+	"unified_exec_tty",
+	"view_image",
+	"apps",
+	"browser_use",
+	"browser_use_external",
+	"computer_use",
+	"image_generation",
+	"plugins",
+	"code_mode_host",
+	"sleep_tool",
+}
 
 func (s *AgentSession) runCodexTurnLocked(
 	ctx context.Context,
@@ -506,8 +566,13 @@ func (s *AgentSession) runCodexTurnLocked(
 		bin := cmp.Or(strings.TrimSpace(s.cfg.CodexBin), strings.TrimSpace(os.Getenv("ORCA_CODEX_CLI")), strings.TrimSpace(os.Getenv("CODEX_BIN")), "codex")
 		cliModel := cliModelFlag("codex", effectiveModel)
 
+		enabledToolsJSON, _ := json.Marshal(newTools)
 		appArgs := []string{
 			"-c", fmt.Sprintf("mcp_servers.orca.url=%q", mcpURL),
+			"-c", fmt.Sprintf("mcp_servers.orca.enabled_tools=%s", string(enabledToolsJSON)),
+		}
+		for _, feat := range codexDisabledBuiltinFeatures {
+			appArgs = append(appArgs, "--disable", feat)
 		}
 		if effort := strings.TrimSpace(s.cfg.Effort); effort != "" {
 			appArgs = append(appArgs, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
@@ -533,13 +598,19 @@ func (s *AgentSession) runCodexTurnLocked(
 			return nil, fmt.Errorf("orca/model: start codex app-server: %w", err)
 		}
 
+		disabledFeatureMap := make(map[string]interface{}, len(codexDisabledBuiltinFeatures))
+		for _, feat := range codexDisabledBuiltinFeatures {
+			disabledFeatureMap[feat] = false
+		}
 		devInstructions := strings.TrimSpace(s.cfg.SystemPrompt) + codexToolConfinementInstruction
 		threadCfg := map[string]interface{}{
 			"mcp_servers": map[string]interface{}{
 				"orca": map[string]interface{}{
-					"url": mcpURL,
+					"url":           mcpURL,
+					"enabled_tools": slices.Clone(newTools),
 				},
 			},
+			"features":               disabledFeatureMap,
 			"developer_instructions": strings.TrimSpace(devInstructions),
 		}
 		if effort := strings.TrimSpace(s.cfg.Effort); effort != "" {
@@ -708,4 +779,121 @@ func (m *AgentSessionMap) Close() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// RunFakeClaudeStreamCLI replays a recorded Claude NDJSON stream fixture over
+// stdin/stdout for subprocess-based unit tests of AgentSession.
+func RunFakeClaudeStreamCLI(streamFile, argsFile, mcpRespFile, counterFile string) {
+	cliArgs := os.Args
+	if idx := slices.Index(cliArgs, "--"); idx >= 0 {
+		cliArgs = cliArgs[idx+1:]
+	}
+	if argsFile != "" {
+		raw, _ := json.Marshal(cliArgs)
+		if f, err := os.OpenFile(argsFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			_, _ = f.Write(append(raw, '\n'))
+			_ = f.Close()
+		}
+	}
+
+	streamData, err := os.ReadFile(streamFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read stream file %q: %v\n", streamFile, err)
+		os.Exit(1)
+	}
+	var allLines []string
+	for _, line := range strings.Split(string(streamData), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			allLines = append(allLines, trimmed)
+		}
+	}
+
+	var turns [][]string
+	var cur []string
+	for _, line := range allLines {
+		cur = append(cur, line)
+		var env struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal([]byte(line), &env) == nil && env.Type == "result" {
+			turns = append(turns, cur)
+			cur = nil
+		}
+	}
+	if len(cur) > 0 {
+		turns = append(turns, cur)
+	}
+
+	turnIdx := 0
+	if counterFile != "" {
+		if b, err := os.ReadFile(counterFile); err == nil {
+			_, _ = fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &turnIdx)
+		}
+	}
+
+	recordMCPResp := func(line string) {
+		if mcpRespFile == "" {
+			return
+		}
+		if f, err := os.OpenFile(mcpRespFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			_, _ = f.WriteString(line + "\n")
+			_ = f.Close()
+		}
+	}
+
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		inLine := strings.TrimSpace(scanner.Text())
+		if inLine == "" {
+			continue
+		}
+		var msg struct {
+			Type      string `json:"type"`
+			RequestID string `json:"request_id"`
+			Request   struct {
+				Subtype string `json:"subtype"`
+			} `json:"request"`
+		}
+		if json.Unmarshal([]byte(inLine), &msg) != nil {
+			continue
+		}
+		switch msg.Type {
+		case "control_request":
+			if msg.Request.Subtype == "initialize" {
+				fmt.Fprintf(os.Stdout, `{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{}}}`+"\n", msg.RequestID)
+			}
+		case "user":
+			if turnIdx >= len(turns) {
+				turnIdx = len(turns) - 1
+			}
+			turnLines := turns[turnIdx]
+			turnIdx++
+			if counterFile != "" {
+				_ = os.WriteFile(counterFile, []byte(fmt.Sprintf("%d", turnIdx)), 0o600)
+			}
+			for _, outLine := range turnLines {
+				fmt.Fprintln(os.Stdout, outLine)
+				var outEnv struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal([]byte(outLine), &outEnv) == nil && outEnv.Type == "control_request" {
+					for scanner.Scan() {
+						respLine := strings.TrimSpace(scanner.Text())
+						if respLine == "" {
+							continue
+						}
+						recordMCPResp(respLine)
+						var ctrlResp struct {
+							Type string `json:"type"`
+						}
+						if json.Unmarshal([]byte(respLine), &ctrlResp) == nil && ctrlResp.Type == "control_response" {
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	os.Exit(0)
 }

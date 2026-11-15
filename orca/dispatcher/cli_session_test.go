@@ -1,7 +1,6 @@
 package dispatcher_test
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -23,132 +22,12 @@ func TestFakeClaudeCLIHelper(t *testing.T) {
 	if os.Getenv("GO_WANT_FAKE_CLAUDE_CLI") != "1" {
 		return
 	}
-
-	cliArgs := os.Args
-	if idx := slices.Index(cliArgs, "--"); idx >= 0 {
-		cliArgs = cliArgs[idx+1:]
-	}
-	if argsFile := os.Getenv("FAKE_CLAUDE_ARGS_FILE"); argsFile != "" {
-		raw, _ := json.Marshal(cliArgs)
-		f, err := os.OpenFile(argsFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-		if err == nil {
-			_, _ = f.Write(append(raw, '\n'))
-			_ = f.Close()
-		}
-	}
-
-	streamFile := os.Getenv("FAKE_CLAUDE_STREAM_FILE")
-	streamData, err := os.ReadFile(streamFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "read stream file %q: %v\n", streamFile, err)
-		os.Exit(1)
-	}
-	var allLines []string
-	for _, line := range strings.Split(string(streamData), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" {
-			allLines = append(allLines, trimmed)
-		}
-	}
-
-	// Group stream lines into turns ending with a "result" message.
-	var turns [][]string
-	var cur []string
-	for _, line := range allLines {
-		cur = append(cur, line)
-		var env struct {
-			Type string `json:"type"`
-		}
-		if json.Unmarshal([]byte(line), &env) == nil && env.Type == "result" {
-			turns = append(turns, cur)
-			cur = nil
-		}
-	}
-	if len(cur) > 0 {
-		turns = append(turns, cur)
-	}
-
-	// Track which turn index across process invocations via a counter file.
-	turnIdx := 0
-	if counterFile := os.Getenv("FAKE_CLAUDE_TURN_COUNTER_FILE"); counterFile != "" {
-		if b, err := os.ReadFile(counterFile); err == nil {
-			_, _ = fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &turnIdx)
-		}
-	}
-
-	mcpRespFile := os.Getenv("FAKE_CLAUDE_MCP_RESPONSES_FILE")
-	recordMCPResp := func(line string) {
-		if mcpRespFile == "" {
-			return
-		}
-		f, err := os.OpenFile(mcpRespFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-		if err == nil {
-			_, _ = f.WriteString(line + "\n")
-			_ = f.Close()
-		}
-	}
-
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-
-	for scanner.Scan() {
-		inLine := strings.TrimSpace(scanner.Text())
-		if inLine == "" {
-			continue
-		}
-		var msg struct {
-			Type      string `json:"type"`
-			RequestID string `json:"request_id"`
-			Request   struct {
-				Subtype string `json:"subtype"`
-			} `json:"request"`
-		}
-		if err := json.Unmarshal([]byte(inLine), &msg); err != nil {
-			continue
-		}
-
-		switch msg.Type {
-		case "control_request":
-			if msg.Request.Subtype == "initialize" {
-				resp := fmt.Sprintf(`{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{}}}`, msg.RequestID)
-				fmt.Fprintln(os.Stdout, resp)
-			}
-		case "user":
-			if turnIdx >= len(turns) {
-				turnIdx = len(turns) - 1
-			}
-			turnLines := turns[turnIdx]
-			turnIdx++
-			if counterFile := os.Getenv("FAKE_CLAUDE_TURN_COUNTER_FILE"); counterFile != "" {
-				_ = os.WriteFile(counterFile, []byte(fmt.Sprintf("%d", turnIdx)), 0o600)
-			}
-
-			for _, outLine := range turnLines {
-				fmt.Fprintln(os.Stdout, outLine)
-				var outEnv struct {
-					Type      string `json:"type"`
-					RequestID string `json:"request_id"`
-				}
-				if json.Unmarshal([]byte(outLine), &outEnv) == nil && outEnv.Type == "control_request" {
-					// Wait for the SDK's control_response before proceeding.
-					for scanner.Scan() {
-						respLine := strings.TrimSpace(scanner.Text())
-						if respLine == "" {
-							continue
-						}
-						recordMCPResp(respLine)
-						var ctrlResp struct {
-							Type string `json:"type"`
-						}
-						if json.Unmarshal([]byte(respLine), &ctrlResp) == nil && ctrlResp.Type == "control_response" {
-							break
-						}
-					}
-				}
-			}
-		}
-	}
-	os.Exit(0)
+	model.RunFakeClaudeStreamCLI(
+		os.Getenv("FAKE_CLAUDE_STREAM_FILE"),
+		os.Getenv("FAKE_CLAUDE_ARGS_FILE"),
+		os.Getenv("FAKE_CLAUDE_MCP_RESPONSES_FILE"),
+		os.Getenv("FAKE_CLAUDE_TURN_COUNTER_FILE"),
+	)
 }
 
 type fakeClaudeHarness struct {
