@@ -1290,7 +1290,9 @@ func ResolveWorkerAgentHarness(modelName, configuredHarness string) string {
 	}
 	switch harness {
 	case "agy":
-		return configuredHarness
+		if strings.HasPrefix(model, "gemini-") || strings.HasPrefix(model, "claude-") || strings.HasPrefix(model, "gpt-oss-") || model == "agy" {
+			return configuredHarness
+		}
 	case "codex", "openai":
 		if strings.HasPrefix(model, "gpt-") || model == "codex" || model == "openai" {
 			return configuredHarness

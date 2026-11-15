@@ -2287,6 +2287,7 @@ func TestResolveWorkerAgentHarnessPreservesCompatibleConfiguredHarness(t *testin
 		{"gpt-oss-120b-medium", "agy", "agy"},
 		{"claude-sonnet-4-6", "agy", "agy"},
 		{"gpt-6.1-sol", "claude", "codex"},
+		{"gpt-6-luna", "agy", "codex"},
 		{"gemini-4-argon-high", "codex", "agy"},
 	} {
 		t.Run(tc.model+"/"+tc.configured, func(t *testing.T) {

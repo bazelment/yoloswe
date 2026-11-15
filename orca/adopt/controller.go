@@ -1540,12 +1540,12 @@ func populateRunRepo(r *Run) {
 	if r.Dir == "" {
 		return
 	}
-	t1RepoID, t1Repo, originRepo, hasTier1Repo := readTier1AndOriginRepo(r.Dir)
+	t1RepoID, t1Repo, originRepo, _ := readTier1AndOriginRepo(r.Dir)
 	if t1Repo != "" || t1RepoID != "" {
-		if hasTier1Repo && t1Repo != "" {
+		if t1Repo != "" {
 			r.Repo = t1Repo
 		}
-		if hasTier1Repo && t1RepoID != "" {
+		if t1RepoID != "" {
 			r.RepoID = t1RepoID
 		}
 		return

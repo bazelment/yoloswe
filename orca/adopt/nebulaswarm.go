@@ -562,32 +562,51 @@ func readGitOriginURL(dirPath string) string {
 	parse := func(configPath string) string {
 		return parseGitConfigOriginURL(readText(configPath))
 	}
-	// A bare repository stores its remotes in <repo>/config.
-	if u := parse(filepath.Join(cur, "config")); u != "" {
-		return u
-	}
-	dotGit := filepath.Join(cur, ".git")
-	if info, err := os.Stat(dotGit); err == nil {
+	parseGitDir := func(base string) string {
+		dotGit := filepath.Join(base, ".git")
+		info, err := os.Stat(dotGit)
+		if err != nil {
+			return ""
+		}
 		if info.IsDir() {
 			return parse(filepath.Join(dotGit, "config"))
 		}
 		gitDirLine := strings.TrimSpace(readText(dotGit))
-		if target, ok := strings.CutPrefix(gitDirLine, "gitdir:"); ok {
-			target = strings.TrimSpace(target)
-			if !filepath.IsAbs(target) {
-				target = filepath.Join(cur, target)
-			}
-			target = filepath.Clean(target)
-			if u := parse(filepath.Join(target, "config")); u != "" {
-				return u
-			}
-			if common := strings.TrimSpace(readText(filepath.Join(target, "commondir"))); common != "" {
-				if !filepath.IsAbs(common) {
-					common = filepath.Join(target, common)
-				}
-				return parse(filepath.Join(filepath.Clean(common), "config"))
-			}
+		target, ok := strings.CutPrefix(gitDirLine, "gitdir:")
+		if !ok {
+			return ""
 		}
+		target = strings.TrimSpace(target)
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(base, target)
+		}
+		target = filepath.Clean(target)
+		if u := parse(filepath.Join(target, "config")); u != "" {
+			return u
+		}
+		if common := strings.TrimSpace(readText(filepath.Join(target, "commondir"))); common != "" {
+			if !filepath.IsAbs(common) {
+				common = filepath.Join(target, common)
+			}
+			return parse(filepath.Join(filepath.Clean(common), "config"))
+		}
+		return ""
+	}
+	// A bare repository stores its remotes in <repo>/config. For a checkout,
+	// inspect only real .git markers while walking parents; arbitrary config
+	// files are never treated as Git metadata.
+	if u := parse(filepath.Join(cur, "config")); u != "" {
+		return u
+	}
+	for depth := 0; depth <= 4; depth++ {
+		if u := parseGitDir(cur); u != "" {
+			return u
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
 	}
 	return ""
 }
