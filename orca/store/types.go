@@ -77,14 +77,17 @@ type RunNote struct {
 
 func (n RunNote) Clone() RunNote { return n }
 
+// StarterSetMemorySource is the Source marker on pre-seeded starter memories.
+const StarterSetMemorySource = "orca starter set"
+
 // StarterMemories returns the default operating rules.
 func StarterMemories() []MemoryEntry {
 	return []MemoryEntry{
-		{ID: "starter-inner-loop", Name: "fast inner loop", Description: "Validate the smallest case first", Type: "rule", Scope: "owner", Source: "orca starter set", Body: "Why: feedback is fastest on the smallest case. How to apply: run the narrowest deterministic check before broad work.", ProposedBy: "owner"},
-		{ID: "starter-reversible", Name: "reversible decisions", Description: "Decide anything reversible", Type: "rule", Scope: "owner", Source: "orca starter set", Body: "Why: reversible choices do not need delay. How to apply: choose and proceed when undo is cheap.", ProposedBy: "owner"},
-		{ID: "starter-one-way", Name: "one-way doors", Description: "Ask only on irreversible choices", Type: "rule", Scope: "owner", Source: "orca starter set", Body: "Why: owner input matters at irreversible boundaries. How to apply: ask only before a one-way door.", ProposedBy: "owner"},
-		{ID: "starter-verifier", Name: "verifier independence", Description: "Verifier is never the author", Type: "rule", Scope: "owner", Source: "orca starter set", Body: "Why: independent verification catches author bias. How to apply: assign verification to a separate role.", ProposedBy: "owner"},
-		{ID: "starter-language", Name: "plain language", Description: "Use plain language with the owner", Type: "preference", Scope: "owner", Source: "orca starter set", Body: "Why: the owner should understand decisions quickly. How to apply: explain results in direct, plain language.", ProposedBy: "owner"},
+		{ID: "starter-inner-loop", Name: "fast inner loop", Description: "Validate the smallest case first", Type: "rule", Scope: "owner", Source: StarterSetMemorySource, Body: "Why: feedback is fastest on the smallest case. How to apply: run the narrowest deterministic check before broad work.", ProposedBy: "owner"},
+		{ID: "starter-reversible", Name: "reversible decisions", Description: "Decide anything reversible", Type: "rule", Scope: "owner", Source: StarterSetMemorySource, Body: "Why: reversible choices do not need delay. How to apply: choose and proceed when undo is cheap.", ProposedBy: "owner"},
+		{ID: "starter-one-way", Name: "one-way doors", Description: "Ask only on irreversible choices", Type: "rule", Scope: "owner", Source: StarterSetMemorySource, Body: "Why: owner input matters at irreversible boundaries. How to apply: ask only before a one-way door.", ProposedBy: "owner"},
+		{ID: "starter-verifier", Name: "verifier independence", Description: "Verifier is never the author", Type: "rule", Scope: "owner", Source: StarterSetMemorySource, Body: "Why: independent verification catches author bias. How to apply: assign verification to a separate role.", ProposedBy: "owner"},
+		{ID: "starter-language", Name: "plain language", Description: "Use plain language with the owner", Type: "preference", Scope: "owner", Source: StarterSetMemorySource, Body: "Why: the owner should understand decisions quickly. How to apply: explain results in direct, plain language.", ProposedBy: "owner"},
 	}
 }
 
@@ -253,6 +256,36 @@ func IsNoMergeBacklogItem(item BacklogItem) bool {
 		IsNoMergeText(item.Acceptance)
 }
 
+// IsNoMergeLane reports whether ln (and its associated backlog item, if any)
+// is a no-merge / report-only lane that must stop after review without running
+// integrate.
+func IsNoMergeLane(ln Lane, item *BacklogItem) bool {
+	if item != nil {
+		if item.NoMerge {
+			return true
+		}
+		if item.CreatedAt.IsZero() && item.UpdatedAt.IsZero() && IsNoMergeBacklogItem(*item) {
+			return true
+		}
+	}
+	return IsNoMergeText(ln.Title)
+}
+
+// IsNoMergeSpawn reports whether a lane.spawn request (explicit no_merge flag,
+// backlog item state, worker brief, or recipe override) specifies a no-merge /
+// report-only lane.
+func IsNoMergeSpawn(noMergeParam bool, item *BacklogItem, briefText, recipeOverride string) bool {
+	if noMergeParam {
+		return true
+	}
+	if item != nil {
+		if item.NoMerge || (item.CreatedAt.IsZero() && item.UpdatedAt.IsZero() && IsNoMergeBacklogItem(*item)) {
+			return true
+		}
+	}
+	return IsNoMergeText(briefText) || IsNoMergeText(recipeOverride)
+}
+
 // IsNoMergeText reports whether text specifies a report-only, analysis-only, or
 // no-merge task that must stop after review without running integrate or merging.
 func IsNoMergeText(text string) bool {
@@ -279,8 +312,8 @@ func IsNoMergeText(text string) bool {
 		"merge_mode=none",
 		"merge: none",
 		"skip merge",
-		"without merging",
-		"without merge",
+		"skip integrate",
+		"no integrate",
 	} {
 		if strings.Contains(lower, phrase) {
 			return true
@@ -291,8 +324,36 @@ func IsNoMergeText(text string) bool {
 			return true
 		}
 	}
+	if containsNoMergePhrase(lower, "without merging", false) {
+		return true
+	}
 	for _, phrase := range []string{"no merge", "do not merge", "don't merge", "dont merge", "never merge"} {
 		if containsNoMergePhrase(lower, phrase, false) {
+			if phrase != "no merge" && isStandardPRInstructionWithoutReportMarker(lower) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func isStandardPRInstructionWithoutReportMarker(lower string) bool {
+	for _, marker := range []string{"report", "measurement", "analysis", "audit", "benchmark"} {
+		if strings.Contains(lower, marker) {
+			return false
+		}
+	}
+	for _, prInstruction := range []string{
+		"open a pr",
+		"open pr",
+		"create a pr",
+		"create pr",
+		"keep prs ready",
+		"keep pr ready",
+		"draft pr",
+	} {
+		if strings.Contains(lower, prInstruction) {
 			return true
 		}
 	}

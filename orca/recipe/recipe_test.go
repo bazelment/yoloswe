@@ -123,3 +123,65 @@ func TestRecipeValidationAndJudgmentTransitions(t *testing.T) {
 		t.Fatal("expected Validate() error for phase name ending in digit")
 	}
 }
+
+func TestWithoutIntegrate(t *testing.T) {
+	t.Parallel()
+
+	def := recipe.Default()
+	noInt := recipe.WithoutIntegrate(def)
+	if err := noInt.Validate(); err != nil {
+		t.Fatalf("WithoutIntegrate(Default()).Validate() error: %v", err)
+	}
+	wantPhases := []string{recipe.PhaseSWE, recipe.PhaseClean, recipe.PhaseReview}
+	if got := noInt.PhaseNames(); !slices.Equal(got, wantPhases) {
+		t.Fatalf("PhaseNames() = %v, want %v", got, wantPhases)
+	}
+	tr, _ := noInt.MatchTransitions(recipe.PhaseReview, recipe.OutcomeDone, false, 1)
+	if tr == nil || tr.To != recipe.TargetComplete {
+		t.Fatalf("review done (ciGreen=false) transition = %+v, want -> %q", tr, recipe.TargetComplete)
+	}
+
+	// Custom recipe where integrate transitions to a post_review phase rather than complete:
+	// WithoutIntegrate must still terminate at review -> complete and prune unreachable post_review.
+	custom := recipe.Recipe{
+		Name:    "custom-post-integrate",
+		Version: 1,
+		Phases: []recipe.Phase{
+			{Name: recipe.PhaseSWE, Agents: []recipe.AgentSpec{{Harness: "claude", Model: "opus"}}},
+			{Name: recipe.PhaseReview, Agents: []recipe.AgentSpec{{Harness: "claude", Model: "sonnet"}}},
+			{Name: recipe.PhaseIntegrate, Agents: []recipe.AgentSpec{{Harness: "claude", Model: "sonnet"}}},
+			{Name: "notify", Agents: []recipe.AgentSpec{{Harness: "claude", Model: "haiku"}}},
+		},
+		Transitions: []recipe.Transition{
+			{From: recipe.PhaseSWE, On: recipe.Condition{Verdict: recipe.OutcomeDone}, To: recipe.PhaseReview},
+			{From: recipe.PhaseReview, On: recipe.Condition{Verdict: recipe.OutcomeDone, CIGreen: true}, To: recipe.PhaseIntegrate},
+			{From: recipe.PhaseIntegrate, On: recipe.Condition{Verdict: recipe.OutcomeDone}, To: "notify"},
+			{From: "notify", On: recipe.Condition{Verdict: recipe.OutcomeDone}, To: recipe.TargetComplete},
+		},
+	}
+	customNoInt := recipe.WithoutIntegrate(custom)
+	if err := customNoInt.Validate(); err != nil {
+		t.Fatalf("WithoutIntegrate(custom).Validate() error: %v", err)
+	}
+	if got := customNoInt.PhaseNames(); !slices.Equal(got, []string{recipe.PhaseSWE, recipe.PhaseReview}) {
+		t.Fatalf("customNoInt.PhaseNames() = %v, want [swe review]", got)
+	}
+	trCustom, _ := customNoInt.MatchTransitions(recipe.PhaseReview, recipe.OutcomeDone, false, 1)
+	if trCustom == nil || trCustom.To != recipe.TargetComplete {
+		t.Fatalf("customNoInt review done transition = %+v, want -> complete", trCustom)
+	}
+
+	// Single-phase recipe is returned unchanged.
+	single := recipe.Recipe{
+		Name:    "single",
+		Version: 1,
+		Phases:  []recipe.Phase{{Name: recipe.PhaseIntegrate, Agents: []recipe.AgentSpec{{Harness: "claude", Model: "sonnet"}}}},
+		Transitions: []recipe.Transition{
+			{From: recipe.PhaseIntegrate, On: recipe.Condition{Verdict: recipe.OutcomeDone}, To: recipe.TargetComplete},
+		},
+	}
+	singleOut := recipe.WithoutIntegrate(single)
+	if got := singleOut.PhaseNames(); !slices.Equal(got, []string{recipe.PhaseIntegrate}) {
+		t.Fatalf("WithoutIntegrate(single) = %v, want [integrate]", got)
+	}
+}

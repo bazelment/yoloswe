@@ -3410,18 +3410,14 @@ func (c *Controller) isNoMergeLane(ctx context.Context, ln *lane.Lane) bool {
 	if ln == nil {
 		return false
 	}
-	if store.IsNoMergeText(ln.Title) {
-		return true
-	}
+	var item *store.BacklogItem
 	itemID := cmp.Or(ln.ItemID, ln.ID)
 	if itemID != "" && c.store != nil && c.store.Backlog() != nil {
-		if item, err := c.store.Backlog().Get(ctx, c.cfg.RunID, itemID); err == nil && item != nil {
-			if item.NoMerge || store.IsNoMergeBacklogItem(*item) {
-				return true
-			}
+		if loaded, err := c.store.Backlog().Get(ctx, c.cfg.RunID, itemID); err == nil {
+			item = loaded
 		}
 	}
-	return false
+	return store.IsNoMergeLane(*ln, item)
 }
 
 func (c *Controller) resolveRecipe(ctx context.Context, ln *lane.Lane) (*recipe.Recipe, error) {

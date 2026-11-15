@@ -1691,11 +1691,15 @@ func (c *Concierge) laneNextStep(
 		} else if loaded, err := c.store.Recipes().Get(ctx, run.ID, recName, 0); err == nil && loaded != nil {
 			rec = *loaded
 		}
+		var item *store.BacklogItem
 		itemID := cmp.Or(ln.ItemID, ln.ID)
 		if itemID != "" && c.store.Backlog() != nil {
-			if item, err := c.store.Backlog().Get(ctx, run.ID, itemID); err == nil && item != nil && (item.NoMerge || store.IsNoMergeBacklogItem(*item)) {
-				rec = recipe.WithoutIntegrate(rec)
+			if loaded, err := c.store.Backlog().Get(ctx, run.ID, itemID); err == nil {
+				item = loaded
 			}
+		}
+		if store.IsNoMergeLane(*ln, item) {
+			rec = recipe.WithoutIntegrate(rec)
 		}
 	}
 	if ln.Phase == "" && len(rec.Phases) > 0 {

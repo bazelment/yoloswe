@@ -1957,3 +1957,168 @@ func TestDispatch_G35ActiveDirectivesRevokableAndUndoStaleHoldsInOneTurn(t *test
 		}
 	}
 }
+
+func TestDispatch_BacklogUpdateCanClearNoMerge(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Backlog().Add(ctx, store.BacklogItem{
+		ID:          "m4-metrics",
+		RunID:       "run-1",
+		Title:       "M4 metrics report",
+		Description: "Do not merge anything; this is a measurement/report task",
+		Priority:    store.PriorityP0,
+		Status:      store.BacklogOpen,
+	}); err != nil {
+		t.Fatalf("Backlog.Add: %v", err)
+	}
+	itemBefore, err := st.Backlog().Get(ctx, "run-1", "m4-metrics")
+	if err != nil || itemBefore == nil || !itemBefore.NoMerge {
+		t.Fatalf("itemBefore = %+v, err = %v; want NoMerge=true", itemBefore, err)
+	}
+
+	fake := model.NewFakeClient(
+		toolUseResponse(
+			model.ToolCall{
+				ID:    "t1",
+				Name:  dispatcher.ToolBacklogUpdate,
+				Input: json.RawMessage(`{"id":"m4-metrics","no_merge":false,"reason":"owner asked to merge this item"}`),
+			},
+		),
+		endTurnResponse("Cleared no_merge on m4-metrics."),
+	)
+	d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+	ev, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventOwnerMessage,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "m4-metrics should merge after review; clear no_merge",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(res.Rejected) > 0 || len(res.Accepted) != 1 {
+		t.Fatalf("Accepted=%+v Rejected=%v, want 1 accepted and 0 rejected", res.Accepted, res.Rejected)
+	}
+	itemAfter, err := st.Backlog().Get(ctx, "run-1", "m4-metrics")
+	if err != nil || itemAfter == nil {
+		t.Fatalf("Backlog.Get after update: %v", err)
+	}
+	if itemAfter.NoMerge {
+		t.Fatalf("itemAfter.NoMerge = true, want false after explicit no_merge:false update")
+	}
+	snap, err := d.BuildSnapshot(ctx, "run-1", nil)
+	if err != nil {
+		t.Fatalf("BuildSnapshot: %v", err)
+	}
+	if strings.Contains(snap.Text, "no_merge") {
+		t.Fatalf("snapshot still tags m4-metrics as no_merge after clearing:\n%s", snap.Text)
+	}
+}
+
+func TestDispatch_G35HoldSweepAllowsSameTurnSpawnAndSelectiveKeep(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Backlog().Add(ctx, store.BacklogItem{
+		ID:       "item-bookkeeping",
+		RunID:    "run-1",
+		Title:    "Bookkeeping cleanup",
+		Priority: store.PriorityP0,
+		Status:   store.BacklogOpen,
+	}); err != nil {
+		t.Fatalf("Backlog.Add: %v", err)
+	}
+	for _, dir := range []store.Directive{
+		{
+			ID:     "note-1",
+			RunID:  "run-1",
+			Kind:   store.DirectiveNote,
+			Source: store.DirectiveSourceDispatcher,
+			Scope:  "run",
+			Text:   "Hold all new lanes until owner confirms",
+			Status: store.DirectiveActive,
+		},
+		{
+			ID:     "note-2",
+			RunID:  "run-1",
+			Kind:   store.DirectiveStanding,
+			Source: store.DirectiveSourceConcierge,
+			Scope:  "run",
+			Text:   "Pause new lanes while bookkeeping is pending",
+			Status: store.DirectiveActive,
+		},
+	} {
+		if err := st.Directives().Add(ctx, dir); err != nil {
+			t.Fatalf("Directives.Add(%s): %v", dir.ID, err)
+		}
+	}
+
+	// Part 1: Owner message says "keep note-2" -> revoking note-1 must NOT sweep note-2.
+	fakeSelective := model.NewFakeClient(
+		toolUseResponse(
+			model.ToolCall{ID: "t1", Name: dispatcher.ToolDirectiveRevoke, Input: json.RawMessage(`{"id":"note-1","reason":"owner lifted note-1 only"}`)},
+		),
+		endTurnResponse("Revoked note-1 and kept note-2."),
+	)
+	dSelective := dispatcher.New(dispatcher.Config{}, st, drv, clk, fakeSelective)
+	ev1, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventOwnerMessage,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "lift the hold in note-1, but keep note-2 active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dSelective.Dispatch(ctx, "run-1", []store.Event{ev1}); err != nil {
+		t.Fatalf("Dispatch selective: %v", err)
+	}
+	d2, err := st.Directives().Get(ctx, "run-1", "note-2")
+	if err != nil || d2.Status != store.DirectiveActive {
+		t.Fatalf("note-2 status = %+v, err = %v; want still active when owner said 'keep'", d2, err)
+	}
+
+	// Re-add note-1 so both note-1 and note-2 are active holds, then lift all holds
+	// with a message containing "bookkeeping" (must not match whole-word "keep") and
+	// spawn item-bookkeeping in the same turn after revoking only note-1.
+	if err := st.Directives().UpdateStatus(ctx, "run-1", "note-1", store.DirectiveActive); err != nil {
+		t.Fatal(err)
+	}
+	fakeSweepAndSpawn := model.NewFakeClient(
+		toolUseResponse(
+			model.ToolCall{ID: "t1", Name: dispatcher.ToolDirectiveRevoke, Input: json.RawMessage(`{"id":"note-1","reason":"owner lifted holds"}`)},
+			model.ToolCall{ID: "t2", Name: dispatcher.ToolLaneSpawn, Input: json.RawMessage(`{"item_id":"item-bookkeeping","brief":"Implement bookkeeping cleanup.","reason":"owner lifted holds and asked to start"}`)},
+		),
+		endTurnResponse("Lifted holds and spawned item-bookkeeping."),
+	)
+	dSweep := dispatcher.New(dispatcher.Config{}, st, drv, clk, fakeSweepAndSpawn)
+	ev2, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventOwnerMessage,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "undo the stale hold directives and start bookkeeping cleanup now",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res2, err := dSweep.Dispatch(ctx, "run-1", []store.Event{ev2})
+	if err != nil {
+		t.Fatalf("Dispatch sweep+spawn: %v", err)
+	}
+	if len(res2.Rejected) > 0 {
+		t.Fatalf("unexpected rejections in sweep+spawn turn: %v", res2.Rejected)
+	}
+	if len(res2.Accepted) != 2 {
+		t.Fatalf("Accepted = %+v, want 2 (directive.revoke + lane.spawn)", res2.Accepted)
+	}
+}

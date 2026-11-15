@@ -661,7 +661,7 @@ func ListActiveDirectives(ctx context.Context, st Store, runID string, now time.
 		if mems, mErr := st.Memories().List(ctx, MemoryFilter{RunID: runID, Type: "rule"}); mErr == nil {
 			for i := range mems {
 				m := &mems[i]
-				if m.Source == "orca starter set" || inactiveIDs[m.ID] || seenActive[m.ID] {
+				if m.Source == StarterSetMemorySource || inactiveIDs[m.ID] || seenActive[m.ID] {
 					continue
 				}
 				if m.RunID != runID || m.RunID == "" {

@@ -440,9 +440,6 @@ func (b *memBacklogStore) Update(_ context.Context, item BacklogItem, actor, rea
 	}
 	now := s.now()
 	cp := item.Clone()
-	if !cp.NoMerge && (existing.NoMerge || IsNoMergeBacklogItem(cp)) {
-		cp.NoMerge = true
-	}
 	cp.CreatedAt = existing.CreatedAt
 	cp.UpdatedAt = now
 	cp.History = append(slices.Clone(existing.History), BacklogHistoryEntry{

@@ -120,7 +120,7 @@ func (e *MemoryEditor) Submit(ctx context.Context, st store.Store, runID, id, qu
 }
 
 // StarterSetMemorySource is the Source marker on pre-seeded starter memories.
-const StarterSetMemorySource = "orca starter set"
+const StarterSetMemorySource = store.StarterSetMemorySource
 
 var (
 	plainOwnerNoNewWorkPhrases = []string{

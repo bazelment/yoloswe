@@ -574,8 +574,8 @@ func Default() Recipe {
 }
 
 // WithoutIntegrate returns a copy of r with the integrate phase removed,
-// transitions into integrate rewritten to complete, and MergePolicy.Mode set
-// to MergeModeNone.
+// transitions into integrate rewritten to complete, unreachable post-integrate
+// phases pruned, and MergePolicy.Mode set to MergeModeNone.
 func WithoutIntegrate(r Recipe) Recipe {
 	out := r.Clone()
 	out.MergePolicy.Mode = MergeModeNone
@@ -583,16 +583,6 @@ func WithoutIntegrate(r Recipe) Recipe {
 	out.MergePolicy.RequireCIGreen = false
 	if len(out.Phases) <= 1 {
 		return out
-	}
-	var nextPhase string
-	for _, tr := range out.Transitions {
-		if tr.From == PhaseIntegrate && tr.On.Verdict == OutcomeDone {
-			nextPhase = tr.To
-			break
-		}
-	}
-	if nextPhase == "" {
-		nextPhase = TargetComplete
 	}
 	out.Phases = slices.DeleteFunc(out.Phases, func(p Phase) bool {
 		return p.Name == PhaseIntegrate
@@ -603,12 +593,41 @@ func WithoutIntegrate(r Recipe) Recipe {
 			continue
 		}
 		if tr.To == PhaseIntegrate {
-			tr.To = nextPhase
-			if nextPhase == TargetComplete {
-				tr.On.CIGreen = false
-			}
+			tr.To = TargetComplete
+			tr.On.CIGreen = false
 		}
 		updatedTransitions = append(updatedTransitions, tr)
+	}
+	if len(out.Phases) > 0 {
+		adj := make(map[string][]string, len(out.Phases))
+		for _, tr := range updatedTransitions {
+			adj[tr.From] = append(adj[tr.From], tr.To)
+		}
+		reachable := make(map[string]bool, len(out.Phases))
+		queue := []string{out.Phases[0].Name}
+		reachable[out.Phases[0].Name] = true
+		for len(queue) > 0 {
+			cur := queue[0]
+			queue = queue[1:]
+			for _, next := range adj[cur] {
+				if next != TargetComplete && next != TargetEscalate && !reachable[next] {
+					reachable[next] = true
+					queue = append(queue, next)
+				}
+			}
+		}
+		out.Phases = slices.DeleteFunc(out.Phases, func(p Phase) bool {
+			return !reachable[p.Name]
+		})
+		updatedTransitions = slices.DeleteFunc(updatedTransitions, func(tr Transition) bool {
+			if !reachable[tr.From] {
+				return true
+			}
+			if tr.To != TargetComplete && tr.To != TargetEscalate && !reachable[tr.To] {
+				return true
+			}
+			return false
+		})
 	}
 	out.Transitions = updatedTransitions
 	return out

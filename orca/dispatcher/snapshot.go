@@ -289,7 +289,7 @@ func BuildSnapshot(
 				readiness = " ready"
 			}
 			noMergeTag := ""
-			if it.NoMerge || store.IsNoMergeBacklogItem(it) {
+			if it.NoMerge {
 				noMergeTag = " no_merge"
 			}
 			fmt.Fprintf(&row, "- **%s** [%s #%d %s%s%s]", it.ID, it.Priority, it.Order, it.Status, readiness, noMergeTag)

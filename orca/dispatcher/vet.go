@@ -725,6 +725,7 @@ type StateView struct {
 	AllowedModels  []string
 	OwnerAsks      map[string]controller.OwnerAsk
 	Directives     map[string]store.Directive
+	RevokedInTurn  map[string]store.Directive
 	Settings       store.RunSettings
 }
 
@@ -1206,8 +1207,12 @@ func (s *StateView) RecipeForLane(ln lane.Lane) (recipe.Recipe, bool) {
 		r, ok = s.RecipeByName(name)
 	}
 	if ok && s != nil {
+		var itemPtr *store.BacklogItem
 		itemID := cmp.Or(ln.ItemID, ln.ID)
-		if item, hasItem := s.BacklogItem(itemID); (hasItem && (item.NoMerge || store.IsNoMergeBacklogItem(item))) || store.IsNoMergeText(ln.Title) {
+		if item, hasItem := s.BacklogItem(itemID); hasItem {
+			itemPtr = &item
+		}
+		if store.IsNoMergeLane(ln, itemPtr) {
 			r = recipe.WithoutIntegrate(r)
 		}
 	}
@@ -1218,7 +1223,11 @@ func (s *StateView) RecipeForLane(ln lane.Lane) (recipe.Recipe, bool) {
 // named-recipe or deterministic overrides) for a lane.spawn action so vet and
 // execution evaluate the same recipe.
 func (s *StateView) ResolveSpawnRecipe(p LaneSpawnParams) (base recipe.Recipe, effective recipe.Recipe, hasBase bool) {
-	item, _ := s.BacklogItem(strings.TrimSpace(p.ItemID))
+	item, hasItem := s.BacklogItem(strings.TrimSpace(p.ItemID))
+	var itemPtr *store.BacklogItem
+	if hasItem {
+		itemPtr = &item
+	}
 	baseName := cmp.Or(strings.TrimSpace(p.RecipeName), item.RecipeName)
 	base, hasBase = s.RecipeByName(baseName)
 	if !hasBase {
@@ -1233,7 +1242,7 @@ func (s *StateView) ResolveSpawnRecipe(p LaneSpawnParams) (base recipe.Recipe, e
 			effective = CompileRecipeOverride(base, override)
 		}
 	}
-	if p.NoMerge || item.NoMerge || store.IsNoMergeBacklogItem(item) || store.IsNoMergeText(p.Brief) {
+	if store.IsNoMergeSpawn(p.NoMerge, itemPtr, p.Brief, p.RecipeOverride) {
 		effective = recipe.WithoutIntegrate(effective)
 	}
 	return base, effective, hasBase
@@ -2134,6 +2143,9 @@ func checkDirectiveAndPlannerInvariants(st *StateView, act ProposedAction) error
 		if st != nil && st.Directives != nil {
 			id := store.NormalizeDirectiveID(p.ID)
 			dir, inDirs := st.Directives[id]
+			if !inDirs && st.RevokedInTurn != nil {
+				dir, inDirs = st.RevokedInTurn[id]
+			}
 			if !inDirs {
 				return fmt.Errorf("active directive %q does not exist in the snapshot", id)
 			}

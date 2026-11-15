@@ -927,9 +927,11 @@ func (d *Dispatcher) handleRawToolCall(
 		}
 		if state != nil {
 			for k := range state.autoRevokedDirectives {
-				if _, exists := view.Directives[k]; !exists {
-					view.Directives[k] = state.autoRevokedDirectives[k]
+				if view.RevokedInTurn == nil {
+					view.RevokedInTurn = make(map[string]store.Directive)
 				}
+				view.RevokedInTurn[k] = state.autoRevokedDirectives[k]
+				delete(view.Directives, k)
 			}
 			state.view = view
 		}
@@ -1231,7 +1233,7 @@ func (d *Dispatcher) applyBacklogUpdate(ctx context.Context, runID string, view 
 	}
 	if p.NoMerge != nil {
 		updated.NoMerge = *p.NoMerge
-	} else if store.IsNoMergeBacklogItem(updated) {
+	} else if !existing.NoMerge && (strings.TrimSpace(p.Title) != "" || p.Description != "" || p.Acceptance != "") && store.IsNoMergeBacklogItem(updated) {
 		updated.NoMerge = true
 	}
 	if err := d.store.Backlog().Update(ctx, updated, ActorDispatcher, strings.TrimSpace(p.Reason)); err != nil {
@@ -1274,7 +1276,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 
 	base, resolved, _ := view.ResolveSpawnRecipe(p)
 	r := base
-	noMerge := p.NoMerge || item.NoMerge || store.IsNoMergeBacklogItem(item) || store.IsNoMergeText(p.Brief) || store.IsNoMergeText(p.RecipeOverride)
+	noMerge := store.IsNoMergeSpawn(p.NoMerge, &item, p.Brief, p.RecipeOverride)
 
 	override := strings.TrimSpace(p.RecipeOverride)
 	if override != "" {
@@ -2066,8 +2068,19 @@ func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, sta
 	if view != nil && view.Directives != nil {
 		delete(view.Directives, id)
 	}
-	if state != nil && state.autoRevokedDirectives != nil {
-		delete(state.autoRevokedDirectives, id)
+	if dir != nil {
+		if view != nil {
+			if view.RevokedInTurn == nil {
+				view.RevokedInTurn = make(map[string]store.Directive)
+			}
+			view.RevokedInTurn[id] = *dir
+		}
+		if state != nil {
+			if state.autoRevokedDirectives == nil {
+				state.autoRevokedDirectives = make(map[string]store.Directive)
+			}
+			state.autoRevokedDirectives[id] = *dir
+		}
 	}
 	if dir != nil && d.shouldSweepAllHoldsOnRevoke(state, *dir) && view != nil {
 		for otherID := range view.Directives {
@@ -2075,13 +2088,25 @@ func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, sta
 			if otherID == id || strings.HasPrefix(strings.TrimSpace(od.Ref), ownerAskRefPrefix) {
 				continue
 			}
+			if od.Scope != "" && od.Scope != "run" {
+				continue
+			}
 			isHold := isHoldDirectiveText(od.Text)
 			isOwnerHoldLiftChat := strings.HasPrefix(od.ID, "chat-") && od.Source == store.DirectiveSourceOwner && ownerMessageLiftsHold(od.Text, store.Directive{})
 			if !isHold && !isOwnerHoldLiftChat {
 				continue
 			}
-			_ = d.store.Directives().UpdateStatus(ctx, runID, otherID, store.DirectiveRevoked)
-			_ = d.store.Memories().Delete(ctx, "", otherID)
+			if uErr := d.store.Directives().UpdateStatus(ctx, runID, otherID, store.DirectiveRevoked); uErr != nil && !errors.Is(uErr, store.ErrNotFound) {
+				return "", uErr
+			}
+			if memErr := d.store.Memories().Delete(ctx, "", otherID); memErr != nil && !errors.Is(memErr, store.ErrNotFound) {
+				return "", memErr
+			}
+			delete(view.Directives, otherID)
+			if view.RevokedInTurn == nil {
+				view.RevokedInTurn = make(map[string]store.Directive)
+			}
+			view.RevokedInTurn[otherID] = od
 			if state != nil {
 				if state.autoRevokedDirectives == nil {
 					state.autoRevokedDirectives = make(map[string]store.Directive)
@@ -2109,6 +2134,9 @@ func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, sta
 }
 
 func (d *Dispatcher) shouldSweepAllHoldsOnRevoke(state *turnExecState, revoked store.Directive) bool {
+	if revoked.Scope != "" && revoked.Scope != "run" {
+		return false
+	}
 	revokedIsHoldOrLift := isHoldDirectiveText(revoked.Text) ||
 		(revoked.Source == store.DirectiveSourceOwner && ownerMessageLiftsHold(revoked.Text, store.Directive{}))
 	if !revokedIsHoldOrLift || state == nil {
@@ -2121,7 +2149,7 @@ func (d *Dispatcher) shouldSweepAllHoldsOnRevoke(state *turnExecState, revoked s
 		}
 		text := strings.TrimSpace(ev.Summary + " " + string(ev.Payload))
 		lower := strings.ToLower(text)
-		if strings.Contains(lower, "keep") || strings.Contains(lower, "except") {
+		if dispatcherContainsWholeWord(lower, "keep") || dispatcherContainsWholeWord(lower, "except") || dispatcherContainsWholeWord(lower, "only") {
 			return false
 		}
 		if ownerMessageLiftsHold(text, store.Directive{}) {

@@ -207,7 +207,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 					if existingItem.Description == "" && item.Description != "" {
 						existingItem.Description = item.Description
 					}
-					_ = d.store.Backlog().Update(ctx, *existingItem, controller.ActorController, "mark no-merge from host brief")
+					if err := d.store.Backlog().Update(ctx, *existingItem, controller.ActorController, "mark no-merge from host brief"); err != nil {
+						return err
+					}
 				}
 			}
 		}
