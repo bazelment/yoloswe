@@ -784,6 +784,30 @@ func testMemoriesAndNotes(t *testing.T, factory Factory) {
 	if err := st.Memories().Delete(ctx, "owner", m.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("wrong scope delete = %v", err)
 	}
+	byName := MemoryEntry{
+		ID:          "memory-00000001-0001",
+		Name:        "hold-new-lanes-trial-m1-20261114",
+		Description: "Hold new lanes on trial-m1",
+		Type:        "rule",
+		Scope:       "run",
+		RunID:       "run-1",
+		Source:      "hold new lanes on trial-m1",
+		Body:        "Do not spawn new lanes on trial-m1.",
+		ProposedBy:  "owner",
+	}
+	if _, err := st.Memories().Put(ctx, byName); err != nil {
+		t.Fatalf("put byName memory: %v", err)
+	}
+	gotByName, err := st.Memories().Get(ctx, "", "hold-new-lanes-trial-m1-20261114")
+	if err != nil || gotByName.ID != byName.ID {
+		t.Fatalf("Get by name = %+v, %v; want ID %s", gotByName, err, byName.ID)
+	}
+	if err := st.Memories().Delete(ctx, "", "hold-new-lanes-trial-m1-20261114"); err != nil {
+		t.Fatalf("Delete by name: %v", err)
+	}
+	if _, err := st.Memories().Get(ctx, "", byName.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected memory %s deleted after Delete by name, got %v", byName.ID, err)
+	}
 	memories, err := st.Memories().List(ctx, MemoryFilter{RunID: "other-run"})
 	if err != nil {
 		t.Fatal(err)

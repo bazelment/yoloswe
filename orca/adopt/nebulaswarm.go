@@ -125,13 +125,17 @@ type nsLedger struct {
 
 // readNebulaSwarm imports a nebula-swarm ledger: each lane's session, the
 // terminal of its current phase and round, PR, latest report and EVENTS line.
-func readNebulaSwarm(dir string, b []byte, r *Run) error {
+func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) error {
 	var st nsLedger
 	if err := json.Unmarshal(b, &st); err != nil {
 		return fmt.Errorf("parse %s: %w", filepath.Join(dir, "state.json"), err)
 	}
 	r.Goal, r.DrivenBy = st.Config.Goal, st.Config.Orchestrator
-	applyRepoValue(r, st.Config.Repo)
+	if isLocalRepoPath(st.Config.Repo) && localRepoPaths != nil {
+		*localRepoPaths = append(*localRepoPaths, st.Config.Repo)
+	} else {
+		applyRepoValue(r, st.Config.Repo)
+	}
 	for i := range st.Tasks {
 		t := &st.Tasks[i]
 		round := max(t.Round, 1)
@@ -345,29 +349,92 @@ func clip(s string, n int) string {
 // repoSlug is the run's owner/repo: nebula-swarm caches it in .repo-slug.
 func repoSlug(dir string) string {
 	raw := readText(filepath.Join(dir, ".repo-slug"))
-	if !lane.IsRepositorySlug(raw) {
+	if !isRepoSlug(raw) {
 		return ""
 	}
 	return lane.NormalizeRepositorySlug(raw)
 }
 
-func applyRepoValue(r *Run, raw string) {
-	v := strings.TrimSpace(raw)
-	if v == "" {
+func isLocalRepoPath(raw string) bool {
+	s := strings.Trim(strings.TrimSpace(raw), `"'`)
+	if s == "" {
+		return false
+	}
+	if s == "." || s == ".." || s == "~" {
+		return true
+	}
+	if strings.HasPrefix(s, "/") || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") || strings.HasPrefix(s, "~/") || strings.HasPrefix(s, `\`) {
+		return true
+	}
+	if strings.HasPrefix(strings.ToLower(s), "file://") {
+		return true
+	}
+	if len(s) >= 2 && ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) && s[1] == ':' {
+		return true
+	}
+	if s == ".bare" || s == ".git" ||
+		strings.HasSuffix(s, "/.bare") || strings.HasSuffix(s, `\.bare`) ||
+		strings.HasSuffix(s, "/.git") || strings.HasSuffix(s, `\.git`) ||
+		strings.Contains(s, "/.bare/") || strings.Contains(s, "/.git/") {
+		return true
+	}
+	return false
+}
+
+func isRepoSlug(raw string) bool {
+	s := strings.Trim(strings.TrimSpace(raw), `"'`)
+	return s != "" && !isLocalRepoPath(s) && lane.IsRepositorySlug(s)
+}
+
+func isRepoID(raw string) bool {
+	s := strings.Trim(strings.TrimSpace(raw), `"'`)
+	if s == "" || isLocalRepoPath(s) || lane.IsRepositorySlug(s) {
+		return false
+	}
+	return !strings.ContainsAny(s, "/:\\ \t\r\n")
+}
+
+func sanitizeRunRepo(r *Run) {
+	if r == nil {
 		return
 	}
-	if lane.IsRepositorySlug(v) {
+	if isLocalRepoPath(r.Repo) {
+		r.Repo = ""
+	}
+	if !isRepoID(r.RepoID) {
+		if isRepoSlug(r.RepoID) && r.Repo == "" {
+			r.Repo = lane.NormalizeRepositorySlug(r.RepoID)
+		}
+		r.RepoID = ""
+	}
+}
+
+func applyRepoValue(r *Run, raw string) {
+	v := strings.Trim(strings.TrimSpace(raw), `"'`)
+	if v == "" || isLocalRepoPath(v) {
+		return
+	}
+	if isRepoSlug(v) {
 		if r.Repo == "" {
 			r.Repo = lane.NormalizeRepositorySlug(v)
 		}
 		return
 	}
-	if r.RepoID == "" {
+	if isRepoID(v) && r.RepoID == "" {
 		r.RepoID = v
 	}
 }
 
-func applyRunEnvRepo(dir string, r *Run) {
+func applyRunEnvRepo(dir string, r *Run, localRepoPaths *[]string) {
+	recordRepoVal := func(v string) {
+		if isLocalRepoPath(v) {
+			if localRepoPaths != nil {
+				*localRepoPaths = append(*localRepoPaths, v)
+			}
+			return
+		}
+		applyRepoValue(r, v)
+	}
 	for _, line := range strings.Split(readText(filepath.Join(dir, "env.sh")), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -385,27 +452,189 @@ func applyRunEnvRepo(dir string, r *Run) {
 		}
 		switch k {
 		case "SNL_REPO_ID", "NEBULA_REPO_ID":
-			if r.RepoID == "" {
+			if isRepoID(v) && r.RepoID == "" {
 				r.RepoID = v
 			}
 		case "SNL_GH_REPO", "SNL_REPO_URL":
-			applyRepoValue(r, v)
+			recordRepoVal(v)
 		}
 	}
 	if r.ID != "" && os.Getenv("SNL_RUN_ID") == r.ID {
-		if v := strings.TrimSpace(os.Getenv("SNL_REPO_ID")); v != "" && r.RepoID == "" {
+		if v := strings.TrimSpace(os.Getenv("SNL_REPO_ID")); isRepoID(v) && r.RepoID == "" {
 			r.RepoID = v
 		}
-		if v := strings.TrimSpace(os.Getenv("NEBULA_REPO_ID")); v != "" && r.RepoID == "" {
+		if v := strings.TrimSpace(os.Getenv("NEBULA_REPO_ID")); isRepoID(v) && r.RepoID == "" {
 			r.RepoID = v
 		}
 		if v := strings.TrimSpace(os.Getenv("SNL_GH_REPO")); v != "" {
-			applyRepoValue(r, v)
+			recordRepoVal(v)
 		}
 		if v := strings.TrimSpace(os.Getenv("SNL_REPO_URL")); v != "" {
-			applyRepoValue(r, v)
+			recordRepoVal(v)
 		}
 	}
+}
+
+func applyOriginRepo(runDir string, r *Run, localRepoPaths []string) {
+	if r == nil || r.Repo != "" || r.RepoID != "" {
+		return
+	}
+	for _, rawPath := range localRepoPaths {
+		if slug := gitOriginSlugForPath(runDir, rawPath); slug != "" {
+			r.Repo = slug
+			return
+		}
+	}
+}
+
+func readTier1AndOriginRepo(dir string) (tier1RepoID, tier1Repo, originRepo string, hasTier1 bool) {
+	if strings.TrimSpace(dir) == "" {
+		return "", "", "", false
+	}
+	var t1 Run
+	var localPaths []string
+	applyRunEnvRepo(dir, &t1, &localPaths)
+	if t1.Repo == "" {
+		t1.Repo = repoSlug(dir)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "state.json")); err == nil {
+		var st struct {
+			Config struct {
+				Repo string `json:"repo"`
+			} `json:"config"`
+			Tasks []struct {
+				RepoURL string `json:"repo_url"`
+			} `json:"tasks"`
+		}
+		if json.Unmarshal(b, &st) == nil {
+			if isLocalRepoPath(st.Config.Repo) {
+				localPaths = append(localPaths, st.Config.Repo)
+			} else {
+				applyRepoValue(&t1, st.Config.Repo)
+			}
+			for i := range st.Tasks {
+				if isLocalRepoPath(st.Tasks[i].RepoURL) {
+					localPaths = append(localPaths, st.Tasks[i].RepoURL)
+				} else {
+					applyRepoValue(&t1, st.Tasks[i].RepoURL)
+				}
+			}
+		}
+	}
+	hasTier1 = t1.Repo != "" || t1.RepoID != ""
+	var t3 Run
+	applyOriginRepo(dir, &t3, localPaths)
+	return t1.RepoID, t1.Repo, t3.Repo, hasTier1
+}
+
+func gitOriginSlugForPath(runDir, rawPath string) string {
+	p := strings.Trim(strings.TrimSpace(rawPath), `"'`)
+	if p == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(p), "file://") {
+		p = p[len("file://"):]
+	}
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			if p == "~" {
+				p = home
+			} else {
+				p = filepath.Join(home, p[2:])
+			}
+		}
+	} else if !filepath.IsAbs(p) && runDir != "" {
+		p = filepath.Join(runDir, p)
+	}
+	p = filepath.Clean(p)
+	originURL := readGitOriginURL(p)
+	if !isRepoSlug(originURL) {
+		return ""
+	}
+	return lane.NormalizeRepositorySlug(originURL)
+}
+
+func readGitOriginURL(dirPath string) string {
+	cur := filepath.Clean(strings.TrimSpace(dirPath))
+	if cur == "" {
+		return ""
+	}
+	parse := func(configPath string) string {
+		return parseGitConfigOriginURL(readText(configPath))
+	}
+	parseGitDir := func(base string) string {
+		dotGit := filepath.Join(base, ".git")
+		info, err := os.Stat(dotGit)
+		if err != nil {
+			return ""
+		}
+		if info.IsDir() {
+			return parse(filepath.Join(dotGit, "config"))
+		}
+		gitDirLine := strings.TrimSpace(readText(dotGit))
+		target, ok := strings.CutPrefix(gitDirLine, "gitdir:")
+		if !ok {
+			return ""
+		}
+		target = strings.TrimSpace(target)
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(base, target)
+		}
+		target = filepath.Clean(target)
+		if u := parse(filepath.Join(target, "config")); u != "" {
+			return u
+		}
+		if common := strings.TrimSpace(readText(filepath.Join(target, "commondir"))); common != "" {
+			if !filepath.IsAbs(common) {
+				common = filepath.Join(target, common)
+			}
+			return parse(filepath.Join(filepath.Clean(common), "config"))
+		}
+		return ""
+	}
+	// A bare repository stores its remotes in <repo>/config. For a checkout,
+	// inspect only real .git markers while walking parents; arbitrary config
+	// files are never treated as Git metadata.
+	if u := parse(filepath.Join(cur, "config")); u != "" {
+		return u
+	}
+	for depth := 0; depth <= 4; depth++ {
+		if u := parseGitDir(cur); u != "" {
+			return u
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
+	}
+	return ""
+}
+
+func parseGitConfigOriginURL(text string) string {
+	inOrigin := false
+	for _, rawLine := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			sec := strings.TrimSpace(line[1 : len(line)-1])
+			inOrigin = strings.EqualFold(sec, `remote "origin"`)
+			continue
+		}
+		if !inOrigin {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(k), "url") {
+			return strings.Trim(strings.TrimSpace(v), `"'`)
+		}
+	}
+	return ""
 }
 
 // ledgerPhase maps an orca lane phase to a phase valid in a nebula-swarm

@@ -433,12 +433,16 @@ func Read(dir string) (Run, error) {
 		r.Holder = j.Holder
 	}
 	r.Orchestrator = orchestrator(dir, r.Holder)
-	r.Repo = repoSlug(dir)
+	var localRepoPaths []string
+	applyRunEnvRepo(dir, &r, &localRepoPaths)
+	if r.Repo == "" {
+		r.Repo = repoSlug(dir)
+	}
 	r.Objective = stripMarker(readText(filepath.Join(dir, "OBJECTIVE.md")))
 	r.Progress = clip(stripMarker(readText(filepath.Join(dir, "PROGRESS.md"))), 1500)
 	r.Escalations = clip(stripMarker(readText(filepath.Join(dir, "ESCALATIONS.md"))), 1500)
 	if r.Format == FormatNebulaSwarm {
-		if err := readNebulaSwarm(dir, b, &r); err != nil {
+		if err := readNebulaSwarm(dir, b, &r, &localRepoPaths); err != nil {
 			return Run{}, err
 		}
 	} else {
@@ -447,14 +451,24 @@ func Read(dir string) (Run, error) {
 			return Run{}, fmt.Errorf("parse %s: %w", filepath.Join(dir, "state.json"), err)
 		}
 		r.Goal = st.Config.Goal
-		applyRepoValue(&r, st.Config.Repo)
+		if isLocalRepoPath(st.Config.Repo) {
+			localRepoPaths = append(localRepoPaths, st.Config.Repo)
+		} else {
+			applyRepoValue(&r, st.Config.Repo)
+		}
 		for i := range st.Tasks {
-			applyRepoValue(&r, st.Tasks[i].RepoURL)
+			if isLocalRepoPath(st.Tasks[i].RepoURL) {
+				localRepoPaths = append(localRepoPaths, st.Tasks[i].RepoURL)
+			} else {
+				applyRepoValue(&r, st.Tasks[i].RepoURL)
+			}
 			r.Lanes = append(r.Lanes, importLane(dir, &st.Tasks[i]))
 		}
 		annotateLanes(dir, &r, st.Config.Phases)
 	}
-	applyRunEnvRepo(dir, &r)
+	if r.Repo == "" && r.RepoID == "" {
+		applyOriginRepo(dir, &r, localRepoPaths)
+	}
 	r.PlanPath = extractPlanPath(dir, r.Objective, r.Progress)
 	r.Next = extractNextSection(r.Objective)
 	sort.Slice(r.Lanes, func(a, b int) bool { return r.Lanes[a].ID < r.Lanes[b].ID })

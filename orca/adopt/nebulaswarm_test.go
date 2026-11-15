@@ -3199,3 +3199,233 @@ func TestCloseoutUnitHelpers(t *testing.T) {
 		}
 	})
 }
+
+func TestSubagentSwarmLocalBareRepoResolution(t *testing.T) {
+	t.Parallel()
+
+	t.Run("env_sh_overrides_local_bare_path_store_and_origin", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		runID := "20261115-diskless-sandbox"
+		dir := filepath.Join(root, ".shared", "subagent-swarm", runID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		barePath := filepath.Join(root, "nebula", ".bare")
+		if err := os.MkdirAll(barePath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		write(t, filepath.Join(barePath, "config"), "[remote \"origin\"]\n\turl = git@github.com:origin-org/origin-repo.git\n")
+		twoSegPath := "/host/nebula"
+		write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{
+			"config": {
+				"goal": "diskless sandbox",
+				"repo": %q,
+				"phases": [{"name": "swe", "agent": "agy", "model": "gemini-4-argon-high"}]
+			},
+			"tasks": [
+				{"id": "mem-overhead", "title": "mem overhead", "phase": "swe", "status": "planned", "round": 1, "repo_url": %q, "sessions": {}}
+			]
+		}`, barePath, twoSegPath))
+		const wantRepoID = "11111111-2222-3333-4444-555555555555"
+		write(t, filepath.Join(dir, "env.sh"), "export SNL_REPO_ID="+wantRepoID+"\nexport SNL_GH_REPO=sycamore-labs/nebula\n")
+		write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: diskless sandbox\n")
+
+		r, err := Read(dir)
+		if err != nil {
+			t.Fatalf("Read(%s): %v", dir, err)
+		}
+		if r.Repo != "sycamore-labs/nebula" {
+			t.Fatalf("r.Repo = %q, want sycamore-labs/nebula", r.Repo)
+		}
+		if r.RepoID != wantRepoID {
+			t.Fatalf("r.RepoID = %q, want %s (must not be local path %q)", r.RepoID, wantRepoID, barePath)
+		}
+
+		clk := clock.NewFakeClock(time.Date(2026, 11, 15, 21, 49, 0, 0, time.UTC))
+		st := store.NewMemoryStore(clk)
+		t.Cleanup(func() { _ = st.Close() })
+		if err := st.Runs().Create(t.Context(), store.Run{ID: "front-desk", Repository: "store-org/store-repo", Objective: "front desk"}); err != nil {
+			t.Fatal(err)
+		}
+		drv := lane.NewFakeDriver()
+		controllers := NewControllers(t.Context(), st, drv, clk, nil)
+		svc := &Service{
+			Importer: Importer{Roots: []string{root}},
+			Labeler:  &fakeLabeler{label: "claude"},
+			Watcher:  &fakeWatcher{running: false},
+			Driver:   controllers,
+			Holder:   ChatHolder("front-desk"),
+			Now:      clk.Now,
+		}
+		adopted, err := svc.Adopt(t.Context(), runID)
+		if err != nil {
+			t.Fatalf("Adopt: %v", err)
+		}
+		t.Cleanup(func() { _ = controllers.Stop(context.Background(), adopted) })
+
+		if len(drv.Spawns) != 1 || drv.Spawns[0].RepositoryID != wantRepoID || drv.Spawns[0].Repository != "sycamore-labs/nebula" ||
+			drv.Spawns[0].Harness != "agy" || drv.Spawns[0].Model != "gemini-4-argon-high" {
+			t.Fatalf("Spawns = %+v, want RepositoryID=%s Repository=sycamore-labs/nebula Harness=agy Model=gemini-4-argon-high", drv.Spawns, wantRepoID)
+		}
+	})
+
+	t.Run("store_run_repository_overrides_local_bare_origin_when_env_sh_absent", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		runID := "20261115-diskless-sandbox"
+		dir := filepath.Join(root, ".shared", "subagent-swarm", runID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		barePath := filepath.Join(root, "nebula", ".bare")
+		if err := os.MkdirAll(barePath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		write(t, filepath.Join(barePath, "config"), "[remote \"origin\"]\n\turl = https://github.com/origin-org/origin-repo.git\n")
+		write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{
+			"config": {
+				"goal": "diskless sandbox",
+				"repo": %q,
+				"phases": [{"name": "swe"}]
+			},
+			"tasks": [
+				{"id": "mem-overhead", "title": "mem overhead", "phase": "swe", "status": "planned", "round": 1, "sessions": {}}
+			]
+		}`, barePath))
+		write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: diskless sandbox\n")
+
+		clk := clock.NewFakeClock(time.Date(2026, 11, 15, 21, 49, 0, 0, time.UTC))
+		st := store.NewMemoryStore(clk)
+		t.Cleanup(func() { _ = st.Close() })
+		if err := st.Runs().Create(t.Context(), store.Run{ID: "front-desk", Repository: "sycamore-labs/nebula", Objective: "front desk"}); err != nil {
+			t.Fatal(err)
+		}
+		drv := lane.NewFakeDriver()
+		controllers := NewControllers(t.Context(), st, drv, clk, nil)
+		svc := &Service{
+			Importer: Importer{Roots: []string{root}},
+			Labeler:  &fakeLabeler{label: "claude"},
+			Watcher:  &fakeWatcher{running: false},
+			Driver:   controllers,
+			Holder:   ChatHolder("front-desk"),
+			Now:      clk.Now,
+		}
+		adopted, err := svc.Adopt(t.Context(), runID)
+		if err != nil {
+			t.Fatalf("Adopt: %v", err)
+		}
+		t.Cleanup(func() { _ = controllers.Stop(context.Background(), adopted) })
+
+		if len(drv.Spawns) != 1 || drv.Spawns[0].Repository != "sycamore-labs/nebula" || drv.Spawns[0].RepositoryID != "" {
+			t.Fatalf("Spawns = %+v, want Repository=sycamore-labs/nebula RepositoryID=\"\"", drv.Spawns)
+		}
+	})
+
+	t.Run("local_bare_origin_remote_resolves_slug_when_env_sh_and_store_absent", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		runID := "20261115-diskless-sandbox"
+		dir := filepath.Join(root, ".shared", "subagent-swarm", runID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		barePath := filepath.Join(root, "nebula", ".bare")
+		if err := os.MkdirAll(barePath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		write(t, filepath.Join(barePath, "config"), "[remote \"origin\"]\n\turl = git@github.com:sycamore-labs/nebula.git\n")
+		write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{
+			"config": {
+				"goal": "diskless sandbox",
+				"repo": "",
+				"phases": [{"name": "swe"}]
+			},
+			"tasks": [
+				{"id": "mem-overhead", "title": "mem overhead", "phase": "swe", "status": "planned", "round": 1, "repo_url": %q, "sessions": {}}
+			]
+		}`, barePath))
+		write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: diskless sandbox\n")
+
+		r, err := Read(dir)
+		if err != nil {
+			t.Fatalf("Read(%s): %v", dir, err)
+		}
+		if r.Repo != "sycamore-labs/nebula" || r.RepoID != "" {
+			t.Fatalf("Read(%s) = Repo=%q RepoID=%q, want Repo=sycamore-labs/nebula RepoID=\"\"", dir, r.Repo, r.RepoID)
+		}
+	})
+
+	t.Run("refuses_spawn_naming_run_and_never_posts_path_when_none_resolves", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		runID := "20261115-diskless-sandbox"
+		dir := filepath.Join(root, ".shared", "subagent-swarm", runID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		barePath := filepath.Join(root, "nebula", ".bare")
+		if err := os.MkdirAll(barePath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Origin points to another local path, so no GitHub slug can be resolved.
+		write(t, filepath.Join(barePath, "config"), "[remote \"origin\"]\n\turl = /var/cache/git/nebula.bare\n")
+		write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{
+			"config": {
+				"goal": "diskless sandbox",
+				"repo": %q,
+				"phases": [{"name": "swe"}]
+			},
+			"tasks": [
+				{"id": "mem-overhead", "title": "mem overhead", "phase": "swe", "status": "planned", "round": 1, "repo_url": "/host/nebula", "sessions": {}}
+			]
+		}`, barePath))
+		write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: diskless sandbox\n")
+
+		r, err := Read(dir)
+		if err != nil {
+			t.Fatalf("Read(%s): %v", dir, err)
+		}
+		if r.Repo != "" || r.RepoID != "" {
+			t.Fatalf("Read(%s) resolved Repo=%q RepoID=%q from local paths, want both empty", dir, r.Repo, r.RepoID)
+		}
+
+		var creates atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if req.Method == http.MethodPost && req.URL.Path == "/api/code-sessions" {
+				creates.Add(1)
+			}
+			http.NotFound(w, req)
+		}))
+		defer srv.Close()
+
+		clk := clock.NewFakeClock(time.Date(2026, 11, 15, 21, 49, 0, 0, time.UTC))
+		st := store.NewMemoryStore(clk)
+		t.Cleanup(func() { _ = st.Close() })
+		nebDrv, err := nebula.New(nebula.Config{
+			APIURL: srv.URL,
+			Token:  "test-token",
+			Clock:  clk,
+			Events: st.Events(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		controllers := NewControllers(t.Context(), st, nebDrv, clk, nil)
+		svc := &Service{
+			Importer: Importer{Roots: []string{root}},
+			Labeler:  &fakeLabeler{label: "claude"},
+			Watcher:  &fakeWatcher{running: false},
+			Driver:   controllers,
+			Holder:   ChatHolder("front-desk"),
+			Now:      clk.Now,
+		}
+		_, err = svc.Adopt(t.Context(), runID)
+		if err == nil || !strings.Contains(err.Error(), runID) || !strings.Contains(err.Error(), "repository is not configured") {
+			t.Fatalf("Adopt with unresolvable local path = %v, want error naming %s with repository is not configured", err, runID)
+		}
+		if got := creates.Load(); got != 0 {
+			t.Fatalf("POST /api/code-sessions called %d times, want 0", got)
+		}
+	})
+}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/concierge"
+	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/mailbox"
 	"github.com/bazelment/yoloswe/orca/model"
@@ -562,6 +563,191 @@ func TestQueuedAcknowledgementNeedsLiveControllerLease(t *testing.T) {
 				t.Fatalf("ack = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+type modelClientFunc func(context.Context, model.Request) (*model.Response, error)
+
+func (f modelClientFunc) CreateMessage(ctx context.Context, req model.Request) (*model.Response, error) {
+	return f(ctx, req)
+}
+
+func TestOfferConfirmationReachesDispatcherWithOfferSpec(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	const offerSpec = "I'd fund this as a small lane (argon-medium, 15m) to measure sandbox memory overhead."
+
+	var dispatcherInputs []string
+	var f *adoptedFixture
+	f = newAdoptedFixture(t, func(runID string, answer func(context.Context, string, string, string) error) controller.Judge {
+		return controller.JudgeFunc(func(ctx context.Context, rID string, events []store.Event) error {
+			var calls int
+			client := modelClientFunc(func(_ context.Context, req model.Request) (*model.Response, error) {
+				calls++
+				if calls == 1 {
+					var snapText string
+					for _, msg := range req.Messages {
+						snapText += msg.Text() + "\n"
+					}
+					dispatcherInputs = append(dispatcherInputs, snapText)
+					brief := "spawn argon-medium"
+					if strings.Contains(snapText, offerSpec) {
+						brief = offerSpec
+					}
+					args, _ := json.Marshal(dispatcher.LaneSpawnParams{
+						ItemID: "argon-medium",
+						Brief:  brief,
+						Reason: "owner confirmed concierge offer",
+					})
+					return &model.Response{
+						StopReason: model.StopReasonToolUse,
+						Message:    model.NewAssistantMessage(model.NewToolUseBlock("spawn-1", dispatcher.ToolLaneSpawn, args)),
+					}, nil
+				}
+				return &model.Response{
+					StopReason: model.StopReasonEndTurn,
+					Message:    model.NewAssistantMessage(model.NewTextBlock("Spawned argon-medium.")),
+				}, nil
+			})
+			d := dispatcher.New(dispatcher.Config{OnOwnerAnswer: answer}, f.store, f.driver, f.clock, client)
+			return d.Judge(ctx, rID, events)
+		})
+	})
+	if err := f.store.Backlog().Add(ctx, store.BacklogItem{
+		ID:       "argon-medium",
+		RunID:    adoptedRun,
+		Title:    "Measure diskless sandbox memory overhead",
+		Priority: store.PriorityP1,
+		Status:   store.BacklogOpen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	f.backend.Stream = func(_ context.Context, _ string, emit func(string)) error {
+		emit(offerSpec)
+		return nil
+	}
+
+	var routed []router.Handler
+	r := routeFunc(func(_ context.Context, input string) (router.Decision, error) {
+		var h router.Handler
+		switch {
+		case strings.HasPrefix(input, "yes fund it") && strings.Contains(input, "Open questions:"):
+			h = router.Dispatcher
+		default:
+			h = router.Concierge
+		}
+		routed = append(routed, h)
+		return router.Decision{Handler: h, Confidence: 0.9}, nil
+	})
+	m := New(ctx, chatRun, nil, r)
+	m.Backend = f.backend
+	m.Dispatch = f.backend.Dispatch
+	var out strings.Builder
+	if err := Run(ctx, strings.NewReader("how much memory does the diskless sandbox use?\nyes fund it\n"), &out, m); err != nil {
+		t.Fatal(err)
+	}
+
+	if !slices.Equal(routed, []router.Handler{router.Concierge, router.Dispatcher}) {
+		t.Fatalf("routed handlers = %v, want [concierge dispatcher]\nchat output:\n%s", routed, out.String())
+	}
+	if len(dispatcherInputs) == 0 || !strings.Contains(dispatcherInputs[0], offerSpec) {
+		t.Fatalf("dispatcher input = %q, want offer spec %q", dispatcherInputs, offerSpec)
+	}
+	if len(f.driver.Spawns) != 1 || !strings.Contains(f.driver.Spawns[0].Brief, offerSpec) {
+		t.Fatalf("spawns = %+v, want 1 spawn whose Brief contains %q", f.driver.Spawns, offerSpec)
+	}
+	dirs, err := f.store.Directives().List(ctx, store.DirectiveFilter{RunID: adoptedRun})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawDeliveredSpec, sawHandledProposal bool
+	for _, d := range dirs {
+		if strings.TrimSpace(d.Text) == "yes fund it" {
+			t.Fatalf("found bare confirmation directive row: %+v", d)
+		}
+		if d.Kind == store.DirectiveInstruction && !store.IsInternalDirective(d) && strings.Contains(d.Text, offerSpec) && strings.Contains(d.Text, "owner: yes fund it") {
+			sawDeliveredSpec = true
+		}
+		if strings.HasPrefix(d.Ref, "owner_ask:"+ProposalAskIDPrefix) && d.Status == store.DirectiveHandled {
+			sawHandledProposal = true
+		}
+	}
+	if !sawDeliveredSpec {
+		t.Fatalf("expected instruction directive with offer spec and quoted owner reply, got: %+v", dirs)
+	}
+	if !sawHandledProposal {
+		t.Fatalf("expected proposal directive to be marked handled, got: %+v", dirs)
+	}
+}
+
+func TestConversationWindowAttachedOnNonConciergeHandoff(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	var batches [][]store.Event
+	f := newAdoptedFixture(t, func(_ string, _ func(context.Context, string, string, string) error) controller.Judge {
+		return controller.JudgeFunc(func(_ context.Context, _ string, events []store.Event) error {
+			batches = append(batches, slices.Clone(events))
+			return nil
+		})
+	})
+	replies := []string{
+		"Turn 1 reply about alpha.",
+		"Turn 2 reply about beta.",
+		"Turn 3 reply about gamma.",
+		"Turn 4 reply: lane memory-spike is ready on backlog item argon-medium.",
+	}
+	var turnIdx int
+	f.backend.Stream = func(_ context.Context, _ string, emit func(string)) error {
+		emit(replies[turnIdx])
+		turnIdx++
+		return nil
+	}
+	for i := 0; i < 4; i++ {
+		if err := f.backend.Dispatch(ctx, router.Decision{Handler: router.Concierge}, fmt.Sprintf("question %d", i+1), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.backend.Dispatch(ctx, router.Decision{Handler: router.Dispatcher}, "spawn a lane for it now", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(batches) != 1 || len(batches[0]) != 1 {
+		t.Fatalf("batches = %+v, want 1 event", batches)
+	}
+	summary := batches[0][0].Summary
+	if !strings.Contains(summary, "Recent chat context:") || !strings.Contains(summary, "argon-medium") {
+		t.Fatalf("event summary missing recent chat context: %q", summary)
+	}
+	if strings.Contains(summary, "Turn 1 reply about alpha.") {
+		t.Fatalf("expected conversation window to keep only last ~3 exchanges, got: %q", summary)
+	}
+}
+
+func TestBareConfirmationAndChitChatWriteNoDirectiveAndAskWhenUnresolved(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newAdoptedFixture(t, func(_ string, _ func(context.Context, string, string, string) error) controller.Judge {
+		return controller.JudgeFunc(func(_ context.Context, _ string, _ []store.Event) error {
+			return nil
+		})
+	})
+	for _, msg := range []string{"yes", "no", "ok", "thanks", "yes fund it"} {
+		var ack string
+		if err := f.backend.Dispatch(ctx, router.Decision{Handler: router.Dispatcher}, msg, func(s string) { ack += s }); err != nil {
+			t.Fatal(err)
+		}
+		if msg == "yes fund it" && !strings.Contains(ack, `What does "yes fund it" refer to?`) {
+			t.Fatalf("unresolved bare confirmation ack = %q, want clarification prompt", ack)
+		}
+	}
+	dirs, err := f.store.Directives().List(ctx, store.DirectiveFilter{RunID: adoptedRun})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range dirs {
+		if !store.IsInternalDirective(d) {
+			t.Fatalf("unexpected durable directive from bare confirmation/chit-chat: %+v", d)
+		}
 	}
 }
 

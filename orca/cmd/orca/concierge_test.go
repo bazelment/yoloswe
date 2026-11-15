@@ -1166,6 +1166,177 @@ func TestConciergeAdoptReplyWording(t *testing.T) {
 	}
 }
 
+func TestConciergeReadFileResolvesAdoptedRunReportsAheadOfFrontDesk(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	const adoptedID = "20261115-diskless-sandbox"
+	for _, id := range []string{frontDeskRunID, adoptedID} {
+		if err := st.Runs().Create(ctx, store.Run{ID: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	root := t.TempDir()
+	frontDeskDir := filepath.Join(root, ".swarm", frontDeskRunID)
+	adoptedDir := filepath.Join(root, ".shared", "subagent-swarm", adoptedID)
+	if err := os.MkdirAll(frontDeskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(adoptedDir, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// subagent-swarm-nebula flat report file in the adopted run root:
+	const flatReport = "lazy-bazel-out integrate report: RSS peak 1.4 GiB"
+	if err := os.WriteFile(filepath.Join(adoptedDir, "lazy-bazel-out.integrate.md"), []byte(flatReport), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// nebula-swarm round-numbered report file in adoptedDir/reports/:
+	const roundReport = "sandbox-mem swe r2 report: overhead 180 MiB"
+	if err := os.WriteFile(filepath.Join(adoptedDir, "reports", "sandbox-mem.swe.r2.md"), []byte(roundReport), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewConcierge(frontDeskRunID, st, nil, scriptedModel(
+		toolUse("rf-1", model.ToolReadFile, `{"path":"reports/lazy-bazel-out.integrate.md"}`),
+		toolUse("rf-2", model.ToolReadFile, `{"path":"reports/sandbox-mem.swe.md"}`),
+		textAnswer("Both lane reports loaded."),
+	), DefaultConciergeModel)
+	c.Investigate = model.InvestigateConfig{RunDir: frontDeskDir}
+	c.HeldRuns = func(context.Context) ([]string, error) {
+		return []string{frontDeskRunID, adoptedID}, nil
+	}
+	c.HostRun = func(id string) (adopt.Run, error) {
+		if id == adoptedID {
+			return adopt.Run{ID: adoptedID, Dir: adoptedDir}, nil
+		}
+		return adopt.Run{}, adopt.ErrRunNotFound
+	}
+
+	icfg := c.investigateConfig(ctx)
+	if icfg.RunDir != adoptedDir {
+		t.Fatalf("investigateConfig.RunDir = %q, want adopted run dir %q ahead of front-desk", icfg.RunDir, adoptedDir)
+	}
+
+	if _, err := c.Ask(ctx, "what did the lane reports find?"); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+
+	threads, err := st.Threads().ListThreads(ctx, store.ThreadFilter{RunID: frontDeskRunID, Role: store.ThreadRoleConcierge})
+	if err != nil || len(threads) != 1 {
+		t.Fatalf("threads = %+v, %v", threads, err)
+	}
+	turns, err := st.Threads().ListTurns(ctx, threads[0].ID)
+	if err != nil || len(turns) != 1 {
+		t.Fatalf("turns = %+v, %v", turns, err)
+	}
+	items, err := st.Threads().ListItems(ctx, threads[0].ID, turns[0].ID, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotResults []string
+	for _, it := range items {
+		if it.Kind == store.ItemKindToolResult {
+			if it.IsError {
+				t.Fatalf("unexpected tool error on %s: %s", it.Name, it.Content)
+			}
+			gotResults = append(gotResults, it.Content)
+		}
+	}
+	if len(gotResults) != 2 || !strings.Contains(gotResults[0], flatReport) || !strings.Contains(gotResults[1], roundReport) {
+		t.Fatalf("read.file results = %q, want [%q, %q]", gotResults, flatReport, roundReport)
+	}
+}
+
+func TestConciergeBudgetStopReportsSkippedReads(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(ctx, store.Run{ID: frontDeskRunID}); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls atomic.Int32
+	client := modelClientFunc(func(_ context.Context, req model.Request) (*model.Response, error) {
+		n := int(calls.Add(1))
+		if len(req.Tools) == 0 {
+			return &model.Response{
+				StopReason: model.StopReasonEndTurn,
+				Message:    model.NewAssistantMessage(model.NewTextBlock("Partial status from completed reads.")),
+			}, nil
+		}
+		if n == DefaultConciergeMaxTurn-1 {
+			return &model.Response{
+				StopReason: model.StopReasonToolUse,
+				Message: model.NewAssistantMessage(
+					model.NewToolUseBlock("skip-1", model.ToolReadFile, json.RawMessage(`{"path":"reports/lane-unloaded.integrate.md"}`)),
+				),
+			}, nil
+		}
+		return &model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock(fmt.Sprintf("call-%d", n), ToolConciergeStatus, json.RawMessage(`{}`)),
+			),
+		}, nil
+	})
+	c := NewConcierge(frontDeskRunID, st, nil, client, DefaultConciergeModel)
+	ans, err := c.Ask(ctx, "status of all lanes?")
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if !strings.Contains(ans, "Skipped reads (tool-call limit)") || !strings.Contains(ans, "reports/lane-unloaded.integrate.md") {
+		t.Fatalf("budget answer did not report skipped read:\n%s", ans)
+	}
+}
+
+func TestConciergeMemoryDeleteByNameAndAcrossHeldRunG36(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	const adoptedID = "20261114-trial-m1"
+	for _, id := range []string{frontDeskRunID, adoptedID} {
+		if err := st.Runs().Create(ctx, store.Run{ID: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.Memories().Put(ctx, store.MemoryEntry{
+		ID:          "memory-00000001-0001",
+		Name:        "hold-new-lanes-trial-m1-20261114",
+		Description: "Hold new lanes on trial-m1",
+		Type:        "rule",
+		Scope:       "run",
+		RunID:       adoptedID,
+		Source:      "hold new lanes on trial-m1",
+		Body:        "Do not spawn new lanes on trial-m1.",
+		ProposedBy:  "owner",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewConcierge(frontDeskRunID, st, nil, scriptedModel(
+		toolUse("del-1", ToolMemorySubmit, `{"action":"delete","id":"hold-new-lanes-trial-m1-20261114"}`),
+		textAnswer("Deleted rule hold-new-lanes-trial-m1-20261114."),
+	), DefaultConciergeModel)
+	c.HeldRuns = func(context.Context) ([]string, error) {
+		return []string{frontDeskRunID, adoptedID}, nil
+	}
+
+	ans, err := c.Ask(ctx, "delete rule hold-new-lanes-trial-m1-20261114")
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if !strings.Contains(ans, "Forgot memory") {
+		t.Fatalf("unexpected delete echo: %q", ans)
+	}
+	if _, err := st.Memories().Get(ctx, "", "memory-00000001-0001"); err == nil {
+		t.Fatal("expected memory-00000001-0001 to be deleted")
+	}
+}
+
 func TestConciergeAndPlannerChat_EscalationAndPlannerStream(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
