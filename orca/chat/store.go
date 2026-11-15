@@ -1158,9 +1158,7 @@ func (b *StoreBackend) recordProposalLocked(ctx context.Context, st store.Store,
 	if summary != "" && !strings.Contains(spec, summary) {
 		spec = summary + ": " + spec
 	}
-	if len(spec) > 4096 {
-		spec = spec[:4096]
-	}
+	spec = truncateProposalSpec(spec, 4096)
 	targetRun := strings.TrimSpace(runID)
 	if targetRun == "" {
 		targetRun = b.proposalTargetRun(ctx, spec)
@@ -1444,6 +1442,24 @@ func matchesProposal(text string) bool {
 	return IsOfferReply(text)
 }
 
+func truncateProposalSpec(spec string, maxBytes int) string {
+	if maxBytes <= 0 || len(spec) <= maxBytes {
+		return spec
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.ValidString(spec[:cut]) {
+		cut--
+	}
+	return spec[:cut]
+}
+
+func (b *StoreBackend) bareReplyUnresolved(ctx context.Context, st store.Store, runID, text string) bool {
+	propDir, _ := b.activeProposal(ctx, st, runID)
+	hasAsk := b.hasNonProposalOpenAsk(ctx, st, runID)
+	convWin := b.conversationWindow(ctx, st, runID)
+	return propDir == nil && !hasAsk && convWin == "" && IsBareConfirmationOrChitChat(text) && HasReferentPronoun(text)
+}
+
 func (b *StoreBackend) hasNonProposalOpenAsk(ctx context.Context, st store.Store, runID string) bool {
 	if st == nil || runID == "" {
 		return false
@@ -1513,10 +1529,7 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 	default:
 		if d.Handler == router.Dispatcher {
 			b.seedSeenDispatcherRun(ctx, st, runID)
-			propDir, _ := b.activeProposal(ctx, st, runID)
-			hasAsk := b.hasNonProposalOpenAsk(ctx, st, runID)
-			convWin := b.conversationWindow(ctx, st, runID)
-			unresolvedBareReply = propDir == nil && !hasAsk && convWin == "" && IsBareConfirmationOrChitChat(text) && HasReferentPronoun(text)
+			unresolvedBareReply = b.bareReplyUnresolved(ctx, st, runID, text)
 		}
 		var live bool
 		live, err = b.deliver(ctx, st, runID, d.Handler, text)
@@ -1678,7 +1691,7 @@ func (b *StoreBackend) frontDeskTarget(ctx context.Context, text string) (runID,
 	}
 }
 
-// deliverFromFrontDesk routes a front-desk instruction to a live held run.
+// frontDeskDelivery carries the selected run and its delivery result.
 type frontDeskDelivery struct {
 	store               store.Store
 	err                 error
@@ -1687,6 +1700,7 @@ type frontDeskDelivery struct {
 	unresolvedBareReply bool
 }
 
+// deliverFromFrontDesk routes a front-desk instruction to a live held run.
 func (b *StoreBackend) deliverFromFrontDesk(ctx context.Context, handler router.Handler, text string) frontDeskDelivery {
 	target, refusal, err := b.frontDeskTarget(ctx, text)
 	if err != nil || refusal != "" {
@@ -1709,10 +1723,7 @@ func (b *StoreBackend) deliverFromFrontDesk(ctx context.Context, handler router.
 	}
 	if handler == router.Dispatcher {
 		b.seedSeenDispatcherRun(ctx, st, target)
-		propDir, _ := b.activeProposal(ctx, st, target)
-		hasAsk := b.hasNonProposalOpenAsk(ctx, st, target)
-		convWin := b.conversationWindow(ctx, st, target)
-		unresolvedBareReply = propDir == nil && !hasAsk && convWin == "" && IsBareConfirmationOrChitChat(text) && HasReferentPronoun(text)
+		unresolvedBareReply = b.bareReplyUnresolved(ctx, st, target, text)
 	}
 	if live, err := b.deliver(ctx, st, target, handler, text); err != nil || !live {
 		if closeStore && st != nil {

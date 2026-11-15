@@ -337,13 +337,26 @@ func (m *sqliteMemoryStore) Get(ctx context.Context, scope, id string) (*MemoryE
 	var v MemoryEntry
 	var ca, ua string
 	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("%w: memory %q", ErrNotFound, id)
 	}
 	if err := rows.Scan(&v.ID, &v.Name, &v.Description, &v.Type, &v.Scope, &v.RunID, &v.Source, &v.Body, &v.ProposedBy, &ca, &ua); err != nil {
 		return nil, err
 	}
-	if rows.Next() {
+	if v.ID == id || v.ID == norm {
+		v.CreatedAt, _ = time.Parse(time.RFC3339Nano, ca)
+		v.UpdatedAt, _ = time.Parse(time.RFC3339Nano, ua)
+		return &v, nil
+	}
+	// Exact ID and normalized-ID matches have the same precedence as the
+	// in-memory backend and remain unambiguous even if names collide.
+	if (v.ID != id && v.ID != norm) && rows.Next() {
 		return nil, fmt.Errorf("memory %q is ambiguous", id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	v.CreatedAt, _ = time.Parse(time.RFC3339Nano, ca)
 	v.UpdatedAt, _ = time.Parse(time.RFC3339Nano, ua)
@@ -372,7 +385,11 @@ func (m *sqliteMemoryStore) List(ctx context.Context, f MemoryFilter) ([]MemoryE
 }
 func (m *sqliteMemoryStore) Delete(ctx context.Context, scope, id string) error {
 	targetID := id
-	if got, err := m.Get(ctx, scope, id); err == nil && got != nil {
+	if got, err := m.Get(ctx, scope, id); err != nil {
+		if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+	} else if got != nil {
 		targetID = got.ID
 	}
 	r, err := m.s().db.ExecContext(ctx, `DELETE FROM memories WHERE id=? AND (?='' OR scope=?)`, targetID, scope, scope)
