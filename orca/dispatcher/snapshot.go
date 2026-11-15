@@ -295,6 +295,9 @@ func BuildSnapshot(
 			parts = append(parts, fmt.Sprintf("%s (%s)", it.ID, it.Status))
 			shownBacklog++
 		}
+		if rest := len(allBacklog) - len(topItems); rest > 0 {
+			parts = append(parts, fmt.Sprintf("+%d more", rest))
+		}
 		fmt.Fprintf(&b, "All %d backlog items are terminal: %s\n", len(allBacklog), strings.Join(parts, ", "))
 	} else {
 		secStart := b.Len()

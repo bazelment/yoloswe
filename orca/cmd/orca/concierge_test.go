@@ -900,6 +900,30 @@ func TestConciergeNonHeldRunReadsObjectiveFile(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:     "dir-stale-ask",
+		RunID:  releasedID,
+		Kind:   store.DirectiveInstruction,
+		Source: store.DirectiveSourceDispatcher,
+		Scope:  "m2-default",
+		Ref:    "owner_ask:ask-stale-1",
+		Text:   `{"id":"ask-stale-1","lane_id":"m2-default","question":"Stale question from 20h ago?"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(ctx, store.Lane{
+		ID:     "m2-default",
+		RunID:  releasedID,
+		ItemID: "m2-default",
+		Status: "running",
+		Phase:  "swe",
+		Round:  1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Runs().AcquireLease(ctx, releasedID, "external-controller", 24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
 	clk.Set(now)
 
 	// Write current OBJECTIVE.md on disk for the released host swarm.
@@ -977,6 +1001,17 @@ func TestConciergeNonHeldRunReadsObjectiveFile(t *testing.T) {
 	if !strings.Contains(statusResult, "Active Directives (0): none (run is not held by orca)") ||
 		!strings.Contains(statusResult, "Historical Store Directives (1, from stale store copy age 20h — not active holds):") {
 		t.Fatalf("status output for non-held run should demote stale directives to Historical Store Directives:\n%s", statusResult)
+	}
+	if strings.Contains(statusResult, "Open Questions") || strings.Contains(statusResult, "awaiting owner answer") {
+		t.Fatalf("non-held run status must not surface stale owner_ask directives as active questions or lane next steps:\n%s", statusResult)
+	}
+	icfg := c.investigateConfig(ctx)
+	if slices.Contains(icfg.ExtraRoots, filepath.Dir(runDir)) {
+		t.Fatalf("investigateConfig must not add parent directory %s to ExtraRoots: %+v", filepath.Dir(runDir), icfg.ExtraRoots)
+	}
+	swarmsSchema := string(model.SchemaFor[SwarmsParams]())
+	if !strings.Contains(swarmsSchema, "return only active swarms (plus any runs held by orca)") {
+		t.Fatalf("SwarmsParams schema truncated active_only description: %s", swarmsSchema)
 	}
 }
 

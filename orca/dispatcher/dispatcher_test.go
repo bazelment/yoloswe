@@ -2216,12 +2216,18 @@ func TestDispatchAdoptedFinishedRunSkipsTurnAndCompactSnapshot(t *testing.T) {
 		t.Fatalf("Dispatch forced owner event on finished run: %v", err)
 	}
 	reqs := forcedClient.Requests
-	if len(reqs) != 1 || reqs[0].Model != dispatcher.DefaultModel {
-		t.Fatalf("forced turn requests = %d model=%q, want 1 request on %q (no Opus escalation)",
-			len(reqs), reqs[0].Model, dispatcher.DefaultModel)
+	if len(reqs) != 1 {
+		t.Fatalf("forced turn requests = %d, want 1 request", len(reqs))
+	}
+	if reqs[0].Model != dispatcher.DefaultModel {
+		t.Fatalf("forced turn model = %q, want %q (no Opus escalation)", reqs[0].Model, dispatcher.DefaultModel)
 	}
 	if resForced.Usage.CostUSD >= 0.50 {
 		t.Fatalf("forced turn CostUSD = %f, want < $0.50", resForced.Usage.CostUSD)
+	}
+	spawnSchema := string(model.SchemaFor[dispatcher.LaneSpawnParams]())
+	if strings.Contains(spawnSchema, `"recipe_name"`) {
+		t.Fatalf("LaneSpawnParams schema should omit recipe_name via jsonschema:\"-\": %s", spawnSchema)
 	}
 
 	// 4. Done-run skipping must NEVER apply to runs that are not done, even for AdoptMailSummarySource.

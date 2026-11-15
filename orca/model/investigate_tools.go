@@ -188,7 +188,7 @@ func resolveSafePath(roots []string, rawPath string) (string, error) {
 		candidates := []string{filepath.Clean(filepath.Join(root, rawPath))}
 		if prefix, rest, ok := strings.Cut(filepath.ToSlash(rawPath), "/"); ok && rest != "" {
 			base := filepath.Base(root)
-			if prefix == base || strings.HasSuffix(base, "-"+prefix) {
+			if prefix == base || (isDatedRunDirBase(base) && strings.HasSuffix(base, "-"+prefix)) {
 				candidates = append(candidates, filepath.Clean(filepath.Join(root, filepath.FromSlash(rest))))
 			}
 		}
@@ -220,6 +220,18 @@ func resolveSafePath(roots []string, rawPath string) (string, error) {
 		return "", fmt.Errorf("read.file: path %q is restricted (sensitive or database file)", rawPath)
 	}
 	return firstCandidate, nil
+}
+
+func isDatedRunDirBase(base string) bool {
+	if len(base) < 10 || base[8] != '-' {
+		return false
+	}
+	for i := range 8 {
+		if base[i] < '0' || base[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func isSensitiveInvestigationPath(target string) bool {

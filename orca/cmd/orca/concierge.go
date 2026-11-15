@@ -102,7 +102,7 @@ type DirectiveRevokeParams struct {
 // SwarmsParams optionally filters swarms by run ID or substring.
 type SwarmsParams struct {
 	Run        string `json:"run,omitempty" jsonschema:"description=Optional run ID or substring filter (e.g. trial-m1)"`
-	ActiveOnly bool   `json:"active_only,omitempty" jsonschema:"description=Optional filter: when true, return only active swarms (plus any runs held by orca)"`
+	ActiveOnly bool   `json:"active_only,omitempty" jsonschema_description:"Optional filter: when true, return only active swarms (plus any runs held by orca)"`
 	Page       int    `json:"page,omitempty" jsonschema:"description=Optional 1-based page number when the swarm list has multiple pages"`
 }
 
@@ -435,7 +435,7 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 	msgs := append(c.relevantHistory(ctx, prior, question, held), model.NewUserMessage(question))
 
 	memoryEcho := ""
-	reg := c.buildToolRegistry(threadID, turnID, question, &memoryEcho, start)
+	reg := c.buildToolRegistryWithContext(ctx, threadID, turnID, question, &memoryEcho, start)
 	systemPrompt := ConciergeSystemPrompt
 	if len(held) > 0 && (len(held) > 1 || held[0] != frontDeskRunID) {
 		systemPrompt += "\n\n## Held Runs\nThis chat currently holds in its Store: " + strings.Join(held, ", ") + ". Use status, lane.show, pr.ci, and read.file (not swarms) to answer questions about held runs."
@@ -1095,30 +1095,27 @@ func (c *Concierge) investigateConfig(ctx context.Context) model.InvestigateConf
 		} else if dir != icfg.RunDir && !slices.Contains(icfg.ExtraRoots, dir) {
 			icfg.ExtraRoots = append(icfg.ExtraRoots, dir)
 		}
-		if parent := filepath.Dir(dir); parent != "" && parent != "." && parent != "/" && parent != icfg.RunDir && !slices.Contains(icfg.ExtraRoots, parent) {
-			icfg.ExtraRoots = append(icfg.ExtraRoots, parent)
-		}
 		icfg.RepoDir = model.ResolveRunRepoDir(icfg.RepoDir, dir)
 	}
 	if c.HostRun != nil {
-		for _, id := range c.heldRunIDs(ctx) {
-			if id == "" || id == frontDeskRunID {
-				continue
+		seen := map[string]bool{}
+		addRunID := func(id string) {
+			id = strings.TrimSpace(id)
+			if id == "" || id == frontDeskRunID || seen[id] {
+				return
 			}
+			seen[id] = true
 			if hr, err := c.HostRun(id); err == nil {
 				addRunDir(hr.Dir)
 			}
 		}
+		for _, id := range c.heldRunIDs(ctx) {
+			addRunID(id)
+		}
 		if c.store != nil {
 			if runs, err := c.store.Runs().List(ctx); err == nil {
 				for i := range runs {
-					id := runs[i].ID
-					if id == "" || id == frontDeskRunID {
-						continue
-					}
-					if hr, hrErr := c.HostRun(id); hrErr == nil {
-						addRunDir(hr.Dir)
-					}
+					addRunID(runs[i].ID)
 				}
 			}
 		}
@@ -1132,6 +1129,10 @@ func (c *Concierge) investigateConfig(ctx context.Context) model.InvestigateConf
 // buildToolRegistry builds the turn's tools. run.start launches only when
 // start allows it: an explicit request or confirmation after a refusal.
 func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho *string, start *ownerTurn) *model.ToolRegistry {
+	return c.buildToolRegistryWithContext(context.Background(), threadID, turnID, quote, memoryEcho, start)
+}
+
+func (c *Concierge) buildToolRegistryWithContext(regCtx context.Context, threadID, turnID, quote string, memoryEcho *string, start *ownerTurn) *model.ToolRegistry {
 	reg := model.NewToolRegistry()
 	model.AddTool[RunStartParams](reg, ToolRunStart, "Start a new run for an owner goal", func(ctx context.Context, p RunStartParams) (string, error) {
 		goal := strings.TrimSpace(p.Goal)
@@ -1313,7 +1314,7 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 		return m.Body, nil
 	})
 
-	model.RegisterInvestigationTools(reg, c.investigateConfig(context.Background()))
+	model.RegisterInvestigationTools(reg, c.investigateConfig(regCtx))
 
 	return reg
 }
@@ -1406,7 +1407,7 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 
 	var b strings.Builder
 	now := c.clock.Now().UTC()
-	heldByOrca := runID == frontDeskRunID || slices.Contains(c.heldRunIDs(ctx), runID) || (run.Lease != nil && !run.Lease.Expired(now))
+	heldByOrca := c.isRunHeldByOrca(ctx, runID, run, hostRun, now)
 	storeAge := "unknown"
 	if !run.UpdatedAt.IsZero() {
 		storeAge = mailbox.FormatAge(now, run.UpdatedAt)
@@ -1457,9 +1458,13 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 			it.ID, it.Priority, it.Status, cmp.Or(it.LaneID, "-"), it.Title)
 	}
 
+	var activeDirs []store.Directive
 	var unescalatedQs []mailbox.OpenQuestion
-	if c.store != nil {
-		unescalatedQs, _ = mailbox.OpenUnescalatedQuestions(ctx, c.store, runID, c.clock.Now().UTC())
+	if heldByOrca {
+		activeDirs = dirs
+		if c.store != nil {
+			unescalatedQs, _ = mailbox.OpenUnescalatedQuestions(ctx, c.store, runID, now)
+		}
 	}
 
 	fmt.Fprintf(&b, "\nLanes (%s):\n", formatStoreLaneCounts(lanes))
@@ -1496,7 +1501,7 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 		b.WriteString(line + "\n")
 
 		nowParts := c.laneNowParts(ctx, runID, &ln, hl, terminalID, sessionID, live, unescalatedQs)
-		nextStep := c.laneNextStep(ctx, run, &ln, dirs, hl, unescalatedQs)
+		nextStep := c.laneNextStep(ctx, run, &ln, activeDirs, hl, unescalatedQs)
 		fmt.Fprintf(&b, "    now: %s\n", strings.Join(nowParts, "; "))
 		fmt.Fprintf(&b, "    next: %s\n", nextStep)
 		if ln.PR > 0 {
@@ -1532,10 +1537,13 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 		}
 	}
 
-	if freshDirs, dErr := store.ListActiveDirectives(ctx, c.store, runID, c.clock.Now().UTC()); dErr == nil {
+	if freshDirs, dErr := store.ListActiveDirectives(ctx, c.store, runID, now); dErr == nil {
 		dirs = freshDirs
 	}
-	openQs := c.openQuestionsForRun(ctx, runID, dirs, unescalatedQs)
+	if heldByOrca {
+		activeDirs = dirs
+	}
+	openQs := c.openQuestionsForRun(ctx, runID, activeDirs, unescalatedQs)
 	if len(openQs) > 0 {
 		fmt.Fprintf(&b, "\nOpen Questions (%d):\n", len(openQs))
 		for _, q := range openQs {
@@ -1566,6 +1574,20 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 
 	fmt.Fprintf(&b, "\nMetrics: %s\n", metrics.Summary())
 	return b.String(), nil
+}
+
+func (c *Concierge) isRunHeldByOrca(ctx context.Context, runID string, run *store.Run, hostRun adopt.Run, now time.Time) bool {
+	if runID == frontDeskRunID || slices.Contains(c.heldRunIDs(ctx), runID) {
+		return true
+	}
+	if strings.HasPrefix(strings.TrimSpace(hostRun.Holder), "orca") {
+		return true
+	}
+	if run != nil && run.Lease != nil && !run.Lease.Expired(now) {
+		holder := strings.TrimSpace(run.Lease.HolderID)
+		return strings.HasPrefix(holder, "orca")
+	}
+	return false
 }
 
 func (c *Concierge) openQuestionsForRun(ctx context.Context, runID string, dirs []store.Directive, laneQs []mailbox.OpenQuestion) []string {
@@ -1920,7 +1942,7 @@ func (c *Concierge) handleLaneShow(ctx context.Context, runHint, laneID, quote s
 		return "", err
 	}
 	run, _ := c.store.Runs().Get(ctx, runID)
-	dirs, _ := c.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	var hostRun adopt.Run
 	var hl adopt.Lane
 	var repo, runDir string
 	if run != nil {
@@ -1928,6 +1950,7 @@ func (c *Concierge) handleLaneShow(ctx context.Context, runHint, laneID, quote s
 	}
 	if c.HostRun != nil {
 		if hr, hrErr := c.HostRun(runID); hrErr == nil {
+			hostRun = hr
 			repo = cmp.Or(repo, hr.Repo)
 			runDir = hr.Dir
 			for i := range hr.Lanes {
@@ -1938,14 +1961,17 @@ func (c *Concierge) handleLaneShow(ctx context.Context, runHint, laneID, quote s
 			}
 		}
 	}
+	now := c.clock.Now().UTC()
+	var dirs []store.Directive
+	var unescalatedQs []mailbox.OpenQuestion
+	if c.isRunHeldByOrca(ctx, runID, run, hostRun, now) && c.store != nil {
+		dirs, _ = c.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+		unescalatedQs, _ = mailbox.OpenUnescalatedQuestions(ctx, c.store, runID, now)
+	}
 	probed := c.probeHeldLanes(ctx, c.hostProbe(), repo, runDir, []store.Lane{*ln}, map[string]adopt.Lane{ln.ID: hl})
 	live := probed[ln.ID]
 	sessionID := cmp.Or(ln.SessionID, hl.Session)
 	terminalID := cmp.Or(ln.TerminalID, hl.Terminal)
-	var unescalatedQs []mailbox.OpenQuestion
-	if c.store != nil {
-		unescalatedQs, _ = mailbox.OpenUnescalatedQuestions(ctx, c.store, runID, c.clock.Now().UTC())
-	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Lane %s (run=%s item=%s status=%s phase=%s round=%d attempt=%d session=%s terminal=%s recipe=%s@v%d)\n",
