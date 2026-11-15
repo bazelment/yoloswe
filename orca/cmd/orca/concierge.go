@@ -702,9 +702,8 @@ func (c *Concierge) budgetAnswer(ctx context.Context, req model.Request, questio
 
 func skippedReads(msgs []model.Message) []string {
 	type callInfo struct {
-		name   string
-		key    string
-		target string
+		name string
+		key  string
 	}
 	byID := map[string]callInfo{}
 	succeededKey := map[string]bool{}
@@ -716,8 +715,8 @@ func skippedReads(msgs []model.Message) []string {
 			blk := &msgs[i].Content[j]
 			switch blk.Type {
 			case model.BlockTypeToolUse:
-				label, target := formatSkippedToolCall(blk.Name, blk.Input)
-				byID[blk.ID] = callInfo{name: blk.Name, key: label, target: target}
+				label := formatSkippedToolCall(blk.Name, blk.Input)
+				byID[blk.ID] = callInfo{name: blk.Name, key: label}
 			case model.BlockTypeToolResult:
 				completedID[blk.ToolUseID] = true
 				if blk.IsError {
@@ -746,7 +745,7 @@ func skippedReads(msgs []model.Message) []string {
 	return out
 }
 
-func formatSkippedToolCall(name string, raw json.RawMessage) (label, target string) {
+func formatSkippedToolCall(name string, raw json.RawMessage) string {
 	var m map[string]any
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &m)
@@ -754,10 +753,10 @@ func formatSkippedToolCall(name string, raw json.RawMessage) (label, target stri
 	for _, k := range []string{"path", "lane_id", "run_id", "run", "id"} {
 		if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
 			t := strings.TrimSpace(v)
-			return fmt.Sprintf("%s(%s)", name, t), t
+			return fmt.Sprintf("%s(%s)", name, t)
 		}
 	}
-	return name, ""
+	return name
 }
 
 func ensureSkippedReadsMentioned(answer string, skipped []string) string {
@@ -1183,16 +1182,35 @@ func (c *Concierge) listHeldMemories(ctx context.Context, held []string) ([]stor
 	if c.store == nil || c.store.Memories() == nil {
 		return nil, nil
 	}
-	all, err := c.store.Memories().List(ctx, store.MemoryFilter{})
+	seen := make(map[string]bool)
+	var out []store.MemoryEntry
+	add := func(entries []store.MemoryEntry) {
+		for i := range entries {
+			key := entries[i].ID
+			if key == "" {
+				key = entries[i].RunID + "\x00" + entries[i].Name
+			}
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, entries[i])
+			}
+		}
+	}
+	global, err := c.store.Memories().List(ctx, store.MemoryFilter{RunID: ""})
 	if err != nil {
 		return nil, err
 	}
-	var out []store.MemoryEntry
-	for i := range all {
-		m := &all[i]
-		if m.RunID == "" || m.RunID == c.runID || slices.Contains(held, m.RunID) {
-			out = append(out, *m)
+	add(global)
+	runs := append(slices.Clone(held), c.runID)
+	for _, runID := range runs {
+		if strings.TrimSpace(runID) == "" || runID == frontDeskRunID {
+			continue
 		}
+		entries, listErr := c.store.Memories().List(ctx, store.MemoryFilter{RunID: runID})
+		if listErr != nil {
+			return nil, listErr
+		}
+		add(entries)
 	}
 	return out, nil
 }

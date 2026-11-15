@@ -1276,15 +1276,6 @@ func (b *StoreBackend) latestProposalID(ctx context.Context) string {
 	return latest
 }
 
-// ObserveConciergeReply records an owner/concierge exchange and creates a
-// pending proposal if the concierge reply proposes an action.
-func (b *StoreBackend) ObserveConciergeReply(ctx context.Context, userText, reply string) {
-	b.recordExchange(userText, reply)
-	if ContainsOffer(reply) {
-		_, _ = b.RecordProposal(ctx, "", "", reply)
-	}
-}
-
 func (b *StoreBackend) recordExchange(ownerText, orcaText string) {
 	ownerText = strings.TrimSpace(ownerText)
 	orcaText = strings.TrimSpace(orcaText)
@@ -1436,7 +1427,7 @@ func (b *StoreBackend) activeProposal(ctx context.Context, st store.Store, runID
 	return bestDir, bestAsk
 }
 
-func matchesProposal(text, spec string) bool {
+func matchesProposal(text string) bool {
 	if IsOfferReply(text) {
 		return true
 	}
@@ -1579,7 +1570,7 @@ func (b *StoreBackend) deliver(ctx context.Context, st store.Store, runID string
 	switch handler {
 	case router.Planner:
 		delivered := text
-		if propDir != nil && matchesProposal(text, propAsk.Question) {
+		if propDir != nil && matchesProposal(text) {
 			_ = st.Directives().UpdateStatus(ctx, propDir.RunID, propDir.ID, store.DirectiveHandled)
 			if IsRejection(text) {
 				run, err := st.Runs().Get(ctx, runID)
@@ -1600,7 +1591,7 @@ func (b *StoreBackend) deliver(ctx context.Context, st store.Store, runID string
 		}
 	case router.Dispatcher:
 		switch {
-		case propDir != nil && matchesProposal(text, propAsk.Question):
+		case propDir != nil && matchesProposal(text):
 			_ = st.Directives().UpdateStatus(ctx, propDir.RunID, propDir.ID, store.DirectiveHandled)
 			if IsRejection(text) {
 				summary := fmt.Sprintf("Owner rejected proposal %q (owner: %s)", strings.TrimSpace(propAsk.Question), text)
