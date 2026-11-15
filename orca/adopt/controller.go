@@ -20,6 +20,7 @@ import (
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
+	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/mailbox"
 	"github.com/bazelment/yoloswe/orca/recipe"
@@ -403,34 +404,10 @@ func expireHoldDirectivesIfRunDone(ctx context.Context, st store.Store, runID st
 		if d.Kind != store.DirectiveStanding && d.Kind != store.DirectiveInstruction {
 			continue
 		}
-		if isAdoptHoldDirectiveText(d.Text) {
+		if dispatcher.IsHoldDirectiveText(d.Text) {
 			_ = st.Directives().UpdateStatus(ctx, runID, d.ID, store.DirectiveExpired)
 		}
 	}
-}
-
-func isAdoptHoldDirectiveText(text string) bool {
-	lower := adoptNormalizeContractions(strings.ToLower(strings.TrimSpace(text)))
-	if strings.HasPrefix(lower, "hold:") {
-		return true
-	}
-	for _, phrase := range []string{
-		"hold off",
-		"on hold",
-		"do not launch",
-		"dont launch",
-		"do not start",
-		"dont start",
-		"wait before launching",
-		"pause launching",
-		"pause new lanes",
-		"stop launching",
-	} {
-		if strings.Contains(lower, phrase) {
-			return true
-		}
-	}
-	return adoptContainsWholeWord(lower, "hold") || adoptContainsWholeWord(lower, "pause")
 }
 
 func sameAdoptionGeneration(storedPlanRef, currentMarker string) bool {

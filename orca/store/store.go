@@ -228,7 +228,8 @@ type RecipeStore interface {
 	ListLatest(ctx context.Context, runID string) ([]Recipe, error)
 }
 
-func estimateStoreUsageCostUSD(modelOrRole string, inputTokens, outputTokens int64) float64 {
+// EstimateUsageCostUSD estimates model usage cost from a model name or actor role.
+func EstimateUsageCostUSD(modelOrRole string, inputTokens, outputTokens int64) float64 {
 	if inputTokens <= 0 && outputTokens <= 0 {
 		return 0
 	}
@@ -274,7 +275,7 @@ func HourlyRunCostUSD(ctx context.Context, st Store, runID string, now time.Time
 		}
 		c := d.CostUSD
 		if c <= 0 {
-			c = estimateStoreUsageCostUSD(cmp.Or(d.Model, d.Actor), d.InputTokens, d.OutputTokens)
+			c = EstimateUsageCostUSD(cmp.Or(d.Model, d.Actor), d.InputTokens, d.OutputTokens)
 		}
 		if c <= 0 {
 			continue
@@ -307,7 +308,7 @@ func HourlyRunCostUSD(ctx context.Context, st Store, runID string, now time.Time
 			}
 			tc := t.CostUSD
 			if tc <= 0 {
-				tc = estimateStoreUsageCostUSD(string(threads[i].Role), t.InputTokens, t.OutputTokens)
+				tc = EstimateUsageCostUSD(string(threads[i].Role), t.InputTokens, t.OutputTokens)
 			}
 			if tc <= 0 {
 				continue

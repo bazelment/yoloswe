@@ -20,7 +20,6 @@ import (
 	"github.com/bazelment/yoloswe/orca/concierge"
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/mailbox"
-	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/router"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -563,42 +562,25 @@ func (b *StoreBackend) view(ctx context.Context, includeLive bool) (runView, []l
 	return v, groups, nil
 }
 
-func estimateTokenCostUSD(modelOrRole string, inputTokens, outputTokens int64) float64 {
-	if inputTokens <= 0 && outputTokens <= 0 {
-		return 0
-	}
-	lower := strings.ToLower(strings.TrimSpace(modelOrRole))
-	modelName := lower
-	switch lower {
-	case "", "dispatcher", "concierge":
-		modelName = "sonnet"
-	case "planner":
-		modelName = "opus"
-	case "router":
-		modelName = "haiku"
-	}
-	return model.CalculateCost(modelName, model.Usage{InputTokens: inputTokens, OutputTokens: outputTokens}, nil)
-}
-
 func decisionCostUSD(d *store.Decision) float64 {
 	if d.CostUSD > 0 {
 		return d.CostUSD
 	}
-	return estimateTokenCostUSD(cmp.Or(d.Model, d.Actor), d.InputTokens, d.OutputTokens)
+	return store.EstimateUsageCostUSD(cmp.Or(d.Model, d.Actor), d.InputTokens, d.OutputTokens)
 }
 
 func turnCostUSD(t *store.Turn, role string) float64 {
 	if t.CostUSD > 0 {
 		return t.CostUSD
 	}
-	return estimateTokenCostUSD(role, t.InputTokens, t.OutputTokens)
+	return store.EstimateUsageCostUSD(role, t.InputTokens, t.OutputTokens)
 }
 
 func threadCostUSD(th *store.Thread) float64 {
 	if th.CostUSD > 0 {
 		return th.CostUSD
 	}
-	return estimateTokenCostUSD(string(th.Role), th.InputTokens, th.OutputTokens)
+	return store.EstimateUsageCostUSD(string(th.Role), th.InputTokens, th.OutputTokens)
 }
 
 func (b *StoreBackend) eventCostToday(ctx context.Context, st store.Store, runID string, start time.Time) (float64, error) {

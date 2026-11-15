@@ -177,6 +177,7 @@ func (m *Mailbox) pollOnce(ctx context.Context, forceAdoptCheck bool) ([]store.E
 	pageOK := true
 	msgs := make([]mailbox.Message, 0, len(arr))
 	keys := make([]string, 0, len(arr))
+	unseen := make([]bool, 0, len(arr))
 	lastUnseen := -1
 	for i, raw := range arr {
 		b, marshalErr := json.Marshal(raw)
@@ -190,11 +191,13 @@ func (m *Mailbox) pollOnce(ctx context.Context, forceAdoptCheck bool) ([]store.E
 			break
 		}
 		key := m.messageSeenKey(msg)
-		if !m.checkOrMarkSeen(key, false) {
+		isUnseen := !m.checkOrMarkSeen(key, false)
+		if isUnseen {
 			lastUnseen = i
 		}
 		msgs = append(msgs, msg)
 		keys = append(keys, key)
+		unseen = append(unseen, isUnseen)
 	}
 	if !pageOK {
 		return nil, nil
@@ -209,7 +212,7 @@ func (m *Mailbox) pollOnce(ctx context.Context, forceAdoptCheck bool) ([]store.E
 	for i := range msgs {
 		msg := msgs[i]
 		key := keys[i]
-		if m.checkOrMarkSeen(key, false) {
+		if !unseen[i] {
 			continue
 		}
 		if m.isOlderThanAdopt(msg, initialAdopt) {
