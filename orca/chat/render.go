@@ -177,15 +177,6 @@ func FormatUserLine(text string, width int, tty bool) []string {
 	return out
 }
 
-// CostGuardState classifies run spend relative to the cost-guard limit.
-type CostGuardState uint8
-
-const (
-	CostStateNormal CostGuardState = iota
-	CostStateNearLimit
-	CostStateOverLimit
-)
-
 // FooterOptions configures dynamic styling and animation in the status footer.
 //
 //nolint:govet

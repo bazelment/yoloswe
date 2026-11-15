@@ -38,6 +38,15 @@ func EmitToolCall(ctx context.Context, name string, rawInput []byte, defaultRunI
 type AskFunc func(context.Context, string) (string, error)
 type DispatchFunc func(context.Context, router.Decision, string, func(string)) error
 
+// CostGuardState classifies run spend relative to the cost-guard limit.
+type CostGuardState uint8
+
+const (
+	CostStateNormal CostGuardState = iota
+	CostStateNearLimit
+	CostStateOverLimit
+)
+
 //nolint:govet
 type Snapshot struct {
 	Status           string

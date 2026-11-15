@@ -1172,11 +1172,11 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 		b.stepAdopted(ctx, runID)
 		var outcomes []string
 		if closeStepStore {
-			outcomes = b.collectDispatcherOutcomes(ctx, stepStore, []string{runID})
+			outcomes = b.collectDispatcherOutcomes(ctx, stepStore, []string{runID}, false)
 		} else {
 			b.mu.RLock()
 			if b.store == stepStore {
-				outcomes = b.collectDispatcherOutcomes(ctx, stepStore, []string{runID})
+				outcomes = b.collectDispatcherOutcomes(ctx, stepStore, []string{runID}, false)
 			}
 			b.mu.RUnlock()
 		}
@@ -1382,7 +1382,7 @@ func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st 
 	b.cacheMu.Unlock()
 	var out []string
 	for _, runID := range runs {
-		res := b.collectDispatcherOutcomes(ctx, st, []string{runID})
+		res := b.collectDispatcherOutcomes(ctx, st, []string{runID}, true)
 		if len(res) > 0 {
 			b.cacheMu.Lock()
 			delete(b.pendingOutcomeRuns, runID)
@@ -1391,6 +1391,9 @@ func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st 
 		}
 	}
 	for _, runID := range held {
+		if slices.Contains(runs, runID) {
+			continue
+		}
 		if res := b.collectControllerNotices(ctx, st, runID, true); len(res) > 0 {
 			out = append(out, res...)
 		}
@@ -1471,6 +1474,9 @@ func formatControllerDecisionNotice(d *store.Decision, includeBackgroundEvents b
 		return ""
 	}
 	detail := oneLineSummary(cmp.Or(d.Result, d.Reason))
+	if detail == "" {
+		return ""
+	}
 	switch d.Tool {
 	case controller.ToolPhaseAdvance, controller.ToolPhaseRework, controller.ToolPhaseStart:
 		if d.LaneID != "" && !strings.Contains(detail, d.LaneID) {
@@ -1494,13 +1500,13 @@ func formatControllerDecisionNotice(d *store.Decision, includeBackgroundEvents b
 	return ""
 }
 
-func (b *StoreBackend) collectDispatcherOutcomes(ctx context.Context, st store.Store, runs []string) []string {
+func (b *StoreBackend) collectDispatcherOutcomes(ctx context.Context, st store.Store, runs []string, includeBackgroundEvents bool) []string {
 	if st == nil || len(runs) == 0 {
 		return nil
 	}
 	var out []string
 	for _, runID := range runs {
-		out = append(out, b.collectControllerNotices(ctx, st, runID, false)...)
+		out = append(out, b.collectControllerNotices(ctx, st, runID, includeBackgroundEvents)...)
 		threads, err := st.Threads().ListThreads(ctx, store.ThreadFilter{RunID: runID, Role: store.ThreadRoleDispatcher})
 		if err != nil {
 			continue
