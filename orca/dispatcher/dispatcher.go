@@ -1406,7 +1406,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		agent := firstPhase.Agents[0]
 		if selectedModel != "" {
 			agent.Model = selectedModel
-			agent.Harness = ResolveWorkerHarness(selectedModel, agent.Harness)
+			agent.Harness = ResolveWorkerAgentHarness(selectedModel, agent.Harness)
 		}
 		spawnRes, err := d.spawnLaneSession(ctx, drv, runID, view.Run.Repository, ln, firstPhase.Name, ln.Round, agent, workerBrief)
 		if err != nil {
@@ -1566,7 +1566,7 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 		agent := targetPhase.Agents[0]
 		if selectedModel != "" {
 			agent.Model = selectedModel
-			agent.Harness = ResolveWorkerHarness(selectedModel, agent.Harness)
+			agent.Harness = ResolveWorkerAgentHarness(selectedModel, agent.Harness)
 		}
 		if ln.SessionID == "" {
 			res, err := d.spawnLaneSession(ctx, drv, runID, view.Run.Repository, ln, targetPhase.Name, round, agent, workerBrief)

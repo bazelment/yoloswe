@@ -487,9 +487,9 @@ func applyOriginRepo(runDir string, r *Run, localRepoPaths []string) {
 	}
 }
 
-func readTier1AndOriginRepo(dir string) (tier1RepoID, tier1Repo, originRepo string) {
+func readTier1AndOriginRepo(dir string) (tier1RepoID, tier1Repo, originRepo string, hasTier1 bool) {
 	if strings.TrimSpace(dir) == "" {
-		return "", "", ""
+		return "", "", "", false
 	}
 	var t1 Run
 	var localPaths []string
@@ -521,9 +521,10 @@ func readTier1AndOriginRepo(dir string) (tier1RepoID, tier1Repo, originRepo stri
 			}
 		}
 	}
+	hasTier1 = t1.Repo != "" || t1.RepoID != ""
 	var t3 Run
 	applyOriginRepo(dir, &t3, localPaths)
-	return t1.RepoID, t1.Repo, t3.Repo
+	return t1.RepoID, t1.Repo, t3.Repo, hasTier1
 }
 
 func gitOriginSlugForPath(runDir, rawPath string) string {
@@ -558,51 +559,33 @@ func readGitOriginURL(dirPath string) string {
 	if cur == "" {
 		return ""
 	}
-	for depth := 0; depth <= 4; depth++ {
-		dotGit := filepath.Join(cur, ".git")
-		if info, err := os.Stat(dotGit); err == nil {
-			if info.IsDir() {
-				if u := parseGitConfigOriginURL(readText(filepath.Join(dotGit, "config"))); u != "" {
-					return u
-				}
-			} else {
-				gitDirLine := strings.TrimSpace(readText(dotGit))
-				if target, ok := strings.CutPrefix(gitDirLine, "gitdir:"); ok {
-					target = strings.TrimSpace(target)
-					if !filepath.IsAbs(target) {
-						target = filepath.Join(cur, target)
-					}
-					target = filepath.Clean(target)
-					if u := parseGitConfigOriginURL(readText(filepath.Join(target, "config"))); u != "" {
-						return u
-					}
-					if common := strings.TrimSpace(readText(filepath.Join(target, "commondir"))); common != "" {
-						if !filepath.IsAbs(common) {
-							common = filepath.Join(target, common)
-						}
-						if u := parseGitConfigOriginURL(readText(filepath.Join(filepath.Clean(common), "config"))); u != "" {
-							return u
-						}
-					}
-					if u := parseGitConfigOriginURL(readText(filepath.Join(filepath.Dir(filepath.Dir(target)), "config"))); u != "" {
-						return u
-					}
-				}
-			}
-		}
-		if u := parseGitConfigOriginURL(readText(filepath.Join(cur, "config"))); u != "" {
-			return u
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			break
-		}
-		cur = parent
+	parse := func(configPath string) string {
+		return parseGitConfigOriginURL(readText(configPath))
 	}
-	if info, err := os.Stat(dirPath); err == nil && info.IsDir() {
-		if out, err := exec.Command("git", "-C", dirPath, "config", "--get", "remote.origin.url").Output(); err == nil {
-			if u := strings.TrimSpace(string(out)); u != "" {
+	// A bare repository stores its remotes in <repo>/config.
+	if u := parse(filepath.Join(cur, "config")); u != "" {
+		return u
+	}
+	dotGit := filepath.Join(cur, ".git")
+	if info, err := os.Stat(dotGit); err == nil {
+		if info.IsDir() {
+			return parse(filepath.Join(dotGit, "config"))
+		}
+		gitDirLine := strings.TrimSpace(readText(dotGit))
+		if target, ok := strings.CutPrefix(gitDirLine, "gitdir:"); ok {
+			target = strings.TrimSpace(target)
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(cur, target)
+			}
+			target = filepath.Clean(target)
+			if u := parse(filepath.Join(target, "config")); u != "" {
 				return u
+			}
+			if common := strings.TrimSpace(readText(filepath.Join(target, "commondir"))); common != "" {
+				if !filepath.IsAbs(common) {
+					common = filepath.Join(target, common)
+				}
+				return parse(filepath.Join(filepath.Clean(common), "config"))
 			}
 		}
 	}

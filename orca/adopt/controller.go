@@ -153,8 +153,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	generation := journal.Marker
 	populateRunRepo(&r)
-	_, _, originRepo := readTier1AndOriginRepo(r.Dir)
-	hasTier1Repo := (r.Repo != "" && r.Repo != originRepo) || r.RepoID != ""
+	_, _, originRepo, hasTier1Repo := readTier1AndOriginRepo(r.Dir)
 	if !hasTier1Repo {
 		if storeRepo := resolveStoreRepository(ctx, d.store, r.ID, originRepo); storeRepo != "" {
 			r.Repo = ""
@@ -1541,12 +1540,12 @@ func populateRunRepo(r *Run) {
 	if r.Dir == "" {
 		return
 	}
-	t1RepoID, t1Repo, originRepo := readTier1AndOriginRepo(r.Dir)
+	t1RepoID, t1Repo, originRepo, hasTier1Repo := readTier1AndOriginRepo(r.Dir)
 	if t1Repo != "" || t1RepoID != "" {
-		if r.Repo == "" || r.Repo == originRepo {
+		if hasTier1Repo && t1Repo != "" {
 			r.Repo = t1Repo
 		}
-		if r.RepoID == "" {
+		if hasTier1Repo && t1RepoID != "" {
 			r.RepoID = t1RepoID
 		}
 		return
@@ -1595,8 +1594,7 @@ func (d *adoptedRunDriver) resolveRepository(ctx context.Context, reqRepoID, req
 	tmp := d.run
 	sanitizeRunRepo(&tmp)
 	populateRunRepo(&tmp)
-	_, _, originRepo := readTier1AndOriginRepo(tmp.Dir)
-	hasTier1 := (tmp.Repo != "" && tmp.Repo != originRepo) || tmp.RepoID != ""
+	_, _, originRepo, hasTier1 := readTier1AndOriginRepo(tmp.Dir)
 	if hasTier1 {
 		applyRepoValue(&tmp, reqRepoID)
 		applyRepoValue(&tmp, reqRepo)
@@ -1897,8 +1895,7 @@ func (s *adoptedRunStore) Get(ctx context.Context, runID string) (*store.Run, er
 	}
 	if s.syncer != nil && runID == s.syncer.runID {
 		cur := s.syncer.CurrentRun()
-		_, _, originRepo := readTier1AndOriginRepo(cur.Dir)
-		hasTier1 := (cur.Repo != "" && cur.Repo != originRepo) || cur.RepoID != ""
+		_, _, _, hasTier1 := readTier1AndOriginRepo(cur.Dir)
 		if hasTier1 {
 			sr.Repository = cmp.Or(cur.Repo, cur.RepoID)
 		} else if sr.Repository == "" {

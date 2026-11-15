@@ -2278,3 +2278,21 @@ func TestModelVetterAcceptsConcreteHarnessModelsAndRejectsUnknown(t *testing.T) 
 		t.Fatalf("Spawns = %+v, want 1 spawn with Harness=agy Model=gemini-4-argon-high", drv.Spawns)
 	}
 }
+
+func TestResolveWorkerAgentHarnessPreservesCompatibleConfiguredHarness(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		model, configured, want string
+	}{
+		{"gpt-oss-120b-medium", "agy", "agy"},
+		{"claude-sonnet-4-6", "agy", "agy"},
+		{"gpt-6.1-sol", "claude", "codex"},
+		{"gemini-4-argon-high", "codex", "agy"},
+	} {
+		t.Run(tc.model+"/"+tc.configured, func(t *testing.T) {
+			if got := dispatcher.ResolveWorkerAgentHarness(tc.model, tc.configured); got != tc.want {
+				t.Fatalf("ResolveWorkerAgentHarness(%q, %q) = %q, want %q", tc.model, tc.configured, got, tc.want)
+			}
+		})
+	}
+}

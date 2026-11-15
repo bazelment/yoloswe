@@ -1201,10 +1201,10 @@ func isValidModelSuffix(s string) bool {
 }
 
 func effectiveAllowedModels(st *StateView) []string {
-	if st != nil && len(st.AllowedModels) > 0 {
-		return st.AllowedModels
-	}
 	allowed := slices.Clone(DefaultAllowedModels)
+	if st != nil && len(st.AllowedModels) > 0 {
+		allowed = slices.Clone(st.AllowedModels)
+	}
 	if st == nil {
 		return allowed
 	}
@@ -1252,7 +1252,7 @@ func isModelAllowed(modelName string, allowed []string) bool {
 
 func isFastestWorkerModel(modelName string) bool {
 	lower := strings.ToLower(strings.TrimSpace(modelName))
-	return lower == "fastest" || lower == "haiku" || strings.Contains(lower, "haiku") || lower == "gpt-5.4-mini" || strings.HasSuffix(lower, "-mini")
+	return lower == "fastest" || lower == "haiku" || strings.Contains(lower, "haiku") || lower == "gpt-5.4-mini" || strings.HasSuffix(lower, "-mini") || strings.Contains(lower, "flash")
 }
 
 // ResolveWorkerHarness infers the lane harness ("claude", "codex", or "agy")
@@ -1276,6 +1276,33 @@ func ResolveWorkerHarness(modelName, defaultHarness string) string {
 		return trimmed
 	}
 	return "claude"
+}
+
+// ResolveWorkerAgentHarness keeps an explicitly configured harness when it
+// supports the selected concrete model, and infers a harness only when the
+// configuration cannot run that model. agy accepts the concrete model IDs
+// exposed by the lane driver, including Claude and gpt-oss IDs.
+func ResolveWorkerAgentHarness(modelName, configuredHarness string) string {
+	model := strings.ToLower(strings.TrimSpace(modelName))
+	harness := strings.ToLower(strings.TrimSpace(configuredHarness))
+	if model == "" || harness == "" {
+		return ResolveWorkerHarness(modelName, configuredHarness)
+	}
+	switch harness {
+	case "agy":
+		return configuredHarness
+	case "codex", "openai":
+		if strings.HasPrefix(model, "gpt-") || model == "codex" || model == "openai" {
+			return configuredHarness
+		}
+	case "claude":
+		if model == "claude" || model == "opus" || model == "sonnet" || model == "haiku" || model == "fable" || strings.HasPrefix(model, "claude-") || strings.HasSuffix(model, "[200k]") {
+			return configuredHarness
+		}
+	default:
+		return ResolveWorkerHarness(modelName, configuredHarness)
+	}
+	return ResolveWorkerHarness(modelName, configuredHarness)
 }
 
 // ResolveWorkerModel maps policy tier aliases (strongest, mid, cheaper, fastest)
