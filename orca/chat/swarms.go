@@ -50,6 +50,21 @@ func HostSwarmLine(r *adopt.Run, now time.Time) string {
 	return line
 }
 
+// HostSwarmCompactLine renders a compact one-line summary for a host swarm
+// (id, status, live lanes, driver) so large swarm lists fit on a single page.
+func HostSwarmCompactLine(r *adopt.Run, now time.Time) string {
+	status := cmp.Or(r.State, adopt.RunActive)
+	if r.State == adopt.RunSuperseded && r.SupersededBy != "" {
+		status = "superseded by " + r.SupersededBy
+	}
+	driver := cmp.Or(r.DrivenBy, r.Orchestrator, "-")
+	if r.Holder != "" {
+		driver += " (held by " + r.Holder + ")"
+	}
+	return fmt.Sprintf("%s | %s | lanes: %s | driver: %s",
+		r.ID, status, hostPhases(r.Lanes), driver)
+}
+
 // hostPhases counts lanes by status and phase.
 func hostPhases(lanes []adopt.Lane) string {
 	statuses, phases := map[string]int{}, map[string]int{}
@@ -165,6 +180,58 @@ func (l SwarmList) Filter(run string) SwarmList {
 	return l
 }
 
+// FilterActive narrows Orca and Host runs to active runs (or runs with a live lease/holder).
+func (l SwarmList) FilterActive(now time.Time) SwarmList {
+	l.sortRecentFirst()
+	var orca []store.Run
+	for i := range l.Orca {
+		r := &l.Orca[i]
+		if r.Lease != nil && !r.Lease.Expired(now) {
+			orca = append(orca, *r)
+		}
+	}
+	var host []adopt.Run
+	for i := range l.Host {
+		r := &l.Host[i]
+		if r.State == adopt.RunActive || r.State == "" || r.Holder != "" {
+			host = append(host, *r)
+		}
+	}
+	l.Orca, l.Host = orca, host
+	return l
+}
+
+func (l SwarmList) renderCompactSummary(now time.Time) string {
+	l.sortRecentFirst()
+	var b strings.Builder
+	switch {
+	case l.OrcaErr != nil:
+		fmt.Fprintf(&b, "orca runs: unreadable: %v\n", l.OrcaErr)
+	case len(l.Orca) == 0:
+		b.WriteString("orca runs: none\n")
+	default:
+		fmt.Fprintf(&b, "orca runs (%d; /runs <id> attaches):\n", len(l.Orca))
+		for i := range l.Orca {
+			b.WriteString("  " + orcaRunLine(&l.Orca[i], now) + "\n")
+		}
+	}
+	switch {
+	case l.HostOff != "":
+		fmt.Fprintf(&b, "host swarms: not listed: %s\n", l.HostOff)
+	case len(l.Host) == 0 && l.HostErr == nil:
+		b.WriteString("host swarms: none found\n")
+	default:
+		fmt.Fprintf(&b, "host swarms (%d; /adopt <id> takes one over):\n", len(l.Host))
+		for i := range l.Host {
+			b.WriteString("  " + HostSwarmCompactLine(&l.Host[i], now) + "\n")
+		}
+		if l.HostErr != nil {
+			fmt.Fprintf(&b, "  unreadable: %v\n", l.HostErr)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // Render lists both groups; detail adds each host lane's activity, next step
 // and PR state, and per run what is running now and what was not checked.
 // When unfiltered across multiple host swarms, non-active runs stay as compact
@@ -213,9 +280,10 @@ func (l SwarmList) RenderBounded(now time.Time, detail bool, maxBytes int) strin
 }
 
 // RenderPage renders page (1-based) of the swarm list within maxBytes.
-// When the detailed output exceeds maxBytes, page 1 always includes the full
-// compact summary of all orca runs and host swarms first so no adoptable run
-// is ever truncated out of view.
+// When the detailed output exceeds maxBytes, page 1 renders a single self-contained
+// compact list of all orca runs and host swarms (plus inline active-swarm details
+// that fit within maxBytes) so one call answers "which runs can you adopt" without
+// multi-page truncation.
 func (l SwarmList) RenderPage(now time.Time, detail bool, maxBytes, page int) string {
 	if page <= 0 {
 		page = 1
@@ -226,6 +294,30 @@ func (l SwarmList) RenderPage(now time.Time, detail bool, maxBytes, page int) st
 	}
 
 	summary := l.Render(now, false)
+	if len(summary) > maxBytes {
+		summary = l.renderCompactSummary(now)
+	}
+	if page == 1 && !l.Filtered && len(summary) <= maxBytes {
+		out := summary
+		if detail {
+			l.sortRecentFirst()
+			for i := range l.Host {
+				r := &l.Host[i]
+				if l.compactRow(r) {
+					continue
+				}
+				var db strings.Builder
+				fmt.Fprintf(&db, "\ndetail %s:\n", r.ID)
+				l.renderHostDetail(&db, r)
+				block := strings.TrimRight(db.String(), "\n")
+				if len(out)+len(block) <= maxBytes {
+					out += block
+				}
+			}
+		}
+		return out
+	}
+
 	const footerReserve = 120
 	budget := max(maxBytes-footerReserve, 256)
 

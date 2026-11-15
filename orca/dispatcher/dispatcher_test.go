@@ -2101,3 +2101,160 @@ func TestDispatcherLaneWaitToolSuppressesStallUntilDeadline(t *testing.T) {
 		t.Fatalf("at 121m (after expected wait deadline): stops=%+v, want perf-sweep stopped", drv.Stops)
 	}
 }
+
+func TestDispatchAdoptedFinishedRunSkipsTurnAndCompactSnapshot(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	const runID = "20261114-trial-m1"
+	obj := "# Objective\nGoal: Slim subagent-swarm-nebula prompt footprint by >=35% with no regression.\n\n" +
+		strings.Repeat("Milestone history line with merged PR details and verification evidence.\n", 25) +
+		"\nNext: none. Run DONE 2026-11-14T18:10Z.\n"
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:            runID,
+		Repository:    "sycamore-labs/nebula",
+		Objective:     obj,
+		DefaultRecipe: "adopted",
+	}); err != nil {
+		t.Fatalf("Create run: %v", err)
+	}
+	for i := 1; i <= 9; i++ {
+		id := fmt.Sprintf("m%d-lane", i)
+		status := store.BacklogDone
+		laneStatus := lane.StatusDone
+		if i == 9 {
+			status = store.BacklogDropped
+			laneStatus = lane.StatusFailed
+		}
+		if err := st.Backlog().Add(ctx, store.BacklogItem{
+			ID:       id,
+			RunID:    runID,
+			Title:    fmt.Sprintf("Milestone lane %d", i),
+			Priority: store.PriorityP1,
+			Status:   status,
+			LaneID:   id,
+		}); err != nil {
+			t.Fatalf("Add backlog %d: %v", i, err)
+		}
+		if err := st.Lanes().Upsert(ctx, lane.Lane{
+			ID:     id,
+			RunID:  runID,
+			ItemID: id,
+			Title:  fmt.Sprintf("Milestone lane %d", i),
+			Status: laneStatus,
+			Phase:  recipe.PhaseReview,
+			Round:  1,
+			PR:     5600 + i,
+			Checks: "green",
+		}); err != nil {
+			t.Fatalf("Upsert lane %d: %v", i, err)
+		}
+	}
+
+	ev, err := st.Events().Append(ctx, store.Event{
+		RunID:   runID,
+		Kind:    store.EventLaneReport,
+		Class:   store.EventClassJudgment,
+		Source:  mailbox.AdoptMailSummarySource,
+		Summary: "Adopted finished run 20261114-trial-m1: 9 lanes (done:8, failed:1); no open questions.",
+	})
+	if err != nil {
+		t.Fatalf("Append adopt summary event: %v", err)
+	}
+
+	// 1. Compact snapshot for a finished run stays small (< 1100 bytes, vs ~3900 bytes full).
+	snap, err := dispatcher.BuildSnapshot(ctx, st, clk, runID, []store.Event{ev}, dispatcher.SnapshotConfig{})
+	if err != nil {
+		t.Fatalf("BuildSnapshot: %v", err)
+	}
+	if !strings.Contains(snap.Text, "Status: DONE") || !strings.Contains(snap.Text, "All 9 backlog items are terminal") || !strings.Contains(snap.Text, "All 9 lanes are terminal") {
+		t.Fatalf("expected compact DONE snapshot summary, got:\n%s", snap.Text)
+	}
+	if len(snap.Text) > 1200 {
+		t.Fatalf("done run snapshot size = %d bytes, want <= 1200 bytes:\n%s", len(snap.Text), snap.Text)
+	}
+
+	// 2. Dispatching an adopted finished run with only the adopt summary (or non-owner events)
+	// skips the model call completely: 0 turns, $0.00 cost, and "No action needed."
+	client := model.NewFakeClient()
+	disp := dispatcher.New(dispatcher.Config{}, st, drv, clk, client)
+	res, err := disp.Dispatch(ctx, runID, []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch adopt summary on finished run: %v", err)
+	}
+	if res.TurnCount != 0 || res.Usage.CostUSD != 0 || len(client.Requests) != 0 {
+		t.Fatalf("expected 0 model turns and $0 cost when adopting finished run, got TurnCount=%d CostUSD=%f requests=%d",
+			res.TurnCount, res.Usage.CostUSD, len(client.Requests))
+	}
+	if !strings.Contains(res.Summary, "No action needed") {
+		t.Fatalf("Summary = %q, want 'No action needed'", res.Summary)
+	}
+
+	// 3. Even if an owner message forces a dispatcher turn on a finished run with 4+ events,
+	// it stays on the default model (never escalates to HardBatchModel) and stays well under $0.50.
+	ownerEv, err := st.Events().Append(ctx, store.Event{
+		RunID:   runID,
+		Kind:    store.EventOwnerMessage,
+		Class:   store.EventClassJudgment,
+		Source:  "owner",
+		Summary: "confirm trial-m1 needs no further work",
+	})
+	if err != nil {
+		t.Fatalf("Append owner event: %v", err)
+	}
+	forcedClient := model.NewFakeClient(model.Response{
+		ID:         "msg-done-1",
+		Model:      dispatcher.DefaultModel,
+		StopReason: model.StopReasonEndTurn,
+		Message:    model.NewAssistantMessage(model.NewTextBlock("No action needed.")),
+		Usage:      model.Usage{InputTokens: 220, OutputTokens: 12, CostUSD: 0.02},
+	})
+	dispForced := dispatcher.New(dispatcher.Config{}, st, drv, clk, forcedClient)
+	resForced, err := dispForced.Dispatch(ctx, runID, []store.Event{ev, ev, ev, ownerEv})
+	if err != nil {
+		t.Fatalf("Dispatch forced owner event on finished run: %v", err)
+	}
+	reqs := forcedClient.Requests
+	if len(reqs) != 1 {
+		t.Fatalf("forced turn requests = %d, want 1 request", len(reqs))
+	}
+	if reqs[0].Model != dispatcher.DefaultModel {
+		t.Fatalf("forced turn model = %q, want %q (no Opus escalation)", reqs[0].Model, dispatcher.DefaultModel)
+	}
+	if resForced.Usage.CostUSD >= 0.50 {
+		t.Fatalf("forced turn CostUSD = %f, want < $0.50", resForced.Usage.CostUSD)
+	}
+	spawnSchema := string(model.SchemaFor[dispatcher.LaneSpawnParams]())
+	if strings.Contains(spawnSchema, `"recipe_name"`) {
+		t.Fatalf("LaneSpawnParams schema should omit recipe_name via jsonschema:\"-\": %s", spawnSchema)
+	}
+
+	// 4. Done-run skipping must NEVER apply to runs that are not done, even for AdoptMailSummarySource.
+	activeEv, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventLaneReport,
+		Class:   store.EventClassJudgment,
+		Source:  mailbox.AdoptMailSummarySource,
+		Summary: "Adopted active run run-1: 0 lanes, open backlog.",
+	})
+	if err != nil {
+		t.Fatalf("Append active adopt summary event: %v", err)
+	}
+	activeClient := model.NewFakeClient(model.Response{
+		ID:         "msg-active-1",
+		Model:      dispatcher.DefaultModel,
+		StopReason: model.StopReasonEndTurn,
+		Message:    model.NewAssistantMessage(model.NewTextBlock("Reviewed active run.")),
+		Usage:      model.Usage{InputTokens: 180, OutputTokens: 8, CostUSD: 0.01},
+	})
+	dispActive := dispatcher.New(dispatcher.Config{}, st, drv, clk, activeClient)
+	resActive, err := dispActive.Dispatch(ctx, "run-1", []store.Event{activeEv})
+	if err != nil {
+		t.Fatalf("Dispatch adopt summary on active run: %v", err)
+	}
+	if resActive.TurnCount != 1 || len(activeClient.Requests) != 1 {
+		t.Fatalf("expected active run to invoke model turn (not skip), got TurnCount=%d requests=%d",
+			resActive.TurnCount, len(activeClient.Requests))
+	}
+}

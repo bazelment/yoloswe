@@ -690,15 +690,25 @@ func (r *ToolRegistry) Definitions() []ToolDefinition {
 
 // Has reports whether a tool with name is registered.
 func (r *ToolRegistry) Has(name string) bool {
+	return r.findEntry(name) != nil
+}
+
+func (r *ToolRegistry) findEntry(name string) *toolEntry {
 	if r == nil {
-		return false
+		return nil
 	}
-	for _, e := range r.entries {
-		if e.def.Name == name {
-			return true
+	norm := strings.ReplaceAll(name, ".", "_")
+	for i := range r.entries {
+		if r.entries[i].def.Name == name {
+			return &r.entries[i]
 		}
 	}
-	return false
+	for i := range r.entries {
+		if strings.ReplaceAll(r.entries[i].def.Name, ".", "_") == norm {
+			return &r.entries[i]
+		}
+	}
+	return nil
 }
 
 // Names returns the registered tool names in registration order.
@@ -715,16 +725,12 @@ func (r *ToolRegistry) Names() []string {
 
 // Execute invokes the handler matching call.Name and returns a ToolResult.
 func (r *ToolRegistry) Execute(ctx context.Context, call ToolCall) ToolResult {
-	if r != nil {
-		for _, e := range r.entries {
-			if e.def.Name == call.Name {
-				res, err := e.handler(ctx, call.Input)
-				if err != nil {
-					return ToolResult{ToolUseID: call.ID, Content: err.Error(), IsError: true}
-				}
-				return ToolResult{ToolUseID: call.ID, Content: res, IsError: false}
-			}
+	if e := r.findEntry(call.Name); e != nil {
+		res, err := e.handler(ctx, call.Input)
+		if err != nil {
+			return ToolResult{ToolUseID: call.ID, Content: err.Error(), IsError: true}
 		}
+		return ToolResult{ToolUseID: call.ID, Content: res, IsError: false}
 	}
 	return ToolResult{
 		ToolUseID: call.ID,
@@ -806,7 +812,8 @@ func collectStructFields(t reflect.Type, props map[string]any, required *[]strin
 			continue
 		}
 		jsonTag := f.Tag.Get("json")
-		if jsonTag == "-" {
+		jsTag := strings.TrimSpace(f.Tag.Get("jsonschema"))
+		if jsonTag == "-" || jsTag == "-" {
 			continue
 		}
 		if f.Anonymous && jsonTag == "" {
@@ -833,19 +840,28 @@ func collectStructFields(t reflect.Type, props map[string]any, required *[]strin
 		if desc := f.Tag.Get("jsonschema_description"); desc != "" {
 			prop["description"] = desc
 		}
-		if jsTag := f.Tag.Get("jsonschema"); jsTag != "" {
+		if jsTag != "" {
 			var enums []any
-			for _, part := range strings.Split(jsTag, ",") {
-				part = strings.TrimSpace(part)
+			inDesc := false
+			for _, rawPart := range strings.Split(jsTag, ",") {
+				part := strings.TrimSpace(rawPart)
 				switch {
 				case part == "required":
 					isReq = true
+					inDesc = false
 				case strings.HasPrefix(part, "description="):
 					prop["description"] = strings.TrimPrefix(part, "description=")
+					inDesc = true
 				case strings.HasPrefix(part, "enum="):
 					enums = append(enums, strings.TrimPrefix(part, "enum="))
+					inDesc = false
 				case strings.HasPrefix(part, "default="):
 					prop["default"] = strings.TrimPrefix(part, "default=")
+					inDesc = false
+				case inDesc:
+					if cur, ok := prop["description"].(string); ok {
+						prop["description"] = cur + "," + rawPart
+					}
 				}
 			}
 			if len(enums) > 0 {
