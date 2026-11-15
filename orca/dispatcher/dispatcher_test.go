@@ -2030,7 +2030,7 @@ func TestDispatcherLaneWaitToolSuppressesStallUntilDeadline(t *testing.T) {
 		ID:          "perf-sweep",
 		RunID:       "run-1",
 		Title:       "Azure sweep",
-		Status:      lane.StatusRunning,
+		Status:      lane.StatusBlocked,
 		Phase:       recipe.PhaseSWE,
 		Round:       1,
 		Attempt:     1,
@@ -2039,6 +2039,15 @@ func TestDispatcherLaneWaitToolSuppressesStallUntilDeadline(t *testing.T) {
 		LastEventAt: clk.Now(),
 	}); err != nil {
 		t.Fatalf("Upsert lane: %v", err)
+	}
+	deadline := clk.Now().Add(2 * time.Hour)
+	ask := controller.OwnerAsk{ID: "escalation-perf-sweep-12", RunID: "run-1", LaneID: "perf-sweep", Question: "How should it continue?", Options: []string{"wait", "stop"}, Default: "wait", Deadline: deadline}
+	rawAsk, err := json.Marshal(ask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Directives().Add(ctx, store.Directive{ID: "ask-" + ask.ID, RunID: "run-1", Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Scope: ask.LaneID, Ref: "owner_ask:" + ask.ID, Text: string(rawAsk), ExpiresAt: &deadline, Status: store.DirectiveActive}); err != nil {
+		t.Fatalf("Add escalation ask: %v", err)
 	}
 
 	ev, err := st.Events().Append(ctx, store.Event{
@@ -2073,6 +2082,17 @@ func TestDispatcherLaneWaitToolSuppressesStallUntilDeadline(t *testing.T) {
 	}
 	if len(res.Decisions) != 1 || !res.Decisions[0].Vetted || res.Decisions[0].Tool != dispatcher.ToolLaneWait {
 		t.Fatalf("decisions = %+v, want 1 vetted lane.wait decision", res.Decisions)
+	}
+	if !strings.Contains(res.Decisions[0].Result, "resolved escalation-perf-sweep-12 myself: expected wait") {
+		t.Fatalf("lane.wait result = %q, want escalation resolution", res.Decisions[0].Result)
+	}
+	resolved, err := st.Directives().Get(ctx, "run-1", "ask-"+ask.ID)
+	if err != nil || resolved.Status != store.DirectiveHandled {
+		t.Fatalf("escalation ask status = %v, err=%v; want handled", resolved.Status, err)
+	}
+	ln, err := st.Lanes().Get(ctx, "run-1", "perf-sweep")
+	if err != nil || ln.Status != lane.StatusRunning {
+		t.Fatalf("lane status after wait = %s, err=%v; want running", ln.Status, err)
 	}
 
 	judge := controller.NewFakeJudge()

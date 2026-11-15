@@ -463,6 +463,11 @@ func (c *Controller) forwardLaneEvents(ctx context.Context, ch <-chan lane.Event
 }
 
 func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
+	if ev.Kind == lane.EventWaitingForInput && lane.WorkingInputWaiting(ev.Text) {
+		// agy can report input.waiting while its own timer/background task is
+		// active. That is a working heartbeat, never a phase exit or stop cue.
+		return true
+	}
 	// Drivers may report run-wide silence. Apply it only to lanes that were
 	// already quiet at Since, retaining each terminal's identity for stale checks.
 	if ev.Kind == lane.EventNoActivity && ev.LaneID == "" {
@@ -2409,6 +2414,11 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		// Stale exit for an earlier terminal that already advanced.
 		return store.EventClassAuto, nil
 	}
+	if terminalID := strings.TrimSpace(payload.TerminalID); terminalID != "" && c.stoppedTerminals[terminalID] {
+		// Orca stopped this live terminal as part of a deliberate handover or
+		// retry. Its exit is not evidence that the worker failed an attempt.
+		return store.EventClassAuto, nil
+	}
 	if settled, err := c.reconcileLanePRState(ctx, ln, ev.ID); settled || err != nil {
 		if err != nil {
 			return store.EventClassUnclassified, err
@@ -2753,12 +2763,27 @@ func (c *Controller) startLanePhase(
 	}
 	if phase.Name == recipe.PhaseIntegrate {
 		intentKey := "intent:" + actionKey
-		if c.hasActionDecision(intentKey) {
-			_, err := c.escalateLane(ctx, ln, "integrate launch outcome uncertain; reconcile the existing terminal before proceeding", "integrate intent recovered", DecisionArgs{ActionKey: "uncertain:" + actionKey})
-			return err
-		}
+		recovered := c.hasActionDecision(intentKey)
 		if _, _, err := c.recordDecision(ctx, "phase.launch.intent", ln.ID, reason, "integrate launch reserved", DecisionArgs{ActionKey: intentKey, Phase: phase.Name, Round: round, Attempt: attempt}); err != nil {
 			return err
+		}
+		if recovered {
+			// A durable intent means the previous controller may have died between
+			// reserving and applying the launch. Re-run the launch effect with a
+			// small persisted retry budget and backoff; never turn recovery into an
+			// owner escalation.
+			recoveries, lastRecovery := c.integrateRecoveryState(ctx, ln.ID, actionKey)
+			if recoveries >= 3 {
+				return nil
+			}
+			if !lastRecovery.IsZero() && c.clock.Now().Before(lastRecovery.Add(time.Second)) {
+				return nil
+			}
+			recoveryKey := fmt.Sprintf("recover:%s:%d", actionKey, recoveries+1)
+			if _, _, err := c.recordDecision(ctx, "phase.launch.recovery", ln.ID, "retry interrupted integrate launch", "recovery pending", DecisionArgs{ActionKey: recoveryKey, Phase: phase.Name, Round: round, Attempt: attempt}); err != nil {
+				return err
+			}
+			reason = "recover interrupted integrate launch: " + reason
 		}
 	}
 
@@ -2881,6 +2906,28 @@ func (c *Controller) startLanePhase(
 		}
 	}
 	return nil
+}
+
+func (c *Controller) integrateRecoveryState(ctx context.Context, laneID, actionKey string) (int, time.Time) {
+	decs, err := c.store.Decisions().List(ctx, store.DecisionFilter{RunID: c.cfg.RunID, LaneID: laneID})
+	if err != nil {
+		return 0, time.Time{}
+	}
+	count := 0
+	var last time.Time
+	for i := range decs {
+		if decs[i].Tool != "phase.launch.recovery" {
+			continue
+		}
+		var args DecisionArgs
+		if json.Unmarshal(decs[i].Args, &args) == nil && strings.HasPrefix(args.ActionKey, "recover:"+actionKey+":") {
+			count++
+			if decs[i].CreatedAt.After(last) {
+				last = decs[i].CreatedAt
+			}
+		}
+	}
+	return count, last
 }
 
 func (c *Controller) stopCurrentTerminal(ctx context.Context, ln *lane.Lane, reason string) error {

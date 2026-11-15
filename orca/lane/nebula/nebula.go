@@ -504,6 +504,9 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 		e.Kind = lane.EventPhaseReported
 		e.Report = p.Report
 	case store.EventPhaseExit:
+		if p.TerminalEvent != nil && strings.EqualFold(strings.TrimSpace(p.TerminalEvent.Type), "input.waiting") && inputWaitingIsWorking(p.TerminalEvent) {
+			return lane.Event{}, false
+		}
 		outcome := ""
 		if p.TerminalEvent != nil {
 			outcome = strings.ToLower(strings.TrimSpace(p.TerminalEvent.Outcome))
@@ -519,6 +522,11 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 		}
 	case store.EventStall:
 		if p.TerminalEvent != nil {
+			if strings.EqualFold(strings.TrimSpace(p.TerminalEvent.Type), "input.waiting") && inputWaitingIsWorking(p.TerminalEvent) {
+				// agy uses input.waiting while it owns a background timer/task. It
+				// is still working; do not turn this heartbeat into a phase exit.
+				return lane.Event{}, false
+			}
 			outcome := strings.ToLower(strings.TrimSpace(p.TerminalEvent.Outcome))
 			if quota || isQuotaOutcome(outcome) {
 				e.Kind = lane.EventQuotaFailure
@@ -545,6 +553,21 @@ func uniformEvent(ev store.Event, runID string) (lane.Event, bool) {
 		return lane.Event{}, false
 	}
 	return e, true
+}
+
+// inputWaitingIsWorking recognizes agy's intentional idle screen. The
+// terminal emits input.waiting while a background task or timer is checking
+// back in; stopping that terminal would discard live work.
+func inputWaitingIsWorking(ev *TerminalEvent) bool {
+	if ev == nil {
+		return false
+	}
+	text := strings.ToLower(ev.Text)
+	if lane.WorkingInputWaiting(text) {
+		return true
+	}
+	raw := strings.ToLower(strings.TrimSpace(string(ev.BackgroundTasks)))
+	return raw != "" && raw != "null" && raw != "[]" && strings.Contains(raw, "task")
 }
 
 func isQuotaOutcome(outcome string) bool {
@@ -1890,6 +1913,9 @@ func (d *Driver) mapTerminalEvent(ctx context.Context, req StreamRequest, termEv
 		}
 
 	case "input.waiting":
+		if inputWaitingIsWorking(&termEv) {
+			return store.Event{}, false, nil
+		}
 		kind = store.EventStall
 		class = store.EventClassJudgment
 		urgent = strings.ToLower(strings.TrimSpace(termEv.EOTSource)) != "heuristic"

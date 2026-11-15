@@ -570,6 +570,16 @@ func IsBusyProcess(cmd string) bool {
 	return false
 }
 
+// WorkingInputWaiting reports whether a terminal's input.waiting screen is
+// the intentional agy idle state while a timer or background task is active.
+func WorkingInputWaiting(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "timer running") ||
+		strings.Contains(lower, "checking back in") ||
+		strings.Contains(lower, "task(s)") ||
+		strings.Contains(lower, "task-")
+}
+
 type Driver = LaneDriver
 
 // FakeDriver is an in-memory LaneDriver implementation for deterministic unit tests.
