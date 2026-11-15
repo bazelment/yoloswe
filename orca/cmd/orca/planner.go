@@ -799,6 +799,17 @@ func (p *Planner) AskStream(
 	hostRun func(string) (adopt.Run, error),
 	emit func(string),
 ) (string, error) {
+	return p.askStream(ctx, st, runID, question, findings, p.investigate, hostRun, emit)
+}
+
+func (p *Planner) askStream(
+	ctx context.Context,
+	st store.Store,
+	runID, question, findings string,
+	icfg model.InvestigateConfig,
+	hostRun func(string) (adopt.Run, error),
+	emit func(string),
+) (string, error) {
 	if st == nil {
 		st = p.store
 	}
@@ -910,30 +921,26 @@ func (p *Planner) AskStream(
 	}
 
 	var appliedSummary string
-	reg := p.buildChatToolRegistryForRun(st, *run, effectiveRef, hostRun, func(callCtx context.Context, rec PlanReconciliation) (string, error) {
-		sum, applyErr := p.applyReconciliation(callCtx, st, runID, rec, effectiveRef)
-		if applyErr != nil {
-			return "", applyErr
+	reg := p.buildChatToolRegistryForRun(st, *run, effectiveRef, icfg, hostRun, func(callCtx context.Context, rec PlanReconciliation) (string, error) {
+		if len(rec.AddItems) == 0 && len(rec.UpdateItems) == 0 && len(rec.DropItemIDs) == 0 && strings.TrimSpace(rec.Objective) == "" && len(rec.Conflicts) == 0 {
+			return cmp.Or(strings.TrimSpace(rec.Summary), "No plan changes proposed"), nil
 		}
-		appliedSummary = sum
-		if len(rec.Conflicts) == 0 && (len(rec.AddItems) > 0 || len(rec.UpdateItems) > 0 || len(rec.DropItemIDs) > 0 || strings.TrimSpace(rec.Objective) != "") {
-			propQ := strings.TrimSpace(rec.Summary)
-			if propQ == "" && len(rec.AddItems) > 0 {
-				var titles []string
-				for i := range rec.AddItems {
-					titles = append(titles, rec.AddItems[i].Title)
-				}
-				propQ = "Approve proposed backlog work: " + strings.Join(titles, "; ")
+		propQ := strings.TrimSpace(rec.Summary)
+		if propQ == "" && len(rec.AddItems) > 0 {
+			var titles []string
+			for i := range rec.AddItems {
+				titles = append(titles, rec.AddItems[i].Title)
 			}
-			if propQ == "" {
-				propQ = sum
-			}
-			_, _ = recordProposal(callCtx, planreader.ProposeWorkParams{
-				Question:    propQ,
-				Description: propQ,
-			})
+			propQ = "Approve proposed backlog work: " + strings.Join(titles, "; ")
 		}
-		return sum, nil
+		if propQ == "" {
+			propQ = "Approve proposed Planner changes"
+		}
+		ask, err := recordProposal(callCtx, planreader.ProposeWorkParams{Question: propQ, Description: propQ})
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Recorded proposal %s for owner approval; no plan changes were applied", ask.ID), nil
 	}, recordProposal)
 
 	ctx, stream := withChatStream(ctx, emit)
@@ -947,7 +954,6 @@ func (p *Planner) AskStream(
 	)
 
 	if p.agentBackend == model.AgentBackendCLI {
-		icfg := p.investigate
 		if hostRun != nil {
 			if hr, hrErr := hostRun(runID); hrErr == nil && strings.TrimSpace(hr.Dir) != "" {
 				icfg.RunDir = hr.Dir
@@ -1040,7 +1046,7 @@ func (p *Planner) AskStream(
 				})
 			}),
 		)
-		if lErr != nil && strings.Contains(lErr.Error(), "FakeClient has no more scripted responses") && (loopRes == nil || loopRes.TurnCount == 0) {
+		if lErr != nil && errors.Is(lErr, model.ErrFakeClientExhausted) && (loopRes == nil || loopRes.TurnCount == 0) {
 			_ = st.Threads().CompleteTurn(cleanupCtx, th.ID, turnID, store.TurnStatusInterrupted, model.Usage{}, "")
 			_ = st.Threads().UpdateThreadStatus(cleanupCtx, th.ID, store.ThreadStatusArchived)
 			return "", chat.ErrPlannerFallbackToQueue
@@ -1264,6 +1270,7 @@ func (p *Planner) buildChatToolRegistryForRun(
 	st store.Store,
 	run store.Run,
 	effectiveRef string,
+	icfg model.InvestigateConfig,
 	hostRun func(string) (adopt.Run, error),
 	applyReconcile func(context.Context, PlanReconciliation) (string, error),
 	recordProposal func(context.Context, planreader.ProposeWorkParams) (controller.OwnerAsk, error),
@@ -1386,7 +1393,6 @@ func (p *Planner) buildChatToolRegistryForRun(
 		},
 	)
 
-	icfg := p.investigate
 	if hostRun != nil {
 		if hr, err := hostRun(runID); err == nil && strings.TrimSpace(hr.Dir) != "" {
 			if strings.TrimSpace(icfg.RunDir) == "" {

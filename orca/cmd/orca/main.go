@@ -555,23 +555,20 @@ func runChatSession(
 		if routerOnlyReplay || (chatPlanner.client == nil && chatPlanner.agentBackend != model.AgentBackendCLI) {
 			return chatui.ErrPlannerFallbackToQueue
 		}
-		chatPlanner.store = runStore
-		chatPlanner.investigate = concierge.investigateConfig(streamCtx)
-		targetRun, err := concierge.resolveTargetRun(streamCtx, text)
-		if err != nil || strings.TrimSpace(targetRun) == "" {
-			targetRun = activeRun
-		}
-		_, askErr := chatPlanner.AskStream(streamCtx, runStore, targetRun, text, "", backend.ReadHostRun, emit)
+		_, askErr := chatPlanner.askStream(streamCtx, runStore, activeRun, text, "", concierge.investigateConfig(streamCtx), backend.ReadHostRun, emit)
 		return askErr
 	}
 	concierge.AskPlanner = func(askCtx context.Context, targetRun, q, findings string, emit func(string)) (string, error) {
 		var ans string
 		err := backend.WithRun(func(runStore store.Store, activeRun string) error {
-			chatPlanner.store = runStore
-			chatPlanner.investigate = concierge.investigateConfig(askCtx)
-			runID := cmp.Or(strings.TrimSpace(targetRun), activeRun)
+			runID := activeRun
+			if requested := strings.TrimSpace(targetRun); requested != "" {
+				if _, getErr := runStore.Runs().Get(askCtx, requested); getErr == nil {
+					runID = requested
+				}
+			}
 			var askErr error
-			ans, askErr = chatPlanner.AskStream(askCtx, runStore, runID, q, findings, backend.ReadHostRun, emit)
+			ans, askErr = chatPlanner.askStream(askCtx, runStore, runID, q, findings, concierge.investigateConfig(askCtx), backend.ReadHostRun, emit)
 			return askErr
 		})
 		return ans, err
