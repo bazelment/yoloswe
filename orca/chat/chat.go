@@ -37,10 +37,16 @@ func EmitToolCall(ctx context.Context, name string, rawInput []byte, defaultRunI
 
 type AskFunc func(context.Context, string) (string, error)
 type DispatchFunc func(context.Context, router.Decision, string, func(string)) error
+
+//nolint:govet
 type Snapshot struct {
-	Status    string
-	Questions []string
-	Outcomes  []string
+	Status           string
+	BackgroundRole   string
+	Questions        []string
+	Outcomes         []string
+	CostLimitUSD     float64
+	BackgroundActive bool
+	CostState        CostGuardState
 }
 type Backend interface {
 	Snapshot(context.Context) (Snapshot, error)
@@ -75,11 +81,23 @@ func commandUsage() string {
 //nolint:govet
 type Model struct {
 	poll                 bool
+	NoColor              bool
 	initPrinted          bool
 	refreshing           bool
 	restarting           bool
+	spinnerTicking       bool
+	bgActive             bool
+	bgRole               string
+	costState            CostGuardState
+	costLimitUSD         float64
 	restartMessage       string
 	PollInterval         time.Duration
+	SpinnerInterval      time.Duration
+	Now                  func() time.Time
+	turnStartedAt        time.Time
+	turnHandler          string
+	turnStep             string
+	spinnerFrame         int
 	questions            []string
 	ctx                  context.Context
 	ask                  AskFunc
@@ -100,6 +118,33 @@ type Model struct {
 	cursor int
 	// hints are rendered below the prompt.
 	hints []string
+}
+
+// NoColor reports whether terminal color, emoji, and animation are disabled via
+// the NO_COLOR environment variable.
+func NoColor() bool {
+	return os.Getenv("NO_COLOR") != ""
+}
+
+func (m Model) styled() bool {
+	return m.poll && !m.NoColor && !NoColor()
+}
+
+func (m Model) now() time.Time {
+	if m.Now != nil {
+		return m.Now()
+	}
+	if b, ok := m.Backend.(*StoreBackend); ok && b.Now != nil {
+		return b.Now()
+	}
+	return time.Now()
+}
+
+func (m Model) turnElapsed() time.Duration {
+	if m.turnStartedAt.IsZero() {
+		return 0
+	}
+	return max(m.now().Sub(m.turnStartedAt), 0)
 }
 
 func New(ctx context.Context, runID string, ask AskFunc, r router.Router) Model {
@@ -208,6 +253,9 @@ func IsConfirmation(text string) bool {
 type pollMsg struct{}
 
 //nolint:govet // message payload grouping
+type spinnerTickMsg struct{}
+
+//nolint:govet // message payload grouping
 type initPrintMsg struct{}
 
 //nolint:govet // message payload grouping
@@ -273,6 +321,22 @@ func (m Model) pollInterval() time.Duration {
 func (m Model) nextPoll() tea.Cmd {
 	return tea.Tick(m.pollInterval(), func(time.Time) tea.Msg { return pollMsg{} })
 }
+func (m Model) spinnerInterval() time.Duration {
+	if m.SpinnerInterval > 0 {
+		return m.SpinnerInterval
+	}
+	return 110 * time.Millisecond
+}
+func (m Model) needsSpinner() bool {
+	return m.styled() && m.SpinnerInterval >= 0 && (m.busy || m.bgActive)
+}
+func (m *Model) ensureSpinner() tea.Cmd {
+	if !m.needsSpinner() || m.spinnerTicking {
+		return nil
+	}
+	m.spinnerTicking = true
+	return tea.Tick(m.spinnerInterval(), func(time.Time) tea.Msg { return spinnerTickMsg{} })
+}
 func (m Model) currentRunID() string {
 	runID := m.runID
 	if backend, ok := m.Backend.(*StoreBackend); ok {
@@ -302,7 +366,7 @@ func (m *Model) flushInitPrint() tea.Cmd {
 	m.initPrinted = true
 	rows := []string{m.headerLine()}
 	if len(m.initLines) > 0 {
-		rows = append(rows, FormatTranscript(m.initLines, DefaultMaxTurns, m.width, true)...)
+		rows = append(rows, FormatTranscript(m.initLines, DefaultMaxTurns, m.width, m.styled())...)
 	}
 	rows = append(rows, m.pendingPrint...)
 	m.pendingPrint = nil
@@ -318,16 +382,7 @@ func (m *Model) printRawLines(rows ...string) tea.Cmd {
 	}
 	return tea.Println(strings.Join(rows, "\n"))
 }
-func (m *Model) printLines(blocks ...string) tea.Cmd {
-	if !m.poll || len(blocks) == 0 {
-		return nil
-	}
-	var rows []string
-	for _, b := range blocks {
-		rows = append(rows, wrapPhysicalLines(b, m.width)...)
-	}
-	return m.printRawLines(rows...)
-}
+
 func (m *Model) flushStream(done bool) []string {
 	if !done {
 		return nil
@@ -341,7 +396,7 @@ func (m *Model) flushStream(done bool) []string {
 	if raw == "" {
 		return nil
 	}
-	return FormatReply(raw, m.width, m.poll)
+	return FormatReply(raw, m.width, m.styled())
 }
 func (m Model) submit(text string) (Model, tea.Cmd) {
 	var rawRows []string
@@ -352,10 +407,14 @@ func (m Model) submit(text string) (Model, tea.Cmd) {
 	m.turnCount++
 	userLine := "you> " + text
 	m.lines = append(m.lines, userLine)
-	rawRows = append(rawRows, FormatUserLine(text, m.width, m.poll)...)
+	rawRows = append(rawRows, FormatUserLine(text, m.width, m.styled())...)
 	m.busy = true
+	m.turnStartedAt = m.now()
+	m.turnHandler = ""
+	m.turnStep = "thinking"
 	var runCmd tea.Cmd
 	if strings.HasPrefix(text, "/") {
+		m.turnStep = text
 		fields := strings.Fields(text)
 		isRestart := len(fields) > 0 && strings.EqualFold(fields[0], "/restart")
 		ctx, backend := m.ctx, m.Backend
@@ -370,10 +429,14 @@ func (m Model) submit(text string) (Model, tea.Cmd) {
 		runCmd = m.route(text)
 	}
 	printCmd := m.printRawLines(rawRows...)
-	return m, tea.Sequence(printCmd, runCmd)
+	spinCmd := m.ensureSpinner()
+	return m, tea.Batch(tea.Sequence(printCmd, runCmd), spinCmd)
 }
 func (m Model) finishTurn(printed ...string) (tea.Model, tea.Cmd) {
 	m.busy = false
+	m.turnHandler = ""
+	m.turnStep = ""
+	m.turnStartedAt = time.Time{}
 	printCmd := m.printRawLines(printed...)
 	var nextCmd tea.Cmd
 	if len(m.queued) > 0 {
@@ -464,6 +527,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case initPrintMsg:
 		cmd := m.flushInitPrint()
 		return m, cmd
+	case spinnerTickMsg:
+		m.spinnerTicking = false
+		if !m.styled() || (!m.busy && !m.bgActive) {
+			return m, nil
+		}
+		m.spinnerFrame++
+		spinCmd := m.ensureSpinner()
+		return m, spinCmd
 	case pollMsg:
 		if !m.poll {
 			return m, nil
@@ -480,11 +551,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status = x.snapshot.Status
 		m.questions = x.snapshot.Questions
+		m.bgActive = x.snapshot.BackgroundActive
+		m.bgRole = x.snapshot.BackgroundRole
+		m.costState = x.snapshot.CostState
+		m.costLimitUSD = x.snapshot.CostLimitUSD
+		spinCmd := m.ensureSpinner()
 		if len(x.snapshot.Outcomes) > 0 {
 			m.lines = append(m.lines, x.snapshot.Outcomes...)
-			cmd := m.printLines(x.snapshot.Outcomes...)
-			return m, cmd
+			var rawRows []string
+			for _, o := range x.snapshot.Outcomes {
+				rawRows = append(rawRows, FormatBackgroundEvent(o, m.width, m.styled())...)
+			}
+			printCmd := m.printRawLines(rawRows...)
+			return m, tea.Batch(printCmd, spinCmd)
 		}
+		return m, spinCmd
 	case commandMsg:
 		out := x.text
 		if x.err != nil {
@@ -509,14 +590,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamLine = len(m.lines) - 1
 		m.streaming = true
 		m.streamBuf = ""
-		routeRows := FormatRouteLine(string(x.decision.Handler), x.text, x.decision.Fallback, m.width, m.poll)
+		m.turnHandler = string(x.decision.Handler)
+		m.turnStep = "thinking"
+		routeRows := FormatRouteLine(string(x.decision.Handler), x.text, x.decision.Fallback, m.width, m.styled())
 		printCmd := m.printRawLines(routeRows...)
 		return m, tea.Sequence(printCmd, m.dispatch(x.decision, x.text))
 	case streamMsg:
 		if x.tool != "" {
 			m.lines = slices.Insert(m.lines, m.streamLine, x.tool)
 			m.streamLine++
-			toolRows := FormatDimLine(x.tool, m.width, m.poll)
+			m.turnStep = FormatToolStep(x.tool)
+			toolRows := FormatDimLine(x.tool, m.width, m.styled())
 			printCmd := m.printRawLines(toolRows...)
 			return m, tea.Sequence(printCmd, receive(m.ctx, x.ch))
 		}
@@ -675,7 +759,14 @@ func (m Model) streamPreview() string {
 
 func (m Model) View() tea.View {
 	var top strings.Builder
-	if m.streaming {
+	switch {
+	case m.streaming && strings.TrimSpace(strings.TrimPrefix(m.streamBuf, replyPrefix)) != "":
+		top.WriteString(truncateLine(m.streamPreview(), m.width))
+		top.WriteByte('\n')
+	case m.busy && m.styled():
+		top.WriteString(FormatSpinnerLine(m.spinnerFrame, m.turnHandler, m.turnStep, m.turnElapsed(), m.width, true))
+		top.WriteByte('\n')
+	case m.streaming:
 		top.WriteString(truncateLine(m.streamPreview(), m.width))
 		top.WriteByte('\n')
 	}
@@ -693,13 +784,15 @@ func (m Model) statusFooter() string {
 	if m.status == "" {
 		return ""
 	}
-	raw := strings.Split(m.status, "\n")
-	if len(raw) > 2 {
-		raw = raw[:2]
-	}
-	out := make([]string, len(raw))
-	for i, line := range raw {
-		out[i] = renderStyledLine(line, styleDim, m.width, true)
+	out := FormatStatusFooter(m.status, FooterOptions{
+		SpinnerFrame:     m.spinnerFrame,
+		BackgroundActive: m.bgActive,
+		BackgroundRole:   m.bgRole,
+		CostState:        m.costState,
+		CostLimitUSD:     m.costLimitUSD,
+	}, m.width, m.styled())
+	if len(out) == 0 {
+		return ""
 	}
 	return "\n" + strings.Join(out, "\n")
 }

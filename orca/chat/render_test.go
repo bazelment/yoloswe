@@ -12,6 +12,9 @@ import (
 	"github.com/charmbracelet/x/exp/teatest/v2"
 	"github.com/mattn/go-runewidth"
 
+	"github.com/bazelment/yoloswe/orca/clock"
+	"github.com/bazelment/yoloswe/orca/controller"
+	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/router"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -92,6 +95,7 @@ func (t *fakeTerminal) write(s string) {
 		case '\r':
 			t.col = 0
 		case '\n':
+			t.col = 0
 			if t.row+1 >= t.h {
 				t.scrollUp()
 			} else {
@@ -441,10 +445,10 @@ func TestTurnLayoutWithToolCallsAndBlankLineBetweenTurns(t *testing.T) {
 	captured.Write(rawBytes)
 	raw := captured.String()
 
-	// Verify styled owner line, dim routing line, dim tool-call lines, and rendered markdown reply.
+	// Verify styled owner line, colored/emoji routing line, dim tool-call lines, and rendered markdown reply.
 	for _, want := range []string{
 		"\x1b[1myou> check status\x1b[22m",
-		"\x1b[2m  → concierge: check status\x1b[22m",
+		"\x1b[36m  💬 → concierge: check status\x1b[39m",
 		"\x1b[2m  → status front-desk\x1b[22m",
 		"\x1b[2m  → lanes 20261114-trial-m1\x1b[22m",
 		"orca> \x1b[1mStatus:\x1b[22m \x1b[36mm2-default\x1b[39m is in review.",
@@ -782,4 +786,554 @@ func TestStreamPreviewMultiLineAndChunkedAppends(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInnerLoopSpinnerUnderSlowTurnReplacedByReplyGolden(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 5, 45, 0, 0, time.UTC))
+
+	step1Gate := make(chan struct{})
+	step2Gate := make(chan struct{})
+	replyGate := make(chan struct{})
+
+	m := New(ctx, "front-desk", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
+		return router.Decision{Handler: router.Concierge, Confidence: 1}, nil
+	}))
+	m.Now = clk.Now
+	m.SpinnerInterval = -1 // deterministic frame stepping for golden comparison
+	m.Dispatch = func(turnCtx context.Context, _ router.Decision, _ string, emit func(string)) error {
+		<-step1Gate
+		EmitToolCall(turnCtx, "status", []byte(`{"run_id":"20261114-trial-m1"}`), "front-desk")
+		<-step2Gate
+		EmitToolCall(turnCtx, "read.file", []byte(`{"path":"OBJECTIVE.md"}`), "front-desk")
+		<-replyGate
+		emit("All 8 checks passed on PR #5899.")
+		return nil
+	}
+
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	vt := newFakeTerminal(80, 24)
+	var rawAll strings.Builder
+
+	waitScreen := func(substr string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
+			probe := newFakeTerminal(80, 24)
+			probe.write(rawAll.String())
+			probe.write(string(p))
+			if strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
+				rawAll.Write(p)
+				vt = probe
+				return true
+			}
+			return false
+		}, teatest.WithDuration(5*time.Second))
+	}
+
+	waitScreen("orca chat — run front-desk")
+
+	var frames []string
+	recordFrame := func(label string) {
+		frames = append(frames, "=== "+label+" ===\n"+strings.Join(vt.nonEmptyLines(), "\n"))
+	}
+
+	submit(tm, "check 20261114-trial-m1")
+	waitScreen("⠋ 💬 concierge · thinking (0s)")
+	recordFrame("frame 0: thinking")
+
+	clk.Advance(time.Second)
+	close(step1Gate)
+	tm.Send(spinnerTickMsg{})
+	waitScreen("⠙ 💬 concierge · → status 20261114-trial-m1 (1s)")
+	recordFrame("frame 1: tool status")
+
+	clk.Advance(time.Second)
+	close(step2Gate)
+	tm.Send(spinnerTickMsg{})
+	waitScreen("⠹ 💬 concierge · reading OBJECTIVE.md (2s)")
+	recordFrame("frame 2: reading OBJECTIVE.md")
+
+	close(replyGate)
+	waitScreen("orca> All 8 checks passed on PR #5899.")
+	recordFrame("frame 3: reply replaces spinner")
+
+	finish(t, tm)
+
+	gotGolden := strings.Join(frames, "\n") + "\n"
+	wantBytes, err := goldenFS.ReadFile("testdata/spinner_turn.golden")
+	if err != nil {
+		t.Fatalf("read spinner_turn.golden: %v", err)
+	}
+	if gotGolden != string(wantBytes) {
+		t.Fatalf("spinner golden frames mismatch (raw=%q):\ngot:\n%s\nwant:\n%s", rawAll.String(), gotGolden, string(wantBytes))
+	}
+	if len(vt.scrollback) != 0 {
+		t.Fatalf("spinner redraws leaked into scrollback: %q", vt.scrollback)
+	}
+}
+
+func TestRoutedHandlersDistinctEmojiAndColor(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		handler   string
+		wantEmoji string
+		wantSGR   string
+	}{
+		{"concierge", "💬", "\x1b[36m"},
+		{"dispatcher", "⚡", "\x1b[33m"},
+		{"planner", "🧭", "\x1b[35m"},
+	} {
+		t.Run(tc.handler, func(t *testing.T) {
+			t.Parallel()
+			routeLines := FormatRouteLine(tc.handler, "act on run", false, 80, true)
+			if len(routeLines) != 1 {
+				t.Fatalf("FormatRouteLine(%q) = %v, want 1 line", tc.handler, routeLines)
+			}
+			if !strings.Contains(routeLines[0], tc.wantEmoji) || !strings.Contains(routeLines[0], tc.wantSGR) {
+				t.Fatalf("FormatRouteLine(%q) = %q, want emoji %q and SGR %q", tc.handler, routeLines[0], tc.wantEmoji, tc.wantSGR)
+			}
+			spinLine := FormatSpinnerLine(0, tc.handler, "thinking", 3*time.Second, 80, true)
+			if !strings.Contains(spinLine, tc.wantEmoji) || !strings.Contains(spinLine, "3s") {
+				t.Fatalf("FormatSpinnerLine(%q) = %q, want emoji %q and elapsed 3s", tc.handler, spinLine, tc.wantEmoji)
+			}
+		})
+	}
+}
+
+func TestFooterColoredSegmentsOpenPRFailingCheckAndCostGuard(t *testing.T) {
+	t.Parallel()
+	status := strings.Join([]string{
+		"adopted: 20261114-trial-m1 | m5-finish review r1 PR #5899 (open, checks: 7 passed, 1 failing, 1 pending) 10m, m2-clean clean r1 PR #5900 (merged) 4m, m3-int integrate r2 PR #5901 (closed) 2m, m4-swe swe r1 1m",
+		"lanes: 9 (done:7, failed:1, running:1; review:1) | open questions: 2 | cost today: $4.50",
+	}, "\n")
+
+	lines := FormatStatusFooter(status, FooterOptions{
+		SpinnerFrame:     1,
+		BackgroundActive: true,
+		BackgroundRole:   "dispatcher",
+		CostLimitUSD:     5.00, // $4.50 is 90% -> near limit (amber/yellow)
+	}, 240, true)
+	if len(lines) != 2 {
+		t.Fatalf("FormatStatusFooter lines = %d, want 2", len(lines))
+	}
+	joined := strings.Join(lines, "\n")
+
+	for _, want := range []string{
+		"\x1b[1;33m⠙ ⚡ dispatcher\x1b[22;39m",                                  // background activity indicator
+		"\x1b[1;36m🐋 adopted: 20261114-trial-m1\x1b[22;39m",                    // held run name colored/bold
+		"\x1b[33m🔍 \x1b[39m\x1b[1mm5-finish\x1b[22m\x1b[33m review r1\x1b[39m", // review lane with 🔍
+		"\x1b[1m PR #5899\x1b[22m",                                             // PR number bold
+		"\x1b[32mopen\x1b[39m",                                                 // open PR green
+		"\x1b[32m7 passed\x1b[39m",                                             // passed checks green
+		"\x1b[1;31m1 failing\x1b[22;39m",                                       // failing check bold red
+		"\x1b[33m1 pending\x1b[39m",                                            // pending check yellow
+		"\x1b[2m) 10m, \x1b[22m",                                               // elapsed in phase dimmed
+		"\x1b[34m🧹 \x1b[39m\x1b[1mm2-clean\x1b[22m\x1b[34m clean r1\x1b[39m",   // clean lane with 🧹
+		"\x1b[1;35mmerged\x1b[22;39m",                                          // merged PR bold magenta
+		"\x1b[35m🚀 \x1b[39m\x1b[1mm3-int\x1b[22m\x1b[35m integrate r2\x1b[39m", // integrate lane with 🚀
+		"\x1b[31mclosed\x1b[39m",                                               // closed PR red
+		"\x1b[36m🔨 \x1b[39m\x1b[1mm4-swe\x1b[22m\x1b[36m swe r1\x1b[39m",       // swe lane with 🔨
+		"\x1b[1;33m❓ open questions: 2\x1b[22;39m",                             // open questions > 0 highlighted
+		"\x1b[1;33m🔶 cost today: $4.50\x1b[22;39m",                             // cost near limit amber
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("colored footer missing %q in:\n%q", want, joined)
+		}
+	}
+
+	// Over-limit cost renders bold red with 🛑; open questions: 0 renders dimmed.
+	overLines := FormatStatusFooter(
+		"adopted: 20261114-trial-m1\nlanes: 1 (running:1; swe:1) | open questions: 0 | cost today: $6.10",
+		FooterOptions{CostLimitUSD: 5.00},
+		120,
+		true,
+	)
+	overJoined := strings.Join(overLines, "\n")
+	if !strings.Contains(overJoined, "\x1b[1;31m🛑 cost today: $6.10\x1b[22;39m") {
+		t.Fatalf("over-limit cost not colored red:\n%q", overJoined)
+	}
+	if !strings.Contains(overJoined, "open questions: 0") || strings.Contains(overJoined, "❓") {
+		t.Fatalf("zero open questions should be dimmed without ❓:\n%q", overJoined)
+	}
+}
+
+func TestNoColorAndPipedOutputProducePlainText(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	status := "adopted: 20261114-trial-m1 | m5-finish review r1 PR #5899 (open, checks: 7 passed, 1 failing) 10m\nlanes: 9 (done:7, failed:1, running:1; review:1) | open questions: 1 | cost today: $7.49"
+
+	m := New(t.Context(), "front-desk", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
+		return router.Decision{Handler: router.Concierge, Confidence: 1}, nil
+	}))
+	m.width = 120
+	m.status = status
+	m.bgActive = true
+	m.bgRole = "dispatcher"
+	m.costState = CostStateOverLimit
+
+	footer := m.statusFooter()
+	if strings.Contains(footer, "\x1b[") {
+		t.Fatalf("NO_COLOR footer contains ANSI escapes: %q", footer)
+	}
+	for _, emoji := range []string{"🐋", "🔨", "🧹", "🔍", "🚀", "❓", "🔶", "🛑", "⠋", "⠙", "⚡", "💬", "🧭"} {
+		if strings.Contains(footer, emoji) {
+			t.Fatalf("NO_COLOR footer contains emoji/spinner glyph %q: %q", emoji, footer)
+		}
+	}
+
+	// Verify interactive Model under NO_COLOR emits no spinner ticks, no ANSI, and no emoji.
+	m.Dispatch = func(turnCtx context.Context, _ router.Decision, _ string, emit func(string)) error {
+		EmitToolCall(turnCtx, "status", []byte(`{"run_id":"20261114-trial-m1"}`), "front-desk")
+		emit("**Status:** `m5-finish` is green.")
+		return nil
+	}
+	var pipedOut strings.Builder
+	if err := Run(t.Context(), strings.NewReader("status\n"), &pipedOut, m); err != nil {
+		t.Fatalf("Run piped under NO_COLOR: %v", err)
+	}
+	if strings.Contains(pipedOut.String(), "\x1b[") {
+		t.Fatalf("piped output contains ANSI escapes: %q", pipedOut.String())
+	}
+	for _, emoji := range []string{"💬", "⚡", "🧭", "🐋", "🔍", "⠋"} {
+		if strings.Contains(pipedOut.String(), emoji) {
+			t.Fatalf("piped output contains emoji/spinner %q: %q", emoji, pipedOut.String())
+		}
+	}
+}
+
+func TestHalfTypedInputSurvives50SpinnerFrames(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 5, 50, 0, 0, time.UTC))
+
+	turnStarted := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	dispatched := make(chan string, 4)
+
+	m := New(ctx, "front-desk", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
+		return router.Decision{Handler: router.Dispatcher, Confidence: 1}, nil
+	}))
+	m.Now = clk.Now
+	m.SpinnerInterval = -1
+	m.status = "adopted: 20261114-trial-m1 | m5-finish review r1 PR #5899 (open, checks: 8 passed) 10m\nlanes: 5 (done:4, running:1; review:1) | open questions: 0 | cost today: $2.10"
+	m.Dispatch = func(_ context.Context, _ router.Decision, text string, emit func(string)) error {
+		if text == "first command" {
+			close(turnStarted)
+			<-releaseTurn
+		}
+		emit("completed: " + text)
+		dispatched <- text
+		return nil
+	}
+
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	vt := newFakeTerminal(80, 24)
+	var rawAll strings.Builder
+
+	waitScreen := func(substr string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
+			probe := newFakeTerminal(80, 24)
+			probe.write(rawAll.String())
+			probe.write(string(p))
+			if strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
+				rawAll.Write(p)
+				vt = probe
+				return true
+			}
+			return false
+		}, teatest.WithDuration(5*time.Second))
+	}
+
+	waitScreen("orca chat — run front-desk")
+	submit(tm, "first command")
+	select {
+	case <-turnStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first turn did not start")
+	}
+	waitScreen("⠋ ⚡ dispatcher · thinking (0s)")
+
+	// Type half an input line while the spinner is active.
+	tm.Type("hold m5-finish ")
+	waitScreen("> hold m5-finish")
+
+	// Advance 50 spinner frames across 50 seconds and verify the half-typed input
+	// stays intact and zero lines leak into scrollback.
+	for i := 1; i <= 50; i++ {
+		clk.Advance(time.Second)
+		tm.Send(spinnerTickMsg{})
+	}
+	wantGlyph := SpinnerFrames[50%len(SpinnerFrames)]
+	waitScreen(wantGlyph + " ⚡ dispatcher · thinking (50s)")
+
+	screenDuring50th := strings.Join(vt.nonEmptyLines(), "\n")
+	if !strings.Contains(screenDuring50th, "> hold m5-finish") {
+		t.Fatalf("half-typed input disturbed after 50 spinner frames:\n%s", screenDuring50th)
+	}
+	if len(vt.scrollback) != 0 {
+		t.Fatalf("50 spinner frames leaked %d lines into scrollback: %q", len(vt.scrollback), vt.scrollback)
+	}
+
+	// Finish the first turn, complete the half-typed input, and submit.
+	close(releaseTurn)
+	waitScreen("orca> completed: first command")
+	if got := <-dispatched; got != "first command" {
+		t.Fatalf("first dispatched = %q, want first command", got)
+	}
+
+	submit(tm, "until CI passes")
+	select {
+	case got := <-dispatched:
+		if got != "hold m5-finish until CI passes" {
+			t.Fatalf("second dispatched after 50 spinner frames = %q, want %q", got, "hold m5-finish until CI passes")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("follow-up input after 50 spinner frames was not dispatched")
+	}
+	waitScreen("orca> completed: hold m5-finish until CI passes")
+	finish(t, tm)
+}
+
+func TestFooter60ColAnd188ColTruncation(t *testing.T) {
+	t.Parallel()
+	status := strings.Join([]string{
+		"adopted: 20261114-trial-m1 | m5-finish review r1 PR #5899 (open, checks: 8 passed) 10m",
+		"lanes: 9 (done:7, failed:1, running:1; review:1) | open questions: 1 | cost today: $7.49",
+	}, "\n")
+
+	for _, width := range []int{60, 188} {
+		t.Run(strconv.Itoa(width)+"-cols", func(t *testing.T) {
+			t.Parallel()
+			lines := FormatStatusFooter(status, FooterOptions{
+				SpinnerFrame:     0,
+				BackgroundActive: true,
+				BackgroundRole:   "dispatcher",
+				CostState:        CostStateNearLimit,
+			}, width, true)
+			if len(lines) != 2 {
+				t.Fatalf("FormatStatusFooter(%d) returned %d lines, want 2", width, len(lines))
+			}
+			vt := newFakeTerminal(width, 6)
+			for i, l := range lines {
+				plain := SanitizeText(l)
+				w := runewidth.StringWidth(plain)
+				if w > effectiveWidth(width) {
+					t.Fatalf("width %d line %d plain=%q display width=%d exceeds effectiveWidth=%d", width, i, plain, w, effectiveWidth(width))
+				}
+				if width == 60 && !strings.HasSuffix(plain, "…") {
+					t.Fatalf("width 60 line %d plain=%q expected ellipsis truncation", i, plain)
+				}
+				if width == 188 && strings.HasSuffix(plain, "…") {
+					t.Fatalf("width 188 line %d plain=%q unexpectedly truncated", i, plain)
+				}
+				vt.write(l + "\r\n")
+			}
+			if gotRows := len(vt.nonEmptyLines()); gotRows != 2 {
+				t.Fatalf("width %d footer wrapped onto %d rows on fakeTerminal:\n%s", width, gotRows, strings.Join(vt.nonEmptyLines(), "\n"))
+			}
+		})
+	}
+}
+
+func TestBackgroundEventsPrintedAboveInputColored(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 5, 55, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+
+	if err := st.Runs().Create(ctx, store.Run{ID: "run-1", Objective: "live ui"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(ctx, store.Lane{
+		RunID: "run-1", ID: "m5-finish", Phase: "review", Status: "running", Round: 1, PR: 5899,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b := NewStoreBackend(st, "run-1")
+	b.Now = clk.Now
+
+	m := New(ctx, "run-1", nil, nil)
+	m.PollInterval = 30 * time.Millisecond
+	m.SpinnerInterval = -1
+	m.Backend = b
+
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 24))
+	vt := newFakeTerminal(100, 24)
+	var rawAll strings.Builder
+
+	waitScreen := func(substr string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
+			probe := newFakeTerminal(100, 24)
+			probe.write(rawAll.String())
+			probe.write(string(p))
+			if strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
+				rawAll.Write(p)
+				vt = probe
+				return true
+			}
+			return false
+		}, teatest.WithDuration(5*time.Second))
+	}
+
+	waitScreen("orca chat — run run-1")
+	tm.Type("drafting reply")
+	waitScreen("> drafting reply")
+
+	// Emit the 4 notable background events: lane advanced, PR merged, lane question, cost guard pause.
+	if _, err := st.Decisions().Append(ctx, store.Decision{
+		RunID: "run-1", LaneID: "m5-finish", Actor: "controller", Category: store.DecisionAuto,
+		Tool: controller.ToolPhaseAdvance, Result: "advanced m5-finish from review to integrate",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Decisions().Append(ctx, store.Decision{
+		RunID: "run-1", LaneID: "m5-finish", Actor: "controller", Category: store.DecisionAuto,
+		Tool: controller.ToolLaneComplete, Reason: "PR #5899 is MERGED on GitHub", Result: "lane done (pr merged)",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID: "ask-bg-1", RunID: "run-1", Ref: "owner_ask:q-bg-1", Scope: "m5-finish",
+		Text: `{"id":"q-bg-1","LaneID":"m5-finish","question":"Cut release tag now?"}`,
+		Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Status: store.DirectiveActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Decisions().Append(ctx, store.Decision{
+		RunID: "run-1", Actor: "controller", Category: store.DecisionAuto,
+		Tool: "cost.guard", Result: "paused run: hourly spend $6.20 exceeds $5.00",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	waitScreen("cost guard: paused run: hourly spend $6.20 exceeds $5.00")
+	finish(t, tm)
+
+	screen := strings.Join(vt.nonEmptyLines(), "\n")
+	promptIdx := strings.Index(screen, "> drafting reply")
+	if promptIdx < 0 {
+		t.Fatalf("half-typed input lost after background events:\n%s", screen)
+	}
+	for _, wantAbove := range []string{
+		"🚀 lane advanced: advanced m5-finish from review to integrate",
+		"🎉 PR merged (m5-finish): PR #5899 is MERGED on GitHub",
+		"❓ lane question (m5-finish): Cut release tag now?",
+		"🛑 cost guard: paused run: hourly spend $6.20 exceeds $5.00",
+	} {
+		idx := strings.Index(screen, wantAbove)
+		if idx < 0 || idx > promptIdx {
+			t.Fatalf("background event %q missing or not printed above input prompt:\n%s", wantAbove, screen)
+		}
+	}
+}
+
+func TestStoreBackendSnapshotBackgroundActivityAndCostGuardState(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 6, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+
+	if err := st.Runs().Create(ctx, store.Run{ID: "run-cg", Objective: "verify cost guard and bg"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runs().UpdateSettings(ctx, "run-cg", store.RunSettings{MaxCostPerHourUSD: 5.00}); err != nil {
+		t.Fatal(err)
+	}
+	b := NewStoreBackend(st, "run-cg")
+	b.Now = clk.Now
+
+	// Start a running dispatcher turn ($0 so far).
+	th, err := st.Threads().StartThread(ctx, store.Thread{
+		ID: "dispatcher-run-cg", RunID: "run-cg", Role: store.ThreadRoleDispatcher, Status: store.ThreadStatusRunning,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := st.Threads().StartTurn(ctx, store.Turn{
+		ID: "turn-bg-1", ThreadID: th.ID, RunID: "run-cg", Input: "batch",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snap1, err := b.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap1.BackgroundActive || snap1.BackgroundRole != "dispatcher" || snap1.CostState != CostStateNormal {
+		t.Fatalf("snap1 = %+v, want BackgroundActive=true role=dispatcher CostState=Normal", snap1)
+	}
+
+	// Complete the turn with $4.25 (85% of $5.00 limit -> CostStateNearLimit).
+	if err := st.Threads().CompleteTurn(ctx, th.ID, turn.ID, store.TurnStatusCompleted, model.Usage{CostUSD: 4.25}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Threads().UpdateThreadStatus(ctx, th.ID, store.ThreadStatusIdle); err != nil {
+		t.Fatal(err)
+	}
+
+	snap2, err := b.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap2.BackgroundActive || snap2.CostState != CostStateNearLimit {
+		t.Fatalf("snap2 = %+v, want BackgroundActive=false CostState=CostStateNearLimit", snap2)
+	}
+
+	// Add $1.20 decision cost ($5.45 total -> CostStateOverLimit).
+	if _, err := st.Decisions().Append(ctx, store.Decision{
+		RunID: "run-cg", Actor: "dispatcher", Category: store.DecisionJudgment,
+		Tool: "lane.spawn", CostUSD: 1.20, CreatedAt: clk.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snap3, err := b.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap3.CostState != CostStateOverLimit {
+		t.Fatalf("snap3 = %+v, want CostState=CostStateOverLimit", snap3)
+	}
+}
+
+func TestAutoSpinnerTicksAdvanceFramesDuringSlowTurn(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	release := make(chan struct{})
+	m := New(ctx, "front-desk", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
+		return router.Decision{Handler: router.Planner, Confidence: 1}, nil
+	}))
+	m.SpinnerInterval = 20 * time.Millisecond
+	m.Dispatch = func(_ context.Context, _ router.Decision, _ string, emit func(string)) error {
+		<-release
+		emit("Plan updated.")
+		return nil
+	}
+
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	var captured strings.Builder
+	waitRaw := func(substr string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
+			if strings.Contains(string(p), substr) {
+				captured.Write(p)
+				return true
+			}
+			return false
+		}, teatest.WithDuration(5*time.Second))
+	}
+
+	waitRaw("orca chat — run front-desk")
+	submit(tm, "replan m5")
+	waitRaw("⠋ 🧭 planner")
+	waitRaw("⠙ 🧭 planner")
+	waitRaw("⠹ 🧭 planner")
+	close(release)
+	waitRaw("orca> Plan updated.")
+	finish(t, tm)
 }

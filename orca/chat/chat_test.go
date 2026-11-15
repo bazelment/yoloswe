@@ -58,7 +58,10 @@ type routeFunc func(context.Context, string) (router.Decision, error)
 func (f routeFunc) Route(ctx context.Context, s string) (router.Decision, error) { return f(ctx, s) }
 func waitText(t *testing.T, tm *teatest.TestModel, text string) {
 	t.Helper()
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return strings.Contains(string(b), text) }, teatest.WithDuration(5*time.Second))
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		s := string(b)
+		return strings.Contains(s, text) || strings.Contains(SanitizeText(s), text)
+	}, teatest.WithDuration(5*time.Second))
 }
 func submit(tm *teatest.TestModel, s string) {
 	tm.Type(s)
