@@ -53,6 +53,7 @@ type Controllers struct {
 //nolint:govet // field alignment
 type controlledRun struct {
 	dispatch   controller.Judge
+	driver     lane.LaneDriver
 	controller *controller.Controller
 	syncer     *runLedgerSync
 	cancel     context.CancelFunc
@@ -203,6 +204,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			}
 		}
 	}
+	releasedOnAdopt := make(map[string]bool, len(lanes))
 	for i := range lanes {
 		ln := &lanes[i]
 		if resume {
@@ -217,10 +219,12 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		if err := d.store.Lanes().Upsert(ctx, *ln); err != nil {
 			return err
 		}
-		if ln.Status.Terminal() && ln.SessionID != "" {
+		if ln.Status.Terminal() && ln.SessionID != "" && ln.SessionID != strings.TrimSpace(r.DrivenBy) {
 			if releaser, ok := d.driver.(lane.SessionReleaser); ok {
 				if err := releaser.ReleaseSession(ctx, ln.SessionID, true); err != nil {
 					slog.Warn("release completed lane session during adoption", "session", ln.SessionID, "error", err)
+				} else {
+					releasedOnAdopt[ln.SessionID] = true
 				}
 			}
 		}
@@ -228,7 +232,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			tracker.TrackLane(*ln)
 		}
 	}
-	if err := d.store.Runs().UpdateObjective(ctx, r.ID, r.FullObjective(), generation); err != nil {
+	if err := d.store.Runs().UpdateObjective(ctx, r.ID, fullObjectiveWithHandover(r), generation); err != nil {
 		return err
 	}
 	var boxes []mailbox.Mailbox
@@ -236,6 +240,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		boxes = d.Mailboxes(r.ID)
 	}
 	syncer := newRunLedgerSync(r, d.clock, lanes)
+	for sid := range releasedOnAdopt {
+		syncer.MarkSessionReleased(sid)
+	}
 	syncer.ledgerScript = d.ledgerScript
 	runStore := &adoptedStore{
 		Store: d.store,
@@ -266,6 +273,11 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	if setter, ok := dispatch.(interface{ SetMailboxes(...mailbox.Mailbox) }); ok && len(boxes) > 0 {
 		setter.SetMailboxes(boxes...)
 	}
+	if setter, ok := dispatch.(interface {
+		SetRunCloseout(func(context.Context, string, dispatcher.RunCloseoutParams) (string, error))
+	}); ok {
+		setter.SetRunCloseout(d.CloseoutRun)
+	}
 	adoptedAt := parseAdoptCutoff(generation, d.clock)
 	for i := range boxes {
 		if setter, ok := boxes[i].(mailbox.AdoptCutoffSetter); ok {
@@ -278,7 +290,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	runDriver := d.driver
 	if runDriver != nil {
-		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: runStore}
+		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: runStore, syncer: syncer}
 		if ds, ok := dispatch.(interface{ SetDriver(lane.LaneDriver) }); ok {
 			ds.SetDriver(runDriver)
 		} else if dispatch != nil {
@@ -288,7 +300,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	ctrl = controller.New(controller.Config{
 		RunID:             r.ID,
 		HolderID:          holder,
-		PRProbe:           d.PRProbe,
+		PRProbe:           d.runPRProbe(syncer),
 		JudgeLaneMail:     true,
 		MaxCostPerHourUSD: d.MaxCostPerHourUSD,
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
@@ -296,6 +308,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	cr := &controlledRun{
 		controller: ctrl,
 		dispatch:   dispatch,
+		driver:     runDriver,
 		syncer:     syncer,
 		cancel:     cancel,
 		done:       make(chan struct{}),
@@ -376,24 +389,12 @@ func expireHoldDirectivesIfRunDone(ctx context.Context, st store.Store, runID st
 	if err != nil {
 		return
 	}
-	for i := range lanes {
-		if !lanes[i].Status.Terminal() {
-			return
-		}
-	}
 	items, err := st.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
 	if err != nil {
 		return
 	}
-	terminalLanes := make(map[string]bool, len(lanes))
-	for i := range lanes {
-		terminalLanes[lanes[i].ID] = true
-	}
-	for i := range items {
-		it := &items[i]
-		if !it.Status.Terminal() && !terminalLanes[it.ID] && !terminalLanes[it.LaneID] {
-			return
-		}
+	if dispatcher.CheckRunTerminal(lanes, items, false) != nil {
+		return
 	}
 	dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
 	if err != nil {
@@ -580,6 +581,65 @@ func (d *Controllers) RefreshObjective(ctx context.Context, runID string) (bool,
 	return cr.syncer.RefreshObjectiveIfChanged(ctx, d.store.Runs())
 }
 
+func (d *Controllers) runPRProbe(syncer *runLedgerSync) controller.PRProbe {
+	if d.PRProbe == nil {
+		return nil
+	}
+	var cacheMu sync.Mutex
+	var cachedDir string
+	var cachedHasGit bool
+	var cachedSet bool
+	checkGit := func(dir string) bool {
+		cacheMu.Lock()
+		defer cacheMu.Unlock()
+		if cachedSet && cachedDir == dir {
+			return cachedHasGit
+		}
+		cachedDir = dir
+		cachedHasGit = hasGitCheckout(dir)
+		cachedSet = true
+		return cachedHasGit
+	}
+	return func(ctx context.Context, runID, branch string, pr int) (controller.PRStatus, error) {
+		if syncer != nil {
+			curRun := syncer.CurrentRun()
+			if strings.TrimSpace(curRun.Repo) == "" && strings.TrimSpace(curRun.RepoID) == "" && !checkGit(curRun.Dir) {
+				var storeRepo string
+				if d.store != nil && runID != "" {
+					if sr, err := d.store.Runs().Get(ctx, runID); err == nil && sr != nil {
+						storeRepo = strings.TrimSpace(sr.Repository)
+					}
+				}
+				if storeRepo == "" {
+					return controller.PRStatus{}, nil
+				}
+			}
+		}
+		return d.PRProbe(ctx, runID, branch, pr)
+	}
+}
+
+const maxGitCheckoutSearchDepth = 4
+
+func hasGitCheckout(dir string) bool {
+	cur := strings.TrimSpace(dir)
+	if cur == "" {
+		return false
+	}
+	cur = filepath.Clean(cur)
+	for depth := 0; depth <= maxGitCheckoutSearchDepth; depth++ {
+		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
+		cur = parent
+	}
+	return false
+}
+
 func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger string) (bool, error) {
 	cr := d.lookupRun(runID)
 	d.mu.Lock()
@@ -589,11 +649,20 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 		return false, nil
 	}
 	_, _ = cr.syncer.RefreshObjectiveIfChanged(ctx, d.store.Runs())
-	if plannerFn == nil {
+	lanes, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
+	if err != nil {
+		return false, err
+	}
+	items, err := d.store.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
+	if err != nil {
+		return false, err
+	}
+	if dispatcher.CheckRunTerminal(lanes, items, false) != nil {
 		return false, nil
 	}
 	curRun := cr.syncer.CurrentRun()
-	if !curRun.HasNextWork() || ObjectiveIsDone(curRun.Objective) {
+	needsCloseout := shouldAutoCloseoutRun(curRun, lanes, items)
+	if !needsCloseout && (!curRun.HasNextWork() || ObjectiveIsDone(curRun.Objective)) {
 		expireHoldDirectivesIfRunDone(ctx, d.store, runID)
 		return false, nil
 	}
@@ -604,27 +673,9 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 	if settings, sErr := d.store.Runs().GetSettings(ctx, runID); sErr == nil && settings.Paused {
 		return false, nil
 	}
-	lanes, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
-	if err != nil {
-		return false, err
-	}
-	terminalLanes := make(map[string]bool, len(lanes))
-	for i := range lanes {
-		if !lanes[i].Status.Terminal() {
-			return false, nil
-		}
-		terminalLanes[lanes[i].ID] = true
-	}
-	items, err := d.store.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
-	if err != nil {
-		return false, err
-	}
 	var doneSummary []string
 	for i := range items {
 		it := &items[i]
-		if !it.Status.Terminal() && !terminalLanes[it.ID] && !terminalLanes[it.LaneID] {
-			return false, nil
-		}
 		doneSummary = append(doneSummary, fmt.Sprintf("%s:%s", it.ID, it.Status))
 	}
 	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
@@ -636,6 +687,21 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 		if strings.HasPrefix(dir.Ref, ownerAskRef) && (dir.ExpiresAt == nil || now.Before(*dir.ExpiresAt)) {
 			return false, nil
 		}
+	}
+	if needsCloseout {
+		if cr.syncer.MarkClosedOut() {
+			if _, cErr := d.CloseoutRun(ctx, runID, dispatcher.RunCloseoutParams{
+				Reason: "all lanes terminal (" + trigger + "); execute remaining handover close-out steps",
+			}); cErr != nil {
+				cr.syncer.ClearClosedOut()
+				return false, cErr
+			}
+			return true, nil
+		}
+		return false, nil
+	}
+	if plannerFn == nil {
+		return false, nil
 	}
 	planKey := curRun.FullObjective() + "|" + strings.Join(doneSummary, ",")
 	if !cr.syncer.MarkPlanned(planKey) {
@@ -1114,35 +1180,61 @@ func validatePathComponent(label, value string) error {
 	return nil
 }
 
-// resolveBriefPath permits imported task briefs only when their lexical and
-// resolved paths remain inside the host run directory. Ledger data is
-// untrusted: an absolute path or traversal must never become model context.
+// resolveBriefPath permits imported task briefs and close-out targets only when
+// their lexical and resolved paths (including every existing parent directory
+// and symlink component) remain inside the host run directory. Ledger data is
+// untrusted: an absolute path, symlink escape, or traversal must never escape dir.
 func resolveBriefPath(dir, brief string) (string, error) {
-	if filepath.IsAbs(brief) {
+	if filepath.IsAbs(brief) || strings.HasPrefix(brief, "/") || strings.HasPrefix(brief, `\`) {
 		return "", fmt.Errorf("brief path %q must be inside the run directory", brief)
 	}
 	clean := filepath.Clean(brief)
-	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("brief path %q escapes the run directory", brief)
 	}
 	base, err := filepath.Abs(dir)
 	if err != nil {
 		return "", fmt.Errorf("resolve run directory for brief path %q: %w", brief, err)
 	}
-	candidate := filepath.Join(base, clean)
-	if resolved, err := filepath.EvalSymlinks(candidate); err == nil {
-		resolvedBase, baseErr := filepath.EvalSymlinks(base)
-		if baseErr != nil {
-			return "", fmt.Errorf("resolve run directory for brief path %q: %w", brief, baseErr)
+	resolvedBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return "", fmt.Errorf("resolve run directory for brief path %q: %w", brief, err)
+	}
+	parts := strings.Split(filepath.ToSlash(clean), "/")
+	cur := resolvedBase
+	for i, part := range parts {
+		if part == "" || part == "." {
+			continue
 		}
-		rel, relErr := filepath.Rel(resolvedBase, resolved)
-		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if part == ".." {
 			return "", fmt.Errorf("brief path %q escapes the run directory", brief)
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("resolve brief path %q: %w", brief, err)
+		next := filepath.Join(cur, part)
+		info, lerr := os.Lstat(next)
+		if lerr != nil {
+			if errors.Is(lerr, os.ErrNotExist) {
+				rem := append([]string{cur}, parts[i:]...)
+				return filepath.Join(rem...), nil
+			}
+			return "", fmt.Errorf("resolve brief path %q: %w", brief, lerr)
+		}
+		resolvedNext, evalErr := filepath.EvalSymlinks(next)
+		if evalErr != nil {
+			return "", fmt.Errorf("brief path %q escapes the run directory: %w", brief, evalErr)
+		}
+		rel, relErr := filepath.Rel(resolvedBase, resolvedNext)
+		if relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("brief path %q escapes the run directory", brief)
+		}
+		if i+1 < len(parts) && !info.IsDir() {
+			tInfo, tErr := os.Stat(resolvedNext)
+			if tErr != nil || !tInfo.IsDir() {
+				return "", fmt.Errorf("brief path %q parent %q is not a directory", brief, part)
+			}
+		}
+		cur = resolvedNext
 	}
-	return candidate, nil
+	return cur, nil
 }
 
 type hostAgent struct {
@@ -1355,10 +1447,12 @@ func nebulaSwarmPhaseBrief(dir, phase, specPrompt string) string {
 	}
 }
 
+//nolint:govet // field alignment
 type adoptedRunDriver struct {
 	lane.LaneDriver
-	store store.Store
-	run   Run
+	store  store.Store
+	syncer *runLedgerSync
+	run    Run
 }
 
 func (d *adoptedRunDriver) PhaseSkill(phase string) string {
@@ -1609,9 +1703,21 @@ func (d *adoptedRunDriver) readRunReportFile(ctx context.Context, runID, laneID,
 
 func (d *adoptedRunDriver) ReleaseSession(ctx context.Context, sessionID string, force ...bool) error {
 	if rel, ok := d.LaneDriver.(lane.SessionReleaser); ok {
-		return rel.ReleaseSession(ctx, sessionID, force...)
+		if err := rel.ReleaseSession(ctx, sessionID, force...); err != nil {
+			return err
+		}
+		if d.syncer != nil {
+			d.syncer.MarkSessionReleased(sessionID)
+		}
 	}
 	return nil
+}
+
+func (d *adoptedRunDriver) UpdatePost(ctx context.Context, postID, content string) error {
+	if pub, ok := d.LaneDriver.(lane.PostPublisher); ok {
+		return pub.UpdatePost(ctx, postID, content)
+	}
+	return fmt.Errorf("republish post %s: driver does not support post updates", postID)
 }
 
 func (d *adoptedRunDriver) ReportOnlyNoWork(ctx context.Context, ln lane.Lane) (bool, error) {
@@ -1747,27 +1853,46 @@ func (s *adoptedBacklogStore) Close(ctx context.Context, runID, itemID string, s
 // runLedgerSync mirrors controller lane transitions and OBJECTIVE.md updates
 // to an adopted host run directory.
 //
-// Lock ordering: ioMu serializes disk and subprocess I/O in SyncLane; mu guards
-// in-memory state (run, known, lastObjective, lastPlannedKey, stat signatures).
-// Callers may acquire mu while holding ioMu, never the reverse, and mu is never
-// held across file or subprocess I/O.
+// Lock ordering: closeoutMu serializes CloseoutRun execution per run; ioMu
+// serializes disk and subprocess I/O in SyncLane; mu guards in-memory state
+// (run, known, lastObjective, lastPlannedKey, stat signatures). Callers may
+// acquire ioMu or mu while holding closeoutMu, and mu while holding ioMu,
+// never the reverse, and mu is never held across file or subprocess I/O.
 type runLedgerSync struct {
-	clock          clock.Clock
-	known          map[string]lane.Lane
-	ledgerScript   *string
-	runID          string
-	resolvedScript string
-	lastObjective  string
-	lastPlannedKey string
-	run            Run
-	objModNano     int64
-	objSize        int64
-	progModNano    int64
-	progSize       int64
-	statReady      bool
-	scriptResolved bool
-	ioMu           sync.Mutex
-	mu             sync.Mutex
+	clock            clock.Clock
+	known            map[string]lane.Lane
+	releasedSessions map[string]bool
+	ledgerScript     *string
+	runID            string
+	resolvedScript   string
+	lastObjective    string
+	lastPlannedKey   string
+	run              Run
+	objModNano       int64
+	objSize          int64
+	progModNano      int64
+	progSize         int64
+	statReady        bool
+	scriptResolved   bool
+	closedOut        bool
+	closeoutMu       sync.Mutex
+	ioMu             sync.Mutex
+	mu               sync.Mutex
+}
+
+func fullObjectiveWithHandover(r Run) string {
+	full := r.FullObjective()
+	if r.Dir == "" || extractCloseoutPostID(full) != "" {
+		return full
+	}
+	handover := stripMarker(readText(filepath.Join(r.Dir, "HANDOVER.md")))
+	if postID := extractCloseoutPostID(r.Progress, handover); postID != "" {
+		if full != "" {
+			full += "\n"
+		}
+		full += "Post: " + postID
+	}
+	return full
 }
 
 func fileStatSignature(path string) (int64, int64) {
@@ -1789,17 +1914,62 @@ func newRunLedgerSync(r Run, clk clock.Clock, initial []lane.Lane) *runLedgerSyn
 	objMod, objSize := fileStatSignature(filepath.Join(r.Dir, "OBJECTIVE.md"))
 	progMod, progSize := fileStatSignature(filepath.Join(r.Dir, "PROGRESS.md"))
 	return &runLedgerSync{
-		runID:         r.ID,
-		run:           r,
-		clock:         clk,
-		known:         known,
-		lastObjective: r.FullObjective(),
-		objModNano:    objMod,
-		objSize:       objSize,
-		progModNano:   progMod,
-		progSize:      progSize,
-		statReady:     r.Dir != "",
+		runID:            r.ID,
+		run:              r,
+		clock:            clk,
+		known:            known,
+		releasedSessions: make(map[string]bool),
+		lastObjective:    fullObjectiveWithHandover(r),
+		objModNano:       objMod,
+		objSize:          objSize,
+		progModNano:      progMod,
+		progSize:         progSize,
+		statReady:        r.Dir != "",
 	}
+}
+
+func (s *runLedgerSync) MarkSessionReleased(sessionID string) bool {
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.releasedSessions == nil {
+		s.releasedSessions = make(map[string]bool)
+	}
+	if s.releasedSessions[sid] {
+		return false
+	}
+	s.releasedSessions[sid] = true
+	return true
+}
+
+func (s *runLedgerSync) ReleasedSessions() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.releasedSessions))
+	for sid := range s.releasedSessions {
+		out = append(out, sid)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func (s *runLedgerSync) MarkClosedOut() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closedOut {
+		return false
+	}
+	s.closedOut = true
+	return true
+}
+
+func (s *runLedgerSync) ClearClosedOut() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closedOut = false
 }
 
 func (s *runLedgerSync) CurrentRun() Run {
@@ -1860,6 +2030,14 @@ func (s *runLedgerSync) RefreshObjective(ctx context.Context, runs store.RunStor
 	progMod, progSize := fileStatSignature(progPath)
 	objText := stripMarker(readText(objPath))
 	progText := clip(stripMarker(readText(progPath)), 1500)
+	planPath := extractPlanPath(dir, objText, progText)
+	nextSec := extractNextSection(objText)
+	fullObj := fullObjectiveWithHandover(Run{
+		Dir:       dir,
+		Objective: objText,
+		Progress:  progText,
+		Goal:      goal,
+	})
 	s.mu.Lock()
 	s.objModNano, s.objSize = objMod, objSize
 	s.progModNano, s.progSize = progMod, progSize
@@ -1870,9 +2048,8 @@ func (s *runLedgerSync) RefreshObjective(ctx context.Context, runs store.RunStor
 	if updated.Goal == "" {
 		updated.Goal = goal
 	}
-	updated.PlanPath = extractPlanPath(dir, updated.Objective, updated.Progress)
-	updated.Next = extractNextSection(updated.Objective)
-	fullObj := updated.FullObjective()
+	updated.PlanPath = planPath
+	updated.Next = nextSec
 	if fullObj == "" || fullObj == prevObj {
 		s.mu.Unlock()
 		return false, nil
@@ -2182,4 +2359,367 @@ func checkpointNebulaSwarm(task map[string]json.RawMessage, ln *lane.Lane, cfgPh
 	}
 	task["terminals"], _ = json.Marshal(terminals)
 	return nil
+}
+
+// CloseoutRun closes out an adopted run once every lane and backlog item is
+// terminal: validates that all file writes stay inside the run directory and
+// target files named in OBJECTIVE.md, releases remaining lane sessions, appends
+// to the plan's log file when named in OBJECTIVE.md, republishes any Nebula post
+// named in OBJECTIVE.md, writes FINAL.md, updates PROGRESS.md and OBJECTIVE.md's
+// Next: line, and records one-line summaries for the owner with a /release offer.
+func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params dispatcher.RunCloseoutParams) (string, error) {
+	cr := d.lookupRun(runID)
+	if cr == nil || cr.syncer == nil {
+		return "", fmt.Errorf("adopted run %q is not active", runID)
+	}
+	cr.syncer.closeoutMu.Lock()
+	defer cr.syncer.closeoutMu.Unlock()
+
+	curRun := cr.syncer.CurrentRun()
+	if strings.TrimSpace(curRun.Dir) == "" {
+		return "", fmt.Errorf("adopted run %q has no run directory", runID)
+	}
+
+	lanes, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
+	if err != nil {
+		return "", err
+	}
+	slices.SortFunc(lanes, func(a, b lane.Lane) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	items, err := d.store.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
+	if err != nil {
+		return "", err
+	}
+	if err := dispatcher.CheckRunTerminal(lanes, items, true); err != nil {
+		return "", err
+	}
+
+	objPath := filepath.Join(curRun.Dir, "OBJECTIVE.md")
+	progPath := filepath.Join(curRun.Dir, "PROGRESS.md")
+	handoverPath := filepath.Join(curRun.Dir, "HANDOVER.md")
+	rawObj := stripMarker(readText(objPath))
+	if strings.TrimSpace(rawObj) == "" {
+		rawObj = curRun.Objective
+	}
+	rawProg := stripMarker(readText(progPath))
+	if strings.TrimSpace(rawProg) == "" {
+		rawProg = curRun.Progress
+	}
+	handoverText := stripMarker(readText(handoverPath))
+	var storedObj, storedPlanRef string
+	if sr, gErr := d.store.Runs().Get(ctx, runID); gErr == nil && sr != nil {
+		storedObj = sr.Objective
+		storedPlanRef = sr.PlanRef
+	}
+
+	if strings.TrimSpace(params.PlanFile) != "" {
+		if _, vErr := ValidateCloseoutWrite(curRun.Dir, rawObj, params.PlanFile); vErr != nil {
+			return "", vErr
+		}
+	}
+	fileKeys := make([]string, 0, len(params.Files))
+	resolvedFiles := make(map[string]string, len(params.Files))
+	for k := range params.Files {
+		resolvedTarget, vErr := ValidateCloseoutWrite(curRun.Dir, rawObj, k)
+		if vErr != nil {
+			return "", vErr
+		}
+		resolvedFiles[k] = resolvedTarget
+		fileKeys = append(fileKeys, k)
+	}
+	slices.Sort(fileKeys)
+
+	if err := dispatcher.ValidateCloseoutPostID(params.PostID, rawObj, storedObj, rawProg, handoverText, storedPlanRef); err != nil {
+		return "", err
+	}
+
+	now := d.clock.Now().UTC()
+	ts := now.Format(time.RFC3339)
+
+	var prRefs []string
+	var prLines []string
+	doneLanes := 0
+	failedLanes := 0
+	for i := range lanes {
+		ln := lanes[i]
+		if ln.Status == lane.StatusDone {
+			doneLanes++
+		} else {
+			failedLanes++
+		}
+		isMerged := ln.MergeSHA != "" || (ln.Status == lane.StatusDone && ln.PR > 0)
+		if isMerged && ln.PR > 0 {
+			prRefs = append(prRefs, fmt.Sprintf("#%d", ln.PR))
+		}
+		switch {
+		case isMerged && ln.PR > 0 && ln.MergeSHA != "":
+			prLines = append(prLines, fmt.Sprintf("- %s: #%d (%s) — %s", ln.ID, ln.PR, ln.MergeSHA, cmp.Or(ln.Title, ln.ID)))
+		case isMerged && ln.PR > 0:
+			prLines = append(prLines, fmt.Sprintf("- %s: #%d — %s", ln.ID, ln.PR, cmp.Or(ln.Title, ln.ID)))
+		case ln.PR > 0:
+			prLines = append(prLines, fmt.Sprintf("- %s: %s (#%d, unmerged) — %s", ln.ID, ln.Status, ln.PR, cmp.Or(ln.Title, ln.ID)))
+		default:
+			prLines = append(prLines, fmt.Sprintf("- %s: %s — %s", ln.ID, ln.Status, cmp.Or(ln.Title, ln.ID)))
+		}
+	}
+	defaultOutcome := "done"
+	if failedLanes > 0 {
+		if doneLanes > 0 {
+			defaultOutcome = "partial"
+		} else {
+			defaultOutcome = "failed"
+		}
+	}
+	outcome := cmp.Or(strings.TrimSpace(params.Outcome), defaultOutcome)
+	prSummary := strings.Join(prRefs, ", ")
+	if prSummary == "" {
+		prSummary = fmt.Sprintf("%d terminal lane(s)", len(lanes))
+	}
+
+	var stepSummaries []string
+	recordStep := func(summary string) {
+		stepSummaries = append(stepSummaries, summary)
+	}
+
+	// 1. Release any remaining lane sessions.
+	sessionSet := make(map[string]bool)
+	for i := range lanes {
+		if sid := strings.TrimSpace(lanes[i].SessionID); sid != "" {
+			sessionSet[sid] = true
+		}
+		for _, sid := range lanes[i].Sessions {
+			if trimmed := strings.TrimSpace(sid); trimmed != "" {
+				sessionSet[trimmed] = true
+			}
+		}
+	}
+	for i := range curRun.Lanes {
+		if sid := strings.TrimSpace(curRun.Lanes[i].Session); sid != "" {
+			sessionSet[sid] = true
+		}
+	}
+	if orchSess := strings.TrimSpace(curRun.DrivenBy); orchSess != "" {
+		delete(sessionSet, orchSess)
+	}
+	var allSessions []string
+	for sid := range sessionSet {
+		allSessions = append(allSessions, sid)
+	}
+	slices.Sort(allSessions)
+	alreadyReleased := make(map[string]bool)
+	for _, sid := range cr.syncer.ReleasedSessions() {
+		alreadyReleased[sid] = true
+	}
+	var releaseFailed []string
+	if releaser, ok := d.driver.(lane.SessionReleaser); ok {
+		for _, sid := range allSessions {
+			if alreadyReleased[sid] {
+				continue
+			}
+			if rErr := releaser.ReleaseSession(ctx, sid, true); rErr != nil {
+				slog.Warn("release lane session during closeout", "run", runID, "session", sid, "error", rErr)
+				releaseFailed = append(releaseFailed, sid)
+				continue
+			}
+			cr.syncer.MarkSessionReleased(sid)
+		}
+	} else {
+		for _, sid := range allSessions {
+			if !alreadyReleased[sid] {
+				releaseFailed = append(releaseFailed, sid)
+			}
+		}
+	}
+	releasedList := cr.syncer.ReleasedSessions()
+	if len(releasedList) > 0 && len(releaseFailed) > 0 {
+		recordStep(fmt.Sprintf("released lane sessions (%s); failed to release (%s)", strings.Join(releasedList, ", "), strings.Join(releaseFailed, ", ")))
+	} else if len(releasedList) > 0 {
+		recordStep(fmt.Sprintf("released lane sessions (%s)", strings.Join(releasedList, ", ")))
+	} else if len(releaseFailed) > 0 {
+		recordStep(fmt.Sprintf("failed to release lane sessions (%s)", strings.Join(releaseFailed, ", ")))
+	}
+
+	// 2. Apply any additional validated file writes named in OBJECTIVE.md.
+	for _, relKey := range fileKeys {
+		resolvedTarget := resolvedFiles[relKey]
+		if filepath.ToSlash(filepath.Clean(relKey)) == "FINAL.md" {
+			if strings.TrimSpace(params.FinalMarkdown) == "" {
+				params.FinalMarkdown = params.Files[relKey]
+			}
+			continue
+		}
+		existingContent := stripMarker(readText(resolvedTarget))
+		if trimmedAdd := strings.TrimSpace(params.Files[relKey]); trimmedAdd != "" && !strings.Contains(existingContent, trimmedAdd) {
+			if _, wErr := WriteCloseoutFile(curRun.Dir, rawObj, relKey, params.Files[relKey], true); wErr != nil {
+				return "", wErr
+			}
+		}
+		recordStep(fmt.Sprintf("updated %s in run directory", relKey))
+	}
+	if len(fileKeys) > 0 {
+		if refreshedObj := stripMarker(readText(objPath)); strings.TrimSpace(refreshedObj) != "" {
+			rawObj = refreshedObj
+		}
+		if refreshedProg := stripMarker(readText(progPath)); strings.TrimSpace(refreshedProg) != "" {
+			rawProg = refreshedProg
+		}
+	}
+
+	// 3. Append to plan log file (e.g. PLAN.md) if named in OBJECTIVE.md.
+	planRel := strings.TrimSpace(params.PlanFile)
+	if planRel == "" {
+		planRel = extractCloseoutPlanFile(curRun.Dir, rawObj)
+	}
+	if planRel != "" {
+		planAbs, vErr := ValidateCloseoutWrite(curRun.Dir, rawObj, planRel)
+		if vErr != nil {
+			return "", vErr
+		}
+		logLine := strings.TrimSpace(params.PlanLogLine)
+		dedupeKey := logLine
+		if logLine == "" {
+			dedupeKey = fmt.Sprintf("%s %s: merged %s", runID, outcome, prSummary)
+			logLine = fmt.Sprintf("- %s %s", ts, dedupeKey)
+		}
+		existingPlan := readText(planAbs)
+		if !strings.Contains(existingPlan, dedupeKey) {
+			if _, wErr := WriteCloseoutFile(curRun.Dir, rawObj, planRel, logLine, true); wErr != nil {
+				return "", wErr
+			}
+		}
+		recordStep(fmt.Sprintf("appended close-out log entry to %s (%s)", planRel, prSummary))
+	}
+
+	// 4. Build FINAL.md content and republish Nebula post before marking OBJECTIVE.md done.
+	var finalContent string
+	if explicitFinal := strings.TrimSpace(params.FinalMarkdown); explicitFinal != "" {
+		finalContent = explicitFinal + "\n"
+	} else {
+		var finalBuilder strings.Builder
+		fmt.Fprintf(&finalBuilder, "# Final Report: %s\n\n", runID)
+		fmt.Fprintf(&finalBuilder, "Outcome: %s\n", outcome)
+		fmt.Fprintf(&finalBuilder, "Completed: %s\n", ts)
+		if curRun.Goal != "" {
+			fmt.Fprintf(&finalBuilder, "Goal: %s\n", curRun.Goal)
+		}
+		finalBuilder.WriteString("\n## Merged PRs\n")
+		for _, line := range prLines {
+			finalBuilder.WriteString(line + "\n")
+		}
+		if len(releaseFailed) > 0 {
+			fmt.Fprintf(&finalBuilder, "\n## Unreleased Sessions\n- %d session(s) failed to release: %s\n", len(releaseFailed), strings.Join(releaseFailed, ", "))
+		}
+		if extra := strings.TrimSpace(params.Summary); extra != "" {
+			finalBuilder.WriteString("\n## Summary\n")
+			finalBuilder.WriteString(extra + "\n")
+		} else {
+			fmt.Fprintf(&finalBuilder, "\n## Summary\nAll lanes terminal (%s). Remaining orchestrator handover steps completed; run `/release` when ready.\n", prSummary)
+		}
+		finalContent = finalBuilder.String()
+	}
+
+	handoverText = stripMarker(readText(handoverPath))
+	postID := cmp.Or(strings.TrimSpace(params.PostID), extractCloseoutPostID(rawObj, storedObj, rawProg, handoverText, storedPlanRef))
+	if postID != "" {
+		if vErr := dispatcher.ValidateCloseoutPostID(postID, rawObj, storedObj, rawProg, handoverText, storedPlanRef); vErr != nil {
+			return "", vErr
+		}
+		postBody := strings.TrimSpace(params.PostContent)
+		if postBody == "" {
+			if planRel != "" {
+				if planText := strings.TrimSpace(readText(filepath.Join(curRun.Dir, planRel))); planText != "" {
+					postBody = planText + "\n\n" + finalContent
+				}
+			}
+			if postBody == "" {
+				postBody = finalContent
+			}
+		}
+		postDrv := cmp.Or(cr.driver, d.driver)
+		pub, ok := postDrv.(lane.PostPublisher)
+		if !ok {
+			return "", fmt.Errorf("republish post %s: driver does not support post updates", postID)
+		}
+		if pErr := pub.UpdatePost(ctx, postID, postBody); pErr != nil {
+			if !strings.HasPrefix(pErr.Error(), "republish post ") {
+				return "", fmt.Errorf("republish post %s: %w", postID, pErr)
+			}
+			return "", pErr
+		}
+		recordStep(fmt.Sprintf("republished Nebula post %s with close-out summary (%s)", postID, prSummary))
+	}
+
+	// 5. Write FINAL.md inside the run directory.
+	if _, wErr := WriteCloseoutFile(curRun.Dir, rawObj, "FINAL.md", finalContent, false); wErr != nil {
+		return "", wErr
+	}
+	recordStep(fmt.Sprintf("wrote FINAL.md (outcome=%s, merged %s)", outcome, prSummary))
+
+	// 6. Update PROGRESS.md and OBJECTIVE.md Next: line.
+	nextLine := strings.TrimSpace(params.Next)
+	if nextLine == "" {
+		if failedLanes > 0 {
+			nextLine = fmt.Sprintf("Next: none. Run DONE %s — lanes terminal (%s, outcome=%s); FINAL.md written. Run /release when ready.", ts, prSummary, outcome)
+		} else {
+			nextLine = fmt.Sprintf("Next: none. Run DONE %s — all lanes merged (%s); FINAL.md written. Run /release when ready.", ts, prSummary)
+		}
+	} else if !ObjectiveIsDone(nextLine) {
+		nextLine = strings.TrimRight(nextLine, ".") + fmt.Sprintf(" — Run DONE %s (FINAL.md written; /release ready).", ts)
+	}
+	updatedObj := replaceObjectiveNextLine(rawObj, nextLine)
+	if _, wErr := WriteCloseoutFile(curRun.Dir, rawObj, "OBJECTIVE.md", updatedObj, false); wErr != nil {
+		return "", wErr
+	}
+	progAppend := strings.TrimSpace(params.ProgressMarkdown)
+	progDedupe := progAppend
+	if progAppend == "" {
+		progDedupe = fmt.Sprintf("- Outcome: %s (merged %s)", outcome, prSummary)
+		progAppend = fmt.Sprintf("\n## Close-out (%s)\n%s\n- Wrote FINAL.md and updated OBJECTIVE.md Next:\n- Run `/release` to hand back the run.\n", ts, progDedupe)
+	}
+	if !strings.Contains(rawProg, progDedupe) {
+		if _, wErr := WriteCloseoutFile(curRun.Dir, rawObj, "PROGRESS.md", progAppend, true); wErr != nil {
+			return "", wErr
+		}
+	}
+	_, _ = cr.syncer.RefreshObjective(ctx, d.store.Runs())
+	expireHoldDirectivesIfRunDone(ctx, d.store, runID)
+	cr.syncer.MarkClosedOut()
+	recordStep(fmt.Sprintf("updated OBJECTIVE.md Next: and PROGRESS.md (run DONE, merged %s)", prSummary))
+
+	// 7. Offer /release to the owner.
+	finalMsg := fmt.Sprintf("run %s close-out complete (outcome=%s, merged %s, FINAL.md written); run /release to hand back the run", runID, outcome, prSummary)
+	if len(releaseFailed) > 0 {
+		finalMsg = fmt.Sprintf("run %s close-out complete with %d unreleased session(s) (%s; outcome=%s, merged %s, FINAL.md written); run /release to hand back the run", runID, len(releaseFailed), strings.Join(releaseFailed, ", "), outcome, prSummary)
+	}
+	recordStep(finalMsg)
+	if d.store != nil {
+		existingResults := make(map[string]bool)
+		if prevDecs, lErr := d.store.Decisions().List(context.WithoutCancel(ctx), store.DecisionFilter{RunID: runID}); lErr == nil {
+			for i := range prevDecs {
+				if prevDecs[i].Tool == dispatcher.ToolRunCloseout {
+					existingResults[prevDecs[i].Result] = true
+				}
+			}
+		}
+		reason := cmp.Or(strings.TrimSpace(params.Reason), "close out adopted run")
+		for _, summary := range stepSummaries {
+			if existingResults[summary] {
+				continue
+			}
+			existingResults[summary] = true
+			_, _ = d.store.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
+				RunID:     runID,
+				Category:  store.DecisionJudgment,
+				Actor:     dispatcher.ActorDispatcher,
+				Tool:      dispatcher.ToolRunCloseout,
+				Reason:    reason,
+				Result:    summary,
+				Output:    summary,
+				Vetted:    true,
+				CreatedAt: now,
+			})
+		}
+	}
+	return strings.Join(stepSummaries, "; "), nil
 }

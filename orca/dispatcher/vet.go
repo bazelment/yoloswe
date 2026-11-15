@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -40,6 +41,7 @@ const (
 	ToolLaneForward     = "lane.forward"
 	ToolReadLane        = "read.lane"
 	ToolLaneInspect     = ToolReadLane
+	ToolRunCloseout     = "run.closeout"
 	ToolReadLaneReport  = "read.lane_report"
 	ToolReadPR          = "read.pr"
 	ToolReadCI          = "read.ci"
@@ -246,6 +248,22 @@ type ReadLaneParams struct {
 	MaxBytes int      `json:"max_bytes,omitempty" jsonschema:"description=Maximum bytes to return"`
 }
 
+// RunCloseoutParams holds parameters for the run.closeout tool, which closes
+// out an adopted run once every lane and backlog item is terminal.
+type RunCloseoutParams struct {
+	Files            map[string]string `json:"files,omitempty" jsonschema:"description=Additional close-out file updates inside the run dir for files named in OBJECTIVE.md"`
+	Outcome          string            `json:"outcome,omitempty" jsonschema:"description=Final run outcome (defaults to done)"`
+	Summary          string            `json:"summary,omitempty" jsonschema:"description=Final summary for FINAL.md"`
+	FinalMarkdown    string            `json:"final_md,omitempty" jsonschema:"description=Explicit markdown body to write to FINAL.md"`
+	ProgressMarkdown string            `json:"progress_md,omitempty" jsonschema:"description=Markdown summary to append to PROGRESS.md"`
+	Next             string            `json:"next,omitempty" jsonschema:"description=Replacement Next: line for OBJECTIVE.md"`
+	PlanFile         string            `json:"plan_file,omitempty" jsonschema:"description=Plan file named in OBJECTIVE.md to append a completion log entry to (e.g. PLAN.md)"`
+	PlanLogLine      string            `json:"plan_log_line,omitempty" jsonschema:"description=Log line to append to the plan file named in OBJECTIVE.md"`
+	PostID           string            `json:"post_id,omitempty" jsonschema:"description=Nebula post ID named in OBJECTIVE.md to republish/update"`
+	PostContent      string            `json:"post_content,omitempty" jsonschema:"description=Updated markdown content for the Nebula post"`
+	Reason           string            `json:"reason,omitempty" jsonschema:"description=Reason for closing out the run"`
+}
+
 // ReadLaneReportParams holds parameters for the read.lane_report tool.
 type ReadLaneReportParams struct {
 	LaneID     string `json:"lane_id" jsonschema:"required,description=Lane ID whose phase report to read"`
@@ -289,6 +307,7 @@ type ProposedAction struct {
 	DirectiveRevoke *DirectiveRevokeParams `json:"-"`
 	PlannerRequest  *PlannerRequestParams  `json:"-"`
 	ReadLane        *ReadLaneParams        `json:"-"`
+	RunCloseout     *RunCloseoutParams     `json:"-"`
 	ReadLaneReport  *ReadLaneReportParams  `json:"-"`
 	ReadPR          *ReadPRParams          `json:"-"`
 	ReadCI          *ReadCIParams          `json:"-"`
@@ -346,7 +365,7 @@ func isKnownTool(tool string) bool {
 	switch tool {
 	case ToolBacklogAdd, ToolBacklogUpdate, ToolBacklogReorder, ToolBacklogClose,
 		ToolLaneSpawn, ToolLaneSteer, ToolLaneForward, ToolLaneRetry, ToolLaneStop, ToolLaneWait,
-		ToolOwnerAsk, ToolOwnerAnswer, ToolMailAnswer, ToolMailDismiss, ToolDirectiveNote, ToolDirectiveRevoke, ToolPlannerRequest,
+		ToolOwnerAsk, ToolOwnerAnswer, ToolMailAnswer, ToolMailDismiss, ToolDirectiveNote, ToolDirectiveRevoke, ToolPlannerRequest, ToolRunCloseout,
 		ToolReadLane, ToolReadLaneReport, ToolReadPR, ToolReadCI:
 		return true
 	default:
@@ -639,6 +658,14 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 		act.ReadLane = p
 		act.LaneID = strings.TrimSpace(p.LaneID)
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("inspect lane %s", p.LaneID))
+
+	case ToolRunCloseout:
+		p, err := decodeParams[RunCloseoutParams](canonical, trimmed)
+		if err != nil {
+			return act, err
+		}
+		act.RunCloseout = p
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Summary), "close out run")
 
 	case ToolReadLaneReport:
 		p, err := decodeParams[ReadLaneReportParams](canonical, trimmed)
@@ -2125,20 +2152,275 @@ func checkDirectiveAndPlannerInvariants(st *StateView, act ProposedAction) error
 		if strings.TrimSpace(p.MessageID) == "" && strings.TrimSpace(p.LaneID) == "" {
 			return errors.New("message_id or lane_id is required for mail.dismiss")
 		}
+
+	case ToolRunCloseout:
+		return checkRunCloseout(st, act.RunCloseout)
 	}
 	return nil
 }
 
-func isRunStateDone(run *store.Run, lanes []lane.Lane, backlog []store.BacklogItem) bool {
+// ValidateCloseoutFileRef checks that targetPath is a relative path confined to
+// the run directory and is either a standard run close-out file (FINAL.md,
+// PROGRESS.md, OBJECTIVE.md) or a file explicitly named in objective.
+func ValidateCloseoutFileRef(objective, targetPath string) (string, error) {
+	raw := strings.TrimSpace(targetPath)
+	if raw == "" {
+		return "", errors.New("close-out file path is empty")
+	}
+	if filepath.IsAbs(raw) || strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, `\`) {
+		return "", fmt.Errorf("close-out write %q is outside the run directory", raw)
+	}
+	cleaned := filepath.ToSlash(filepath.Clean(raw))
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
+		return "", fmt.Errorf("close-out write %q is outside the run directory", raw)
+	}
+	switch cleaned {
+	case "FINAL.md", "PROGRESS.md", "OBJECTIVE.md":
+		return cleaned, nil
+	}
+	if !strings.HasSuffix(strings.ToLower(cleaned), ".md") || strings.EqualFold(filepath.Base(cleaned), "HANDOVER.md") {
+		return "", fmt.Errorf("close-out write %q must target a markdown file, not a control or handover file", raw)
+	}
+	if !closeoutObjectiveMentionsFile(objective, cleaned) {
+		return "", fmt.Errorf("close-out write %q is not named in OBJECTIVE.md", raw)
+	}
+	return cleaned, nil
+}
+
+func closeoutObjectiveMentionsFile(objective, relPath string) bool {
+	if strings.TrimSpace(objective) == "" || relPath == "" {
+		return false
+	}
+	idx := 0
+	for idx <= len(objective)-len(relPath) {
+		pos := strings.Index(objective[idx:], relPath)
+		if pos < 0 {
+			return false
+		}
+		start := idx + pos
+		end := start + len(relPath)
+		leftOK := start == 0 || isCloseoutPathBoundary(objective[start-1])
+		rightOK := end == len(objective) || isCloseoutPathBoundary(objective[end])
+		if leftOK && rightOK {
+			return true
+		}
+		idx = start + 1
+	}
+	return false
+}
+
+func isCloseoutPathBoundary(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r', ',', ';', ':', '(', ')', '[', ']', '"', '\'', '`':
+		return true
+	default:
+		return false
+	}
+}
+
+// CheckRunTerminal verifies that every lane and backlog item in the run is in a
+// terminal status (a backlog item whose ID or LaneID matches a terminal lane is
+// treated as terminal). When requireLanes is true, at least one lane must exist.
+func CheckRunTerminal(lanes []lane.Lane, items []store.BacklogItem, requireLanes bool) error {
+	if requireLanes && len(lanes) == 0 {
+		return errors.New("cannot close out run with no lanes")
+	}
+	terminalLanes := make(map[string]bool, len(lanes))
 	for i := range lanes {
 		if !lanes[i].Status.Terminal() {
+			return fmt.Errorf("cannot close out run while lane %q is %s (all lanes must be terminal)", lanes[i].ID, lanes[i].Status)
+		}
+		terminalLanes[lanes[i].ID] = true
+	}
+	for i := range items {
+		it := &items[i]
+		if !it.Status.Terminal() && !terminalLanes[it.ID] && !terminalLanes[it.LaneID] {
+			return fmt.Errorf("cannot close out run while backlog item %q is %s (all items must be terminal)", it.ID, it.Status)
+		}
+	}
+	return nil
+}
+
+// ValidateCloseoutPostID checks that postID (when non-empty) is a well-formed
+// post identifier explicitly named as a whole token in at least one of sources.
+func ValidateCloseoutPostID(postID string, sources ...string) error {
+	id := strings.TrimSpace(postID)
+	if id == "" {
+		return nil
+	}
+	if !IsLikelyPostID(id) {
+		return fmt.Errorf("post_id %q is malformed", id)
+	}
+	for _, src := range sources {
+		if closeoutTextMentionsToken(src, id) {
+			return nil
+		}
+	}
+	return fmt.Errorf("post_id %q is not named in OBJECTIVE.md or handover sources", id)
+}
+
+func closeoutTextMentionsToken(text, tok string) bool {
+	if strings.TrimSpace(text) == "" || tok == "" || len(text) < len(tok) {
+		return false
+	}
+	isTokenByte := func(b byte) bool {
+		return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '-'
+	}
+	for idx := 0; idx <= len(text)-len(tok); {
+		pos := strings.Index(text[idx:], tok)
+		if pos < 0 {
+			return false
+		}
+		start := idx + pos
+		end := start + len(tok)
+		leftOK := start == 0 || !isTokenByte(text[start-1])
+		rightOK := end == len(text) || !isTokenByte(text[end])
+		if leftOK && rightOK {
+			return true
+		}
+		idx = start + 1
+	}
+	return false
+}
+
+// FindPostIDInText extracts a Nebula post ID referenced in text after a
+// "post:" or "post" marker.
+func FindPostIDInText(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	if idx := indexFoldASCII(text, "post:"); idx >= 0 {
+		rest := strings.TrimSpace(text[idx+len("post:"):])
+		if tok := leadingHexToken(rest); IsLikelyPostID(tok) {
+			return tok
+		}
+	}
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
+		postIdx := indexFoldASCII(line, "post")
+		if postIdx < 0 {
+			continue
+		}
+		if tok := firstLikelyPostToken(line[postIdx+len("post"):]); tok != "" {
+			return tok
+		}
+	}
+	return ""
+}
+
+func indexFoldASCII(s, substr string) int {
+	if substr == "" {
+		return 0
+	}
+	if len(s) < len(substr) {
+		return -1
+	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if strings.EqualFold(s[i:i+len(substr)], substr) {
+			return i
+		}
+	}
+	return -1
+}
+
+func firstLikelyPostToken(s string) string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F' || r == '-')
+	})
+	for _, f := range fields {
+		tok := strings.Trim(f, "-")
+		if IsLikelyPostID(tok) {
+			return tok
+		}
+	}
+	return ""
+}
+
+func leadingHexToken(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || c == '-' {
+			b.WriteByte(c)
+		} else {
+			break
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// IsLikelyPostID reports whether tok looks like a hex or UUID Nebula post ID.
+func IsLikelyPostID(tok string) bool {
+	if len(tok) < 7 || len(tok) > 36 {
+		return false
+	}
+	hasDigit := false
+	hasAlpha := false
+	for i := 0; i < len(tok); i++ {
+		c := tok[i]
+		switch {
+		case c >= '0' && c <= '9':
+			hasDigit = true
+		case (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'):
+			hasAlpha = true
+		case c == '-':
+		default:
 			return false
 		}
 	}
-	for i := range backlog {
-		if !backlog[i].Status.Terminal() {
-			return false
+	return hasDigit && hasAlpha
+}
+
+func checkRunCloseout(st *StateView, p *RunCloseoutParams) error {
+	if p == nil {
+		return errors.New("missing run.closeout parameters")
+	}
+	if st != nil {
+		lanes := make([]lane.Lane, 0, len(st.Lanes))
+		for id := range st.Lanes {
+			lanes = append(lanes, st.Lanes[id])
 		}
+		slices.SortFunc(lanes, func(a, b lane.Lane) int {
+			return strings.Compare(a.ID, b.ID)
+		})
+		items := make([]store.BacklogItem, 0, len(st.Backlog))
+		for id := range st.Backlog {
+			items = append(items, st.Backlog[id])
+		}
+		slices.SortFunc(items, func(a, b store.BacklogItem) int {
+			return strings.Compare(a.ID, b.ID)
+		})
+		if err := CheckRunTerminal(lanes, items, true); err != nil {
+			return err
+		}
+	}
+	var objText, planRef string
+	if st != nil && st.Run != nil {
+		objText = st.Run.Objective
+		planRef = st.Run.PlanRef
+	}
+	if strings.TrimSpace(p.PlanFile) != "" {
+		if _, err := ValidateCloseoutFileRef(objText, p.PlanFile); err != nil {
+			return err
+		}
+	}
+	for target := range p.Files {
+		if _, err := ValidateCloseoutFileRef(objText, target); err != nil {
+			return err
+		}
+	}
+	if err := ValidateCloseoutPostID(p.PostID, objText, planRef); err != nil {
+		return err
+	}
+	return nil
+}
+
+// isRunStateDone reports whether every lane and backlog item is terminal (including
+// adopted task-backed backlog items whose corresponding lane is terminal) and the
+// run objective's Next: directive is done.
+func isRunStateDone(run *store.Run, lanes []lane.Lane, backlog []store.BacklogItem) bool {
+	if err := CheckRunTerminal(lanes, backlog, false); err != nil {
+		return false
 	}
 	if run != nil && isObjectiveDoneText(run.Objective) {
 		return true

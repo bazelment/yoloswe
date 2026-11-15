@@ -1850,6 +1850,177 @@ func TestDispatcherStaleJudgmentDismissesQuestionAndEarlierOwnerLiftAllowsRevoke
 	}
 }
 
+func TestRunCloseoutToolVettingAndExecution(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Runs().UpdateObjective(ctx, "run-1", "Goal: trial-m1\nPlan: PLAN.md (post ac9da4cb)\nNext: write FINAL.md, update PLAN.md log, republish ac9da4cb", "post:ac9da4cb"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:     "m5-finish",
+		RunID:  "run-1",
+		Status: lane.StatusRunning,
+		Phase:  "review",
+		Round:  1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	viewRunning, err := dispatcher.LoadStateView(ctx, st, clk, "run-1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actClose := dispatcher.ProposedAction{
+		Tool: dispatcher.ToolRunCloseout,
+		RunCloseout: &dispatcher.RunCloseoutParams{
+			Outcome:  "done",
+			PlanFile: "PLAN.md",
+			PostID:   "ac9da4cb",
+		},
+	}
+	if err := dispatcher.VetAction(viewRunning, actClose, dispatcher.DefaultInvariants()); err == nil {
+		t.Fatal("expected VetAction to reject run.closeout while m5-finish is still running")
+	}
+
+	// Reject run.closeout when the run has zero lanes.
+	viewNoLanes := *viewRunning
+	viewNoLanes.Lanes = nil
+	if err := dispatcher.VetAction(&viewNoLanes, actClose, dispatcher.DefaultInvariants()); err == nil {
+		t.Fatal("expected VetAction to reject run.closeout when the run has 0 lanes")
+	}
+
+	// Mark lane done and test file confinement / named-file invariants.
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:       "m5-finish",
+		RunID:    "run-1",
+		Status:   lane.StatusDone,
+		Phase:    "review",
+		Round:    1,
+		PR:       5899,
+		MergeSHA: "def5899",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	viewDone, err := dispatcher.LoadStateView(ctx, st, clk, "run-1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A backlog item whose corresponding lane is terminal does not block run.closeout,
+	// whereas a backlog item with no terminal lane does block run.closeout.
+	viewWithSyncedBacklog := *viewDone
+	viewWithSyncedBacklog.Backlog = map[string]store.BacklogItem{
+		"m5-finish": {ID: "m5-finish", RunID: "run-1", Status: store.BacklogInProgress},
+	}
+	if err := dispatcher.VetAction(&viewWithSyncedBacklog, actClose, dispatcher.DefaultInvariants()); err != nil {
+		t.Fatalf("expected run.closeout to pass when backlog item matches terminal lane, got: %v", err)
+	}
+	viewWithPendingBacklog := *viewDone
+	viewWithPendingBacklog.Backlog = map[string]store.BacklogItem{
+		"m6-unspawned": {ID: "m6-unspawned", RunID: "run-1", Status: store.BacklogInProgress},
+	}
+	if err := dispatcher.VetAction(&viewWithPendingBacklog, actClose, dispatcher.DefaultInvariants()); err == nil {
+		t.Fatal("expected VetAction to reject run.closeout when an unspawned backlog item is ready")
+	}
+
+	// Reject post_id when Objective and PlanRef are empty or when post_id is only a substring.
+	viewEmptyObj := *viewDone
+	runEmpty := *viewDone.Run
+	runEmpty.Objective = ""
+	runEmpty.PlanRef = ""
+	viewEmptyObj.Run = &runEmpty
+	if err := dispatcher.VetAction(&viewEmptyObj, actClose, dispatcher.DefaultInvariants()); err == nil {
+		t.Fatal("expected VetAction to reject post_id when Objective and PlanRef are empty")
+	}
+
+	for _, bad := range []dispatcher.RunCloseoutParams{
+		{PlanFile: "../outside.md"},
+		{PlanFile: "/tmp/escape.md"},
+		{PlanFile: "UNLISTED.md"},
+		{Files: map[string]string{"../outside.md": "bad"}},
+		{Files: map[string]string{"UNLISTED.md": "bad"}},
+		{PostID: "deadbeef"}, // malformed (no digits)
+		{PostID: "a1b2c3d4"}, // well-formed hex with digits, but not named in OBJECTIVE.md
+		{PostID: "ac9da4c"},  // prefix substring must not match ac9da4cb
+	} {
+		p := bad
+		if err := dispatcher.VetAction(viewDone, dispatcher.ProposedAction{
+			Tool:        dispatcher.ToolRunCloseout,
+			RunCloseout: &p,
+		}, dispatcher.DefaultInvariants()); err == nil {
+			t.Fatalf("expected VetAction to reject invalid run.closeout params %+v", bad)
+		}
+	}
+
+	if err := dispatcher.ValidateCloseoutPostID("deadbeef", viewDone.Run.Objective); err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("expected malformed error for deadbeef, got %v", err)
+	}
+	if err := dispatcher.ValidateCloseoutPostID("a1b2c3d4", viewDone.Run.Objective); err == nil || !strings.Contains(err.Error(), "is not named in OBJECTIVE.md") {
+		t.Fatalf("expected not-named error for a1b2c3d4, got %v", err)
+	}
+	if _, err := dispatcher.ValidateCloseoutFileRef("Inspect state.json and HANDOVER.md", "state.json"); err == nil {
+		t.Fatal("expected ValidateCloseoutFileRef to reject state.json even when mentioned in OBJECTIVE.md")
+	}
+	if _, err := dispatcher.ValidateCloseoutFileRef("Inspect state.json and HANDOVER.md", "HANDOVER.md"); err == nil {
+		t.Fatal("expected ValidateCloseoutFileRef to reject HANDOVER.md even when mentioned in OBJECTIVE.md")
+	}
+	if got := dispatcher.FindPostIDInText("republish the plan; m1 merged abc5604"); got != "" {
+		t.Fatalf("FindPostIDInText without post marker = %q, want empty", got)
+	}
+	if err := dispatcher.CheckRunTerminal(
+		[]lane.Lane{{ID: "m5-finish", Status: lane.StatusDone}},
+		[]store.BacklogItem{{ID: "item-1", LaneID: "m5-finish", Status: store.BacklogInProgress}},
+		true,
+	); err != nil {
+		t.Fatalf("CheckRunTerminal should treat backlog item paired with terminal lane as terminal: %v", err)
+	}
+
+	if err := dispatcher.VetAction(viewDone, actClose, dispatcher.DefaultInvariants()); err != nil {
+		t.Fatalf("expected valid run.closeout to pass VetAction, got: %v", err)
+	}
+
+	var calledWith dispatcher.RunCloseoutParams
+	client := model.NewFakeClient(
+		toolUseResponse(model.ToolCall{
+			ID:    "close-1",
+			Name:  dispatcher.ToolRunCloseout,
+			Input: json.RawMessage(`{"outcome":"done","plan_file":"PLAN.md","post_id":"ac9da4cb","summary":"All lanes merged (#5899)"}`),
+		}),
+		endTurnResponse("Closed out run."),
+	)
+	d := dispatcher.New(dispatcher.Config{
+		OnRunCloseout: func(_ context.Context, runID string, params dispatcher.RunCloseoutParams) (string, error) {
+			if runID != "run-1" {
+				return "", fmt.Errorf("unexpected runID %q", runID)
+			}
+			calledWith = params
+			return "wrote FINAL.md; updated PLAN.md and post ac9da4cb; run /release", nil
+		},
+	}, st, drv, clk, client)
+
+	ev, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventTimer,
+		Class:   store.EventClassJudgment,
+		Summary: "all lanes terminal; close out run",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch(run.closeout): %v", err)
+	}
+	if len(res.Accepted) != 1 || res.Accepted[0].Tool != dispatcher.ToolRunCloseout {
+		t.Fatalf("Accepted = %+v, want 1 run.closeout action", res.Accepted)
+	}
+	if calledWith.PostID != "ac9da4cb" || calledWith.PlanFile != "PLAN.md" {
+		t.Fatalf("OnRunCloseout calledWith = %+v", calledWith)
+	}
+}
+
 func TestDispatcherLaneWaitToolSuppressesStallUntilDeadline(t *testing.T) {
 	t.Parallel()
 	clk, st, drv := setupTestEnv(t)

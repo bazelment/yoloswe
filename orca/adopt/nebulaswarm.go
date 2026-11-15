@@ -16,7 +16,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
+	"github.com/bazelment/yoloswe/orca/store"
 )
 
 // Run directory formats.
@@ -636,4 +638,324 @@ func appendNebulaSwarmEvents(dir string, now time.Time, prev *lane.Lane, cur lan
 	}
 	_, err = f.WriteString(b.String())
 	return err
+}
+
+// ValidateCloseoutWrite checks that targetPath resolves inside runDir and is
+// either a standard close-out file (FINAL.md, PROGRESS.md, OBJECTIVE.md) or a
+// file explicitly named in objective. It returns the resolved path inside runDir.
+func ValidateCloseoutWrite(runDir, objective, targetPath string) (string, error) {
+	dir := strings.TrimSpace(runDir)
+	if dir == "" {
+		return "", fmt.Errorf("close-out write %q: run directory is required", targetPath)
+	}
+	raw := strings.TrimSpace(targetPath)
+	if raw == "" {
+		return "", fmt.Errorf("close-out file path is empty")
+	}
+	if _, err := dispatcher.ValidateCloseoutFileRef(objective, raw); err != nil {
+		return "", err
+	}
+	resolved, err := resolveBriefPath(dir, raw)
+	if err != nil || resolved == "" {
+		return "", fmt.Errorf("close-out write %q is outside the run directory", raw)
+	}
+	base, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("close-out write %q is outside the run directory", raw)
+	}
+	cleanDir, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return "", fmt.Errorf("close-out write %q is outside the run directory", raw)
+	}
+	rel, err := filepath.Rel(cleanDir, resolved)
+	if err != nil {
+		return "", fmt.Errorf("close-out write %q is outside the run directory", raw)
+	}
+	relSlash := filepath.ToSlash(filepath.Clean(rel))
+	if relSlash == "." || relSlash == ".." || strings.HasPrefix(relSlash, "../") {
+		return "", fmt.Errorf("close-out write %q is outside the run directory", raw)
+	}
+	if _, err := dispatcher.ValidateCloseoutFileRef(objective, relSlash); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+// WriteCloseoutFile validates targetPath against runDir and objective and
+// writes (or appends) content atomically, preserving any ORCHESTRATOR stand-down
+// marker header on OBJECTIVE.md and PROGRESS.md.
+func WriteCloseoutFile(runDir, objective, targetPath, content string, appendMode bool) (string, error) {
+	resolved, err := ValidateCloseoutWrite(runDir, objective, targetPath)
+	if err != nil {
+		return "", err
+	}
+	base := filepath.Base(resolved)
+	existingRaw := readText(resolved)
+	var markerHeader string
+	body := existingRaw
+	if base == "OBJECTIVE.md" || base == "PROGRESS.md" {
+		for strings.HasPrefix(body, markerPrefix) {
+			line, rest, ok := strings.Cut(body, "\n")
+			if !ok {
+				markerHeader += line + "\n"
+				body = ""
+				break
+			}
+			markerHeader += line + "\n"
+			body = rest
+		}
+	}
+	var nextBody string
+	if appendMode && strings.TrimSpace(body) != "" {
+		nextBody = strings.TrimRight(body, "\n") + "\n" + strings.TrimLeft(content, "\n")
+		if !strings.HasSuffix(nextBody, "\n") {
+			nextBody += "\n"
+		}
+	} else {
+		nextBody = content
+		if base == "OBJECTIVE.md" || base == "PROGRESS.md" {
+			nextBody = stripMarker(nextBody)
+		}
+		if !strings.HasSuffix(nextBody, "\n") {
+			nextBody += "\n"
+		}
+	}
+	if err := writeAtomic(resolved, []byte(markerHeader+nextBody)); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+func hasUncheckedMilestoneItems(objective string) bool {
+	for _, line := range strings.Split(objective, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- [ ] ") || strings.HasPrefix(trimmed, "* [ ] ") {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldAutoCloseoutRun(r Run, lanes []lane.Lane, items []store.BacklogItem) bool {
+	if strings.TrimSpace(r.Dir) == "" || dispatcher.CheckRunTerminal(lanes, items, true) != nil {
+		return false
+	}
+	if fileExists(filepath.Join(r.Dir, "FINAL.md")) && ObjectiveIsDone(r.Objective) {
+		return false
+	}
+	if hasUncheckedMilestoneItems(r.Objective) {
+		return false
+	}
+	handoverText := stripMarker(readText(filepath.Join(r.Dir, "HANDOVER.md")))
+	triggerText := extractCloseoutTriggerText(r, handoverText)
+	if strings.TrimSpace(triggerText) == "" {
+		return false
+	}
+	triggerNorm := adoptNormalizeContractions(strings.ToLower(triggerText))
+	if adoptContainsWholeWord(triggerNorm, "staff") ||
+		adoptContainsWholeWord(triggerNorm, "spawn") ||
+		strings.Contains(triggerNorm, "ask owner") {
+		return false
+	}
+	return strings.Contains(triggerNorm, "final.md") ||
+		strings.Contains(triggerNorm, "close out") ||
+		strings.Contains(triggerNorm, "close-out") ||
+		strings.Contains(triggerNorm, "closeout") ||
+		strings.Contains(triggerNorm, "republish")
+}
+
+func extractCloseoutTriggerText(r Run, handoverText string) string {
+	var parts []string
+	next := strings.TrimSpace(r.Next)
+	if next == "" && r.Objective != "" {
+		next = strings.TrimSpace(extractNextSection(r.Objective))
+	}
+	if next != "" {
+		parts = append(parts, next)
+	}
+	if hNext := strings.TrimSpace(extractNextSection(handoverText)); hNext != "" {
+		parts = append(parts, hNext)
+	}
+	if hSec := extractHandoverSectionText(handoverText); hSec != "" {
+		parts = append(parts, hSec)
+	}
+	// When OBJECTIVE.md has an active non-done Next: directive, rely only on
+	// that Next: directive and explicit remaining-steps sections in HANDOVER.md
+	// so historical notes in PROGRESS.md cannot prematurely trigger close-out.
+	if next != "" && !IsDoneOrEmptyNext(next) {
+		return strings.Join(parts, "\n")
+	}
+	if progNext := strings.TrimSpace(extractNextSection(r.Progress)); progNext != "" {
+		parts = append(parts, progNext)
+	}
+	if objHandover := extractHandoverSectionText(r.Objective); objHandover != "" {
+		parts = append(parts, objHandover)
+	}
+	if progHandover := extractHandoverSectionText(r.Progress); progHandover != "" {
+		parts = append(parts, progHandover)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func extractHandoverSectionText(md string) string {
+	if strings.TrimSpace(md) == "" {
+		return ""
+	}
+	lines := strings.Split(md, "\n")
+	var out []string
+	inHandoverHeading := false
+	inRemainingBlock := false
+	isHistoricalNote := func(lower string) bool {
+		clean := strings.TrimLeft(lower, "-* \t")
+		return strings.HasPrefix(clean, "previously ") || strings.HasPrefix(clean, "already ")
+	}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(trimmed, "#") {
+			heading := strings.TrimSpace(strings.TrimLeft(lower, "#"))
+			if strings.HasPrefix(heading, "close-out (") {
+				inHandoverHeading = false
+				inRemainingBlock = false
+				continue
+			}
+			inHandoverHeading = strings.Contains(heading, "handover") ||
+				strings.Contains(heading, "remaining") ||
+				strings.Contains(heading, "close-out") ||
+				strings.Contains(heading, "close out") ||
+				strings.Contains(heading, "closeout")
+			inRemainingBlock = false
+			continue
+		}
+		if strings.HasPrefix(lower, "remaining") || strings.HasPrefix(lower, "handover:") {
+			inRemainingBlock = true
+			if !isHistoricalNote(lower) {
+				out = append(out, trimmed)
+			}
+			continue
+		}
+		if inRemainingBlock {
+			if trimmed == "" {
+				inRemainingBlock = false
+				continue
+			}
+			if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") || strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
+				if !isHistoricalNote(lower) {
+					out = append(out, trimmed)
+				}
+				continue
+			}
+			inRemainingBlock = false
+		}
+		if inHandoverHeading && trimmed != "" && !isHistoricalNote(lower) {
+			out = append(out, trimmed)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func extractCloseoutPlanFile(runDir, objective string) string {
+	if p := extractPlanPath(runDir, objective, ""); p != "" {
+		if resolved, err := ValidateCloseoutWrite(runDir, objective, p); err == nil {
+			base, bErr := filepath.Abs(runDir)
+			if bErr == nil {
+				if realDir, eErr := filepath.EvalSymlinks(base); eErr == nil {
+					base = realDir
+				}
+				if rel, rErr := filepath.Rel(base, resolved); rErr == nil {
+					return filepath.ToSlash(rel)
+				}
+			}
+		}
+	}
+	if _, err := ValidateCloseoutWrite(runDir, objective, "PLAN.md"); err == nil {
+		return "PLAN.md"
+	}
+	return ""
+}
+
+func extractCloseoutPostID(texts ...string) string {
+	for _, text := range texts {
+		if id := findPostIDInText(text); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func findPostIDInText(text string) string {
+	return dispatcher.FindPostIDInText(text)
+}
+
+func replaceObjectiveNextLine(objective, newNextLine string) string {
+	trimmedNext := strings.TrimSpace(newNextLine)
+	if !strings.HasPrefix(strings.ToLower(trimmedNext), "next:") {
+		trimmedNext = "Next: " + trimmedNext
+	}
+	lines := strings.Split(objective, "\n")
+	type span struct {
+		start, end int
+	}
+	var spans []span
+	for i := 0; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		clean := strings.TrimLeft(trimmed, "-* \t")
+		lower := strings.ToLower(clean)
+		if strings.HasPrefix(lower, "next:") {
+			end := i + 1
+			for end < len(lines) {
+				nextLine := lines[end]
+				nextTrim := strings.TrimSpace(nextLine)
+				if nextTrim == "" || strings.HasPrefix(nextTrim, "#") {
+					break
+				}
+				nxtClean := strings.ToLower(strings.TrimLeft(nextTrim, "-* \t"))
+				if strings.HasPrefix(nxtClean, "next:") {
+					break
+				}
+				if strings.HasPrefix(nextLine, " ") || strings.HasPrefix(nextLine, "\t") || strings.HasPrefix(nextTrim, "- ") || strings.HasPrefix(nextTrim, "* ") {
+					end++
+					continue
+				}
+				break
+			}
+			spans = append(spans, span{start: i, end: end})
+			i = end - 1
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			heading := strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "#")))
+			if heading == "next" || strings.HasPrefix(heading, "next ") || strings.HasPrefix(heading, "next:") {
+				end := i + 1
+				for end < len(lines) {
+					if strings.HasPrefix(strings.TrimSpace(lines[end]), "#") {
+						break
+					}
+					end++
+				}
+				for end > i+1 && strings.TrimSpace(lines[end-1]) == "" {
+					end--
+				}
+				spans = append(spans, span{start: i, end: end})
+				i = end - 1
+			}
+		}
+	}
+	if len(spans) == 0 {
+		out := append([]string{}, lines...)
+		for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+			out = out[:len(out)-1]
+		}
+		if len(out) > 0 {
+			out = append(out, "")
+		}
+		out = append(out, trimmedNext)
+		return strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n"
+	}
+	last := spans[len(spans)-1]
+	var out []string
+	out = append(out, lines[:last.start]...)
+	out = append(out, trimmedNext)
+	out = append(out, lines[last.end:]...)
+	return strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n"
 }
