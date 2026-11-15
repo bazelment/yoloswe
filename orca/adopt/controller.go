@@ -31,10 +31,6 @@ type JudgeFactory func(runID string, answer func(ctx context.Context, runID, ask
 // escalationAskTTL bounds an unanswered escalation question.
 const escalationAskTTL = 24 * time.Hour
 
-// ReadyBacklogSummaryPrefix prefixes the urgent judgment trigger emitted when
-// an owner start instruction leaves open ready P0 items unspawned.
-const ReadyBacklogSummaryPrefix = "open backlog items ready for dispatch: "
-
 // Controllers attaches host runs to orca's deterministic lane lifecycle.
 type Controllers struct {
 	ctx          context.Context
@@ -53,14 +49,12 @@ type Controllers struct {
 
 //nolint:govet // field alignment
 type controlledRun struct {
-	controller         *controller.Controller
-	syncer             *runLedgerSync
-	cancel             context.CancelFunc
-	done               chan struct{}
-	dispatchedOpenSet  map[string]bool
-	maxConcurrentLanes int
-	holder             string
-	run                Run
+	controller *controller.Controller
+	syncer     *runLedgerSync
+	cancel     context.CancelFunc
+	done       chan struct{}
+	holder     string
+	run        Run
 }
 
 type startup struct {
@@ -285,14 +279,12 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
 	cr := &controlledRun{
-		controller:         ctrl,
-		syncer:             syncer,
-		cancel:             cancel,
-		done:               make(chan struct{}),
-		dispatchedOpenSet:  map[string]bool{},
-		maxConcurrentLanes: workflow.Limits.MaxConcurrentLanes,
-		run:                r,
-		holder:             holder,
+		controller: ctrl,
+		syncer:     syncer,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+		run:        r,
+		holder:     holder,
 	}
 	d.mu.Lock()
 	s.cr = cr
@@ -433,8 +425,6 @@ func (d *Controllers) judge(holder string, dispatch controller.Judge) controller
 						})
 					}
 				}
-			} else {
-				d.enqueueReadyBacklogTriggerIfNeeded(ctx, runID, events)
 			}
 		}
 		d.syncRunLanes(ctx, runID)
@@ -446,200 +436,6 @@ func (d *Controllers) judge(holder string, dispatch controller.Judge) controller
 		}
 		return d.askOwnerOnEscalation(ctx, runID, events)
 	})
-}
-
-func (d *Controllers) enqueueReadyBacklogTriggerIfNeeded(ctx context.Context, runID string, events []store.Event) {
-	if d.store == nil {
-		return
-	}
-	cr := d.lookupRun(runID)
-	clearDedup := func() {
-		if cr != nil {
-			d.mu.Lock()
-			cr.dispatchedOpenSet = nil
-			d.mu.Unlock()
-		}
-	}
-	asked, ownerKey := adoptOwnerAskedToStart(events)
-	if !asked {
-		clearDedup()
-		return
-	}
-	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
-	if err != nil {
-		return
-	}
-	for i := range dirs {
-		if strings.HasPrefix(dirs[i].Ref, "owner_ask:") {
-			continue
-		}
-		if adoptIsHoldDirectiveText(dirs[i].Text) {
-			clearDedup()
-			return
-		}
-	}
-	items, err := d.store.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
-	if err != nil {
-		return
-	}
-	byID := make(map[string]store.BacklogStatus, len(items))
-	for i := range items {
-		byID[items[i].ID] = items[i].Status
-	}
-	lanes, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
-	if err != nil {
-		return
-	}
-	activeItemLane := make(map[string]bool, len(lanes))
-	activeOrPlanned := 0
-	for i := range lanes {
-		if !lanes[i].Status.Terminal() {
-			activeItemLane[cmp.Or(lanes[i].ItemID, lanes[i].ID)] = true
-			activeItemLane[lanes[i].ID] = true
-		}
-		if lanes[i].Status == lane.StatusRunning || lanes[i].Status == lane.StatusPlanned {
-			activeOrPlanned++
-		}
-	}
-	if cr != nil && cr.maxConcurrentLanes > 0 && activeOrPlanned >= cr.maxConcurrentLanes {
-		return
-	}
-	var readyP0 []string
-	for i := range items {
-		it := &items[i]
-		if it.Status != store.BacklogOpen || it.Priority != store.PriorityP0 || it.LaneID != "" || activeItemLane[it.ID] {
-			continue
-		}
-		ready := true
-		for _, dep := range it.DependsOn {
-			if byID[dep] != store.BacklogDone {
-				ready = false
-				break
-			}
-		}
-		if ready {
-			readyP0 = append(readyP0, it.ID)
-		}
-	}
-	if len(readyP0) == 0 {
-		clearDedup()
-		return
-	}
-	stateKey := fmt.Sprintf("owner:%s:open:%s:active:%d", ownerKey, strings.Join(readyP0, ","), activeOrPlanned)
-	if cr != nil {
-		d.mu.Lock()
-		already := cr.dispatchedOpenSet[stateKey]
-		d.mu.Unlock()
-		if already {
-			return
-		}
-	}
-	if _, err := d.store.Events().Append(ctx, store.Event{
-		RunID:     runID,
-		Kind:      store.EventTimer,
-		Class:     store.EventClassJudgment,
-		Urgent:    true,
-		Source:    controller.ActorController,
-		Summary:   ReadyBacklogSummaryPrefix + strings.Join(readyP0, ", "),
-		CreatedAt: d.clock.Now().UTC(),
-	}); err != nil {
-		return
-	}
-	if cr != nil {
-		d.mu.Lock()
-		cr.dispatchedOpenSet = map[string]bool{stateKey: true}
-		d.mu.Unlock()
-	}
-	d.Wake(runID)
-}
-
-func adoptOwnerAskedToStart(events []store.Event) (bool, string) {
-	asked := false
-	ownerKey := ""
-	for i := range events {
-		if events[i].Kind != store.EventOwnerMessage {
-			continue
-		}
-		text := strings.TrimSpace(events[i].Summary + " " + string(events[i].Payload))
-		if adoptIsHoldDirectiveText(text) {
-			asked = false
-			ownerKey = ""
-			continue
-		}
-		if adoptOwnerTextAskedToStart(text) {
-			asked = true
-			ownerKey = cmp.Or(events[i].ID, strconv.FormatInt(events[i].Seq, 10), events[i].Summary)
-		}
-	}
-	return asked, ownerKey
-}
-
-func adoptStripQuotedSpans(s string) string {
-	var b strings.Builder
-	var quote byte
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if quote != 0 {
-			if c == quote {
-				quote = 0
-			}
-			continue
-		}
-		if c == '"' {
-			quote = c
-			b.WriteByte(' ')
-			continue
-		}
-		if c == '\'' {
-			prevAlpha := i > 0 && ((s[i-1] >= 'a' && s[i-1] <= 'z') || (s[i-1] >= 'A' && s[i-1] <= 'Z'))
-			nextAlpha := i+1 < len(s) && ((s[i+1] >= 'a' && s[i+1] <= 'z') || (s[i+1] >= 'A' && s[i+1] <= 'Z'))
-			if !prevAlpha || !nextAlpha {
-				quote = c
-				b.WriteByte(' ')
-				continue
-			}
-		}
-		b.WriteByte(c)
-	}
-	return b.String()
-}
-
-func adoptSplitIntentClauses(s string) []string {
-	r := strings.NewReplacer(
-		"\n", "|",
-		".", "|",
-		";", "|",
-		"!", "|",
-		",", "|",
-		":", "|",
-		" — ", "|",
-		" – ", "|",
-		" - ", "|",
-		" and ", "|",
-		" then ", "|",
-		" but ", "|",
-	)
-	return strings.Split(r.Replace(s), "|")
-}
-
-func adoptSplitHoldClauses(s string) []string {
-	r := strings.NewReplacer(
-		"\n", "|",
-		".", "|",
-		";", "|",
-		"!", "|",
-		",", "|",
-		":", "|",
-		" — ", "|",
-		" – ", "|",
-		" - ", "|",
-		" and ", "|",
-		" then ", "|",
-		" but ", "|",
-		" until ", "|",
-		" unless ", "|",
-	)
-	return strings.Split(r.Replace(s), "|")
 }
 
 func adoptNormalizeContractions(s string) string {
@@ -675,128 +471,8 @@ func adoptContainsWholeWord(text, word string) bool {
 	return false
 }
 
-func adoptHasStartNegation(prefix string) bool {
-	norm := adoptNormalizeContractions(prefix)
-	for _, neg := range []string{
-		"not", "no", "never", "dont", "cannot", "cant", "wont", "shouldnt",
-		"hold", "pause", "stop", "wait", "delay", "defer", "block", "avoid",
-		"without", "before", "until", "unless",
-	} {
-		if adoptContainsWholeWord(norm, neg) {
-			return true
-		}
-	}
-	return false
-}
-
-func adoptOwnerTextAskedToStart(text string) bool {
-	unquoted := strings.ToLower(adoptStripQuotedSpans(text))
-	for _, sentence := range strings.FieldsFunc(unquoted, func(r rune) bool {
-		return r == '.' || r == ';' || r == '\n' || r == '!'
-	}) {
-		sentence = strings.TrimSpace(sentence)
-		if sentence == "" || strings.Contains(sentence, "?") {
-			continue
-		}
-		for _, clause := range adoptSplitIntentClauses(sentence) {
-			clause = strings.TrimSpace(clause)
-			if clause == "" {
-				continue
-			}
-			for _, phrase := range []string{"go ahead", "clear the hold", "clear both hold", "clear hold", "lift the hold", "lift hold"} {
-				if idx := strings.Index(clause, phrase); idx >= 0 && !adoptHasStartNegation(clause[:idx]) {
-					return true
-				}
-			}
-			for _, kw := range []string{"start", "spawn", "launch", "proceed", "resume", "unblock", "unpause"} {
-				for start := 0; start < len(clause); {
-					idx := strings.Index(clause[start:], kw)
-					if idx < 0 {
-						break
-					}
-					pos := start + idx
-					end := pos + len(kw)
-					leftOK := pos == 0 || !isWordByte(clause[pos-1])
-					rightOK := end == len(clause) || !isWordByte(clause[end])
-					if leftOK && rightOK && !adoptHasStartNegation(clause[:pos]) {
-						return true
-					}
-					start = pos + 1
-				}
-			}
-		}
-	}
-	return false
-}
-
 func isWordByte(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-}
-
-func adoptIsHoldDirectiveText(text string) bool {
-	unquoted := strings.ToLower(adoptStripQuotedSpans(text))
-	for _, sentence := range strings.FieldsFunc(unquoted, func(r rune) bool {
-		return r == '.' || r == ';' || r == '\n' || r == '!'
-	}) {
-		sentence = strings.TrimSpace(sentence)
-		if sentence == "" || strings.Contains(sentence, "?") {
-			continue
-		}
-		for _, clause := range adoptSplitHoldClauses(sentence) {
-			clause = strings.TrimSpace(clause)
-			if clause == "" {
-				continue
-			}
-			if strings.Contains(clause, "keep the hold") ||
-				strings.Contains(clause, "keep hold") ||
-				strings.Contains(clause, "hold on the run") ||
-				strings.Contains(clause, "hold on run") ||
-				adoptContainsWholeWord(clause, "lease") {
-				continue
-			}
-			lifting := false
-			for _, lift := range []string{
-				"clear", "cleared", "clearing", "lift", "lifted", "lifting",
-				"remove", "removed", "removing", "revoke", "revoked", "revoking",
-				"cancel", "canceled", "cancelled", "drop", "dropped", "undo",
-				"unpause", "unpaused", "resume", "resumed", "unblock", "unblocked",
-				"release", "released",
-			} {
-				if adoptContainsWholeWord(clause, lift) {
-					lifting = true
-					break
-				}
-			}
-			if lifting {
-				continue
-			}
-			for _, phrase := range []string{
-				"do not start", "don't start", "dont start",
-				"do not spawn", "don't spawn", "dont spawn",
-				"do not launch", "don't launch", "dont launch",
-				"no new lanes", "start no new lanes", "stop spawning", "pause spawning",
-				"no additional lanes", "no more lanes", "hold new lanes", "hold off",
-				"hold on starting", "hold starting", "block new lanes", "pause new lanes",
-				"no new work", "block all new work", "standing hold", "standing owner hold",
-			} {
-				if idx := strings.Index(clause, phrase); idx >= 0 {
-					prefix := adoptNormalizeContractions(clause[:idx])
-					if !adoptContainsWholeWord(prefix, "not") && !adoptContainsWholeWord(prefix, "never") && !adoptContainsWholeWord(prefix, "didnt") {
-						return true
-					}
-				}
-			}
-			norm := adoptNormalizeContractions(clause)
-			if (adoptContainsWholeWord(norm, "hold") || adoptContainsWholeWord(norm, "pause")) &&
-				!adoptContainsWholeWord(norm, "no") &&
-				!adoptContainsWholeWord(norm, "not") &&
-				!adoptContainsWholeWord(norm, "never") &&
-				!adoptContainsWholeWord(norm, "without") {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (d *Controllers) syncRunLanes(ctx context.Context, runID string) {
@@ -1114,7 +790,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	workflow.RunID = r.ID
 	workflow.Name = "adopted"
 	objectiveText := stripMarker(readText(filepath.Join(r.Dir, "OBJECTIVE.md")))
-	ruleText := extractMergeRuleText(r.Dir, st.Config.MergeRule, objectiveText, r.Goal, st.Config.Phases)
+	ruleText := extractMergeRuleText(st.Config.MergeRule, objectiveText)
 	if st.Config.MergePolicy != nil {
 		workflow.MergePolicy = *st.Config.MergePolicy
 	} else if strings.EqualFold(st.Config.Merge, "self") || strings.EqualFold(st.Config.Merge, "lane") || hasSelfMergeRule(ruleText) {
@@ -1431,23 +1107,17 @@ func normalizeHostPhaseName(name string, hasExplicitClean bool) (string, bool) {
 	}
 }
 
-func extractMergeRuleText(dir, configMergeRule, objectiveText, goal string, phases []hostPhase) string {
+func extractMergeRuleText(configMergeRule, objectiveText string) string {
 	var parts []string
-	for _, s := range []string{
-		configMergeRule,
-		objectiveText,
-		goal,
-		readText(filepath.Join(dir, "clean.brief")),
-		readText(filepath.Join(dir, "review.brief")),
-	} {
-		if trimmed := strings.TrimSpace(s); trimmed != "" {
-			parts = append(parts, trimmed)
-		}
+	if trimmed := strings.TrimSpace(configMergeRule); trimmed != "" {
+		parts = append(parts, trimmed)
 	}
-	for i := range phases {
-		if trimmed := strings.TrimSpace(phases[i].Prompt); trimmed != "" {
-			parts = append(parts, trimmed)
+	for _, line := range strings.Split(objectiveText, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(strings.ToLower(trimmed), "goal:") {
+			continue
 		}
+		parts = append(parts, trimmed)
 	}
 	return strings.Join(parts, "\n")
 }
@@ -1470,7 +1140,7 @@ func splitMergeRuleClauses(s string) []string {
 
 func isNegatedMergeRuleClause(clause string) bool {
 	norm := adoptNormalizeContractions(clause)
-	for _, neg := range []string{"not", "no", "never", "dont", "cannot", "cant", "without", "forbid"} {
+	for _, neg := range []string{"not", "no", "never", "dont", "cannot", "cant", "without", "forbid", "disable", "disabled", "off", "false", "none", "manual", "controller"} {
 		if adoptContainsWholeWord(norm, neg) {
 			return true
 		}
@@ -1486,8 +1156,8 @@ func hasSelfMergeRule(text string) bool {
 			continue
 		}
 		for _, phrase := range []string{
-			"self-merge",
-			"self merge",
+			"lanes self-merge",
+			"lane self-merges",
 			"merge themselves",
 			"merges itself",
 			"merge itself",
@@ -1503,9 +1173,13 @@ func hasSelfMergeRule(text string) bool {
 			"merge after pr-polish",
 			"merges once clean",
 			"merge once clean",
+			"merges after clean",
+			"merge after clean",
 			"merge_mode=self",
 			"merge mode: self",
 			"merge: self",
+			"merge rule: self-merge",
+			"merge policy: self-merge",
 		} {
 			if strings.Contains(clause, phrase) {
 				return true

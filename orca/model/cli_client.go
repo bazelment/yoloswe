@@ -299,7 +299,7 @@ func buildCLIPrompt(req Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return `You are an orca model adapter. Follow the system instructions below and the supplied conversation. Native CLI tools are disabled by design; every orchestrator tool in TOOL DEFINITIONS (including lane.spawn and directive.revoke) IS available in this session and is invoked by returning JSON. Select tools only from TOOL DEFINITIONS. Return ONLY JSON with either {"text":"..."} or {"tool":"name","id":"unique-call-id","input":{...}}. A tool response will be supplied in the next conversation turn; use its result before choosing the next action. Tool arguments must match the input_schema. Do not wrap JSON in markdown.
+	return `You are an orca model adapter. Follow the system instructions below and the supplied conversation. Native CLI tools are disabled by design; every orchestrator tool listed in TOOL DEFINITIONS is available in this session and is invoked by returning JSON. Select tools only from TOOL DEFINITIONS. Return ONLY JSON with {"text":"..."}, {"tool":"name","id":"unique-call-id","input":{...}}, or a JSON array of such tool-call objects. A tool response will be supplied in the next conversation turn; use its result before choosing the next action. Tool arguments must match the input_schema. Do not wrap JSON in markdown.
 SYSTEM:
 ` + req.System + "\nCONVERSATION:\n" + string(messages) + "\nTOOL DEFINITIONS:\n" + string(tools) + "\n", nil
 }

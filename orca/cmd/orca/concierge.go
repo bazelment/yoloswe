@@ -1945,17 +1945,17 @@ func (c *Concierge) handleDirectiveRevoke(
 		c.Wake(runID)
 	}
 	rawArgs, _ := json.Marshal(p)
-	_, _ = c.store.Decisions().Append(ctx, store.Decision{
-		RunID:    cmp.Or(runID, c.runID),
-		Category: store.DecisionJudgment,
-		Actor:    ActorConcierge,
-		ThreadID: threadID,
-		TurnID:   turnID,
-		Tool:     ToolDirectiveRevoke,
-		Reason:   cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("revoked directive %s on run %s", id, runID)),
-		Result:   fmt.Sprintf("revoked directive %s", id),
-		Args:     rawArgs,
-		Vetted:   true,
-	})
+	_, _ = memorychat.AppendDirectiveRevokeDecision(
+		ctx,
+		c.store,
+		cmp.Or(runID, c.runID),
+		threadID,
+		turnID,
+		id,
+		p.Reason,
+		rawArgs,
+		model.Usage{},
+		0,
+	)
 	return fmt.Sprintf("Revoked directive %s on run %s", id, runID), nil
 }

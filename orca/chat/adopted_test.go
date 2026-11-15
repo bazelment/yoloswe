@@ -845,3 +845,43 @@ func TestDispatchDoesNotHoldRLockAcrossStepAdopted(t *testing.T) {
 		t.Fatalf("Dispatch: %v", err)
 	}
 }
+
+func TestDispatcherOutcomesDoNotCollideAcrossRunsWithOverlappingSeq(t *testing.T) {
+	t.Parallel()
+	f := newAdoptedFixture(t, func(string, func(context.Context, string, string, string) error) controller.Judge {
+		return controller.JudgeFunc(func(context.Context, string, []store.Event) error {
+			return errors.New("lane.spawn unavailable in session")
+		})
+	})
+	ctx := t.Context()
+
+	// Seed prior dispatcher decisions on the chatRun (Seq 1 and 2) and
+	// re-attach so seedSeenDispatcherRun records Seq 1..2 on chatRun.
+	for i := 0; i < 2; i++ {
+		if _, err := f.store.Decisions().Append(ctx, store.Decision{
+			RunID:     chatRun,
+			Category:  store.DecisionJudgment,
+			Actor:     "dispatcher",
+			Tool:      controller.ToolJudgmentDispatch,
+			Reason:    "prior front-desk decision",
+			Result:    "noop",
+			Vetted:    true,
+			CreatedAt: f.clock.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.backend.Attach(f.store, chatRun); err != nil {
+		t.Fatal(err)
+	}
+
+	var emitted string
+	if err := f.backend.Dispatch(ctx, router.Decision{Handler: router.Dispatcher, Confidence: 1}, "start M4 now", func(s string) {
+		emitted += s
+	}); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if !strings.Contains(emitted, "dispatcher failed: lane.spawn unavailable in session") {
+		t.Fatalf("adopted run Seq=1 failed-judgment outcome was suppressed by chatRun Seq=1..2:\n%s", emitted)
+	}
+}

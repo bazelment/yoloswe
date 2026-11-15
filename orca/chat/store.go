@@ -72,7 +72,7 @@ type StoreBackend struct {
 	prCache            map[string]cachedPR
 	usageCache         map[string]runUsageCache
 	seenTurns          map[string]bool
-	seenDecs           map[int64]bool
+	seenDecs           map[string]bool
 	pendingOutcomeRuns map[string]bool
 }
 
@@ -1132,7 +1132,7 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 		defer func() { _ = stepStore.Close() }()
 	}
 	if queuedDispatcher && stepStore != nil {
-		b.stepAdopted(ctx, stepStore, closeStepStore, runID)
+		b.stepAdopted(ctx, runID)
 		var outcomes []string
 		if closeStepStore {
 			outcomes = b.collectDispatcherOutcomes(ctx, stepStore, []string{runID})
@@ -1251,7 +1251,7 @@ func (b *StoreBackend) deliverFromFrontDesk(ctx context.Context, handler router.
 	return target, st, closeStore, ack, nil
 }
 
-func (b *StoreBackend) stepAdopted(ctx context.Context, st store.Store, standaloneStore bool, runID string) {
+func (b *StoreBackend) stepAdopted(ctx context.Context, runID string) {
 	if b.Adoption == nil || runID == "" {
 		return
 	}
@@ -1262,28 +1262,14 @@ func (b *StoreBackend) stepAdopted(ctx context.Context, st store.Store, standalo
 		return
 	}
 	_ = stepper.Step(ctx, runID)
-	if st == nil {
-		return
-	}
-	var stepAgain bool
-	if standaloneStore {
-		if evs, err := st.Events().List(ctx, store.EventFilter{RunID: runID}); err == nil && len(evs) > 0 {
-			last := evs[len(evs)-1]
-			stepAgain = last.Source == controller.ActorController && strings.HasPrefix(last.Summary, adopt.ReadyBacklogSummaryPrefix)
-		}
-	} else {
-		b.mu.RLock()
-		if b.store == st {
-			if evs, err := st.Events().List(ctx, store.EventFilter{RunID: runID}); err == nil && len(evs) > 0 {
-				last := evs[len(evs)-1]
-				stepAgain = last.Source == controller.ActorController && strings.HasPrefix(last.Summary, adopt.ReadyBacklogSummaryPrefix)
-			}
-		}
-		b.mu.RUnlock()
-	}
-	if stepAgain {
-		_ = stepper.Step(ctx, runID)
-	}
+}
+
+func seenTurnKey(runID, turnID string) string {
+	return runID + "\x00" + turnID
+}
+
+func seenDecKey(runID string, seq int64) string {
+	return runID + "\x00" + strconv.FormatInt(seq, 10)
 }
 
 func (b *StoreBackend) markPendingOutcomeRun(runID string) {
@@ -1310,18 +1296,18 @@ func (b *StoreBackend) seedSeenDispatcherRun(ctx context.Context, st store.Store
 		b.seenTurns = map[string]bool{}
 	}
 	if b.seenDecs == nil {
-		b.seenDecs = map[int64]bool{}
+		b.seenDecs = map[string]bool{}
 	}
 	for i := range threads {
 		turns, _ := st.Threads().ListTurns(ctx, threads[i].ID)
 		for j := range turns {
 			if turns[j].Status != store.TurnStatusRunning {
-				b.seenTurns[turns[j].ID] = true
+				b.seenTurns[seenTurnKey(runID, turns[j].ID)] = true
 			}
 		}
 	}
 	for i := range decs {
-		b.seenDecs[decs[i].Seq] = true
+		b.seenDecs[seenDecKey(runID, decs[i].Seq)] = true
 	}
 }
 
@@ -1377,19 +1363,20 @@ func (b *StoreBackend) collectDispatcherOutcomes(ctx context.Context, st store.S
 				if tr.Status == store.TurnStatusRunning {
 					continue
 				}
+				turnKey := seenTurnKey(runID, tr.ID)
 				b.cacheMu.Lock()
 				if b.seenTurns == nil {
 					b.seenTurns = map[string]bool{}
 				}
-				seen := b.seenTurns[tr.ID]
+				seen := b.seenTurns[turnKey]
 				if !seen {
-					b.seenTurns[tr.ID] = true
+					b.seenTurns[turnKey] = true
 					if b.seenDecs == nil {
-						b.seenDecs = map[int64]bool{}
+						b.seenDecs = map[string]bool{}
 					}
 					turnDecs := byTurn[tr.ID]
 					for k := range turnDecs {
-						b.seenDecs[turnDecs[k].Seq] = true
+						b.seenDecs[seenDecKey(runID, turnDecs[k].Seq)] = true
 					}
 				}
 				b.cacheMu.Unlock()
@@ -1406,13 +1393,14 @@ func (b *StoreBackend) collectDispatcherOutcomes(ctx context.Context, st store.S
 			if d.TurnID != "" {
 				continue
 			}
+			decKey := seenDecKey(runID, d.Seq)
 			b.cacheMu.Lock()
 			if b.seenDecs == nil {
-				b.seenDecs = map[int64]bool{}
+				b.seenDecs = map[string]bool{}
 			}
-			seen := b.seenDecs[d.Seq]
+			seen := b.seenDecs[decKey]
 			if !seen {
-				b.seenDecs[d.Seq] = true
+				b.seenDecs[decKey] = true
 			}
 			b.cacheMu.Unlock()
 			if seen {

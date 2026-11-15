@@ -753,7 +753,20 @@ func TestConcierge_DirectiveRevokeRemovesDirectiveAndDecisionRecorded(t *testing
 	}
 
 	// Revoking a nonexistent directive must return a not-found error to the model
-	// rather than recording a vetted success decision.
+	// rather than recording a vetted success decision, even if an unrelated memory
+	// entry with the same ID exists.
+	if _, err := st.Memories().Put(ctx, store.MemoryEntry{
+		ID:          "does-not-exist",
+		Name:        "Standalone memory",
+		Description: "not a directive",
+		Type:        "rule",
+		Scope:       "repo",
+		Source:      "test",
+		Body:        "not a directive",
+		ProposedBy:  "model",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	clientNotFound := model.NewFakeClient(
 		model.Response{
 			StopReason: model.StopReasonToolUse,
@@ -772,6 +785,9 @@ func TestConcierge_DirectiveRevokeRemovesDirectiveAndDecisionRecorded(t *testing
 	}
 	if len(clientNotFound.Requests) != 2 || !clientNotFound.Requests[1].Messages[2].Content[0].IsError {
 		t.Fatalf("expected error tool_result for nonexistent directive.revoke, got %+v", clientNotFound.Requests)
+	}
+	if mem, mErr := st.Memories().Get(ctx, "", "does-not-exist"); mErr != nil || mem == nil {
+		t.Fatalf("standalone memory entry should not be deleted when directive row is missing, got %+v, %v", mem, mErr)
 	}
 }
 

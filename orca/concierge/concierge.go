@@ -1363,8 +1363,7 @@ func (c *Concierge) execDirectiveSubmit(
 
 // RevokeDirective marks directive id revoked on runID (or the first matching
 // fallbackRunIDs entry) and deletes any matching memory entry. It returns a
-// wrapped store.ErrNotFound when neither the directive nor the memory entry
-// exists.
+// wrapped store.ErrNotFound when the directive does not exist.
 func RevokeDirective(ctx context.Context, st store.Store, runID, id string, fallbackRunIDs ...string) (string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -1383,17 +1382,43 @@ func RevokeDirective(ctx context.Context, st store.Store, runID, id string, fall
 			}
 		}
 	}
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return runID, fmt.Errorf("directive %q not found: %w", id, err)
+		}
 		return runID, err
 	}
-	memErr := st.Memories().Delete(ctx, "", id)
-	if memErr != nil && !errors.Is(memErr, store.ErrNotFound) {
+	if memErr := st.Memories().Delete(ctx, "", id); memErr != nil && !errors.Is(memErr, store.ErrNotFound) {
 		return runID, memErr
 	}
-	if errors.Is(err, store.ErrNotFound) && errors.Is(memErr, store.ErrNotFound) {
-		return runID, fmt.Errorf("directive %q not found: %w", id, err)
-	}
 	return runID, nil
+}
+
+// AppendDirectiveRevokeDecision records a vetted directive.revoke decision row.
+func AppendDirectiveRevokeDecision(
+	ctx context.Context,
+	st store.Store,
+	runID, threadID, turnID, id, reason string,
+	rawArgs json.RawMessage,
+	usage model.Usage,
+	latencyMs int64,
+) (store.Decision, error) {
+	return st.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
+		RunID:        runID,
+		Category:     store.DecisionJudgment,
+		Actor:        ActorConcierge,
+		ThreadID:     threadID,
+		TurnID:       turnID,
+		Tool:         ToolDirectiveRevoke,
+		Reason:       cmp.Or(strings.TrimSpace(reason), fmt.Sprintf("owner revoked directive %s", id)),
+		Result:       fmt.Sprintf("revoked directive %s", id),
+		Args:         slices.Clone(rawArgs),
+		Vetted:       true,
+		InputTokens:  usage.InputTokens,
+		OutputTokens: usage.OutputTokens,
+		CostUSD:      usage.CostUSD,
+		LatencyMs:    max(latencyMs, 0),
+	})
 }
 
 func (c *Concierge) execDirectiveRevoke(
@@ -1421,30 +1446,25 @@ func (c *Concierge) execDirectiveRevoke(
 			state.turnUsageRecorded = true
 		}
 	}
-	resultMsg := fmt.Sprintf("revoked directive %s", id)
-	dec, decErr := c.store.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
-		RunID:        runID,
-		Category:     store.DecisionJudgment,
-		Actor:        ActorConcierge,
-		ThreadID:     threadID,
-		TurnID:       turnID,
-		Tool:         ToolDirectiveRevoke,
-		Reason:       cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("owner revoked directive %s", id)),
-		Result:       resultMsg,
-		Args:         slices.Clone(rawArgs),
-		Vetted:       true,
-		InputTokens:  usage.InputTokens,
-		OutputTokens: usage.OutputTokens,
-		CostUSD:      usage.CostUSD,
-		LatencyMs:    max(c.clock.Now().Sub(start).Milliseconds(), 0),
-	})
+	dec, decErr := AppendDirectiveRevokeDecision(
+		ctx,
+		c.store,
+		runID,
+		threadID,
+		turnID,
+		id,
+		p.Reason,
+		rawArgs,
+		usage,
+		c.clock.Now().Sub(start).Milliseconds(),
+	)
 	if decErr != nil {
 		return "", decErr
 	}
 	if state != nil {
 		state.decisions = append(state.decisions, dec)
 	}
-	return resultMsg, nil
+	return dec.Result, nil
 }
 
 func (c *Concierge) resolveLaneScope(ctx context.Context, runID, scope string) string {

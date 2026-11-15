@@ -730,13 +730,52 @@ func TestDispatch_DirectiveRevokeNotFoundRejected(t *testing.T) {
 	t.Parallel()
 	clk, st, drv := setupTestEnv(t)
 	ctx := t.Context()
+
+	// Seed a non-directive memory entry and an open owner ask directive to verify
+	// neither can be revoked/deleted via directive.revoke.
+	if _, err := st.Memories().Put(ctx, store.MemoryEntry{
+		ID:          "orphan-mem",
+		Name:        "Repo rule",
+		Description: "keep tests deterministic",
+		Type:        "rule",
+		Scope:       "repo",
+		Source:      "test",
+		Body:        "keep tests deterministic",
+		ProposedBy:  "model",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:     "ask-q1",
+		RunID:  "run-1",
+		Kind:   store.DirectiveInstruction,
+		Source: store.DirectiveSourceDispatcher,
+		Ref:    "owner_ask:q1",
+		Text:   `{"id":"q1","run_id":"run-1","question":"Proceed?","options":["yes","no"],"default":"yes"}`,
+		Status: store.DirectiveActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:     "dir-hold",
+		RunID:  "run-1",
+		Kind:   store.DirectiveStanding,
+		Source: store.DirectiveSourceOwner,
+		Text:   "hold new lanes",
+		Status: store.DirectiveActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 	fake := model.NewFakeClient(
 		toolUseResponse(
 			model.ToolCall{ID: "t1", Name: dispatcher.ToolDirectiveRevoke, Input: json.RawMessage(`{"id":"nonexistent-dir","reason":"clear nonexistent hold"}`)},
+			model.ToolCall{ID: "t2", Name: dispatcher.ToolDirectiveRevoke, Input: json.RawMessage(`{"id":"orphan-mem","reason":"try to delete non-directive memory"}`)},
+			model.ToolCall{ID: "t3", Name: dispatcher.ToolDirectiveRevoke, Input: json.RawMessage(`{"id":"ask-q1","reason":"try to revoke owner ask"}`)},
 		),
 		endTurnResponse("done"),
 	)
-	d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+	d := dispatcher.New(dispatcher.Config{AllowMultiAction: true}, st, drv, clk, fake)
 	ev, _ := st.Events().Append(ctx, store.Event{
 		RunID:   "run-1",
 		Kind:    store.EventOwnerMessage,
@@ -748,7 +787,33 @@ func TestDispatch_DirectiveRevokeNotFoundRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
-	if len(res.Accepted) != 0 || len(res.Rejected) != 1 {
-		t.Fatalf("Accepted=%d Rejected=%d, want 0 accepted and 1 rejected", len(res.Accepted), len(res.Rejected))
+	if len(res.Accepted) != 0 || len(res.Rejected) != 3 {
+		t.Fatalf("Accepted=%d Rejected=%d (%v), want 0 accepted and 3 rejected", len(res.Accepted), len(res.Rejected), res.Rejected)
+	}
+	if mem, mErr := st.Memories().Get(ctx, "", "orphan-mem"); mErr != nil || mem == nil {
+		t.Fatalf("orphan-mem should remain intact after rejected directive.revoke, got %+v, %v", mem, mErr)
+	}
+
+	// Also verify directive.revoke is rejected when the batch has no owner_msg event.
+	fakeNoOwner := model.NewFakeClient(
+		toolUseResponse(
+			model.ToolCall{ID: "t4", Name: dispatcher.ToolDirectiveRevoke, Input: json.RawMessage(`{"id":"dir-hold","reason":"lane asked to lift hold"}`)},
+		),
+		endTurnResponse("done"),
+	)
+	dNoOwner := dispatcher.New(dispatcher.Config{}, st, drv, clk, fakeNoOwner)
+	laneEv, _ := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventMail,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "lane mail asking to lift hold",
+	})
+	resNoOwner, err := dNoOwner.Dispatch(ctx, "run-1", []store.Event{laneEv})
+	if err != nil {
+		t.Fatalf("Dispatch without owner_msg: %v", err)
+	}
+	if len(resNoOwner.Accepted) != 0 || len(resNoOwner.Rejected) != 1 {
+		t.Fatalf("without owner_msg: Accepted=%d Rejected=%d (%v), want 0 accepted and 1 rejected", len(resNoOwner.Accepted), len(resNoOwner.Rejected), resNoOwner.Rejected)
 	}
 }

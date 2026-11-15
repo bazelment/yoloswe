@@ -875,7 +875,7 @@ func (d *Dispatcher) applyVettedAction(
 	case ToolDirectiveNote:
 		return d.applyDirectiveNote(ctx, runID, state, *act.DirectiveNote)
 	case ToolDirectiveRevoke:
-		return d.applyDirectiveRevoke(ctx, runID, view, *act.DirectiveRevoke)
+		return d.applyDirectiveRevoke(ctx, runID, state, view, *act.DirectiveRevoke)
 	case ToolPlannerRequest:
 		return d.applyPlannerRequest(ctx, runID, *act.PlannerRequest)
 	case ToolReadLaneReport:
@@ -1453,21 +1453,24 @@ func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, state
 	return fmt.Sprintf("recorded directive note %s", dir.ID), nil
 }
 
-func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, view *StateView, p DirectiveRevokeParams) (string, error) {
+func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, state *turnExecState, view *StateView, p DirectiveRevokeParams) (string, error) {
 	id := strings.TrimSpace(p.ID)
 	if id == "" {
 		return "", fmt.Errorf("%w: directive id is required", store.ErrInvalidArgument)
 	}
-	err := d.store.Directives().UpdateStatus(ctx, runID, id, store.DirectiveRevoked)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
+	if state != nil && len(state.events) > 0 && !slices.ContainsFunc(state.events, func(ev store.Event) bool {
+		return ev.Kind == store.EventOwnerMessage
+	}) {
+		return "", &invariantViolationError{msg: "directive.revoke [run]: requires an owner_msg event in the batch"}
+	}
+	if err := d.store.Directives().UpdateStatus(ctx, runID, id, store.DirectiveRevoked); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", fmt.Errorf("directive %q not found: %w", id, err)
+		}
 		return "", err
 	}
-	memErr := d.store.Memories().Delete(ctx, "", id)
-	if memErr != nil && !errors.Is(memErr, store.ErrNotFound) {
+	if memErr := d.store.Memories().Delete(ctx, "", id); memErr != nil && !errors.Is(memErr, store.ErrNotFound) {
 		return "", memErr
-	}
-	if errors.Is(err, store.ErrNotFound) && errors.Is(memErr, store.ErrNotFound) {
-		return "", fmt.Errorf("directive %q not found: %w", id, err)
 	}
 	if view != nil && view.Directives != nil {
 		delete(view.Directives, id)

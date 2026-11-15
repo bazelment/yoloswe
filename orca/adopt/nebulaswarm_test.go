@@ -2170,30 +2170,38 @@ func TestAdoptedSelfMergeRecipeHasNoControllerMergePhase(t *testing.T) {
 		t.Fatalf("lanes2 = %+v, want normalized clean phase with term-m3-polish", lanes2)
 	}
 
-	// Negative check: prose mentioning "no review" or negated "do not self-merge"
+	// Negative check: prose mentioning "no review", negated "do not self-merge",
+	// a goal mentioning "add self-merge support", or "Self-merge: disabled"
 	// must NOT flip merge policy to self or drop the review phase.
-	write(t, filepath.Join(dir, "OBJECTIVE.md"), "# 20261114-trial-m1\n\nGoal: ensure no review comments are dropped.\nMerge rule: lanes must not self-merge; controller merges after review.\n")
-	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"ensure no review comments are dropped","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"squash",
+	for _, negObj := range []string{
+		"# 20261114-trial-m1\n\nGoal: ensure no review comments are dropped.\nMerge rule: lanes must not self-merge; controller merges after review.\n",
+		"# 20261114-trial-m1\n\nGoal: add self-merge support to the recipe compiler.\n",
+		"# 20261114-trial-m1\n\nSelf-merge: disabled\n",
+	} {
+		write(t, filepath.Join(dir, "OBJECTIVE.md"), negObj)
+		write(t, filepath.Join(dir, "clean.brief"), "Note: self-merge is discussed in docs.")
+		write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"add self-merge support to the recipe compiler","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"squash",
 "phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":""},
 {"name":"clean","kind":"codex","model":"gpt-5.6-sol","effort":"high","prompt":""},
 {"name":"review","kind":"claude","model":"sonnet","effort":"high","prompt":""}]},
 "tasks":[]}`)
-	r3, err := Read(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wf3, _, _, err := controllerState(r3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if wf3.MergePolicy.Mode != recipe.MergeModeController {
-		t.Fatalf("wf3.MergePolicy.Mode = %q, want %q when self-merge is negated", wf3.MergePolicy.Mode, recipe.MergeModeController)
-	}
-	if _, hasReview := wf3.Phase(recipe.PhaseReview); !hasReview {
-		t.Fatalf("wf3 dropped review phase on generic 'no review' prose: %+v", wf3.Phases)
-	}
-	if _, hasIntegrate := wf3.Phase(recipe.PhaseIntegrate); !hasIntegrate {
-		t.Fatalf("wf3 missing controller integrate phase: %+v", wf3.Phases)
+		r3, err := Read(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wf3, _, _, err := controllerState(r3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if wf3.MergePolicy.Mode != recipe.MergeModeController {
+			t.Fatalf("wf3.MergePolicy.Mode = %q for %q, want %q", wf3.MergePolicy.Mode, negObj, recipe.MergeModeController)
+		}
+		if _, hasReview := wf3.Phase(recipe.PhaseReview); !hasReview {
+			t.Fatalf("wf3 dropped review phase for %q: %+v", negObj, wf3.Phases)
+		}
+		if _, hasIntegrate := wf3.Phase(recipe.PhaseIntegrate); !hasIntegrate {
+			t.Fatalf("wf3 missing controller integrate phase for %q: %+v", negObj, wf3.Phases)
+		}
 	}
 
 	// Self-merge rule variants: "Merge mode: self", "Merge: self", "merge_mode=self",
@@ -2259,15 +2267,13 @@ func TestAdoptStartAndHoldIntentParityWithDispatcher(t *testing.T) {
 		{"can we start M4 or what is the status?", false, false},
 		{"the M4 requirement is unclear", false, false},
 	} {
-		gotAdoptStart := adoptOwnerTextAskedToStart(tc.text)
 		gotDispStart := dispatcher.OwnerTextAskedToStart(tc.text)
-		if gotAdoptStart != tc.wantStart || gotDispStart != tc.wantStart {
-			t.Fatalf("start intent(%q): adopt=%v dispatcher=%v, want %v", tc.text, gotAdoptStart, gotDispStart, tc.wantStart)
+		if gotDispStart != tc.wantStart {
+			t.Fatalf("start intent(%q): dispatcher=%v, want %v", tc.text, gotDispStart, tc.wantStart)
 		}
-		gotAdoptHold := adoptIsHoldDirectiveText(tc.text)
 		gotDispHold := dispatcher.IsHoldDirectiveText(tc.text)
-		if gotAdoptHold != tc.wantHold || gotDispHold != tc.wantHold {
-			t.Fatalf("hold intent(%q): adopt=%v dispatcher=%v, want %v", tc.text, gotAdoptHold, gotDispHold, tc.wantHold)
+		if gotDispHold != tc.wantHold {
+			t.Fatalf("hold intent(%q): dispatcher=%v, want %v", tc.text, gotDispHold, tc.wantHold)
 		}
 	}
 }

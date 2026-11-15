@@ -1462,10 +1462,12 @@ func checkDirectiveAndPlannerInvariants(st *StateView, act ProposedAction) error
 		}
 		if st != nil && st.Directives != nil {
 			id := strings.TrimSpace(p.ID)
-			_, inDirs := st.Directives[id]
-			inMem := slices.ContainsFunc(st.Memories, func(m store.MemoryEntry) bool { return m.ID == id })
-			if !inDirs && !inMem {
+			dir, inDirs := st.Directives[id]
+			if !inDirs {
 				return fmt.Errorf("active directive %q does not exist in the snapshot", id)
+			}
+			if strings.HasPrefix(dir.Ref, ownerAskRefPrefix) {
+				return fmt.Errorf("directive %q is an open owner ask; use %s to resolve it", id, ToolOwnerAnswer)
 			}
 		}
 
