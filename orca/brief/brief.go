@@ -2,9 +2,11 @@
 package brief
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -18,25 +20,91 @@ const DefaultMaxBytes = 16 * 1024
 // Render includes all supplied memories and rejects briefs that exceed maxBytes.
 // Callers must filter out memories belonging to other runs.
 func Render(text string, memories []store.MemoryEntry, maxBytes int) (string, error) {
+	return RenderWithContract(text, nil, memories, maxBytes)
+}
+
+// SortContractDirectives sorts contract directives in deterministic CreatedAt
+// (then ID) order in place.
+func SortContractDirectives(directives []store.Directive) {
+	slices.SortFunc(directives, func(a, b store.Directive) int {
+		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ID, b.ID)
+	})
+}
+
+// FormatRunContract renders active contract directives into a shared Run Contract section.
+func FormatRunContract(directives []store.Directive) string {
+	var contractDirs []store.Directive
+	for i := range directives {
+		if directives[i].IsContract() {
+			contractDirs = append(contractDirs, directives[i])
+		}
+	}
+	SortContractDirectives(contractDirs)
+	var lines []string
+	seen := make(map[string]bool)
+	for i := range contractDirs {
+		d := &contractDirs[i]
+		txt := strings.TrimSpace(d.Text)
+		if txt == "" {
+			continue
+		}
+		key := strings.TrimSpace(d.ID) + "\x00" + txt
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if id := strings.TrimSpace(d.ID); id != "" {
+			lines = append(lines, fmt.Sprintf("- [%s] %s", id, txt))
+		} else {
+			lines = append(lines, "- "+txt)
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "## Run Contract\n" + strings.Join(lines, "\n") + "\n"
+}
+
+// RenderWithContract includes active run-contract directives and applicable
+// memories in the worker brief, capping the output to maxBytes when positive.
+func RenderWithContract(text string, directives []store.Directive, memories []store.MemoryEntry, maxBytes int) (string, error) {
 	if maxBytes > 0 && len(text) > maxBytes {
 		return "", fmt.Errorf("%w: worker brief is %d bytes, exceeds cap %d", store.ErrInvalidArgument, len(text), maxBytes)
 	}
 	var b strings.Builder
 	b.WriteString(text)
-	// Mechanical cleanup and review phases receive their task only through the
-	// goal line. Their phase skill is the complete instruction and must not be
-	// followed by task descriptions or memory bodies.
+	contractSection := FormatRunContract(directives)
 	trimmed := strings.TrimSpace(text)
-	if strings.HasPrefix(trimmed, "/simplify") || strings.HasPrefix(trimmed, "/pr-polish") {
-		return text, nil
-	}
-	if strings.TrimSpace(text) == "" {
+	if trimmed == "" {
+		if contractSection != "" {
+			b.WriteString("\n")
+			b.WriteString(strings.TrimSuffix(contractSection, "\n"))
+		}
 		for i := range memories {
 			if line := memoryLine(&memories[i]); line != "" {
 				b.WriteString("\n")
 				b.WriteString(line)
 			}
 		}
+		if maxBytes > 0 && b.Len() > maxBytes {
+			return "", fmt.Errorf("%w: rendered worker brief is %d bytes, exceeds cap %d", store.ErrInvalidArgument, b.Len(), maxBytes)
+		}
+		return b.String(), nil
+	}
+	if contractSection != "" && !strings.Contains(text, "## Run Contract") {
+		block := "\n\n" + contractSection
+		if maxBytes > 0 && b.Len()+len(block) > maxBytes {
+			return "", fmt.Errorf("%w: run contract would exceed worker brief cap %d", store.ErrInvalidArgument, maxBytes)
+		}
+		b.WriteString(block)
+	}
+	// Mechanical cleanup and review phases receive their task only through the
+	// goal line. Their phase skill is the complete instruction and must not be
+	// followed by task descriptions or memory bodies.
+	if strings.HasPrefix(trimmed, "/simplify") || strings.HasPrefix(trimmed, "/pr-polish") {
 		return b.String(), nil
 	}
 	var applicable []store.MemoryEntry
@@ -77,7 +145,7 @@ func memoryLine(m *store.MemoryEntry) string {
 }
 
 func applies(text string, m store.MemoryEntry) bool {
-	if m.Scope == "owner" || m.Scope == "repo" {
+	if m.Scope == "owner" || m.Scope == "repo" || m.Scope == "contract" || m.Type == "contract" || strings.HasPrefix(m.Source, "contract:") {
 		return true
 	}
 	words := strings.Fields(strings.ToLower(text))
@@ -172,7 +240,11 @@ func (d *memoryDriver) render(ctx context.Context, runID, laneID, text string) (
 	if limit <= 0 {
 		limit = DefaultMaxBytes
 	}
-	return Render(text, memories, limit)
+	directives, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	if err != nil {
+		return "", err
+	}
+	return RenderWithContract(text, directives, memories, limit)
 }
 
 func (d *memoryDriver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {

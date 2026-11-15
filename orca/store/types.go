@@ -269,6 +269,7 @@ type DirectiveKind string
 
 const (
 	DirectiveStanding    DirectiveKind = "standing"
+	DirectiveContract    DirectiveKind = "contract"
 	DirectiveInstruction DirectiveKind = "instruction"
 	DirectiveRecipeEdit  DirectiveKind = "recipe_edit"
 	DirectivePlanImport  DirectiveKind = "plan_import"
@@ -307,6 +308,17 @@ type Directive struct {
 	Text      string          `json:"text"`
 	Ref       string          `json:"ref,omitempty"`
 	Status    DirectiveStatus `json:"status"`
+	Contract  bool            `json:"contract,omitempty"`
+}
+
+// IsContract reports whether d is a run-contract directive included in every
+// worker brief and broadcast to running lanes when added or updated.
+func (d Directive) IsContract() bool {
+	return d.Contract ||
+		d.Kind == DirectiveContract ||
+		strings.EqualFold(strings.TrimSpace(d.Scope), string(DirectiveContract)) ||
+		strings.EqualFold(strings.TrimSpace(d.Ref), string(DirectiveContract)) ||
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(d.Ref)), "contract:")
 }
 
 // IsActive reports whether d is currently active at now.

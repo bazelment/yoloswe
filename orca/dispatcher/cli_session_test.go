@@ -12,6 +12,7 @@ import (
 	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/model"
+	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
@@ -435,5 +436,107 @@ func TestLoopBackendDoesNotAdvertiseInvestigationTools(t *testing.T) {
 		if tool.Name == model.ToolReadFile || tool.Name == model.ToolReadCmd {
 			t.Fatalf("loop backend unexpectedly advertised investigation tool %q", tool.Name)
 		}
+	}
+}
+
+func TestCLISession_RawEvidenceInspectionAndForward(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	runDir := t.TempDir()
+	laneDir := filepath.Join(runDir, "lanes", "lazyblk-perf")
+	if err := os.MkdirAll(laneDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rawSummary := `{"claim":"66x fewer bytes read","seed_bytes":32,"duplicated_blocks":2048,"note":"test files were one 32-byte seed repeated"}` + "\n"
+	if err := os.WriteFile(filepath.Join(laneDir, "summary.json"), []byte(rawSummary), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ln := lane.Lane{
+		ID:         "lazyblk-perf",
+		RunID:      "run-1",
+		ItemID:     "lazyblk-perf",
+		Title:      "Benchmark lazy block device",
+		Status:     lane.StatusBlocked,
+		Phase:      recipe.PhaseReview,
+		Round:      1,
+		RecipeName: recipe.DefaultName,
+		Worktree:   laneDir,
+	}
+	ln.RecordAttempt(recipe.PhaseSWE, 1, "sess-lazy-1", "term-lazy-swe-1")
+	ln.RecordAttempt(recipe.PhaseReview, 1, "sess-lazy-1", "term-lazy-rev-1")
+	if err := st.Lanes().Upsert(ctx, ln); err != nil {
+		t.Fatal(err)
+	}
+	peerLn := lane.Lane{
+		ID:         "transport",
+		RunID:      "run-1",
+		ItemID:     "transport",
+		Title:      "Transport layer",
+		Status:     lane.StatusRunning,
+		Phase:      recipe.PhaseSWE,
+		Round:      1,
+		RecipeName: recipe.DefaultName,
+		SessionID:  "sess-transport-1",
+		TerminalID: "term-transport-1",
+	}
+	peerLn.RecordAttempt(recipe.PhaseSWE, 1, "sess-transport-1", "term-transport-1")
+	if err := st.Lanes().Upsert(ctx, peerLn); err != nil {
+		t.Fatal(err)
+	}
+
+	streamPath := filepath.Join(t.TempDir(), "cli_inspect_forward.jsonl")
+	streamContent := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"sess-cli-judg-1","model":"claude-sonnet-5-5","cwd":"/tmp"}`,
+		`{"type":"control_request","request_id":"mcp-inspect","request":{"subtype":"mcp_message","server_name":"orca","message":{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_lane","arguments":{"lane_id":"lazyblk-perf","path":"summary.json","reason":"verify 66x claim from raw summary.json"}}}}}`,
+		`{"type":"control_request","request_id":"mcp-fwd","request":{"subtype":"mcp_message","server_name":"orca","message":{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lane_forward","arguments":{"from_lane_id":"lazyblk-perf","to_lane_id":"transport","excerpt":"32-byte repeated seed inflated compression ratio 66x","reason":"share benchmark pitfall with transport"}}}}}`,
+		`{"type":"control_request","request_id":"mcp-retry","request":{"subtype":"mcp_message","server_name":"orca","message":{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lane_retry","arguments":{"lane_id":"lazyblk-perf","phase":"swe","round":2,"model":"claude-opus-4-6","note":"Voided reported win: summary.json shows one 32-byte seed repeated.","reason":"raw evidence check failed"}}}}}`,
+		`{"type":"assistant","message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":"Inspected summary.json, forwarded finding to transport, and sent lazyblk-perf back for round 2."}]},"session_id":"sess-cli-judg-1"}`,
+		`{"type":"result","subtype":"success","is_error":false,"session_id":"sess-cli-judg-1","result":"Done.","num_turns":1,"duration_ms":30,"duration_api_ms":20,"total_cost_usd":0.008,"usage":{"input_tokens":100,"output_tokens":40}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(streamPath, []byte(streamContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	harness := newFakeClaudeCLI(t, streamPath)
+	d := dispatcher.New(dispatcher.Config{
+		AgentBackend:  model.AgentBackendCLI,
+		Provider:      "claude-cli",
+		Model:         "claude-sonnet-5-5",
+		ClaudeBin:     harness.binPath,
+		AllowedModels: []string{"claude-opus-4-6", "claude-sonnet-4-6"},
+		Investigate:   model.InvestigateConfig{RunDir: runDir},
+	}, st, drv, clk, nil)
+	t.Cleanup(func() { _ = d.Close() })
+
+	ev, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		LaneID:  "lazyblk-perf",
+		Kind:    store.EventLaneReport,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "lazyblk-perf review reported done: 66x fewer bytes read",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(res.Rejected) != 0 || len(res.Decisions) != 3 {
+		t.Fatalf("Decisions=%d Rejected=%v, want 3 decisions and 0 rejections", len(res.Decisions), res.Rejected)
+	}
+	mcpResps := harness.readMCPResponses(t)
+	if len(mcpResps) != 3 || !strings.Contains(mcpResps[0], "one 32-byte seed repeated") {
+		t.Fatalf("MCP responses = %v, want read_lane output with raw summary.json content", mcpResps)
+	}
+	if len(drv.Steers) != 1 || drv.Steers[0].SessionID != "sess-transport-1" || !strings.Contains(drv.Steers[0].Message, "32-byte repeated seed") {
+		t.Fatalf("Steers = %+v, want forwarded excerpt on sess-transport-1", drv.Steers)
+	}
+	if len(drv.PhaseStarts) != 1 || drv.PhaseStarts[0].Model != "claude-opus-4-6" || drv.PhaseStarts[0].Round != 2 {
+		t.Fatalf("PhaseStarts = %+v, want round 2 retry with claude-opus-4-6", drv.PhaseStarts)
 	}
 }

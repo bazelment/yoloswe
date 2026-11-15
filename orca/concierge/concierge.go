@@ -52,6 +52,7 @@ const (
 // Directive submission kinds accepted by directive.submit.
 const (
 	KindRule       = "rule"
+	KindContract   = "contract"
 	KindPlanImport = "plan_import"
 	KindRecipeEdit = "recipe_edit"
 	KindOrder      = "order"
@@ -225,6 +226,8 @@ func ParseDirectiveKind(raw string) (store.DirectiveKind, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case KindRule, string(store.DirectiveStanding):
 		return store.DirectiveStanding, nil
+	case KindContract:
+		return store.DirectiveContract, nil
 	case KindPlanImport:
 		return store.DirectivePlanImport, nil
 	case KindRecipeEdit:
@@ -232,7 +235,7 @@ func ParseDirectiveKind(raw string) (store.DirectiveKind, error) {
 	case KindOrder, string(store.DirectiveInstruction):
 		return store.DirectiveInstruction, nil
 	default:
-		return "", fmt.Errorf("%w: unsupported directive kind %q (want rule, plan_import, recipe_edit, or order)", store.ErrInvalidArgument, raw)
+		return "", fmt.Errorf("%w: unsupported directive kind %q (want rule, contract, plan_import, recipe_edit, or order)", store.ErrInvalidArgument, raw)
 	}
 }
 

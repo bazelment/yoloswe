@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -57,6 +59,7 @@ type Config struct {
 	PRProbe          controller.PRProbe
 	OnPlannerRequest func(ctx context.Context, runID, reason, planRef string) error
 	OnOwnerAnswer    func(ctx context.Context, runID, askID, answer string) error
+	LaneInspector    func(ctx context.Context, runID, laneID string, req ReadLaneParams) (string, error)
 	// Logger, when set, receives one INFO line per tool call.
 	Logger *slog.Logger
 	// Temperature is the sampling temperature for judgment turns. Nil omits it
@@ -74,6 +77,7 @@ type Config struct {
 	HardBatchModel   string
 	SystemPrompt     string
 	ThreadID         string
+	AllowedModels    []string
 	Mailboxes        []mailbox.Mailbox
 	Invariants       []Invariant
 	Snapshot         SnapshotConfig
@@ -147,16 +151,17 @@ type BatchResult struct {
 // long-lived CLI agent session), vetting every tool call against deterministic
 // invariants, and logging decisions.
 type Dispatcher struct {
-	store           store.Store
-	driver          lane.LaneDriver
-	clock           clock.Clock
-	client          model.ModelClient
-	lastMemoryIndex map[string]string
-	sessions        model.AgentSessionMap
-	lastResult      *BatchResult
-	cfg             Config
-	seq             int64
-	mu              sync.Mutex
+	store              store.Store
+	driver             lane.LaneDriver
+	clock              clock.Clock
+	client             model.ModelClient
+	lastMemoryIndex    map[string]string
+	contractBroadcasts map[string]map[string]bool
+	sessions           model.AgentSessionMap
+	lastResult         *BatchResult
+	cfg                Config
+	seq                int64
+	mu                 sync.Mutex
 }
 
 // New constructs a new Dispatcher.
@@ -171,12 +176,13 @@ func New(
 		clk = clock.NewRealClock()
 	}
 	return &Dispatcher{
-		cfg:             cfg.withDefaults(),
-		store:           st,
-		driver:          drv,
-		clock:           clk,
-		client:          client,
-		lastMemoryIndex: make(map[string]string),
+		cfg:                cfg.withDefaults(),
+		store:              st,
+		driver:             drv,
+		clock:              clk,
+		client:             client,
+		lastMemoryIndex:    make(map[string]string),
+		contractBroadcasts: make(map[string]map[string]bool),
 	}
 }
 
@@ -189,6 +195,7 @@ func (d *Dispatcher) Session(runID string) *model.AgentSession {
 func (d *Dispatcher) CloseRun(runID string) error {
 	d.mu.Lock()
 	delete(d.lastMemoryIndex, runID)
+	delete(d.contractBroadcasts, runID)
 	d.mu.Unlock()
 	return d.sessions.CloseRun(runID)
 }
@@ -197,6 +204,7 @@ func (d *Dispatcher) CloseRun(runID string) error {
 func (d *Dispatcher) Close() error {
 	d.mu.Lock()
 	clear(d.lastMemoryIndex)
+	clear(d.contractBroadcasts)
 	d.mu.Unlock()
 	return d.sessions.Close()
 }
@@ -386,6 +394,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	}
 
 	cleanupCtx := context.WithoutCancel(ctx)
+	d.syncRunContract(ctx, runID)
+
 	snapCfg := d.cfg.Snapshot
 	if len(turnRec.Steers) > 0 {
 		snapCfg.Steers = append(slices.Clone(snapCfg.Steers), turnRec.Steers...)
@@ -525,6 +535,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 		loopErr = compErr
 	}
 	if loopErr == nil {
+		d.staffIdleObjectiveReadyWork(cleanupCtx, runID, events, state)
 		d.dismissStaleBatchQuestions(cleanupCtx, runID, events, state, summary)
 	}
 
@@ -608,7 +619,7 @@ func toolsForBatch(defs []model.ToolDefinition, events []store.Event) []model.To
 		return defs
 	}
 	return slices.DeleteFunc(slices.Clone(defs), func(def model.ToolDefinition) bool {
-		if !hasLane && isReadOnlyTool(def.Name) {
+		if !hasLane && (isReadOnlyTool(def.Name) || def.Name == ToolLaneForward) {
 			return true
 		}
 		if !hasLaneMail && (def.Name == ToolMailAnswer || def.Name == ToolMailDismiss) {
@@ -647,6 +658,7 @@ var dispatcherToolDefs = []model.ToolDefinition{
 	{Name: ToolBacklogClose, Description: "Close a backlog item as done or dropped", InputSchema: model.SchemaFor[BacklogCloseParams]()},
 	{Name: ToolLaneSpawn, Description: "Spawn a worker lane for an open, ready backlog item. This also marks the item in_progress, so it is the only call needed to start work on it", InputSchema: model.SchemaFor[LaneSpawnParams]()},
 	{Name: ToolLaneSteer, Description: "Send a steering note to an active or blocked lane", InputSchema: model.SchemaFor[LaneSteerParams]()},
+	{Name: ToolLaneForward, Description: "Forward a finding or report excerpt from a source lane to another active or blocked target lane as a steering note", InputSchema: model.SchemaFor[LaneForwardParams]()},
 	{Name: ToolLaneRetry, Description: "Retry a stalled, blocked, or failed lane on a fresh round", InputSchema: model.SchemaFor[LaneRetryParams]()},
 	{Name: ToolLaneStop, Description: "Stop a non-terminal lane and mark it failed", InputSchema: model.SchemaFor[LaneStopParams]()},
 	{Name: ToolLaneWait, Description: "Record a named expected wait on a lane (e.g. cloud VM run, sweep, or merge gate) with a reason and deadline so the controller suppresses stall judgments until the deadline", InputSchema: model.SchemaFor[LaneWaitParams]()},
@@ -656,6 +668,7 @@ var dispatcherToolDefs = []model.ToolDefinition{
 	{Name: ToolDirectiveRevoke, Description: "Revoke or supersede an active standing directive or instruction by ID when the owner lifts, clears, or replaces it", InputSchema: model.SchemaFor[DirectiveRevokeParams]()},
 	{Name: ToolPlannerRequest, Description: "Request a Planner turn to replan or import a plan. The reason is delivered to the Planner and also stored as an active directive, so it carries any standing rule given with the request", InputSchema: model.SchemaFor[PlannerRequestParams]()},
 	{Name: ToolReadLaneReport, Description: "Read a bounded phase report for a lane", InputSchema: model.SchemaFor[ReadLaneReportParams]()},
+	{Name: ToolReadLane, Description: "Inspect raw files, directory listings, or read-only command output in a lane's session/worktree or pushed branch to verify claims from raw evidence before integration", InputSchema: model.SchemaFor[ReadLaneParams]()},
 	{Name: ToolReadPR, Description: "Read bounded PR metadata and approval status for a lane", InputSchema: model.SchemaFor[ReadPRParams]()},
 	{Name: ToolReadCI, Description: "Read bounded CI check status and recent CI events for a lane", InputSchema: model.SchemaFor[ReadCIParams]()},
 	{Name: "memory.read", Description: "Read the full body of a memory by ID", InputSchema: model.SchemaFor[struct {
@@ -693,7 +706,7 @@ func (d *Dispatcher) buildToolRegistry(runID string, state *turnExecState) *mode
 }
 
 func batchAllowsTool(toolName string, events []store.Event) error {
-	if isReadOnlyTool(toolName) && !batchNamesLane(events) {
+	if (isReadOnlyTool(toolName) || toolName == ToolLaneForward) && !batchNamesLane(events) {
 		return fmt.Errorf("%s is only available when the judgment batch contains a lane event", toolName)
 	}
 	if (toolName == ToolMailAnswer || toolName == ToolMailDismiss) && !batchHasLaneMail(events) {
@@ -718,7 +731,7 @@ func (d *Dispatcher) buildCLIToolRegistry(runID string, state *turnExecState, ev
 				return "", err
 			}
 			res, err := d.handleRawToolCall(ctx, runID, state, def.Name, raw)
-			if err != nil || d.cfg.AllowMultiAction || isReadOnlyTool(def.Name) || def.Name == "memory.read" {
+			if err != nil || d.cfg.AllowMultiAction || isReadOnlyTool(def.Name) || def.Name == ToolLaneForward || def.Name == "memory.read" {
 				return res, err
 			}
 			if isFanOutTool(def.Name) {
@@ -886,6 +899,7 @@ func (d *Dispatcher) handleRawToolCall(
 			state.view = view
 		}
 	}
+	view.AllowedModels = slices.Clone(d.cfg.AllowedModels)
 
 	if vetErr := VetAction(view, act, d.cfg.Invariants); vetErr != nil {
 		rejMsg := vetErr.Error()
@@ -938,7 +952,8 @@ func (d *Dispatcher) handleRawToolCall(
 // the work that is naturally plural and independent per target.
 func isFanOutTool(tool string) bool {
 	return tool == ToolBacklogAdd || tool == ToolLaneSpawn || tool == ToolLaneRetry || tool == ToolLaneWait ||
-		tool == ToolDirectiveRevoke || tool == ToolOwnerAnswer || tool == ToolMailDismiss
+		tool == ToolDirectiveRevoke || tool == ToolOwnerAnswer || tool == ToolMailDismiss ||
+		tool == ToolLaneForward
 }
 
 // checkOnePrimaryAction enforces one primary action per batch: the first
@@ -946,12 +961,12 @@ func isFanOutTool(tool string) bool {
 // and the decision log see it) unless both are fan-out tools. Read tools are
 // never limited.
 func checkOnePrimaryAction(accepted []ProposedAction, act ProposedAction) error {
-	if isReadOnlyTool(act.Tool) {
+	if isReadOnlyTool(act.Tool) || act.Tool == ToolLaneForward {
 		return nil
 	}
 	for i := range accepted {
 		prev := accepted[i]
-		if isReadOnlyTool(prev.Tool) || (isFanOutTool(prev.Tool) && isFanOutTool(act.Tool)) {
+		if isReadOnlyTool(prev.Tool) || prev.Tool == ToolLaneForward || (isFanOutTool(prev.Tool) && isFanOutTool(act.Tool)) {
 			continue
 		}
 		return fmt.Errorf("this batch already applied %s [%s]; answer a batch with a single primary action (only %s, %s, %s, %s and %s may combine)",
@@ -961,7 +976,7 @@ func checkOnePrimaryAction(accepted []ProposedAction, act ProposedAction) error 
 }
 
 func isReadOnlyTool(tool string) bool {
-	return tool == ToolReadLaneReport || tool == ToolReadPR || tool == ToolReadCI
+	return tool == ToolReadLaneReport || tool == ToolReadLane || tool == ToolReadPR || tool == ToolReadCI
 }
 
 func (d *Dispatcher) recordDecision(
@@ -990,6 +1005,11 @@ func (d *Dispatcher) recordDecision(
 	traceID, modelName, input := "", "", ""
 	if state != nil {
 		traceID, modelName, input = state.traceID, state.model, state.input
+	}
+	if act.Tool == ToolLaneSpawn && act.LaneSpawn != nil && strings.TrimSpace(act.LaneSpawn.Model) != "" {
+		modelName = resolveDecisionWorkerModel(act.LaneSpawn.Model, result)
+	} else if act.Tool == ToolLaneRetry && act.LaneRetry != nil && strings.TrimSpace(act.LaneRetry.Model) != "" {
+		modelName = resolveDecisionWorkerModel(act.LaneRetry.Model, result)
 	}
 	dec, err := d.store.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
 		RunID:         runID,
@@ -1040,6 +1060,15 @@ func outcomeLabel(result string) string {
 	}
 }
 
+func resolveDecisionWorkerModel(rawModel, result string) string {
+	if _, after, ok := strings.Cut(result, "model="); ok {
+		if resolved := strings.TrimSpace(strings.TrimSuffix(after, ")")); resolved != "" {
+			return resolved
+		}
+	}
+	return ResolveWorkerModel(rawModel, "")
+}
+
 func (d *Dispatcher) applyVettedAction(
 	ctx context.Context,
 	runID string,
@@ -1060,6 +1089,8 @@ func (d *Dispatcher) applyVettedAction(
 		return d.applyLaneSpawn(ctx, runID, view, *act.LaneSpawn)
 	case ToolLaneSteer:
 		return d.applyLaneSteer(ctx, runID, view, *act.LaneSteer)
+	case ToolLaneForward:
+		return d.applyLaneForward(ctx, runID, view, *act.LaneForward)
 	case ToolMailAnswer:
 		return d.applyMailAnswer(ctx, runID, state, view, *act.MailAnswer)
 	case ToolMailDismiss:
@@ -1085,6 +1116,8 @@ func (d *Dispatcher) applyVettedAction(
 		return d.applyPlannerRequest(ctx, runID, *act.PlannerRequest)
 	case ToolReadLaneReport:
 		return d.applyReadLaneReport(ctx, runID, view, *act.ReadLaneReport)
+	case ToolReadLane:
+		return d.applyReadLane(ctx, runID, view, *act.ReadLane)
 	case ToolReadPR:
 		return d.applyReadPR(ctx, runID, view, *act.ReadPR)
 	case ToolReadCI:
@@ -1174,6 +1207,16 @@ func (d *Dispatcher) applyBacklogClose(ctx context.Context, runID string, p Back
 
 func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *StateView, p LaneSpawnParams) (string, error) {
 	item, ok := view.BacklogItem(p.ItemID)
+	if !ok {
+		if synth, found := view.ObjectiveMentionsReadyItem(p.ItemID); found {
+			if addErr := d.store.Backlog().Add(ctx, synth); addErr != nil && !errors.Is(addErr, store.ErrAlreadyExists) {
+				return "", addErr
+			}
+			view.Backlog[synth.ID] = synth
+			item = synth
+			ok = true
+		}
+	}
 	if !ok {
 		return "", fmt.Errorf("%w: backlog item %q", store.ErrNotFound, p.ItemID)
 	}
@@ -1266,8 +1309,20 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		return "", err
 	}
 
+	selectedModel := strings.TrimSpace(p.Model)
+	if selectedModel != "" {
+		var harness string
+		if len(firstPhase.Agents) > 0 {
+			harness = firstPhase.Agents[0].Harness
+		}
+		selectedModel = ResolveWorkerModel(selectedModel, harness)
+	}
 	if drv := d.laneDriver(); drv != nil && len(firstPhase.Agents) > 0 {
-		spawnRes, err := d.spawnLaneSession(ctx, drv, runID, view.Run.Repository, ln, firstPhase.Name, ln.Round, firstPhase.Agents[0], workerBrief)
+		agent := firstPhase.Agents[0]
+		if selectedModel != "" {
+			agent.Model = selectedModel
+		}
+		spawnRes, err := d.spawnLaneSession(ctx, drv, runID, view.Run.Repository, ln, firstPhase.Name, ln.Round, agent, workerBrief)
 		if err != nil {
 			return "", err
 		}
@@ -1277,6 +1332,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		}
 		ln.RecordAttempt(firstPhase.Name, ln.Round, spawnRes.SessionID, spawnRes.TerminalID)
 	}
+	d.markContractKnownForLane(runID, ln.ID, view.Directives)
 
 	if err := d.store.Lanes().Upsert(ctx, ln); err != nil {
 		return "", err
@@ -1292,6 +1348,10 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		return "", err
 	}
 
+	if selectedModel != "" {
+		return fmt.Sprintf("spawned lane %s for item %s on %s (round %d, recipe %s@v%d, model=%s)",
+			ln.ID, item.ID, ln.Phase, ln.Round, ln.RecipeName, ln.RecipeVersion, selectedModel), nil
+	}
 	return fmt.Sprintf("spawned lane %s for item %s on %s (round %d, recipe %s@v%d)",
 		ln.ID, item.ID, ln.Phase, ln.Round, ln.RecipeName, ln.RecipeVersion), nil
 }
@@ -1333,6 +1393,49 @@ func (d *Dispatcher) applyLaneSteer(ctx context.Context, runID string, view *Sta
 	return fmt.Sprintf("steered lane %s", ln.ID), nil
 }
 
+func (d *Dispatcher) applyLaneForward(ctx context.Context, runID string, view *StateView, p LaneForwardParams) (string, error) {
+	target, ok := view.Lane(p.ToLaneID)
+	if !ok {
+		return "", fmt.Errorf("%w: lane %q", store.ErrNotFound, p.ToLaneID)
+	}
+	if settled, msg, err := d.reconcileLanePRState(ctx, runID, &target); settled || err != nil {
+		return msg, err
+	}
+	from := strings.TrimSpace(p.FromLaneID)
+	if from != "" {
+		if _, ok := view.Lane(from); !ok {
+			return "", fmt.Errorf("%w: source lane %q", store.ErrNotFound, from)
+		}
+	}
+	finding := strings.TrimSpace(p.Excerpt)
+	msg := finding
+	if from != "" {
+		msg = fmt.Sprintf("Forwarded finding from lane %s: %s", from, finding)
+	}
+	if drv := d.laneDriver(); drv != nil {
+		if err := drv.Steer(ctx, lane.SteerRequest{
+			RunID:      runID,
+			LaneID:     target.ID,
+			SessionID:  target.SessionID,
+			TerminalID: target.TerminalID,
+			Message:    msg,
+		}); err != nil {
+			return "", err
+		}
+	}
+	if target.Status == lane.StatusBlocked {
+		target.Status = lane.StatusRunning
+	}
+	target.LastEventAt = d.clock.Now().UTC()
+	if err := d.store.Lanes().Upsert(ctx, target); err != nil {
+		return "", err
+	}
+	if from != "" {
+		return fmt.Sprintf("forwarded finding from lane %s to lane %s", from, target.ID), nil
+	}
+	return fmt.Sprintf("forwarded finding to lane %s", target.ID), nil
+}
+
 func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *StateView, p LaneRetryParams) (string, error) {
 	ln, ok := view.Lane(p.LaneID)
 	if !ok {
@@ -1362,8 +1465,19 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 	}
 	var sessionID, terminalID string
 
+	selectedModel := strings.TrimSpace(p.Model)
+	if selectedModel != "" {
+		var harness string
+		if len(targetPhase.Agents) > 0 {
+			harness = targetPhase.Agents[0].Harness
+		}
+		selectedModel = ResolveWorkerModel(selectedModel, harness)
+	}
 	if drv := d.laneDriver(); drv != nil && len(targetPhase.Agents) > 0 {
 		agent := targetPhase.Agents[0]
+		if selectedModel != "" {
+			agent.Model = selectedModel
+		}
 		if ln.SessionID == "" {
 			res, err := d.spawnLaneSession(ctx, drv, runID, view.Run.Repository, ln, targetPhase.Name, round, agent, workerBrief)
 			if err != nil {
@@ -1397,6 +1511,7 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 		sessionID = cmp.Or(ln.SessionID, fmt.Sprintf("sess-%s-r%d", ln.ID, round))
 		terminalID = fmt.Sprintf("term-%s-%s", ln.ID, lane.PhaseRoundKey(targetPhase.Name, round))
 	}
+	d.markContractKnownForLane(runID, ln.ID, view.Directives)
 
 	ln.Status = lane.StatusRunning
 	ln.Attempt = 1
@@ -1404,6 +1519,9 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 	ln.LastEventAt = d.clock.Now().UTC()
 	if err := d.store.Lanes().Upsert(ctx, ln); err != nil {
 		return "", err
+	}
+	if selectedModel != "" {
+		return fmt.Sprintf("retried lane %s in phase %s (round %d, model=%s)", ln.ID, targetPhase.Name, round, selectedModel), nil
 	}
 	return fmt.Sprintf("retried lane %s in phase %s (round %d)", ln.ID, targetPhase.Name, round), nil
 }
@@ -1445,7 +1563,15 @@ func (d *Dispatcher) buildWorkerBrief(view *StateView, ln lane.Lane, r recipe.Re
 	if drv != nil {
 		instructions = drv.ReportInstructions(ln.RunID, ln.ID, phase.Name, round)
 	}
-	text, err := brief.Render(raw, view.Memories, 0)
+	var dirs []store.Directive
+	var memories []store.MemoryEntry
+	if view != nil {
+		for id := range view.Directives {
+			dirs = append(dirs, view.Directives[id])
+		}
+		memories = view.Memories
+	}
+	text, err := brief.RenderWithContract(raw, dirs, memories, 0)
 	if err != nil {
 		return "", err
 	}
@@ -1662,10 +1788,18 @@ func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, state
 	if dirID == "" {
 		dirID = d.nextID("note")
 	}
+	isContract := p.Contract ||
+		strings.EqualFold(strings.TrimSpace(p.Kind), "contract") ||
+		strings.EqualFold(strings.TrimSpace(p.Scope), "contract")
+	kind := store.DirectiveNote
+	if isContract {
+		kind = store.DirectiveContract
+	}
 	dir := store.Directive{
 		ID:        dirID,
 		RunID:     runID,
-		Kind:      store.DirectiveNote,
+		Kind:      kind,
+		Contract:  isContract,
 		Source:    store.DirectiveSourceDispatcher,
 		Scope:     strings.TrimSpace(p.Scope),
 		Text:      strings.TrimSpace(p.Fact),
@@ -1676,6 +1810,9 @@ func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, state
 		return "", err
 	}
 	if expiresAt != nil {
+		if dir.IsContract() {
+			d.syncRunContract(ctx, runID)
+		}
 		return fmt.Sprintf("recorded time-limited directive note %s", dir.ID), nil
 	}
 	if existing, getErr := d.store.Memories().Get(ctx, "", dir.ID); getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
@@ -1701,7 +1838,126 @@ func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, state
 		_ = d.store.Directives().UpdateStatus(context.WithoutCancel(ctx), runID, dir.ID, store.DirectiveRevoked)
 		return "", err
 	}
+	if dir.IsContract() {
+		d.syncRunContract(ctx, runID)
+	}
 	return fmt.Sprintf("recorded directive note %s", dir.ID), nil
+}
+
+func contractDirectiveKey(dir *store.Directive) string {
+	return dir.ID + "\x00" + strings.TrimSpace(dir.Text)
+}
+
+func (d *Dispatcher) markContractKnownForLane(runID, laneID string, directives map[string]store.Directive) {
+	if laneID == "" || len(directives) == 0 {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.contractBroadcasts == nil {
+		d.contractBroadcasts = make(map[string]map[string]bool)
+	}
+	byRun := d.contractBroadcasts[runID]
+	if byRun == nil {
+		byRun = make(map[string]bool)
+		d.contractBroadcasts[runID] = byRun
+	}
+	for id := range directives {
+		dir := directives[id]
+		if !dir.IsContract() {
+			continue
+		}
+		byRun[contractDirectiveKey(&dir)+"\x00"+laneID] = true
+	}
+}
+
+func (d *Dispatcher) syncRunContract(ctx context.Context, runID string) {
+	if d.store == nil {
+		return
+	}
+	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{
+		RunID:      runID,
+		ActiveOnly: true,
+	})
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.WarnContext(ctx, "dispatcher: list directives for run contract failed", "run_id", runID, "err", err)
+		}
+		return
+	}
+	var contractDirs []store.Directive
+	for i := range dirs {
+		if dirs[i].IsContract() {
+			contractDirs = append(contractDirs, dirs[i])
+		}
+	}
+	if len(contractDirs) == 0 {
+		return
+	}
+	brief.SortContractDirectives(contractDirs)
+	drv := d.laneDriver()
+	if drv == nil {
+		return
+	}
+	lanes, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.WarnContext(ctx, "dispatcher: list lanes for run contract failed", "run_id", runID, "err", err)
+		}
+		return
+	}
+	for i := range lanes {
+		ln := lanes[i]
+		if ln.Status != lane.StatusRunning {
+			continue
+		}
+		var unsent []store.Directive
+		d.mu.Lock()
+		if d.contractBroadcasts == nil {
+			d.contractBroadcasts = make(map[string]map[string]bool)
+		}
+		byRun := d.contractBroadcasts[runID]
+		if byRun == nil {
+			byRun = make(map[string]bool)
+			d.contractBroadcasts[runID] = byRun
+		}
+		for j := range contractDirs {
+			if !byRun[contractDirectiveKey(&contractDirs[j])+"\x00"+ln.ID] {
+				unsent = append(unsent, contractDirs[j])
+			}
+		}
+		d.mu.Unlock()
+		if len(unsent) == 0 {
+			continue
+		}
+		msg := brief.FormatRunContract(unsent)
+		if msg == "" {
+			continue
+		}
+		if sErr := drv.Steer(ctx, lane.SteerRequest{
+			RunID:      runID,
+			LaneID:     ln.ID,
+			SessionID:  ln.SessionID,
+			TerminalID: ln.TerminalID,
+			Message:    msg,
+		}); sErr == nil {
+			d.mu.Lock()
+			if d.contractBroadcasts == nil {
+				d.contractBroadcasts = make(map[string]map[string]bool)
+			}
+			byRun := d.contractBroadcasts[runID]
+			if byRun == nil {
+				byRun = make(map[string]bool)
+				d.contractBroadcasts[runID] = byRun
+			}
+			for j := range unsent {
+				byRun[contractDirectiveKey(&unsent[j])+"\x00"+ln.ID] = true
+			}
+			d.mu.Unlock()
+		} else if d.cfg.Logger != nil {
+			d.cfg.Logger.WarnContext(ctx, "dispatcher: steer run contract failed", "run_id", runID, "lane_id", ln.ID, "err", sErr)
+		}
+	}
 }
 
 func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, state *turnExecState, view *StateView, p DirectiveRevokeParams) (string, error) {
@@ -1734,6 +1990,21 @@ func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, sta
 	}
 	if view != nil && view.Directives != nil {
 		delete(view.Directives, id)
+	}
+	if dir.IsContract() {
+		d.syncRunContract(ctx, runID)
+		if drv := d.laneDriver(); drv != nil {
+			if lanes, listErr := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID}); listErr == nil {
+				for i := range lanes {
+					ln := lanes[i]
+					if ln.Status.Terminal() || (ln.SessionID == "" && ln.TerminalID == "") {
+						continue
+					}
+					_ = drv.Steer(ctx, lane.SteerRequest{RunID: runID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID,
+						Message: fmt.Sprintf("Run contract updated: directive %s was revoked.", id)})
+				}
+			}
+		}
 	}
 	return fmt.Sprintf("revoked directive %s", id), nil
 }
@@ -1897,7 +2168,7 @@ func (d *Dispatcher) followUpSpawnNudge(
 			continue
 		}
 		_, r, _ := view.ResolveSpawnRecipe(LaneSpawnParams{ItemID: item.ID, RecipeName: item.RecipeName})
-		if r.Limits.MaxConcurrentLanes > 0 && view.RunningLaneCount() >= r.Limits.MaxConcurrentLanes {
+		if maxConcurrent := view.EffectiveMaxConcurrentLanes(r); maxConcurrent > 0 && view.RunningLaneCount() >= maxConcurrent {
 			continue
 		}
 		if readyP0 == nil || item.Order < readyP0.Order || (item.Order == readyP0.Order && item.ID < readyP0.ID) {
@@ -1910,6 +2181,47 @@ func (d *Dispatcher) followUpSpawnNudge(
 	}
 	return fmt.Sprintf("The %s tool is registered and callable in this session, and backlog item %q (%s, open ready) has no lane yet. Call %s with item_id=%q and a task brief now.",
 		ToolLaneSpawn, readyP0.ID, readyP0.Priority, ToolLaneSpawn, readyP0.ID)
+}
+
+func (d *Dispatcher) staffIdleObjectiveReadyWork(ctx context.Context, runID string, events []store.Event, state *turnExecState) {
+	if state == nil || len(state.accepted) > 0 || len(state.rejected) > 0 {
+		return
+	}
+	if !isIdleTick(events) {
+		return
+	}
+	view, err := loadStateViewWithCache(ctx, d.store, d.clock, runID, d.cfg.MaxBriefBytes, state.pinnedRecipes)
+	if err != nil || view == nil || view.Run == nil {
+		return
+	}
+	if !containsReadyWorkMarker(view.Run.Objective) {
+		return
+	}
+	item, ok := view.FirstObjectiveReadyItem()
+	if !ok {
+		return
+	}
+	raw, err := json.Marshal(LaneSpawnParams{
+		ItemID: item.ID,
+		Brief:  cmp.Or(strings.TrimSpace(item.Description), strings.TrimSpace(item.Title), item.ID),
+		Reason: "proactive staffing: nothing needed a decision on idle tick, started next ready piece from objective",
+	})
+	if err != nil {
+		return
+	}
+	_, _ = d.handleRawToolCall(ctx, runID, state, ToolLaneSpawn, raw)
+}
+
+func isIdleTick(events []store.Event) bool {
+	if len(events) == 0 {
+		return false
+	}
+	for i := range events {
+		if events[i].Kind != store.EventTimer || strings.TrimSpace(events[i].LaneID) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func ownerAskedToStart(events []store.Event) bool {
@@ -2431,6 +2743,239 @@ func (d *Dispatcher) applyReadLaneReport(ctx context.Context, runID string, view
 	return truncateText(out, maxBytes, nil), nil
 }
 
+func (d *Dispatcher) applyReadLane(ctx context.Context, runID string, view *StateView, p ReadLaneParams) (string, error) {
+	ln, ok := view.Lane(p.LaneID)
+	if !ok {
+		return "", fmt.Errorf("%w: lane %q", store.ErrNotFound, p.LaneID)
+	}
+	maxBytes := d.effectiveReadLimit(p.MaxBytes)
+	if d.cfg.LaneInspector != nil {
+		out, err := d.cfg.LaneInspector(ctx, runID, ln.ID, p)
+		if err != nil {
+			return "", err
+		}
+		return truncateText(out, maxBytes, nil), nil
+	}
+
+	invCfg := d.laneInvestigateConfig(view, ln)
+	if !invCfg.HasRoots() {
+		return d.applyReadLaneReport(ctx, runID, view, ReadLaneReportParams{
+			LaneID:   p.LaneID,
+			MaxBytes: p.MaxBytes,
+		})
+	}
+
+	prog := strings.TrimSpace(p.Program)
+	var cmdArgs []string
+	if prog != "" {
+		if len(p.Args) > 0 {
+			cmdArgs = slices.Clone(p.Args)
+		} else if strings.ContainsAny(prog, " \t") {
+			fields, err := splitCommandFields(prog)
+			if err != nil {
+				return "", fmt.Errorf("read.lane: %w", err)
+			}
+			if len(fields) > 0 {
+				prog = fields[0]
+				cmdArgs = fields[1:]
+			}
+		}
+		if len(cmdArgs) == 0 && strings.TrimSpace(p.Path) != "" {
+			cmdArgs = []string{strings.TrimSpace(p.Path)}
+		}
+	} else if cmdText := strings.TrimSpace(p.Command); cmdText != "" {
+		fields, err := splitCommandFields(cmdText)
+		if err != nil {
+			return "", fmt.Errorf("read.lane: %w", err)
+		}
+		if len(fields) == 0 {
+			return "", errors.New("read.lane: command is empty")
+		}
+		prog = fields[0]
+		cmdArgs = fields[1:]
+	}
+	if prog != "" {
+		execCfg := invCfg
+		if prog == "git" {
+			execCfg = d.laneGitInvestigateConfig(invCfg, view)
+		}
+		out, err := model.ExecuteReadCmd(ctx, execCfg, model.ReadCmdParams{
+			Program: prog,
+			Args:    cmdArgs,
+		})
+		if err != nil {
+			return "", err
+		}
+		return truncateText(out, maxBytes, nil), nil
+	}
+
+	targetPath := cmp.Or(strings.TrimSpace(p.Path), ".")
+	if explicitRef := strings.TrimSpace(p.Ref); explicitRef != "" {
+		if strings.HasPrefix(explicitRef, "-") {
+			return "", fmt.Errorf("read.lane: invalid git ref %q", explicitRef)
+		}
+		gitOut, gitErr := readLaneGitRef(ctx, d.laneGitInvestigateConfig(invCfg, view), explicitRef, targetPath)
+		if gitErr != nil {
+			return "", gitErr
+		}
+		return truncateText(gitOut, maxBytes, nil), nil
+	}
+
+	out, err := model.ExecuteReadFile(invCfg, model.ReadFileParams{
+		Path:     targetPath,
+		MaxBytes: maxBytes,
+	})
+	if err != nil {
+		ref := cmp.Or(strings.TrimSpace(ln.PRHead), strings.TrimSpace(ln.Branch))
+		if ref != "" && !strings.HasPrefix(ref, "-") && invCfg.HasRoots() {
+			if gitOut, gitErr := readLaneGitRef(ctx, d.laneGitInvestigateConfig(invCfg, view), ref, targetPath); gitErr == nil {
+				return truncateText(gitOut, maxBytes, nil), nil
+			}
+		}
+		return "", err
+	}
+	return truncateText(out, maxBytes, nil), nil
+}
+
+func readLaneGitRef(ctx context.Context, invCfg model.InvestigateConfig, ref, targetPath string) (string, error) {
+	cleanPath := strings.TrimPrefix(targetPath, "./")
+	var gitArgs []string
+	if cleanPath == "." || cleanPath == "" || strings.HasSuffix(cleanPath, "/") {
+		gitArgs = []string{"ls-tree", ref}
+		if cleanPath != "." && cleanPath != "" {
+			gitArgs = append(gitArgs, cleanPath)
+		}
+	} else {
+		gitArgs = []string{"show", fmt.Sprintf("%s:%s", ref, cleanPath)}
+	}
+	return model.ExecuteReadCmd(ctx, invCfg, model.ReadCmdParams{
+		Program: "git",
+		Args:    gitArgs,
+	})
+}
+
+func splitCommandFields(s string) ([]string, error) {
+	var fields []string
+	var cur strings.Builder
+	inToken := false
+	inSingle := false
+	inDouble := false
+	escaped := false
+
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if escaped {
+			cur.WriteByte(ch)
+			inToken = true
+			escaped = false
+			continue
+		}
+		if ch == '\\' && !inSingle {
+			escaped = true
+			inToken = true
+			continue
+		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			inToken = true
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			inToken = true
+			continue
+		}
+		if !inSingle && !inDouble && (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+			if inToken {
+				fields = append(fields, cur.String())
+				cur.Reset()
+				inToken = false
+			}
+			continue
+		}
+		cur.WriteByte(ch)
+		inToken = true
+	}
+	if escaped || inSingle || inDouble {
+		return nil, errors.New("unterminated quote or escape in command")
+	}
+	if inToken {
+		fields = append(fields, cur.String())
+	}
+	return fields, nil
+}
+
+func (d *Dispatcher) laneInvestigateConfig(view *StateView, ln lane.Lane) model.InvestigateConfig {
+	var roots []string
+	addRoot := func(dir string) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			return
+		}
+		roots = append(roots, dir)
+	}
+	addRoot(ln.Worktree)
+	if runDir := strings.TrimSpace(d.cfg.Investigate.RunDir); runDir != "" {
+		addRoot(filepath.Join(runDir, "lanes", ln.ID))
+		addRoot(filepath.Join(runDir, ln.ID))
+		addRoot(runDir)
+	}
+	addRoot(d.cfg.Investigate.RepoDir)
+	if view != nil && view.Run != nil {
+		if repo := strings.TrimSpace(view.Run.Repository); repo != "" {
+			if info, err := os.Stat(repo); err == nil && info.IsDir() {
+				addRoot(repo)
+			}
+		}
+	}
+	for _, extra := range d.cfg.Investigate.ExtraRoots {
+		addRoot(extra)
+	}
+
+	var primaryRunDir string
+	for _, r := range roots {
+		if info, err := os.Stat(r); err == nil && info.IsDir() {
+			primaryRunDir = r
+			break
+		}
+	}
+	if primaryRunDir == "" && len(roots) > 0 {
+		primaryRunDir = roots[0]
+	}
+	return model.InvestigateConfig{
+		CommandRunner: d.cfg.Investigate.CommandRunner,
+		RunDir:        primaryRunDir,
+		RepoDir:       primaryRunDir,
+		ExtraRoots:    roots,
+	}
+}
+
+func (d *Dispatcher) laneGitInvestigateConfig(invCfg model.InvestigateConfig, view *StateView) model.InvestigateConfig {
+	if model.ResolveGitTopLevel(invCfg.RepoDir) != "" {
+		return invCfg
+	}
+	var candidates []string
+	candidates = append(candidates, d.cfg.Investigate.RepoDir)
+	if view != nil && view.Run != nil {
+		candidates = append(candidates, view.Run.Repository)
+	}
+	candidates = append(candidates, invCfg.ExtraRoots...)
+	for _, cand := range candidates {
+		cand = strings.TrimSpace(cand)
+		if cand == "" {
+			continue
+		}
+		if model.ResolveGitTopLevel(cand) != "" {
+			invCfg.RepoDir = cand
+			return invCfg
+		}
+	}
+	if repo := strings.TrimSpace(d.cfg.Investigate.RepoDir); repo != "" {
+		invCfg.RepoDir = repo
+	}
+	return invCfg
+}
+
 func (d *Dispatcher) applyReadPR(_ context.Context, _ string, view *StateView, p ReadPRParams) (string, error) {
 	ln, ok := view.Lane(p.LaneID)
 	if !ok {
@@ -2817,7 +3362,33 @@ func (d *Dispatcher) resolveLaneMailTarget(
 			}
 		}
 	}
+	if !requireTarget && laneID == "" && isRunLevelBatchEventID(batchEvents, messageID) {
+		return batchLaneMail{}, false, nil
+	}
 	return batchLaneMail{}, false, fmt.Errorf("%w: unknown lane mail message_id %q", store.ErrNotFound, messageID)
+}
+
+func isRunLevelBatchEventID(events []store.Event, id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	for i := range events {
+		if events[i].LaneID != "" {
+			continue
+		}
+		if events[i].ID == id {
+			return true
+		}
+		var msg mailbox.Message
+		if len(events[i].Payload) > 0 && json.Unmarshal(events[i].Payload, &msg) == nil {
+			msg.Normalize()
+			if msg.LaneID == "" && msg.ID == id {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (d *Dispatcher) applyMailAnswer(

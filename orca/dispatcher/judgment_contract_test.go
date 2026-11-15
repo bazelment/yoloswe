@@ -1,15 +1,20 @@
 package dispatcher_test
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/model"
+	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
@@ -815,5 +820,874 @@ func TestDispatch_DirectiveRevokeNotFoundRejected(t *testing.T) {
 	}
 	if len(resNoOwner.Accepted) != 0 || len(resNoOwner.Rejected) != 1 {
 		t.Fatalf("without owner_msg: Accepted=%d Rejected=%d (%v), want 0 accepted and 1 rejected", len(resNoOwner.Accepted), len(resNoOwner.Rejected), resNoOwner.Rejected)
+	}
+}
+
+func TestDispatch_RawEvidenceInspectionSendsInvalidClaimBack(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	runDir := t.TempDir()
+	laneDir := filepath.Join(runDir, "lanes", "lazyblk-perf")
+	if err := os.MkdirAll(laneDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rawSummary := `{"claim":"66x fewer bytes read","seed_bytes":32,"duplicated_blocks":2048,"note":"test files were one 32-byte seed repeated"}` + "\n"
+	if err := os.WriteFile(filepath.Join(laneDir, "summary.json"), []byte(rawSummary), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.Backlog().Add(ctx, store.BacklogItem{
+		ID:       "lazyblk-perf",
+		RunID:    "run-1",
+		Title:    "Benchmark lazy block device vs local disk",
+		Priority: store.PriorityP0,
+		Status:   store.BacklogInProgress,
+		LaneID:   "lazyblk-perf",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ln := lane.Lane{
+		ID:         "lazyblk-perf",
+		RunID:      "run-1",
+		ItemID:     "lazyblk-perf",
+		Title:      "Benchmark lazy block device vs local disk",
+		Status:     lane.StatusBlocked,
+		Phase:      recipe.PhaseReview,
+		Round:      1,
+		RecipeName: recipe.DefaultName,
+		Worktree:   laneDir,
+	}
+	ln.RecordAttempt(recipe.PhaseSWE, 1, "sess-lazy-1", "term-lazy-swe-1")
+	ln.RecordAttempt(recipe.PhaseReview, 1, "sess-lazy-1", "term-lazy-rev-1")
+	if err := st.Lanes().Upsert(ctx, ln); err != nil {
+		t.Fatal(err)
+	}
+	drv.SetReport("term-lazy-rev-1", lane.PhaseReport{
+		LaneID:       "lazyblk-perf",
+		TerminalID:   "term-lazy-rev-1",
+		Phase:        recipe.PhaseReview,
+		Round:        1,
+		Outcome:      lane.OutcomeDone,
+		Summary:      "Reported win: lazy path reads 66x fewer bytes than local disk (see summary.json).",
+		RiskiestStep: "verify benchmark payload entropy in summary.json",
+		Observed:     "summary.json -> 66x fewer bytes read",
+	})
+
+	fake := model.NewFakeClient(
+		toolUseResponse(
+			model.ToolCall{
+				ID:    "inspect-1",
+				Name:  "read.lane",
+				Input: json.RawMessage(`{"lane_id":"lazyblk-perf","path":"summary.json","reason":"check raw evidence for 66x speedup claim before integrate"}`),
+			},
+		),
+		toolUseResponse(
+			model.ToolCall{
+				ID:    "retry-1",
+				Name:  dispatcher.ToolLaneRetry,
+				Input: json.RawMessage(`{"lane_id":"lazyblk-perf","phase":"swe","round":2,"note":"Voided reported win: summary.json shows test files were one 32-byte seed repeated, so compression skewed lazy reads 66x.","reason":"raw evidence check failed: duplicated 32-byte seed in summary.json"}`),
+			},
+		),
+		endTurnResponse("Voided reported win from raw evidence in summary.json and sent lazyblk-perf back for round 2."),
+	)
+
+	d := dispatcher.New(dispatcher.Config{
+		Investigate: model.InvestigateConfig{RunDir: runDir},
+	}, st, drv, clk, fake)
+
+	ev, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		LaneID:  "lazyblk-perf",
+		Kind:    store.EventLaneReport,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "lazyblk-perf review reported done: lazy path reads 66x fewer bytes than local disk",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(res.Rejected) != 0 {
+		t.Fatalf("Rejected = %v, want 0 rejections", res.Rejected)
+	}
+	if len(fake.Requests) < 2 {
+		t.Fatalf("Requests = %d, want at least 2", len(fake.Requests))
+	}
+	secondTurnMsgs := fake.Requests[1].Messages
+	toolResultText := secondTurnMsgs[len(secondTurnMsgs)-1].Content[0].Content
+	if !strings.Contains(toolResultText, "one 32-byte seed repeated") || !strings.Contains(toolResultText, `"duplicated_blocks":2048`) {
+		t.Fatalf("inspection tool output did not reach model in turn 2: %q", toolResultText)
+	}
+
+	decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decs) != 2 {
+		t.Fatalf("len(decisions) = %d, want 2 (read.lane + lane.retry): %+v", len(decs), decs)
+	}
+	if !decs[0].Vetted || decs[0].Tool != "read.lane" || !strings.Contains(decs[0].Result, "one 32-byte seed repeated") {
+		t.Fatalf("decision[0] = %+v, want vetted read.lane with raw file output", decs[0])
+	}
+	if !decs[1].Vetted || decs[1].Tool != dispatcher.ToolLaneRetry || decs[1].LaneID != "lazyblk-perf" {
+		t.Fatalf("decision[1] = %+v, want vetted lane.retry on lazyblk-perf", decs[1])
+	}
+
+	updatedLane, err := st.Lanes().Get(ctx, "run-1", "lazyblk-perf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedLane.Status != lane.StatusRunning || updatedLane.Phase != recipe.PhaseSWE || updatedLane.Round != 2 {
+		t.Fatalf("lane after raw evidence failure = %+v, want running in swe round 2", updatedLane)
+	}
+}
+
+func TestDispatch_ContractDirectiveBroadcastsToRunningLanesAndNextBrief(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	for _, id := range []string{"lane-a", "lane-b"} {
+		ln := lane.Lane{
+			ID:         id,
+			RunID:      "run-1",
+			ItemID:     id,
+			Title:      "Running work " + id,
+			Status:     lane.StatusRunning,
+			Phase:      recipe.PhaseSWE,
+			Round:      1,
+			RecipeName: recipe.DefaultName,
+			SessionID:  "sess-" + id,
+			TerminalID: "term-" + id,
+		}
+		ln.RecordAttempt(recipe.PhaseSWE, 1, "sess-"+id, "term-"+id)
+		if err := st.Lanes().Upsert(ctx, ln); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.Backlog().Add(ctx, store.BacklogItem{
+		ID:       "item-next",
+		RunID:    "run-1",
+		Title:    "Next worker lane",
+		Priority: store.PriorityP0,
+		Status:   store.BacklogOpen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := model.NewFakeClient(
+		toolUseResponse(
+			model.ToolCall{
+				ID:    "contract-1",
+				Name:  dispatcher.ToolDirectiveNote,
+				Input: json.RawMessage(`{"fact":"best performance, beat local disk; Bazel code may change","contract":true,"reason":"owner run contract decision"}`),
+			},
+		),
+		endTurnResponse("Recorded run contract."),
+		toolUseResponse(
+			model.ToolCall{
+				ID:    "spawn-1",
+				Name:  dispatcher.ToolLaneSpawn,
+				Input: json.RawMessage(`{"item_id":"item-next","brief":"Implement the next piece following the run contract.","reason":"staff ready work"}`),
+			},
+		),
+		endTurnResponse("Spawned item-next."),
+	)
+	d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+
+	ownerEv, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventOwnerMessage,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "Owner contract: best performance, beat local disk; Bazel code may change",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Dispatch(ctx, "run-1", []store.Event{ownerEv}); err != nil {
+		t.Fatalf("Dispatch tick 1: %v", err)
+	}
+
+	if len(drv.Steers) != 2 {
+		t.Fatalf("len(Steers) after new contract directive = %d, want 2 (one per running lane): %+v", len(drv.Steers), drv.Steers)
+	}
+	steeredSessions := []string{drv.Steers[0].SessionID, drv.Steers[1].SessionID}
+	slices.Sort(steeredSessions)
+	if !slices.Equal(steeredSessions, []string{"sess-lane-a", "sess-lane-b"}) {
+		t.Fatalf("steered sessions = %v, want [sess-lane-a sess-lane-b]", steeredSessions)
+	}
+	for _, stCall := range drv.Steers {
+		if !strings.Contains(stCall.Message, "best performance, beat local disk; Bazel code may change") {
+			t.Fatalf("steer message missing contract directive: %q", stCall.Message)
+		}
+	}
+
+	timerEv, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventTimer,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "tick 2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Dispatch(ctx, "run-1", []store.Event{timerEv}); err != nil {
+		t.Fatalf("Dispatch tick 2: %v", err)
+	}
+
+	if len(drv.Steers) != 2 {
+		t.Fatalf("len(Steers) after tick 2 = %d, want 2 (no duplicate contract steers)", len(drv.Steers))
+	}
+	if len(drv.Spawns) != 1 {
+		t.Fatalf("len(Spawns) = %d, want 1", len(drv.Spawns))
+	}
+	if !strings.Contains(drv.Spawns[0].Brief, "## Run Contract") || !strings.Contains(drv.Spawns[0].Brief, "best performance, beat local disk; Bazel code may change") {
+		t.Fatalf("next brief missing run contract:\n%s", drv.Spawns[0].Brief)
+	}
+	if !strings.Contains(fake.Requests[2].Messages[0].Text(), "## Run Contract") || !strings.Contains(fake.Requests[2].Messages[0].Text(), "best performance, beat local disk; Bazel code may change") {
+		t.Fatalf("next dispatcher snapshot missing run contract:\n%s", fake.Requests[2].Messages[0].Text())
+	}
+}
+
+func TestDispatch_ForwardToolPostsExcerptToTargetLane(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	srcLane := lane.Lane{
+		ID:         "perf-sweep",
+		RunID:      "run-1",
+		ItemID:     "perf-sweep",
+		Title:      "Sweep per-knob numbers",
+		Status:     lane.StatusDone,
+		Phase:      recipe.PhaseSWE,
+		Round:      1,
+		RecipeName: recipe.DefaultName,
+		SessionID:  "sess-perf-sweep",
+		TerminalID: "term-perf-sweep",
+	}
+	if err := st.Lanes().Upsert(ctx, srcLane); err != nil {
+		t.Fatal(err)
+	}
+	dstLane := lane.Lane{
+		ID:         "lazyblk-perf",
+		RunID:      "run-1",
+		ItemID:     "lazyblk-perf",
+		Title:      "Optimize lazy block device",
+		Status:     lane.StatusRunning,
+		Phase:      recipe.PhaseSWE,
+		Round:      1,
+		RecipeName: recipe.DefaultName,
+		SessionID:  "sess-lazyblk",
+		TerminalID: "term-lazyblk",
+	}
+	dstLane.RecordAttempt(recipe.PhaseSWE, 1, "sess-lazyblk", "term-lazyblk")
+	if err := st.Lanes().Upsert(ctx, dstLane); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := model.NewFakeClient(
+		toolUseResponse(
+			model.ToolCall{
+				ID:    "fwd-1",
+				Name:  dispatcher.ToolLaneForward,
+				Input: json.RawMessage(`{"from_lane_id":"perf-sweep","to_lane_id":"lazyblk-perf","excerpt":"readahead=256KiB cut p99 latency by 41%; queue_depth=32 saturated iops","reason":"perf-sweep per-knob numbers affect lazyblk-perf"}`),
+			},
+		),
+		endTurnResponse("Forwarded perf-sweep findings to lazyblk-perf."),
+	)
+	d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+
+	ev, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		LaneID:  "perf-sweep",
+		Kind:    store.EventLaneReport,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "perf-sweep reported per-knob latency numbers",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(res.Rejected) != 0 || len(res.Accepted) != 1 {
+		t.Fatalf("Accepted=%d Rejected=%v, want 1 accepted and 0 rejected", len(res.Accepted), res.Rejected)
+	}
+	if len(drv.Steers) != 1 {
+		t.Fatalf("len(Steers) = %d, want 1", len(drv.Steers))
+	}
+	if drv.Steers[0].SessionID != "sess-lazyblk" {
+		t.Fatalf("steer session = %q, want sess-lazyblk", drv.Steers[0].SessionID)
+	}
+	if !strings.Contains(drv.Steers[0].Message, "perf-sweep") || !strings.Contains(drv.Steers[0].Message, "readahead=256KiB cut p99 latency by 41%") {
+		t.Fatalf("steer message missing forwarded excerpt: %q", drv.Steers[0].Message)
+	}
+}
+
+func TestDispatch_SpawnWithModelOutsideAllowedListIsRefused(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Backlog().Add(ctx, store.BacklogItem{
+		ID:       "item-hard",
+		RunID:    "run-1",
+		Title:    "Hard novel architecture work",
+		Priority: store.PriorityP0,
+		Status:   store.BacklogOpen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := model.NewFakeClient(
+		toolUseResponse(
+			model.ToolCall{
+				ID:    "spawn-bad-model",
+				Name:  dispatcher.ToolLaneSpawn,
+				Input: json.RawMessage(`{"item_id":"item-hard","model":"gpt-4o-mini","brief":"Implement hard novel subsystem.","reason":"spawn with disallowed model"}`),
+			},
+		),
+		toolUseResponse(
+			model.ToolCall{
+				ID:    "spawn-good-model",
+				Name:  dispatcher.ToolLaneSpawn,
+				Input: json.RawMessage(`{"item_id":"item-hard","model":"claude-opus-4-6","brief":"Implement hard novel subsystem.","reason":"hard/new work uses strongest allowed model"}`),
+			},
+		),
+		endTurnResponse("Spawned item-hard with claude-opus-4-6."),
+	)
+	d := dispatcher.New(dispatcher.Config{
+		AllowedModels: []string{"claude-opus-4-6", "claude-sonnet-4-6"},
+	}, st, drv, clk, fake)
+
+	ev, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventTimer,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "staff open backlog",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(res.Rejected) != 1 || !strings.Contains(res.Rejected[0], "not in the allowed models list") {
+		t.Fatalf("Rejected = %+v, want 1 rejection for model outside allowed list", res.Rejected)
+	}
+	if len(res.Accepted) != 1 || res.Accepted[0].Tool != dispatcher.ToolLaneSpawn {
+		t.Fatalf("Accepted = %+v, want 1 accepted lane.spawn", res.Accepted)
+	}
+	if len(drv.Spawns) != 1 || drv.Spawns[0].Model != "claude-opus-4-6" {
+		t.Fatalf("Spawns = %+v, want 1 spawn with Model=claude-opus-4-6", drv.Spawns)
+	}
+
+	decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decs) != 2 {
+		t.Fatalf("len(decisions) = %d, want 2 (1 rejected + 1 accepted): %+v", len(decs), decs)
+	}
+	if decs[0].Vetted || !strings.Contains(decs[0].Result, "not in the allowed models list") {
+		t.Fatalf("decision[0] = %+v, want unvetted rejection for disallowed model", decs[0])
+	}
+	if !decs[1].Vetted || decs[1].Model != "claude-opus-4-6" || !strings.Contains(decs[1].Result, "model=claude-opus-4-6") {
+		t.Fatalf("decision[1] = %+v, want vetted spawn recording model=claude-opus-4-6", decs[1])
+	}
+}
+
+func TestDispatch_IdleRunWithReadyWorkInObjectiveSpawns(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Runs().UpdateObjective(ctx, "run-1", "Deliver diskless sandbox.\n\nNext:\n- lazyblk-perf: benchmark lazy block device vs local disk", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := model.NewFakeClient(
+		endTurnResponse("Nothing needed a decision."),
+	)
+	d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+
+	ev, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventTimer,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "periodic check: nothing needed a decision",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(res.Accepted) != 1 || res.Accepted[0].Tool != dispatcher.ToolLaneSpawn {
+		t.Fatalf("Accepted = %+v, want 1 proactive lane.spawn decision", res.Accepted)
+	}
+	if len(drv.Spawns) != 1 || drv.Spawns[0].LaneID != "lazyblk-perf" {
+		t.Fatalf("Spawns = %+v, want 1 spawn for lazyblk-perf", drv.Spawns)
+	}
+
+	decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decs) != 1 || !decs[0].Vetted || decs[0].Tool != dispatcher.ToolLaneSpawn || decs[0].LaneID != "lazyblk-perf" {
+		t.Fatalf("decisions = %+v, want 1 vetted lane.spawn decision for lazyblk-perf", decs)
+	}
+}
+
+func TestReadOnlyCommandAndReadLaneConfinement(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	for _, tc := range []struct {
+		name    string
+		prog    string
+		args    []string
+		wantErr bool
+	}{
+		{name: "jq valid filter and file", prog: "jq", args: []string{"-r", ".claim", "summary.json"}, wantErr: false},
+		{name: "jq field named env allowed", prog: "jq", args: []string{".env", "summary.json"}, wantErr: false},
+		{name: "jq missing file arg rejected", prog: "jq", args: []string{"."}, wantErr: true},
+		{name: "jq null-input env rejected", prog: "jq", args: []string{"-n", "env"}, wantErr: true},
+		{name: "jq env builtin rejected", prog: "jq", args: []string{"env", "summary.json"}, wantErr: true},
+		{name: "jq string interpolation env rejected", prog: "jq", args: []string{`"\(env)"`, "summary.json"}, wantErr: true},
+		{name: "jq ENV var rejected", prog: "jq", args: []string{"$ENV.SECRET", "summary.json"}, wantErr: true},
+		{name: "jq rawfile flag rejected", prog: "jq", args: []string{"--rawfile", "x", "/etc/passwd", ".", "summary.json"}, wantErr: true},
+		{name: "jq first file traversal rejected", prog: "jq", args: []string{".", "../secret.json", "summary.json"}, wantErr: true},
+		{name: "wc valid flag and file", prog: "wc", args: []string{"-l", "summary.json"}, wantErr: false},
+		{name: "wc files0-from rejected", prog: "wc", args: []string{"--files0-from=/etc/passwd"}, wantErr: true},
+		{name: "tail follow rejected", prog: "tail", args: []string{"-f", "summary.json"}, wantErr: true},
+		{name: "cat without file rejected", prog: "cat", args: []string{"-n"}, wantErr: true},
+		{name: "rg valid pattern and file", prog: "rg", args: []string{"-n", "seed_bytes", "summary.json"}, wantErr: false},
+		{name: "rg without file rejected", prog: "rg", args: []string{"-n", "seed_bytes"}, wantErr: true},
+		{name: "rg encoding flag -E rejected", prog: "rg", args: []string{"-E", "seed_bytes", "summary.json"}, wantErr: true},
+		{name: "grep extended-regexp -E allowed", prog: "grep", args: []string{"-E", "seed_bytes", "summary.json"}, wantErr: false},
+		{name: "grep recursive flag rejected", prog: "grep", args: []string{"-r", "seed_bytes", "summary.json"}, wantErr: true},
+		{name: "rg pre flag rejected", prog: "rg", args: []string{"--pre=sh", "seed_bytes", "summary.json"}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := model.ValidateReadOnlyCommand(tc.prog, tc.args)
+			if tc.wantErr && err == nil {
+				t.Fatalf("ValidateReadOnlyCommand(%q, %v) succeeded, want error", tc.prog, tc.args)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("ValidateReadOnlyCommand(%q, %v) unexpected error: %v", tc.prog, tc.args, err)
+			}
+		})
+	}
+
+	// Verify symlink confinement and read.lane execution in the lane worktree (not main RepoDir).
+	mainRepoDir := t.TempDir()
+	worktreeDir := t.TempDir()
+	outsideDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(mainRepoDir, "summary.json"), []byte(`{"source":"main-repo"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, "summary.json"), []byte(`{"source":"lane-worktree","note":"hello world"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outsideFile := filepath.Join(outsideDir, "outside.txt")
+	if err := os.WriteFile(outsideFile, []byte("outside-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideFile, filepath.Join(worktreeDir, "escape.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	invCfg := model.InvestigateConfig{
+		RunDir:  worktreeDir,
+		RepoDir: worktreeDir,
+	}
+	if _, err := model.ExecuteReadCmd(ctx, invCfg, model.ReadCmdParams{
+		Program: "cat",
+		Args:    []string{"escape.txt"},
+	}); err == nil {
+		t.Fatal("ExecuteReadCmd(cat escape.txt) succeeded on symlink outside allowed roots, want error")
+	}
+	if _, err := model.ExecuteReadCmd(ctx, invCfg, model.ReadCmdParams{
+		Program: "grep",
+		Args:    []string{"hello", "."},
+	}); err == nil {
+		t.Fatal("ExecuteReadCmd(grep hello .) succeeded on directory path, want error")
+	}
+	dirListing, err := model.ExecuteReadFile(invCfg, model.ReadFileParams{
+		Path:     ".",
+		MaxBytes: 24,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteReadFile(. MaxBytes=24): %v", err)
+	}
+	if !strings.HasSuffix(dirListing, "...[truncated]") {
+		t.Fatalf("ExecuteReadFile(. MaxBytes=24) = %q, want truncation suffix", dirListing)
+	}
+
+	clk, st, drv := setupTestEnv(t)
+	ln := lane.Lane{
+		ID:         "lane-wt",
+		RunID:      "run-1",
+		ItemID:     "lane-wt",
+		Title:      "Worktree inspection lane",
+		Status:     lane.StatusRunning,
+		Phase:      recipe.PhaseSWE,
+		Round:      1,
+		RecipeName: recipe.DefaultName,
+		Worktree:   worktreeDir,
+		Branch:     "swarm-lane/lane-wt",
+		SessionID:  "sess-wt",
+		TerminalID: "term-wt",
+	}
+	if err := st.Lanes().Upsert(ctx, ln); err != nil {
+		t.Fatal(err)
+	}
+
+	var seenDir, seenProg string
+	var seenArgs []string
+	fake := model.NewFakeClient(
+		toolUseResponse(
+			model.ToolCall{
+				ID:    "rl-prog",
+				Name:  dispatcher.ToolReadLane,
+				Input: json.RawMessage(`{"lane_id":"lane-wt","program":"wc","args":["-l","summary.json"],"reason":"inspect line count via program+args"}`),
+			},
+			model.ToolCall{
+				ID:    "rl-cmd",
+				Name:  dispatcher.ToolReadLane,
+				Input: json.RawMessage(`{"lane_id":"lane-wt","command":"grep -F \"hello world\" summary.json","reason":"inspect quoted command in lane worktree"}`),
+			},
+			model.ToolCall{
+				ID:    "rl-ref",
+				Name:  dispatcher.ToolReadLane,
+				Input: json.RawMessage(`{"lane_id":"lane-wt","path":"only-on-ref.txt","ref":"refs/heads/custom-ref","reason":"inspect explicit ref"}`),
+			},
+		),
+		endTurnResponse("Inspected lane."),
+	)
+	d := dispatcher.New(dispatcher.Config{
+		Investigate: model.InvestigateConfig{
+			RepoDir: mainRepoDir,
+			CommandRunner: func(_ context.Context, dir, program string, args []string) ([]byte, error) {
+				seenDir = dir
+				seenProg = program
+				seenArgs = slices.Clone(args)
+				return []byte(dir + "|" + program + "|" + strings.Join(args, ",")), nil
+			},
+		},
+	}, st, drv, clk, fake)
+
+	ev, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		LaneID:  "lane-wt",
+		Kind:    store.EventLaneReport,
+		Class:   store.EventClassJudgment,
+		Summary: "lane-wt report",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(res.Rejected) != 0 || len(res.Accepted) != 3 {
+		t.Fatalf("Accepted=%d Rejected=%v, want 3 accepted read.lane calls", len(res.Accepted), res.Rejected)
+	}
+	decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1"})
+	if err != nil || len(decs) != 3 {
+		t.Fatalf("decisions = %+v, err=%v, want 3 decisions", decs, err)
+	}
+	if !strings.Contains(decs[0].Result, worktreeDir+"|wc|-l,summary.json") {
+		t.Fatalf("decision[0] result = %q, want execution in worktreeDir with program=wc args=[-l summary.json]", decs[0].Result)
+	}
+	if !strings.Contains(decs[1].Result, worktreeDir+"|grep|-F,hello world,summary.json") {
+		t.Fatalf("decision[1] result = %q, want quote-aware command split in worktreeDir", decs[1].Result)
+	}
+	if seenProg != "git" || !slices.Equal(seenArgs, []string{"show", "--no-ext-diff", "--no-textconv", "refs/heads/custom-ref:only-on-ref.txt"}) {
+		t.Fatalf("ref call ran dir=%q prog=%q args=%v, want git show refs/heads/custom-ref:only-on-ref.txt", seenDir, seenProg, seenArgs)
+	}
+}
+
+func TestProactiveStaffingAndObjectiveReadyItemRules(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Runs().UpdateObjective(ctx, "run-1", "Deliver diskless sandbox.\n\nNext:\n- Implement the lazy block device benchmark\n- lazyblk-perf: benchmark lazy block device vs local disk\n- cache-warmup: prewarm chunk index", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	view, err := dispatcher.LoadStateView(ctx, st, clk, "run-1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := view.ObjectiveMentionsReadyItem("lazyblk-perf"); !ok {
+		t.Fatal("ObjectiveMentionsReadyItem(lazyblk-perf) = false, want true")
+	}
+	for _, proseWord := range []string{"diskless", "sandbox", "local", "disk", "benchmark", "lazy", "block", "device"} {
+		if _, ok := view.ObjectiveMentionsReadyItem(proseWord); ok {
+			t.Fatalf("ObjectiveMentionsReadyItem(%q) = true, want false for prose word", proseWord)
+		}
+	}
+	if firstReady, ok := view.FirstObjectiveReadyItem(); !ok || firstReady.ID != "lazyblk-perf" {
+		t.Fatalf("FirstObjectiveReadyItem() = (%+v, %v), want lazyblk-perf (not prose word)", firstReady, ok)
+	}
+
+	// Seed one running lane; default MaxConcurrentLanes is 4, so idle tick should staff the next ready item.
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:         "lazyblk-perf",
+		RunID:      "run-1",
+		ItemID:     "lazyblk-perf",
+		Status:     lane.StatusRunning,
+		Phase:      recipe.PhaseSWE,
+		Round:      1,
+		RecipeName: recipe.DefaultName,
+		SessionID:  "sess-1",
+		TerminalID: "term-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runs().UpdateSettings(ctx, "run-1", store.RunSettings{ConcurrencyCap: 2}); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := model.NewFakeClient(
+		endTurnResponse("No action."),
+		endTurnResponse("Lane timer."),
+		endTurnResponse("At cap."),
+		endTurnResponse("Empty batch."),
+	)
+	d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+
+	// Lane-scoped timer event (LaneID != "") must not be treated as a run-level idle tick.
+	evLaneTimer, _ := st.Events().Append(ctx, store.Event{RunID: "run-1", LaneID: "lazyblk-perf", Kind: store.EventTimer, Class: store.EventClassJudgment, Summary: "lane wait deadline"})
+	resLaneTimer, err := d.Dispatch(ctx, "run-1", []store.Event{evLaneTimer})
+	if err != nil {
+		t.Fatalf("Dispatch lane timer: %v", err)
+	}
+	if len(resLaneTimer.Accepted) != 0 {
+		t.Fatalf("resLaneTimer.Accepted = %+v, want 0 proactive spawns on lane-scoped timer", resLaneTimer.Accepted)
+	}
+
+	ev1, _ := st.Events().Append(ctx, store.Event{RunID: "run-1", Kind: store.EventTimer, Class: store.EventClassJudgment, Summary: "idle tick 1"})
+	res1, err := d.Dispatch(ctx, "run-1", []store.Event{ev1})
+	if err != nil {
+		t.Fatalf("Dispatch 1: %v", err)
+	}
+	if len(res1.Accepted) != 1 || res1.Accepted[0].LaneID != "cache-warmup" {
+		t.Fatalf("res1.Accepted = %+v, want proactive spawn of cache-warmup while 1/2 lanes running", res1.Accepted)
+	}
+
+	// Now 2/2 lanes are running (at ConcurrencyCap=2); next idle tick must not spawn.
+	ev2, _ := st.Events().Append(ctx, store.Event{RunID: "run-1", Kind: store.EventTimer, Class: store.EventClassJudgment, Summary: "idle tick 2"})
+	res2, err := d.Dispatch(ctx, "run-1", []store.Event{ev2})
+	if err != nil {
+		t.Fatalf("Dispatch 2: %v", err)
+	}
+	if len(res2.Accepted) != 0 {
+		t.Fatalf("res2.Accepted = %+v, want 0 spawns when at ConcurrencyCap", res2.Accepted)
+	}
+
+	// Empty events slice must not be treated as an idle timer tick.
+	res3, err := d.Dispatch(ctx, "run-1", nil)
+	if err != nil {
+		t.Fatalf("Dispatch 3: %v", err)
+	}
+	if len(res3.Accepted) != 0 {
+		t.Fatalf("res3.Accepted = %+v, want 0 spawns on empty events slice", res3.Accepted)
+	}
+}
+
+func TestContractOrderingRevokeAndModelPolicyInvariants(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	runDir := t.TempDir()
+	t0 := clk.Now().UTC()
+	for _, dir := range []store.Directive{
+		{ID: "c-late", RunID: "run-1", Kind: store.DirectiveContract, Contract: true, Source: store.DirectiveSourceOwner, Text: "second contract rule", Status: store.DirectiveActive, CreatedAt: t0.Add(2 * time.Minute)},
+		{ID: "c-early", RunID: "run-1", Kind: store.DirectiveContract, Contract: true, Source: store.DirectiveSourceOwner, Text: "first contract rule", Status: store.DirectiveActive, CreatedAt: t0.Add(1 * time.Minute)},
+	} {
+		if err := st.Directives().Add(ctx, dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:         "lane-run",
+		RunID:      "run-1",
+		ItemID:     "lane-run",
+		Status:     lane.StatusRunning,
+		Phase:      recipe.PhaseSWE,
+		Round:      1,
+		RecipeName: recipe.DefaultName,
+		SessionID:  "sess-run",
+		TerminalID: "term-run",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:         "lane-review",
+		RunID:      "run-1",
+		ItemID:     "lane-review",
+		Status:     lane.StatusBlocked,
+		Phase:      recipe.PhaseReview,
+		Round:      1,
+		RecipeName: recipe.DefaultName,
+		SessionID:  "sess-rev",
+		TerminalID: "term-rev",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Backlog().Add(ctx, store.BacklogItem{
+		ID:       "item-tier",
+		RunID:    "run-1",
+		Title:    "Tier alias spawn item",
+		Priority: store.PriorityP0,
+		Status:   store.BacklogOpen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	view, err := dispatcher.LoadStateView(ctx, st, clk, "run-1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invs := dispatcher.DefaultInvariants()
+
+	// 1. DefaultAllowedModels is enforced even when AllowedModels is unset, and directive.note decodes kind="contract".
+	noteKindAct, err := dispatcher.ParseAction("dn-kind", dispatcher.ToolDirectiveNote, json.RawMessage(`{"fact":"contract rule via kind","kind":"contract"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noteKindAct.DirectiveNote == nil || !noteKindAct.DirectiveNote.Contract {
+		t.Fatalf("ParseAction(directive.note kind=contract) = %+v, want Contract=true", noteKindAct.DirectiveNote)
+	}
+	badModelAct, err := dispatcher.ParseAction("m1", dispatcher.ToolLaneSpawn, json.RawMessage(`{"item_id":"item-tier","model":"unknown-model-xyz","brief":"do work"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vErr := dispatcher.VetAction(view, badModelAct, invs); vErr == nil || !strings.Contains(vErr.Error(), "not in the allowed models list") {
+		t.Fatalf("VetAction(unknown-model-xyz) = %v, want allowed-models rejection", vErr)
+	}
+
+	// 2. Fastest model (haiku / fastest / gpt-5.4-mini) is rejected for verification/review phase on lane.retry.
+	for _, fastModel := range []string{"fastest", "gpt-5.4-mini"} {
+		fastRevAct, pErr := dispatcher.ParseAction("m2-"+fastModel, dispatcher.ToolLaneRetry, json.RawMessage(`{"lane_id":"lane-review","phase":"review","model":"`+fastModel+`","note":"re-verify"}`))
+		if pErr != nil {
+			t.Fatal(pErr)
+		}
+		if vErr := dispatcher.VetAction(view, fastRevAct, invs); vErr == nil || !strings.Contains(vErr.Error(), "never use fastest model for verification") {
+			t.Fatalf("VetAction(retry review with %s) = %v, want fastest-model verification rejection", fastModel, vErr)
+		}
+	}
+	// "cheaper" maps to sonnet/gpt-5.4 (not fastest) and is allowed.
+	if got := dispatcher.ResolveWorkerModel("cheaper", "claude"); got != "sonnet" {
+		t.Fatalf("ResolveWorkerModel(cheaper, claude) = %q, want sonnet", got)
+	}
+	if got := dispatcher.ResolveWorkerModel("cheaper", "codex"); got != "gpt-5.4" {
+		t.Fatalf("ResolveWorkerModel(cheaper, codex) = %q, want gpt-5.4", got)
+	}
+
+	// 3. lane.forward self-forward and unknown from_lane_id are rejected by vet.
+	selfFwdAct, err := dispatcher.ParseAction("m3", dispatcher.ToolLaneForward, json.RawMessage(`{"from_lane_id":"lane-run","to_lane_id":"lane-run","excerpt":"same lane"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vErr := dispatcher.VetAction(view, selfFwdAct, invs); vErr == nil || !strings.Contains(vErr.Error(), "to itself") {
+		t.Fatalf("VetAction(self forward) = %v, want self-forward rejection", vErr)
+	}
+	unknownFromAct, err := dispatcher.ParseAction("m3b", dispatcher.ToolLaneForward, json.RawMessage(`{"from_lane_id":"unknown-src","to_lane_id":"lane-run","excerpt":"from ghost"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vErr := dispatcher.VetAction(view, unknownFromAct, invs); vErr == nil || !strings.Contains(vErr.Error(), "source lane") {
+		t.Fatalf("VetAction(unknown from_lane_id) = %v, want unknown source lane rejection", vErr)
+	}
+
+	// 4. Revoking a contract directive steers running lanes with revocation notice,
+	// spawning with tier alias "strongest" resolves to "opus", and brief contract lines are sorted by CreatedAt.
+	fake := model.NewFakeClient(
+		toolUseResponse(
+			model.ToolCall{ID: "rev-1", Name: dispatcher.ToolDirectiveRevoke, Input: json.RawMessage(`{"id":"c-late","reason":"owner revoked second rule"}`)},
+			model.ToolCall{ID: "sp-1", Name: dispatcher.ToolLaneSpawn, Input: json.RawMessage(`{"item_id":"item-tier","model":"strongest","brief":"Build tier item.","reason":"staff P0"}`)},
+		),
+		endTurnResponse("Done."),
+	)
+	d := dispatcher.New(dispatcher.Config{
+		AllowMultiAction: true,
+		Investigate:      model.InvestigateConfig{RunDir: runDir},
+	}, st, drv, clk, fake)
+
+	snapBefore, err := d.BuildSnapshot(ctx, "run-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	earlyIdx := strings.Index(snapBefore.Text, "first contract rule")
+	lateIdx := strings.Index(snapBefore.Text, "second contract rule")
+	if earlyIdx < 0 || lateIdx < 0 || earlyIdx > lateIdx {
+		t.Fatalf("snapshot contract rules out of CreatedAt order (early=%d late=%d):\n%s", earlyIdx, lateIdx, snapBefore.Text)
+	}
+
+	ev, _ := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventOwnerMessage,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "revoke c-late and start item-tier",
+	})
+	res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(res.Rejected) != 0 || len(res.Accepted) != 2 {
+		t.Fatalf("Accepted=%d Rejected=%v, want 2 accepted", len(res.Accepted), res.Rejected)
+	}
+	if len(drv.Spawns) != 1 || drv.Spawns[0].Model != "opus" {
+		t.Fatalf("Spawns = %+v, want Model=opus resolved from strongest tier alias", drv.Spawns)
+	}
+	decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundResolvedDecisionModel := false
+	for _, dec := range decs {
+		if dec.Tool == dispatcher.ToolLaneSpawn && dec.Model == "opus" && strings.Contains(dec.Result, "model=opus") {
+			foundResolvedDecisionModel = true
+			break
+		}
+	}
+	if !foundResolvedDecisionModel {
+		t.Fatalf("decisions = %+v, want lane.spawn decision with resolved Model=opus and result containing model=opus", decs)
+	}
+	if _, statErr := os.Stat(filepath.Join(runDir, "CONTEXT.md")); !os.IsNotExist(statErr) {
+		t.Fatalf("unexpected CONTEXT.md written to RunDir: err=%v", statErr)
+	}
+	foundRevokeSteer := false
+	for _, stCall := range drv.Steers {
+		if strings.Contains(stCall.Message, "directive c-late was revoked") {
+			foundRevokeSteer = true
+			break
+		}
+	}
+	if !foundRevokeSteer {
+		t.Fatalf("drv.Steers = %+v, want revocation steer for c-late", drv.Steers)
 	}
 }

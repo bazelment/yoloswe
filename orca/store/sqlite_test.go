@@ -746,4 +746,39 @@ func TestObjectiveDoneAndCostGuardHelpers(t *testing.T) {
 	if err != nil || exceeded3 {
 		t.Fatalf("EnforceCostGuard with CostGuardDisabled=true = (%v, %v), want (false, nil)", exceeded3, err)
 	}
+
+	// Contract directive with explicit non-contract Kind and non-empty Scope round-trips as Contract=true in both stores.
+	contractDir := store.Directive{
+		ID:       "dir-contract-scoped",
+		RunID:    "run-cost",
+		Kind:     store.DirectiveStanding,
+		Scope:    "run",
+		Contract: true,
+		Text:     "Do not edit go.mod manually",
+	}
+	if err := st.Directives().Add(ctx, contractDir); err != nil {
+		t.Fatal(err)
+	}
+	gotSQLite, err := st.Directives().Get(ctx, "run-cost", "dir-contract-scoped")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotSQLite.IsContract() || !gotSQLite.Contract || gotSQLite.Kind != store.DirectiveContract || gotSQLite.Scope != "run" {
+		t.Fatalf("gotSQLite = %+v, want Contract=true Kind=contract Scope=run", gotSQLite)
+	}
+	memSt := store.NewMemoryStore(clk)
+	defer memSt.Close()
+	if err := memSt.Runs().Create(ctx, store.Run{ID: "run-cost"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := memSt.Directives().Add(ctx, contractDir); err != nil {
+		t.Fatal(err)
+	}
+	gotMem, err := memSt.Directives().Get(ctx, "run-cost", "dir-contract-scoped")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotMem.IsContract() || !gotMem.Contract || gotMem.Kind != store.DirectiveContract || gotMem.Scope != "run" {
+		t.Fatalf("gotMem = %+v, want Contract=true Kind=contract Scope=run", gotMem)
+	}
 }

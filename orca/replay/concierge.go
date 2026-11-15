@@ -425,9 +425,9 @@ func (c *StoreConcierge) executeTool(
 		}
 		kind := store.DirectiveKind(cmp.Or(strings.TrimSpace(p.Kind), string(store.DirectiveInstruction)))
 		switch kind {
-		case store.DirectiveStanding, store.DirectiveInstruction, store.DirectiveNote:
+		case store.DirectiveStanding, store.DirectiveContract, store.DirectiveInstruction, store.DirectiveNote:
 		default:
-			return "", fmt.Errorf("invalid directive kind %q: want standing, instruction, or note", p.Kind)
+			return "", fmt.Errorf("invalid directive kind %q: want standing, contract, instruction, or note", p.Kind)
 		}
 		seq := c.dirSeq.Add(1)
 		dir := store.Directive{

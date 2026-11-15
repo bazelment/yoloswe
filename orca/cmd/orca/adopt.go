@@ -244,6 +244,7 @@ func adoptedDispatchers(
 			ClaudeBin:        cfg.ClaudeBin,
 			CodexBin:         cfg.CodexBin,
 			HardBatchModel:   cfg.Models.DispatcherHard,
+			AllowedModels:    cfg.AllowedModels,
 			RecipeCompiler:   planner,
 			OnPlannerRequest: planner.HandlePlannerRequest,
 			Logger:           logger,

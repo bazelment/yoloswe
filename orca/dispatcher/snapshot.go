@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/bazelment/yoloswe/orca/brief"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/recipe"
@@ -160,6 +161,12 @@ func BuildSnapshot(
 	} else {
 		objBudget := min(cfg.MaxObjectiveBytes, max(maxTotalBytes/8, 256))
 		b.WriteString(truncateText(strings.TrimSpace(run.Objective), objBudget, &truncated))
+		b.WriteString("\n")
+	}
+
+	if contractSection := brief.FormatRunContract(directives); contractSection != "" {
+		b.WriteString("\n")
+		b.WriteString(truncateText(contractSection, max(maxTotalBytes/10, 512), &truncated))
 		b.WriteString("\n")
 	}
 

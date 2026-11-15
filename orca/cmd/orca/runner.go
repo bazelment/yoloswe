@@ -338,6 +338,7 @@ func NewRunner(
 		ClaudeBin:        cfg.ClaudeBin,
 		CodexBin:         cfg.CodexBin,
 		HardBatchModel:   cfg.Models.DispatcherHard,
+		AllowedModels:    cfg.AllowedModels,
 		RecipeCompiler:   planner,
 		OnPlannerRequest: planner.HandlePlannerRequest,
 		Logger:           logger,
@@ -772,6 +773,13 @@ func (r *Runner) enqueueOpenBacklogTriggerIfNeeded(ctx context.Context) error {
 		}
 		if depsDone {
 			readyIDs = append(readyIDs, it.ID)
+		}
+	}
+	if len(readyIDs) == 0 {
+		if run, rErr := r.store.Runs().Get(ctx, r.cfg.RunID); rErr == nil && run != nil {
+			if nextSec := strings.TrimSpace(store.ExtractNextSection(run.Objective)); nextSec != "" && !store.IsDoneOrEmptyNext(nextSec) {
+				readyIDs = append(readyIDs, "objective-next")
+			}
 		}
 	}
 	if len(readyIDs) == 0 {
