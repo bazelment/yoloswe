@@ -2671,16 +2671,17 @@ Remaining orchestrator steps after #5899 merges:
 
 Goal: finish trial-m1 rollout
 
-Plan: PLAN.md (post ac9da4cb)
+Plan: PLAN.md (also reports/FINAL.md)
 
 Next: Done — write FINAL.md, update PLAN.md log, and republish post ac9da4cb.
 Constraints: preserve this line directly after Next.
 `)
+		write(t, filepath.Join(dir, "HANDOVER.md"), "# Handover\nPlan post: b2c3d4e5\n")
 		write(t, filepath.Join(dir, "PROGRESS.md"), "# Progress\n- m1-base and m5-finish merged.\n")
 
 		var postAttempts atomic.Int32
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodPut && r.URL.Path == "/api/posts/ac9da4cb" {
+			if r.Method == http.MethodPut && (r.URL.Path == "/api/posts/ac9da4cb" || r.URL.Path == "/api/posts/b2c3d4e5") {
 				attempt := postAttempts.Add(1)
 				if attempt == 1 {
 					http.Error(w, `{"error":"temporary upstream error"}`, http.StatusBadGateway)
@@ -2731,6 +2732,15 @@ Constraints: preserve this line directly after Next.
 		if fileExists(filepath.Join(dir, "FINAL.md")) {
 			t.Fatalf("FINAL.md must not be written when UpdatePost fails")
 		}
+		if decs, dErr := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: nsRun}); dErr != nil {
+			t.Fatal(dErr)
+		} else {
+			for _, dec := range decs {
+				if dec.Tool == dispatcher.ToolRunCloseout {
+					t.Fatalf("failed CloseoutRun must not persist partial ToolRunCloseout decisions, got %+v", dec)
+				}
+			}
+		}
 
 		// Advance clock and retry via planNextWorkIfDrained: attempt 2 succeeds.
 		clk.Advance(2 * time.Minute)
@@ -2744,11 +2754,33 @@ Constraints: preserve this line directly after Next.
 		if !fileExists(filepath.Join(dir, "FINAL.md")) {
 			t.Fatalf("expected FINAL.md after retry succeeded")
 		}
+		decsAfterFirstSuccess, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: nsRun})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closeoutDecCount := 0
+		for _, dec := range decsAfterFirstSuccess {
+			if dec.Tool == dispatcher.ToolRunCloseout {
+				closeoutDecCount++
+			}
+		}
+		if closeoutDecCount == 0 {
+			t.Fatal("expected ToolRunCloseout decisions after successful closeout")
+		}
 
-		// Re-running CloseoutRun again with a later clock must be idempotent (no duplicate PLAN.md or PROGRESS.md entries).
+		// Re-running CloseoutRun again with a later clock, explicit HANDOVER.md post ID, and nested reports/FINAL.md must be idempotent and write the nested file at reports/FINAL.md.
 		clk.Advance(5 * time.Minute)
-		if _, err := controllers.CloseoutRun(t.Context(), nsRun, dispatcher.RunCloseoutParams{}); err != nil {
+		if _, err := controllers.CloseoutRun(t.Context(), nsRun, dispatcher.RunCloseoutParams{
+			PostID: "b2c3d4e5",
+			Files:  map[string]string{"reports/FINAL.md": "# Sub-report\n"},
+		}); err != nil {
 			t.Fatalf("second CloseoutRun: %v", err)
+		}
+		if gotSub := readText(filepath.Join(dir, "reports", "FINAL.md")); !strings.Contains(gotSub, "# Sub-report") {
+			t.Fatalf("reports/FINAL.md = %q, want # Sub-report", gotSub)
+		}
+		if gotRoot := readText(filepath.Join(dir, "FINAL.md")); strings.Contains(gotRoot, "# Sub-report") {
+			t.Fatalf("root FINAL.md was overwritten by reports/FINAL.md:\n%s", gotRoot)
 		}
 		planStr := readText(filepath.Join(dir, "PLAN.md"))
 		if count := strings.Count(planStr, "20261114-trial-m1 done: merged #5604, #5899"); count != 1 {
@@ -2761,6 +2793,19 @@ Constraints: preserve this line directly after Next.
 		objStr := stripMarker(readText(filepath.Join(dir, "OBJECTIVE.md")))
 		if !strings.Contains(objStr, "Constraints: preserve this line directly after Next.") {
 			t.Fatalf("OBJECTIVE.md lost line directly following Next:\n%s", objStr)
+		}
+		decsAfterRepeat, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: nsRun})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seenDecResults := make(map[string]int)
+		for _, dec := range decsAfterRepeat {
+			if dec.Tool == dispatcher.ToolRunCloseout {
+				seenDecResults[dec.Result]++
+				if seenDecResults[dec.Result] > 1 {
+					t.Fatalf("duplicate ToolRunCloseout decision result recorded: %q", dec.Result)
+				}
+			}
 		}
 	})
 
@@ -3058,6 +3103,9 @@ func TestCloseoutUnitHelpers(t *testing.T) {
 		if got := findPostIDInText("- Merged #5899 (def58990) and republish plan post (ac9da4cb)"); got != "ac9da4cb" {
 			t.Fatalf("findPostIDInText with earlier merge SHA = %q, want ac9da4cb", got)
 		}
+		if got := findPostIDInText("republish the plan; m1 merged abc5604"); got != "" {
+			t.Fatalf("findPostIDInText matched merge SHA without post marker = %q, want empty", got)
+		}
 
 		var reqCount atomic.Int32
 		var gotMethod, gotPath, gotAuth, gotMarkdown string
@@ -3141,6 +3189,13 @@ func TestCloseoutUnitHelpers(t *testing.T) {
 		probeWithGit := controllers.runPRProbe(syncerWithGit)
 		if got, err := probeWithGit(t.Context(), "mid-review", "lane-a", 42); err != nil || got.State != "OPEN" || calls.Load() != 2 {
 			t.Fatalf("runPRProbe inside git checkout = (%+v, %v), calls=%d; want OPEN, 2 calls", got, err, calls.Load())
+		}
+		adoptedDrv := &adoptedRunDriver{LaneDriver: lane.NewFakeDriver(), syncer: syncerWithGit}
+		if err := adoptedDrv.ReleaseSession(t.Context(), "sess-mid", true); err != nil {
+			t.Fatalf("adoptedRunDriver.ReleaseSession: %v", err)
+		}
+		if !slices.Contains(syncerWithGit.ReleasedSessions(), "sess-mid") {
+			t.Fatalf("ReleasedSessions() = %v, want sess-mid", syncerWithGit.ReleasedSessions())
 		}
 	})
 }

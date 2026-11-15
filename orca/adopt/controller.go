@@ -53,6 +53,7 @@ type Controllers struct {
 //nolint:govet // field alignment
 type controlledRun struct {
 	dispatch   controller.Judge
+	driver     lane.LaneDriver
 	controller *controller.Controller
 	syncer     *runLedgerSync
 	cancel     context.CancelFunc
@@ -289,7 +290,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	runDriver := d.driver
 	if runDriver != nil {
-		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: runStore}
+		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: runStore, syncer: syncer}
 		if ds, ok := dispatch.(interface{ SetDriver(lane.LaneDriver) }); ok {
 			ds.SetDriver(runDriver)
 		} else if dispatch != nil {
@@ -307,6 +308,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	cr := &controlledRun{
 		controller: ctrl,
 		dispatch:   dispatch,
+		driver:     runDriver,
 		syncer:     syncer,
 		cancel:     cancel,
 		done:       make(chan struct{}),
@@ -583,10 +585,25 @@ func (d *Controllers) runPRProbe(syncer *runLedgerSync) controller.PRProbe {
 	if d.PRProbe == nil {
 		return nil
 	}
+	var cacheMu sync.Mutex
+	var cachedDir string
+	var cachedHasGit bool
+	var cachedSet bool
+	checkGit := func(dir string) bool {
+		cacheMu.Lock()
+		defer cacheMu.Unlock()
+		if cachedSet && cachedDir == dir {
+			return cachedHasGit
+		}
+		cachedDir = dir
+		cachedHasGit = hasGitCheckout(dir)
+		cachedSet = true
+		return cachedHasGit
+	}
 	return func(ctx context.Context, runID, branch string, pr int) (controller.PRStatus, error) {
 		if syncer != nil {
 			curRun := syncer.CurrentRun()
-			if strings.TrimSpace(curRun.Repo) == "" && strings.TrimSpace(curRun.RepoID) == "" && !hasGitCheckout(curRun.Dir) {
+			if strings.TrimSpace(curRun.Repo) == "" && strings.TrimSpace(curRun.RepoID) == "" && !checkGit(curRun.Dir) {
 				var storeRepo string
 				if d.store != nil && runID != "" {
 					if sr, err := d.store.Runs().Get(ctx, runID); err == nil && sr != nil {
@@ -602,13 +619,15 @@ func (d *Controllers) runPRProbe(syncer *runLedgerSync) controller.PRProbe {
 	}
 }
 
+const maxGitCheckoutSearchDepth = 4
+
 func hasGitCheckout(dir string) bool {
 	cur := strings.TrimSpace(dir)
 	if cur == "" {
 		return false
 	}
 	cur = filepath.Clean(cur)
-	for {
+	for depth := 0; depth <= maxGitCheckoutSearchDepth; depth++ {
 		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
 			return true
 		}
@@ -618,6 +637,7 @@ func hasGitCheckout(dir string) bool {
 		}
 		cur = parent
 	}
+	return false
 }
 
 func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger string) (bool, error) {
@@ -1427,10 +1447,12 @@ func nebulaSwarmPhaseBrief(dir, phase, specPrompt string) string {
 	}
 }
 
+//nolint:govet // field alignment
 type adoptedRunDriver struct {
 	lane.LaneDriver
-	store store.Store
-	run   Run
+	store  store.Store
+	syncer *runLedgerSync
+	run    Run
 }
 
 func (d *adoptedRunDriver) PhaseSkill(phase string) string {
@@ -1681,7 +1703,12 @@ func (d *adoptedRunDriver) readRunReportFile(ctx context.Context, runID, laneID,
 
 func (d *adoptedRunDriver) ReleaseSession(ctx context.Context, sessionID string, force ...bool) error {
 	if rel, ok := d.LaneDriver.(lane.SessionReleaser); ok {
-		return rel.ReleaseSession(ctx, sessionID, force...)
+		if err := rel.ReleaseSession(ctx, sessionID, force...); err != nil {
+			return err
+		}
+		if d.syncer != nil {
+			d.syncer.MarkSessionReleased(sessionID)
+		}
 	}
 	return nil
 }
@@ -2370,6 +2397,7 @@ func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params disp
 
 	objPath := filepath.Join(curRun.Dir, "OBJECTIVE.md")
 	progPath := filepath.Join(curRun.Dir, "PROGRESS.md")
+	handoverPath := filepath.Join(curRun.Dir, "HANDOVER.md")
 	rawObj := stripMarker(readText(objPath))
 	if strings.TrimSpace(rawObj) == "" {
 		rawObj = curRun.Objective
@@ -2378,6 +2406,7 @@ func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params disp
 	if strings.TrimSpace(rawProg) == "" {
 		rawProg = curRun.Progress
 	}
+	handoverText := stripMarker(readText(handoverPath))
 	var storedObj, storedPlanRef string
 	if sr, gErr := d.store.Runs().Get(ctx, runID); gErr == nil && sr != nil {
 		storedObj = sr.Objective
@@ -2390,15 +2419,18 @@ func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params disp
 		}
 	}
 	fileKeys := make([]string, 0, len(params.Files))
+	resolvedFiles := make(map[string]string, len(params.Files))
 	for k := range params.Files {
-		if _, vErr := ValidateCloseoutWrite(curRun.Dir, rawObj, k); vErr != nil {
+		resolvedTarget, vErr := ValidateCloseoutWrite(curRun.Dir, rawObj, k)
+		if vErr != nil {
 			return "", vErr
 		}
+		resolvedFiles[k] = resolvedTarget
 		fileKeys = append(fileKeys, k)
 	}
 	slices.Sort(fileKeys)
 
-	if err := dispatcher.ValidateCloseoutPostID(params.PostID, rawObj, storedObj, storedPlanRef); err != nil {
+	if err := dispatcher.ValidateCloseoutPostID(params.PostID, rawObj, storedObj, rawProg, handoverText, storedPlanRef); err != nil {
 		return "", err
 	}
 
@@ -2448,19 +2480,6 @@ func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params disp
 	var stepSummaries []string
 	recordStep := func(summary string) {
 		stepSummaries = append(stepSummaries, summary)
-		if d.store != nil {
-			_, _ = d.store.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
-				RunID:     runID,
-				Category:  store.DecisionJudgment,
-				Actor:     dispatcher.ActorDispatcher,
-				Tool:      dispatcher.ToolRunCloseout,
-				Reason:    cmp.Or(strings.TrimSpace(params.Reason), "close out adopted run"),
-				Result:    summary,
-				Output:    summary,
-				Vetted:    true,
-				CreatedAt: now,
-			})
-		}
 	}
 
 	// 1. Release any remaining lane sessions.
@@ -2523,11 +2542,8 @@ func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params disp
 
 	// 2. Apply any additional validated file writes named in OBJECTIVE.md.
 	for _, relKey := range fileKeys {
-		resolvedTarget, vErr := ValidateCloseoutWrite(curRun.Dir, rawObj, relKey)
-		if vErr != nil {
-			return "", vErr
-		}
-		if filepath.Base(resolvedTarget) == "FINAL.md" {
+		resolvedTarget := resolvedFiles[relKey]
+		if filepath.ToSlash(filepath.Clean(relKey)) == "FINAL.md" {
 			if strings.TrimSpace(params.FinalMarkdown) == "" {
 				params.FinalMarkdown = params.Files[relKey]
 			}
@@ -2603,7 +2619,7 @@ func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params disp
 		finalContent = finalBuilder.String()
 	}
 
-	handoverText := stripMarker(readText(filepath.Join(curRun.Dir, "HANDOVER.md")))
+	handoverText = stripMarker(readText(handoverPath))
 	postID := cmp.Or(strings.TrimSpace(params.PostID), extractCloseoutPostID(rawObj, storedObj, rawProg, handoverText, storedPlanRef))
 	if postID != "" {
 		if vErr := dispatcher.ValidateCloseoutPostID(postID, rawObj, storedObj, rawProg, handoverText, storedPlanRef); vErr != nil {
@@ -2620,12 +2636,16 @@ func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params disp
 				postBody = finalContent
 			}
 		}
-		pub, ok := d.driver.(lane.PostPublisher)
+		postDrv := cmp.Or(cr.driver, d.driver)
+		pub, ok := postDrv.(lane.PostPublisher)
 		if !ok {
 			return "", fmt.Errorf("republish post %s: driver does not support post updates", postID)
 		}
 		if pErr := pub.UpdatePost(ctx, postID, postBody); pErr != nil {
-			return "", fmt.Errorf("republish post %s: %w", postID, pErr)
+			if !strings.HasPrefix(pErr.Error(), "republish post ") {
+				return "", fmt.Errorf("republish post %s: %w", postID, pErr)
+			}
+			return "", pErr
 		}
 		recordStep(fmt.Sprintf("republished Nebula post %s with close-out summary (%s)", postID, prSummary))
 	}
@@ -2673,5 +2693,33 @@ func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params disp
 		finalMsg = fmt.Sprintf("run %s close-out complete with %d unreleased session(s) (%s; outcome=%s, merged %s, FINAL.md written); run /release to hand back the run", runID, len(releaseFailed), strings.Join(releaseFailed, ", "), outcome, prSummary)
 	}
 	recordStep(finalMsg)
+	if d.store != nil {
+		existingResults := make(map[string]bool)
+		if prevDecs, lErr := d.store.Decisions().List(context.WithoutCancel(ctx), store.DecisionFilter{RunID: runID}); lErr == nil {
+			for i := range prevDecs {
+				if prevDecs[i].Tool == dispatcher.ToolRunCloseout {
+					existingResults[prevDecs[i].Result] = true
+				}
+			}
+		}
+		reason := cmp.Or(strings.TrimSpace(params.Reason), "close out adopted run")
+		for _, summary := range stepSummaries {
+			if existingResults[summary] {
+				continue
+			}
+			existingResults[summary] = true
+			_, _ = d.store.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
+				RunID:     runID,
+				Category:  store.DecisionJudgment,
+				Actor:     dispatcher.ActorDispatcher,
+				Tool:      dispatcher.ToolRunCloseout,
+				Reason:    reason,
+				Result:    summary,
+				Output:    summary,
+				Vetted:    true,
+				CreatedAt: now,
+			})
+		}
+	}
 	return strings.Join(stepSummaries, "; "), nil
 }

@@ -1966,6 +1966,16 @@ func TestRunCloseoutToolVettingAndExecution(t *testing.T) {
 	if _, err := dispatcher.ValidateCloseoutFileRef("Inspect state.json and HANDOVER.md", "HANDOVER.md"); err == nil {
 		t.Fatal("expected ValidateCloseoutFileRef to reject HANDOVER.md even when mentioned in OBJECTIVE.md")
 	}
+	if got := dispatcher.FindPostIDInText("republish the plan; m1 merged abc5604"); got != "" {
+		t.Fatalf("FindPostIDInText without post marker = %q, want empty", got)
+	}
+	if err := dispatcher.CheckRunTerminal(
+		[]lane.Lane{{ID: "m5-finish", Status: lane.StatusDone}},
+		[]store.BacklogItem{{ID: "item-1", LaneID: "m5-finish", Status: store.BacklogInProgress}},
+		true,
+	); err != nil {
+		t.Fatalf("CheckRunTerminal should treat backlog item paired with terminal lane as terminal: %v", err)
+	}
 
 	if err := dispatcher.VetAction(viewDone, actClose, dispatcher.DefaultInvariants()); err != nil {
 		t.Fatalf("expected valid run.closeout to pass VetAction, got: %v", err)

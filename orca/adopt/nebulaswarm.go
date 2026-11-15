@@ -714,14 +714,7 @@ func WriteCloseoutFile(runDir, objective, targetPath, content string, appendMode
 	} else {
 		nextBody = content
 		if base == "OBJECTIVE.md" || base == "PROGRESS.md" {
-			for strings.HasPrefix(nextBody, markerPrefix) {
-				_, rest, ok := strings.Cut(nextBody, "\n")
-				if !ok {
-					nextBody = ""
-					break
-				}
-				nextBody = rest
-			}
+			nextBody = stripMarker(nextBody)
 		}
 		if !strings.HasSuffix(nextBody, "\n") {
 			nextBody += "\n"

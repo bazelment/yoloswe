@@ -2256,7 +2256,7 @@ func ValidateCloseoutPostID(postID string, sources ...string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("post_id %q is not named in OBJECTIVE.md", id)
+	return fmt.Errorf("post_id %q is not named in OBJECTIVE.md or handover sources", id)
 }
 
 func closeoutTextMentionsToken(text, tok string) bool {
@@ -2283,8 +2283,8 @@ func closeoutTextMentionsToken(text, tok string) bool {
 	return false
 }
 
-// FindPostIDInText extracts a Nebula post ID referenced in text (via "post:"
-// or on a line mentioning "post" or "republish").
+// FindPostIDInText extracts a Nebula post ID referenced in text after a
+// "post:" or "post" marker.
 func FindPostIDInText(text string) string {
 	if strings.TrimSpace(text) == "" {
 		return ""
@@ -2298,16 +2298,10 @@ func FindPostIDInText(text string) string {
 	lines := strings.Split(text, "\n")
 	for _, line := range lines {
 		postIdx := indexFoldASCII(line, "post")
-		repubIdx := indexFoldASCII(line, "republish")
-		if postIdx < 0 && repubIdx < 0 {
+		if postIdx < 0 {
 			continue
 		}
-		if postIdx >= 0 {
-			if tok := firstLikelyPostToken(line[postIdx+len("post"):]); tok != "" {
-				return tok
-			}
-		}
-		if tok := firstLikelyPostToken(line); tok != "" {
+		if tok := firstLikelyPostToken(line[postIdx+len("post"):]); tok != "" {
 			return tok
 		}
 	}
@@ -2421,6 +2415,9 @@ func checkRunCloseout(st *StateView, p *RunCloseoutParams) error {
 	return nil
 }
 
+// isRunStateDone reports whether every lane and backlog item is terminal (including
+// adopted task-backed backlog items whose corresponding lane is terminal) and the
+// run objective's Next: directive is done.
 func isRunStateDone(run *store.Run, lanes []lane.Lane, backlog []store.BacklogItem) bool {
 	if err := CheckRunTerminal(lanes, backlog, false); err != nil {
 		return false
