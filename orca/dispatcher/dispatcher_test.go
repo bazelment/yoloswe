@@ -1849,3 +1849,84 @@ func TestDispatcherStaleJudgmentDismissesQuestionAndEarlierOwnerLiftAllowsRevoke
 		t.Fatalf("expected escalated owner_ask directive ask-ask-rebase, got err=%v", err)
 	}
 }
+
+func TestDispatcherLaneWaitToolSuppressesStallUntilDeadline(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:          "perf-sweep",
+		RunID:       "run-1",
+		Title:       "Azure sweep",
+		Status:      lane.StatusRunning,
+		Phase:       recipe.PhaseSWE,
+		Round:       1,
+		Attempt:     1,
+		SessionID:   "sess-perf",
+		TerminalID:  "term-perf",
+		LastEventAt: clk.Now(),
+	}); err != nil {
+		t.Fatalf("Upsert lane: %v", err)
+	}
+
+	ev, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		LaneID:  "perf-sweep",
+		Kind:    store.EventMail,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "perf-sweep launched 120-minute Azure sweep",
+	})
+	if err != nil {
+		t.Fatalf("Append event: %v", err)
+	}
+
+	client := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("wait-1", dispatcher.ToolLaneWait, json.RawMessage(`{"lane_id":"perf-sweep","reason":"120-minute wait for perf-sweep's Azure sweep","deadline":"120m"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Recorded 120-minute expected wait on perf-sweep.")),
+		},
+	)
+
+	disp := dispatcher.New(dispatcher.Config{}, st, drv, clk, client)
+	res, err := disp.Dispatch(ctx, "run-1", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch(lane.wait): %v", err)
+	}
+	if len(res.Decisions) != 1 || !res.Decisions[0].Vetted || res.Decisions[0].Tool != dispatcher.ToolLaneWait {
+		t.Fatalf("decisions = %+v, want 1 vetted lane.wait decision", res.Decisions)
+	}
+
+	judge := controller.NewFakeJudge()
+	ctrl := controller.New(controller.Config{
+		RunID:            "run-1",
+		JudgmentDebounce: -1,
+		StallTimeout:     45 * time.Minute,
+		StallTimeoutSet:  true,
+	}, st, drv, clk, judge)
+
+	// Advance 90m (past the 45m stall timeout, before the 120m deadline): no stall.
+	clk.Advance(90 * time.Minute)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step at 90m: %v", err)
+	}
+	if len(drv.Stops) != 0 {
+		t.Fatalf("at 90m (before expected wait deadline): stops=%+v, want 0", drv.Stops)
+	}
+
+	// Advance past the 120m deadline (to 121m): stall fires.
+	clk.Advance(31 * time.Minute)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step at 121m: %v", err)
+	}
+	if len(drv.Stops) != 1 || drv.Stops[0].LaneID != "perf-sweep" {
+		t.Fatalf("at 121m (after expected wait deadline): stops=%+v, want perf-sweep stopped", drv.Stops)
+	}
+}

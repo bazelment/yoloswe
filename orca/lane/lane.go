@@ -4,6 +4,7 @@ package lane
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"strconv"
@@ -499,6 +500,64 @@ type TerminalStateReader interface {
 	TerminalAgentState(ctx context.Context, terminalID string) (string, error)
 }
 
+// ErrStaleTerminal is returned when Steer targets a terminal that has been
+// stopped or superseded by a later phase/attempt terminal on the same lane.
+var ErrStaleTerminal = errors.New("lane terminal is stopped or superseded")
+
+// GitState summarizes the working tree and unpushed commit state inside a lane
+// session checkout.
+type GitState struct {
+	OldestUnpushedAt time.Time
+	DirtyFiles       []string
+	UnpushedCommits  int
+}
+
+// HasUnpushedWork reports whether the checkout has local commits not on the
+// remote branch or uncommitted dirty files.
+func (g GitState) HasUnpushedWork() bool {
+	return g.UnpushedCommits > 0 || len(g.DirtyFiles) > 0
+}
+
+// GitStateReader is optionally implemented by drivers that can inspect a lane
+// session's git working tree and unpushed commits.
+type GitStateReader interface {
+	LaneGitState(ctx context.Context, ln Lane) (GitState, error)
+}
+
+// SessionHealth summarizes the operational health of a lane's session.
+type SessionHealth struct {
+	BusyProcesses   []string
+	DiskUsedPercent int
+}
+
+// HasBusyProcess reports whether the session has an active build, gate, or
+// review process that should be treated as active work.
+func (h SessionHealth) HasBusyProcess() bool {
+	return len(h.BusyProcesses) > 0
+}
+
+// SessionHealthReader is optionally implemented by drivers that can inspect a
+// lane session's disk usage and active gate/review processes.
+type SessionHealthReader interface {
+	LaneSessionHealth(ctx context.Context, ln Lane) (SessionHealth, error)
+}
+
+// IsBusyProcess reports whether a process command line represents an active
+// review, build, or gate process (e.g. review_cli, bazel, prepush) that means
+// the lane session is actively working even if terminal output is quiet.
+func IsBusyProcess(cmd string) bool {
+	lower := strings.ToLower(strings.TrimSpace(cmd))
+	if lower == "" {
+		return false
+	}
+	for _, token := range []string{"review_cli", "review-cli", "pr-polish", "bazel", "prepush", "pre-push"} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
 type Driver = LaneDriver
 
 // FakeDriver is an in-memory LaneDriver implementation for deterministic unit tests.
@@ -513,6 +572,12 @@ type FakeDriver struct { //nolint:govet // test double state is intentionally gr
 	ReportOnlyCommitsAhead int
 	SpawnBaseCommit        string
 	AgentStates            map[string]string
+	GitStates              map[string]GitState
+	SessionHealths         map[string]SessionHealth
+	DiskUsage              map[string]int
+	BusyProcesses          map[string][]string
+	activeTerminal         map[string]string
+	stoppedTerminals       map[string]bool
 	nextSeq                int
 	subs                   map[int]chan Event
 	nextSub                int
@@ -521,9 +586,15 @@ type FakeDriver struct { //nolint:govet // test double state is intentionally gr
 
 func NewFakeDriver() *FakeDriver {
 	return &FakeDriver{
-		reports:     make(map[string]*PhaseReport),
-		AgentStates: make(map[string]string),
-		subs:        make(map[int]chan Event),
+		reports:          make(map[string]*PhaseReport),
+		AgentStates:      make(map[string]string),
+		GitStates:        make(map[string]GitState),
+		SessionHealths:   make(map[string]SessionHealth),
+		DiskUsage:        make(map[string]int),
+		BusyProcesses:    make(map[string][]string),
+		activeTerminal:   make(map[string]string),
+		stoppedTerminals: make(map[string]bool),
+		subs:             make(map[int]chan Event),
 	}
 }
 
@@ -531,6 +602,55 @@ func (f *FakeDriver) TerminalAgentState(_ context.Context, terminalID string) (s
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.AgentStates[terminalID], nil
+}
+
+func (f *FakeDriver) LaneGitState(_ context.Context, ln Lane) (GitState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if st, ok := f.GitStates[ln.ID]; ok {
+		cp := st
+		cp.DirtyFiles = append([]string(nil), st.DirtyFiles...)
+		return cp, nil
+	}
+	if st, ok := f.GitStates[ln.SessionID]; ok {
+		cp := st
+		cp.DirtyFiles = append([]string(nil), st.DirtyFiles...)
+		return cp, nil
+	}
+	return GitState{}, nil
+}
+
+func (f *FakeDriver) LaneSessionHealth(_ context.Context, ln Lane) (SessionHealth, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out SessionHealth
+	if h, ok := f.SessionHealths[ln.ID]; ok {
+		out = h
+		out.BusyProcesses = append([]string(nil), h.BusyProcesses...)
+	} else if h, ok := f.SessionHealths[ln.SessionID]; ok {
+		out = h
+		out.BusyProcesses = append([]string(nil), h.BusyProcesses...)
+	}
+	if pct, ok := f.DiskUsage[ln.ID]; ok {
+		out.DiskUsedPercent = pct
+	} else if pct, ok := f.DiskUsage[ln.SessionID]; ok {
+		out.DiskUsedPercent = pct
+	}
+	if procs, ok := f.BusyProcesses[ln.ID]; ok {
+		out.BusyProcesses = append([]string(nil), procs...)
+	} else if procs, ok := f.BusyProcesses[ln.SessionID]; ok {
+		out.BusyProcesses = append([]string(nil), procs...)
+	} else if procs, ok := f.BusyProcesses[ln.TerminalID]; ok {
+		out.BusyProcesses = append([]string(nil), procs...)
+	}
+	return out, nil
+}
+
+// IsTerminalStopped reports whether terminalID has been stopped or superseded.
+func (f *FakeDriver) IsTerminalStopped(terminalID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stoppedTerminals[terminalID]
 }
 
 func (f *FakeDriver) ReportInstructions(_, laneID, phase string, round int) string {
@@ -557,9 +677,20 @@ func (f *FakeDriver) SpawnSession(_ context.Context, req SpawnRequest) (SpawnRes
 		cp.Env = maps.Clone(req.Env)
 	}
 	f.Spawns = append(f.Spawns, cp)
+	termID := fmt.Sprintf("term-%s-%s-%d", req.LaneID, PhaseRoundKey(req.Phase, req.Round), f.nextSeq)
+	if f.activeTerminal == nil {
+		f.activeTerminal = make(map[string]string)
+	}
+	if f.stoppedTerminals == nil {
+		f.stoppedTerminals = make(map[string]bool)
+	}
+	if prev := f.activeTerminal[req.LaneID]; prev != "" && prev != termID {
+		f.stoppedTerminals[prev] = true
+	}
+	f.activeTerminal[req.LaneID] = termID
 	return SpawnResult{
 		SessionID:  fmt.Sprintf("sess-%s-%d", req.LaneID, f.nextSeq),
-		TerminalID: fmt.Sprintf("term-%s-%s-%d", req.LaneID, PhaseRoundKey(req.Phase, req.Round), f.nextSeq),
+		TerminalID: termID,
 		StartedAt:  time.Now().UTC(),
 		BaseCommit: f.SpawnBaseCommit,
 	}, nil
@@ -578,9 +709,20 @@ func (f *FakeDriver) StartPhaseTerminal(_ context.Context, req StartPhaseRequest
 	if sessID == "" {
 		sessID = fmt.Sprintf("sess-%s-%d", req.LaneID, f.nextSeq)
 	}
+	termID := fmt.Sprintf("term-%s-%s-%d", req.LaneID, PhaseRoundKey(req.Phase, req.Round), f.nextSeq)
+	if f.activeTerminal == nil {
+		f.activeTerminal = make(map[string]string)
+	}
+	if f.stoppedTerminals == nil {
+		f.stoppedTerminals = make(map[string]bool)
+	}
+	if prev := f.activeTerminal[req.LaneID]; prev != "" && prev != termID {
+		f.stoppedTerminals[prev] = true
+	}
+	f.activeTerminal[req.LaneID] = termID
 	return StartPhaseResult{
 		SessionID:  sessID,
-		TerminalID: fmt.Sprintf("term-%s-%s-%d", req.LaneID, PhaseRoundKey(req.Phase, req.Round), f.nextSeq),
+		TerminalID: termID,
 		StartedAt:  time.Now().UTC(),
 	}, nil
 }
@@ -588,6 +730,14 @@ func (f *FakeDriver) StartPhaseTerminal(_ context.Context, req StartPhaseRequest
 func (f *FakeDriver) Steer(_ context.Context, req SteerRequest) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if req.TerminalID != "" && f.stoppedTerminals[req.TerminalID] {
+		return fmt.Errorf("%w: %s", ErrStaleTerminal, req.TerminalID)
+	}
+	if req.LaneID != "" && req.TerminalID != "" {
+		if active := f.activeTerminal[req.LaneID]; active != "" && active != req.TerminalID {
+			return fmt.Errorf("%w: %s (active %s)", ErrStaleTerminal, req.TerminalID, active)
+		}
+	}
 	f.Steers = append(f.Steers, req)
 	return nil
 }
@@ -595,6 +745,16 @@ func (f *FakeDriver) Steer(_ context.Context, req SteerRequest) error {
 func (f *FakeDriver) Stop(_ context.Context, req StopRequest) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.stoppedTerminals == nil {
+		f.stoppedTerminals = make(map[string]bool)
+	}
+	if req.TerminalID != "" {
+		f.stoppedTerminals[req.TerminalID] = true
+	} else if req.LaneID != "" {
+		if active := f.activeTerminal[req.LaneID]; active != "" {
+			f.stoppedTerminals[active] = true
+		}
+	}
 	f.Stops = append(f.Stops, req)
 	return nil
 }

@@ -617,7 +617,11 @@ func TestControllerWatchRestartLadder(t *testing.T) {
 					}
 				}
 				before, _ := st.Events().List(ctx, store.EventFilter{RunID: "run-1"})
-				clk.Advance(time.Second)
+				if step == 2 {
+					clk.Advance(controller.DefaultStallTimeout / 2)
+				} else {
+					clk.Advance(time.Second)
+				}
 				drv.Emit(lane.Event{RunID: "run-1", LaneID: "lane-quiet", Kind: lane.EventNoActivity, Text: "quiet", At: clk.Now()})
 				waitFor(t, func() bool {
 					events, _ := st.Events().List(ctx, store.EventFilter{RunID: "run-1"})
@@ -749,17 +753,78 @@ func TestControllerQuietWorkingBeforePhaseLimitDoesNotRestart(t *testing.T) {
 		t.Fatalf("before phase limit: steers=%d phase starts=%d spawns=%d, want 0, 0, 1", len(drv.Steers), len(drv.PhaseStarts), len(drv.Spawns))
 	}
 	clk.Advance(2 * time.Minute)
+	appendLaneWatchEvent(t, st, ln.ID, ln.TerminalID, lane.EventNoActivity)
 	if err := ctrl.Step(ctx); err != nil {
-		t.Fatalf("timeout nudge: %v", err)
+		t.Fatalf("working past phase limit: %v", err)
+	}
+	if len(drv.Steers) != 0 || len(drv.PhaseStarts) != 0 || len(drv.Stops) != 0 {
+		t.Fatalf("working terminal past phase limit: steers=%d starts=%d stops=%d, want 0, 0, 0", len(drv.Steers), len(drv.PhaseStarts), len(drv.Stops))
+	}
+	delete(drv.AgentStates, ln.TerminalID)
+	appendLaneWatchEvent(t, st, ln.ID, ln.TerminalID, lane.EventNoActivity)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("idle nudge: %v", err)
 	}
 	if len(drv.Steers) != 1 || len(drv.PhaseStarts) != 0 {
-		t.Fatalf("at phase limit: steers=%d starts=%d", len(drv.Steers), len(drv.PhaseStarts))
+		t.Fatalf("after idle nudge: steers=%d starts=%d", len(drv.Steers), len(drv.PhaseStarts))
 	}
+	clk.Advance(10 * time.Minute)
+	appendLaneWatchEvent(t, st, ln.ID, ln.TerminalID, lane.EventNoActivity)
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("timeout fresh terminal: %v", err)
 	}
 	if len(drv.PhaseStarts) != 1 || len(drv.Stops) != 1 || drv.Stops[0].TerminalID != ln.TerminalID {
 		t.Fatalf("after phase limit: starts=%d stops=%d", len(drv.PhaseStarts), len(drv.Stops))
+	}
+}
+
+func TestControllerWorkingTerminalProducesNoNoActivityRowsOverTenPolls(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+	saveRecipeWithTimeout(t, st, 20*time.Minute)
+	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-working", RunID: "run-1", RecipeName: "stall-test", Status: lane.StatusPlanned}); err != nil {
+		t.Fatalf("Upsert lane: %v", err)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1", StallTimeout: 5 * time.Minute, StallTimeoutSet: true}, st, drv, clk, judge)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if err := ctrl.StartWatches(ctx); err != nil {
+		t.Fatalf("StartWatches: %v", err)
+	}
+	ln, err := st.Lanes().Get(ctx, "run-1", "lane-working")
+	if err != nil {
+		t.Fatalf("Get lane: %v", err)
+	}
+	drv.AgentStates[ln.TerminalID] = "working"
+
+	since := clk.Now()
+	for poll := 1; poll <= 10; poll++ {
+		clk.Advance(time.Minute)
+		drv.Emit(lane.Event{RunID: "run-1", Kind: lane.EventNoActivity, Since: since, At: clk.Now()})
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatalf("Step poll %d: %v", poll, err)
+		}
+		since = clk.Now()
+	}
+
+	evs, err := st.Events().List(ctx, store.EventFilter{RunID: "run-1", Kinds: []store.EventKind{store.EventPhaseExit}})
+	if err != nil {
+		t.Fatalf("Events().List: %v", err)
+	}
+	var noActivityRows int
+	for _, ev := range evs {
+		var p controller.PhaseExitPayload
+		if json.Unmarshal(ev.Payload, &p) == nil && p.Kind == lane.EventNoActivity {
+			noActivityRows++
+		}
+	}
+	if noActivityRows != 0 {
+		t.Fatalf("working terminal produced %d no_activity rows over 10 polls, want 0", noActivityRows)
+	}
+	if len(drv.Steers) != 0 || len(drv.PhaseStarts) != 0 || len(drv.Stops) != 0 {
+		t.Fatalf("working terminal steered/restarted/stopped: steers=%d starts=%d stops=%d, want 0", len(drv.Steers), len(drv.PhaseStarts), len(drv.Stops))
 	}
 }
 
@@ -1231,8 +1296,26 @@ func (d *writeAheadCheckDriver) StartPhaseTerminal(ctx context.Context, req lane
 }
 
 func (d *writeAheadCheckDriver) Stop(ctx context.Context, req lane.StopRequest) error {
-	d.assertDecisionLogged(controller.ToolLaneStall, req.LaneID)
-	return d.FakeDriver.Stop(ctx, req)
+	d.t.Helper()
+	decs, err := d.store.Decisions().List(ctx, store.DecisionFilter{
+		RunID:  "run-1",
+		LaneID: req.LaneID,
+	})
+	if err != nil || len(decs) == 0 {
+		d.t.Fatalf("Stop executed without prior decision: err=%v decs=%+v", err, decs)
+	}
+	for i := len(decs) - 1; i >= 0; i-- {
+		switch decs[i].Tool {
+		case controller.ToolLaneStall,
+			controller.ToolPhaseAdvance + ".intent",
+			controller.ToolPhaseRework + ".intent",
+			controller.ToolPhaseRetry + ".intent",
+			"phase.launch.intent":
+			return d.FakeDriver.Stop(ctx, req)
+		}
+	}
+	d.t.Fatalf("driver Stop on lane %q executed BEFORE Decision was written to DecisionStore (decisions=%+v)", req.LaneID, decs)
+	return nil
 }
 
 func (d *writeAheadCheckDriver) Steer(ctx context.Context, req lane.SteerRequest) error {
@@ -1539,6 +1622,9 @@ func TestRestartFailedEffectsRetry(t *testing.T) {
 				}
 				quiet(t, st)
 				mustStep(t, ctrl)
+				if prior == "nudge" {
+					clk.Advance(controller.DefaultStallTimeout / 2)
+				}
 			}
 			if rung == "nudge" {
 				d.failSteer = true
@@ -2062,7 +2148,11 @@ func TestWatchQuietHandlingDoesNotCountAsActivity(t *testing.T) {
 	}
 	since := clk.Now()
 	for step := 1; step <= 2; step++ {
-		clk.Advance(time.Minute)
+		if step == 2 {
+			clk.Advance(controller.DefaultStallTimeout / 2)
+		} else {
+			clk.Advance(time.Minute)
+		}
 		emitted := clk.Now()
 		drv.Emit(lane.Event{RunID: "run-1", Kind: lane.EventNoActivity, Since: since, At: emitted})
 		waitFor(t, func() bool {
@@ -2363,4 +2453,358 @@ func TestControllerCostGuardPausesTurnsAtLimit(t *testing.T) {
 	if settingsDisabled.Paused {
 		t.Fatalf("run settings Paused when CostGuardDisabled=true = true, want false")
 	}
+}
+
+func TestControllerUnpushedWorkSteersOnceThenReportsToDispatcher(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:     "lane-unpushed",
+		RunID:  "run-1",
+		Status: lane.StatusPlanned,
+	}); err != nil {
+		t.Fatalf("Upsert lane: %v", err)
+	}
+
+	ctrl := controller.New(controller.Config{
+		RunID:                 "run-1",
+		JudgmentDebounce:      -1,
+		StallTimeout:          4 * time.Hour,
+		StallTimeoutSet:       true,
+		UnpushedWorkThreshold: 45 * time.Minute,
+	}, st, drv, clk, judge)
+
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step (spawn): %v", err)
+	}
+
+	oldest := clk.Now()
+	drv.GitStates["lane-unpushed"] = lane.GitState{
+		UnpushedCommits:  2,
+		DirtyFiles:       []string{"pkg/foo.go", "pkg/bar.go"},
+		OldestUnpushedAt: oldest,
+	}
+
+	// Below the 45m threshold: no steer and no dispatcher event.
+	clk.Advance(30 * time.Minute)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step at 30m: %v", err)
+	}
+	if len(drv.Steers) != 0 || judge.BatchCount() != 0 {
+		t.Fatalf("at 30m: steers=%d batches=%d, want 0, 0", len(drv.Steers), judge.BatchCount())
+	}
+
+	// Past the 45m threshold (at 50m): one steer telling the lane to commit and push WIP.
+	clk.Advance(20 * time.Minute)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step at 50m (first check past threshold): %v", err)
+	}
+	if len(drv.Steers) != 1 || !strings.Contains(drv.Steers[0].Message, "WIP") {
+		t.Fatalf("at 50m: steers=%+v, want 1 WIP steer", drv.Steers)
+	}
+	if judge.BatchCount() != 0 {
+		t.Fatalf("at 50m: batches=%d, want 0 before persistence check", judge.BatchCount())
+	}
+
+	// Next poll when unpushed work still persists: one dispatcher event, no second steer.
+	clk.Advance(5 * time.Minute)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step at 55m (persistent unpushed work): %v", err)
+	}
+	if len(drv.Steers) != 1 {
+		t.Fatalf("at 55m: steers=%d, want still 1", len(drv.Steers))
+	}
+	if judge.BatchCount() != 1 || len(judge.Batches[0]) != 1 || judge.Batches[0][0].Source != "lane.unpushed" {
+		t.Fatalf("at 55m: judge batches=%+v, want 1 batch with lane.unpushed event", judge.Batches)
+	}
+
+	// Subsequent polls do not emit repeated steers or dispatcher events.
+	clk.Advance(10 * time.Minute)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step at 65m: %v", err)
+	}
+	if len(drv.Steers) != 1 || judge.BatchCount() != 1 {
+		t.Fatalf("at 65m: steers=%d batches=%d, want 1, 1", len(drv.Steers), judge.BatchCount())
+	}
+}
+
+func TestControllerExpectedWaitSuppressesStallUntilDeadline(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:     "perf-sweep",
+		RunID:  "run-1",
+		Status: lane.StatusPlanned,
+	}); err != nil {
+		t.Fatalf("Upsert lane: %v", err)
+	}
+
+	ctrl := controller.New(controller.Config{
+		RunID:            "run-1",
+		JudgmentDebounce: -1,
+		StallTimeout:     20 * time.Minute,
+		StallTimeoutSet:  true,
+	}, st, drv, clk, judge)
+
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step (spawn): %v", err)
+	}
+	ln, err := st.Lanes().Get(ctx, "run-1", "perf-sweep")
+	if err != nil {
+		t.Fatalf("Get lane: %v", err)
+	}
+
+	deadline := clk.Now().Add(120 * time.Minute)
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:        "wait-perf-sweep",
+		RunID:     "run-1",
+		Kind:      store.DirectiveInstruction,
+		Source:    store.DirectiveSourceDispatcher,
+		Scope:     "perf-sweep",
+		Ref:       "named-wait:perf-sweep",
+		Text:      "120-minute wait for perf-sweep's Azure sweep",
+		ExpiresAt: &deadline,
+		Status:    store.DirectiveActive,
+	}); err != nil {
+		t.Fatalf("Add expected wait directive: %v", err)
+	}
+
+	// Advance 60 minutes (3x the 20m stall timeout) and emit no_activity: suppressed until deadline.
+	clk.Advance(60 * time.Minute)
+	appendLaneWatchEvent(t, st, ln.ID, ln.TerminalID, lane.EventNoActivity)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step at 60m: %v", err)
+	}
+	if len(drv.Steers) != 0 || len(drv.PhaseStarts) != 0 || len(drv.Stops) != 0 || judge.BatchCount() != 0 {
+		t.Fatalf("during expected wait at 60m: steers=%d starts=%d stops=%d batches=%d, want all 0",
+			len(drv.Steers), len(drv.PhaseStarts), len(drv.Stops), judge.BatchCount())
+	}
+
+	// Advance past the 120-minute deadline: wait expires and stall is no longer suppressed.
+	clk.Advance(61 * time.Minute)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step at 121m (past deadline): %v", err)
+	}
+	if len(drv.Stops) != 1 || drv.Stops[0].LaneID != "perf-sweep" {
+		t.Fatalf("after deadline expiry: stops=%+v, want perf-sweep stopped on stall", drv.Stops)
+	}
+}
+
+func TestControllerDiskPressure94PercentOneNoteAndOneEvent(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:     "lane-disk",
+		RunID:  "run-1",
+		Status: lane.StatusPlanned,
+	}); err != nil {
+		t.Fatalf("Upsert lane: %v", err)
+	}
+
+	ctrl := controller.New(controller.Config{
+		RunID:            "run-1",
+		JudgmentDebounce: -1,
+	}, st, drv, clk, judge)
+
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step (spawn): %v", err)
+	}
+
+	drv.DiskUsage["lane-disk"] = 94
+
+	for poll := 1; poll <= 5; poll++ {
+		clk.Advance(time.Minute)
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatalf("Step poll %d: %v", poll, err)
+		}
+	}
+
+	if len(drv.Steers) != 1 {
+		t.Fatalf("disk 94%% steers=%d, want 1", len(drv.Steers))
+	}
+	msg := drv.Steers[0].Message
+	if !strings.Contains(msg, "94%") || !strings.Contains(msg, "build cache") || !strings.Contains(msg, "rerun only the failed step") {
+		t.Fatalf("disk steer message = %q, want 94%%, build cache, and rerun only the failed step", msg)
+	}
+	notes, err := st.Notes().List(ctx, store.NoteFilter{RunID: "run-1", TaskID: "lane-disk"})
+	if err != nil || len(notes) != 1 {
+		t.Fatalf("disk notes = %+v (err=%v), want 1 note", notes, err)
+	}
+	if judge.BatchCount() != 1 || len(judge.Batches[0]) != 1 || judge.Batches[0][0].Source != "lane.health" {
+		t.Fatalf("disk judge batches = %+v, want 1 batch with lane.health event", judge.Batches)
+	}
+	ln, err := st.Lanes().Get(ctx, "run-1", "lane-disk")
+	if err != nil || ln.Status != lane.StatusRunning {
+		t.Fatalf("lane status after disk pressure alert = %+v, err=%v, want still running", ln, err)
+	}
+}
+
+func TestControllerNewPhaseStopsPreviousTerminalAndRefusesInput(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:        "lane-stale",
+		RunID:     "run-1",
+		Status:    lane.StatusPlanned,
+		Terminals: map[string]string{"prehandover": "19f8df22"},
+	}); err != nil {
+		t.Fatalf("Upsert lane: %v", err)
+	}
+
+	ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step 1 (spawn swe): %v", err)
+	}
+
+	// Pre-handover terminal 19f8df22 recorded on the lane must be stopped on Step.
+	if !drv.IsTerminalStopped("19f8df22") {
+		t.Fatalf("expected pre-handover terminal 19f8df22 to be stopped")
+	}
+	if err := drv.Steer(ctx, lane.SteerRequest{RunID: "run-1", LaneID: "lane-stale", TerminalID: "19f8df22", Message: "stale input"}); !errors.Is(err, lane.ErrStaleTerminal) {
+		t.Fatalf("Steer to pre-handover terminal 19f8df22 = %v, want ErrStaleTerminal", err)
+	}
+
+	ln, err := st.Lanes().Get(ctx, "run-1", "lane-stale")
+	if err != nil {
+		t.Fatalf("Get lane: %v", err)
+	}
+	sweTerm := ln.TerminalID
+
+	// Report done on swe so the controller advances the lane to clean.
+	appendReportEvent(t, st, "lane-stale", lane.PhaseReport{
+		Phase:   recipe.PhaseSWE,
+		Outcome: lane.OutcomeDone,
+		HeadSHA: "sha-stale-1",
+		PR:      42,
+	})
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step 2 (advance swe -> clean): %v", err)
+	}
+
+	lnAfter, err := st.Lanes().Get(ctx, "run-1", "lane-stale")
+	if err != nil {
+		t.Fatalf("Get lane after advance: %v", err)
+	}
+	if lnAfter.Phase != recipe.PhaseClean || lnAfter.TerminalID == sweTerm {
+		t.Fatalf("lane after advance = %+v, want clean on new terminal", lnAfter)
+	}
+	if !drv.IsTerminalStopped(sweTerm) {
+		t.Fatalf("expected previous phase terminal %s to be stopped when clean started", sweTerm)
+	}
+	if err := drv.Steer(ctx, lane.SteerRequest{
+		RunID:      "run-1",
+		LaneID:     "lane-stale",
+		SessionID:  lnAfter.SessionID,
+		TerminalID: sweTerm,
+		Message:    "late input to old phase terminal",
+	}); !errors.Is(err, lane.ErrStaleTerminal) {
+		t.Fatalf("Steer to previous phase terminal %s = %v, want ErrStaleTerminal", sweTerm, err)
+	}
+}
+
+func TestControllerStallLadderNudgeThenActivityWithinWaitAndBusyProcess(t *testing.T) {
+	t.Parallel()
+	t.Run("nudge_then_activity_within_wait_no_fresh_terminal", func(t *testing.T) {
+		t.Parallel()
+		clk, st, drv, judge := setupTestEnv(t)
+		ctx := t.Context()
+		saveRecipeWithTimeout(t, st, 20*time.Minute)
+		if err := st.Lanes().Upsert(ctx, lane.Lane{
+			ID:         "lane-nudge-active",
+			RunID:      "run-1",
+			RecipeName: "stall-test",
+			Status:     lane.StatusPlanned,
+		}); err != nil {
+			t.Fatalf("Upsert lane: %v", err)
+		}
+		ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatalf("Step (spawn): %v", err)
+		}
+		ln, err := st.Lanes().Get(ctx, "run-1", "lane-nudge-active")
+		if err != nil {
+			t.Fatalf("Get lane: %v", err)
+		}
+
+		// Quiet pulse 1 -> nudges the terminal.
+		clk.Advance(time.Minute)
+		appendLaneWatchEvent(t, st, ln.ID, ln.TerminalID, lane.EventNoActivity)
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatalf("Step (nudge): %v", err)
+		}
+		if len(drv.Steers) != 1 || len(drv.PhaseStarts) != 0 {
+			t.Fatalf("after nudge: steers=%d starts=%d, want 1, 0", len(drv.Steers), len(drv.PhaseStarts))
+		}
+
+		// Quiet pulse 2 seconds later (inside the 10m wait window) -> no fresh terminal.
+		clk.Advance(2 * time.Second)
+		appendLaneWatchEvent(t, st, ln.ID, ln.TerminalID, lane.EventNoActivity)
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatalf("Step (2s after nudge): %v", err)
+		}
+		if len(drv.PhaseStarts) != 0 || len(drv.Stops) != 0 {
+			t.Fatalf("2s after nudge: starts=%d stops=%d, want 0, 0", len(drv.PhaseStarts), len(drv.Stops))
+		}
+
+		// Activity within the wait window (at +3m): CI event arrives (and/or terminal works).
+		clk.Advance(3 * time.Minute)
+		appendCIEvent(t, st, ln.ID, "pending", "sha-1")
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatalf("Step (activity within wait): %v", err)
+		}
+
+		// Advance past the original 10m nudge wait window and emit no_activity -> still no fresh terminal.
+		clk.Advance(8 * time.Minute)
+		appendLaneWatchEvent(t, st, ln.ID, ln.TerminalID, lane.EventNoActivity)
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatalf("Step (after wait window following activity): %v", err)
+		}
+		if len(drv.PhaseStarts) != 0 || len(drv.Stops) != 0 {
+			t.Fatalf("after nudge + activity within wait: starts=%d stops=%d, want 0, 0", len(drv.PhaseStarts), len(drv.Stops))
+		}
+	})
+
+	t.Run("busy_review_gate_process_never_nudged_or_replaced", func(t *testing.T) {
+		t.Parallel()
+		clk, st, drv, judge := setupTestEnv(t)
+		ctx := t.Context()
+		saveRecipeWithTimeout(t, st, 20*time.Minute)
+		if err := st.Lanes().Upsert(ctx, lane.Lane{
+			ID:         "lane-busy-proc",
+			RunID:      "run-1",
+			RecipeName: "stall-test",
+			Status:     lane.StatusPlanned,
+		}); err != nil {
+			t.Fatalf("Upsert lane: %v", err)
+		}
+		ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatalf("Step (spawn): %v", err)
+		}
+		ln, err := st.Lanes().Get(ctx, "run-1", "lane-busy-proc")
+		if err != nil {
+			t.Fatalf("Get lane: %v", err)
+		}
+
+		for _, proc := range []string{"pr-polish review_cli --headless", "bazel test //orca/...", "scripts/prepush.sh"} {
+			drv.BusyProcesses[ln.ID] = []string{proc}
+			clk.Advance(25 * time.Minute)
+			appendLaneWatchEvent(t, st, ln.ID, ln.TerminalID, lane.EventNoActivity)
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatalf("Step with busy proc %q: %v", proc, err)
+			}
+			if len(drv.Steers) != 0 || len(drv.PhaseStarts) != 0 || len(drv.Stops) != 0 {
+				t.Fatalf("busy proc %q was nudged/replaced/stopped: steers=%d starts=%d stops=%d",
+					proc, len(drv.Steers), len(drv.PhaseStarts), len(drv.Stops))
+			}
+		}
+	})
 }

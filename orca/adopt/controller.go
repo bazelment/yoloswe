@@ -1628,6 +1628,20 @@ func (d *adoptedRunDriver) TerminalAgentState(ctx context.Context, terminalID st
 	return "", nil
 }
 
+func (d *adoptedRunDriver) LaneGitState(ctx context.Context, ln lane.Lane) (lane.GitState, error) {
+	if gr, ok := d.LaneDriver.(lane.GitStateReader); ok {
+		return gr.LaneGitState(ctx, ln)
+	}
+	return lane.GitState{}, nil
+}
+
+func (d *adoptedRunDriver) LaneSessionHealth(ctx context.Context, ln lane.Lane) (lane.SessionHealth, error) {
+	if hr, ok := d.LaneDriver.(lane.SessionHealthReader); ok {
+		return hr.LaneSessionHealth(ctx, ln)
+	}
+	return lane.SessionHealth{}, nil
+}
+
 func (d *adoptedRunDriver) TrackLane(ln lane.Lane) {
 	if tl, ok := d.LaneDriver.(interface{ TrackLane(lane.Lane) }); ok {
 		tl.TrackLane(ln)

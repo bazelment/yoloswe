@@ -29,6 +29,7 @@ const (
 	ToolLaneSteer       = "lane.steer"
 	ToolLaneRetry       = "lane.retry"
 	ToolLaneStop        = "lane.stop"
+	ToolLaneWait        = "lane.wait"
 	ToolOwnerAsk        = "owner.ask"
 	ToolOwnerAnswer     = "owner.answer"
 	ToolMailAnswer      = "mail.answer"
@@ -120,6 +121,15 @@ type LaneStopParams struct {
 	Reason string `json:"reason" jsonschema:"required,description=Reason for stopping the lane"`
 }
 
+// LaneWaitParams holds parameters for the lane.wait tool, recording a named
+// expected wait on a lane so the controller suppresses stall judgments until
+// the deadline.
+type LaneWaitParams struct {
+	LaneID   string `json:"lane_id" jsonschema:"required,description=Lane ID performing long external work"`
+	Reason   string `json:"reason" jsonschema:"required,description=Named reason for the expected wait (e.g. cloud VM run, sweep, or merge gate)"`
+	Deadline string `json:"deadline" jsonschema:"required,description=Wait deadline as RFC3339 timestamp, positive duration (e.g. 45m, 2h), or UTC clock time"`
+}
+
 // OwnerAskParams holds parameters for the owner.ask tool.
 type OwnerAskParams struct {
 	ID        string   `json:"id,omitempty" jsonschema:"description=Optional unique ask ID"`
@@ -208,6 +218,7 @@ type ProposedAction struct {
 	LaneSteer       *LaneSteerParams       `json:"-"`
 	LaneRetry       *LaneRetryParams       `json:"-"`
 	LaneStop        *LaneStopParams        `json:"-"`
+	LaneWait        *LaneWaitParams        `json:"-"`
 	OwnerAsk        *OwnerAskParams        `json:"-"`
 	OwnerAnswer     *OwnerAnswerParams     `json:"-"`
 	MailAnswer      *MailAnswerParams      `json:"-"`
@@ -252,6 +263,8 @@ func NormalizeToolName(name string) string {
 		return ToolDirectiveRevoke
 	case "mail.resolve", "mail_resolve", "worker.question.dismiss", "question.dismiss", "mail_dismiss":
 		return ToolMailDismiss
+	case "lane.expected_wait", "lane_expected_wait", "expected_wait", "lane_wait":
+		return ToolLaneWait
 	}
 	if isKnownTool(trimmed) {
 		return trimmed
@@ -265,7 +278,7 @@ func NormalizeToolName(name string) string {
 func isKnownTool(tool string) bool {
 	switch tool {
 	case ToolBacklogAdd, ToolBacklogUpdate, ToolBacklogReorder, ToolBacklogClose,
-		ToolLaneSpawn, ToolLaneSteer, ToolLaneRetry, ToolLaneStop,
+		ToolLaneSpawn, ToolLaneSteer, ToolLaneRetry, ToolLaneStop, ToolLaneWait,
 		ToolOwnerAsk, ToolOwnerAnswer, ToolMailAnswer, ToolMailDismiss, ToolDirectiveNote, ToolDirectiveRevoke, ToolPlannerRequest,
 		ToolReadLaneReport, ToolReadPR, ToolReadCI:
 		return true
@@ -407,6 +420,21 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 			p.LaneID = decodeAliases(trimmed).Lane
 		}
 		act.LaneStop = p
+		act.LaneID = p.LaneID
+		act.Reason = strings.TrimSpace(p.Reason)
+
+	case ToolLaneWait:
+		p, err := decodeParams[LaneWaitParams](canonical, trimmed)
+		if err != nil {
+			return act, err
+		}
+		if p.LaneID == "" || p.Reason == "" || p.Deadline == "" {
+			a := decodeAliases(trimmed)
+			p.LaneID = cmp.Or(p.LaneID, a.Lane)
+			p.Reason = cmp.Or(p.Reason, a.Note, a.Text, a.Message)
+			p.Deadline = cmp.Or(p.Deadline, a.ExpiresAt)
+		}
+		act.LaneWait = p
 		act.LaneID = p.LaneID
 		act.Reason = strings.TrimSpace(p.Reason)
 
@@ -1199,7 +1227,7 @@ func checkBriefSizeCap(st *StateView, act ProposedAction) error {
 
 func checkLaneExists(st *StateView, act ProposedAction) error {
 	switch act.Tool {
-	case ToolLaneSteer, ToolLaneRetry, ToolLaneStop,
+	case ToolLaneSteer, ToolLaneRetry, ToolLaneStop, ToolLaneWait,
 		ToolReadLaneReport, ToolReadPR, ToolReadCI:
 		if strings.TrimSpace(act.LaneID) == "" {
 			return errors.New("lane_id is required")
@@ -1366,6 +1394,29 @@ func checkLaneActionState(st *StateView, act ProposedAction) error {
 	case ToolLaneStop:
 		if act.LaneStop == nil || strings.TrimSpace(act.LaneStop.Reason) == "" {
 			return errors.New("reason is required to stop a lane")
+		}
+		ln, ok := st.Lane(act.LaneID)
+		if !ok {
+			return nil
+		}
+		if ln.Status.Terminal() {
+			return fmt.Errorf("lane %q is already in terminal status %s", ln.ID, ln.Status)
+		}
+
+	case ToolLaneWait:
+		if act.LaneWait == nil || strings.TrimSpace(act.LaneWait.Reason) == "" {
+			return errors.New("reason is required for lane.wait")
+		}
+		if strings.TrimSpace(act.LaneWait.Deadline) == "" {
+			return errors.New("deadline is required for lane.wait")
+		}
+		now := st.currentTime()
+		dl, err := parseFutureTime(now, act.LaneWait.Deadline)
+		if err != nil {
+			return fmt.Errorf("invalid deadline %q: %w", act.LaneWait.Deadline, err)
+		}
+		if !dl.After(now) {
+			return fmt.Errorf("deadline %s must be in the future (now=%s)", dl.Format(time.RFC3339), now.Format(time.RFC3339))
 		}
 		ln, ok := st.Lane(act.LaneID)
 		if !ok {
