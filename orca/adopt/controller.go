@@ -153,6 +153,15 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	generation := journal.Marker
 	populateRunRepo(&r)
+	_, _, originRepo := readTier1AndOriginRepo(r.Dir)
+	hasTier1Repo := (r.Repo != "" && r.Repo != originRepo) || r.RepoID != ""
+	if !hasTier1Repo {
+		if storeRepo := resolveStoreRepository(ctx, d.store, r.ID, originRepo); storeRepo != "" {
+			r.Repo = ""
+			r.RepoID = ""
+			applyRepoValue(&r, storeRepo)
+		}
+	}
 	workflow, lanes, items, err := controllerState(r)
 	if err != nil {
 		return err
@@ -1253,6 +1262,7 @@ func resolveBriefPath(dir, brief string) (string, error) {
 
 type hostAgent struct {
 	Kind   string `json:"kind"`
+	Agent  string `json:"agent"`
 	Model  string `json:"model"`
 	Effort string `json:"effort"`
 }
@@ -1437,9 +1447,9 @@ func mergesAfterCleanOrPolish(text string) bool {
 }
 
 func (a hostAgent) agent() recipe.AgentSpec {
-	kind := a.Kind
+	kind := cmp.Or(strings.TrimSpace(a.Kind), strings.TrimSpace(a.Agent))
 	if kind == "" {
-		kind = "claude"
+		kind = dispatcher.ResolveWorkerHarness(a.Model, "claude")
 	}
 	return recipe.AgentSpec{Harness: kind, Model: a.Model, Effort: a.Effort}
 }
@@ -1496,12 +1506,12 @@ func (d *adoptedRunDriver) ReportInstructions(runID, laneID, phase string, round
 }
 
 func (d *adoptedRunDriver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
-	repoID, repo := d.resolveRepository(req.RepositoryID, req.Repository)
+	repoID, repo := d.resolveRepository(ctx, req.RepositoryID, req.Repository)
 	if repoID == "" && repo == "" {
 		return lane.SpawnResult{}, fmt.Errorf("spawn lane %s for adopted run %s: repository is not configured", req.LaneID, cmp.Or(req.RunID, d.run.ID))
 	}
-	req.RepositoryID = cmp.Or(repoID, req.RepositoryID)
-	req.Repository = cmp.Or(repo, repoID, req.Repository)
+	req.RepositoryID = repoID
+	req.Repository = cmp.Or(repo, repoID)
 	if req.RunDir == "" {
 		req.RunDir = d.run.Dir
 	}
@@ -1510,12 +1520,12 @@ func (d *adoptedRunDriver) SpawnSession(ctx context.Context, req lane.SpawnReque
 }
 
 func (d *adoptedRunDriver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (lane.StartPhaseResult, error) {
-	repoID, repo := d.resolveRepository(req.RepositoryID, req.Repository)
+	repoID, repo := d.resolveRepository(ctx, req.RepositoryID, req.Repository)
 	if strings.TrimSpace(req.SessionID) == "" && repoID == "" && repo == "" {
 		return lane.StartPhaseResult{}, fmt.Errorf("start phase %s on lane %s for adopted run %s: repository is not configured", req.Phase, req.LaneID, cmp.Or(req.RunID, d.run.ID))
 	}
-	req.RepositoryID = cmp.Or(repoID, req.RepositoryID)
-	req.Repository = cmp.Or(repo, repoID, req.Repository)
+	req.RepositoryID = repoID
+	req.Repository = cmp.Or(repo, repoID)
 	if req.RunDir == "" {
 		req.RunDir = d.run.Dir
 	}
@@ -1524,19 +1534,97 @@ func (d *adoptedRunDriver) StartPhaseTerminal(ctx context.Context, req lane.Star
 }
 
 func populateRunRepo(r *Run) {
-	if r == nil || r.Dir == "" || (r.Repo != "" && r.RepoID != "") {
+	if r == nil {
 		return
 	}
-	if loaded, err := Read(r.Dir); err == nil {
-		r.Repo = cmp.Or(r.Repo, loaded.Repo)
-		r.RepoID = cmp.Or(r.RepoID, loaded.RepoID)
+	sanitizeRunRepo(r)
+	if r.Dir == "" {
+		return
+	}
+	t1RepoID, t1Repo, originRepo := readTier1AndOriginRepo(r.Dir)
+	if t1Repo != "" || t1RepoID != "" {
+		if r.Repo == "" || r.Repo == originRepo {
+			r.Repo = t1Repo
+		}
+		if r.RepoID == "" {
+			r.RepoID = t1RepoID
+		}
+		return
+	}
+	if r.Repo == "" && r.RepoID == "" && originRepo != "" {
+		r.Repo = originRepo
 	}
 }
 
-func (d *adoptedRunDriver) resolveRepository(reqRepoID, reqRepo string) (repoID, repo string) {
+func resolveStoreRepository(ctx context.Context, st store.Store, runID, ignoreOriginRepo string) string {
+	if st == nil || st.Runs() == nil {
+		return ""
+	}
+	check := func(id string, skipOrigin bool) string {
+		if strings.TrimSpace(id) == "" {
+			return ""
+		}
+		sr, err := st.Runs().Get(ctx, id)
+		if err != nil || sr == nil {
+			return ""
+		}
+		repo := strings.TrimSpace(sr.Repository)
+		if repo == "" || isLocalRepoPath(repo) {
+			return ""
+		}
+		if skipOrigin && ignoreOriginRepo != "" && repo == ignoreOriginRepo {
+			return ""
+		}
+		if isRepoSlug(repo) || isRepoID(repo) {
+			return repo
+		}
+		return ""
+	}
+	if v := check(runID, true); v != "" {
+		return v
+	}
+	if runID != "front-desk" {
+		if v := check("front-desk", false); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func (d *adoptedRunDriver) resolveRepository(ctx context.Context, reqRepoID, reqRepo string) (repoID, repo string) {
 	tmp := d.run
-	applyRepoValue(&tmp, reqRepoID)
-	applyRepoValue(&tmp, reqRepo)
+	sanitizeRunRepo(&tmp)
+	populateRunRepo(&tmp)
+	_, _, originRepo := readTier1AndOriginRepo(tmp.Dir)
+	hasTier1 := (tmp.Repo != "" && tmp.Repo != originRepo) || tmp.RepoID != ""
+	if hasTier1 {
+		applyRepoValue(&tmp, reqRepoID)
+		applyRepoValue(&tmp, reqRepo)
+		if tmp.Repo == "" && tmp.RepoID != "" {
+			tmp.Repo = tmp.RepoID
+		}
+		return tmp.RepoID, tmp.Repo
+	}
+
+	var tier2 Run
+	if originRepo == "" || strings.TrimSpace(reqRepoID) != originRepo {
+		applyRepoValue(&tier2, reqRepoID)
+	}
+	if originRepo == "" || strings.TrimSpace(reqRepo) != originRepo {
+		applyRepoValue(&tier2, reqRepo)
+	}
+	if tier2.Repo == "" && tier2.RepoID == "" {
+		if storeRepo := resolveStoreRepository(ctx, d.store, tmp.ID, originRepo); storeRepo != "" {
+			applyRepoValue(&tier2, storeRepo)
+		}
+	}
+	if tier2.Repo != "" || tier2.RepoID != "" {
+		if tier2.Repo == "" && tier2.RepoID != "" {
+			tier2.Repo = tier2.RepoID
+		}
+		return tier2.RepoID, tier2.Repo
+	}
+
 	if tmp.Repo == "" && tmp.RepoID != "" {
 		tmp.Repo = tmp.RepoID
 	}
@@ -1800,7 +1888,24 @@ func (s *adoptedRunStore) Get(ctx context.Context, runID string) (*store.Run, er
 	if s.syncer != nil && runID == s.syncer.runID {
 		_, _ = s.syncer.RefreshObjectiveIfChanged(ctx, s.RunStore)
 	}
-	return s.RunStore.Get(ctx, runID)
+	sr, err := s.RunStore.Get(ctx, runID)
+	if err != nil || sr == nil {
+		return sr, err
+	}
+	if isLocalRepoPath(sr.Repository) {
+		sr.Repository = ""
+	}
+	if s.syncer != nil && runID == s.syncer.runID {
+		cur := s.syncer.CurrentRun()
+		_, _, originRepo := readTier1AndOriginRepo(cur.Dir)
+		hasTier1 := (cur.Repo != "" && cur.Repo != originRepo) || cur.RepoID != ""
+		if hasTier1 {
+			sr.Repository = cmp.Or(cur.Repo, cur.RepoID)
+		} else if sr.Repository == "" {
+			sr.Repository = cmp.Or(cur.Repo, cur.RepoID)
+		}
+	}
+	return sr, nil
 }
 
 func (s *adoptedRunStore) List(ctx context.Context) ([]store.Run, error) {

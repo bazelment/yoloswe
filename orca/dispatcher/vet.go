@@ -58,27 +58,90 @@ var DefaultAllowedModels = []string{
 	"opus",
 	"sonnet",
 	"haiku",
+	"fable",
+	"opus[200k]",
+	"sonnet[200k]",
+	"fable[200k]",
 	"claude",
 	"codex",
 	"agy",
 	"carbon",
 	"agy-carbon",
 	"agy carbon",
+	"argon",
+	"agy-argon",
+	"agy argon",
+	"hydrogen",
+	"agy-hydrogen",
+	"agy hydrogen",
+	"claude-opus-4-8",
 	"claude-opus-4-7",
 	"claude-opus-4-6",
+	"claude-opus-4-5",
+	"claude-opus-4-1",
+	"claude-opus-4-20250514",
 	"claude-opus-5-5",
+	"claude-opus-5-5-low",
+	"claude-opus-5-5-medium",
+	"claude-opus-5-5-high",
 	"claude-sonnet-5-5",
+	"claude-sonnet-5-5-low",
+	"claude-sonnet-5-5-medium",
+	"claude-sonnet-5-5-high",
 	"claude-sonnet-4-6",
+	"claude-sonnet-4-5",
 	"claude-sonnet-4-5-20250929",
+	"claude-sonnet-4-20250514",
 	"claude-haiku-5-5",
 	"claude-haiku-4-5",
 	"claude-haiku-4-5-20251001",
+	"claude-3-5-haiku-20241022",
+	"claude-fable-5",
 	"gpt-6.1-sol",
 	"gpt-6-sol",
 	"gpt-6-astra",
+	"gpt-6-luna",
 	"gpt-5.6-sol",
+	"gpt-5.6-luna",
+	"gpt-5.6-terra",
+	"gpt-5.5",
 	"gpt-5.4",
 	"gpt-5.4-mini",
+	"gpt-oss-120b-medium",
+	"gemini-4-*",
+	"gemini-4-argon",
+	"gemini-4-argon-low",
+	"gemini-4-argon-medium",
+	"gemini-4-argon-high",
+	"gemini-4-argon-xhigh",
+	"gemini-4-carbon",
+	"gemini-4-carbon-low",
+	"gemini-4-carbon-medium",
+	"gemini-4-carbon-high",
+	"gemini-4-carbon-xhigh",
+	"gemini-4-hydrogen",
+	"gemini-4-hydrogen-low",
+	"gemini-4-hydrogen-medium",
+	"gemini-4-hydrogen-high",
+	"gemini-4-hydrogen-xhigh",
+	"gemini-4-pro",
+	"gemini-4-pro-low",
+	"gemini-4-pro-medium",
+	"gemini-4-pro-high",
+	"gemini-4-pro-xhigh",
+	"gemini-4-flash",
+	"gemini-4-flash-low",
+	"gemini-4-flash-medium",
+	"gemini-4-flash-high",
+	"gemini-4-flash-lite",
+	"gemini-3.8-flash",
+	"gemini-3.8-flash-low",
+	"gemini-3.8-flash-medium",
+	"gemini-3.8-flash-high",
+	"gemini-3.1-pro",
+	"gemini-3.1-pro-low",
+	"gemini-3.1-pro-medium",
+	"gemini-3.1-pro-high",
 }
 
 // DefaultMaxBriefBytes is the fallback brief/note size cap when a recipe does
@@ -1124,6 +1187,46 @@ func extractObjectiveItemTitle(text, itemID string) string {
 	return itemID
 }
 
+func isValidModelSuffix(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' && c != '_' && c != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+func effectiveAllowedModels(st *StateView) []string {
+	if st != nil && len(st.AllowedModels) > 0 {
+		return st.AllowedModels
+	}
+	allowed := slices.Clone(DefaultAllowedModels)
+	if st == nil {
+		return allowed
+	}
+	addRecipeModels := func(phases []recipe.Phase) {
+		for i := range phases {
+			for j := range phases[i].Agents {
+				m := strings.TrimSpace(phases[i].Agents[j].Model)
+				if m != "" && !isModelAllowed(m, allowed) {
+					allowed = append(allowed, m)
+				}
+			}
+		}
+	}
+	for k := range st.Recipes {
+		addRecipeModels(st.Recipes[k].Phases)
+	}
+	for k := range st.VersionRecipes {
+		addRecipeModels(st.VersionRecipes[k].Phases)
+	}
+	return allowed
+}
+
 func isModelAllowed(modelName string, allowed []string) bool {
 	trimmed := strings.TrimSpace(modelName)
 	if trimmed == "" {
@@ -1133,7 +1236,17 @@ func isModelAllowed(modelName string, allowed []string) bool {
 		allowed = DefaultAllowedModels
 	}
 	return slices.ContainsFunc(allowed, func(m string) bool {
-		return strings.EqualFold(strings.TrimSpace(m), trimmed)
+		pattern := strings.TrimSpace(m)
+		if strings.EqualFold(pattern, trimmed) {
+			return true
+		}
+		if prefix, ok := strings.CutSuffix(strings.ToLower(pattern), "*"); ok && prefix != "" {
+			lower := strings.ToLower(trimmed)
+			if rest, hasPrefix := strings.CutPrefix(lower, prefix); hasPrefix && isValidModelSuffix(rest) {
+				return true
+			}
+		}
+		return false
 	})
 }
 
@@ -1142,27 +1255,61 @@ func isFastestWorkerModel(modelName string) bool {
 	return lower == "fastest" || lower == "haiku" || strings.Contains(lower, "haiku") || lower == "gpt-5.4-mini" || strings.HasSuffix(lower, "-mini")
 }
 
+// ResolveWorkerHarness infers the lane harness ("claude", "codex", or "agy")
+// from a concrete worker model identifier or harness alias when unambiguous,
+// falling back to defaultHarness (or "claude" when empty).
+func ResolveWorkerHarness(modelName, defaultHarness string) string {
+	lower := strings.ToLower(strings.TrimSpace(modelName))
+	switch {
+	case lower == "":
+	case lower == "agy" || strings.HasPrefix(lower, "agy-") || strings.HasPrefix(lower, "agy ") ||
+		lower == "carbon" || lower == "argon" || lower == "hydrogen" ||
+		strings.HasPrefix(lower, "gemini-"):
+		return "agy"
+	case lower == "codex" || lower == "openai" || strings.HasPrefix(lower, "gpt-"):
+		return "codex"
+	case lower == "claude" || lower == "opus" || lower == "sonnet" || lower == "haiku" || lower == "fable" ||
+		strings.HasSuffix(lower, "[200k]") || strings.HasPrefix(lower, "claude-"):
+		return "claude"
+	}
+	if trimmed := strings.TrimSpace(defaultHarness); trimmed != "" {
+		return trimmed
+	}
+	return "claude"
+}
+
 // ResolveWorkerModel maps policy tier aliases (strongest, mid, cheaper, fastest)
 // to concrete worker model identifiers for harness, leaving explicit model names
 // unchanged.
 func ResolveWorkerModel(modelName, harness string) string {
 	trimmed := strings.TrimSpace(modelName)
 	lower := strings.ToLower(trimmed)
-	isCodex := strings.EqualFold(strings.TrimSpace(harness), "codex") || strings.EqualFold(strings.TrimSpace(harness), "openai")
+	trimmedHarness := strings.TrimSpace(harness)
+	isCodex := strings.EqualFold(trimmedHarness, "codex") || strings.EqualFold(trimmedHarness, "openai")
+	isAgy := strings.EqualFold(trimmedHarness, "agy")
 	switch lower {
 	case "strongest":
 		if isCodex {
 			return "gpt-6.1-sol"
+		}
+		if isAgy {
+			return "gemini-4-argon-high"
 		}
 		return "opus"
 	case "mid", "cheaper":
 		if isCodex {
 			return "gpt-5.4"
 		}
+		if isAgy {
+			return "gemini-4-carbon-high"
+		}
 		return "sonnet"
 	case "fastest":
 		if isCodex {
 			return "gpt-5.4-mini"
+		}
+		if isAgy {
+			return "gemini-4-flash"
 		}
 		return "haiku"
 	default:
@@ -1891,14 +2038,8 @@ func checkSpawnInvariants(st *StateView, act ProposedAction) error {
 		return fmt.Errorf("unknown recipe %q", p.RecipeName)
 	}
 	if strings.TrimSpace(p.Model) != "" {
-		var allowedModels []string
-		if st != nil {
-			allowedModels = st.AllowedModels
-		}
+		allowedModels := effectiveAllowedModels(st)
 		if !isModelAllowed(p.Model, allowedModels) {
-			if len(allowedModels) == 0 {
-				allowedModels = DefaultAllowedModels
-			}
 			return fmt.Errorf("model %q is not in the allowed models list %v", p.Model, allowedModels)
 		}
 		if firstPhase := r.FirstPhase(); firstPhase == recipe.PhaseReview && (isFastestWorkerModel(p.Model) || isFastestWorkerModel(ResolveWorkerModel(p.Model, ""))) {
@@ -1967,14 +2108,8 @@ func checkLaneActionState(st *StateView, act ProposedAction) error {
 			return fmt.Errorf("lane %q is already done", ln.ID)
 		}
 		if act.LaneRetry != nil && strings.TrimSpace(act.LaneRetry.Model) != "" {
-			var allowedModels []string
-			if st != nil {
-				allowedModels = st.AllowedModels
-			}
+			allowedModels := effectiveAllowedModels(st)
 			if !isModelAllowed(act.LaneRetry.Model, allowedModels) {
-				if len(allowedModels) == 0 {
-					allowedModels = DefaultAllowedModels
-				}
 				return fmt.Errorf("model %q is not in the allowed models list %v", act.LaneRetry.Model, allowedModels)
 			}
 			r, _ := st.RecipeForLane(ln)

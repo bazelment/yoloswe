@@ -2147,3 +2147,134 @@ func TestDispatch_G35HoldSweepAllowsSameTurnSpawnAndSelectiveKeep(t *testing.T) 
 		t.Fatalf("note-lane status = %+v, err = %v; want lane-scoped hold untouched by run sweep", laneScopedDir, err)
 	}
 }
+
+func TestModelVetterAcceptsConcreteHarnessModelsAndRejectsUnknown(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Backlog().Add(ctx, store.BacklogItem{
+		ID:       "mem-overhead",
+		RunID:    "run-1",
+		Title:    "Measure memory overhead",
+		Priority: store.PriorityP0,
+		Status:   store.BacklogOpen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:         "lane-blocked",
+		RunID:      "run-1",
+		ItemID:     "lane-blocked",
+		Status:     lane.StatusBlocked,
+		Phase:      recipe.PhaseSWE,
+		Round:      1,
+		RecipeName: recipe.DefaultName,
+		SessionID:  "sess-blocked",
+		TerminalID: "term-blocked",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	view, err := dispatcher.LoadStateView(ctx, st, clk, "run-1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invs := dispatcher.DefaultInvariants()
+
+	for _, acceptedModel := range []string{
+		"gemini-4-argon-high",
+		"gemini-4-argon",
+		"gemini-4-carbon-high",
+		"gemini-4-hydrogen-high",
+		"gemini-4-flash",
+		"gemini-3.8-flash-high",
+		"gemini-3.1-pro-high",
+		"claude-opus-4-6",
+		"claude-opus-4-8",
+		"claude-sonnet-4-6",
+		"claude-haiku-4-5",
+		"claude-fable-5",
+		"gpt-6.1-sol",
+		"gpt-6-sol",
+		"gpt-5.6-terra",
+		"gpt-5.4",
+		"opus[200k]",
+		"sonnet[200k]",
+	} {
+		spawnAct, pErr := dispatcher.ParseAction("sp-"+acceptedModel, dispatcher.ToolLaneSpawn, json.RawMessage(`{"item_id":"mem-overhead","model":"`+acceptedModel+`","brief":"measure overhead","reason":"staff lane"}`))
+		if pErr != nil {
+			t.Fatalf("ParseAction(%s): %v", acceptedModel, pErr)
+		}
+		if vErr := dispatcher.VetAction(view, spawnAct, invs); vErr != nil {
+			t.Fatalf("VetAction(lane.spawn model=%q) unexpected error: %v", acceptedModel, vErr)
+		}
+		retryAct, pErr := dispatcher.ParseAction("rt-"+acceptedModel, dispatcher.ToolLaneRetry, json.RawMessage(`{"lane_id":"lane-blocked","phase":"swe","round":2,"model":"`+acceptedModel+`","note":"retry with concrete model","reason":"retry lane"}`))
+		if pErr != nil {
+			t.Fatalf("ParseAction(retry %s): %v", acceptedModel, pErr)
+		}
+		if vErr := dispatcher.VetAction(view, retryAct, invs); vErr != nil {
+			t.Fatalf("VetAction(lane.retry model=%q) unexpected error: %v", acceptedModel, vErr)
+		}
+	}
+
+	for _, rejectedModel := range []string{"gemini-9-bogus", "unknown-model-xyz"} {
+		badSpawn, pErr := dispatcher.ParseAction("bad-sp-"+rejectedModel, dispatcher.ToolLaneSpawn, json.RawMessage(`{"item_id":"mem-overhead","model":"`+rejectedModel+`","brief":"measure overhead","reason":"staff lane"}`))
+		if pErr != nil {
+			t.Fatalf("ParseAction(%s): %v", rejectedModel, pErr)
+		}
+		vErr := dispatcher.VetAction(view, badSpawn, invs)
+		if vErr == nil || !strings.Contains(vErr.Error(), "not in the allowed models list") || !strings.Contains(vErr.Error(), "gemini-4-argon-high") {
+			t.Fatalf("VetAction(lane.spawn model=%q) = %v, want allowed-models rejection naming accepted set", rejectedModel, vErr)
+		}
+		badRetry, pErr := dispatcher.ParseAction("bad-rt-"+rejectedModel, dispatcher.ToolLaneRetry, json.RawMessage(`{"lane_id":"lane-blocked","phase":"swe","round":2,"model":"`+rejectedModel+`","note":"retry","reason":"retry lane"}`))
+		if pErr != nil {
+			t.Fatalf("ParseAction(retry %s): %v", rejectedModel, pErr)
+		}
+		if rErr := dispatcher.VetAction(view, badRetry, invs); rErr == nil || !strings.Contains(rErr.Error(), "not in the allowed models list") || !strings.Contains(rErr.Error(), "gemini-4-argon-high") {
+			t.Fatalf("VetAction(lane.retry model=%q) = %v, want allowed-models rejection naming accepted set", rejectedModel, rErr)
+		}
+	}
+
+	fake := model.NewFakeClient(
+		toolUseResponse(
+			model.ToolCall{
+				ID:    "spawn-bogus",
+				Name:  dispatcher.ToolLaneSpawn,
+				Input: json.RawMessage(`{"item_id":"mem-overhead","model":"gemini-9-bogus","brief":"Measure memory overhead.","reason":"try bogus model"}`),
+			},
+		),
+		toolUseResponse(
+			model.ToolCall{
+				ID:    "spawn-argon",
+				Name:  dispatcher.ToolLaneSpawn,
+				Input: json.RawMessage(`{"item_id":"mem-overhead","model":"gemini-4-argon-high","brief":"Measure memory overhead.","reason":"owner named gemini-4-argon-high"}`),
+			},
+		),
+		endTurnResponse("Spawned mem-overhead with gemini-4-argon-high."),
+	)
+	d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+	ev, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventOwnerMessage,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "fund lane mem-overhead on gemini-4-argon-high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.Dispatch(ctx, "run-1", []store.Event{ev})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(res.Rejected) != 1 || !strings.Contains(res.Rejected[0], `"gemini-9-bogus" is not in the allowed models list`) {
+		t.Fatalf("Rejected = %+v, want rejection for gemini-9-bogus", res.Rejected)
+	}
+	if len(res.Accepted) != 1 || res.Accepted[0].Tool != dispatcher.ToolLaneSpawn {
+		t.Fatalf("Accepted = %+v, want 1 accepted lane.spawn", res.Accepted)
+	}
+	if len(drv.Spawns) != 1 || drv.Spawns[0].Model != "gemini-4-argon-high" || drv.Spawns[0].Harness != "agy" {
+		t.Fatalf("Spawns = %+v, want 1 spawn with Harness=agy Model=gemini-4-argon-high", drv.Spawns)
+	}
+}
