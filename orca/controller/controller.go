@@ -50,8 +50,7 @@ const (
 )
 
 const (
-	ownerAskRefPrefix          = "owner_ask:"
-	runWorkerFallbackRefPrefix = "worker-fallback:"
+	ownerAskRefPrefix = "owner_ask:"
 	// NamedWaitRefPrefix is the directive Ref prefix for lane/run expected waits.
 	NamedWaitRefPrefix = "named-wait:"
 )
@@ -2450,15 +2449,6 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		maxAttempts = max(len(curPhase.Agents), 1)
 	}
 	curAttempt := max(ln.Attempt, 1)
-	quota := payload.Kind == lane.EventQuotaFailure
-	quotaFallbackChanged := false
-	if quota {
-		var err error
-		quotaFallbackChanged, err = c.ensureRunWorkerFallback(ctx, ln, curPhase, curAttempt)
-		if err != nil {
-			return store.EventClassUnclassified, err
-		}
-	}
 	ln.LastEventID = ev.ID
 	// A quiet pulse is controller bookkeeping, not worker activity.
 	quiet := ev.Source == "lane.watch" && (payload.Kind == lane.EventNoActivity || payload.Kind == lane.EventTurnEndedNoReport)
@@ -2482,11 +2472,6 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		ln.LastEventAt = now
 	}
 	if quiet {
-		if rung, waiting := c.quietLadderRungFromStore(ctx, ln, r, now); rung >= 2 && !waiting {
-			// The fresh-terminal rung already consumed this stall window's one
-			// restart. Further quiet pulses are observations, not restart cues.
-			return store.EventClassAuto, nil
-		}
 		key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
 		switch {
 		case !c.hasActionDecision("restart:nudge:" + key):
@@ -2541,7 +2526,7 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		}
 	}
 
-	if curAttempt < maxAttempts || quotaFallbackChanged {
+	if curAttempt < maxAttempts {
 		nextAttempt := curAttempt + 1
 		reason := fmt.Sprintf("phase %s attempt %d exited without report; retrying attempt %d via fallback chain", curPhase.Name, curAttempt, nextAttempt)
 		if err := c.startLanePhase(ctx, ln, r, curPhase, max(ln.Round, 1), nextAttempt, ToolPhaseRetry, ev.ID, reason, payload.Error); err != nil {
@@ -2765,12 +2750,6 @@ func (c *Controller) startLanePhase(
 	}
 	agentIdx := min(attempt-1, len(phase.Agents)-1)
 	agent := phase.Agents[agentIdx]
-	if fallback, ok := c.runWorkerFallback(ctx, phase.Name); ok {
-		agent = fallback
-	}
-	if chosen := c.chosenLaneModel(ctx, ln.ID); chosen != "" {
-		agent.Model = chosen
-	}
 
 	fromPhase := ln.Phase
 	brief := c.buildBrief(ctx, ln, r, phase, round, extraNote)
@@ -2927,64 +2906,6 @@ func (c *Controller) startLanePhase(
 		}
 	}
 	return nil
-}
-
-func (c *Controller) chosenLaneModel(ctx context.Context, laneID string) string {
-	decs, err := c.store.Decisions().List(ctx, store.DecisionFilter{RunID: c.cfg.RunID, LaneID: laneID})
-	if err != nil {
-		return ""
-	}
-	for i := len(decs) - 1; i >= 0; i-- {
-		if decs[i].Actor == "dispatcher" && (strings.HasSuffix(decs[i].Tool, "lane.retry") || strings.HasSuffix(decs[i].Tool, "lane.spawn")) && strings.TrimSpace(decs[i].Model) != "" {
-			return strings.TrimSpace(decs[i].Model)
-		}
-	}
-	return ""
-}
-
-func (c *Controller) runWorkerFallback(ctx context.Context, phaseName string) (recipe.AgentSpec, bool) {
-	dirs, err := c.store.Directives().List(ctx, store.DirectiveFilter{RunID: c.cfg.RunID, Scope: "run", ActiveOnly: true})
-	if err != nil {
-		return recipe.AgentSpec{}, false
-	}
-	for i := range dirs {
-		if !strings.HasPrefix(dirs[i].Ref, runWorkerFallbackRefPrefix) {
-			continue
-		}
-		var agent recipe.AgentSpec
-		if json.Unmarshal([]byte(dirs[i].Text), &agent) == nil && agent.Model != "" {
-			return agent, true
-		}
-	}
-	return recipe.AgentSpec{}, false
-}
-
-func (c *Controller) ensureRunWorkerFallback(ctx context.Context, ln *lane.Lane, phase recipe.Phase, attempt int) (bool, error) {
-	if ln == nil || attempt < 1 || attempt > len(phase.Agents) {
-		return false, nil
-	}
-	current := phase.Agents[min(attempt-1, len(phase.Agents)-1)]
-	if !strings.Contains(strings.ToLower(current.Harness), "agy") {
-		return false, nil
-	}
-	if _, ok := c.runWorkerFallback(ctx, phase.Name); ok {
-		return false, nil
-	}
-	for _, candidate := range phase.Agents[attempt:] {
-		if strings.Contains(strings.ToLower(candidate.Harness), "agy") {
-			continue
-		}
-		raw, err := json.Marshal(candidate)
-		if err != nil {
-			return false, err
-		}
-		dir := store.Directive{ID: runWorkerFallbackRefPrefix + c.cfg.RunID, RunID: c.cfg.RunID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Scope: "run", Ref: runWorkerFallbackRefPrefix + candidate.Harness, Text: string(raw), Status: store.DirectiveActive}
-		if err := c.store.Directives().Add(ctx, dir); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-			return false, err
-		}
-		return true, nil
-	}
-	return false, nil
 }
 
 func (c *Controller) integrateRecoveryState(ctx context.Context, laneID, actionKey string) (int, time.Time) {

@@ -596,25 +596,6 @@ func TestControllerJudgmentRuleAndPhaseExitFallback(t *testing.T) {
 	}
 }
 
-func TestControllerRetryUsesDispatcherChosenLaneModel(t *testing.T) {
-	t.Parallel()
-	clk, st, drv, judge := setupTestEnv(t)
-	ctx := t.Context()
-	ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
-	mustStep(t, ctrl)
-	if len(drv.Spawns) != 1 {
-		t.Fatalf("initial spawns = %d, want 1", len(drv.Spawns))
-	}
-	if _, err := st.Decisions().Append(ctx, store.Decision{RunID: "run-1", LaneID: "worker", Actor: "dispatcher", Tool: "lane.retry", Model: "gpt-6.1-sol", Args: json.RawMessage(`{"lane_id":"worker","model":"gpt-6.1-sol"}`), Result: "retried lane worker (model=gpt-6.1-sol)", Vetted: true}); err != nil {
-		t.Fatal(err)
-	}
-	appendLaneWatchEvent(t, st, "worker", "term-worker-swe", lane.EventExited)
-	mustStep(t, ctrl)
-	if len(drv.PhaseStarts) != 1 || drv.PhaseStarts[0].Model != "gpt-6.1-sol" {
-		t.Fatalf("controller retry model = %+v, want dispatcher-selected gpt-6.1-sol", drv.PhaseStarts)
-	}
-}
-
 func TestControllerWatchRestartLadder(t *testing.T) {
 	t.Parallel()
 	for _, restartAfter := range []int{0, 1, 2, 3} {
