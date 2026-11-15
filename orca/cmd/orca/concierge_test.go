@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bazelment/yoloswe/orca/adopt"
 	chatui "github.com/bazelment/yoloswe/orca/chat"
@@ -861,5 +863,269 @@ func TestConciergeEmitsToolCallLinesExceptRunStart(t *testing.T) {
 	}
 	if !slices.Equal(emittedTools, []string{"→ status front-desk"}) {
 		t.Fatalf("emittedTools = %q, want only [\"→ status front-desk\"] (excluding run.start)", emittedTools)
+	}
+}
+
+func TestConciergeNonHeldRunReadsObjectiveFile(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	now := time.Date(2026, 11, 15, 18, 15, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(now)
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+
+	if err := st.Runs().Create(ctx, store.Run{ID: frontDeskRunID, Objective: "front desk"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a released run in Store with a stale 1-line objective and a stale hold directive
+	// from 20 hours earlier (matching the G20 live soak failure on released 20261114-trial-m1).
+	const releasedID = "20261114-trial-m1"
+	staleTime := now.Add(-20 * time.Hour)
+	clk.Set(staleTime)
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:         releasedID,
+		Repository: "sycamore-labs/nebula",
+		Objective:  "trial m1: initial one-line objective before M2/M3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:     "dir-stale-hold",
+		RunID:  releasedID,
+		Kind:   store.DirectiveStanding,
+		Source: store.DirectiveSourceOwner,
+		Scope:  "m2-default",
+		Text:   "Hold m2-default until owner confirms.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clk.Set(now)
+
+	// Write current OBJECTIVE.md on disk for the released host swarm.
+	runDir := filepath.Join(t.TempDir(), releasedID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	currentObj := "# Objective\nGoal: Slim subagent-swarm-nebula prompt footprint by >=35%.\n" +
+		"- M1: complete (#5604)\n- M2: complete (#5705)\n- M3: complete (#5712)\n" +
+		"Next: none. Run DONE 2026-11-15T18:00Z.\n"
+	if err := os.WriteFile(filepath.Join(runDir, "OBJECTIVE.md"), []byte(currentObj), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := chatui.NewStoreBackend(st, frontDeskRunID)
+	backend.FrontDesk = frontDeskRunID
+	backend.HostSwarms = func(context.Context) ([]adopt.Run, error) {
+		return []adopt.Run{{
+			ID:           releasedID,
+			Dir:          runDir,
+			Goal:         "trial m1: initial one-line objective before M2/M3",
+			State:        adopt.RunFinished,
+			LastActivity: "2026-11-15T18:00:00Z",
+		}}, nil
+	}
+
+	c := NewConcierge(frontDeskRunID, st, clk, scriptedModel(
+		toolUse("st-1", ToolConciergeStatus, `{"run_id":"20261114-trial-m1"}`),
+		toolUse("rf-1", "read_file", `{"path":"20261114-trial-m1/OBJECTIVE.md"}`),
+		textAnswer("20261114-trial-m1 is DONE (M1 #5604, M2 #5705, M3 #5712 complete; Next: none) and has no active holds."),
+	), DefaultConciergeModel)
+	c.BindBackend(backend)
+	c.HeldRuns = func(context.Context) ([]string, error) {
+		return []string{frontDeskRunID}, nil
+	}
+
+	ans, err := c.Ask(ctx, "where does 20261114-trial-m1 stand and are there any holds on it?")
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if !strings.Contains(ans, "DONE") || !strings.Contains(ans, "no active holds") {
+		t.Fatalf("unexpected answer: %q", ans)
+	}
+
+	items, err := st.Threads().ListItems(ctx, c.threadID, "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statusResult, readFileResult string
+	var readFileCalled bool
+	for _, it := range items {
+		if it.Kind == store.ItemKindToolCall && (it.Name == "read_file" || it.Name == model.ToolReadFile) {
+			if strings.Contains(string(it.Payload), "OBJECTIVE.md") {
+				readFileCalled = true
+			}
+		}
+		if it.Kind == store.ItemKindToolResult {
+			switch it.Name {
+			case ToolConciergeStatus:
+				statusResult = it.Content
+			case "read_file", model.ToolReadFile:
+				readFileResult = it.Content
+			}
+		}
+	}
+	if !readFileCalled {
+		t.Fatalf("expected concierge to record a read_file tool call on OBJECTIVE.md for non-held run; items=%+v", items)
+	}
+	if !strings.Contains(readFileResult, "M3: complete (#5712)") || !strings.Contains(readFileResult, "Next: none. Run DONE") {
+		t.Fatalf("read_file result did not contain current OBJECTIVE.md contents:\n%s", readFileResult)
+	}
+	if !strings.Contains(statusResult, "Store Copy Status: NOT HELD by orca") || !strings.Contains(statusResult, "age 20h") {
+		t.Fatalf("status output for non-held run missing NOT HELD + store age warning:\n%s", statusResult)
+	}
+	if !strings.Contains(statusResult, "Active Directives (0): none (run is not held by orca)") ||
+		!strings.Contains(statusResult, "Historical Store Directives (1, from stale store copy age 20h — not active holds):") {
+		t.Fatalf("status output for non-held run should demote stale directives to Historical Store Directives:\n%s", statusResult)
+	}
+}
+
+func TestConciergeSwarmsTool40SwarmFixtureSinglePage(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	now := time.Date(2026, 11, 15, 18, 15, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(now)
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	if err := st.Runs().Create(ctx, store.Run{ID: frontDeskRunID}); err != nil {
+		t.Fatal(err)
+	}
+
+	var allRuns []adopt.Run
+	var activeIDs []string
+	for i := range 40 {
+		id := fmt.Sprintf("20261114-swarm-%02d", i)
+		state := adopt.RunFinished
+		laneStatus := "done"
+		if i >= 35 {
+			state = adopt.RunActive
+			laneStatus = "running"
+			activeIDs = append(activeIDs, id)
+		}
+		allRuns = append(allRuns, adopt.Run{
+			ID:           id,
+			Goal:         fmt.Sprintf("Swarm %02d objective with detailed milestone description for testing single-page compact rendering", i),
+			State:        state,
+			Orchestrator: "claude",
+			DrivenBy:     fmt.Sprintf("sess-orch-%02d", i),
+			Format:       "subagent-swarm-nebula",
+			LastActivity: now.Add(-time.Duration(40-i) * time.Minute).Format(time.RFC3339),
+			Lanes: []adopt.Lane{
+				{ID: fmt.Sprintf("lane-%02d-a", i), Phase: "swe", Status: laneStatus, PR: fmt.Sprintf("%d", 5000+i)},
+				{ID: fmt.Sprintf("lane-%02d-b", i), Phase: "review", Status: "done", PR: fmt.Sprintf("%d", 6000+i)},
+			},
+		})
+	}
+
+	backend := chatui.NewStoreBackend(st, frontDeskRunID)
+	backend.Now = clk.Now
+	backend.HostSwarms = func(context.Context) ([]adopt.Run, error) {
+		return allRuns, nil
+	}
+
+	c := NewConcierge(frontDeskRunID, st, clk, scriptedModel(
+		toolUse("sw-all", ToolSwarms, `{}`),
+		toolUse("sw-act", ToolSwarms, `{"active_only":true}`),
+		textAnswer("5 active swarms can be adopted."),
+	), DefaultConciergeModel)
+	c.BindBackend(backend)
+
+	if _, err := c.Ask(ctx, "which runs can you adopt right now?"); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+
+	items, err := st.Threads().ListItems(ctx, c.threadID, "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []string
+	for _, it := range items {
+		if it.Kind == store.ItemKindToolResult && it.Name == ToolSwarms {
+			results = append(results, it.Content)
+		}
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 swarms tool results, got %d", len(results))
+	}
+
+	// Result 1 (unfiltered 40-swarm call): returns all 40 swarms (including all 5 active swarms)
+	// in a single page with no "[swarms page 1/..." multi-page truncation footer.
+	fullOut := results[0]
+	if strings.Contains(fullOut, "[swarms page ") {
+		t.Fatalf("expected single-page swarms output for 40-swarm fixture, got paging footer:\n%s", fullOut)
+	}
+	for _, id := range activeIDs {
+		if !strings.Contains(fullOut, id) {
+			t.Fatalf("40-swarm single-page output missing active swarm %s:\n%s", id, fullOut)
+		}
+	}
+	for _, r := range allRuns {
+		if !strings.Contains(fullOut, r.ID) {
+			t.Fatalf("40-swarm single-page output missing swarm %s:\n%s", r.ID, fullOut)
+		}
+	}
+
+	// Also verify that even under a tight byte budget (e.g. 4500 bytes), RenderPage
+	// switches to HostSwarmCompactLine (id | status | lanes | driver) and fits all 40 swarms in 1 page.
+	compactOut := chatui.SwarmList{Host: allRuns}.RenderPage(now, true, 4500, 1)
+	if strings.Contains(compactOut, "[swarms page ") {
+		t.Fatalf("compact 40-swarm RenderPage should fit on 1 page without paging footer:\n%s", compactOut)
+	}
+	for _, id := range activeIDs {
+		if !strings.Contains(compactOut, id+" | active | lanes:") {
+			t.Fatalf("compact 40-swarm output missing compact active line for %s:\n%s", id, compactOut)
+		}
+	}
+
+	// Result 2 (active_only=true): returns only the 5 active swarms on one page.
+	activeOut := results[1]
+	if strings.Contains(activeOut, "[swarms page ") {
+		t.Fatalf("active_only swarms output should be a single page:\n%s", activeOut)
+	}
+	for _, id := range activeIDs {
+		if !strings.Contains(activeOut, id) {
+			t.Fatalf("active_only output missing active swarm %s:\n%s", id, activeOut)
+		}
+	}
+	if strings.Contains(activeOut, "20261114-swarm-00") {
+		t.Fatalf("active_only output included finished swarm 20261114-swarm-00:\n%s", activeOut)
+	}
+}
+
+func TestConciergeAdoptReplyWording(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(ctx, store.Run{ID: frontDeskRunID}); err != nil {
+		t.Fatal(err)
+	}
+
+	var capturedSystem string
+	client := modelClientFunc(func(_ context.Context, req model.Request) (*model.Response, error) {
+		capturedSystem = req.System
+		if !strings.Contains(req.System, "run /adopt <id> here") {
+			t.Fatalf("ConciergeSystemPrompt missing 'run /adopt <id> here':\n%s", req.System)
+		}
+		if !strings.Contains(req.System, `Never say "I can't adopt anything from this chat"`) {
+			t.Fatalf("ConciergeSystemPrompt missing prohibition on 'I can't adopt anything from this chat':\n%s", req.System)
+		}
+		resp := textAnswer("Run `/adopt 20261114-trial-m1` here to take over that swarm.")
+		return &resp, nil
+	})
+
+	c := NewConcierge(frontDeskRunID, st, nil, client, DefaultConciergeModel)
+	ans, err := c.Ask(ctx, "can you adopt 20261114-trial-m1?")
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if capturedSystem == "" {
+		t.Fatal("expected model client to receive system prompt")
+	}
+	if !strings.Contains(strings.ToLower(ans), "/adopt 20261114-trial-m1") || !strings.Contains(strings.ToLower(ans), "here") {
+		t.Fatalf("adopt reply wording = %q, want instruction to run /adopt <id> here", ans)
+	}
+	if strings.Contains(ans, "I can't adopt anything from this chat") {
+		t.Fatalf("adopt reply wording must not say 'I can't adopt anything from this chat': %q", ans)
 	}
 }

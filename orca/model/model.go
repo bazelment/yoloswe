@@ -690,15 +690,25 @@ func (r *ToolRegistry) Definitions() []ToolDefinition {
 
 // Has reports whether a tool with name is registered.
 func (r *ToolRegistry) Has(name string) bool {
+	return r.findEntry(name) != nil
+}
+
+func (r *ToolRegistry) findEntry(name string) *toolEntry {
 	if r == nil {
-		return false
+		return nil
 	}
-	for _, e := range r.entries {
-		if e.def.Name == name {
-			return true
+	norm := strings.ReplaceAll(name, ".", "_")
+	for i := range r.entries {
+		if r.entries[i].def.Name == name {
+			return &r.entries[i]
 		}
 	}
-	return false
+	for i := range r.entries {
+		if strings.ReplaceAll(r.entries[i].def.Name, ".", "_") == norm {
+			return &r.entries[i]
+		}
+	}
+	return nil
 }
 
 // Names returns the registered tool names in registration order.
@@ -715,16 +725,12 @@ func (r *ToolRegistry) Names() []string {
 
 // Execute invokes the handler matching call.Name and returns a ToolResult.
 func (r *ToolRegistry) Execute(ctx context.Context, call ToolCall) ToolResult {
-	if r != nil {
-		for _, e := range r.entries {
-			if e.def.Name == call.Name {
-				res, err := e.handler(ctx, call.Input)
-				if err != nil {
-					return ToolResult{ToolUseID: call.ID, Content: err.Error(), IsError: true}
-				}
-				return ToolResult{ToolUseID: call.ID, Content: res, IsError: false}
-			}
+	if e := r.findEntry(call.Name); e != nil {
+		res, err := e.handler(ctx, call.Input)
+		if err != nil {
+			return ToolResult{ToolUseID: call.ID, Content: err.Error(), IsError: true}
 		}
+		return ToolResult{ToolUseID: call.ID, Content: res, IsError: false}
 	}
 	return ToolResult{
 		ToolUseID: call.ID,

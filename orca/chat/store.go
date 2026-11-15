@@ -194,16 +194,25 @@ func (b *StoreBackend) RestartHeld(ctx context.Context) ([]adopt.Run, error) {
 	return restarted, errors.Join(errs...)
 }
 
-// ReadHostRun reads the host swarm run directory of id when Adoption is set.
+// ReadHostRun reads the host swarm run directory of id when Adoption or HostSwarms is set.
 func (b *StoreBackend) ReadHostRun(id string) (adopt.Run, error) {
-	if b.Adoption == nil {
-		return adopt.Run{}, adopt.ErrRunNotFound
+	if b.Adoption != nil {
+		if dir, err := b.Adoption.Importer.Find(id); err == nil {
+			return adopt.Read(dir)
+		}
 	}
-	dir, err := b.Adoption.Importer.Find(id)
-	if err != nil {
-		return adopt.Run{}, err
+	if b.HostSwarms != nil {
+		runs, err := b.HostSwarms(context.Background())
+		if err != nil {
+			return adopt.Run{}, err
+		}
+		for i := range runs {
+			if runs[i].ID == id {
+				return runs[i], nil
+			}
+		}
 	}
-	return adopt.Read(dir)
+	return adopt.Run{}, adopt.ErrRunNotFound
 }
 
 // heldRuns returns the attached run followed by the adopted runs driven in

@@ -185,21 +185,29 @@ func resolveSafePath(roots []string, rawPath string) (string, error) {
 
 	var firstCandidate string
 	for _, root := range roots {
-		cand := filepath.Clean(filepath.Join(root, rawPath))
-		if !isWithinRoot(root, cand) {
-			continue
-		}
-		if firstCandidate == "" {
-			firstCandidate = cand
-		}
-		if _, err := os.Lstat(cand); err == nil {
-			if err := verifySymlinkConfinement(roots, cand, rawPath); err != nil {
-				return "", err
+		candidates := []string{filepath.Clean(filepath.Join(root, rawPath))}
+		if prefix, rest, ok := strings.Cut(filepath.ToSlash(rawPath), "/"); ok && rest != "" {
+			base := filepath.Base(root)
+			if prefix == base || strings.HasSuffix(base, "-"+prefix) {
+				candidates = append(candidates, filepath.Clean(filepath.Join(root, filepath.FromSlash(rest))))
 			}
-			if isSensitiveInvestigationPath(cand) {
-				return "", fmt.Errorf("read.file: path %q is restricted (sensitive or database file)", rawPath)
+		}
+		for _, cand := range candidates {
+			if !isWithinRoot(root, cand) {
+				continue
 			}
-			return cand, nil
+			if firstCandidate == "" {
+				firstCandidate = cand
+			}
+			if _, err := os.Lstat(cand); err == nil {
+				if err := verifySymlinkConfinement(roots, cand, rawPath); err != nil {
+					return "", err
+				}
+				if isSensitiveInvestigationPath(cand) {
+					return "", fmt.Errorf("read.file: path %q is restricted (sensitive or database file)", rawPath)
+				}
+				return cand, nil
+			}
 		}
 	}
 	if firstCandidate == "" {

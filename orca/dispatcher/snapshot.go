@@ -85,6 +85,7 @@ type Snapshot struct {
 	BacklogShown    int
 	LaneCount       int
 	EventCount      int
+	Done            bool
 	Truncated       bool
 }
 
@@ -143,6 +144,7 @@ func BuildSnapshot(
 	}
 
 	maxTotalBytes := cfg.MaxSnapshotTokens * bytesPerTokenEstimate
+	doneRun := len(lanes) > 0 && isRunStateDone(run, lanes, allBacklog)
 
 	var b strings.Builder
 	truncated := false
@@ -153,9 +155,15 @@ func BuildSnapshot(
 	if run.PlanRef != "" {
 		fmt.Fprintf(&b, "Plan Ref: %s\n", truncateText(run.PlanRef, 256, &truncated))
 	}
+	if doneRun {
+		b.WriteString("Status: DONE (all lanes and backlog items terminal; no Next: work)\n")
+	}
 	b.WriteString("\n## Objective\n")
 	if strings.TrimSpace(run.Objective) == "" {
 		b.WriteString("(none)\n")
+	} else if doneRun {
+		b.WriteString(compactDoneObjective(strings.TrimSpace(run.Objective), 512, &truncated))
+		b.WriteString("\n")
 	} else {
 		objBudget := min(cfg.MaxObjectiveBytes, max(maxTotalBytes/8, 256))
 		b.WriteString(truncateText(strings.TrimSpace(run.Objective), objBudget, &truncated))
@@ -226,21 +234,23 @@ func BuildSnapshot(
 			b.WriteString(entry)
 		}
 	}
-	fmt.Fprintf(&b, "\n## Memory Index (%d)\n", len(memories))
-	if len(memories) == 0 {
-		b.WriteString("(none)\n")
-	} else {
-		secStart := b.Len()
-		for i := range memories {
-			m := memories[i]
-			entry := fmt.Sprintf("- [%s] %s (%s/%s): %s\n", singleLine(truncateText(m.ID, 128, &truncated)), singleLine(truncateText(m.Name, 256, &truncated)), m.Type, m.Scope, singleLine(truncateText(m.Description, cfg.MaxDirectiveBytes, &truncated)))
-			omitted := fmt.Sprintf("... (%d more memories omitted for token budget)\n", len(memories)-i)
-			if b.Len()-secStart+len(entry)+len(omitted) > memoryBudget {
-				truncated = true
-				b.WriteString(omitted)
-				break
+	if !doneRun {
+		fmt.Fprintf(&b, "\n## Memory Index (%d)\n", len(memories))
+		if len(memories) == 0 {
+			b.WriteString("(none)\n")
+		} else {
+			secStart := b.Len()
+			for i := range memories {
+				m := memories[i]
+				entry := fmt.Sprintf("- [%s] %s (%s/%s): %s\n", singleLine(truncateText(m.ID, 128, &truncated)), singleLine(truncateText(m.Name, 256, &truncated)), m.Type, m.Scope, singleLine(truncateText(m.Description, cfg.MaxDirectiveBytes, &truncated)))
+				omitted := fmt.Sprintf("... (%d more memories omitted for token budget)\n", len(memories)-i)
+				if b.Len()-secStart+len(entry)+len(omitted) > memoryBudget {
+					truncated = true
+					b.WriteString(omitted)
+					break
+				}
+				b.WriteString(entry)
 			}
-			b.WriteString(entry)
 		}
 	}
 
@@ -278,6 +288,14 @@ func BuildSnapshot(
 	shownBacklog := 0
 	if len(topItems) == 0 {
 		b.WriteString("(empty)\n")
+	} else if doneRun {
+		var parts []string
+		for i := range topItems {
+			it := topItems[i]
+			parts = append(parts, fmt.Sprintf("%s (%s)", it.ID, it.Status))
+			shownBacklog++
+		}
+		fmt.Fprintf(&b, "All %d backlog items are terminal: %s\n", len(allBacklog), strings.Join(parts, ", "))
 	} else {
 		secStart := b.Len()
 		for i := range topItems {
@@ -325,6 +343,17 @@ func BuildSnapshot(
 	fmt.Fprintf(&b, "\n## Lanes (%d)\n", len(lanes))
 	if len(lanes) == 0 {
 		b.WriteString("(none)\n")
+	} else if doneRun {
+		var parts []string
+		for i := range lanes {
+			ln := lanes[i]
+			if ln.PR > 0 {
+				parts = append(parts, fmt.Sprintf("%s (%s #%d)", ln.ID, ln.Status, ln.PR))
+			} else {
+				parts = append(parts, fmt.Sprintf("%s (%s)", ln.ID, ln.Status))
+			}
+		}
+		fmt.Fprintf(&b, "All %d lanes are terminal: %s\n", len(lanes), strings.Join(parts, ", "))
 	} else {
 		b.WriteString("| Lane | Item | Status | Recipe | Phase | Round | MaxRound | Attempt | Age | PR | Checks | Approval | LastEvent |\n")
 		b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
@@ -381,7 +410,7 @@ func BuildSnapshot(
 		}
 	}
 
-	if batchHasLaneMail(events) {
+	if !doneRun && batchHasLaneMail(events) {
 		var priorReports []string
 		if repEvs, rErr := st.Events().List(ctx, store.EventFilter{RunID: runID, Kinds: []store.EventKind{store.EventLaneReport}}); rErr == nil {
 			for i := len(repEvs) - 1; i >= max(len(repEvs)-10, 0); i-- {
@@ -484,6 +513,7 @@ func BuildSnapshot(
 	return Snapshot{
 		RunID:           runID,
 		Text:            text,
+		Done:            doneRun,
 		EstimatedTokens: EstimateTokens(text),
 		DirectiveCount:  len(directives),
 		BacklogTotal:    len(allBacklog),
@@ -492,6 +522,38 @@ func BuildSnapshot(
 		EventCount:      len(events),
 		Truncated:       truncated,
 	}, nil
+}
+
+func compactDoneObjective(obj string, maxBytes int, truncated *bool) string {
+	nextLine := strings.TrimSpace(store.ExtractNextSection(obj))
+	var goalLine string
+	for _, raw := range strings.Split(obj, "\n") {
+		line := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(raw), "#"))
+		if line == "" || strings.EqualFold(line, "objective") {
+			continue
+		}
+		goalLine = line
+		break
+	}
+	if goalLine != "" {
+		if len(obj) > len(goalLine) && truncated != nil {
+			*truncated = true
+		}
+		head := truncateText(goalLine, min(maxBytes, 200), truncated)
+		if nextLine != "" && !strings.Contains(head, nextLine) {
+			return head + "\nNext: " + nextLine
+		}
+		return head
+	}
+	if len(obj) <= maxBytes {
+		return obj
+	}
+	headBudget := max(maxBytes-len(nextLine)-32, 128)
+	head := truncateText(obj, headBudget, truncated)
+	if nextLine != "" && !strings.Contains(head, nextLine) {
+		return head + "\nNext: " + nextLine
+	}
+	return head
 }
 
 func depsDone(it store.BacklogItem, statusByID map[string]store.BacklogStatus) bool {

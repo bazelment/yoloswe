@@ -450,7 +450,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	}
 
 	reg := d.buildToolRegistry(runID, state)
-	modelName := d.selectModel(events)
+	modelName := d.selectModel(events, snap.Done)
 	state.model = modelName
 
 	var (
@@ -460,8 +460,16 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 		loopErr   error
 	)
 
-	if d.cfg.AgentBackend == model.AgentBackendCLI {
-		usage, turnCount, summary, loopErr = d.dispatchCLITurn(ctx, cleanupCtx, runID, threadID, turnID, modelName, snap.Text, events, state)
+	if d.shouldSkipDispatcherTurn(ctx, runID, snap.Done, events, turnRec.Steers) {
+		summary = "No action needed."
+		_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
+			ThreadID: threadID,
+			TurnID:   turnID,
+			Kind:     store.ItemKindAssistantMessage,
+			Content:  summary,
+		})
+	} else if d.cfg.AgentBackend == model.AgentBackendCLI {
+		usage, turnCount, summary, loopErr = d.dispatchCLITurn(ctx, cleanupCtx, runID, threadID, turnID, modelName, snap.Text, events, state, snap.Done)
 	} else {
 		req := model.Request{
 			Model:       modelName,
@@ -618,11 +626,26 @@ func (d *Dispatcher) ensureThread(ctx context.Context, runID string) (string, er
 	return th.ID, nil
 }
 
-func (d *Dispatcher) selectModel(events []store.Event) string {
-	if d.cfg.HardBatchModel != "" && isHardBatch(events) {
+func (d *Dispatcher) selectModel(events []store.Event, doneRun bool) string {
+	if d.cfg.HardBatchModel != "" && isHardBatch(events) && !doneRun {
 		return d.cfg.HardBatchModel
 	}
 	return d.cfg.Model
+}
+
+func (d *Dispatcher) shouldSkipDispatcherTurn(ctx context.Context, runID string, doneRun bool, events []store.Event, steers []string) bool {
+	if !doneRun || len(steers) > 0 || len(events) == 0 {
+		return false
+	}
+	if slices.ContainsFunc(events, isOwnerOriginEvent) {
+		return false
+	}
+	if d.store != nil {
+		if dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true}); err == nil && len(dirs) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // toolsForBatch drops the read.* tools from a batch that names no lane: they
@@ -668,7 +691,7 @@ func isHardBatch(events []store.Event) bool {
 }
 
 var dispatcherToolDefs = []model.ToolDefinition{
-	{Name: ToolBacklogAdd, Description: "Add a new prioritized item to the run backlog", InputSchema: model.SchemaFor[BacklogAddParams]()},
+	{Name: ToolBacklogAdd, Description: "Add a brand-new prioritized item to the run backlog only when no matching item is already listed in ## Backlog. Never call backlog.add for an item ID or work already shown in ## Backlog (call lane.spawn alone with that existing item_id)", InputSchema: model.SchemaFor[BacklogAddParams]()},
 	{Name: ToolBacklogUpdate, Description: "Edit an existing open or blocked backlog item (title, acceptance, priority, dependencies, open/blocked). Never sets in_progress: lane.spawn does that", InputSchema: model.SchemaFor[BacklogUpdateParams]()},
 	{Name: ToolBacklogReorder, Description: "Reorder backlog items within their priority tier", InputSchema: model.SchemaFor[BacklogReorderParams]()},
 	{Name: ToolBacklogClose, Description: "Close a backlog item as done or dropped", InputSchema: model.SchemaFor[BacklogCloseParams]()},
@@ -678,9 +701,9 @@ var dispatcherToolDefs = []model.ToolDefinition{
 	{Name: ToolLaneRetry, Description: "Retry a stalled, blocked, or failed lane on a fresh round", InputSchema: model.SchemaFor[LaneRetryParams]()},
 	{Name: ToolLaneStop, Description: "Stop a non-terminal lane and mark it failed", InputSchema: model.SchemaFor[LaneStopParams]()},
 	{Name: ToolLaneWait, Description: "Record a named expected wait on a lane (e.g. cloud VM run, sweep, or merge gate) with a reason and deadline so the controller suppresses stall judgments until the deadline", InputSchema: model.SchemaFor[LaneWaitParams]()},
-	{Name: ToolOwnerAsk, Description: "Pose a decision to the owner that only the owner can make (product scope, spend, credentials, one-way/destructive policy) and that the batch presents as still open, with options, a mandatory default, and a deadline. Never use it for engineering, ordering or retry choices, or for work the owner already ordered", InputSchema: model.SchemaFor[OwnerAskParams]()},
+	{Name: ToolOwnerAsk, Description: "Pose a decision to the owner that only the owner can make (product scope, spend, credentials, one-way/destructive policy) and that the batch presents as still open, with options, a mandatory default, and a deadline. Never use it for engineering, ordering, retry, or reversible workflow-dispatch/deploy timing choices covered by a runbook and rollback (e.g. HOST-ASK dispatch vs hold), or for work the owner already ordered", InputSchema: model.SchemaFor[OwnerAskParams]()},
 	{Name: ToolOwnerAnswer, Description: "If the owner's message answers one of the listed open owner asks, resolve it with that ask's id; otherwise treat the message as work", InputSchema: model.SchemaFor[OwnerAnswerParams]()},
-	{Name: ToolDirectiveNote, Description: "Persist a standing rule, preference or decision that later batches need and that no backlog item, lane or other call in this batch carries. At most one per batch, holding every point in its fact. Not a log of your own actions or questions", InputSchema: model.SchemaFor[DirectiveNoteParams]()},
+	{Name: ToolDirectiveNote, Description: "Persist a standing rule, preference, inter-agent status/agreed context, or engineering/deploy-timing decision (including resolving a reversible HOST-ASK dispatch/hold choice) that later batches need and that no backlog item, lane or other call in this batch carries. At most one per batch, holding every point in its fact. Not a log of your own actions or questions", InputSchema: model.SchemaFor[DirectiveNoteParams]()},
 	{Name: ToolDirectiveRevoke, Description: "Revoke or supersede an active standing directive or instruction by ID when the owner lifts, clears, or replaces it", InputSchema: model.SchemaFor[DirectiveRevokeParams]()},
 	{Name: ToolPlannerRequest, Description: "Request a Planner turn to replan or import a plan. The reason is delivered to the Planner and also stored as an active directive, so it carries any standing rule given with the request", InputSchema: model.SchemaFor[PlannerRequestParams]()},
 	{Name: ToolReadLaneReport, Description: "Read a bounded phase report for a lane", InputSchema: model.SchemaFor[ReadLaneReportParams]()},
@@ -746,12 +769,12 @@ func batchAllowsTool(toolName string, events []store.Event) error {
 // long-lived CLI session's MCP tool list stays constant across run-level and
 // lane-level batches (avoiding subprocess restarts), while enforcing batch-level
 // tool eligibility inside the handler.
-func (d *Dispatcher) buildCLIToolRegistry(runID string, state *turnExecState, events []store.Event) *model.ToolRegistry {
+func (d *Dispatcher) buildCLIToolRegistry(runID string, state *turnExecState, events []store.Event, doneRun bool) *model.ToolRegistry {
 	reg := model.NewToolRegistry()
 	defs := make([]model.ToolDefinition, 0, len(dispatcherToolDefs)+3)
 	defs = append(defs, dispatcherToolDefs...)
 	defs = append(defs, mailAnswerToolDef, mailDismissToolDef)
-	if d.runCloseoutHandler() != nil {
+	if d.runCloseoutHandler() != nil && !doneRun {
 		defs = append(defs, runCloseoutToolDef)
 	}
 	for i := range defs {
@@ -770,7 +793,9 @@ func (d *Dispatcher) buildCLIToolRegistry(runID string, state *turnExecState, ev
 			return res + " (batch primary action applied; end your turn now — no further mutating calls are permitted in this batch)", nil
 		})
 	}
-	model.RegisterInvestigationTools(reg, d.cfg.Investigate)
+	if !doneRun {
+		model.RegisterInvestigationTools(reg, d.cfg.Investigate)
+	}
 	return reg
 }
 
@@ -784,8 +809,9 @@ func (d *Dispatcher) dispatchCLITurn(
 	promptText string,
 	events []store.Event,
 	state *turnExecState,
+	doneRun bool,
 ) (model.Usage, int, string, error) {
-	cliReg := d.buildCLIToolRegistry(runID, state, events)
+	cliReg := d.buildCLIToolRegistry(runID, state, events, doneRun)
 	memSection := d.memoryIndexSection(ctx, runID)
 	turnPrompt := promptText
 	if d.shouldIncludeMemoryIndex(runID, memSection) {
@@ -805,7 +831,7 @@ func (d *Dispatcher) dispatchCLITurn(
 			Model:            modelName,
 			Effort:           d.cfg.Effort,
 			SystemPrompt:     d.cfg.SystemPrompt,
-			WorkDir:          model.DeterministicSessionWorkDir(cmp.Or(d.cfg.Investigate.RunDir, d.cfg.Investigate.RepoDir), runID, ActorDispatcher),
+			WorkDir:          model.DeterministicSessionWorkDir("", runID, ActorDispatcher),
 			LLMGatewayURL:    d.cfg.LLMGatewayURL,
 			ClaudeBin:        d.cfg.ClaudeBin,
 			CodexBin:         d.cfg.CodexBin,

@@ -87,7 +87,7 @@ const DefaultMaxBriefBytes = 16 * 1024
 
 // BacklogAddParams holds parameters for the backlog.add tool.
 type BacklogAddParams struct {
-	ID          string   `json:"id" jsonschema:"required,description=Unique backlog item ID"`
+	ID          string   `json:"id" jsonschema:"required" jsonschema_description:"Unique new backlog item ID that is NOT already listed in ## Backlog. If an open ready item for the work already exists in ## Backlog, never call backlog.add — call lane.spawn alone with its item_id"`
 	Title       string   `json:"title" jsonschema:"required,description=Short title of the work item"`
 	Description string   `json:"description,omitempty" jsonschema:"description=Detailed description of the work"`
 	Acceptance  string   `json:"acceptance,omitempty" jsonschema:"description=Acceptance criteria"`
@@ -130,15 +130,15 @@ type BacklogCloseParams struct {
 
 // LaneSpawnParams holds parameters for the lane.spawn tool.
 type LaneSpawnParams struct {
-	ItemID         string `json:"item_id" jsonschema:"required" jsonschema_description:"ID of an open backlog item marked ready in the snapshot. Spawning marks it in_progress itself, so do not call backlog.update first"`
+	ItemID         string `json:"item_id" jsonschema:"required" jsonschema_description:"ID of an open backlog item marked ready in the snapshot. Spawning marks it in_progress itself, so do not call backlog.update first, and never call backlog.add for an item already in ## Backlog"`
 	LaneID         string `json:"lane_id,omitempty" jsonschema:"description=Optional lane ID (defaults to item_id)"`
 	Brief          string `json:"brief" jsonschema:"required,description=Task brief for the lane"`
-	RecipeName     string `json:"recipe_name,omitempty" jsonschema:"description=Optional recipe name"`
+	RecipeName     string `json:"recipe_name,omitempty" jsonschema:"-"`
 	RecipeOverride string `json:"recipe_override,omitempty" jsonschema:"description=Optional natural-language recipe override or recipe name for this lane"`
 	Branch         string `json:"branch,omitempty" jsonschema:"description=Optional git branch name"`
 	BaseBranch     string `json:"base_branch,omitempty" jsonschema:"description=Optional base branch name"`
 	Reason         string `json:"reason,omitempty" jsonschema:"description=Reason for spawning this lane"`
-	Model          string `json:"model,omitempty" jsonschema:"description=Optional worker model override from the allowed list"`
+	Model          string `json:"model,omitempty" jsonschema_description:"Optional worker model override from the allowed list: use exact tier token 'strongest', 'mid', 'cheaper', or 'fastest' (never 'strong', 'cheap', or 'fast'), or an explicit allowed model ID"`
 	NoMerge        bool   `json:"no_merge,omitempty" jsonschema:"description=Optional: true when this lane is a report-only or no-merge task that must stop after review and never run integrate"`
 }
 
@@ -163,7 +163,7 @@ type LaneRetryParams struct {
 	Phase  string `json:"phase,omitempty" jsonschema:"description=Optional phase to retry (defaults to current lane phase or recipe first phase)"`
 	Note   string `json:"note,omitempty" jsonschema:"description=Optional additional brief or guidance for the retry"`
 	Reason string `json:"reason,omitempty" jsonschema:"description=Reason for retrying this lane"`
-	Model  string `json:"model,omitempty" jsonschema:"description=Optional worker model override from the allowed list"`
+	Model  string `json:"model,omitempty" jsonschema_description:"Optional worker model override from the allowed list: use exact tier token 'strongest', 'mid', 'cheaper', or 'fastest' (never 'strong', 'cheap', or 'fast'), or an explicit allowed model ID"`
 	Round  int    `json:"round,omitempty" jsonschema:"description=Target round number (must be > max recorded round for the phase; defaults to next unused round)"`
 }
 
@@ -2439,6 +2439,19 @@ func checkRunCloseout(st *StateView, p *RunCloseoutParams) error {
 		return err
 	}
 	return nil
+}
+
+// isRunStateDone reports whether every lane and backlog item is terminal (including
+// adopted task-backed backlog items whose corresponding lane is terminal) and the
+// run objective's Next: directive is done.
+func isRunStateDone(run *store.Run, lanes []lane.Lane, backlog []store.BacklogItem) bool {
+	if err := CheckRunTerminal(lanes, backlog, false); err != nil {
+		return false
+	}
+	if run != nil && isObjectiveDoneText(run.Objective) {
+		return true
+	}
+	return false
 }
 
 func isObjectiveDoneText(objective string) bool {
