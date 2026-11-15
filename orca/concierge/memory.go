@@ -120,7 +120,7 @@ func (e *MemoryEditor) Submit(ctx context.Context, st store.Store, runID, id, qu
 }
 
 // StarterSetMemorySource is the Source marker on pre-seeded starter memories.
-const StarterSetMemorySource = "orca starter set"
+const StarterSetMemorySource = store.StarterSetMemorySource
 
 var (
 	plainOwnerNoNewWorkPhrases = []string{
@@ -329,55 +329,26 @@ func WriteStandingRulesSection(b *strings.Builder, rules []StandingRule) {
 	}
 }
 
-// ListStandingRules returns active standing rules for runID from both the
-// directive store and rule-type memories (excluding starter-set entries),
-// deduplicated by ID.
+// ListStandingRules returns active standing rules and directives for runID from
+// the canonical active-directive set (excluding internal machine records and
+// starter-set entries), deduplicated by ID.
 func ListStandingRules(ctx context.Context, st store.Store, runID string, now time.Time) []StandingRule {
 	if st == nil {
 		return nil
 	}
-	seen := make(map[string]bool)
-	var out []StandingRule
-	if st.Directives() != nil {
-		if dirs, err := st.Directives().List(ctx, store.DirectiveFilter{
-			RunID:      runID,
-			Kinds:      []store.DirectiveKind{store.DirectiveStanding},
-			ActiveOnly: true,
-		}); err == nil {
-			for i := range dirs {
-				d := &dirs[i]
-				if d.Kind != store.DirectiveStanding || d.Status != store.DirectiveActive {
-					continue
-				}
-				if !now.IsZero() && d.ExpiresAt != nil && !now.Before(*d.ExpiresAt) {
-					continue
-				}
-				seen[d.ID] = true
-				out = append(out, StandingRule{
-					ID:    d.ID,
-					Scope: cmp.Or(d.Scope, "run"),
-					Text:  d.Text,
-					RunID: d.RunID,
-				})
-			}
-		}
+	dirs, err := store.ListUserFacingActiveDirectives(ctx, st, runID, now)
+	if err != nil {
+		return nil
 	}
-	if st.Memories() != nil {
-		if mems, err := st.Memories().List(ctx, store.MemoryFilter{RunID: runID, Type: "rule"}); err == nil {
-			for i := range mems {
-				m := &mems[i]
-				if m.Source == StarterSetMemorySource || seen[m.ID] {
-					continue
-				}
-				seen[m.ID] = true
-				out = append(out, StandingRule{
-					ID:    m.ID,
-					Scope: cmp.Or(m.Scope, "run"),
-					Text:  cmp.Or(strings.TrimSpace(m.Body), strings.TrimSpace(m.Description), strings.TrimSpace(m.Name)),
-					RunID: m.RunID,
-				})
-			}
-		}
+	out := make([]StandingRule, 0, len(dirs))
+	for i := range dirs {
+		d := &dirs[i]
+		out = append(out, StandingRule{
+			ID:    d.ID,
+			Scope: cmp.Or(d.Scope, "run"),
+			Text:  d.Text,
+			RunID: d.RunID,
+		})
 	}
 	return out
 }

@@ -1394,3 +1394,179 @@ func TestConciergeCLIBackendAnswersDoneFromLatestNextLine(t *testing.T) {
 		t.Fatalf("MCP status response missing latest Next: line:\n%s", string(mcpData))
 	}
 }
+
+func TestConciergeStatusAndSnapshotShareActiveDirectiveSet(t *testing.T) {
+	t.Parallel()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 18, 14, 54, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	drv := lane.NewFakeDriver()
+	ctx := t.Context()
+
+	const runID = "run-g35"
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:            runID,
+		Objective:     "Soak test run | Next: done",
+		DefaultRecipe: recipe.DefaultName,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const (
+		noteID      = "note-7"
+		conciergeID = "dir-concierge-1794641883102318034-1435a60f-5"
+		chatID      = "chat-EBEMBAM3PGYIVRBAW22H46DF5M"
+		memRuleID   = "rule-mem-only"
+		revokedID   = "note-revoked"
+	)
+
+	// Seed active note-7, dir-concierge-...-5, chat-..., a revoked directive with a stale memory,
+	// a memory-only rule, and an internal owner_ask directive.
+	for _, d := range []store.Directive{
+		{
+			ID:     noteID,
+			RunID:  runID,
+			Kind:   store.DirectiveNote,
+			Source: store.DirectiveSourceDispatcher,
+			Scope:  "run",
+			Text:   "Hold off on spawning m4-metrics until the owner lifts the hold",
+			Status: store.DirectiveActive,
+		},
+		{
+			ID:     conciergeID,
+			RunID:  runID,
+			Kind:   store.DirectiveStanding,
+			Source: store.DirectiveSourceConcierge,
+			Scope:  "run",
+			Text:   "Do not start m4-metrics yet",
+			Status: store.DirectiveActive,
+		},
+		{
+			ID:     chatID,
+			RunID:  runID,
+			Kind:   store.DirectiveInstruction,
+			Source: store.DirectiveSourceOwner,
+			Scope:  "run",
+			Text:   "Hold lanes until owner confirms",
+			Status: store.DirectiveActive,
+		},
+		{
+			ID:     revokedID,
+			RunID:  runID,
+			Kind:   store.DirectiveStanding,
+			Source: store.DirectiveSourceOwner,
+			Scope:  "run",
+			Text:   "Already revoked hold",
+			Status: store.DirectiveRevoked,
+		},
+		{
+			ID:     "ask-internal-1",
+			RunID:  runID,
+			Kind:   store.DirectiveInstruction,
+			Source: store.DirectiveSourceDispatcher,
+			Ref:    "owner_ask:q1",
+			Text:   `{"id":"q1","run_id":"run-g35","question":"Proceed?"}`,
+			Status: store.DirectiveActive,
+		},
+	} {
+		if err := st.Directives().Add(ctx, d); err != nil {
+			t.Fatalf("Directives.Add(%s): %v", d.ID, err)
+		}
+	}
+	for _, m := range []store.MemoryEntry{
+		{
+			ID: noteID, Name: "Directive: " + noteID, Description: "Hold m4-metrics",
+			Type: "rule", Scope: "run", RunID: runID, Source: "hold", Body: "Hold off on spawning m4-metrics until the owner lifts the hold", ProposedBy: "owner",
+		},
+		{
+			ID: conciergeID, Name: "Directive: " + conciergeID, Description: "Do not start m4-metrics",
+			Type: "rule", Scope: "run", RunID: runID, Source: "hold", Body: "Do not start m4-metrics yet", ProposedBy: "owner",
+		},
+		{
+			ID: memRuleID, Name: "Memory rule", Description: "Keep tests deterministic",
+			Type: "rule", Scope: "run", RunID: runID, Source: "owner", Body: "Keep tests deterministic", ProposedBy: "owner",
+		},
+		{
+			ID: revokedID, Name: "Revoked rule", Description: "Already revoked hold",
+			Type: "rule", Scope: "run", RunID: runID, Source: "owner", Body: "Already revoked hold", ProposedBy: "owner",
+		},
+	} {
+		if _, err := st.Memories().Put(ctx, m); err != nil {
+			t.Fatalf("Memories.Put(%s): %v", m.ID, err)
+		}
+	}
+
+	wantActiveIDs := []string{noteID, conciergeID, chatID, memRuleID}
+
+	// 1. Check /status standing rules (concierge.ListStandingRules).
+	rules := concierge.ListStandingRules(ctx, st, runID, clk.Now())
+	var ruleIDs []string
+	for _, r := range rules {
+		ruleIDs = append(ruleIDs, r.ID)
+	}
+	for _, id := range wantActiveIDs {
+		if !slices.Contains(ruleIDs, id) {
+			t.Fatalf("ListStandingRules (/status) IDs = %v, missing %q", ruleIDs, id)
+		}
+	}
+	if slices.Contains(ruleIDs, revokedID) || slices.Contains(ruleIDs, "ask-internal-1") {
+		t.Fatalf("ListStandingRules (/status) IDs = %v, must not include revoked or internal directives", ruleIDs)
+	}
+
+	// 2. Check concierge status tool output.
+	statusClient := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message:    model.NewAssistantMessage(model.NewToolUseBlock("s1", concierge.ToolStatus, json.RawMessage(`{}`))),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Run run-g35 has active directives note-7, dir-concierge-1794641883102318034-1435a60f-5, chat-EBEMBAM3PGYIVRBAW22H46DF5M, rule-mem-only.")),
+		},
+	)
+	conc := concierge.New(concierge.Config{}, st, drv, clk, statusClient)
+	if _, err := conc.Ask(ctx, runID, "status"); err != nil {
+		t.Fatalf("conc.Ask(status): %v", err)
+	}
+	statusDump := fmt.Sprintf("%+v", statusClient.Requests)
+	for _, id := range wantActiveIDs {
+		if !strings.Contains(statusDump, "- "+id+" [") {
+			t.Fatalf("concierge status output missing %s:\n%s", id, statusDump)
+		}
+	}
+	if strings.Contains(statusDump, revokedID) {
+		t.Fatalf("concierge status output should not include revoked directive %s:\n%s", revokedID, statusDump)
+	}
+
+	// 3. Check dispatcher snapshot.
+	snap, err := dispatcher.BuildSnapshot(ctx, st, clk, runID, nil, dispatcher.SnapshotConfig{})
+	if err != nil {
+		t.Fatalf("BuildSnapshot: %v", err)
+	}
+	for _, id := range wantActiveIDs {
+		if !strings.Contains(snap.Text, "["+id+"]") {
+			t.Fatalf("dispatcher snapshot missing [%s]:\n%s", id, snap.Text)
+		}
+	}
+	if strings.Contains(snap.Text, revokedID) {
+		t.Fatalf("dispatcher snapshot should not include revoked directive %s:\n%s", revokedID, snap.Text)
+	}
+
+	// 4. Every listed active directive ID is revokable by that ID.
+	for _, id := range wantActiveIDs {
+		if _, err := concierge.RevokeDirective(ctx, st, runID, "["+id+"]"); err != nil {
+			t.Fatalf("RevokeDirective(%s): %v", id, err)
+		}
+	}
+	if got := concierge.ListStandingRules(ctx, st, runID, clk.Now()); len(got) != 0 {
+		t.Fatalf("ListStandingRules after revoking all = %+v, want empty", got)
+	}
+	snapAfter, err := dispatcher.BuildSnapshot(ctx, st, clk, runID, nil, dispatcher.SnapshotConfig{})
+	if err != nil {
+		t.Fatalf("BuildSnapshot after: %v", err)
+	}
+	for _, id := range wantActiveIDs {
+		if strings.Contains(snapAfter.Text, "["+id+"]") {
+			t.Fatalf("dispatcher snapshot after revoking all still lists [%s]:\n%s", id, snapAfter.Text)
+		}
+	}
+}

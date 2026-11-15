@@ -186,6 +186,7 @@ func TestSQLiteStoreReopenIdenticalState(t *testing.T) {
 		Acceptance: "CLI runs",
 		Priority:   store.PriorityP1,
 		Order:      2,
+		NoMerge:    true,
 		DependsOn:  []string{"item-a"},
 	}); err != nil {
 		t.Fatalf("Backlog.Add(item-b): %v", err)
@@ -376,8 +377,8 @@ func TestSQLiteStoreReopenIdenticalState(t *testing.T) {
 	if before.ControllerCursor.Seq != 2 {
 		t.Fatalf("ControllerCursor.Seq = %d, want 2 (monotonic)", before.ControllerCursor.Seq)
 	}
-	if !slices.Equal(before.AppliedMigrations, []string{"0001_init.sql", "0002_memory_notes.sql", "0003_decision_trace.sql", "0004_lane_base_commit.sql", "0005_run_settings.sql", "0006_run_repository.sql", "0007_thread_resume_id.sql", "0008_cost_guard.sql"}) {
-		t.Fatalf("AppliedMigrations = %v, want all migrations through 0008", before.AppliedMigrations)
+	if !slices.Equal(before.AppliedMigrations, []string{"0001_init.sql", "0002_memory_notes.sql", "0003_decision_trace.sql", "0004_lane_base_commit.sql", "0005_run_settings.sql", "0006_run_repository.sql", "0007_thread_resume_id.sql", "0008_cost_guard.sql", "0009_backlog_no_merge.sql"}) {
+		t.Fatalf("AppliedMigrations = %v, want all migrations through 0009", before.AppliedMigrations)
 	}
 
 	if err := st1.Close(); err != nil {

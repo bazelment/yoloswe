@@ -384,6 +384,9 @@ func (b *memBacklogStore) Add(_ context.Context, item BacklogItem) error {
 	}
 	now := s.now()
 	cp := item.Clone()
+	if !cp.NoMerge && IsNoMergeBacklogItem(cp) {
+		cp.NoMerge = true
+	}
 	if cp.Priority == "" {
 		cp.Priority = PriorityP2
 	}

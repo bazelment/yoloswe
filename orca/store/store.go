@@ -610,3 +610,130 @@ func EnforceCostGuard(ctx context.Context, st Store, runID string, now time.Time
 	}
 	return true, spent, limit, "", nil
 }
+
+// NormalizeDirectiveID trims whitespace and optional surrounding brackets
+// (as rendered in snapshot lines like "- [note-7] ...") from a directive ID.
+func NormalizeDirectiveID(id string) string {
+	s := strings.TrimSpace(id)
+	for strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") && len(s) >= 2 {
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
+	return s
+}
+
+// IsInternalDirective reports whether d is an internal machine record (such as
+// an open owner_ask card, an expected lane wait deadline, a planner request,
+// or the chat pause control flag) rather than a user-facing active directive.
+func IsInternalDirective(d Directive) bool {
+	if d.Kind == DirectivePlanImport || d.Kind == DirectiveRecipeEdit {
+		return true
+	}
+	ref := strings.TrimSpace(d.Ref)
+	return strings.HasPrefix(ref, "owner_ask:") ||
+		strings.HasPrefix(ref, "named-wait:") ||
+		strings.HasPrefix(ref, "planner_request:") ||
+		ref == "chat:control"
+}
+
+// ListActiveDirectives returns the canonical active directives for runID across
+// the directive store and run-scoped rule memories (excluding starter-set and
+// any memory entry whose directive row is revoked, expired, or handled).
+func ListActiveDirectives(ctx context.Context, st Store, runID string, now time.Time) ([]Directive, error) {
+	if st == nil || st.Directives() == nil {
+		return nil, nil
+	}
+	allDirs, err := st.Directives().List(ctx, DirectiveFilter{RunID: runID, ActiveOnly: false})
+	if err != nil {
+		return nil, err
+	}
+	inactiveIDs := inactiveDirectiveIDs(allDirs, now)
+	seenActive := make(map[string]bool, len(allDirs))
+	out := make([]Directive, 0, len(allDirs))
+	for i := range allDirs {
+		d := allDirs[i]
+		if inactiveIDs[d.ID] {
+			continue
+		}
+		seenActive[d.ID] = true
+		out = append(out, d)
+	}
+	if st.Memories() != nil {
+		if mems, mErr := st.Memories().List(ctx, MemoryFilter{RunID: runID, Type: "rule"}); mErr == nil {
+			for i := range mems {
+				m := &mems[i]
+				if m.Source == StarterSetMemorySource || inactiveIDs[m.ID] || seenActive[m.ID] {
+					continue
+				}
+				if m.RunID != runID || m.RunID == "" {
+					continue
+				}
+				seenActive[m.ID] = true
+				out = append(out, Directive{
+					ID:        m.ID,
+					RunID:     runID,
+					Kind:      DirectiveStanding,
+					Source:    DirectiveSourceOwner,
+					Scope:     cmp.Or(m.Scope, "run"),
+					Text:      cmp.Or(strings.TrimSpace(m.Body), strings.TrimSpace(m.Description), strings.TrimSpace(m.Name)),
+					Status:    DirectiveActive,
+					CreatedAt: m.UpdatedAt,
+				})
+			}
+		}
+	}
+	return out, nil
+}
+
+func inactiveDirectiveIDs(dirs []Directive, now time.Time) map[string]bool {
+	inactive := make(map[string]bool, len(dirs))
+	for i := range dirs {
+		d := &dirs[i]
+		if d.Status != DirectiveActive || (!now.IsZero() && d.ExpiresAt != nil && !now.Before(*d.ExpiresAt)) {
+			inactive[d.ID] = true
+		}
+	}
+	return inactive
+}
+
+// FilterUserFacingDirectives filters out internal machine records from dirs.
+func FilterUserFacingDirectives(dirs []Directive) []Directive {
+	out := make([]Directive, 0, len(dirs))
+	for i := range dirs {
+		if !IsInternalDirective(dirs[i]) {
+			out = append(out, dirs[i])
+		}
+	}
+	return out
+}
+
+// ListUserFacingActiveDirectives returns active user-facing directives for runID.
+func ListUserFacingActiveDirectives(ctx context.Context, st Store, runID string, now time.Time) ([]Directive, error) {
+	dirs, err := ListActiveDirectives(ctx, st, runID, now)
+	if err != nil {
+		return nil, err
+	}
+	return FilterUserFacingDirectives(dirs), nil
+}
+
+// FilterActiveMemories removes any memory entry whose ID corresponds to an
+// inactive (revoked, expired, or handled) directive on runID.
+func FilterActiveMemories(ctx context.Context, st Store, runID string, memories []MemoryEntry, now time.Time) []MemoryEntry {
+	if st == nil || st.Directives() == nil || len(memories) == 0 {
+		return memories
+	}
+	allDirs, err := st.Directives().List(ctx, DirectiveFilter{RunID: runID, ActiveOnly: false})
+	if err != nil || len(allDirs) == 0 {
+		return memories
+	}
+	inactiveIDs := inactiveDirectiveIDs(allDirs, now)
+	if len(inactiveIDs) == 0 {
+		return memories
+	}
+	out := make([]MemoryEntry, 0, len(memories))
+	for i := range memories {
+		if !inactiveIDs[memories[i].ID] {
+			out = append(out, memories[i])
+		}
+	}
+	return out
+}

@@ -2896,3 +2896,102 @@ func TestControllerStallLadderNudgeThenActivityWithinWaitAndBusyProcess(t *testi
 		}
 	})
 }
+
+type mergeRecordingDriver struct {
+	*lane.FakeDriver
+	Merges []int
+}
+
+func (d *mergeRecordingDriver) MergePR(_ context.Context, _ string, ln lane.Lane, _ string) (string, error) {
+	d.Merges = append(d.Merges, ln.PR)
+	return "merged-" + ln.PRHead, nil
+}
+
+func TestControllerNoMergeReportOnlyItemSkipsIntegrateAndNeverMerges(t *testing.T) {
+	t.Parallel()
+	clk, st, baseDrv, judge := setupTestEnv(t)
+	drv := &mergeRecordingDriver{FakeDriver: baseDrv}
+	ctx := t.Context()
+
+	adopted := recipe.Default().Clone()
+	adopted.RunID = "run-1"
+	adopted.Name = "adopted"
+	adopted.MergePolicy.Mode = recipe.MergeModeController
+	if _, err := st.Recipes().Save(ctx, adopted); err != nil {
+		t.Fatalf("Save recipe: %v", err)
+	}
+
+	if err := st.Backlog().Add(ctx, store.BacklogItem{
+		ID:          "m4-metrics",
+		RunID:       "run-1",
+		Title:       "m4-metrics",
+		Description: "Collect M4 metrics. Do not merge anything; this is a measurement/report task.",
+		Status:      store.BacklogInProgress,
+	}); err != nil {
+		t.Fatalf("Add backlog item: %v", err)
+	}
+
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:         "m4-metrics",
+		RunID:      "run-1",
+		ItemID:     "m4-metrics",
+		Title:      "m4-metrics",
+		Status:     lane.StatusPlanned,
+		RecipeName: "adopted",
+	}); err != nil {
+		t.Fatalf("Upsert lane: %v", err)
+	}
+
+	ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step 1 (spawn swe): %v", err)
+	}
+
+	appendReportEvent(t, st, "m4-metrics", lane.PhaseReport{
+		Phase:   recipe.PhaseSWE,
+		Outcome: lane.OutcomeDone,
+		HeadSHA: "sha-m4-1",
+		PR:      5826,
+		Summary: "published measurement report on PR #5826",
+	})
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step 2 (swe -> clean): %v", err)
+	}
+
+	appendReportEvent(t, st, "m4-metrics", lane.PhaseReport{
+		Phase:   recipe.PhaseClean,
+		Outcome: lane.OutcomeDone,
+		HeadSHA: "sha-m4-1",
+		PR:      5826,
+	})
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step 3 (clean -> review): %v", err)
+	}
+
+	appendCIEvent(t, st, "m4-metrics", "green", "sha-m4-1")
+	appendReportEvent(t, st, "m4-metrics", lane.PhaseReport{
+		Phase:   recipe.PhaseReview,
+		Outcome: lane.OutcomeDone,
+		HeadSHA: "sha-m4-1",
+		PR:      5826,
+	})
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step 4 (review -> done without integrate): %v", err)
+	}
+
+	for _, start := range drv.PhaseStarts {
+		if start.Phase == recipe.PhaseIntegrate {
+			t.Fatalf("unexpected integrate PhaseStart on no-merge report-only lane: %+v", start)
+		}
+	}
+	if len(drv.Merges) != 0 {
+		t.Fatalf("drv.Merges = %+v, want 0 merge calls on no-merge report-only lane", drv.Merges)
+	}
+	ln, err := st.Lanes().Get(ctx, "run-1", "m4-metrics")
+	if err != nil {
+		t.Fatalf("Get lane: %v", err)
+	}
+	if ln.Status != lane.StatusDone {
+		t.Fatalf("lane status = %q (phase=%q), want done after review", ln.Status, ln.Phase)
+	}
+}

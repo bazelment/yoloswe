@@ -77,14 +77,17 @@ type RunNote struct {
 
 func (n RunNote) Clone() RunNote { return n }
 
+// StarterSetMemorySource is the Source marker on pre-seeded starter memories.
+const StarterSetMemorySource = "orca starter set"
+
 // StarterMemories returns the default operating rules.
 func StarterMemories() []MemoryEntry {
 	return []MemoryEntry{
-		{ID: "starter-inner-loop", Name: "fast inner loop", Description: "Validate the smallest case first", Type: "rule", Scope: "owner", Source: "orca starter set", Body: "Why: feedback is fastest on the smallest case. How to apply: run the narrowest deterministic check before broad work.", ProposedBy: "owner"},
-		{ID: "starter-reversible", Name: "reversible decisions", Description: "Decide anything reversible", Type: "rule", Scope: "owner", Source: "orca starter set", Body: "Why: reversible choices do not need delay. How to apply: choose and proceed when undo is cheap.", ProposedBy: "owner"},
-		{ID: "starter-one-way", Name: "one-way doors", Description: "Ask only on irreversible choices", Type: "rule", Scope: "owner", Source: "orca starter set", Body: "Why: owner input matters at irreversible boundaries. How to apply: ask only before a one-way door.", ProposedBy: "owner"},
-		{ID: "starter-verifier", Name: "verifier independence", Description: "Verifier is never the author", Type: "rule", Scope: "owner", Source: "orca starter set", Body: "Why: independent verification catches author bias. How to apply: assign verification to a separate role.", ProposedBy: "owner"},
-		{ID: "starter-language", Name: "plain language", Description: "Use plain language with the owner", Type: "preference", Scope: "owner", Source: "orca starter set", Body: "Why: the owner should understand decisions quickly. How to apply: explain results in direct, plain language.", ProposedBy: "owner"},
+		{ID: "starter-inner-loop", Name: "fast inner loop", Description: "Validate the smallest case first", Type: "rule", Scope: "owner", Source: StarterSetMemorySource, Body: "Why: feedback is fastest on the smallest case. How to apply: run the narrowest deterministic check before broad work.", ProposedBy: "owner"},
+		{ID: "starter-reversible", Name: "reversible decisions", Description: "Decide anything reversible", Type: "rule", Scope: "owner", Source: StarterSetMemorySource, Body: "Why: reversible choices do not need delay. How to apply: choose and proceed when undo is cheap.", ProposedBy: "owner"},
+		{ID: "starter-one-way", Name: "one-way doors", Description: "Ask only on irreversible choices", Type: "rule", Scope: "owner", Source: StarterSetMemorySource, Body: "Why: owner input matters at irreversible boundaries. How to apply: ask only before a one-way door.", ProposedBy: "owner"},
+		{ID: "starter-verifier", Name: "verifier independence", Description: "Verifier is never the author", Type: "rule", Scope: "owner", Source: StarterSetMemorySource, Body: "Why: independent verification catches author bias. How to apply: assign verification to a separate role.", ProposedBy: "owner"},
+		{ID: "starter-language", Name: "plain language", Description: "Use plain language with the owner", Type: "preference", Scope: "owner", Source: StarterSetMemorySource, Body: "Why: the owner should understand decisions quickly. How to apply: explain results in direct, plain language.", ProposedBy: "owner"},
 	}
 }
 
@@ -240,6 +243,173 @@ type BacklogItem struct {
 	Tags        []string              `json:"tags,omitempty"`
 	History     []BacklogHistoryEntry `json:"history,omitempty"`
 	Order       int                   `json:"order"`
+	NoMerge     bool                  `json:"no_merge,omitempty"`
+}
+
+// IsNoMergeBacklogItem reports whether item is marked no-merge or its title,
+// description, or acceptance criteria state that the task is report-only /
+// no-merge.
+func IsNoMergeBacklogItem(item BacklogItem) bool {
+	return item.NoMerge ||
+		IsNoMergeText(item.Title) ||
+		IsNoMergeText(item.Description) ||
+		IsNoMergeText(item.Acceptance)
+}
+
+// ItemIsNoMerge reports whether item is marked no-merge. For unpersisted draft
+// items (zero CreatedAt/UpdatedAt and no mutation history), it falls back to
+// IsNoMergeBacklogItem(item); persisted items rely on item.NoMerge so an
+// explicit BacklogStore.Update(NoMerge: false) is respected.
+func ItemIsNoMerge(item BacklogItem) bool {
+	if item.NoMerge {
+		return true
+	}
+	return item.CreatedAt.IsZero() && item.UpdatedAt.IsZero() && len(item.History) == 0 && IsNoMergeBacklogItem(item)
+}
+
+// IsNoMergeLane reports whether ln (and its associated backlog item, if any)
+// is a no-merge / report-only lane that must stop after review without running
+// integrate.
+func IsNoMergeLane(ln Lane, item *BacklogItem) bool {
+	if item != nil && ItemIsNoMerge(*item) {
+		return true
+	}
+	return IsNoMergeText(ln.Title)
+}
+
+// IsNoMergeSpawn reports whether a lane.spawn request (explicit no_merge flag,
+// backlog item state, worker brief, or recipe override) specifies a no-merge /
+// report-only lane.
+func IsNoMergeSpawn(noMergeParam bool, item *BacklogItem, briefText, recipeOverride string) bool {
+	if noMergeParam || (item != nil && ItemIsNoMerge(*item)) {
+		return true
+	}
+	return IsNoMergeText(briefText) || IsNoMergeText(recipeOverride)
+}
+
+// IsNoMergeText reports whether text specifies a report-only, analysis-only, or
+// no-merge task that must stop after review without running integrate or merging.
+func IsNoMergeText(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return false
+	}
+	for _, phrase := range []string{
+		"do not merge anything",
+		"don't merge anything",
+		"dont merge anything",
+		"never merge anything",
+		"do not merge this",
+		"don't merge this",
+		"dont merge this",
+		"never merge this",
+		"report-only",
+		"report only",
+		"analysis-only",
+		"analysis only",
+		"measurement/report",
+		"measurement-only",
+		"measurement only",
+		"merge_mode=none",
+		"merge: none",
+		"skip merge",
+		"skip integrate",
+		"no integrate",
+	} {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	for _, tok := range []string{"no-merge", "no_merge"} {
+		if containsNoMergePhrase(lower, tok, true) {
+			return true
+		}
+	}
+	if containsNoMergePhrase(lower, "without merging", false) {
+		return true
+	}
+	for _, phrase := range []string{"no merge", "do not merge", "don't merge", "dont merge", "never merge"} {
+		if containsNoMergePhrase(lower, phrase, false) {
+			if phrase != "no merge" && isStandardPRInstructionWithoutReportMarker(lower) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func isStandardPRInstructionWithoutReportMarker(lower string) bool {
+	for _, marker := range []string{"report", "measurement", "analysis", "audit", "benchmark"} {
+		if strings.Contains(lower, marker) {
+			return false
+		}
+	}
+	for _, prInstruction := range []string{
+		"open a pr",
+		"open pr",
+		"create a pr",
+		"create pr",
+		"keep prs ready",
+		"keep pr ready",
+		"draft pr",
+	} {
+		if strings.Contains(lower, prInstruction) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsNoMergePhrase(s, phrase string, allowAnyContinuation bool) bool {
+	isWordByte := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
+	}
+	for offset := 0; offset <= len(s)-len(phrase); {
+		idx := strings.Index(s[offset:], phrase)
+		if idx < 0 {
+			return false
+		}
+		start := offset + idx
+		end := start + len(phrase)
+		leftOK := start == 0 || !isWordByte(s[start-1])
+		rightOK := end == len(s) || !isWordByte(s[end])
+		if leftOK && rightOK {
+			if allowAnyContinuation {
+				return true
+			}
+			rest := strings.TrimLeft(s[end:], " \t")
+			for _, suffix := range []string{"phase", "step", "task", "item", "lane"} {
+				if strings.HasPrefix(rest, suffix) {
+					after := rest[len(suffix):]
+					if after == "" || !isWordByte(after[0]) {
+						rest = strings.TrimLeft(after, " \t")
+						break
+					}
+				}
+			}
+			if rest == "" {
+				return true
+			}
+			switch rest[0] {
+			case '.', ';', ')', ':', '|', '\n', '\r', '!':
+				return true
+			case ',':
+				if phrase == "no merge" {
+					return true
+				}
+			case '-':
+				if strings.HasPrefix(rest, "--") || strings.HasPrefix(rest, "- ") {
+					return true
+				}
+			}
+			if strings.HasPrefix(rest, "—") || strings.HasPrefix(rest, "–") {
+				return true
+			}
+		}
+		offset = start + 1
+	}
+	return false
 }
 
 func (b BacklogItem) Clone() BacklogItem {
