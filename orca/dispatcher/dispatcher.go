@@ -1805,7 +1805,21 @@ func (d *Dispatcher) resolveOrcaEscalation(ctx context.Context, runID string, ln
 	if ln == nil {
 		return "", nil
 	}
-	resolved := ""
+	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, Scope: ln.ID, ActiveOnly: true})
+	if err != nil {
+		return "", err
+	}
+	var asks []store.Directive
+	for i := range dirs {
+		dir := dirs[i]
+		if !strings.HasPrefix(dir.Ref, ownerAskRefPrefix) || !strings.HasPrefix(strings.TrimPrefix(dir.Ref, ownerAskRefPrefix), "escalation-") {
+			continue
+		}
+		asks = append(asks, dir)
+	}
+	if len(asks) == 0 {
+		return "", nil
+	}
 	if ln.Status == lane.StatusBlocked {
 		ln.Status = lane.StatusRunning
 		ln.LastEventAt = d.clock.Now().UTC()
@@ -1813,25 +1827,20 @@ func (d *Dispatcher) resolveOrcaEscalation(ctx context.Context, runID string, ln
 			return "", err
 		}
 	}
-	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, Scope: ln.ID, ActiveOnly: true})
-	if err != nil {
-		return "", err
-	}
-	for i := range dirs {
-		dir := dirs[i]
-		if !strings.HasPrefix(dir.Ref, ownerAskRefPrefix) || !strings.HasPrefix(strings.TrimPrefix(dir.Ref, ownerAskRefPrefix), "escalation-") {
-			continue
-		}
+	resolvedIDs := make([]string, 0, len(asks))
+	for i := range asks {
+		dir := &asks[i]
 		askID := strings.TrimPrefix(dir.Ref, ownerAskRefPrefix)
 		if err := d.store.Directives().UpdateStatus(ctx, runID, dir.ID, store.DirectiveHandled); err != nil {
 			return "", err
 		}
-		resolved = fmt.Sprintf("resolved %s myself: %s", askID, action)
+		resolvedIDs = append(resolvedIDs, askID)
+		resolved := fmt.Sprintf("resolved %s myself: %s", askID, action)
 		if _, err := d.store.Notes().Append(ctx, store.RunNote{ID: "resolve-" + askID, RunID: runID, TaskID: ln.ID, Text: resolved}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			return "", err
 		}
 	}
-	return resolved, nil
+	return fmt.Sprintf("resolved %s myself: %s", strings.Join(resolvedIDs, ", "), action), nil
 }
 
 func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, state *turnExecState, view *StateView, p OwnerAskParams) (string, error) {

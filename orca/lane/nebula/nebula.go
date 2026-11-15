@@ -567,7 +567,20 @@ func inputWaitingIsWorking(ev *TerminalEvent) bool {
 		return true
 	}
 	raw := strings.ToLower(strings.TrimSpace(string(ev.BackgroundTasks)))
-	return raw != "" && raw != "null" && raw != "[]" && strings.Contains(raw, "task")
+	if raw == "" || raw == "null" {
+		return false
+	}
+	var tasks []json.RawMessage
+	if json.Unmarshal([]byte(raw), &tasks) == nil {
+		return len(tasks) > 0
+	}
+	var state struct {
+		Tasks []json.RawMessage `json:"tasks"`
+	}
+	if json.Unmarshal([]byte(raw), &state) == nil {
+		return len(state.Tasks) > 0
+	}
+	return false
 }
 
 func isQuotaOutcome(outcome string) bool {

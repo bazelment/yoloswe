@@ -33,6 +33,16 @@ func TestFakeDriverWatchEmitsEveryEventKind(t *testing.T) {
 	}
 }
 
+func TestWorkingInputWaitingRequiresActiveWork(t *testing.T) {
+	t.Parallel()
+	if !lane.WorkingInputWaiting("checking back in 240s (task-656)\n1 task(s)") {
+		t.Fatal("active timer/task screen was not recognized")
+	}
+	if lane.WorkingInputWaiting("waiting for input >") {
+		t.Fatal("ordinary input.waiting screen was treated as active work")
+	}
+}
+
 func TestLaneAttemptKeysAndValidation(t *testing.T) {
 	t.Parallel()
 
