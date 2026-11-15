@@ -6,17 +6,20 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"image/color"
 	"io"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/mattn/go-runewidth"
 	"golang.org/x/term"
 
+	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/router"
 )
 
@@ -106,6 +109,8 @@ type Model struct {
 	poll           bool
 	NoColor        bool
 	initPrinted    bool
+	sized          bool
+	initSnapDone   bool
 	refreshing     bool
 	restarting     bool
 	spinnerTicking bool
@@ -116,7 +121,9 @@ type Model struct {
 	PollInterval   time.Duration
 	// SpinnerInterval sets the spinner frame cadence (default 110ms); negative disables automatic ticks.
 	SpinnerInterval      time.Duration
+	Clock                clock.Clock
 	Now                  func() time.Time
+	sync                 *renderSync
 	turnStartedAt        time.Time
 	turnHandler          string
 	turnStep             string
@@ -143,6 +150,139 @@ type Model struct {
 	hints []string
 }
 
+//nolint:govet
+type frameState struct {
+	seq          uint64
+	content      string
+	input        string
+	status       string
+	turnHandler  string
+	turnStep     string
+	spinnerFrame int
+	turnCount    int
+	lineCount    int
+	busy         bool
+	bgActive     bool
+	refreshing   bool
+	initPrinted  bool
+	readyForInit bool
+}
+
+// renderSync coordinates Bubble Tea's asynchronous 36ms cursedRenderer flush
+// ticker with Model.Update/tea.Println in tests. It is nil in production
+// Models constructed by New, so production View() never sets ForegroundColor.
+//
+//nolint:govet
+type renderSync struct {
+	mu           sync.Mutex
+	rendered     frameState
+	flushed      frameState
+	notify       chan struct{}
+	initFlushed  chan struct{}
+	initOnce     sync.Once
+	initFallback time.Duration
+}
+
+func newRenderSync() *renderSync {
+	return &renderSync{
+		notify:       make(chan struct{}),
+		initFlushed:  make(chan struct{}),
+		initFallback: 2 * time.Second,
+	}
+}
+
+func (s *renderSync) recordView(st frameState) color.Color {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev := s.rendered
+	st.seq = prev.seq
+	if st != prev || prev.seq == 0 {
+		st.seq = prev.seq + 1
+		s.rendered = st
+		close(s.notify)
+		s.notify = make(chan struct{})
+	}
+	return flushProbe{sync: s, state: s.rendered}
+}
+
+func (s *renderSync) onFlush(st frameState) {
+	s.mu.Lock()
+	if st.seq >= s.flushed.seq {
+		s.flushed = st
+		close(s.notify)
+		s.notify = make(chan struct{})
+	}
+	ready := st.readyForInit
+	s.mu.Unlock()
+	// Closing initFlushed via sync.Once wakes any goroutine already blocked in
+	// Init's select as well as any future select that runs after onFlush. In
+	// Bubble Tea v2, cursedRenderer.flush holds cursedRenderer.mu across
+	// cellbuf.Resize, colorful.MakeColor (flushProbe.RGBA), scr.Flush, and
+	// io.Copy(s.w, &buf), and cursedRenderer.insertAbove (tea.Println) acquires
+	// the same mutex, so tea.Println cannot run until flush finishes writing.
+	if ready {
+		s.initOnce.Do(func() {
+			close(s.initFlushed)
+		})
+	}
+}
+
+func (s *renderSync) state() (rendered, flushed frameState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rendered, s.flushed
+}
+
+func (s *renderSync) wait(ctx context.Context, pred func(rendered, flushed frameState) bool) bool {
+	for {
+		// Evaluate pred and capture s.notify under s.mu so a concurrent
+		// recordView/onFlush cannot close notify between the check and select.
+		s.mu.Lock()
+		ok := pred(s.rendered, s.flushed)
+		ch := s.notify
+		s.mu.Unlock()
+		if ok {
+			return true
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+type flushProbe struct {
+	sync  *renderSync
+	state frameState
+}
+
+func (p flushProbe) RGBA() (r, g, b, a uint32) {
+	if p.sync != nil {
+		p.sync.onFlush(p.state)
+	}
+	return 0, 0, 0, 0
+}
+
+// isSettled reports whether the latest rendered View has been flushed by the
+// terminal renderer and whether a turn is currently active.
+func (m Model) isSettled() (settled bool, busy bool) {
+	if m.sync == nil {
+		return true, m.busy
+	}
+	rendered, flushed := m.sync.state()
+	if !rendered.initPrinted || !flushed.initPrinted {
+		return false, rendered.busy
+	}
+	if rendered.refreshing || flushed.refreshing {
+		return false, rendered.busy
+	}
+	if rendered.seq == 0 || flushed.seq < rendered.seq {
+		return false, rendered.busy
+	}
+	return true, rendered.busy
+}
+
 // NoColor reports whether terminal color, emoji, and animation are disabled via
 // the NO_COLOR environment variable.
 func NoColor() bool {
@@ -157,10 +297,33 @@ func (m Model) now() time.Time {
 	if m.Now != nil {
 		return m.Now()
 	}
+	if m.Clock != nil {
+		return m.Clock.Now()
+	}
 	if b, ok := m.Backend.(*StoreBackend); ok && b.Now != nil {
 		return b.Now()
 	}
 	return time.Now()
+}
+
+func (m Model) tick(d time.Duration, fn func(time.Time) tea.Msg) tea.Cmd {
+	if m.Clock != nil {
+		tmr := m.Clock.NewTimer(d)
+		ctx := m.ctx
+		return func() tea.Msg {
+			defer tmr.Stop()
+			if ctx != nil {
+				select {
+				case t := <-tmr.C():
+					return fn(t)
+				case <-ctx.Done():
+					return nil
+				}
+			}
+			return fn(<-tmr.C())
+		}
+	}
+	return tea.Tick(d, fn)
 }
 
 func (m Model) turnElapsed() time.Duration {
@@ -342,7 +505,7 @@ func (m Model) pollInterval() time.Duration {
 	return 15 * time.Second
 }
 func (m Model) nextPoll() tea.Cmd {
-	return tea.Tick(m.pollInterval(), func(time.Time) tea.Msg { return pollMsg{} })
+	return m.tick(m.pollInterval(), func(time.Time) tea.Msg { return pollMsg{} })
 }
 func (m Model) spinnerInterval() time.Duration {
 	if m.SpinnerInterval > 0 {
@@ -358,7 +521,7 @@ func (m *Model) ensureSpinner() tea.Cmd {
 		return nil
 	}
 	m.spinnerTicking = true
-	return tea.Tick(m.spinnerInterval(), func(time.Time) tea.Msg { return spinnerTickMsg{} })
+	return m.tick(m.spinnerInterval(), func(time.Time) tea.Msg { return spinnerTickMsg{} })
 }
 func (m Model) currentRunID() string {
 	runID := m.runID
@@ -372,12 +535,43 @@ func (m Model) headerLine() string {
 }
 func (m Model) Init() tea.Cmd {
 	if m.poll {
-		// Delay initial scrollback emission by one 60fps render frame (18ms) so
-		// Bubble Tea processes the initial WindowSizeMsg and snapshotMsg before
-		// tea.Println writes the header and resumed transcript above the prompt.
-		// Any lines printed before initPrintMsg arrives are queued in pendingPrint
-		// to preserve strict output ordering.
-		initTick := tea.Tick(18*time.Millisecond, func(time.Time) tea.Msg { return initPrintMsg{} })
+		var initTick tea.Cmd
+		if m.sync == nil {
+			// Production default (sync == nil): delay initial scrollback emission
+			// by one 60fps render frame (18ms) so Bubble Tea processes the initial
+			// WindowSizeMsg and snapshotMsg before tea.Println writes the header
+			// and resumed transcript above the prompt.
+			initTick = m.tick(18*time.Millisecond, func(time.Time) tea.Msg { return initPrintMsg{} })
+		} else {
+			// When renderSync is attached (in tests), wait until Bubble Tea processes
+			// the initial WindowSizeMsg and snapshotMsg AND flushes the initial inline
+			// frame (resizing cellbuf to the inline view height) before tea.Println
+			// inserts the header and resumed transcript above the prompt. If onFlush
+			// already closed initFlushed before initTick runs, <-sync.initFlushed
+			// returns immediately; if no flush ever arrives (e.g. non-TTY output),
+			// wall-clock tmr.C provides a bounded fallback (cursedRenderer ticks on
+			// wall-clock time while tests hold FakeClock paused during initial setup).
+			sync, ctx := m.sync, m.ctx
+			fallback := cmp.Or(sync.initFallback, 2*time.Second)
+			initTick = func() tea.Msg {
+				tmr := time.NewTimer(fallback)
+				defer tmr.Stop()
+				if ctx != nil {
+					select {
+					case <-sync.initFlushed:
+					case <-tmr.C:
+					case <-ctx.Done():
+						return nil
+					}
+				} else {
+					select {
+					case <-sync.initFlushed:
+					case <-tmr.C:
+					}
+				}
+				return initPrintMsg{}
+			}
+		}
 		return tea.Batch(initTick, m.refresh(), m.nextPoll())
 	}
 	return m.refresh()
@@ -468,7 +662,11 @@ func (m Model) finishTurn(printed ...string) (tea.Model, tea.Cmd) {
 		m, nextCmd = m.submit(next)
 	}
 	refresh := m.requestRefresh()
-	return m, tea.Sequence(printCmd, nextCmd, refresh)
+	// Batch nextCmd and refresh after printCmd: requestRefresh() sets
+	// m.refreshing = true immediately, and nextCmd includes ensureSpinner()'s
+	// timer cmd, so sequencing refresh after nextCmd would block snapshotMsg
+	// behind the next turn's spinner timer.
+	return m, tea.Sequence(printCmd, tea.Batch(nextCmd, refresh))
 }
 func receive(ctx context.Context, ch <-chan streamMsg) tea.Cmd {
 	return func() tea.Msg {
@@ -566,8 +764,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(refresh, m.nextPoll())
 	case tea.WindowSizeMsg:
 		m.width = x.Width
+		m.sized = true
 	case snapshotMsg:
 		m.refreshing = false
+		m.initSnapDone = true
 		if x.err != nil {
 			m.status = "status error: " + x.err.Error()
 			return m, nil
@@ -804,7 +1004,25 @@ func (m Model) View() tea.View {
 	if m.styled() {
 		input = m.inputView()
 	}
-	return tea.NewView(top.String() + "\n> " + input + hints + m.statusFooter())
+	v := tea.NewView(top.String() + "\n> " + input + hints + m.statusFooter())
+	if m.sync != nil {
+		v.ForegroundColor = m.sync.recordView(frameState{
+			content:      v.Content,
+			input:        m.input,
+			status:       m.status,
+			turnHandler:  m.turnHandler,
+			turnStep:     m.turnStep,
+			spinnerFrame: m.spinnerFrame,
+			turnCount:    m.turnCount,
+			lineCount:    len(m.lines),
+			busy:         m.busy,
+			bgActive:     m.bgActive,
+			refreshing:   m.refreshing,
+			initPrinted:  m.initPrinted,
+			readyForInit: m.sized && (m.Backend == nil || m.initSnapDone),
+		})
+	}
+	return v
 }
 func (m Model) statusFooter() string {
 	if m.status == "" {

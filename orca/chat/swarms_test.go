@@ -2,7 +2,6 @@ package chat
 
 import (
 	"context"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -329,6 +328,7 @@ func TestStatusFooterAutoRefreshesWithoutDisturbingInput(t *testing.T) {
 	m := New(ctx, "run-1", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
 		return router.Decision{Handler: router.Concierge, Confidence: 1}, nil
 	}))
+	m.Clock = clk
 	m.PollInterval = 40 * time.Millisecond
 	m.Backend = b
 	m.Dispatch = func(_ context.Context, _ router.Decision, text string, emit func(string)) error {
@@ -337,15 +337,21 @@ func TestStatusFooterAutoRefreshesWithoutDisturbingInput(t *testing.T) {
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(120, 30))
-	waitText(t, tm, "lane-a swe r1 PR #401 (open)")
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(120, 30))
+	vt := newFakeTerminal(120, 30)
+	var rawAll strings.Builder
+	waitScreen := func(substrs ...string) {
+		t.Helper()
+		waitScreenModel(t, tm, m, &vt, &rawAll, 120, 30, substrs...)
+	}
+
+	waitScreen("lane-a swe r1 PR #401 (open)")
 
 	// Type half a line without pressing Enter.
 	tm.Type("hold lane-a ")
-	waitText(t, tm, "lane-a")
+	waitScreen("> hold lane-a")
 
 	// Mutate store (lane phase, new ask, decision cost) and PR state while input is half-typed.
-	clk.Advance(3 * time.Minute)
 	prState.Store("MERGED")
 	if err := st.Lanes().Upsert(ctx, store.Lane{
 		RunID: "run-1", ID: "lane-a", Phase: "review", Status: "running", Round: 2, PR: 401,
@@ -365,15 +371,10 @@ func TestStatusFooterAutoRefreshesWithoutDisturbingInput(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	clk.Advance(3 * time.Minute)
 
 	// Status footer and open questions redraw within one interval while half-typed input stays intact.
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		s := SanitizeText(string(b))
-		return strings.Contains(s, "Approve merge?") &&
-			strings.Contains(s, "lane-a review r2 PR #401 (merged)") &&
-			strings.Contains(s, "open questions: 1") &&
-			strings.Contains(s, "cost today: $0.35")
-	}, teatest.WithDuration(5*time.Second))
+	waitScreen("Approve merge?", "lane-a review r2 PR #401 (merged)", "open questions: 1", "cost today: $0.35")
 
 	// Finish typing the rest of the line and submit: the full input must arrive intact.
 	submit(tm, "until CI passes")
@@ -442,6 +443,7 @@ func TestReplyCompletesWhileTypingPreservesInputAndRedrawsAddNoScrollback(t *tes
 	m := New(ctx, "run-1", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
 		return router.Decision{Handler: router.Concierge, Confidence: 1}, nil
 	}))
+	m.Clock = clk
 	m.PollInterval = 25 * time.Millisecond
 	m.Backend = b
 	m.Dispatch = func(_ context.Context, _ router.Decision, text string, emit func(string)) error {
@@ -457,8 +459,15 @@ func TestReplyCompletesWhileTypingPreservesInputAndRedrawsAddNoScrollback(t *tes
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
-	waitText(t, tm, "orca chat — run run-1")
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(100, 30))
+	vt := newFakeTerminal(100, 30)
+	var rawAll strings.Builder
+	waitScreen := func(substrs ...string) {
+		t.Helper()
+		waitScreenModel(t, tm, m, &vt, &rawAll, 100, 30, substrs...)
+	}
+
+	waitScreen("orca chat — run run-1")
 
 	// Start the first turn, then type a half-typed line while the reply is in flight.
 	submit(tm, "first question")
@@ -468,14 +477,11 @@ func TestReplyCompletesWhileTypingPreservesInputAndRedrawsAddNoScrollback(t *tes
 		t.Fatal("first turn did not start")
 	}
 	tm.Type("half typed ")
-	waitText(t, tm, "half typed ")
+	waitScreen("> half typed")
 
 	// Complete the reply while the owner is mid-typing.
 	close(releaseFirst)
-	teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-		s := string(p)
-		return strings.Contains(s, "concierge reply line 1") && strings.Contains(s, "concierge reply line 2")
-	}, teatest.WithDuration(5*time.Second))
+	waitScreen("concierge reply line 1", "concierge reply line 2")
 	select {
 	case got := <-dispatched:
 		if got != "first question" {
@@ -495,39 +501,31 @@ func TestReplyCompletesWhileTypingPreservesInputAndRedrawsAddNoScrollback(t *tes
 	case <-time.After(5 * time.Second):
 		t.Fatal("follow-up line was lost or never routed")
 	}
-	teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-		s := string(p)
-		return strings.Contains(s, "→ concierge: half typed follow up") && strings.Contains(s, "orca> ack: half typed follow up")
-	}, teatest.WithDuration(5*time.Second))
+	waitScreen("→ concierge: half typed follow up", "orca> ack: half typed follow up")
 
 	// Wait for the post-turn status refresh to position the cursor on the footer,
-	// then drain the output buffer before measuring N status redraws.
+	// then record the raw output offset before measuring N status redraws.
 	if err := st.Lanes().Upsert(ctx, store.Lane{
 		RunID: "run-1", ID: "lane-a", Phase: "plan", Status: "running", Round: 1, PR: 401,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	waitText(t, tm, "plan")
-	_, _ = io.ReadAll(tm.Output())
+	clk.Advance(25 * time.Millisecond)
+	waitScreen("plan")
+	rawBeforeRedraws := rawAll.Len()
 
 	// Trigger N=5 distinct status redraws and wait for each one to render.
-	var redrawBuf strings.Builder
 	for i, wantPhase := range []string{"build", "verify", "triage", "merge", "deploy"} {
 		if err := st.Lanes().Upsert(ctx, store.Lane{
 			RunID: "run-1", ID: "lane-a", Phase: wantPhase, Status: "running", Round: i + 2, PR: 401,
 		}); err != nil {
 			t.Fatal(err)
 		}
-		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-			if strings.Contains(string(p), wantPhase) {
-				redrawBuf.Write(p)
-				return true
-			}
-			return false
-		}, teatest.WithDuration(5*time.Second))
+		clk.Advance(25 * time.Millisecond)
+		waitScreen(wantPhase)
 	}
 
-	redrawOut := redrawBuf.String()
+	redrawOut := rawAll.String()[rawBeforeRedraws:]
 	for _, transcriptLine := range []string{
 		"orca chat — run run-1",
 		"you> first question",
@@ -549,6 +547,12 @@ func TestReplyCompletesWhileTypingPreservesInputAndRedrawsAddNoScrollback(t *tes
 func TestSubmittedInputWhileBusyIsQueuedAndRouted(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
+	clk := clock.NewFakeClock(swarmNow)
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	if err := st.Runs().Create(ctx, store.Run{ID: "run-1", Objective: "queue while busy"}); err != nil {
+		t.Fatal(err)
+	}
 	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	dispatched := make(chan string, 4)
@@ -556,6 +560,8 @@ func TestSubmittedInputWhileBusyIsQueuedAndRouted(t *testing.T) {
 	m := New(ctx, "run-1", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
 		return router.Decision{Handler: router.Concierge, Confidence: 1}, nil
 	}))
+	m.Clock = clk
+	m.Backend = NewStoreBackend(st, "run-1")
 	m.Dispatch = func(_ context.Context, _ router.Decision, text string, emit func(string)) error {
 		if text == "slow turn" {
 			close(firstStarted)
@@ -566,7 +572,10 @@ func TestSubmittedInputWhileBusyIsQueuedAndRouted(t *testing.T) {
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(100, 30))
+	vt := newFakeTerminal(100, 30)
+	var rawAll strings.Builder
+	waitScreenModel(t, tm, m, &vt, &rawAll, 100, 30, "orca chat — run run-1")
 	submit(tm, "slow turn")
 	select {
 	case <-firstStarted:
@@ -588,10 +597,7 @@ func TestSubmittedInputWhileBusyIsQueuedAndRouted(t *testing.T) {
 			t.Fatalf("timed out waiting for %q to be routed", want)
 		}
 	}
-	teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-		s := string(p)
-		return strings.Contains(s, "→ concierge: submitted while busy") && strings.Contains(s, "orca> done: submitted while busy")
-	}, teatest.WithDuration(5*time.Second))
+	waitScreenModel(t, tm, m, &vt, &rawAll, 100, 30, "→ concierge: submitted while busy", "orca> done: submitted while busy")
 	finish(t, tm)
 }
 
@@ -670,7 +676,7 @@ func TestCtrlUClearsInputBeforeTheNextCommand(t *testing.T) {
 	rec := commandRecorder{got: make(chan string, 1)}
 	m := New(t.Context(), "run", nil, nil)
 	m.Backend = rec
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(100, 30))
 	tm.Type("which swarms are active")
 	tm.Send(tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
 	submit(tm, "/status")

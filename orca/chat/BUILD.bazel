@@ -14,6 +14,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//orca/adopt",
+        "//orca/clock",
         "//orca/concierge",
         "//orca/controller",
         "//orca/mailbox",

@@ -38,7 +38,7 @@ func TestPlanChangeReachesPlanner(t *testing.T) {
 		}
 		return nil
 	}
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(100, 30))
 	tm.Type("change the plan to ship chat first")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	select {
@@ -56,12 +56,21 @@ func TestPlanChangeReachesPlanner(t *testing.T) {
 type routeFunc func(context.Context, string) (router.Decision, error)
 
 func (f routeFunc) Route(ctx context.Context, s string) (router.Decision, error) { return f(ctx, s) }
-func waitText(t *testing.T, tm *teatest.TestModel, text string) {
+func waitText(t *testing.T, tm *teatest.TestModel, texts ...string) {
 	t.Helper()
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		s := string(b)
-		return strings.Contains(s, text) || strings.Contains(SanitizeText(s), text)
-	}, teatest.WithDuration(5*time.Second))
+		san := SanitizeText(s)
+		probe := newFakeTerminal(160, 50)
+		probe.write(s)
+		screen := strings.Join(probe.nonEmptyLines(), "\n")
+		for _, text := range texts {
+			if !strings.Contains(s, text) && !strings.Contains(san, text) && (probe.incompleteEsc || !strings.Contains(screen, text)) {
+				return false
+			}
+		}
+		return true
+	}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(5*time.Millisecond))
 }
 func submit(tm *teatest.TestModel, s string) {
 	tm.Type(s)
@@ -129,7 +138,7 @@ func TestRoutingDoesNotBlockUpdateAndStreams(t *testing.T) {
 		emit(" second chunk")
 		return nil
 	}
-	tm := teatest.NewTestModel(t, m)
+	tm := newTestModel(t, &m)
 	submit(tm, "hello")
 	go tm.Type("still responsive")
 	waitText(t, tm, "still responsive")
@@ -139,7 +148,8 @@ func TestRoutingDoesNotBlockUpdateAndStreams(t *testing.T) {
 	finish(t, tm)
 }
 func TestUTF8Backspace(t *testing.T) {
-	tm := teatest.NewTestModel(t, New(context.Background(), "run", nil, nil))
+	m := New(context.Background(), "run", nil, nil)
+	tm := newTestModel(t, &m)
 	tm.Type("é猫🙂")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -185,14 +195,14 @@ func TestStoreStatusSlashAndInlineAnswer(t *testing.T) {
 	m := New(ctx, "run", nil, r)
 	m.Backend = b
 	m.Dispatch = b.Dispatch
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(150, 50))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(150, 50))
 	waitText(t, tm, "Ship today?")
 	for _, s := range []struct{ cmd, want string }{{"/status", "goal: ship chat"}, {"/lanes", `review`}, {"/asks", "Ship today?"}, {"/plan", "plan.md"}, {"/log trace-1", "logged-route"}, {"/memory", "owner"}, {"/pause", "run pause"}, {"/resume", "run resume"}} {
 		submit(tm, s.cmd)
 		waitText(t, tm, s.want)
 	}
 	submit(tm, "yes")
-	waitText(t, tm, "→ dispatcher: yes")
+	waitText(t, tm, "→ dispatcher: yes", "Saved for the dispatcher of run run")
 	finish(t, tm)
 	evs, err := st.Events().List(ctx, store.EventFilter{RunID: "run"})
 	if err != nil {

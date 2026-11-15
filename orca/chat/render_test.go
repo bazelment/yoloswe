@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/exp/teatest/v2"
 	"github.com/mattn/go-runewidth"
 
@@ -76,6 +77,35 @@ func (t *fakeTerminal) write(s string) {
 					t.row--
 				}
 				i += 2
+				continue
+			}
+			if next == ']' {
+				j := i + 2
+				terminated := false
+				for j < len(runes) {
+					if runes[j] == '\x07' || runes[j] == 0x9c {
+						j++
+						terminated = true
+						break
+					}
+					if runes[j] == '\x1b' {
+						if j+1 >= len(runes) {
+							t.incompleteEsc = true
+							return
+						}
+						if runes[j+1] == '\\' {
+							j += 2
+							terminated = true
+							break
+						}
+					}
+					j++
+				}
+				if !terminated {
+					t.incompleteEsc = true
+					return
+				}
+				i = j
 				continue
 			}
 			if next == '[' {
@@ -238,6 +268,57 @@ func (t *fakeTerminal) nonEmptyLines() []string {
 		}
 	}
 	return out
+}
+
+func (t *fakeTerminal) hasTurnSpinner() bool {
+	for _, line := range t.visibleLines() {
+		if strings.HasPrefix(line, ">") {
+			break
+		}
+		for _, g := range SpinnerFrames {
+			if strings.HasPrefix(line, "  "+g+" ") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func newTestModel(t *testing.T, m *Model, opts ...teatest.TestOption) *teatest.TestModel {
+	t.Helper()
+	if m.sync == nil {
+		m.sync = newRenderSync()
+	}
+	return teatest.NewTestModel(t, *m, opts...)
+}
+
+func waitScreenModel(t *testing.T, tm *teatest.TestModel, m Model, vt **fakeTerminal, rawAll *strings.Builder, w, h int, substrs ...string) {
+	t.Helper()
+	teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
+		probe := newFakeTerminal(w, h)
+		probe.write(rawAll.String() + string(p))
+		if probe.incompleteEsc {
+			return false
+		}
+		settled, busy := m.isSettled()
+		if !settled {
+			return false
+		}
+		if !busy && probe.hasTurnSpinner() {
+			return false
+		}
+		screen := strings.Join(probe.nonEmptyLines(), "\n")
+		for _, sub := range substrs {
+			if !strings.Contains(screen, sub) {
+				return false
+			}
+		}
+		rawAll.Write(p)
+		if vt != nil {
+			*vt = probe
+		}
+		return true
+	}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(5*time.Millisecond))
 }
 
 func TestInnerLoopReply60ColsGolden(t *testing.T) {
@@ -412,9 +493,11 @@ func TestMarkdownRenderedOnTTYAndPlainWhenPiped(t *testing.T) {
 func TestTurnLayoutWithToolCallsAndBlankLineBetweenTurns(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 5, 40, 0, 0, time.UTC))
 	m := New(ctx, "front-desk", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
 		return router.Decision{Handler: router.Concierge, Confidence: 1}, nil
 	}))
+	m.Clock = clk
 	m.width = 80
 	m.SpinnerInterval = -1
 	m.Dispatch = func(turnCtx context.Context, _ router.Decision, text string, emit func(string)) error {
@@ -428,19 +511,11 @@ func TestTurnLayoutWithToolCallsAndBlankLineBetweenTurns(t *testing.T) {
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(80, 24))
 	var captured strings.Builder
-	waitCapture := func(substr string) {
+	waitCapture := func(substrs ...string) {
 		t.Helper()
-		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-			probe := newFakeTerminal(80, 24)
-			probe.write(captured.String() + string(p))
-			if !probe.incompleteEsc && strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
-				captured.Write(p)
-				return true
-			}
-			return false
-		}, teatest.WithDuration(5*time.Second))
+		waitScreenModel(t, tm, m, nil, &captured, 80, 24, substrs...)
 	}
 	waitCapture("orca chat — run front-desk")
 
@@ -523,7 +598,8 @@ func TestRestartPrintsRecentTurnsAndRestartLineOnVisibleScreen(t *testing.T) {
 	transcript = append(transcript, noHeld...)
 
 	ctx := t.Context()
-	st := store.NewMemoryStore(nil)
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 5, 42, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
 	defer st.Close()
 	if err := st.Runs().Create(ctx, store.Run{ID: "front-desk"}); err != nil {
 		t.Fatal(err)
@@ -532,29 +608,16 @@ func TestRestartPrintsRecentTurnsAndRestartLineOnVisibleScreen(t *testing.T) {
 	b.FrontDesk = "front-desk"
 
 	m := New(ctx, "front-desk", nil, nil).WithTranscript(transcript)
+	m.Clock = clk
 	m.width = 80
 	m.Backend = b
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(80, 24))
 	var captured strings.Builder
-	teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-		probe := newFakeTerminal(80, 24)
-		probe.write(captured.String() + string(p))
-		if probe.incompleteEsc {
-			return false
-		}
-		screen := strings.Join(probe.nonEmptyLines(), "\n")
-		if strings.Contains(screen, "orca restarted (version c00d67a -> 9f8e7d6)") && strings.Contains(screen, "front desk: no run yet") {
-			captured.Write(p)
-			return true
-		}
-		return false
-	}, teatest.WithDuration(5*time.Second))
-	liveScreenBytes := captured.String()
+	var vt *fakeTerminal
+	waitScreenModel(t, tm, m, &vt, &captured, 80, 24, "orca restarted (version c00d67a -> 9f8e7d6)", "front desk: no run yet")
 	finish(t, tm)
 
-	vt := newFakeTerminal(80, 24)
-	vt.write(liveScreenBytes)
 	screen := strings.Join(vt.nonEmptyLines(), "\n")
 
 	for _, want := range []string{
@@ -588,7 +651,8 @@ func TestRestartPrintsRecentTurnsAndRestartLineOnVisibleScreen(t *testing.T) {
 func TestHeaderPrintedOnceAcrossTurnsAndStatusRedraws(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	st := store.NewMemoryStore(nil)
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 5, 44, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
 	defer st.Close()
 	if err := st.Runs().Create(ctx, store.Run{ID: "front-desk", Objective: "test header once"}); err != nil {
 		t.Fatal(err)
@@ -599,6 +663,7 @@ func TestHeaderPrintedOnceAcrossTurnsAndStatusRedraws(t *testing.T) {
 	m := New(ctx, "front-desk", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
 		return router.Decision{Handler: router.Concierge, Confidence: 1}, nil
 	}))
+	m.Clock = clk
 	m.PollInterval = 25 * time.Millisecond
 	m.Backend = b
 	m.Dispatch = func(_ context.Context, _ router.Decision, text string, emit func(string)) error {
@@ -606,22 +671,17 @@ func TestHeaderPrintedOnceAcrossTurnsAndStatusRedraws(t *testing.T) {
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(80, 24))
 	var captured strings.Builder
-	waitCapture := func(substr string) {
+	waitCapture := func(substrs ...string) {
 		t.Helper()
-		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-			if strings.Contains(captured.String()+string(p), substr) {
-				captured.Write(p)
-				return true
-			}
-			return false
-		}, teatest.WithDuration(5*time.Second))
+		waitScreenModel(t, tm, m, nil, &captured, 80, 24, substrs...)
 	}
 
 	waitCapture("orca chat — run front-desk")
 	submit(tm, "first turn")
 	waitCapture("orca> reply to first turn")
+	clk.Advance(25 * time.Millisecond)
 	submit(tm, "second turn")
 	waitCapture("orca> reply to second turn")
 	finish(t, tm)
@@ -823,9 +883,10 @@ func TestInnerLoopSpinnerUnderSlowTurnReplacedByReplyGolden(t *testing.T) {
 	m := New(ctx, "front-desk", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
 		return router.Decision{Handler: router.Concierge, Confidence: 1}, nil
 	}))
+	m.Clock = clk
 	m.Now = clk.Now
 	m.width = 80
-	m.SpinnerInterval = -1 // deterministic frame stepping for golden comparison
+	m.SpinnerInterval = time.Second
 	m.Dispatch = func(turnCtx context.Context, _ router.Decision, _ string, emit func(string)) error {
 		<-step1Gate
 		EmitToolCall(turnCtx, "status", []byte(`{"run_id":"20261114-trial-m1"}`), "front-desk")
@@ -836,22 +897,13 @@ func TestInnerLoopSpinnerUnderSlowTurnReplacedByReplyGolden(t *testing.T) {
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(80, 24))
 	vt := newFakeTerminal(80, 24)
 	var rawAll strings.Builder
 
-	waitScreen := func(substr string) {
+	waitScreen := func(substrs ...string) {
 		t.Helper()
-		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-			probe := newFakeTerminal(80, 24)
-			probe.write(rawAll.String() + string(p))
-			if !probe.incompleteEsc && strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
-				rawAll.Write(p)
-				vt = probe
-				return true
-			}
-			return false
-		}, teatest.WithDuration(5*time.Second))
+		waitScreenModel(t, tm, m, &vt, &rawAll, 80, 24, substrs...)
 	}
 
 	waitScreen("orca chat — run front-desk")
@@ -862,18 +914,18 @@ func TestInnerLoopSpinnerUnderSlowTurnReplacedByReplyGolden(t *testing.T) {
 	}
 
 	submit(tm, "check 20261114-trial-m1")
-	waitScreen("⠋ 💬 concierge · thinking (0s)")
+	waitScreen("💬 → concierge: check 20261114-trial-m1", "⠋ 💬 concierge · thinking (0s)")
 	recordFrame("frame 0: thinking")
 
-	clk.Advance(time.Second)
 	close(step1Gate)
-	tm.Send(spinnerTickMsg{})
+	waitScreen("→ status 20261114-trial-m1")
+	clk.Advance(time.Second)
 	waitScreen("⠙ 💬 concierge · → status 20261114-trial-m1 (1s)")
 	recordFrame("frame 1: tool status")
 
-	clk.Advance(time.Second)
 	close(step2Gate)
-	tm.Send(spinnerTickMsg{})
+	waitScreen("→ read.file OBJECTIVE.md")
+	clk.Advance(time.Second)
 	waitScreen("⠹ 💬 concierge · reading OBJECTIVE.md (2s)")
 	recordFrame("frame 2: reading OBJECTIVE.md")
 
@@ -1056,9 +1108,10 @@ func TestHalfTypedInputSurvives50SpinnerFrames(t *testing.T) {
 	m := New(ctx, "front-desk", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
 		return router.Decision{Handler: router.Dispatcher, Confidence: 1}, nil
 	}))
+	m.Clock = clk
 	m.Now = clk.Now
 	m.width = 80
-	m.SpinnerInterval = -1
+	m.SpinnerInterval = time.Second
 	m.status = "adopted: 20261114-trial-m1 | m5-finish review r1 PR #5899 (open, checks: 8 passed) 10m\nlanes: 5 (done:4, running:1; review:1) | open questions: 0 | cost today: $2.10"
 	m.Dispatch = func(_ context.Context, _ router.Decision, text string, emit func(string)) error {
 		if text == "first command" {
@@ -1070,22 +1123,13 @@ func TestHalfTypedInputSurvives50SpinnerFrames(t *testing.T) {
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(80, 24))
 	vt := newFakeTerminal(80, 24)
 	var rawAll strings.Builder
 
 	waitScreen := func(substr string) {
 		t.Helper()
-		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-			probe := newFakeTerminal(80, 24)
-			probe.write(rawAll.String() + string(p))
-			if !probe.incompleteEsc && strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
-				rawAll.Write(p)
-				vt = probe
-				return true
-			}
-			return false
-		}, teatest.WithDuration(5*time.Second))
+		waitScreenModel(t, tm, m, &vt, &rawAll, 80, 24, substr)
 	}
 
 	waitScreen("orca chat — run front-desk")
@@ -1101,11 +1145,13 @@ func TestHalfTypedInputSurvives50SpinnerFrames(t *testing.T) {
 	tm.Type("hold m5-finish ")
 	waitScreen("> hold m5-finish")
 
-	// Advance 50 spinner frames across 50 seconds and verify the half-typed input
-	// stays intact and zero lines leak into scrollback.
+	// Advance 50 spinner frames across 50 seconds via the injected clock and verify
+	// the half-typed input stays intact and zero lines leak into scrollback.
 	for i := 1; i <= 50; i++ {
 		clk.Advance(time.Second)
-		tm.Send(spinnerTickMsg{})
+		if !m.sync.wait(ctx, func(r, _ frameState) bool { return r.spinnerFrame >= i }) {
+			t.Fatalf("spinner did not advance to frame %d", i)
+		}
 	}
 	wantGlyph := SpinnerFrames[50%len(SpinnerFrames)]
 	waitScreen(wantGlyph + " ⚡ dispatcher · thinking (50s)")
@@ -1198,27 +1244,19 @@ func TestBackgroundEventsPrintedAboveInputColored(t *testing.T) {
 	b.Now = clk.Now
 
 	m := New(ctx, "run-1", nil, nil)
+	m.Clock = clk
 	m.width = 100
 	m.PollInterval = 30 * time.Millisecond
 	m.SpinnerInterval = -1
 	m.Backend = b
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 24))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(100, 24))
 	vt := newFakeTerminal(100, 24)
 	var rawAll strings.Builder
 
 	waitScreen := func(substr string) {
 		t.Helper()
-		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-			probe := newFakeTerminal(100, 24)
-			probe.write(rawAll.String() + string(p))
-			if !probe.incompleteEsc && strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
-				rawAll.Write(p)
-				vt = probe
-				return true
-			}
-			return false
-		}, teatest.WithDuration(5*time.Second))
+		waitScreenModel(t, tm, m, &vt, &rawAll, 100, 24, substr)
 	}
 
 	waitScreen("orca chat — run run-1")
@@ -1257,6 +1295,7 @@ func TestBackgroundEventsPrintedAboveInputColored(t *testing.T) {
 		t.Fatalf("EnforceCostGuard = (%v, %v), want (true, nil)", paused, err)
 	}
 
+	clk.Advance(30 * time.Millisecond)
 	waitScreen("Cost guard paused turns for run run-1: spent $6.20 in the last hour (limit $5.00/hr).")
 	finish(t, tm)
 
@@ -1409,10 +1448,12 @@ func TestStoreBackendSnapshotBackgroundActivityAndCostGuardState(t *testing.T) {
 func TestAutoSpinnerTicksAdvanceFramesDuringSlowTurn(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 6, 5, 0, 0, time.UTC))
 	release := make(chan struct{})
 	m := New(ctx, "front-desk", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
 		return router.Decision{Handler: router.Planner, Confidence: 1}, nil
 	}))
+	m.Clock = clk
 	m.width = 80
 	m.SpinnerInterval = 20 * time.Millisecond
 	m.Dispatch = func(_ context.Context, _ router.Decision, _ string, emit func(string)) error {
@@ -1421,33 +1462,21 @@ func TestAutoSpinnerTicksAdvanceFramesDuringSlowTurn(t *testing.T) {
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(80, 24))
+	vt := newFakeTerminal(80, 24)
 	var rawAll strings.Builder
 	waitScreen := func(substr string) {
 		t.Helper()
-		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-			probe := newFakeTerminal(80, 24)
-			probe.write(rawAll.String() + string(p))
-			if !probe.incompleteEsc && strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
-				rawAll.Write(p)
-				return true
-			}
-			return false
-		}, teatest.WithDuration(5*time.Second))
+		waitScreenModel(t, tm, m, &vt, &rawAll, 80, 24, substr)
 	}
 
 	waitScreen("orca chat — run front-desk")
 	submit(tm, "replan m5")
-	teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-		plain := SanitizeText(rawAll.String() + string(p))
-		if strings.Contains(plain, "⠋ 🧭 planner") &&
-			strings.Contains(plain, "⠙ 🧭 planner") &&
-			strings.Contains(plain, "⠹ 🧭 planner") {
-			rawAll.Write(p)
-			return true
-		}
-		return false
-	}, teatest.WithDuration(5*time.Second))
+	waitScreen("⠋ 🧭 planner")
+	clk.Advance(20 * time.Millisecond)
+	waitScreen("⠙ 🧭 planner")
+	clk.Advance(20 * time.Millisecond)
+	waitScreen("⠹ 🧭 planner")
 	close(release)
 	waitScreen("orca> Plan updated.")
 	finish(t, tm)
@@ -1524,5 +1553,94 @@ func TestFormatBackgroundEventClassification(t *testing.T) {
 				t.Fatalf("FormatBackgroundEvent(%q) = %q, missing SGR %q", tc.line, rows[0], tc.wantSGR)
 			}
 		})
+	}
+}
+
+func TestRenderSyncTickAndProductionViewIsolation(t *testing.T) {
+	t.Parallel()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 6, 10, 0, 0, time.UTC))
+
+	// 1. Production Models constructed by New leave sync nil, never set View.ForegroundColor,
+	// and schedule Init's 18ms initPrintMsg tick via Model.tick.
+	prod := New(t.Context(), "front-desk", nil, nil)
+	prod.Clock = clk
+	if prod.sync != nil {
+		t.Fatal("New() set non-nil sync on production Model")
+	}
+	if fg := prod.View().ForegroundColor; fg != nil {
+		t.Fatalf("production View().ForegroundColor = %v, want nil", fg)
+	}
+	prodBatch, ok := prod.Init()().(tea.BatchMsg)
+	if !ok || len(prodBatch) == 0 {
+		t.Fatalf("prod.Init() returned %#v, want non-empty tea.BatchMsg", prodBatch)
+	}
+	clk.Advance(18 * time.Millisecond)
+	if msg := prodBatch[0](); msg != (initPrintMsg{}) {
+		t.Fatalf("prod.Init() tick msg = %#v, want initPrintMsg{}", msg)
+	}
+
+	// 2. Model.tick uses the injected Clock on Advance and returns nil on context cancellation.
+	m := New(t.Context(), "front-desk", nil, nil)
+	m.Clock = clk
+	tickCmd := m.tick(50*time.Millisecond, func(time.Time) tea.Msg { return spinnerTickMsg{} })
+	clk.Advance(50 * time.Millisecond)
+	if msg := tickCmd(); msg != (spinnerTickMsg{}) {
+		t.Fatalf("tick msg = %#v, want spinnerTickMsg{}", msg)
+	}
+
+	cancelCtx, cancel := context.WithCancel(t.Context())
+	mCancel := New(cancelCtx, "front-desk", nil, nil)
+	mCancel.Clock = clk
+	cancelCmd := mCancel.tick(time.Hour, func(time.Time) tea.Msg { return pollMsg{} })
+	cancel()
+	if msg := cancelCmd(); msg != nil {
+		t.Fatalf("canceled tick msg = %#v, want nil", msg)
+	}
+
+	// 3. renderSync tracks rendered vs flushed sequence numbers, signals initFlushed once readyForInit,
+	// and unblocks wait() on state change or context cancellation.
+	sync := newRenderSync()
+	m.sync = sync
+	st1 := frameState{content: "frame-1", initPrinted: true, readyForInit: true}
+	probe1 := sync.recordView(st1)
+	r1, f1 := sync.state()
+	if r1.seq != 1 || f1.seq != 0 {
+		t.Fatalf("after first recordView: rendered.seq=%d flushed.seq=%d, want 1 and 0", r1.seq, f1.seq)
+	}
+	// Identical frameState does not bump rendered.seq.
+	_ = sync.recordView(st1)
+	if rDup, _ := sync.state(); rDup.seq != 1 {
+		t.Fatalf("duplicate recordView bumped rendered.seq to %d, want 1", rDup.seq)
+	}
+	if settled, _ := m.isSettled(); settled {
+		t.Fatal("isSettled() = true before flushProbe.RGBA() ran")
+	}
+	_, _, _, _ = probe1.RGBA()
+	select {
+	case <-sync.initFlushed:
+	default:
+		t.Fatal("flushProbe.RGBA() with readyForInit=true did not close initFlushed")
+	}
+	if settled, _ := m.isSettled(); !settled {
+		t.Fatal("isSettled() = false after flushProbe.RGBA() flushed latest seq")
+	}
+	if !sync.wait(t.Context(), func(r, f frameState) bool { return f.seq == r.seq && r.seq == 1 }) {
+		t.Fatal("sync.wait did not observe flushed.seq == 1")
+	}
+	if sync.wait(cancelCtx, func(r, f frameState) bool { return r.seq == 99 }) {
+		t.Fatal("sync.wait with canceled context returned true for unmet predicate")
+	}
+
+	// 4. Init's renderSync gate falls back after initFallback when no renderer flushes.
+	unflushed := New(t.Context(), "front-desk", nil, nil)
+	unflushed.Clock = clk
+	unflushed.sync = newRenderSync()
+	unflushed.sync.initFallback = 5 * time.Millisecond
+	initBatch, ok := unflushed.Init()().(tea.BatchMsg)
+	if !ok || len(initBatch) == 0 {
+		t.Fatalf("Init() returned %#v, want non-empty tea.BatchMsg", initBatch)
+	}
+	if msg := initBatch[0](); msg != (initPrintMsg{}) {
+		t.Fatalf("Init() fallback cmd returned %#v, want initPrintMsg{}", msg)
 	}
 }
