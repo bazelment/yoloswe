@@ -72,6 +72,7 @@ type StoreBackend struct {
 	usageCache         map[string]runUsageCache
 	seenTurns          map[string]bool
 	seenDecs           map[string]bool
+	seenAsks           map[string]bool
 	pendingOutcomeRuns map[string]bool
 }
 
@@ -377,7 +378,7 @@ func (b *StoreBackend) Snapshot(ctx context.Context) (Snapshot, error) {
 	// or close the store while pending outcomes are read.
 	b.mu.RLock()
 	if b.store == st && st != nil {
-		snap.Outcomes = b.collectPendingDispatcherOutcomes(ctx, st, v.held)
+		snap.Outcomes = b.collectPendingDispatcherOutcomes(ctx, st, v.held, v.asks)
 	}
 	b.mu.RUnlock()
 	return snap, nil
@@ -417,6 +418,9 @@ type runView struct {
 	liveLanes []string
 	asks      []openAsk
 	cost      float64
+	costState CostGuardState
+	bgActive  bool
+	bgRole    string
 	desk      bool
 	statuses  map[string]int
 	phases    map[string]int
@@ -522,13 +526,23 @@ func (b *StoreBackend) view(ctx context.Context, includeLive bool) (runView, []l
 			return runView{}, nil, err
 		}
 		for i := range threads {
+			role := string(threads[i].Role)
+			isBgRole := threads[i].Role == store.ThreadRoleDispatcher || threads[i].Role == store.ThreadRolePlanner || role == "controller"
+			if isBgRole && threads[i].Status == store.ThreadStatusRunning {
+				v.bgActive = true
+				v.bgRole = cmp.Or(v.bgRole, role)
+			}
 			turns, err := b.store.Threads().ListTurns(ctx, threads[i].ID)
 			if err != nil {
 				return runView{}, nil, err
 			}
 			for j := range turns {
+				if isBgRole && turns[j].Status == store.TurnStatusRunning {
+					v.bgActive = true
+					v.bgRole = cmp.Or(v.bgRole, role)
+				}
 				if turns[j].StartedAt.IsZero() || !turns[j].StartedAt.Before(start) {
-					tc := turnCostUSD(&turns[j], string(threads[i].Role))
+					tc := turnCostUSD(&turns[j], role)
 					decCost := turnDecisionCost[turns[j].ID]
 					if rem := tc - decCost; rem > 0 {
 						v.cost += rem
@@ -544,6 +558,25 @@ func (b *StoreBackend) view(ctx context.Context, includeLive bool) (runView, []l
 			return runView{}, nil, err
 		}
 		v.cost += evCost
+		if settings, sErr := b.store.Runs().GetSettings(ctx, id); sErr == nil {
+			if !settings.CostGuardDisabled && settings.MaxCostPerHourUSD > 0 {
+				hourly, hErr := store.HourlyRunCostUSD(ctx, b.store, id, now)
+				if hErr != nil {
+					return runView{}, nil, hErr
+				}
+				if st := ClassifyCostGuard(hourly, settings.MaxCostPerHourUSD); st > v.costState {
+					v.costState = st
+				}
+			}
+			if settings.Paused {
+				for i := range decs {
+					if decs[i].Tool == "cost.guard" && (decs[i].CreatedAt.IsZero() || !decs[i].CreatedAt.Before(start)) {
+						v.costState = CostStateOverLimit
+						break
+					}
+				}
+			}
+		}
 		if len(runLanes) > 0 {
 			var repo string
 			if r := runsByID[id]; r != nil {
@@ -812,7 +845,13 @@ func (v *runView) snapshot(questions []string) Snapshot {
 	if len(v.liveLanes) > 0 {
 		status = lead + " | " + strings.Join(v.liveLanes, " | ") + "\n" + totals
 	}
-	return Snapshot{Status: status, Questions: questions}
+	return Snapshot{
+		Status:           status,
+		Questions:        questions,
+		BackgroundActive: v.bgActive,
+		BackgroundRole:   v.bgRole,
+		CostState:        v.costState,
+	}
 }
 
 // statusReport is /status: the run and its goal, lanes by status and phase,
@@ -1121,11 +1160,11 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 		b.stepAdopted(ctx, runID)
 		var outcomes []string
 		if closeStepStore {
-			outcomes = b.collectDispatcherOutcomes(ctx, stepStore, []string{runID})
+			outcomes = b.collectDispatcherOutcomes(ctx, stepStore, []string{runID}, false)
 		} else {
 			b.mu.RLock()
 			if b.store == stepStore {
-				outcomes = b.collectDispatcherOutcomes(ctx, stepStore, []string{runID})
+				outcomes = b.collectDispatcherOutcomes(ctx, stepStore, []string{runID}, false)
 			}
 			b.mu.RUnlock()
 		}
@@ -1258,6 +1297,10 @@ func seenDecKey(runID string, seq int64) string {
 	return runID + "\x00" + strconv.FormatInt(seq, 10)
 }
 
+func seenAskKey(runID, askID string) string {
+	return runID + "\x00" + askID
+}
+
 func (b *StoreBackend) markPendingOutcomeRun(runID string) {
 	if runID == "" {
 		return
@@ -1277,6 +1320,8 @@ func (b *StoreBackend) seedSeenDispatcherRun(ctx context.Context, st store.Store
 	threads, _ := st.Threads().ListThreads(ctx, store.ThreadFilter{RunID: runID, Role: store.ThreadRoleDispatcher})
 	decs, _ := st.Decisions().List(ctx, store.DecisionFilter{RunID: runID, Actor: "dispatcher"})
 	ctrlDecs, _ := st.Decisions().List(ctx, store.DecisionFilter{RunID: runID, Actor: "controller"})
+	dirs, _ := st.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	laneQs, _ := mailbox.OpenLaneQuestions(ctx, st, runID, b.now())
 	b.cacheMu.Lock()
 	defer b.cacheMu.Unlock()
 	if b.seenTurns == nil {
@@ -1284,6 +1329,9 @@ func (b *StoreBackend) seedSeenDispatcherRun(ctx context.Context, st store.Store
 	}
 	if b.seenDecs == nil {
 		b.seenDecs = map[string]bool{}
+	}
+	if b.seenAsks == nil {
+		b.seenAsks = map[string]bool{}
 	}
 	for i := range threads {
 		turns, _ := st.Threads().ListTurns(ctx, threads[i].ID)
@@ -1297,13 +1345,21 @@ func (b *StoreBackend) seedSeenDispatcherRun(ctx context.Context, st store.Store
 		b.seenDecs[seenDecKey(runID, decs[i].Seq)] = true
 	}
 	for i := range ctrlDecs {
-		if ctrlDecs[i].Tool == mailbox.AdoptMailSummaryTool || ctrlDecs[i].Tool == "cost.guard" {
-			b.seenDecs[seenDecKey(runID, ctrlDecs[i].Seq)] = true
+		b.seenDecs[seenDecKey(runID, ctrlDecs[i].Seq)] = true
+	}
+	for i := range dirs {
+		if after, ok := strings.CutPrefix(dirs[i].Ref, "owner_ask:"); ok && after != "" {
+			b.seenAsks[seenAskKey(runID, after)] = true
+		}
+	}
+	for i := range laneQs {
+		if laneQs[i].ID != "" {
+			b.seenAsks[seenAskKey(runID, laneQs[i].ID)] = true
 		}
 	}
 }
 
-func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st store.Store, held []string) []string {
+func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st store.Store, held []string, asks []openAsk) []string {
 	b.cacheMu.Lock()
 	var runs []string
 	for _, id := range held {
@@ -1312,31 +1368,53 @@ func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st 
 		}
 	}
 	b.cacheMu.Unlock()
-	if len(runs) == 0 && b.Adoption == nil {
-		return nil
-	}
 	var out []string
 	for _, runID := range runs {
-		res := b.collectDispatcherOutcomes(ctx, st, []string{runID})
+		res := b.collectDispatcherOutcomes(ctx, st, []string{runID}, true)
 		if len(res) > 0 {
 			b.cacheMu.Lock()
 			delete(b.pendingOutcomeRuns, runID)
 			b.cacheMu.Unlock()
-			out = append(out, res...)
 		}
+		out = append(out, res...)
 	}
 	for _, runID := range held {
 		if slices.Contains(runs, runID) {
 			continue
 		}
-		if res := b.collectControllerNotices(ctx, st, runID); len(res) > 0 {
+		if res := b.collectControllerNotices(ctx, st, runID, true); len(res) > 0 {
 			out = append(out, res...)
 		}
+	}
+	for i := range asks {
+		a := &asks[i]
+		if strings.HasPrefix(a.ask.ID, "cost-guard-") {
+			continue
+		}
+		id := cmp.Or(a.ask.ID, a.ask.Question)
+		if id == "" {
+			continue
+		}
+		key := seenAskKey(a.run, id)
+		b.cacheMu.Lock()
+		if b.seenAsks == nil {
+			b.seenAsks = map[string]bool{}
+		}
+		seen := b.seenAsks[key]
+		if !seen {
+			b.seenAsks[key] = true
+		}
+		b.cacheMu.Unlock()
+		if seen {
+			continue
+		}
+		laneLabel := cmp.Or(a.ask.LaneID, a.scope, a.run)
+		out = append(out, fmt.Sprintf("lane question (%s): %s", laneLabel, oneLineSummary(a.ask.Question)))
 	}
 	return out
 }
 
-func (b *StoreBackend) collectControllerNotices(ctx context.Context, st store.Store, runID string) []string {
+func (b *StoreBackend) collectControllerNotices(ctx context.Context, st store.Store, runID string, includeBackgroundEvents bool) []string {
 	if st == nil || runID == "" {
 		return nil
 	}
@@ -1347,7 +1425,8 @@ func (b *StoreBackend) collectControllerNotices(ctx context.Context, st store.St
 	var out []string
 	for i := range ctrlDecs {
 		d := &ctrlDecs[i]
-		if d.Tool != mailbox.AdoptMailSummaryTool && d.Tool != "cost.guard" {
+		notice := formatControllerDecisionNotice(d, includeBackgroundEvents)
+		if notice == "" {
 			continue
 		}
 		decKey := seenDecKey(runID, d.Seq)
@@ -1363,20 +1442,62 @@ func (b *StoreBackend) collectControllerNotices(ctx context.Context, st store.St
 		if seen {
 			continue
 		}
-		if txt := oneLineSummary(cmp.Or(d.Result, d.Reason)); txt != "" {
-			out = append(out, txt)
-		}
+		out = append(out, notice)
 	}
 	return out
 }
 
-func (b *StoreBackend) collectDispatcherOutcomes(ctx context.Context, st store.Store, runs []string) []string {
+func formatControllerDecisionNotice(d *store.Decision, includeBackgroundEvents bool) string {
+	switch d.Tool {
+	case mailbox.AdoptMailSummaryTool:
+		return oneLineSummary(cmp.Or(d.Result, d.Reason))
+	case "cost.guard":
+		txt := oneLineSummary(cmp.Or(d.Result, d.Reason))
+		if txt == "" {
+			return ""
+		}
+		if !strings.HasPrefix(strings.ToLower(txt), "cost guard") {
+			return "cost guard: " + txt
+		}
+		return txt
+	}
+	if !includeBackgroundEvents {
+		return ""
+	}
+	detail := oneLineSummary(cmp.Or(d.Result, d.Reason))
+	if detail == "" {
+		return ""
+	}
+	switch d.Tool {
+	case controller.ToolPhaseAdvance, controller.ToolPhaseRework, controller.ToolPhaseStart:
+		if d.LaneID != "" && !strings.Contains(detail, d.LaneID) {
+			return fmt.Sprintf("lane %s advanced: %s", d.LaneID, detail)
+		}
+		return "lane advanced: " + detail
+	case controller.ToolLaneComplete:
+		merged := strings.Contains(strings.ToLower(d.Reason+" "+d.Result), "merge")
+		if merged {
+			det := oneLineSummary(cmp.Or(d.Reason, d.Result))
+			if d.LaneID != "" && !strings.Contains(det, d.LaneID) {
+				return fmt.Sprintf("PR merged (%s): %s", d.LaneID, det)
+			}
+			return "PR merged: " + det
+		}
+		if d.LaneID != "" && !strings.Contains(detail, d.LaneID) {
+			return fmt.Sprintf("lane %s completed: %s", d.LaneID, detail)
+		}
+		return "lane completed: " + detail
+	}
+	return ""
+}
+
+func (b *StoreBackend) collectDispatcherOutcomes(ctx context.Context, st store.Store, runs []string, includeBackgroundEvents bool) []string {
 	if st == nil || len(runs) == 0 {
 		return nil
 	}
 	var out []string
 	for _, runID := range runs {
-		out = append(out, b.collectControllerNotices(ctx, st, runID)...)
+		out = append(out, b.collectControllerNotices(ctx, st, runID, includeBackgroundEvents)...)
 		threads, err := st.Threads().ListThreads(ctx, store.ThreadFilter{RunID: runID, Role: store.ThreadRoleDispatcher})
 		if err != nil {
 			continue
@@ -1625,6 +1746,10 @@ func (b *StoreBackend) Command(ctx context.Context, text string) (string, error)
 		if e != nil {
 			return "", e
 		}
+		b.mu.RLock()
+		adoptedStore := b.store
+		b.mu.RUnlock()
+		b.seedSeenDispatcherRun(ctx, adoptedStore, r.ID)
 		if b.OnHoldChange != nil {
 			b.OnHoldChange()
 		}

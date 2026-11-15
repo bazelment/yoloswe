@@ -39,6 +39,7 @@ go_test(
         "testdata/reply_60.golden",
         "testdata/reply_188.golden",
         "testdata/turn_piped.golden",
+        "testdata/spinner_turn.golden",
     ],
     deps = [
         "//orca/adopt",

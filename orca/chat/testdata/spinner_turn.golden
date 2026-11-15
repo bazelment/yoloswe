@@ -1,0 +1,29 @@
+=== frame 0: thinking ===
+orca chat — run front-desk
+you> check 20261114-trial-m1
+  💬 → concierge: check 20261114-trial-m1
+  ⠋ 💬 concierge · thinking (0s)
+>
+=== frame 1: tool status ===
+orca chat — run front-desk
+you> check 20261114-trial-m1
+  💬 → concierge: check 20261114-trial-m1
+  → status 20261114-trial-m1
+  ⠙ 💬 concierge · → status 20261114-trial-m1 (1s)
+>
+=== frame 2: reading OBJECTIVE.md ===
+orca chat — run front-desk
+you> check 20261114-trial-m1
+  💬 → concierge: check 20261114-trial-m1
+  → status 20261114-trial-m1
+  → read.file OBJECTIVE.md
+  ⠹ 💬 concierge · reading OBJECTIVE.md (2s)
+>
+=== frame 3: reply replaces spinner ===
+orca chat — run front-desk
+you> check 20261114-trial-m1
+  💬 → concierge: check 20261114-trial-m1
+  → status 20261114-trial-m1
+  → read.file OBJECTIVE.md
+orca> All 8 checks passed on PR #5899.
+>

@@ -368,10 +368,11 @@ func TestStatusFooterAutoRefreshesWithoutDisturbingInput(t *testing.T) {
 
 	// Status footer and open questions redraw within one interval while half-typed input stays intact.
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		s := string(b)
+		s := SanitizeText(string(b))
 		return strings.Contains(s, "Approve merge?") &&
 			strings.Contains(s, "lane-a review r2 PR #401 (merged)") &&
-			strings.Contains(s, "open questions: 1 | cost today: $0.35")
+			strings.Contains(s, "open questions: 1") &&
+			strings.Contains(s, "cost today: $0.35")
 	}, teatest.WithDuration(5*time.Second))
 
 	// Finish typing the rest of the line and submit: the full input must arrive intact.
@@ -399,7 +400,7 @@ func TestStatusFooterPinnedBelowInputAndTruncated(t *testing.T) {
 	view := m.View().Content
 	transcriptIdx := strings.Index(view, "orca> world")
 	promptIdx := strings.Index(view, "\n> typing now")
-	footerIdx := strings.Index(view, "\x1b[2madopted: 20261114-trial-m1")
+	footerIdx := strings.Index(view, "adopted: 20261114-trial-m1")
 	if transcriptIdx < 0 || promptIdx < 0 || footerIdx < 0 {
 		t.Fatalf("view missing expected sections:\n%s", view)
 	}
@@ -410,7 +411,7 @@ func TestStatusFooterPinnedBelowInputAndTruncated(t *testing.T) {
 		t.Fatalf("status footer exceeded two lines:\n%s", view)
 	}
 	for _, line := range strings.Split(strings.TrimPrefix(m.statusFooter(), "\n"), "\n") {
-		plain := strings.TrimSuffix(strings.TrimPrefix(line, "\x1b[2m"), "\x1b[22m")
+		plain := SanitizeText(line)
 		if len([]rune(plain)) > 40 {
 			t.Fatalf("footer line %q (%d runes) exceeds width 40", plain, len([]rune(plain)))
 		}
