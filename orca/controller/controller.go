@@ -144,8 +144,9 @@ type Config struct {
 	StallTimeoutSet bool
 	// JudgeLaneMail routes inbound lane mail questions and notes to the
 	// judgment dispatcher rather than the legacy auto-ask fallback.
-	JudgeLaneMail  bool
-	ConcurrencyCap int
+	JudgeLaneMail     bool
+	ConcurrencyCap    int
+	MaxCostPerHourUSD float64
 }
 
 func (c Config) withDefaults() Config {
@@ -291,6 +292,7 @@ type Controller struct {
 	watchStarted       bool
 	stallTimeoutSet    bool
 	runtimeSettingsSet bool
+	notifiedCostGuard  bool
 }
 
 // SetRuntimeSettings applies live settings for subsequent controller ticks.
@@ -301,7 +303,10 @@ func (c *Controller) SetRuntimeSettings(settings store.RunSettings) {
 		c.cfg.StallTimeout = settings.StallTimeout
 		c.stallTimeoutSet = true
 	}
-	if settings.StallTimeout <= 0 && settings.ConcurrencyCap == 0 && !settings.Paused {
+	if settings.MaxCostPerHourUSD > 0 {
+		c.cfg.MaxCostPerHourUSD = settings.MaxCostPerHourUSD
+	}
+	if settings.StallTimeout <= 0 && settings.ConcurrencyCap == 0 && settings.MaxCostPerHourUSD <= 0 && !settings.Paused {
 		return
 	}
 	if settings.ConcurrencyCap >= 0 {
@@ -1351,6 +1356,7 @@ func (c *Controller) consumeEvents(ctx context.Context) error {
 		return err
 	}
 
+	urgentFlush := false
 	for i := range events {
 		ev := events[i]
 		if c.isEventHandled(ev.ID) {
@@ -1369,13 +1375,16 @@ func (c *Controller) consumeEvents(ctx context.Context) error {
 		if class == store.EventClassJudgment {
 			c.enqueueJudgmentEvent(ev)
 			if ev.Urgent || c.cfg.JudgmentDebounce <= 0 {
-				if err := c.flushJudgment(ctx, "urgent bypass"); err != nil {
-					return err
-				}
+				urgentFlush = true
 			}
 		}
 
 		if err := c.store.Events().SetCursor(ctx, c.cfg.RunID, c.cfg.Consumer, ev.Seq); err != nil {
+			return err
+		}
+	}
+	if urgentFlush {
+		if err := c.flushJudgment(ctx, "urgent bypass"); err != nil {
 			return err
 		}
 	}
@@ -1406,6 +1415,9 @@ func (c *Controller) handleEvent(ctx context.Context, ev *store.Event) (store.Ev
 	case store.EventOwnerAskExpired:
 		return c.handleOwnerAskExpired(ctx, ev)
 	case store.EventOwnerMessage, store.EventMail:
+		if ev.Kind == store.EventMail && (ev.Class == store.EventClassAuto || ev.Source == mailbox.AdoptMailSummarySource || ev.Source == "cost.guard") {
+			return store.EventClassAuto, nil
+		}
 		if ev.Kind == store.EventOwnerMessage && len(ev.Payload) > 0 {
 			var msg mailbox.Message
 			if json.Unmarshal(ev.Payload, &msg) == nil && msg.InReplyTo != "" {
@@ -2830,6 +2842,14 @@ func (c *Controller) flushJudgmentIfDue(ctx context.Context) error {
 }
 
 func (c *Controller) flushJudgment(ctx context.Context, reason string) error {
+	now := c.clock.Now().UTC()
+	if paused, _, _, msg, err := store.EnforceCostGuard(ctx, c.store, c.cfg.RunID, now, c.cfg.MaxCostPerHourUSD); err != nil {
+		return err
+	} else if paused {
+		c.notifyOwnerCostGuard(ctx, msg)
+		return nil
+	}
+
 	var batch []store.Event
 	var eventIDs []string
 	for i := range c.pendingJudgment {
@@ -2868,7 +2888,20 @@ func (c *Controller) flushJudgment(ctx context.Context, reason string) error {
 			return err
 		}
 	}
+	if paused, _, _, msg, _ := store.EnforceCostGuard(ctx, c.store, c.cfg.RunID, c.clock.Now().UTC(), c.cfg.MaxCostPerHourUSD); paused {
+		c.notifyOwnerCostGuard(ctx, msg)
+	}
 	return nil
+}
+
+func (c *Controller) notifyOwnerCostGuard(ctx context.Context, msg string) {
+	if c.notifiedCostGuard || strings.TrimSpace(msg) == "" {
+		return
+	}
+	c.notifiedCostGuard = true
+	if c.mailbox != nil {
+		_, _ = c.mailbox.AskOwner(ctx, mailbox.Question{Ask: msg})
+	}
 }
 
 func boolToChecks(green bool) string {

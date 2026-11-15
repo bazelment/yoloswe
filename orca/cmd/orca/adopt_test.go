@@ -794,14 +794,15 @@ func TestRestartExecsStartupPathWithSameArgvAndReplacedBinary(t *testing.T) {
 		t.Fatalf("restarted output with no held runs must not say 'reattached front-desk':\n%s", outRestarted.String())
 	}
 
-	// Verify legacy ORCA_RESTARTED_FROM_PID without ":<version>" reports "unknown -> <newVer>".
+	// Verify ORCA_RESTARTED_FROM_PID without ":<version>" uses the running version recorded at start so the restart line names both.
 	t.Setenv(restartEnvVar, "12345")
+	startupVersion = "commit-new-333"
 	var outLegacy, errLegacy bytes.Buffer
 	if err := Execute(t.Context(), args, strings.NewReader("/exit\n"), &outLegacy, &errLegacy); err != nil {
 		t.Fatalf("Execute legacy restarted session: %v\nstderr:\n%s", err, errLegacy.String())
 	}
-	if !strings.Contains(outLegacy.String(), "orca restarted (version unknown -> commit-new-222)") {
-		t.Fatalf("legacy restarted output missing 'orca restarted (version unknown -> commit-new-222)':\n%s", outLegacy.String())
+	if !strings.Contains(outLegacy.String(), "orca restarted (version commit-new-222 -> commit-new-333)") {
+		t.Fatalf("legacy restarted output missing 'orca restarted (version commit-new-222 -> commit-new-333)':\n%s", outLegacy.String())
 	}
 }
 
@@ -1500,8 +1501,13 @@ func TestAdoptedRunOpenLaneQuestionsAndEscalation(t *testing.T) {
 	waitForCondition(t, 2*time.Second, func() bool {
 		ctrls.Wake(runID)
 		ansMu.Lock()
-		defer ansMu.Unlock()
-		return len(ansPaths) > 0
+		gotAns := len(ansPaths) > 0
+		ansMu.Unlock()
+		if !gotAns {
+			return false
+		}
+		open, err := mailbox.OpenLaneQuestions(t.Context(), st, runID, clk.Now())
+		return err == nil && len(open) == 0
 	})
 	ansMu.Lock()
 	gotPath := ansPaths[0]

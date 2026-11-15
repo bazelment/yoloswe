@@ -366,6 +366,7 @@ func NewRunner(
 		StallTimeout:      cfg.StallTimeout,
 		StallTimeoutSet:   cfg.HasExplicitStallTimeout(),
 		ConcurrencyCap:    cfg.ConcurrencyCap,
+		MaxCostPerHourUSD: cfg.MaxCostPerHourUSD,
 	}, st, drv, clk, controller.JudgeFunc(r.judgeBatch), boxes...)
 
 	r.controller = ctrl

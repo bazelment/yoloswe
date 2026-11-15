@@ -524,6 +524,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	if compErr := d.store.Threads().CompleteTurn(cleanupCtx, threadID, turnID, turnStatus, usage, errMsg); compErr != nil && loopErr == nil {
 		loopErr = compErr
 	}
+	if loopErr == nil {
+		d.dismissStaleBatchQuestions(cleanupCtx, runID, events, state, summary)
+	}
 
 	res := &BatchResult{
 		ThreadID:  threadID,
@@ -608,7 +611,7 @@ func toolsForBatch(defs []model.ToolDefinition, events []store.Event) []model.To
 		if !hasLane && isReadOnlyTool(def.Name) {
 			return true
 		}
-		if !hasLaneMail && def.Name == ToolMailAnswer {
+		if !hasLaneMail && (def.Name == ToolMailAnswer || def.Name == ToolMailDismiss) {
 			return true
 		}
 		return false
@@ -622,7 +625,7 @@ func batchNamesLane(events []store.Event) bool {
 
 // batchHasLaneMail reports whether any event in the batch is an inbound lane mail message.
 func batchHasLaneMail(events []store.Event) bool {
-	return len(extractBatchLaneMails(events)) > 0
+	return len(extractBatchLaneMailsIncludeClosed(events)) > 0
 }
 
 func isHardBatch(events []store.Event) bool {
@@ -665,6 +668,12 @@ var mailAnswerToolDef = model.ToolDefinition{
 	InputSchema: model.SchemaFor[MailAnswerParams](),
 }
 
+var mailDismissToolDef = model.ToolDefinition{
+	Name:        ToolMailDismiss,
+	Description: "Dismiss or close an inbound worker-lane question (with message_id or lane_id) that is stale, withdrawn, or obsolete (e.g. lane already done/merged) so it leaves the open questions list without escalating to the owner. Never use this for run-level host/inter-agent mail",
+	InputSchema: model.SchemaFor[MailDismissParams](),
+}
+
 func (d *Dispatcher) buildToolRegistry(runID string, state *turnExecState) *model.ToolRegistry {
 	reg := model.NewToolRegistry()
 	for i := range dispatcherToolDefs {
@@ -676,6 +685,9 @@ func (d *Dispatcher) buildToolRegistry(runID string, state *turnExecState) *mode
 	reg.Register(mailAnswerToolDef, func(ctx context.Context, raw json.RawMessage) (string, error) {
 		return d.handleRawToolCall(ctx, runID, state, mailAnswerToolDef.Name, raw)
 	})
+	reg.Register(mailDismissToolDef, func(ctx context.Context, raw json.RawMessage) (string, error) {
+		return d.handleRawToolCall(ctx, runID, state, mailDismissToolDef.Name, raw)
+	})
 	return reg
 }
 
@@ -683,7 +695,7 @@ func batchAllowsTool(toolName string, events []store.Event) error {
 	if isReadOnlyTool(toolName) && !batchNamesLane(events) {
 		return fmt.Errorf("%s is only available when the judgment batch contains a lane event", toolName)
 	}
-	if toolName == ToolMailAnswer && !batchHasLaneMail(events) {
+	if (toolName == ToolMailAnswer || toolName == ToolMailDismiss) && !batchHasLaneMail(events) {
 		return fmt.Errorf("%s is only available when the judgment batch contains inbound lane mail", toolName)
 	}
 	return nil
@@ -695,9 +707,9 @@ func batchAllowsTool(toolName string, events []store.Event) error {
 // tool eligibility inside the handler.
 func (d *Dispatcher) buildCLIToolRegistry(runID string, state *turnExecState, events []store.Event) *model.ToolRegistry {
 	reg := model.NewToolRegistry()
-	defs := make([]model.ToolDefinition, 0, len(dispatcherToolDefs)+1)
+	defs := make([]model.ToolDefinition, 0, len(dispatcherToolDefs)+2)
 	defs = append(defs, dispatcherToolDefs...)
-	defs = append(defs, mailAnswerToolDef)
+	defs = append(defs, mailAnswerToolDef, mailDismissToolDef)
 	for i := range defs {
 		def := defs[i]
 		reg.Register(def, func(ctx context.Context, raw json.RawMessage) (string, error) {
@@ -925,7 +937,7 @@ func (d *Dispatcher) handleRawToolCall(
 // the work that is naturally plural and independent per target.
 func isFanOutTool(tool string) bool {
 	return tool == ToolBacklogAdd || tool == ToolLaneSpawn || tool == ToolLaneRetry ||
-		tool == ToolDirectiveRevoke || tool == ToolOwnerAnswer
+		tool == ToolDirectiveRevoke || tool == ToolOwnerAnswer || tool == ToolMailDismiss
 }
 
 // checkOnePrimaryAction enforces one primary action per batch: the first
@@ -1049,6 +1061,8 @@ func (d *Dispatcher) applyVettedAction(
 		return d.applyLaneSteer(ctx, runID, view, *act.LaneSteer)
 	case ToolMailAnswer:
 		return d.applyMailAnswer(ctx, runID, state, view, *act.MailAnswer)
+	case ToolMailDismiss:
+		return d.applyMailDismiss(ctx, runID, state, view, *act.MailDismiss)
 	case ToolLaneRetry:
 		return d.applyLaneRetry(ctx, runID, view, *act.LaneRetry)
 	case ToolLaneStop:
@@ -1529,6 +1543,14 @@ func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, state *tur
 		if laneID == "" {
 			laneID = bm.msg.LaneID
 		}
+		if mailbox.IsQuestionObsoleteOrClosed(ctx, d.store, runID, laneID, bm.msg.ID, bm.event.ID, bm.msg.Body) ||
+			dispatcherTextJudgesQuestionStale(p.Question+" "+p.Reason) {
+			reason := cmp.Or(strings.TrimSpace(p.Reason), "stale or obsolete lane question")
+			if err := d.dismissBatchQuestion(ctx, runID, bm, reason); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("dismissed stale lane question %s for lane %s (%s)", cmp.Or(bm.msg.ID, bm.event.ID, "-"), cmp.Or(laneID, "-"), reason), nil
+		}
 	}
 
 	ask := controller.OwnerAsk{
@@ -1646,17 +1668,19 @@ func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, sta
 	if id == "" {
 		return "", fmt.Errorf("%w: directive id is required", store.ErrInvalidArgument)
 	}
-	if state != nil && len(state.events) > 0 && !slices.ContainsFunc(state.events, func(ev store.Event) bool {
-		return ev.Kind == store.EventOwnerMessage
-	}) {
-		return "", &invariantViolationError{msg: "directive.revoke [run]: requires an owner_msg event in the batch"}
-	}
 	dir, err := d.store.Directives().Get(ctx, runID, id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return "", fmt.Errorf("directive %q not found: %w", id, err)
 		}
 		return "", err
+	}
+	if state != nil && len(state.events) > 0 && !slices.ContainsFunc(state.events, func(ev store.Event) bool {
+		return ev.Kind == store.EventOwnerMessage
+	}) {
+		if !d.canRevokeDirectiveWithoutBatchOwnerMsg(ctx, runID, view, dir) {
+			return "", &invariantViolationError{msg: "directive.revoke [run]: requires an owner_msg event in the batch"}
+		}
 	}
 	if dir != nil && strings.HasPrefix(strings.TrimSpace(dir.Ref), ownerAskRefPrefix) {
 		return "", fmt.Errorf("%w: directive %q is an open owner question (%s); use owner.answer to resolve it", store.ErrInvalidArgument, id, dir.Ref)
@@ -1671,6 +1695,103 @@ func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, sta
 		delete(view.Directives, id)
 	}
 	return fmt.Sprintf("revoked directive %s", id), nil
+}
+
+func (d *Dispatcher) canRevokeDirectiveWithoutBatchOwnerMsg(ctx context.Context, runID string, view *StateView, dir *store.Directive) bool {
+	if view != nil && view.Run != nil && isObjectiveDoneText(view.Run.Objective) {
+		return true
+	}
+	if dir == nil || !isHoldDirectiveText(dir.Text) {
+		return false
+	}
+	return d.priorOwnerMessageLiftedHold(ctx, runID, *dir)
+}
+
+func (d *Dispatcher) priorOwnerMessageLiftedHold(ctx context.Context, runID string, dir store.Directive) bool {
+	if d.store == nil {
+		return false
+	}
+	lifted := false
+	if evs, err := d.store.Events().List(ctx, store.EventFilter{
+		RunID: runID,
+		Kinds: []store.EventKind{store.EventOwnerMessage},
+	}); err == nil {
+		for i := range evs {
+			ev := &evs[i]
+			if !dir.CreatedAt.IsZero() && !ev.CreatedAt.IsZero() && ev.CreatedAt.Before(dir.CreatedAt) {
+				continue
+			}
+			text := strings.TrimSpace(ev.Summary + " " + string(ev.Payload))
+			if ownerMessageLiftsHold(text, dir) {
+				lifted = true
+			} else if isHoldDirectiveText(text) {
+				lifted = false
+			}
+		}
+	}
+	if dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID}); err == nil {
+		for i := range dirs {
+			od := &dirs[i]
+			if od.ID == dir.ID || od.Source != store.DirectiveSourceOwner {
+				continue
+			}
+			if !dir.CreatedAt.IsZero() && !od.CreatedAt.IsZero() && od.CreatedAt.Before(dir.CreatedAt) {
+				continue
+			}
+			if ownerMessageLiftsHold(od.Text, dir) {
+				lifted = true
+			}
+		}
+	}
+	return lifted
+}
+
+func ownerMessageLiftsHold(text string, dir store.Directive) bool {
+	if ownerTextAskedToStart(text) {
+		return true
+	}
+	lower := strings.ToLower(stripDispatcherQuotedSpans(text))
+	if dir.ID != "" && strings.Contains(lower, strings.ToLower(dir.ID)) {
+		for _, w := range dispatcherHoldLiftWords {
+			if dispatcherContainsWholeWord(lower, w) {
+				return true
+			}
+		}
+	}
+	for _, sentence := range strings.FieldsFunc(lower, func(r rune) bool {
+		return r == '.' || r == ';' || r == '\n' || r == '!'
+	}) {
+		sentence = strings.TrimSpace(sentence)
+		if sentence == "" || strings.Contains(sentence, "?") {
+			continue
+		}
+		for _, clause := range splitHoldClauses(sentence) {
+			clause = strings.TrimSpace(clause)
+			if clause == "" {
+				continue
+			}
+			norm := normalizeContractionWords(clause)
+			if dispatcherContainsWholeWord(norm, "not") ||
+				dispatcherContainsWholeWord(norm, "never") ||
+				dispatcherContainsWholeWord(norm, "dont") ||
+				strings.Contains(norm, "keep the hold") ||
+				strings.Contains(norm, "keep hold") {
+				continue
+			}
+			if !dispatcherContainsWholeWord(norm, "hold") &&
+				!dispatcherContainsWholeWord(norm, "holds") &&
+				!dispatcherContainsWholeWord(norm, "pause") &&
+				!dispatcherContainsWholeWord(norm, "freeze") {
+				continue
+			}
+			for _, w := range dispatcherHoldLiftWords {
+				if dispatcherContainsWholeWord(norm, w) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (d *Dispatcher) followUpSpawnNudge(
@@ -2512,6 +2633,14 @@ type batchLaneMail struct {
 }
 
 func extractBatchLaneMails(events []store.Event) []batchLaneMail {
+	return extractBatchLaneMailsFiltered(events, false)
+}
+
+func extractBatchLaneMailsIncludeClosed(events []store.Event) []batchLaneMail {
+	return extractBatchLaneMailsFiltered(events, true)
+}
+
+func extractBatchLaneMailsFiltered(events []store.Event, includeClosed bool) []batchLaneMail {
 	var out []batchLaneMail
 	for i := range events {
 		ev := events[i]
@@ -2529,7 +2658,7 @@ func extractBatchLaneMails(events []store.Event) []batchLaneMail {
 		if msg.From == "owner" || msg.LaneID == "" {
 			continue
 		}
-		if msg.IsClosedOrAnswered() {
+		if !includeClosed && msg.IsClosedOrAnswered() {
 			continue
 		}
 		out = append(out, batchLaneMail{event: ev, msg: msg})
@@ -2734,4 +2863,207 @@ func (d *Dispatcher) respondToLaneMail(ctx context.Context, runID string, bm bat
 		CreatedAt: d.clock.Now().UTC(),
 	})
 	return len(boxes) > 0, nil
+}
+
+func (d *Dispatcher) applyMailDismiss(
+	ctx context.Context,
+	runID string,
+	state *turnExecState,
+	_ *StateView,
+	p MailDismissParams,
+) (string, error) {
+	msgID := strings.TrimSpace(p.MessageID)
+	laneID := strings.TrimSpace(p.LaneID)
+	reason := strings.TrimSpace(p.Reason)
+
+	var batchEvents []store.Event
+	if state != nil {
+		batchEvents = state.events
+	}
+	bm, hasMail, err := d.resolveLaneMailForDismiss(ctx, runID, batchEvents, msgID, laneID)
+	if err != nil {
+		return "", err
+	}
+	if !hasMail {
+		return "", errors.New("mail.dismiss requires a message_id or matching lane mail in the batch")
+	}
+	if msgID == "" {
+		msgID = bm.msg.ID
+	}
+	if laneID == "" {
+		laneID = bm.msg.LaneID
+	}
+	if err := d.dismissBatchQuestion(ctx, runID, bm, reason); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("dismissed lane mail %s for lane %s (%s)", cmp.Or(msgID, bm.event.ID, "-"), cmp.Or(laneID, "-"), reason), nil
+}
+
+func (d *Dispatcher) resolveLaneMailForDismiss(
+	ctx context.Context,
+	runID string,
+	batchEvents []store.Event,
+	messageID, laneID string,
+) (batchLaneMail, bool, error) {
+	messageID = strings.TrimSpace(messageID)
+	laneID = strings.TrimSpace(laneID)
+	bm, ok, err := matchLaneMailSlice(extractBatchLaneMailsIncludeClosed(batchEvents), messageID, laneID, true, nil)
+	if err != nil {
+		return bm, false, err
+	}
+	if ok {
+		return bm, true, nil
+	}
+	if messageID == "" || d.store == nil {
+		return batchLaneMail{}, false, nil
+	}
+	evs, listErr := d.store.Events().List(ctx, store.EventFilter{
+		RunID: runID,
+		Kinds: []store.EventKind{store.EventMail},
+	})
+	if listErr != nil {
+		return batchLaneMail{}, false, listErr
+	}
+	bm, ok, err = matchLaneMailSlice(extractBatchLaneMailsIncludeClosed(evs), messageID, laneID, true, nil)
+	if err != nil {
+		return batchLaneMail{}, false, err
+	}
+	if ok {
+		return bm, true, nil
+	}
+	return batchLaneMail{}, false, fmt.Errorf("%w: unknown lane mail message_id %q", store.ErrNotFound, messageID)
+}
+
+func (d *Dispatcher) dismissBatchQuestion(ctx context.Context, runID string, bm batchLaneMail, reason string) error {
+	reason = cmp.Or(strings.TrimSpace(reason), "stale or obsolete lane question")
+	msg := bm.msg
+	msg.RunID = cmp.Or(msg.RunID, runID)
+	for _, box := range d.mailboxes() {
+		if err := mailbox.Dismiss(ctx, box, msg, reason); err != nil {
+			return err
+		}
+	}
+	if err := mailbox.MarkAnswered(ctx, d.store, runID, msg.LaneID, msg.ID, bm.event.ID, "dismissed: "+reason); err != nil {
+		return err
+	}
+	if d.store != nil {
+		if dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true}); err == nil {
+			for i := range dirs {
+				dir := &dirs[i]
+				if !strings.HasPrefix(dir.Ref, ownerAskRefPrefix) {
+					continue
+				}
+				var ask controller.OwnerAsk
+				if json.Unmarshal([]byte(dir.Text), &ask) != nil {
+					continue
+				}
+				if (msg.ID != "" && (ask.SourceMessageID == msg.ID || ask.ID == msg.ID)) ||
+					(bm.event.ID != "" && ask.SourceEventID == bm.event.ID) {
+					_ = d.store.Directives().UpdateStatus(ctx, runID, dir.ID, store.DirectiveHandled)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (d *Dispatcher) dismissStaleBatchQuestions(
+	ctx context.Context,
+	runID string,
+	events []store.Event,
+	state *turnExecState,
+	summary string,
+) {
+	mails := extractBatchLaneMailsIncludeClosed(events)
+	if len(mails) == 0 {
+		return
+	}
+	judgedStale, staleReason := dispatcherJudgedBatchQuestionStale(state, summary)
+	for i := range mails {
+		bm := mails[i]
+		if !bm.msg.IsQuestion() {
+			continue
+		}
+		if state != nil && slices.ContainsFunc(state.accepted, func(a ProposedAction) bool {
+			return a.Tool == ToolMailAnswer || a.Tool == ToolMailDismiss ||
+				(a.Tool == ToolOwnerAsk && a.OwnerAsk != nil &&
+					(a.OwnerAsk.MessageID == bm.msg.ID || a.OwnerAsk.LaneID == bm.msg.LaneID))
+		}) {
+			continue
+		}
+		obsolete := mailbox.IsQuestionObsoleteOrClosed(ctx, d.store, runID, bm.msg.LaneID, bm.msg.ID, bm.event.ID, bm.msg.Body)
+		if !obsolete && !judgedStale {
+			continue
+		}
+		reason := cmp.Or(staleReason, strings.TrimSpace(summary), "stale or obsolete lane question")
+		if err := d.dismissBatchQuestion(ctx, runID, bm, reason); err != nil {
+			continue
+		}
+		rawArgs, _ := json.Marshal(MailDismissParams{
+			MessageID: bm.msg.ID,
+			LaneID:    bm.msg.LaneID,
+			Reason:    reason,
+		})
+		act := ProposedAction{
+			Tool:   ToolMailDismiss,
+			LaneID: bm.msg.LaneID,
+			Reason: reason,
+			Args:   rawArgs,
+		}
+		_ = d.recordDecision(ctx, runID, state, act, true, fmt.Sprintf("dismissed lane mail %s for lane %s (%s)", cmp.Or(bm.msg.ID, bm.event.ID, "-"), cmp.Or(bm.msg.LaneID, "-"), reason), 0)
+	}
+}
+
+func dispatcherJudgedBatchQuestionStale(state *turnExecState, summary string) (bool, string) {
+	if state != nil {
+		for i := range state.accepted {
+			act := state.accepted[i]
+			switch act.Tool {
+			case ToolDirectiveNote:
+				txt := ""
+				if act.DirectiveNote != nil {
+					txt = strings.TrimSpace(act.DirectiveNote.Fact + " " + act.DirectiveNote.Reason)
+				}
+				if dispatcherTextJudgesQuestionStale(txt) {
+					return true, cmp.Or(strings.TrimSpace(act.Reason), txt)
+				}
+			case ToolDirectiveRevoke:
+			default:
+				return false, ""
+			}
+		}
+		if len(state.rejected) > 0 && len(state.accepted) == 0 {
+			return false, ""
+		}
+	}
+	if dispatcherTextJudgesQuestionStale(summary) {
+		return true, strings.TrimSpace(summary)
+	}
+	return false, ""
+}
+
+func dispatcherTextJudgesQuestionStale(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return false
+	}
+	for _, kw := range []string{
+		"stale",
+		"withdrawn",
+		"obsolete",
+		"already merged",
+		"already done",
+		"already resolved",
+		"already answered",
+		"already closed",
+		"superseded",
+		"moot",
+		"lane done",
+		"lane is done",
+	} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
 }

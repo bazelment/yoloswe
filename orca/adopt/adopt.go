@@ -173,12 +173,88 @@ func sanitizeObjectivePlanLines(dir, obj string) string {
 }
 
 func isEmptyNextText(s string) bool {
-	switch strings.ToLower(strings.Trim(strings.TrimSpace(s), ".")) {
-	case "", "none", "n/a", "nil", "done", "complete", "completed", "nothing", "-":
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
 		return true
-	default:
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.Contains(lower, "run done") || strings.Contains(lower, "no open work") || strings.Contains(lower, "no remaining work") || strings.Contains(lower, "nothing left") {
+		return true
+	}
+	lead := lower
+	for _, sep := range []string{".", ";", "—", " — ", " - ", "\n", "(", ","} {
+		if before, _, ok := strings.Cut(lead, sep); ok {
+			lead = strings.TrimSpace(before)
+		}
+	}
+	lead = strings.Trim(lead, " .,-:;!()[]\"'`")
+	switch lead {
+	case "", "none", "n/a", "nil", "done", "complete", "completed", "finished", "nothing", "-", "all done", "all complete", "run done":
+		return true
+	}
+	for _, prefix := range []string{"none ", "done ", "complete ", "completed ", "finished "} {
+		if strings.HasPrefix(lead, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsDoneOrEmptyNext reports whether a Next: value indicates there is no remaining work.
+func IsDoneOrEmptyNext(s string) bool {
+	return isEmptyNextText(s)
+}
+
+func hasExplicitNextSection(sources ...string) bool {
+	for _, src := range sources {
+		for _, line := range strings.Split(src, "\n") {
+			trimmed := strings.TrimSpace(line)
+			clean := strings.TrimLeft(trimmed, "-* \t")
+			lower := strings.ToLower(clean)
+			if strings.HasPrefix(lower, "next:") {
+				return true
+			}
+			if strings.HasPrefix(trimmed, "#") {
+				heading := strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "#")))
+				if heading == "next" || strings.HasPrefix(heading, "next ") || strings.HasPrefix(heading, "next:") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ObjectiveIsDone reports whether the latest Next: or status lines in md
+// declare the run done/complete with no remaining work.
+func ObjectiveIsDone(md string) bool {
+	if strings.TrimSpace(md) == "" {
 		return false
 	}
+	if hasExplicitNextSection(md) {
+		next := strings.TrimSpace(extractNextSection(md))
+		return isEmptyNextText(next)
+	}
+	lines := strings.Split(md, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		clean := strings.ToLower(strings.TrimLeft(strings.TrimSpace(lines[i]), "-*# \t"))
+		if clean == "" {
+			continue
+		}
+		if strings.Contains(clean, "run done") ||
+			strings.HasPrefix(clean, "status: done") ||
+			strings.HasPrefix(clean, "status: complete") ||
+			strings.HasPrefix(clean, "state: done") ||
+			strings.HasPrefix(clean, "state: complete") {
+			return true
+		}
+	}
+	return false
+}
+
+// CurrentNextSection extracts the latest Next: line or # Next section from sources.
+func CurrentNextSection(sources ...string) string {
+	return extractNextSection(sources...)
 }
 
 var uncheckedTaskItemRE = regexp.MustCompile(`(?m)^\s*(?:[-*+]|\d+[.)])\s+\[\s\]`)
@@ -186,12 +262,19 @@ var uncheckedTaskItemRE = regexp.MustCompile(`(?m)^\s*(?:[-*+]|\d+[.)])\s+\[\s\]
 // HasNextWork reports whether the run's objective/progress states open Next:
 // work or unchecked items beyond the currently imported lanes.
 func (r Run) HasNextWork() bool {
+	if ObjectiveIsDone(r.Objective) || (r.Objective == "" && ObjectiveIsDone(r.Progress)) {
+		return false
+	}
 	next := strings.TrimSpace(r.Next)
+	hasExplicit := next != "" || hasExplicitNextSection(r.Objective, r.Progress)
 	if next == "" && r.Objective != "" {
 		next = strings.TrimSpace(extractNextSection(r.Objective))
 	}
 	if !isEmptyNextText(next) {
 		return true
+	}
+	if hasExplicit {
+		return false
 	}
 	return uncheckedTaskItemRE.MatchString(r.Objective)
 }
@@ -557,6 +640,7 @@ func extractPlanPath(dir string, sources ...string) string {
 func extractNextSection(sources ...string) string {
 	for _, src := range sources {
 		lines := strings.Split(src, "\n")
+		var found string
 		for i := 0; i < len(lines); i++ {
 			trimmed := strings.TrimSpace(lines[i])
 			clean := strings.TrimLeft(trimmed, "-* \t")
@@ -573,6 +657,10 @@ func extractNextSection(sources ...string) string {
 					if nextTrim == "" || strings.HasPrefix(nextTrim, "#") {
 						break
 					}
+					nxtClean := strings.ToLower(strings.TrimLeft(nextTrim, "-* \t"))
+					if strings.HasPrefix(nxtClean, "next:") {
+						break
+					}
 					if strings.HasPrefix(nextLine, " ") || strings.HasPrefix(nextLine, "\t") || strings.HasPrefix(nextTrim, "- ") || strings.HasPrefix(nextTrim, "* ") {
 						parts = append(parts, nextTrim)
 						continue
@@ -580,7 +668,7 @@ func extractNextSection(sources ...string) string {
 					break
 				}
 				if len(parts) > 0 {
-					return strings.Join(parts, "\n")
+					found = strings.Join(parts, "\n")
 				}
 			}
 			if strings.HasPrefix(trimmed, "#") {
@@ -597,10 +685,13 @@ func extractNextSection(sources ...string) string {
 						}
 					}
 					if len(parts) > 0 {
-						return strings.Join(parts, "\n")
+						found = strings.Join(parts, "\n")
 					}
 				}
 			}
+		}
+		if found != "" {
+			return found
 		}
 	}
 	return ""

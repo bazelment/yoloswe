@@ -626,7 +626,7 @@ func (r *sqliteRunStore) GetSettings(ctx context.Context, runID string) (RunSett
 	defer s.mu.RUnlock()
 	var out RunSettings
 	var paused int
-	err := s.db.QueryRowContext(ctx, `SELECT concurrency_cap, stall_timeout_ns, paused FROM run_settings WHERE run_id = ?`, runID).Scan(&out.ConcurrencyCap, &out.StallTimeout, &paused)
+	err := s.db.QueryRowContext(ctx, `SELECT concurrency_cap, stall_timeout_ns, paused, max_cost_per_hour_usd FROM run_settings WHERE run_id = ?`, runID).Scan(&out.ConcurrencyCap, &out.StallTimeout, &paused, &out.MaxCostPerHourUSD)
 	if errors.Is(err, sql.ErrNoRows) {
 		if _, e := getRun(ctx, s.db, runID); e != nil {
 			return out, e
@@ -646,7 +646,7 @@ func (r *sqliteRunStore) UpdateSettings(ctx context.Context, runID string, setti
 	if _, err := getRun(ctx, s.db, runID); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO run_settings(run_id, concurrency_cap, stall_timeout_ns, paused) VALUES(?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET concurrency_cap=excluded.concurrency_cap, stall_timeout_ns=excluded.stall_timeout_ns, paused=excluded.paused`, runID, settings.ConcurrencyCap, settings.StallTimeout, boolInt(settings.Paused))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO run_settings(run_id, concurrency_cap, stall_timeout_ns, paused, max_cost_per_hour_usd) VALUES(?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET concurrency_cap=excluded.concurrency_cap, stall_timeout_ns=excluded.stall_timeout_ns, paused=excluded.paused, max_cost_per_hour_usd=excluded.max_cost_per_hour_usd`, runID, settings.ConcurrencyCap, settings.StallTimeout, boolInt(settings.Paused), settings.MaxCostPerHourUSD)
 	return err
 }
 func boolInt(v bool) int {

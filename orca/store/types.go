@@ -130,9 +130,10 @@ type Run struct {
 
 // RunSettings holds live controller settings for a run.
 type RunSettings struct {
-	ConcurrencyCap int           `json:"concurrency_cap"`
-	StallTimeout   time.Duration `json:"stall_timeout"`
-	Paused         bool          `json:"paused"`
+	ConcurrencyCap    int           `json:"concurrency_cap"`
+	StallTimeout      time.Duration `json:"stall_timeout"`
+	MaxCostPerHourUSD float64       `json:"max_cost_per_hour_usd,omitempty"`
+	Paused            bool          `json:"paused"`
 }
 
 func (r Run) Clone() Run {

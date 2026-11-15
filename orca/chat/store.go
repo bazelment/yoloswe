@@ -271,6 +271,10 @@ func (b *StoreBackend) asks(ctx context.Context, runs []string) ([]openAsk, erro
 			if err := json.Unmarshal([]byte(d.Text), &a.ask); err != nil {
 				return nil, fmt.Errorf("owner ask %s in run %s: %w", d.ID, run, err)
 			}
+			if mailbox.IsQuestionObsoleteOrClosed(ctx, b.store, run, cmp.Or(a.ask.LaneID, d.Scope), a.ask.SourceMessageID, a.ask.SourceEventID, a.ask.Question) {
+				_ = b.store.Directives().UpdateStatus(ctx, run, d.ID, store.DirectiveHandled)
+				continue
+			}
 			if srcID := cmp.Or(a.ask.SourceMessageID, a.ask.SourceEventID); srcID != "" {
 				if ts, ok := mailCreated[srcID]; ok && !ts.IsZero() {
 					a.age = mailbox.FormatAge(now, ts)
@@ -1290,6 +1294,7 @@ func (b *StoreBackend) seedSeenDispatcherRun(ctx context.Context, st store.Store
 	}
 	threads, _ := st.Threads().ListThreads(ctx, store.ThreadFilter{RunID: runID, Role: store.ThreadRoleDispatcher})
 	decs, _ := st.Decisions().List(ctx, store.DecisionFilter{RunID: runID, Actor: "dispatcher"})
+	ctrlDecs, _ := st.Decisions().List(ctx, store.DecisionFilter{RunID: runID, Actor: "controller"})
 	b.cacheMu.Lock()
 	defer b.cacheMu.Unlock()
 	if b.seenTurns == nil {
@@ -1309,6 +1314,11 @@ func (b *StoreBackend) seedSeenDispatcherRun(ctx context.Context, st store.Store
 	for i := range decs {
 		b.seenDecs[seenDecKey(runID, decs[i].Seq)] = true
 	}
+	for i := range ctrlDecs {
+		if ctrlDecs[i].Tool == mailbox.AdoptMailSummaryTool || ctrlDecs[i].Tool == "cost.guard" {
+			b.seenDecs[seenDecKey(runID, ctrlDecs[i].Seq)] = true
+		}
+	}
 }
 
 func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st store.Store, held []string) []string {
@@ -1320,9 +1330,6 @@ func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st 
 		}
 	}
 	b.cacheMu.Unlock()
-	if len(runs) == 0 {
-		return nil
-	}
 	var out []string
 	for _, runID := range runs {
 		res := b.collectDispatcherOutcomes(ctx, st, []string{runID})
@@ -1331,6 +1338,48 @@ func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st 
 			delete(b.pendingOutcomeRuns, runID)
 			b.cacheMu.Unlock()
 			out = append(out, res...)
+		}
+	}
+	for _, runID := range held {
+		if slices.Contains(runs, runID) {
+			continue
+		}
+		if res := b.collectControllerNotices(ctx, st, runID); len(res) > 0 {
+			out = append(out, res...)
+		}
+	}
+	return out
+}
+
+func (b *StoreBackend) collectControllerNotices(ctx context.Context, st store.Store, runID string) []string {
+	if st == nil || runID == "" {
+		return nil
+	}
+	ctrlDecs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: runID, Actor: "controller"})
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for i := range ctrlDecs {
+		d := &ctrlDecs[i]
+		if d.Tool != mailbox.AdoptMailSummaryTool && d.Tool != "cost.guard" {
+			continue
+		}
+		decKey := seenDecKey(runID, d.Seq)
+		b.cacheMu.Lock()
+		if b.seenDecs == nil {
+			b.seenDecs = map[string]bool{}
+		}
+		seen := b.seenDecs[decKey]
+		if !seen {
+			b.seenDecs[decKey] = true
+		}
+		b.cacheMu.Unlock()
+		if seen {
+			continue
+		}
+		if txt := oneLineSummary(cmp.Or(d.Result, d.Reason)); txt != "" {
+			out = append(out, txt)
 		}
 	}
 	return out
@@ -1342,6 +1391,7 @@ func (b *StoreBackend) collectDispatcherOutcomes(ctx context.Context, st store.S
 	}
 	var out []string
 	for _, runID := range runs {
+		out = append(out, b.collectControllerNotices(ctx, st, runID)...)
 		threads, err := st.Threads().ListThreads(ctx, store.ThreadFilter{RunID: runID, Role: store.ThreadRoleDispatcher})
 		if err != nil {
 			continue

@@ -84,6 +84,7 @@ func newAdoption(ctx context.Context, cfg Config, h hostSwarms, holder string, f
 	ctrls.PRProbe = prProbe
 	ctrls.Mailboxes = adoptedMailboxes(cfg, st)
 	ctrls.Planner = plannerFn
+	ctrls.MaxCostPerHourUSD = cfg.MaxCostPerHourUSD
 	return &adopt.Service{
 		Importer:           h.importer,
 		Labeler:            h.client,

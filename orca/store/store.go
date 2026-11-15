@@ -227,3 +227,222 @@ type RecipeStore interface {
 	ListVersions(ctx context.Context, runID, name string) ([]Recipe, error)
 	ListLatest(ctx context.Context, runID string) ([]Recipe, error)
 }
+
+func estimateStoreUsageCostUSD(modelOrRole string, inputTokens, outputTokens int64) float64 {
+	if inputTokens <= 0 && outputTokens <= 0 {
+		return 0
+	}
+	lower := strings.ToLower(strings.TrimSpace(modelOrRole))
+	modelName := lower
+	switch lower {
+	case "", "dispatcher", "concierge", "controller":
+		modelName = "sonnet"
+	case "planner":
+		modelName = "opus"
+	case "router":
+		modelName = "haiku"
+	}
+	return model.CalculateCost(modelName, model.Usage{InputTokens: inputTokens, OutputTokens: outputTokens}, nil)
+}
+
+// HourlyRunCostUSD computes the spend in USD for runID over the trailing hour
+// ending at now, deduplicating costs recorded on both Decisions and Turns.
+func HourlyRunCostUSD(ctx context.Context, st Store, runID string, now time.Time) (float64, error) {
+	if st == nil || strings.TrimSpace(runID) == "" {
+		return 0, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	windowStart := now.Add(-time.Hour)
+
+	decs, err := st.Decisions().List(ctx, DecisionFilter{RunID: runID})
+	if err != nil {
+		return 0, err
+	}
+	byTurn := map[string]float64{}
+	var unlinkedDecCost float64
+	for i := range decs {
+		d := &decs[i]
+		if !d.CreatedAt.IsZero() && d.CreatedAt.Before(windowStart) {
+			continue
+		}
+		if d.Tool == "metrics.snapshot" || d.Tool == "cost.guard" || d.Tool == "mail.adopt_summary" {
+			continue
+		}
+		c := d.CostUSD
+		if c <= 0 {
+			c = estimateStoreUsageCostUSD(cmp.Or(d.Model, d.Actor), d.InputTokens, d.OutputTokens)
+		}
+		if c <= 0 {
+			continue
+		}
+		if d.TurnID != "" {
+			byTurn[d.TurnID] += c
+		} else {
+			unlinkedDecCost += c
+		}
+	}
+
+	threads, err := st.Threads().ListThreads(ctx, ThreadFilter{RunID: runID})
+	if err != nil {
+		return 0, err
+	}
+	var linkedTurnExtra, unlinkedTurnCost float64
+	for i := range threads {
+		turns, err := st.Threads().ListTurns(ctx, threads[i].ID)
+		if err != nil {
+			return 0, err
+		}
+		for j := range turns {
+			t := &turns[j]
+			ts := t.StartedAt
+			if ts.IsZero() && t.CompletedAt != nil {
+				ts = *t.CompletedAt
+			}
+			if !ts.IsZero() && ts.Before(windowStart) {
+				continue
+			}
+			tc := t.CostUSD
+			if tc <= 0 {
+				tc = estimateStoreUsageCostUSD(string(threads[i].Role), t.InputTokens, t.OutputTokens)
+			}
+			if tc <= 0 {
+				continue
+			}
+			if decCost, ok := byTurn[t.ID]; ok {
+				if tc > decCost {
+					linkedTurnExtra += tc - decCost
+				}
+			} else {
+				unlinkedTurnCost += tc
+			}
+		}
+	}
+
+	var total float64
+	for _, c := range byTurn {
+		total += c
+	}
+	total += linkedTurnExtra + max(unlinkedDecCost, unlinkedTurnCost)
+	return total, nil
+}
+
+// EnforceCostGuard checks whether runID has reached or exceeded its configured
+// hourly spend limit (from RunSettings.MaxCostPerHourUSD or fallbackLimit).
+// When reached, it pauses the run (RunSettings.Paused = true), records an
+// owner notification directive and vetted cost.guard decision once per breach,
+// and returns (true, spent, limit, message, nil).
+func EnforceCostGuard(ctx context.Context, st Store, runID string, now time.Time, fallbackLimit float64) (bool, float64, float64, string, error) {
+	if st == nil || strings.TrimSpace(runID) == "" {
+		return false, 0, 0, "", nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	settings, err := st.Runs().GetSettings(ctx, runID)
+	if err != nil {
+		return false, 0, 0, "", err
+	}
+	limit := settings.MaxCostPerHourUSD
+	if limit <= 0 {
+		limit = fallbackLimit
+	}
+	if limit <= 0 {
+		return false, 0, 0, "", nil
+	}
+	spent, err := HourlyRunCostUSD(ctx, st, runID, now)
+	if err != nil {
+		return false, 0, limit, "", err
+	}
+	if spent < limit {
+		return false, spent, limit, "", nil
+	}
+
+	msg := fmt.Sprintf("Cost guard paused turns for run %s: spent $%.2f in the last hour (limit $%.2f/hr).", runID, spent, limit)
+	if !settings.Paused || settings.MaxCostPerHourUSD <= 0 {
+		settings.Paused = true
+		if settings.MaxCostPerHourUSD <= 0 {
+			settings.MaxCostPerHourUSD = limit
+		}
+		if uErr := st.Runs().UpdateSettings(ctx, runID, settings); uErr != nil {
+			return true, spent, limit, msg, uErr
+		}
+	}
+
+	askID := "cost-guard-" + runID
+	dirID := "ask-" + askID
+	if existing, dErr := st.Directives().Get(ctx, runID, dirID); dErr != nil || existing == nil {
+		askPayload, _ := json.Marshal(struct {
+			ID       string `json:"id"`
+			RunID    string `json:"run_id"`
+			Question string `json:"question"`
+		}{
+			ID:       askID,
+			RunID:    runID,
+			Question: msg,
+		})
+		_ = st.Directives().Add(ctx, Directive{
+			ID:        dirID,
+			RunID:     runID,
+			Kind:      DirectiveInstruction,
+			Scope:     "run",
+			Ref:       "owner_ask:" + askID,
+			Text:      string(askPayload),
+			Status:    DirectiveActive,
+			CreatedAt: now,
+		})
+	} else if existing.Status != DirectiveActive {
+		_ = st.Directives().UpdateStatus(ctx, runID, dirID, DirectiveActive)
+	}
+
+	windowStart := now.Add(-time.Hour)
+	existingDecs, _ := st.Decisions().List(ctx, DecisionFilter{RunID: runID})
+	alreadyRecorded := false
+	for i := range existingDecs {
+		if existingDecs[i].Tool != "cost.guard" {
+			continue
+		}
+		if existingDecs[i].CreatedAt.IsZero() || !existingDecs[i].CreatedAt.Before(windowStart) {
+			alreadyRecorded = true
+			break
+		}
+	}
+	if !alreadyRecorded {
+		_, _ = st.Decisions().Append(ctx, Decision{
+			RunID:     runID,
+			Actor:     "controller",
+			Tool:      "cost.guard",
+			Reason:    fmt.Sprintf("hourly spend $%.2f reached limit $%.2f/hr", spent, limit),
+			Result:    msg,
+			Vetted:    true,
+			CreatedAt: now,
+		})
+		payload, _ := json.Marshal(struct {
+			RunID   string  `json:"run_id"`
+			Message string  `json:"message"`
+			Spent   float64 `json:"spent_usd"`
+			Limit   float64 `json:"limit_usd"`
+		}{
+			RunID:   runID,
+			Message: msg,
+			Spent:   spent,
+			Limit:   limit,
+		})
+		_, _ = st.Events().Append(ctx, Event{
+			ID:        "cost-guard-" + runID,
+			RunID:     runID,
+			Kind:      EventMail,
+			Class:     EventClassAuto,
+			Source:    "cost.guard",
+			Summary:   msg,
+			Payload:   payload,
+			CreatedAt: now,
+		})
+	}
+	return true, spent, limit, msg, nil
+}

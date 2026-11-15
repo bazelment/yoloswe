@@ -17,6 +17,8 @@ import (
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
+	"github.com/bazelment/yoloswe/orca/mailbox"
+	mailboxfake "github.com/bazelment/yoloswe/orca/mailbox/fake"
 	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
@@ -1670,5 +1672,134 @@ func TestDispatcherReconcilesMergedAndClosedPRBeforeRetry(t *testing.T) {
 	}
 	if len(drv.Stops) == 0 {
 		t.Fatalf("expected dispatcher to stop terminals on merged PR, stops=%+v", drv.Stops)
+	}
+}
+
+func TestDispatcherStaleJudgmentDismissesQuestionAndEarlierOwnerLiftAllowsRevoke(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID:            "m2-gaps3",
+		RunID:         "run-1",
+		Title:         "m2 gaps 3",
+		RecipeName:    recipe.DefaultName,
+		RecipeVersion: 1,
+		Status:        lane.StatusRunning,
+		Phase:         recipe.PhaseSWE,
+		Round:         1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold directive created at t0.
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:        "hold-m4",
+		RunID:     "run-1",
+		Kind:      store.DirectiveStanding,
+		Source:    store.DirectiveSourceOwner,
+		Scope:     "run",
+		Text:      "Do not start M4 until I confirm",
+		Status:    store.DirectiveActive,
+		CreatedAt: clk.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Owner message at t1 lifting the hold (already handled in an earlier batch).
+	clk.Advance(time.Minute)
+	if _, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventOwnerMessage,
+		Class:   store.EventClassJudgment,
+		Summary: "yes: clear the hold and proceed with M4",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Later non-owner mail event at t2 with a stale lane question + a withdrawn question.
+	clk.Advance(time.Minute)
+	withdrawnPayload, _ := json.Marshal(mailbox.Message{
+		ID:       "msg-withdrawn",
+		RunID:    "run-1",
+		LaneID:   "m2-gaps3",
+		Question: true,
+		Status:   "withdrawn",
+		Body:     "withdrawn question 04547e4e",
+	})
+	if _, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		LaneID:  "m2-gaps3",
+		Kind:    store.EventMail,
+		Class:   store.EventClassAuto,
+		Summary: "withdrawn question 04547e4e",
+		Payload: withdrawnPayload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !mailbox.IsQuestionObsoleteOrClosed(ctx, st, "run-1", "m2-gaps3", "msg-withdrawn", "", "withdrawn question 04547e4e") {
+		t.Fatal("expected withdrawn question to be treated as closed")
+	}
+
+	stalePayload, _ := json.Marshal(mailbox.Message{
+		ID:       "msg-stale-1",
+		RunID:    "run-1",
+		LaneID:   "m2-gaps3",
+		Question: true,
+		Body:     "stale question from earlier round",
+	})
+	staleEv, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		LaneID:  "m2-gaps3",
+		Kind:    store.EventMail,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Summary: "lane question from m2-gaps3: stale question from earlier round",
+		Payload: stalePayload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBox := mailboxfake.New(st.Events(), "run-1")
+	client := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("dismiss-1", dispatcher.ToolMailDismiss, json.RawMessage(`{"message_id":"msg-stale-1","lane_id":"m2-gaps3","reason":"stale question from superseded round"}`)),
+				model.NewToolUseBlock("revoke-1", dispatcher.ToolDirectiveRevoke, json.RawMessage(`{"id":"hold-m4","reason":"owner lifted hold earlier"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Dismissed stale question and revoked lifted hold.")),
+		},
+	)
+	d := dispatcher.New(dispatcher.Config{
+		Mailboxes:        []mailbox.Mailbox{fakeBox},
+		AllowMultiAction: true,
+	}, st, drv, clk, client)
+	res, err := d.Dispatch(ctx, "run-1", []store.Event{staleEv})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	for _, dec := range res.Decisions {
+		if !dec.Vetted {
+			t.Fatalf("unvetted decision: %+v", dec)
+		}
+	}
+	if got := fakeBox.Dismissed()["msg-stale-1"]; !strings.Contains(got, "stale") {
+		t.Fatalf("fakeBox.Dismissed[msg-stale-1] = %q, want stale reason", got)
+	}
+	if !mailbox.IsQuestionObsoleteOrClosed(ctx, st, "run-1", "m2-gaps3", "msg-stale-1", staleEv.ID, "stale question from earlier round") {
+		t.Fatal("expected dismissed question to be treated as closed")
+	}
+	gotHold, err := st.Directives().Get(ctx, "run-1", "hold-m4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotHold.Status != store.DirectiveRevoked {
+		t.Fatalf("hold-m4 status = %q, want %q", gotHold.Status, store.DirectiveRevoked)
 	}
 }

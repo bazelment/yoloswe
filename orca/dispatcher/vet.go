@@ -32,6 +32,7 @@ const (
 	ToolOwnerAsk        = "owner.ask"
 	ToolOwnerAnswer     = "owner.answer"
 	ToolMailAnswer      = "mail.answer"
+	ToolMailDismiss     = "mail.dismiss"
 	ToolDirectiveNote   = "directive.note"
 	ToolDirectiveRevoke = "directive.revoke"
 	ToolPlannerRequest  = "planner.request"
@@ -145,6 +146,13 @@ type MailAnswerParams struct {
 	Reason    string `json:"reason,omitempty" jsonschema:"description=Optional reason for this answer"`
 }
 
+// MailDismissParams holds parameters for the mail.dismiss tool.
+type MailDismissParams struct {
+	MessageID string `json:"message_id,omitempty" jsonschema:"description=Inbound mail message ID to dismiss or close as stale/withdrawn/obsolete"`
+	LaneID    string `json:"lane_id,omitempty" jsonschema:"description=Lane ID that sent the mail"`
+	Reason    string `json:"reason" jsonschema:"required,description=Reason why the lane question or mail is stale, withdrawn, or obsolete"`
+}
+
 // DirectiveNoteParams holds parameters for the directive.note tool.
 type DirectiveNoteParams struct {
 	ID     string `json:"id,omitempty" jsonschema:"description=Optional directive ID"`
@@ -203,6 +211,7 @@ type ProposedAction struct {
 	OwnerAsk        *OwnerAskParams        `json:"-"`
 	OwnerAnswer     *OwnerAnswerParams     `json:"-"`
 	MailAnswer      *MailAnswerParams      `json:"-"`
+	MailDismiss     *MailDismissParams     `json:"-"`
 	DirectiveNote   *DirectiveNoteParams   `json:"-"`
 	DirectiveRevoke *DirectiveRevokeParams `json:"-"`
 	PlannerRequest  *PlannerRequestParams  `json:"-"`
@@ -241,6 +250,8 @@ func NormalizeToolName(name string) string {
 	switch trimmed {
 	case "directive.supersede", "directive_supersede":
 		return ToolDirectiveRevoke
+	case "mail.resolve", "mail_resolve", "worker.question.dismiss", "question.dismiss", "mail_dismiss":
+		return ToolMailDismiss
 	}
 	if isKnownTool(trimmed) {
 		return trimmed
@@ -255,7 +266,7 @@ func isKnownTool(tool string) bool {
 	switch tool {
 	case ToolBacklogAdd, ToolBacklogUpdate, ToolBacklogReorder, ToolBacklogClose,
 		ToolLaneSpawn, ToolLaneSteer, ToolLaneRetry, ToolLaneStop,
-		ToolOwnerAsk, ToolOwnerAnswer, ToolMailAnswer, ToolDirectiveNote, ToolDirectiveRevoke, ToolPlannerRequest,
+		ToolOwnerAsk, ToolOwnerAnswer, ToolMailAnswer, ToolMailDismiss, ToolDirectiveNote, ToolDirectiveRevoke, ToolPlannerRequest,
 		ToolReadLaneReport, ToolReadPR, ToolReadCI:
 		return true
 	default:
@@ -437,6 +448,21 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 		act.LaneID = p.LaneID
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Answer))
 
+	case ToolMailDismiss:
+		p, err := decodeParams[MailDismissParams](canonical, trimmed)
+		if err != nil {
+			return act, err
+		}
+		if p.MessageID == "" || p.LaneID == "" || p.Reason == "" {
+			a := decodeAliases(trimmed)
+			p.MessageID = cmp.Or(p.MessageID, a.ID, a.MsgID)
+			p.LaneID = cmp.Or(p.LaneID, a.Lane)
+			p.Reason = cmp.Or(p.Reason, a.Body, a.Note, a.Message, a.Text)
+		}
+		act.MailDismiss = p
+		act.LaneID = p.LaneID
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("dismiss lane mail %s", cmp.Or(p.MessageID, p.LaneID)))
+
 	case ToolDirectiveNote:
 		p, err := decodeParams[DirectiveNoteParams](canonical, trimmed)
 		if err != nil {
@@ -583,8 +609,13 @@ func loadStateViewWithCache(
 		OwnerAsks:      make(map[string]controller.OwnerAsk),
 		Directives:     make(map[string]store.Directive, len(directives)),
 	}
+	runDone := isRunStateDone(run, lanes, backlog)
 	for i := range directives {
 		d := directives[i]
+		if runDone && !strings.HasPrefix(d.Ref, ownerAskRefPrefix) && isHoldDirectiveText(d.Text) {
+			_ = st.Directives().UpdateStatus(ctx, runID, d.ID, store.DirectiveExpired)
+			continue
+		}
 		if d.ExpiresAt == nil || view.Now.Before(*d.ExpiresAt) {
 			view.Directives[d.ID] = d
 		}
@@ -1188,6 +1219,12 @@ func checkLaneExists(st *StateView, act ProposedAction) error {
 				return fmt.Errorf("lane %q is not in the store", act.MailAnswer.LaneID)
 			}
 		}
+	case ToolMailDismiss:
+		if act.MailDismiss != nil && strings.TrimSpace(act.MailDismiss.LaneID) != "" {
+			if _, ok := st.Lane(act.MailDismiss.LaneID); !ok {
+				return fmt.Errorf("lane %q is not in the store", act.MailDismiss.LaneID)
+			}
+		}
 	}
 	return nil
 }
@@ -1485,8 +1522,67 @@ func checkDirectiveAndPlannerInvariants(st *StateView, act ProposedAction) error
 		if strings.TrimSpace(p.MessageID) == "" && strings.TrimSpace(p.LaneID) == "" {
 			return errors.New("message_id or lane_id is required for mail.answer")
 		}
+
+	case ToolMailDismiss:
+		p := act.MailDismiss
+		if p == nil || strings.TrimSpace(p.Reason) == "" {
+			return errors.New("reason is required for mail.dismiss")
+		}
+		if strings.TrimSpace(p.MessageID) == "" && strings.TrimSpace(p.LaneID) == "" {
+			return errors.New("message_id or lane_id is required for mail.dismiss")
+		}
 	}
 	return nil
+}
+
+func isRunStateDone(run *store.Run, lanes []lane.Lane, backlog []store.BacklogItem) bool {
+	for i := range lanes {
+		if !lanes[i].Status.Terminal() {
+			return false
+		}
+	}
+	for i := range backlog {
+		if !backlog[i].Status.Terminal() {
+			return false
+		}
+	}
+	if run != nil && isObjectiveDoneText(run.Objective) {
+		return true
+	}
+	return false
+}
+
+func isObjectiveDoneText(objective string) bool {
+	lastNext := ""
+	lines := strings.Split(objective, "\n")
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "next:") {
+			lastNext = strings.TrimSpace(line[len("next:"):])
+		} else if strings.Contains(lower, "run done") || strings.Contains(lower, "run complete") || strings.Contains(lower, "swarm done") {
+			if lastNext == "" {
+				lastNext = line
+			}
+		}
+	}
+	if lastNext == "" {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(lastNext))
+	for _, prefix := range []string{"none", "nothing", "n/a", "done", "complete", "completed", "finished", "all done"} {
+		if lower == prefix ||
+			strings.HasPrefix(lower, prefix+".") ||
+			strings.HasPrefix(lower, prefix+",") ||
+			strings.HasPrefix(lower, prefix+";") ||
+			strings.HasPrefix(lower, prefix+":") ||
+			strings.HasPrefix(lower, prefix+" ") ||
+			strings.HasPrefix(lower, prefix+"—") ||
+			strings.HasPrefix(lower, prefix+"-") {
+			return true
+		}
+	}
+	return strings.Contains(lower, "run done") || strings.Contains(lower, "no loop armed") || strings.Contains(lower, "no open work")
 }
 
 func parseFutureTime(now time.Time, raw string) (time.Time, error) {

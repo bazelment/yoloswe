@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -1294,5 +1297,100 @@ Next: when #5786 merges, staff a lane for 6-7 if not covered; then M4 (lane_metr
 		if !strings.Contains(res.Answer, wantInAnswer) {
 			t.Fatalf("concierge progress answer missing %q:\n%s", wantInAnswer, res.Answer)
 		}
+	}
+}
+
+func TestFakeClaudeCLIHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_FAKE_CLAUDE_CLI") != "1" {
+		return
+	}
+	model.RunFakeClaudeStreamCLI(
+		os.Getenv("FAKE_CLAUDE_STREAM_FILE"),
+		os.Getenv("FAKE_CLAUDE_ARGS_FILE"),
+		os.Getenv("FAKE_CLAUDE_MCP_RESPONSES_FILE"),
+		os.Getenv("FAKE_CLAUDE_TURN_COUNTER_FILE"),
+	)
+}
+
+func TestConciergeCLIBackendAnswersDoneFromLatestNextLine(t *testing.T) {
+	t.Parallel()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 2, 4, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+	ctx := t.Context()
+
+	runDir := t.TempDir()
+	objPath := filepath.Join(runDir, "OBJECTIVE.md")
+	objContent := strings.Join([]string{
+		"# 20261114-trial-m1",
+		"Goal: trial m1 slim prompts.",
+		"- [ ] Open: hand interventions 6-7",
+		"Next: when #5786 merges, staff a lane for 6-7",
+		"",
+		"## Final status",
+		"Next: none. Run DONE 22:25Z — all lanes merged (#5604, #5811). PLAN.md log + post updated. No loop armed.",
+	}, "\n") + "\n"
+	if err := os.WriteFile(objPath, []byte(objContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const runID = "20261114-trial-m1"
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:            runID,
+		Objective:     "trial m1 slim prompts. | Next: none. Run DONE 22:25Z — all lanes merged (#5604, #5811). PLAN.md log + post updated. No loop armed.",
+		PlanRef:       "file:" + objPath,
+		DefaultRecipe: "adopted",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	streamFile := filepath.Join(dir, "stream.jsonl")
+	argsFile := filepath.Join(dir, "args.jsonl")
+	mcpRespFile := filepath.Join(dir, "mcp_responses.jsonl")
+	counterFile := filepath.Join(dir, "turn_counter.txt")
+	binPath := filepath.Join(dir, "fake-claude")
+
+	streamLines := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"sess-conc-1","model":"claude-sonnet-5-5","cwd":"/tmp"}`,
+		`{"type":"control_request","request_id":"mcp-status-1","request":{"subtype":"mcp_message","server_name":"orca","message":{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"status","arguments":{}}}}}`,
+		`{"type":"assistant","message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":"Run 20261114-trial-m1 is done (Next: none. Run DONE 22:25Z — all lanes merged)."}]},"session_id":"sess-conc-1"}`,
+		`{"type":"result","subtype":"success","is_error":false,"session_id":"sess-conc-1","result":"Run 20261114-trial-m1 is done (Next: none. Run DONE 22:25Z — all lanes merged).","num_turns":1,"duration_ms":20,"duration_api_ms":15,"total_cost_usd":0.005,"usage":{"input_tokens":80,"output_tokens":20}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(streamFile, []byte(streamLines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf("#!/bin/sh\nexport GO_WANT_FAKE_CLAUDE_CLI=1\nexport FAKE_CLAUDE_STREAM_FILE=%q\nexport FAKE_CLAUDE_ARGS_FILE=%q\nexport FAKE_CLAUDE_MCP_RESPONSES_FILE=%q\nexport FAKE_CLAUDE_TURN_COUNTER_FILE=%q\nexec %q -test.run=^TestFakeClaudeCLIHelper$ -- \"$@\"\n",
+		streamFile, argsFile, mcpRespFile, counterFile, exe)
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	conc := concierge.New(concierge.Config{
+		AgentBackend: model.AgentBackendCLI,
+		Provider:     "claude-cli",
+		Model:        "claude-sonnet-5-5",
+		ClaudeBin:    binPath,
+	}, st, drv, clk, nil)
+	t.Cleanup(func() { _ = conc.Close() })
+
+	res, err := conc.Ask(ctx, runID, "What is our progress?")
+	if err != nil {
+		t.Fatalf("Ask on CLI backend: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(res.Answer), "done") {
+		t.Fatalf("concierge CLI answer = %q, want it to report done", res.Answer)
+	}
+	mcpData, err := os.ReadFile(mcpRespFile)
+	if err != nil {
+		t.Fatalf("read mcp responses: %v", err)
+	}
+	if !strings.Contains(string(mcpData), "Next: none. Run DONE 22:25Z") {
+		t.Fatalf("MCP status response missing latest Next: line:\n%s", string(mcpData))
 	}
 }

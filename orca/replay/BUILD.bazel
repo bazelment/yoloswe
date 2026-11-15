@@ -17,6 +17,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/orca/replay",
     visibility = ["//visibility:public"],
     deps = [
+        "//orca/adopt",
         "//orca/clock",
         "//orca/dispatcher",
         "//orca/lane",

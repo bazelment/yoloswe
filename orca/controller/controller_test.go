@@ -2266,3 +2266,52 @@ func TestControllerMergedPRBeforeRetry(t *testing.T) {
 		t.Fatalf("planned merged lane = %+v, want StatusDone PR=5707 MergeSHA=merged-sha-5707", plannedLn)
 	}
 }
+
+func TestControllerCostGuardPausesTurnsAtLimit(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+
+	for i, cost := range []float64{3.25, 2.50} {
+		if _, err := st.Decisions().Append(ctx, store.Decision{
+			RunID:    "run-1",
+			Category: store.DecisionJudgment,
+			Actor:    "dispatcher",
+			Tool:     "dispatcher.turn",
+			Reason:   "prior turn",
+			Result:   "ok",
+			CostUSD:  cost,
+			Vetted:   true,
+		}); err != nil {
+			t.Fatalf("Append decision %d: %v", i, err)
+		}
+	}
+
+	ctrl := controller.New(controller.Config{
+		RunID:             "run-1",
+		MaxCostPerHourUSD: 5.0,
+	}, st, drv, clk, judge)
+
+	if _, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventMail,
+		Urgent:  true,
+		Summary: "urgent mail event while over cost limit",
+	}); err != nil {
+		t.Fatalf("Append event: %v", err)
+	}
+
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	if judge.BatchCount() != 0 {
+		t.Fatalf("judge batches when cost guard exceeded = %d, want 0", judge.BatchCount())
+	}
+	settings, err := st.Runs().GetSettings(ctx, "run-1")
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if !settings.Paused {
+		t.Fatalf("run settings Paused = false, want true when cost guard limit is reached")
+	}
+}
