@@ -890,13 +890,14 @@ func (s *StateView) ObjectiveMentionsReadyItem(itemID string) (store.BacklogItem
 	if !matchedBullet {
 		return store.BacklogItem{}, false
 	}
-	title := extractObjectiveItemTitle(cmp.Or(nextSec, obj), itemID)
+	title := cmp.Or(extractObjectiveItemTitle(cmp.Or(nextSec, obj), itemID), itemID)
 	return store.BacklogItem{
 		ID:       itemID,
 		RunID:    s.Run.ID,
-		Title:    cmp.Or(title, itemID),
+		Title:    title,
 		Priority: store.PriorityP1,
 		Status:   store.BacklogOpen,
+		NoMerge:  store.IsNoMergeText(title),
 	}, true
 }
 

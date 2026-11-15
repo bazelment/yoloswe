@@ -192,12 +192,46 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 			_ = tx.Rollback()
 			return fmt.Errorf("apply migration %q: %w", version, err)
 		}
+		if version == "0009_backlog_no_merge.sql" {
+			if err := backfillNoMergeRowsTx(ctx, tx); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("backfill migration %q: %w", version, err)
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`, version, formatTime(s.now())); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("record migration %q: %w", version, err)
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit migration %q: %w", version, err)
+		}
+	}
+	return nil
+}
+
+func backfillNoMergeRowsTx(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT run_id, id, title, description, acceptance FROM backlog_items WHERE no_merge = 0`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type key struct{ runID, id string }
+	var toUpdate []key
+	for rows.Next() {
+		var it BacklogItem
+		if err := rows.Scan(&it.RunID, &it.ID, &it.Title, &it.Description, &it.Acceptance); err != nil {
+			return err
+		}
+		if IsNoMergeBacklogItem(it) {
+			toUpdate = append(toUpdate, key{runID: it.RunID, id: it.ID})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, k := range toUpdate {
+		if _, err := tx.ExecContext(ctx, `UPDATE backlog_items SET no_merge = 1 WHERE run_id = ? AND id = ?`, k.runID, k.id); err != nil {
+			return err
 		}
 	}
 	return nil

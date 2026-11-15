@@ -582,6 +582,19 @@ func WithoutIntegrate(r Recipe) Recipe {
 	out.MergePolicy.RequireReviewPass = false
 	out.MergePolicy.RequireCIGreen = false
 	if len(out.Phases) <= 1 {
+		if len(out.Phases) == 1 && out.Phases[0].Name == PhaseIntegrate {
+			out.Phases[0].Name = PhaseReview
+			for i := range out.Transitions {
+				if out.Transitions[i].From == PhaseIntegrate {
+					out.Transitions[i].From = PhaseReview
+					out.Transitions[i].On.CIGreen = false
+				}
+				if out.Transitions[i].To == PhaseIntegrate {
+					out.Transitions[i].To = TargetComplete
+					out.Transitions[i].On.CIGreen = false
+				}
+			}
+		}
 		return out
 	}
 	out.Phases = slices.DeleteFunc(out.Phases, func(p Phase) bool {
@@ -620,13 +633,7 @@ func WithoutIntegrate(r Recipe) Recipe {
 			return !reachable[p.Name]
 		})
 		updatedTransitions = slices.DeleteFunc(updatedTransitions, func(tr Transition) bool {
-			if !reachable[tr.From] {
-				return true
-			}
-			if tr.To != TargetComplete && tr.To != TargetEscalate && !reachable[tr.To] {
-				return true
-			}
-			return false
+			return !reachable[tr.From]
 		})
 	}
 	out.Transitions = updatedTransitions

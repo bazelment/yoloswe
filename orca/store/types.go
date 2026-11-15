@@ -256,17 +256,23 @@ func IsNoMergeBacklogItem(item BacklogItem) bool {
 		IsNoMergeText(item.Acceptance)
 }
 
+// ItemIsNoMerge reports whether item is marked no-merge. For unpersisted draft
+// items (zero CreatedAt/UpdatedAt and no mutation history), it falls back to
+// IsNoMergeBacklogItem(item); persisted items rely on item.NoMerge so an
+// explicit BacklogStore.Update(NoMerge: false) is respected.
+func ItemIsNoMerge(item BacklogItem) bool {
+	if item.NoMerge {
+		return true
+	}
+	return item.CreatedAt.IsZero() && item.UpdatedAt.IsZero() && len(item.History) == 0 && IsNoMergeBacklogItem(item)
+}
+
 // IsNoMergeLane reports whether ln (and its associated backlog item, if any)
 // is a no-merge / report-only lane that must stop after review without running
 // integrate.
 func IsNoMergeLane(ln Lane, item *BacklogItem) bool {
-	if item != nil {
-		if item.NoMerge {
-			return true
-		}
-		if item.CreatedAt.IsZero() && item.UpdatedAt.IsZero() && IsNoMergeBacklogItem(*item) {
-			return true
-		}
+	if item != nil && ItemIsNoMerge(*item) {
+		return true
 	}
 	return IsNoMergeText(ln.Title)
 }
@@ -275,13 +281,8 @@ func IsNoMergeLane(ln Lane, item *BacklogItem) bool {
 // backlog item state, worker brief, or recipe override) specifies a no-merge /
 // report-only lane.
 func IsNoMergeSpawn(noMergeParam bool, item *BacklogItem, briefText, recipeOverride string) bool {
-	if noMergeParam {
+	if noMergeParam || (item != nil && ItemIsNoMerge(*item)) {
 		return true
-	}
-	if item != nil {
-		if item.NoMerge || (item.CreatedAt.IsZero() && item.UpdatedAt.IsZero() && IsNoMergeBacklogItem(*item)) {
-			return true
-		}
 	}
 	return IsNoMergeText(briefText) || IsNoMergeText(recipeOverride)
 }

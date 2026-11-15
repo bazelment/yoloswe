@@ -2055,6 +2055,15 @@ func TestDispatch_G35HoldSweepAllowsSameTurnSpawnAndSelectiveKeep(t *testing.T) 
 			Text:   "Pause new lanes while bookkeeping is pending",
 			Status: store.DirectiveActive,
 		},
+		{
+			ID:     "note-lane",
+			RunID:  "run-1",
+			Kind:   store.DirectiveStanding,
+			Source: store.DirectiveSourceOwner,
+			Scope:  "other-lane",
+			Text:   "Hold other-lane until migration finishes",
+			Status: store.DirectiveActive,
+		},
 	} {
 		if err := st.Directives().Add(ctx, dir); err != nil {
 			t.Fatalf("Directives.Add(%s): %v", dir.ID, err)
@@ -2082,21 +2091,27 @@ func TestDispatch_G35HoldSweepAllowsSameTurnSpawnAndSelectiveKeep(t *testing.T) 
 	if _, err := dSelective.Dispatch(ctx, "run-1", []store.Event{ev1}); err != nil {
 		t.Fatalf("Dispatch selective: %v", err)
 	}
+	d1, err := st.Directives().Get(ctx, "run-1", "note-1")
+	if err != nil || d1.Status != store.DirectiveRevoked {
+		t.Fatalf("note-1 status = %+v, err = %v; want revoked after explicit revoke", d1, err)
+	}
 	d2, err := st.Directives().Get(ctx, "run-1", "note-2")
 	if err != nil || d2.Status != store.DirectiveActive {
 		t.Fatalf("note-2 status = %+v, err = %v; want still active when owner said 'keep'", d2, err)
 	}
 
 	// Re-add note-1 so both note-1 and note-2 are active holds, then lift all holds
-	// with a message containing "bookkeeping" (must not match whole-word "keep") and
-	// spawn item-bookkeeping in the same turn after revoking only note-1.
+	// with a message containing "bookkeeping" (must not match whole-word "keep"),
+	// also explicitly revoke note-2 in the same turn (testing RevokedInTurn after
+	// note-1 already swept note-2), and spawn item-bookkeeping in the same turn.
 	if err := st.Directives().UpdateStatus(ctx, "run-1", "note-1", store.DirectiveActive); err != nil {
 		t.Fatal(err)
 	}
 	fakeSweepAndSpawn := model.NewFakeClient(
 		toolUseResponse(
 			model.ToolCall{ID: "t1", Name: dispatcher.ToolDirectiveRevoke, Input: json.RawMessage(`{"id":"note-1","reason":"owner lifted holds"}`)},
-			model.ToolCall{ID: "t2", Name: dispatcher.ToolLaneSpawn, Input: json.RawMessage(`{"item_id":"item-bookkeeping","brief":"Implement bookkeeping cleanup.","reason":"owner lifted holds and asked to start"}`)},
+			model.ToolCall{ID: "t2", Name: dispatcher.ToolDirectiveRevoke, Input: json.RawMessage(`{"id":"note-2","reason":"owner lifted holds"}`)},
+			model.ToolCall{ID: "t3", Name: dispatcher.ToolLaneSpawn, Input: json.RawMessage(`{"item_id":"item-bookkeeping","brief":"Implement bookkeeping cleanup.","reason":"owner lifted holds and asked to start"}`)},
 		),
 		endTurnResponse("Lifted holds and spawned item-bookkeeping."),
 	)
@@ -2118,7 +2133,17 @@ func TestDispatch_G35HoldSweepAllowsSameTurnSpawnAndSelectiveKeep(t *testing.T) 
 	if len(res2.Rejected) > 0 {
 		t.Fatalf("unexpected rejections in sweep+spawn turn: %v", res2.Rejected)
 	}
-	if len(res2.Accepted) != 2 {
-		t.Fatalf("Accepted = %+v, want 2 (directive.revoke + lane.spawn)", res2.Accepted)
+	if len(res2.Accepted) != 3 {
+		t.Fatalf("Accepted = %+v, want 3 (2x directive.revoke + lane.spawn)", res2.Accepted)
+	}
+	for _, revokedID := range []string{"note-1", "note-2"} {
+		gotDir, gErr := st.Directives().Get(ctx, "run-1", revokedID)
+		if gErr != nil || gotDir.Status != store.DirectiveRevoked {
+			t.Fatalf("%s after sweep = %+v, err = %v; want revoked", revokedID, gotDir, gErr)
+		}
+	}
+	laneScopedDir, err := st.Directives().Get(ctx, "run-1", "note-lane")
+	if err != nil || laneScopedDir.Status != store.DirectiveActive {
+		t.Fatalf("note-lane status = %+v, err = %v; want lane-scoped hold untouched by run sweep", laneScopedDir, err)
 	}
 }

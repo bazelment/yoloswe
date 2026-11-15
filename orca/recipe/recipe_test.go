@@ -171,17 +171,20 @@ func TestWithoutIntegrate(t *testing.T) {
 		t.Fatalf("customNoInt review done transition = %+v, want -> complete", trCustom)
 	}
 
-	// Single-phase recipe is returned unchanged.
+	// Single-phase integrate recipe is rewritten to review so integrate never runs.
 	single := recipe.Recipe{
 		Name:    "single",
 		Version: 1,
 		Phases:  []recipe.Phase{{Name: recipe.PhaseIntegrate, Agents: []recipe.AgentSpec{{Harness: "claude", Model: "sonnet"}}}},
 		Transitions: []recipe.Transition{
-			{From: recipe.PhaseIntegrate, On: recipe.Condition{Verdict: recipe.OutcomeDone}, To: recipe.TargetComplete},
+			{From: recipe.PhaseIntegrate, On: recipe.Condition{Verdict: recipe.OutcomeDone, CIGreen: true}, To: recipe.TargetComplete},
 		},
 	}
 	singleOut := recipe.WithoutIntegrate(single)
-	if got := singleOut.PhaseNames(); !slices.Equal(got, []string{recipe.PhaseIntegrate}) {
-		t.Fatalf("WithoutIntegrate(single) = %v, want [integrate]", got)
+	if err := singleOut.Validate(); err != nil {
+		t.Fatalf("WithoutIntegrate(single).Validate() error: %v", err)
+	}
+	if got := singleOut.PhaseNames(); !slices.Equal(got, []string{recipe.PhaseReview}) {
+		t.Fatalf("WithoutIntegrate(single) = %v, want [review]", got)
 	}
 }
