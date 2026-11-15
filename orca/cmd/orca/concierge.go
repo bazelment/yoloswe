@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -43,7 +44,7 @@ const (
 	ToolRunSettings         = memorychat.ToolRunSettings
 	ToolRunStart            = "run.start"
 	ToolSwarms              = "swarms"
-	DefaultConciergeMaxTurn = 6
+	DefaultConciergeMaxTurn = 12
 	// conciergeHistoryMessages bounds resumed thread history.
 	conciergeHistoryMessages = 40
 	// swarmsReadBytes bounds the swarms tool output.
@@ -152,6 +153,8 @@ type Concierge struct {
 	OwnerRun func(ctx context.Context, run, text string) (string, error)
 	// Wake asks the controller of a run to act on a new directive now.
 	Wake func(runID string)
+	// RecordProposal records a pending action proposal when a concierge reply offers an action.
+	RecordProposal func(ctx context.Context, runID, summary, spec string) (string, error)
 	// Restart validates the startup binary and prepares an in-place re-exec.
 	Restart func(context.Context, string) (string, error)
 	// Logger receives one INFO line per tool call and a WARN on a budget stop.
@@ -213,6 +216,7 @@ func (c *Concierge) BindBackend(b *chat.StoreBackend) {
 	c.SwarmsFilter = b.LiveSwarmsFiltered
 	c.OwnerRun = b.OwnerRun
 	c.Wake = b.Wake
+	c.RecordProposal = b.RecordProposal
 	c.HeldRuns = b.HeldRuns
 	c.HostRun = b.ReadHostRun
 	c.probeFrom = func() chat.HostProbe {
@@ -440,7 +444,7 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 	if len(held) > 0 && (len(held) > 1 || held[0] != frontDeskRunID) {
 		systemPrompt += "\n\n## Held Runs\nThis chat currently holds in its Store: " + strings.Join(held, ", ") + ". Use status, lane.show, pr.ci, and read.file (not swarms) to answer questions about held runs."
 	}
-	if memories, memErr := c.store.Memories().List(ctx, store.MemoryFilter{RunID: c.runID}); memErr == nil {
+	if memories, memErr := c.listHeldMemories(ctx, held); memErr == nil {
 		systemPrompt += "\n\n## Canonical Memory Index\n" + store.MemoryIndex(memories)
 	}
 
@@ -454,10 +458,14 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 	if c.AgentBackend == model.AgentBackendCLI {
 		var cliToolOutputs []string
 		sessCfg := model.AgentSessionConfig{
-			Provider:      c.Provider,
-			Model:         c.modelName,
-			Effort:        c.Effort,
-			SystemPrompt:  systemPrompt,
+			Provider:     c.Provider,
+			Model:        c.modelName,
+			Effort:       c.Effort,
+			SystemPrompt: systemPrompt,
+			// Keep the session directory anchored to the configured front-desk
+			// directory. investigateConfig adds held-run directories as read roots;
+			// using its promoted RunDir here would change the resume path whenever
+			// runs are adopted or released.
 			WorkDir:       model.DeterministicSessionWorkDir(c.Investigate.RunDir, cmp.Or(c.runID, threadID), ActorConcierge),
 			LLMGatewayURL: c.LLMGatewayURL,
 			ClaudeBin:     c.ClaudeBin,
@@ -635,6 +643,9 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 		_ = c.store.Threads().CompleteTurn(cleanupCtx, threadID, turnID, store.TurnStatusFailed, usage, loopErr.Error())
 		return answer, loopErr
 	}
+	if c.RecordProposal != nil && chat.ContainsOffer(answer) {
+		_, _ = c.RecordProposal(ctx, "", "", answer)
+	}
 	if err := c.store.Threads().CompleteTurn(cleanupCtx, threadID, turnID, store.TurnStatusCompleted, usage, ""); err != nil {
 		return answer, err
 	}
@@ -648,8 +659,9 @@ const budgetPrompt = "Your tool budget for this question is spent. Answer the ow
 // falls back to reporting the collected results.
 func (c *Concierge) budgetAnswer(ctx context.Context, req model.Request, question string, turn []model.Message) (string, model.Usage) {
 	results := toolResults(turn)
+	skipped := skippedReads(turn)
 	if c.Logger != nil {
-		c.Logger.Warn("concierge turn budget spent", "turns", DefaultConciergeMaxTurn-1, "tool_results", len(results))
+		c.Logger.Warn("concierge turn budget spent", "turns", DefaultConciergeMaxTurn-1, "tool_results", len(results), "skipped_reads", len(skipped))
 	}
 	var prompt strings.Builder
 	fmt.Fprintf(&prompt, "Owner question: %s\n\nTool results so far:\n", question)
@@ -658,6 +670,9 @@ func (c *Concierge) budgetAnswer(ctx context.Context, req model.Request, questio
 	}
 	if len(results) == 0 {
 		prompt.WriteString("(none)\n")
+	}
+	if len(skipped) > 0 {
+		fmt.Fprintf(&prompt, "\nSkipped reads (tool-call limit): %s\n", strings.Join(skipped, ", "))
 	}
 	prompt.WriteString("\n" + budgetPrompt)
 	final := req.Clone()
@@ -668,7 +683,7 @@ func (c *Concierge) budgetAnswer(ctx context.Context, req model.Request, questio
 	if err == nil && resp != nil {
 		usage = resp.Usage
 		if txt := strings.TrimSpace(resp.Text()); txt != "" && len(resp.ToolCalls()) == 0 {
-			return txt, usage
+			return ensureSkippedReadsMentioned(txt, skipped), usage
 		}
 	}
 	if c.Logger != nil {
@@ -682,7 +697,91 @@ func (c *Concierge) budgetAnswer(ctx context.Context, req model.Request, questio
 	for _, r := range results {
 		b.WriteString("\n" + r)
 	}
+	if len(skipped) > 0 {
+		fmt.Fprintf(&b, "\nSkipped reads (tool-call limit): %s", strings.Join(skipped, ", "))
+	}
 	return b.String(), usage
+}
+
+func skippedReads(msgs []model.Message) []string {
+	type callInfo struct {
+		name string
+		key  string
+	}
+	byID := map[string]callInfo{}
+	succeededKey := map[string]bool{}
+	completedID := map[string]bool{}
+	erroredID := map[string]bool{}
+
+	for i := range msgs {
+		for j := range msgs[i].Content {
+			blk := &msgs[i].Content[j]
+			switch blk.Type {
+			case model.BlockTypeToolUse:
+				label := formatSkippedToolCall(blk.Name, blk.Input)
+				byID[blk.ID] = callInfo{name: blk.Name, key: label}
+			case model.BlockTypeToolResult:
+				completedID[blk.ToolUseID] = true
+				if blk.IsError {
+					erroredID[blk.ToolUseID] = true
+				} else if info, ok := byID[blk.ToolUseID]; ok {
+					succeededKey[info.key] = true
+				}
+			}
+		}
+	}
+	var out []string
+	seen := map[string]bool{}
+	for i := range msgs {
+		for j := range msgs[i].Content {
+			blk := &msgs[i].Content[j]
+			if blk.Type != model.BlockTypeToolUse {
+				continue
+			}
+			info := byID[blk.ID]
+			if (!completedID[blk.ID] || erroredID[blk.ID]) && !succeededKey[info.key] && !seen[info.key] {
+				seen[info.key] = true
+				out = append(out, info.key)
+			}
+		}
+	}
+	return out
+}
+
+func formatSkippedToolCall(name string, raw json.RawMessage) string {
+	var m map[string]any
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &m)
+	}
+	for _, k := range []string{"path", "lane_id", "run_id", "run", "id"} {
+		if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
+			t := strings.TrimSpace(v)
+			return fmt.Sprintf("%s(%s)", name, t)
+		}
+	}
+	return name
+}
+
+func ensureSkippedReadsMentioned(answer string, skipped []string) string {
+	if len(skipped) == 0 {
+		return answer
+	}
+	var missing []string
+	for _, s := range skipped {
+		_, target, hasParen := strings.Cut(s, "(")
+		target = strings.TrimSuffix(target, ")")
+		if hasParen && target != "" {
+			if !strings.Contains(answer, target) && !strings.Contains(answer, filepath.Base(target)) {
+				missing = append(missing, s)
+			}
+		} else if !strings.Contains(answer, s) {
+			missing = append(missing, s)
+		}
+	}
+	if len(missing) == 0 {
+		return answer
+	}
+	return answer + "\n\nSkipped reads (tool-call limit): " + strings.Join(missing, ", ")
 }
 
 // toolResults renders unique tool results in encounter order.
@@ -1082,9 +1181,53 @@ func (c *Concierge) RunInteractive(ctx context.Context, in io.Reader, out io.Wri
 	return scanner.Err()
 }
 
+func (c *Concierge) listHeldMemories(ctx context.Context, held []string) ([]store.MemoryEntry, error) {
+	if c.store == nil || c.store.Memories() == nil {
+		return nil, nil
+	}
+	seen := make(map[string]bool)
+	var out []store.MemoryEntry
+	add := func(entries []store.MemoryEntry) {
+		for i := range entries {
+			key := entries[i].ID
+			if key == "" {
+				key = entries[i].RunID + "\x00" + entries[i].Name
+			}
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, entries[i])
+			}
+		}
+	}
+	global, err := c.store.Memories().List(ctx, store.MemoryFilter{RunID: ""})
+	if err != nil {
+		return nil, err
+	}
+	// List includes run-scoped entries when RunID is empty. Only entries with
+	// an empty owner are global and safe to expose in every held-run prompt.
+	add(slices.DeleteFunc(global, func(entry store.MemoryEntry) bool { return entry.RunID != "" }))
+	runs := append(slices.Clone(held), c.runID)
+	for _, runID := range runs {
+		if strings.TrimSpace(runID) == "" || runID == frontDeskRunID {
+			continue
+		}
+		entries, listErr := c.store.Memories().List(ctx, store.MemoryFilter{RunID: runID})
+		if listErr != nil {
+			return nil, listErr
+		}
+		add(entries)
+	}
+	return out, nil
+}
+
 func (c *Concierge) investigateConfig(ctx context.Context) model.InvestigateConfig {
 	icfg := c.Investigate
 	icfg.ExtraRoots = slices.Clone(c.Investigate.ExtraRoots)
+	frontDeskDir := ""
+	if filepath.Base(strings.TrimSpace(icfg.RunDir)) == frontDeskRunID {
+		frontDeskDir = strings.TrimSpace(icfg.RunDir)
+		icfg.RunDir = ""
+	}
 	addRunDir := func(dir string) {
 		dir = strings.TrimSpace(dir)
 		if dir == "" {
@@ -1120,10 +1263,113 @@ func (c *Concierge) investigateConfig(ctx context.Context) model.InvestigateConf
 			}
 		}
 	}
+	if frontDeskDir != "" {
+		addRunDir(frontDeskDir)
+	}
 	if c.AgentBackend == model.AgentBackendCLI && !icfg.HasRoots() {
 		icfg.RepoDir = "."
 	}
 	return icfg
+}
+
+func (c *Concierge) resolveReadFilePath(ctx context.Context, icfg model.InvestigateConfig, rawPath, quote string) string {
+	rawPath = strings.TrimSpace(rawPath)
+	if rawPath == "" || filepath.IsAbs(rawPath) {
+		return rawPath
+	}
+	var runDirs []string
+	addDir := func(d string) {
+		d = strings.TrimSpace(d)
+		if d == "" || filepath.Base(d) == frontDeskRunID || slices.Contains(runDirs, d) {
+			return
+		}
+		runDirs = append(runDirs, d)
+	}
+	if c.HostRun != nil {
+		held := c.heldRunIDs(ctx)
+		for _, id := range held {
+			if id != frontDeskRunID && chat.Mentions(quote, id) {
+				if hr, err := c.HostRun(id); err == nil {
+					addDir(hr.Dir)
+				}
+			}
+		}
+		for _, id := range held {
+			if hr, err := c.HostRun(id); err == nil {
+				addDir(hr.Dir)
+			}
+		}
+	}
+	addDir(icfg.RunDir)
+	for _, r := range icfg.ExtraRoots {
+		addDir(r)
+	}
+	slash := filepath.ToSlash(rawPath)
+	afterReports, hasReportsPrefix := strings.CutPrefix(slash, "reports/")
+	isReportsRoot := slash == "reports" || slash == "reports/"
+	for _, dir := range runDirs {
+		exact := filepath.Join(dir, filepath.FromSlash(slash))
+		if _, err := os.Stat(exact); err == nil {
+			return exact
+		}
+		if isReportsRoot {
+			if _, err := os.Stat(dir); err == nil {
+				return dir
+			}
+		}
+		if hasReportsPrefix && afterReports != "" {
+			flat := filepath.Join(dir, filepath.FromSlash(afterReports))
+			if _, err := os.Stat(flat); err == nil {
+				return flat
+			}
+			if matched := matchLatestRoundReport(filepath.Join(dir, "reports"), afterReports); matched != "" {
+				return matched
+			}
+			if matched := matchLatestRoundReport(dir, afterReports); matched != "" {
+				return matched
+			}
+		} else if strings.HasSuffix(slash, ".md") && !strings.Contains(slash, "/") {
+			inReports := filepath.Join(dir, "reports", filepath.FromSlash(slash))
+			if _, err := os.Stat(inReports); err == nil {
+				return inReports
+			}
+			if matched := matchLatestRoundReport(dir, slash); matched != "" {
+				return matched
+			}
+			if matched := matchLatestRoundReport(filepath.Join(dir, "reports"), slash); matched != "" {
+				return matched
+			}
+		}
+	}
+	return rawPath
+}
+
+func matchLatestRoundReport(dir, rel string) string {
+	stem, ok := strings.CutSuffix(filepath.Base(rel), ".md")
+	if !ok || stem == "" {
+		return ""
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, stem+".r*.md"))
+	if err != nil || len(matches) == 0 {
+		return ""
+	}
+	slices.SortFunc(matches, func(a, b string) int {
+		return cmp.Compare(roundNumber(a), roundNumber(b))
+	})
+	return matches[len(matches)-1]
+}
+
+func roundNumber(path string) int {
+	base := filepath.Base(path)
+	idx := strings.LastIndex(base, ".r")
+	if idx < 0 {
+		return -1
+	}
+	n, err := strconv.Atoi(strings.TrimSuffix(base[idx+2:], ".md"))
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 // buildToolRegistry builds the turn's tools. run.start launches only when
@@ -1286,9 +1532,40 @@ func (c *Concierge) buildToolRegistryWithContext(regCtx context.Context, threadI
 		},
 	)
 	model.AddTool[MemorySubmitParams](reg, ToolMemorySubmit, "Save an owner correction as memory", func(ctx context.Context, p MemorySubmitParams) (string, error) {
-		targetRun, err := c.resolveTargetRun(ctx, quote)
-		if err != nil {
-			return "", err
+		action := strings.ToLower(strings.TrimSpace(p.Action))
+		lookupKey := cmp.Or(strings.TrimSpace(p.ID), strings.TrimSpace(p.Name))
+		var existing *store.MemoryEntry
+		if (action == "delete" || action == "update") && lookupKey != "" && c.store != nil {
+			if m, gErr := c.store.Memories().Get(ctx, "", lookupKey); gErr == nil && m != nil {
+				existing = m
+				p.ID = m.ID
+			}
+		}
+		var targetRun string
+		if existing != nil && existing.RunID != "" {
+			targetRun = existing.RunID
+		} else {
+			var err error
+			targetRun, err = c.resolveTargetRun(ctx, quote+" "+lookupKey)
+			if err != nil {
+				if existing != nil {
+					targetRun = cmp.Or(existing.RunID, c.runID)
+				} else if action == "delete" && lookupKey != "" {
+					if out, revErr := c.handleDirectiveRevoke(ctx, threadID, turnID, quote, DirectiveRevokeParams{ID: lookupKey, Reason: p.Description}); revErr == nil {
+						*memoryEcho = out
+						return out, nil
+					}
+					return "", err
+				} else {
+					return "", err
+				}
+			}
+		}
+		if action == "delete" && existing == nil && lookupKey != "" {
+			if out, revErr := c.handleDirectiveRevoke(ctx, threadID, turnID, quote, DirectiveRevokeParams{ID: lookupKey, Reason: p.Description}); revErr == nil {
+				*memoryEcho = out
+				return out, nil
+			}
 		}
 		echo, err := c.memoryEditor.Submit(ctx, c.store, targetRun, c.nextID("memory"), quote, p)
 		if err == nil {
@@ -1314,7 +1591,16 @@ func (c *Concierge) buildToolRegistryWithContext(regCtx context.Context, threadI
 		return m.Body, nil
 	})
 
-	model.RegisterInvestigationTools(reg, c.investigateConfig(regCtx))
+	icfg := c.investigateConfig(regCtx)
+	if icfg.HasRoots() {
+		model.AddTool(reg, model.ToolReadFile, "Read a file or list a directory in the held run directory (e.g. OBJECTIVE.md, PROGRESS.md, ESCALATIONS.md, state.json, reports/) or repository checkout", func(ctx context.Context, p model.ReadFileParams) (string, error) {
+			p.Path = c.resolveReadFilePath(ctx, icfg, p.Path, quote)
+			return model.ExecuteReadFile(icfg, p)
+		})
+		model.AddTool(reg, model.ToolReadCmd, "Run a read-only gh, nebula, or git inspection command (e.g. gh pr view/list/checks, nebula post get, nebula terminal logs, nebula mail list, git status/log/diff/show)", func(ctx context.Context, p model.ReadCmdParams) (string, error) {
+			return model.ExecuteReadCmd(ctx, icfg, p)
+		})
+	}
 
 	return reg
 }
@@ -2218,12 +2504,23 @@ func (c *Concierge) handleDirectiveRevoke(
 	if id == "" {
 		return "", fmt.Errorf("%w: directive id is required", store.ErrInvalidArgument)
 	}
+	var existingMem *store.MemoryEntry
+	if c.store != nil && c.store.Memories() != nil {
+		if m, mErr := c.store.Memories().Get(ctx, "", id); mErr == nil && m != nil {
+			existingMem = m
+			id = m.ID
+		}
+	}
 	var runID string
 	combinedText := strings.TrimSpace(quote + "\n" + id + "\n" + p.Reason)
 	if c.OwnerRun != nil {
 		var err error
 		if runID, err = c.OwnerRun(ctx, p.RunID, combinedText); err != nil {
-			return "", err
+			if existingMem != nil {
+				runID = cmp.Or(existingMem.RunID, c.runID)
+			} else {
+				return "", err
+			}
 		}
 	} else if named := strings.TrimSpace(p.RunID); named != "" {
 		runID = named
@@ -2233,8 +2530,19 @@ func (c *Concierge) handleDirectiveRevoke(
 			runID = c.runID
 		}
 	}
+	fallbackRuns := c.heldRunIDs(ctx)
+	if existingMem != nil && existingMem.RunID != "" && !slices.Contains(fallbackRuns, existingMem.RunID) {
+		fallbackRuns = append(fallbackRuns, existingMem.RunID)
+	}
 	var err error
-	runID, err = memorychat.RevokeDirective(ctx, c.store, runID, id, c.heldRunIDs(ctx)...)
+	runID, err = memorychat.RevokeDirective(ctx, c.store, runID, id, fallbackRuns...)
+	if err != nil && existingMem != nil && errors.Is(err, store.ErrNotFound) {
+		if delErr := c.store.Memories().Delete(ctx, existingMem.Scope, existingMem.ID); delErr == nil {
+			runID = cmp.Or(existingMem.RunID, runID, c.runID)
+			_ = c.store.Directives().UpdateStatus(ctx, runID, existingMem.ID, store.DirectiveRevoked)
+			err = nil
+		}
+	}
 	if err != nil {
 		return "", err
 	}

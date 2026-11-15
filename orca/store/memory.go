@@ -118,12 +118,60 @@ func (m *memMemoryStore) Put(_ context.Context, v MemoryEntry) (MemoryEntry, err
 	s.memories[v.ID] = &cp
 	return cp, nil
 }
+func (m *memMemoryStore) findLocked(scope, idOrName string) (string, *MemoryEntry, error) {
+	s := m.s()
+	for _, key := range []string{idOrName, NormalizeDirectiveID(idOrName)} {
+		if key == "" {
+			continue
+		}
+		if v, ok := s.memories[key]; ok && (scope == "" || v.Scope == scope) {
+			return key, v, nil
+		}
+	}
+	target := cmp.Or(NormalizeDirectiveID(idOrName), strings.TrimSpace(idOrName))
+	if target == "" {
+		return "", nil, nil
+	}
+	var matchedKey string
+	var matched *MemoryEntry
+	for k, v := range s.memories {
+		if scope != "" && v.Scope != scope {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(v.ID), target) || strings.EqualFold(strings.TrimSpace(v.Name), target) {
+			if matched == nil || k < matchedKey {
+				matchedKey = k
+				matched = v
+			}
+		}
+	}
+	if matched == nil {
+		return "", nil, nil
+	}
+	count := 0
+	for _, v := range s.memories {
+		if scope != "" && v.Scope != scope {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(v.ID), target) || strings.EqualFold(strings.TrimSpace(v.Name), target) {
+			count++
+		}
+	}
+	if count > 1 {
+		return "", nil, fmt.Errorf("memory %q is ambiguous", idOrName)
+	}
+	return matchedKey, matched, nil
+}
+
 func (m *memMemoryStore) Get(_ context.Context, scope, id string) (*MemoryEntry, error) {
 	s := m.s()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	v, ok := s.memories[id]
-	if !ok || (scope != "" && v.Scope != scope) {
+	_, v, err := m.findLocked(scope, id)
+	if err != nil {
+		return nil, err
+	}
+	if v == nil {
 		return nil, fmt.Errorf("%w: memory %q", ErrNotFound, id)
 	}
 	cp := *v
@@ -153,10 +201,14 @@ func (m *memMemoryStore) Delete(_ context.Context, scope, id string) error {
 	s := m.s()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if v, ok := s.memories[id]; !ok || (scope != "" && v.Scope != scope) {
+	key, v, err := m.findLocked(scope, id)
+	if err != nil {
+		return err
+	}
+	if v == nil {
 		return fmt.Errorf("%w: memory %q", ErrNotFound, id)
 	}
-	delete(s.memories, id)
+	delete(s.memories, key)
 	return nil
 }
 
