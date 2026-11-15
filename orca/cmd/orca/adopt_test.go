@@ -793,6 +793,16 @@ func TestRestartExecsStartupPathWithSameArgvAndReplacedBinary(t *testing.T) {
 	if strings.Contains(outRestarted.String(), "reattached front-desk") {
 		t.Fatalf("restarted output with no held runs must not say 'reattached front-desk':\n%s", outRestarted.String())
 	}
+
+	// Verify legacy ORCA_RESTARTED_FROM_PID without ":<version>" reports "unknown -> <newVer>".
+	t.Setenv(restartEnvVar, "12345")
+	var outLegacy, errLegacy bytes.Buffer
+	if err := Execute(t.Context(), args, strings.NewReader("/exit\n"), &outLegacy, &errLegacy); err != nil {
+		t.Fatalf("Execute legacy restarted session: %v\nstderr:\n%s", err, errLegacy.String())
+	}
+	if !strings.Contains(outLegacy.String(), "orca restarted (version unknown -> commit-new-222)") {
+		t.Fatalf("legacy restarted output missing 'orca restarted (version unknown -> commit-new-222)':\n%s", outLegacy.String())
+	}
 }
 
 func TestRestartTargetFailingVersionCheckLeavesChatRunning(t *testing.T) {

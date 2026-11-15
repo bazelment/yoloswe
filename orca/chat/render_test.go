@@ -605,3 +605,141 @@ func TestHeaderPrintedOnceAcrossTurnsAndStatusRedraws(t *testing.T) {
 		t.Fatalf("header 'orca chat — run front-desk' printed %d times, want 1:\n%q", count, captured.String())
 	}
 }
+
+func TestFencedCodePreservesIndentationAndWrapsByDisplayWidth(t *testing.T) {
+	t.Parallel()
+	md := strings.Join([]string{
+		"Snippet:",
+		"```go",
+		"func main() {",
+		"    fmt.Println(\"a   b\")",
+		"}",
+		"```",
+	}, "\n")
+
+	ttyLines := FormatReply(md, 80, true)
+	ttyOut := strings.Join(ttyLines, "\n")
+	for _, want := range []string{
+		"orca> Snippet:",
+		"        \x1b[36mfunc main() {\x1b[39m",
+		"        \x1b[36m    fmt.Println(\"a   b\")\x1b[39m",
+		"        \x1b[36m}\x1b[39m",
+	} {
+		if !strings.Contains(ttyOut, want) {
+			t.Fatalf("fenced code TTY output missing %q:\n%q", want, ttyOut)
+		}
+	}
+
+	plainLines := FormatReply(md, 80, false)
+	plainOut := strings.Join(plainLines, "\n")
+	if !strings.Contains(plainOut, "        func main() {\n            fmt.Println(\"a   b\")\n        }") {
+		t.Fatalf("fenced code plain output did not preserve 4-space indentation and internal spaces:\n%q", plainOut)
+	}
+
+	// Verify long code lines wrap by display width without stripping spaces.
+	longFence := "```\n    01234567890123456789\n```"
+	wrappedCode := FormatReply(longFence, 22, false)
+	if len(wrappedCode) < 2 || wrappedCode[0] != "orca>       012345678" || !strings.HasPrefix(wrappedCode[1], "        90123456789") {
+		t.Fatalf("long fenced code line wrap at width 22 = %q", wrappedCode)
+	}
+}
+
+func TestOverlongTokenPreservedOnSingleLine(t *testing.T) {
+	t.Parallel()
+	longURL := "https://example.com/orca/very/long/path/that/exceeds/sixty/columns/without/any/whitespace"
+	reply := "See " + longURL + " now."
+	lines := FormatReply(reply, 60, false)
+	want := []string{
+		"orca> See",
+		"      " + longURL,
+		"      now.",
+	}
+	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("FormatReply overlong token:\ngot:\n%s\nwant:\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestControlCharactersStrippedFromUntrustedText(t *testing.T) {
+	t.Parallel()
+	malicious := "normal\x1b[2J\x1b]0;pwned\x07\rcarriage\bback\u009b31mred"
+
+	reply := strings.Join(FormatReply(malicious, 80, false), "\n")
+	if reply != "orca> normalcarriagebackred" {
+		t.Fatalf("FormatReply did not strip control sequences: %q", reply)
+	}
+	user := strings.Join(FormatUserLine(malicious, 80, false), "\n")
+	if user != "you> normalcarriagebackred" {
+		t.Fatalf("FormatUserLine did not strip control sequences: %q", user)
+	}
+	dim := strings.Join(FormatDimLine("→ status "+malicious, 80, false), "\n")
+	if dim != "→ status normalcarriagebackred" {
+		t.Fatalf("FormatDimLine did not strip control sequences: %q", dim)
+	}
+	tool := FormatToolCall("status\x1b[2J", []byte(`{"run_id":"run-1\u001b]0;bad\u0007\r"}`), "front-desk")
+	if tool != "→ status run-1" {
+		t.Fatalf("FormatToolCall did not strip control sequences: %q", tool)
+	}
+}
+
+func TestFormatToolCallTargetSelectionBranches(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		tool         string
+		input        string
+		defaultRunID string
+		want         string
+	}{
+		{"trace-with-run", "log", `{"run_id":"run-1","trace":"tr-9"}`, "front-desk", "→ log run-1 tr-9"},
+		{"trace-only", "log", `{"trace":"tr-9"}`, "", "→ log tr-9"},
+		{"lane-id", "lane.show", `{"lane_id":"orca-ui"}`, "front-desk", "→ lane.show orca-ui"},
+		{"ask-id", "directive.revoke", `{"id":"dir-42"}`, "front-desk", "→ directive.revoke dir-42"},
+		{"goal-multiline", "run.start", `{"goal":"first line\nsecond line"}`, "front-desk", "→ run.start first line"},
+		{"action-with-run", "run.control", `{"action":"pause"}`, "run-2", "→ run.control run-2 pause"},
+		{"action-no-run", "run.control", `{"action":"pause"}`, "", "→ run.control pause"},
+		{"kind", "directive.submit", `{"kind":"instruction"}`, "front-desk", "→ directive.submit instruction"},
+		{"summary", "memory.submit", `{"summary":"keep footer pinned"}`, "front-desk", "→ memory.submit keep footer pinned"},
+		{"default-run", "status", `{}`, "front-desk", "→ status front-desk"},
+		{"no-target", "swarms", `{}`, "", "→ swarms"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := FormatToolCall(tc.tool, []byte(tc.input), tc.defaultRunID); got != tc.want {
+				t.Fatalf("FormatToolCall(%q, %s, %q) = %q, want %q", tc.tool, tc.input, tc.defaultRunID, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatTranscriptAndNarrowWideCJKWidths(t *testing.T) {
+	t.Parallel()
+	// Narrow width (< 10 cols) and wide CJK runes wrap without panicking or losing characters.
+	cjk := "**状態:** テスト実行中 確認完了"
+	narrow := FormatReply(cjk, 8, false)
+	if len(narrow) < 2 || !strings.HasPrefix(narrow[0], "orca> ") {
+		t.Fatalf("narrow CJK FormatReply = %q", narrow)
+	}
+
+	// FormatTranscript preserves explicit header summary, formats turns, and appends tail lines.
+	lines := []string{
+		"4 earlier turns; /log to see them",
+		"you> check lane",
+		"→ concierge: check lane",
+		"→ lane.show orca-ui",
+		"orca> **Lane:** `orca-ui` is green.",
+		"orca restarted (version a -> b)",
+	}
+	got := strings.Join(FormatTranscript(lines, 3, 60, false), "\n")
+	for _, want := range []string{
+		"4 earlier turns; /log to see them",
+		"you> check lane",
+		"→ concierge: check lane",
+		"→ lane.show orca-ui",
+		"orca> Lane: orca-ui is green.",
+		"orca restarted (version a -> b)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("FormatTranscript plain output missing %q:\n%s", want, got)
+		}
+	}
+}

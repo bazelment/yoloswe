@@ -88,7 +88,6 @@ type Model struct {
 	Backend              Backend
 	runID, input, status string
 	streamBuf            string
-	streamChunks         []string
 	initLines            []string
 	pendingPrint         []string
 	lines                []string
@@ -286,6 +285,11 @@ func (m Model) headerLine() string {
 }
 func (m Model) Init() tea.Cmd {
 	if m.poll {
+		// Delay initial scrollback emission by one 60fps render frame (18ms) so
+		// Bubble Tea processes the initial WindowSizeMsg and snapshotMsg before
+		// tea.Println writes the header and resumed transcript above the prompt.
+		// Any lines printed before initPrintMsg arrives are queued in pendingPrint
+		// to preserve strict output ordering.
 		initTick := tea.Tick(18*time.Millisecond, func(time.Time) tea.Msg { return initPrintMsg{} })
 		return tea.Batch(initTick, m.refresh(), m.nextPoll())
 	}
@@ -298,7 +302,7 @@ func (m *Model) flushInitPrint() tea.Cmd {
 	m.initPrinted = true
 	rows := []string{m.headerLine()}
 	if len(m.initLines) > 0 {
-		rows = append(rows, FormatTranscript(m.initLines, defaultMaxTurns, m.width, true)...)
+		rows = append(rows, FormatTranscript(m.initLines, DefaultMaxTurns, m.width, true)...)
 	}
 	rows = append(rows, m.pendingPrint...)
 	m.pendingPrint = nil
@@ -329,9 +333,8 @@ func (m *Model) flushStream(done bool) []string {
 		return nil
 	}
 	m.streaming = false
-	raw := strings.TrimPrefix(m.streamText(), replyPrefix)
+	raw := strings.TrimPrefix(m.streamBuf, replyPrefix)
 	m.streamBuf = ""
-	m.streamChunks = nil
 	if m.streamLine >= 0 && m.streamLine < len(m.lines) {
 		m.lines[m.streamLine] = strings.Join(FormatReply(raw, m.width, false), "\n")
 	}
@@ -501,12 +504,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lines = append(m.lines, errLine)
 			return m.finishTurn(wrapPhysicalLines(errLine, m.width)...)
 		}
-		echo := routeEcho(string(x.decision.Handler), x.text, x.decision.Fallback)
+		echo := RouteEcho(string(x.decision.Handler), x.text, x.decision.Fallback)
 		m.lines = append(m.lines, echo, "orca> ")
 		m.streamLine = len(m.lines) - 1
 		m.streaming = true
 		m.streamBuf = ""
-		m.streamChunks = nil
 		routeRows := FormatRouteLine(string(x.decision.Handler), x.text, x.decision.Fallback, m.width, m.poll)
 		printCmd := m.printRawLines(routeRows...)
 		return m, tea.Sequence(printCmd, m.dispatch(x.decision, x.text))
@@ -519,7 +521,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Sequence(printCmd, receive(m.ctx, x.ch))
 		}
 		if x.text != "" {
-			m.streamChunks = append(m.streamChunks, x.text)
+			m.streamBuf += x.text
 		}
 		if x.done {
 			printed := m.flushStream(true)
@@ -654,17 +656,21 @@ func commonPrefix(s []string) string {
 	return p
 }
 
+// streamPreview renders a single-line live preview of the latest non-empty
+// streaming line while a turn runs. Full markdown rendering is deferred until
+// turn completion so live tool-call lines ("  → <name> <target>") appear
+// above "orca> " in scrollback and multi-line markdown blocks wrap intact.
 func (m Model) streamPreview() string {
-	s := strings.TrimPrefix(m.streamText(), replyPrefix)
-	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", " ")
-	return replyPrefix + s
-}
-
-func (m Model) streamText() string {
-	if len(m.streamChunks) > 0 {
-		return strings.Join(m.streamChunks, "")
+	s := strings.TrimPrefix(m.streamBuf, replyPrefix)
+	s = strings.TrimSpace(s)
+	if idx := strings.LastIndexByte(s, '\n'); idx >= 0 {
+		if tail := strings.TrimSpace(s[idx+1:]); tail != "" {
+			s = tail
+		} else {
+			s = strings.ReplaceAll(s, "\n", " ")
+		}
 	}
-	return m.streamBuf
+	return replyPrefix + s
 }
 
 func (m Model) View() tea.View {
@@ -698,7 +704,7 @@ func (m Model) statusFooter() string {
 	return "\n" + strings.Join(out, "\n")
 }
 func expandTabs(s string) string {
-	return strings.ReplaceAll(s, "\t", "    ")
+	return sanitizeText(s)
 }
 func effectiveWidth(width int) int {
 	if width > 1 {

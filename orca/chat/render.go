@@ -10,12 +10,11 @@ import (
 )
 
 const (
-	replyPrefix      = "orca> "
-	replyIndent      = "      "
-	userPrefix       = "you> "
-	userIndent       = "     "
-	defaultMaxTurns  = 3
-	defaultTermWidth = 80
+	replyPrefix     = "orca> "
+	replyIndent     = "      "
+	userPrefix      = "you> "
+	userIndent      = "     "
+	DefaultMaxTurns = 3
 )
 
 type spanStyle uint8
@@ -66,12 +65,16 @@ func FormatReply(text string, width int, tty bool) []string {
 		}
 		if inFence {
 			code := strings.TrimRight(raw, " \t\r")
+			if code == "" {
+				bodyLines = append(bodyLines, "")
+				lastBlank = true
+				continue
+			}
 			codeWidth := 0
 			if bodyWidth > 2 {
 				codeWidth = bodyWidth - 2
 			}
-			wrapped := wrapSpans([]styledSpan{{text: code, style: styleCode}}, codeWidth, tty)
-			for _, w := range wrapped {
+			for _, w := range wrapCodeLine(code, codeWidth, tty) {
 				bodyLines = append(bodyLines, "  "+w)
 			}
 			lastBlank = false
@@ -99,41 +102,12 @@ func FormatReply(text string, width int, tty bool) []string {
 			if !tty {
 				bullet = "- "
 			}
-			marker := lead + bullet
-			markerWidth := runewidth.StringWidth(marker)
-			itemWidth := 0
-			if bodyWidth > 0 {
-				itemWidth = max(bodyWidth-markerWidth, 8)
-			}
-			spans := parseInline(rest, styleNone)
-			wrapped := wrapSpans(spans, itemWidth, tty)
-			hanging := strings.Repeat(" ", markerWidth)
-			for i, w := range wrapped {
-				if i == 0 {
-					bodyLines = append(bodyLines, marker+w)
-				} else {
-					bodyLines = append(bodyLines, hanging+w)
-				}
-			}
+			bodyLines = append(bodyLines, renderListItem(lead+bullet, rest, bodyWidth, tty)...)
 			continue
 		}
 
 		if marker, rest, ok := cutNumbered(line); ok {
-			markerWidth := runewidth.StringWidth(marker)
-			itemWidth := 0
-			if bodyWidth > 0 {
-				itemWidth = max(bodyWidth-markerWidth, 8)
-			}
-			spans := parseInline(rest, styleNone)
-			wrapped := wrapSpans(spans, itemWidth, tty)
-			hanging := strings.Repeat(" ", markerWidth)
-			for i, w := range wrapped {
-				if i == 0 {
-					bodyLines = append(bodyLines, marker+w)
-				} else {
-					bodyLines = append(bodyLines, hanging+w)
-				}
-			}
+			bodyLines = append(bodyLines, renderListItem(marker, rest, bodyWidth, tty)...)
 			continue
 		}
 
@@ -194,12 +168,13 @@ func FormatUserLine(text string, width int, tty bool) []string {
 // FormatRouteLine renders a routing echo line ("→ concierge: ...") as a dim
 // line on a TTY or plain text when piped.
 func FormatRouteLine(handler, text string, fallback bool, width int, tty bool) []string {
-	echo := routeEcho(handler, text, fallback)
+	echo := RouteEcho(handler, text, fallback)
 	return FormatDimLine(echo, width, tty)
 }
 
-func routeEcho(handler, text string, fallback bool) string {
-	echo := "→ " + handler + ": " + text
+// RouteEcho formats the plain-text routing echo ("→ <handler>: <text>").
+func RouteEcho(handler, text string, fallback bool) string {
+	echo := "→ " + sanitizeInline(handler) + ": " + sanitizeInline(text)
 	if fallback {
 		echo += " (via fallback)"
 	}
@@ -224,6 +199,7 @@ func FormatDimLine(text string, width int, tty bool) []string {
 }
 
 func renderStyledLine(text string, style spanStyle, width int, tty bool) string {
+	text = expandTabs(text)
 	if width > 0 {
 		text = truncateLine(text, width)
 	}
@@ -232,7 +208,7 @@ func renderStyledLine(text string, style spanStyle, width int, tty bool) string 
 
 // FormatToolCall summarizes a tool call as a single "→ <name> <target>" line.
 func FormatToolCall(name string, rawInput []byte, defaultRunID string) string {
-	name = strings.TrimSpace(name)
+	name = strings.TrimSpace(sanitizeInline(name))
 	var fields map[string]any
 	if len(rawInput) > 0 {
 		_ = json.Unmarshal(rawInput, &fields)
@@ -240,14 +216,16 @@ func FormatToolCall(name string, rawInput []byte, defaultRunID string) string {
 	strField := func(keys ...string) string {
 		for _, k := range keys {
 			if v, ok := fields[k]; ok {
-				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					return strings.TrimSpace(s)
+				if s, ok := v.(string); ok {
+					if clean := strings.TrimSpace(expandTabs(s)); clean != "" {
+						return clean
+					}
 				}
 			}
 		}
 		return ""
 	}
-	runID := cmp.Or(strField("run_id"), strings.TrimSpace(defaultRunID))
+	runID := cmp.Or(strField("run_id"), strings.TrimSpace(sanitizeInline(defaultRunID)))
 	trace := strField("trace")
 	target := ""
 	switch {
@@ -309,7 +287,7 @@ func FormatTranscript(lines []string, maxTurns, width int, tty bool) []string {
 		return nil
 	}
 	if maxTurns <= 0 {
-		maxTurns = defaultMaxTurns
+		maxTurns = DefaultMaxTurns
 	}
 
 	var (
@@ -326,6 +304,7 @@ func FormatTranscript(lines []string, maxTurns, width int, tty bool) []string {
 	}
 
 	for _, raw := range lines {
+		raw = expandTabs(raw)
 		trimmed := strings.TrimSpace(raw)
 		if trimmed == "" {
 			continue
@@ -338,7 +317,7 @@ func FormatTranscript(lines []string, maxTurns, width int, tty bool) []string {
 			curTurn = append(curTurn, raw)
 		case strings.HasPrefix(trimmed, "orca> "):
 			curTurn = append(curTurn, raw)
-		case strings.Contains(trimmed, "earlier turns; /log to see them") || strings.HasPrefix(trimmed, "(resumed conversation:"):
+		case strings.Contains(trimmed, "earlier turns; /log to see them"):
 			headerLines = append(headerLines, trimmed)
 		default:
 			if len(curTurn) > 0 && len(turns) == 0 && !strings.HasPrefix(trimmed, "orca restarted") && !strings.HasPrefix(trimmed, "reattached ") {
@@ -358,9 +337,6 @@ func FormatTranscript(lines []string, maxTurns, width int, tty bool) []string {
 		turns = turns[len(turns)-maxTurns:]
 	}
 	for _, h := range headerLines {
-		if strings.HasPrefix(h, "(resumed conversation:") {
-			continue
-		}
 		if tty {
 			out = append(out, renderStyledLine(h, styleDim, 0, true))
 		} else {
@@ -559,35 +535,48 @@ func splitWords(spans []styledSpan) []styledWord {
 	return words
 }
 
-func breakLongWord(w styledWord, maxWidth int) []styledWord {
-	if maxWidth <= 0 || w.width <= maxWidth {
-		return []styledWord{w}
+func renderListItem(marker, rest string, bodyWidth int, tty bool) []string {
+	markerWidth := runewidth.StringWidth(marker)
+	itemWidth := 0
+	if bodyWidth > 0 {
+		itemWidth = max(bodyWidth-markerWidth, 8)
 	}
-	var out []styledWord
-	var curParts []styledSpan
+	spans := parseInline(rest, styleNone)
+	wrapped := wrapSpans(spans, itemWidth, tty)
+	hanging := strings.Repeat(" ", markerWidth)
+	out := make([]string, len(wrapped))
+	for i, w := range wrapped {
+		if i == 0 {
+			out[i] = marker + w
+		} else {
+			out[i] = hanging + w
+		}
+	}
+	return out
+}
+
+func wrapCodeLine(code string, maxWidth int, tty bool) []string {
+	if code == "" {
+		return []string{""}
+	}
+	if maxWidth <= 0 || runewidth.StringWidth(code) <= maxWidth {
+		return []string{renderStyledLine(code, styleCode, 0, tty)}
+	}
+	var out []string
+	var buf strings.Builder
 	curWidth := 0
-	for _, p := range w.parts {
-		var buf strings.Builder
-		for _, r := range p.text {
-			rw := runewidth.RuneWidth(r)
-			if curWidth+rw > maxWidth && curWidth > 0 {
-				if buf.Len() > 0 {
-					curParts = append(curParts, styledSpan{text: buf.String(), style: p.style})
-					buf.Reset()
-				}
-				out = append(out, styledWord{parts: curParts, width: curWidth})
-				curParts = nil
-				curWidth = 0
-			}
-			buf.WriteRune(r)
-			curWidth += rw
+	for _, r := range code {
+		rw := max(runewidth.RuneWidth(r), 1)
+		if curWidth+rw > maxWidth && curWidth > 0 {
+			out = append(out, renderStyledLine(buf.String(), styleCode, 0, tty))
+			buf.Reset()
+			curWidth = 0
 		}
-		if buf.Len() > 0 {
-			curParts = append(curParts, styledSpan{text: buf.String(), style: p.style})
-		}
+		buf.WriteRune(r)
+		curWidth += rw
 	}
-	if len(curParts) > 0 {
-		out = append(out, styledWord{parts: curParts, width: curWidth})
+	if buf.Len() > 0 {
+		out = append(out, renderStyledLine(buf.String(), styleCode, 0, tty))
 	}
 	return out
 }
@@ -619,30 +608,97 @@ func wrapSpans(spans []styledSpan, maxWidth int, tty bool) []string {
 		}
 	}
 
-	for _, rawWord := range words {
-		for _, w := range breakLongWord(rawWord, maxWidth) {
-			if curWidth == 0 {
-				cur = append(cur, w.parts...)
-				curWidth = w.width
-				continue
+	for _, w := range words {
+		if curWidth == 0 {
+			cur = append(cur, w.parts...)
+			curWidth = w.width
+			continue
+		}
+		if curWidth+1+w.width <= maxWidth {
+			spaceStyle := styleNone
+			if len(cur) > 0 && len(w.parts) > 0 && cur[len(cur)-1].style == w.parts[0].style {
+				spaceStyle = cur[len(cur)-1].style &^ styleUnderline
 			}
-			if curWidth+1+w.width <= maxWidth {
-				spaceStyle := styleNone
-				if len(cur) > 0 && len(w.parts) > 0 && cur[len(cur)-1].style == w.parts[0].style {
-					spaceStyle = cur[len(cur)-1].style &^ styleUnderline
-				}
-				cur = append(cur, styledSpan{text: " ", style: spaceStyle})
-				cur = append(cur, w.parts...)
-				curWidth += 1 + w.width
-			} else {
-				flush()
-				cur = append(cur, w.parts...)
-				curWidth = w.width
-			}
+			cur = append(cur, styledSpan{text: " ", style: spaceStyle})
+			cur = append(cur, w.parts...)
+			curWidth += 1 + w.width
+		} else {
+			flush()
+			cur = append(cur, w.parts...)
+			curWidth = w.width
 		}
 	}
 	flush()
 	return lines
+}
+
+// sanitizeText strips terminal escape sequences (CSI, OSC, 2-byte ESC) and
+// C0/C1 control characters (other than '\n', with '\t' expanded to 4 spaces)
+// so untrusted text cannot reposition the cursor or inject ANSI sequences.
+func sanitizeText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	runes := []rune(s)
+	for i := 0; i < len(runes); {
+		r := runes[i]
+		if r == '\x1b' || r == 0x9b || r == 0x9d {
+			if r == 0x9b || (r == '\x1b' && i+1 < len(runes) && runes[i+1] == '[') {
+				if r == '\x1b' {
+					i += 2
+				} else {
+					i++
+				}
+				for i < len(runes) && runes[i] >= 0x20 && runes[i] <= 0x3f {
+					i++
+				}
+				if i < len(runes) && runes[i] >= 0x40 && runes[i] <= 0x7e {
+					i++
+				}
+				continue
+			}
+			if r == 0x9d || (r == '\x1b' && i+1 < len(runes) && runes[i+1] == ']') {
+				if r == '\x1b' {
+					i += 2
+				} else {
+					i++
+				}
+				for i < len(runes) {
+					if runes[i] == '\x07' || runes[i] == 0x9c {
+						i++
+						break
+					}
+					if runes[i] == '\x1b' && i+1 < len(runes) && runes[i+1] == '\\' {
+						i += 2
+						break
+					}
+					i++
+				}
+				continue
+			}
+			if i+1 < len(runes) {
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+		switch {
+		case r == '\t':
+			b.WriteString("    ")
+		case r == '\n':
+			b.WriteByte('\n')
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
+			// Strip remaining C0/DEL/C1 control characters.
+		default:
+			b.WriteRune(r)
+		}
+		i++
+	}
+	return b.String()
+}
+
+func sanitizeInline(s string) string {
+	return strings.ReplaceAll(sanitizeText(s), "\n", " ")
 }
 
 func renderLineSpans(spans []styledSpan, tty bool) string {

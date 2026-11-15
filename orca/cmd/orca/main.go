@@ -34,6 +34,8 @@ import (
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
+// restartEnvVar carries "<pid>:<version>" across an in-place /restart exec
+// (or "<pid>" from older binaries prior to version tagging).
 const restartEnvVar = "ORCA_RESTARTED_FROM_PID"
 
 var (
@@ -557,10 +559,7 @@ func runChatSession(
 				return nil, err
 			}
 		}
-		echo := "→ " + string(d.Handler) + ": " + question
-		if d.Fallback {
-			echo += " (via fallback)"
-		}
+		echo := chatui.RouteEcho(string(d.Handler), question, d.Fallback)
 		if _, err := fmt.Fprintln(stdout, echo); err != nil {
 			return nil, err
 		}
@@ -583,10 +582,7 @@ func runChatSession(
 	}
 	var reattachLines []string
 	if restartedFrom != "" {
-		_, oldVer, ok := strings.Cut(restartedFrom, ":")
-		if !ok || oldVer == "" {
-			oldVer = currentVersion()
-		}
+		_, oldVer, _ := strings.Cut(restartedFrom, ":")
 		reattachLines = chatui.FormatRestartStatus(oldVer, currentVersion(), heldLines)
 	} else {
 		reattachLines = heldLines
@@ -640,9 +636,6 @@ func chatHolder(runID string) (holder string, former []string) {
 	return adopt.ChatHolder(frontDeskRunID), []string{adopt.ChatHolder("")}
 }
 
-// resumedTurns bounds displayed resumed turns on startup.
-const resumedTurns = 3
-
 // transcriptLines renders the tail of resumed history.
 func transcriptLines(history []model.Message) []string {
 	plain := plainHistory(history)
@@ -662,9 +655,9 @@ func transcriptLines(history []model.Message) []string {
 		turns = append(turns, cur)
 	}
 	var lines []string
-	if len(turns) > resumedTurns {
-		lines = append(lines, fmt.Sprintf("%d earlier turns; /log to see them", len(turns)-resumedTurns))
-		turns = turns[len(turns)-resumedTurns:]
+	if len(turns) > chatui.DefaultMaxTurns {
+		lines = append(lines, fmt.Sprintf("%d earlier turns; /log to see them", len(turns)-chatui.DefaultMaxTurns))
+		turns = turns[len(turns)-chatui.DefaultMaxTurns:]
 	}
 	for _, turn := range turns {
 		for _, m := range turn {
