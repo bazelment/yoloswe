@@ -624,7 +624,14 @@ func (d *memDirectiveStore) Add(_ context.Context, dir Directive) error {
 		cp.Status = DirectiveActive
 	}
 	if cp.Kind == "" {
-		cp.Kind = DirectiveStanding
+		if cp.Contract {
+			cp.Kind = DirectiveContract
+		} else {
+			cp.Kind = DirectiveStanding
+		}
+	}
+	if cp.IsContract() {
+		cp.Contract = true
 	}
 	if cp.Source == "" {
 		cp.Source = DirectiveSourceOwner

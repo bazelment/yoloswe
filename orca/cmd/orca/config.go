@@ -192,6 +192,7 @@ type Config struct {
 	ReportDay        string             `json:"report_day,omitempty"`
 	ClaudeBin        string             `json:"-"`
 	CodexBin         string             `json:"-"`
+	AllowedModels    []string           `json:"allowed_models,omitempty"`
 	RecipeFiles      []string           `json:"recipe_files,omitempty"`
 	// launchArgs are the command-line flags a controller launched from this
 	// invocation inherits; see controllerFlags.
@@ -411,6 +412,9 @@ func mergeConfig(lower, higher Config) Config {
 			out.Models.Roles[role] = RoleSelection{Provider: cmp.Or(sel.Provider, prev.Provider), Model: cmp.Or(sel.Model, prev.Model), Effort: cmp.Or(sel.Effort, prev.Effort)}
 		}
 	}
+	if len(higher.AllowedModels) > 0 {
+		out.AllowedModels = append([]string(nil), higher.AllowedModels...)
+	}
 	if len(higher.RecipeFiles) > 0 {
 		out.RecipeFiles = append(append([]string(nil), lower.RecipeFiles...), higher.RecipeFiles...)
 	}
@@ -482,10 +486,11 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.SetOutput(errOut)
 
 	var (
-		cfg          Config
-		configPath   string
-		agentBackend string
-		recipes      stringSliceFlag
+		cfg           Config
+		configPath    string
+		agentBackend  string
+		recipes       stringSliceFlag
+		allowedModels stringSliceFlag
 	)
 
 	fs.StringVar(&configPath, "config", "", "Optional path to JSON config file")
@@ -532,6 +537,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 
 	fs.IntVar(&cfg.ConcurrencyCap, "concurrency-cap", 0, "Maximum concurrent active lanes")
 	fs.Float64Var(&cfg.MaxCostPerHourUSD, "max-cost-per-hour-usd", 0, "Maximum per-run spend in USD per hour before pausing turns (default $5.00/h, 0 = unlimited)")
+	fs.Var(&allowedModels, "allowed-models", "Allowed worker models for lane.spawn/lane.retry (comma-separated or repeatable)")
 	fs.Var(&recipes, "recipe-file", "Recipe file path (.json compiled recipe or plain-text NL source; repeatable)")
 	fs.StringVar(&cfg.ReplayPath, "replay", "", "Recorded model replay JSON path for deterministic execution")
 	fs.StringVar(&cfg.RecordPath, "record", "", "Path to record model request/response exchanges")
@@ -561,6 +567,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 		cfg.AgentBackend = parsed
 	}
 	launchArgs := controllerFlags(fs, args[:len(args)-len(fs.Args())])
+	cfg.AllowedModels = allowedModels
 	cfg.RecipeFiles = recipes
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {

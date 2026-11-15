@@ -89,6 +89,16 @@ func RegisterInvestigationTools(reg *ToolRegistry, cfg InvestigateConfig) {
 	})
 }
 
+// ExecuteReadFile reads a file or lists a directory within cfg's allowed roots.
+func ExecuteReadFile(cfg InvestigateConfig, p ReadFileParams) (string, error) {
+	return executeReadFile(cfg, p)
+}
+
+// ExecuteReadCmd runs a validated read-only command within cfg's allowed roots.
+func ExecuteReadCmd(ctx context.Context, cfg InvestigateConfig, p ReadCmdParams) (string, error) {
+	return executeReadCmd(ctx, cfg, p)
+}
+
 func executeReadFile(cfg InvestigateConfig, p ReadFileParams) (string, error) {
 	rawPath := strings.TrimSpace(p.Path)
 	if rawPath == "" {
@@ -102,6 +112,14 @@ func executeReadFile(cfg InvestigateConfig, p ReadFileParams) (string, error) {
 	resolved, err := resolveSafePath(roots, rawPath)
 	if err != nil {
 		return "", err
+	}
+
+	limit := p.MaxBytes
+	if limit <= 0 {
+		limit = defaultReadFileMaxBytes
+	}
+	if limit > ceilingReadFileMaxBytes {
+		limit = ceilingReadFileMaxBytes
 	}
 
 	info, err := os.Stat(resolved)
@@ -123,16 +141,15 @@ func executeReadFile(cfg InvestigateConfig, p ReadFileParams) (string, error) {
 			} else {
 				fmt.Fprintf(&b, "- %s\n", e.Name())
 			}
+			if b.Len() > limit+1 {
+				break
+			}
 		}
-		return strings.TrimSpace(b.String()), nil
-	}
-
-	limit := p.MaxBytes
-	if limit <= 0 {
-		limit = defaultReadFileMaxBytes
-	}
-	if limit > ceilingReadFileMaxBytes {
-		limit = ceilingReadFileMaxBytes
+		dirOut := strings.TrimSpace(b.String())
+		if len(dirOut) > limit {
+			return dirOut[:limit] + "\n...[truncated]", nil
+		}
+		return dirOut, nil
 	}
 
 	f, err := os.Open(resolved)
@@ -300,13 +317,13 @@ func ResolveRunRepoDir(runDir, fallbackDir string) string {
 }
 
 // ValidateReadOnlyCommand checks that program and args form a permitted
-// read-only gh, nebula, or git inspection command.
+// read-only gh, nebula, git, or local file inspection command.
 func ValidateReadOnlyCommand(program string, args []string) error {
-	_, _, err := normalizeReadOnlyCommand(program, args)
+	_, _, _, err := normalizeReadOnlyCommand(program, args)
 	return err
 }
 
-func normalizeReadOnlyCommand(program string, args []string) (string, []string, error) {
+func normalizeReadOnlyCommand(program string, args []string) (string, []string, []string, error) {
 	prog := strings.TrimSpace(program)
 	var cleanArgs []string
 	for _, a := range args {
@@ -315,78 +332,412 @@ func normalizeReadOnlyCommand(program string, args []string) (string, []string, 
 		}
 	}
 	if len(cleanArgs) == 0 {
-		return "", nil, errors.New("read.cmd: args are required")
+		if prog == "ls" {
+			return prog, []string{"."}, []string{"."}, nil
+		}
+		return "", nil, nil, errors.New("read.cmd: args are required")
 	}
 
 	switch prog {
 	case "gh":
 		for _, arg := range cleanArgs {
 			if arg == "-w" || arg == "--web" {
-				return "", nil, fmt.Errorf("read.cmd: interactive flag %q is not permitted", arg)
+				return "", nil, nil, fmt.Errorf("read.cmd: interactive flag %q is not permitted", arg)
 			}
 		}
 		sub := cleanArgs[0]
 		switch sub {
 		case "pr":
 			if len(cleanArgs) < 2 {
-				return "", nil, errors.New("read.cmd: gh pr requires a read-only subcommand (view, list, checks, status, diff)")
+				return "", nil, nil, errors.New("read.cmd: gh pr requires a read-only subcommand (view, list, checks, status, diff)")
 			}
 			switch cleanArgs[1] {
 			case "view", "list", "checks", "status", "diff":
-				return prog, cleanArgs, nil
+				return prog, cleanArgs, nil, nil
 			default:
-				return "", nil, fmt.Errorf("read.cmd: gh pr %q is not a permitted read-only subcommand", cleanArgs[1])
+				return "", nil, nil, fmt.Errorf("read.cmd: gh pr %q is not a permitted read-only subcommand", cleanArgs[1])
 			}
 		case "run", "issue":
 			if len(cleanArgs) < 2 {
-				return "", nil, fmt.Errorf("read.cmd: gh %s requires a read-only subcommand (view, list, status)", sub)
+				return "", nil, nil, fmt.Errorf("read.cmd: gh %s requires a read-only subcommand (view, list, status)", sub)
 			}
 			switch cleanArgs[1] {
 			case "view", "list", "status":
-				return prog, cleanArgs, nil
+				return prog, cleanArgs, nil, nil
 			default:
-				return "", nil, fmt.Errorf("read.cmd: gh %s %q is not a permitted read-only subcommand", sub, cleanArgs[1])
+				return "", nil, nil, fmt.Errorf("read.cmd: gh %s %q is not a permitted read-only subcommand", sub, cleanArgs[1])
 			}
 		case "repo":
 			if len(cleanArgs) < 2 || cleanArgs[1] != "view" {
-				return "", nil, errors.New("read.cmd: only 'gh repo view' is permitted")
+				return "", nil, nil, errors.New("read.cmd: only 'gh repo view' is permitted")
 			}
-			return prog, cleanArgs, nil
+			return prog, cleanArgs, nil, nil
 		default:
-			return "", nil, fmt.Errorf("read.cmd: gh %q is not a permitted read-only command", sub)
+			return "", nil, nil, fmt.Errorf("read.cmd: gh %q is not a permitted read-only command", sub)
 		}
 
 	case "nebula":
 		if len(cleanArgs) < 2 {
-			return "", nil, errors.New("read.cmd: nebula requires a resource and read-only action (e.g. post get, mail list, terminal logs)")
+			return "", nil, nil, errors.New("read.cmd: nebula requires a resource and read-only action (e.g. post get, mail list, terminal logs)")
 		}
 		res, action := cleanArgs[0], cleanArgs[1]
 		switch res {
 		case "post":
 			if action == "get" || action == "list" {
-				return prog, cleanArgs, nil
+				return prog, cleanArgs, nil, nil
 			}
 		case "mail":
 			if action == "list" || action == "get" || action == "read" || action == "status" {
-				return prog, cleanArgs, nil
+				return prog, cleanArgs, nil, nil
 			}
 		case "terminal":
 			if action == "get" || action == "list" || action == "logs" || action == "status" || action == "read" {
-				return prog, cleanArgs, nil
+				return prog, cleanArgs, nil, nil
 			}
 		case "session", "run":
 			if action == "get" || action == "list" || action == "status" {
-				return prog, cleanArgs, nil
+				return prog, cleanArgs, nil, nil
 			}
 		}
-		return "", nil, fmt.Errorf("read.cmd: nebula %s %s is not a permitted read-only command", res, action)
+		return "", nil, nil, fmt.Errorf("read.cmd: nebula %s %s is not a permitted read-only command", res, action)
 
 	case "git":
-		return normalizeGitReadOnlyCommand(prog, cleanArgs)
+		outProg, outArgs, err := normalizeGitReadOnlyCommand(prog, cleanArgs)
+		return outProg, outArgs, nil, err
+
+	case "sha256sum", "shasum", "wc", "ls", "cat", "head", "tail", "stat":
+		return normalizeFileUtilCommand(prog, cleanArgs)
+
+	case "rg", "grep":
+		return normalizeSearchCommand(prog, cleanArgs)
+
+	case "jq":
+		return normalizeJQCommand(prog, cleanArgs)
 
 	default:
-		return "", nil, fmt.Errorf("read.cmd: program %q is not permitted (only gh, nebula, and git are allowed)", prog)
+		return "", nil, nil, fmt.Errorf("read.cmd: program %q is not permitted (only gh, nebula, git, jq, rg, grep, sha256sum, shasum, wc, ls, cat, head, tail, and stat are allowed)", prog)
 	}
+}
+
+func validateRelativePathArg(prog, arg string) error {
+	if filepath.IsAbs(arg) || strings.HasPrefix(arg, "~") || containsParentTraversal(arg) {
+		return fmt.Errorf("read.cmd: %s path argument %q escapes allowed directories", prog, arg)
+	}
+	if isSensitiveInvestigationPath(arg) {
+		return fmt.Errorf("read.cmd: %s path argument %q is restricted", prog, arg)
+	}
+	return nil
+}
+
+func normalizeFileUtilCommand(prog string, cleanArgs []string) (string, []string, []string, error) {
+	var outArgs, pathArgs []string
+	afterDoubleDash := false
+	expectNumericValue := false
+	for _, arg := range cleanArgs {
+		if expectNumericValue {
+			if !isDigitsOnly(arg) {
+				return "", nil, nil, fmt.Errorf("read.cmd: %s numeric flag value %q must be a positive integer", prog, arg)
+			}
+			outArgs = append(outArgs, arg)
+			expectNumericValue = false
+			continue
+		}
+		if !afterDoubleDash && arg == "--" {
+			afterDoubleDash = true
+			outArgs = append(outArgs, arg)
+			continue
+		}
+		if !afterDoubleDash && strings.HasPrefix(arg, "-") {
+			takesNum, ok := isAllowedFileUtilFlag(prog, arg)
+			if !ok {
+				return "", nil, nil, fmt.Errorf("read.cmd: %s flag %q is not permitted in read-only mode", prog, arg)
+			}
+			outArgs = append(outArgs, arg)
+			expectNumericValue = takesNum
+			continue
+		}
+		if err := validateRelativePathArg(prog, arg); err != nil {
+			return "", nil, nil, err
+		}
+		outArgs = append(outArgs, arg)
+		pathArgs = append(pathArgs, arg)
+	}
+	if expectNumericValue {
+		return "", nil, nil, fmt.Errorf("read.cmd: %s flag requires a numeric value", prog)
+	}
+	if len(pathArgs) == 0 {
+		if prog == "ls" {
+			outArgs = append(outArgs, ".")
+			pathArgs = append(pathArgs, ".")
+		} else {
+			return "", nil, nil, fmt.Errorf("read.cmd: %s requires at least one file path argument", prog)
+		}
+	}
+	return prog, outArgs, pathArgs, nil
+}
+
+func isAllowedFileUtilFlag(prog, flag string) (takesNumericValue bool, allowed bool) {
+	switch prog {
+	case "sha256sum":
+		switch flag {
+		case "-b", "--binary", "-t", "--text", "--tag":
+			return false, true
+		}
+	case "shasum":
+		switch flag {
+		case "-a":
+			return true, true
+		case "-b", "--binary", "-t", "--text", "-p", "--portable", "-U", "--UNIVERSAL":
+			return false, true
+		}
+		if strings.HasPrefix(flag, "-a") && isDigitsOnly(flag[2:]) {
+			return false, true
+		}
+	case "wc":
+		switch flag {
+		case "-l", "--lines", "-w", "--words", "-c", "--bytes", "-m", "--chars", "-L", "--max-line-length",
+			"-lw", "-wl", "-lc", "-cl", "-wc", "-cw", "-lwc":
+			return false, true
+		}
+	case "ls":
+		switch flag {
+		case "-l", "-a", "-A", "-h", "-1", "-d", "-F", "-R", "-r", "-S", "-t",
+			"-la", "-al", "-lh", "-hl", "-lah", "-alh", "-lA", "-Al", "-lR", "-Rl", "-lt", "-tl", "-ltr", "-lrt",
+			"--all", "--almost-all", "--human-readable", "--directory", "--recursive", "--reverse":
+			return false, true
+		}
+	case "cat":
+		switch flag {
+		case "-n", "--number", "-b", "--number-nonblank", "-s", "--squeeze-blank", "-E", "--show-ends", "-T", "--show-tabs", "-A", "--show-all":
+			return false, true
+		}
+	case "head", "tail":
+		switch flag {
+		case "-n", "--lines", "-c", "--bytes":
+			return true, true
+		case "-q", "--quiet", "--silent", "-v", "--verbose":
+			return false, true
+		}
+		if (strings.HasPrefix(flag, "-n") && isDigitsOnly(flag[2:])) ||
+			(strings.HasPrefix(flag, "--lines=") && isDigitsOnly(strings.TrimPrefix(flag, "--lines="))) ||
+			(strings.HasPrefix(flag, "-c") && isDigitsOnly(flag[2:])) ||
+			(strings.HasPrefix(flag, "--bytes=") && isDigitsOnly(strings.TrimPrefix(flag, "--bytes="))) ||
+			(len(flag) > 1 && flag[0] == '-' && isDigitsOnly(flag[1:])) {
+			return false, true
+		}
+	case "stat":
+		switch flag {
+		case "-L", "--dereference", "-t", "--terse":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+func normalizeSearchCommand(prog string, cleanArgs []string) (string, []string, []string, error) {
+	var outArgs, pathArgs []string
+	if prog == "rg" {
+		if !slices.Contains(cleanArgs, "--no-config") {
+			outArgs = append(outArgs, "--no-config")
+		}
+		if !slices.Contains(cleanArgs, "--no-follow") {
+			outArgs = append(outArgs, "--no-follow")
+		}
+	}
+	afterDoubleDash := false
+	expectNumericValue := false
+	expectPatternValue := false
+	hasPattern := false
+	for _, arg := range cleanArgs {
+		if expectNumericValue {
+			if !isDigitsOnly(arg) {
+				return "", nil, nil, fmt.Errorf("read.cmd: %s numeric flag value %q must be a positive integer", prog, arg)
+			}
+			outArgs = append(outArgs, arg)
+			expectNumericValue = false
+			continue
+		}
+		if expectPatternValue {
+			outArgs = append(outArgs, arg)
+			expectPatternValue = false
+			hasPattern = true
+			continue
+		}
+		if !afterDoubleDash && arg == "--" {
+			afterDoubleDash = true
+			outArgs = append(outArgs, arg)
+			continue
+		}
+		if !afterDoubleDash && strings.HasPrefix(arg, "-") {
+			takesNum, takesPat, ok := isAllowedSearchFlag(prog, arg)
+			if !ok {
+				return "", nil, nil, fmt.Errorf("read.cmd: %s flag %q is not permitted in read-only mode", prog, arg)
+			}
+			outArgs = append(outArgs, arg)
+			expectNumericValue = takesNum
+			expectPatternValue = takesPat
+			if strings.HasPrefix(arg, "--regexp=") {
+				hasPattern = true
+			}
+			continue
+		}
+		if !hasPattern {
+			hasPattern = true
+			outArgs = append(outArgs, arg)
+			continue
+		}
+		if err := validateRelativePathArg(prog, arg); err != nil {
+			return "", nil, nil, err
+		}
+		outArgs = append(outArgs, arg)
+		pathArgs = append(pathArgs, arg)
+	}
+	if expectNumericValue || expectPatternValue {
+		return "", nil, nil, fmt.Errorf("read.cmd: %s flag is missing its required value", prog)
+	}
+	if !hasPattern {
+		return "", nil, nil, fmt.Errorf("read.cmd: %s requires a search pattern", prog)
+	}
+	if len(pathArgs) == 0 {
+		return "", nil, nil, fmt.Errorf("read.cmd: %s requires at least one file path argument", prog)
+	}
+	return prog, outArgs, pathArgs, nil
+}
+
+func isAllowedSearchFlag(prog, flag string) (takesNumericValue, takesPatternValue, allowed bool) {
+	switch flag {
+	case "-e", "--regexp":
+		return false, true, true
+	case "-C", "--context", "-A", "--after-context", "-B", "--before-context", "-m", "--max-count":
+		return true, false, true
+	case "-n", "--line-number", "-i", "--ignore-case", "-F", "--fixed-strings", "-w", "--word-regexp",
+		"-c", "--count", "-l", "--files-with-matches", "-v", "--invert-match", "-H", "--with-filename",
+		"-h", "--no-filename", "-E", "--extended-regexp",
+		"-ni", "-in", "-Fni", "-nF", "-Fn", "--color=never":
+		return false, false, true
+	}
+	if strings.HasPrefix(flag, "--regexp=") && len(flag) > len("--regexp=") {
+		return false, false, true
+	}
+	for _, pfx := range []string{"-C", "-A", "-B", "-m", "--context=", "--after-context=", "--before-context=", "--max-count="} {
+		if strings.HasPrefix(flag, pfx) && isDigitsOnly(strings.TrimPrefix(flag, pfx)) {
+			return false, false, true
+		}
+	}
+	if prog == "rg" {
+		switch flag {
+		case "-S", "--smart-case", "--no-heading", "--no-config", "--no-follow", "--vimgrep":
+			return false, false, true
+		}
+	}
+	return false, false, false
+}
+
+func normalizeJQCommand(prog string, cleanArgs []string) (string, []string, []string, error) {
+	var outArgs, pathArgs []string
+	afterDoubleDash := false
+	hasFilter := false
+	for _, arg := range cleanArgs {
+		if !afterDoubleDash && arg == "--" {
+			afterDoubleDash = true
+			outArgs = append(outArgs, arg)
+			continue
+		}
+		if !afterDoubleDash && strings.HasPrefix(arg, "-") {
+			switch arg {
+			case "-r", "--raw-output", "-c", "--compact-output", "-e", "--exit-status",
+				"-s", "--slurp", "-S", "--sort-keys", "-M", "--monochrome-output",
+				"-j", "--join-output", "-a", "--ascii-output", "-rc", "-cr", "-rs", "-sr", "-cs", "-sc":
+				outArgs = append(outArgs, arg)
+				continue
+			default:
+				return "", nil, nil, fmt.Errorf("read.cmd: jq flag %q is not permitted in read-only mode", arg)
+			}
+		}
+		if !hasFilter {
+			if err := validateJQFilter(arg); err != nil {
+				return "", nil, nil, err
+			}
+			hasFilter = true
+			outArgs = append(outArgs, arg)
+			continue
+		}
+		if err := validateRelativePathArg(prog, arg); err != nil {
+			return "", nil, nil, err
+		}
+		outArgs = append(outArgs, arg)
+		pathArgs = append(pathArgs, arg)
+	}
+	if !hasFilter {
+		return "", nil, nil, errors.New("read.cmd: jq requires a filter expression and at least one file path argument")
+	}
+	if len(pathArgs) == 0 {
+		return "", nil, nil, errors.New("read.cmd: jq requires at least one file path argument")
+	}
+	return prog, outArgs, pathArgs, nil
+}
+
+func validateJQFilter(filter string) error {
+	if strings.Contains(filter, "$ENV") {
+		return errors.New("read.cmd: jq filter may not access $ENV")
+	}
+	if strings.Contains(filter, `\(`) {
+		return errors.New("read.cmd: jq string interpolation is not permitted in read-only mode")
+	}
+	// Tokenize identifier runs outside string literals to reject builtin env/module/file builtins.
+	inSingle, inDouble, escaped := false, false, false
+	for i := 0; i < len(filter); i++ {
+		ch := filter[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' && (inSingle || inDouble) {
+			escaped = true
+			continue
+		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		if inSingle || inDouble || !isJQIdentStart(ch) {
+			continue
+		}
+		// If preceded by '.' (e.g. .env or .inputs), it is a JSON field access, not a builtin call.
+		prevNonSpace := byte(0)
+		for k := i - 1; k >= 0; k-- {
+			if filter[k] != ' ' && filter[k] != '\t' && filter[k] != '\n' && filter[k] != '\r' {
+				prevNonSpace = filter[k]
+				break
+			}
+		}
+		j := i + 1
+		for j < len(filter) && isJQIdentCont(filter[j]) {
+			j++
+		}
+		ident := filter[i:j]
+		i = j - 1
+		if prevNonSpace == '.' {
+			continue
+		}
+		switch ident {
+		case "env", "include", "import", "input", "inputs", "input_filename", "debug", "stderr", "halt", "halt_error":
+			return fmt.Errorf("read.cmd: jq builtin %q is not permitted in read-only mode", ident)
+		}
+	}
+	return nil
+}
+
+func isJQIdentStart(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_' || b == '$'
+}
+
+func isJQIdentCont(b byte) bool {
+	return isJQIdentStart(b) || (b >= '0' && b <= '9')
 }
 
 func normalizeGitReadOnlyCommand(prog string, cleanArgs []string) (string, []string, error) {
@@ -395,7 +746,7 @@ func normalizeGitReadOnlyCommand(prog string, cleanArgs []string) (string, []str
 		return "", nil, fmt.Errorf("read.cmd: git global flag %q is not permitted before subcommand", sub)
 	}
 	switch sub {
-	case "status", "log", "diff", "show", "rev-parse":
+	case "status", "log", "diff", "show", "rev-parse", "ls-tree":
 	case "branch":
 		for _, arg := range cleanArgs[1:] {
 			switch arg {
@@ -492,6 +843,11 @@ func isAllowedGitSubcommandFlag(sub, flag string) (takesNumericValue bool, allow
 		case "--verify", "--short", "--abbrev-ref", "--symbolic-full-name", "--show-toplevel", "--is-inside-work-tree":
 			return false, true
 		}
+	case "ls-tree":
+		switch flag {
+		case "-r", "--name-only", "--name-status", "--full-name", "--full-tree", "-d", "-t":
+			return false, true
+		}
 	}
 	return false, false
 }
@@ -581,6 +937,47 @@ func validateGitRootConfinement(roots []string, baseDir string, args []string) e
 	return nil
 }
 
+func validateCommandPathConfinement(roots []string, baseDir, prog string, pathArgs []string) error {
+	if len(roots) == 0 || len(pathArgs) == 0 {
+		return nil
+	}
+	root := cmp.Or(strings.TrimSpace(baseDir), roots[0])
+	for _, rawPath := range pathArgs {
+		joined := filepath.Clean(filepath.Join(root, rawPath))
+		if !isWithinAnyRoot(roots, joined) {
+			return fmt.Errorf("read.cmd: %s path %q resolves outside allowed roots", prog, rawPath)
+		}
+		if err := verifySymlinkConfinement(roots, joined, rawPath); err != nil {
+			return err
+		}
+		if isSensitiveInvestigationPath(joined) {
+			return fmt.Errorf("read.cmd: %s path %q is restricted (sensitive or database file)", prog, rawPath)
+		}
+		if prog == "grep" || prog == "rg" {
+			if info, err := os.Stat(joined); err == nil && info.IsDir() {
+				return fmt.Errorf("read.cmd: %s path %q is a directory; specify explicit file paths in read-only mode", prog, rawPath)
+			}
+		}
+	}
+	return nil
+}
+
+type limitedOutputBuffer struct {
+	data  []byte
+	limit int
+}
+
+func (b *limitedOutputBuffer) Write(p []byte) (int, error) {
+	origLen := len(p)
+	if remaining := b.limit - len(b.data); remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		b.data = append(b.data, p...)
+	}
+	return origLen, nil
+}
+
 func scrubbedReadCmdEnv(environ []string) []string {
 	out := make([]string, 0, len(environ)+4)
 	for _, kv := range environ {
@@ -603,14 +1000,31 @@ func scrubbedReadCmdEnv(environ []string) []string {
 	)
 }
 
+func minimalReadCmdEnv(environ []string) []string {
+	out := make([]string, 0, 8)
+	for _, kv := range environ {
+		k, _, _ := strings.Cut(kv, "=")
+		switch strings.ToUpper(strings.TrimSpace(k)) {
+		case "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "HOME":
+			out = append(out, kv)
+		}
+	}
+	return append(out, "RIPGREP_CONFIG_PATH=/dev/null")
+}
+
 func executeReadCmd(ctx context.Context, cfg InvestigateConfig, p ReadCmdParams) (string, error) {
-	prog, cleanArgs, err := normalizeReadOnlyCommand(p.Program, p.Args)
+	prog, cleanArgs, pathArgs, err := normalizeReadOnlyCommand(p.Program, p.Args)
 	if err != nil {
 		return "", err
 	}
 	dir := cmp.Or(strings.TrimSpace(cfg.RepoDir), strings.TrimSpace(cfg.RunDir))
 	if prog == "git" {
 		if err := validateGitRootConfinement(cfg.allowedRoots(), dir, cleanArgs); err != nil {
+			return "", err
+		}
+	}
+	if len(pathArgs) > 0 {
+		if err := validateCommandPathConfinement(cfg.allowedRoots(), dir, prog, pathArgs); err != nil {
 			return "", err
 		}
 	}
@@ -624,8 +1038,17 @@ func executeReadCmd(ctx context.Context, cfg InvestigateConfig, p ReadCmdParams)
 		if dir != "" {
 			cmd.Dir = dir
 		}
-		cmd.Env = scrubbedReadCmdEnv(os.Environ())
-		out, err = cmd.CombinedOutput()
+		switch prog {
+		case "gh", "nebula", "git":
+			cmd.Env = scrubbedReadCmdEnv(os.Environ())
+		default:
+			cmd.Env = minimalReadCmdEnv(os.Environ())
+		}
+		outBuf := &limitedOutputBuffer{limit: defaultReadFileMaxBytes + 1}
+		cmd.Stdout = outBuf
+		cmd.Stderr = outBuf
+		err = cmd.Run()
+		out = outBuf.data
 	}
 	text := strings.TrimSpace(string(out))
 	if len(text) > defaultReadFileMaxBytes {

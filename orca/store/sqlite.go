@@ -1315,6 +1315,9 @@ func scanDirective(scanner rowScanner) (*Directive, error) {
 	if dir.CreatedAt, err = parseTime(createdStr); err != nil {
 		return nil, err
 	}
+	if dir.IsContract() {
+		dir.Contract = true
+	}
 	return &dir, nil
 }
 
@@ -1337,7 +1340,14 @@ func (d *sqliteDirectiveStore) Add(ctx context.Context, dir Directive) error {
 		cp.Status = DirectiveActive
 	}
 	if cp.Kind == "" {
-		cp.Kind = DirectiveStanding
+		if cp.Contract {
+			cp.Kind = DirectiveContract
+		} else {
+			cp.Kind = DirectiveStanding
+		}
+	}
+	if cp.Contract && cp.Kind != DirectiveContract && strings.TrimSpace(cp.Scope) == "" {
+		cp.Scope = string(DirectiveContract)
 	}
 	if cp.Source == "" {
 		cp.Source = DirectiveSourceOwner

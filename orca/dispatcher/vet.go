@@ -37,10 +37,47 @@ const (
 	ToolDirectiveNote   = "directive.note"
 	ToolDirectiveRevoke = "directive.revoke"
 	ToolPlannerRequest  = "planner.request"
+	ToolLaneForward     = "lane.forward"
+	ToolReadLane        = "read.lane"
+	ToolLaneInspect     = ToolReadLane
 	ToolReadLaneReport  = "read.lane_report"
 	ToolReadPR          = "read.pr"
 	ToolReadCI          = "read.ci"
 )
+
+// DefaultAllowedModels lists the default worker model identifiers and policy
+// tier aliases accepted on lane.spawn and lane.retry when Config.AllowedModels
+// is not explicitly overridden.
+var DefaultAllowedModels = []string{
+	"strongest",
+	"mid",
+	"cheaper",
+	"fastest",
+	"opus",
+	"sonnet",
+	"haiku",
+	"claude",
+	"codex",
+	"agy",
+	"carbon",
+	"agy-carbon",
+	"agy carbon",
+	"claude-opus-4-7",
+	"claude-opus-4-6",
+	"claude-opus-5-5",
+	"claude-sonnet-5-5",
+	"claude-sonnet-4-6",
+	"claude-sonnet-4-5-20250929",
+	"claude-haiku-5-5",
+	"claude-haiku-4-5",
+	"claude-haiku-4-5-20251001",
+	"gpt-6.1-sol",
+	"gpt-6-sol",
+	"gpt-6-astra",
+	"gpt-5.6-sol",
+	"gpt-5.4",
+	"gpt-5.4-mini",
+}
 
 // DefaultMaxBriefBytes is the fallback brief/note size cap when a recipe does
 // not specify Limits.MaxBriefBytes.
@@ -97,6 +134,7 @@ type LaneSpawnParams struct {
 	Branch         string `json:"branch,omitempty" jsonschema:"description=Optional git branch name"`
 	BaseBranch     string `json:"base_branch,omitempty" jsonschema:"description=Optional base branch name"`
 	Reason         string `json:"reason,omitempty" jsonschema:"description=Reason for spawning this lane"`
+	Model          string `json:"model,omitempty" jsonschema:"description=Optional worker model override from the allowed list"`
 }
 
 // LaneSteerParams holds parameters for the lane.steer tool.
@@ -106,12 +144,21 @@ type LaneSteerParams struct {
 	Reason string `json:"reason,omitempty" jsonschema:"description=Reason for steering this lane"`
 }
 
+// LaneForwardParams holds parameters for the lane.forward tool.
+type LaneForwardParams struct {
+	FromLaneID string `json:"from_lane_id,omitempty" jsonschema:"description=Source lane ID whose finding or report excerpt is being forwarded"`
+	ToLaneID   string `json:"to_lane_id" jsonschema:"required,description=Target live lane ID to receive the forwarded finding as a steer"`
+	Excerpt    string `json:"excerpt" jsonschema:"required,description=Finding or report excerpt to forward to the target lane"`
+	Reason     string `json:"reason,omitempty" jsonschema:"description=Why this finding affects the target lane"`
+}
+
 // LaneRetryParams holds parameters for the lane.retry tool.
 type LaneRetryParams struct {
 	LaneID string `json:"lane_id" jsonschema:"required,description=Lane ID to retry"`
 	Phase  string `json:"phase,omitempty" jsonschema:"description=Optional phase to retry (defaults to current lane phase or recipe first phase)"`
 	Note   string `json:"note,omitempty" jsonschema:"description=Optional additional brief or guidance for the retry"`
 	Reason string `json:"reason,omitempty" jsonschema:"description=Reason for retrying this lane"`
+	Model  string `json:"model,omitempty" jsonschema:"description=Optional worker model override from the allowed list"`
 	Round  int    `json:"round,omitempty" jsonschema:"description=Target round number (must be > max recorded round for the phase; defaults to next unused round)"`
 }
 
@@ -165,11 +212,13 @@ type MailDismissParams struct {
 
 // DirectiveNoteParams holds parameters for the directive.note tool.
 type DirectiveNoteParams struct {
-	ID     string `json:"id,omitempty" jsonschema:"description=Optional directive ID"`
-	Fact   string `json:"fact" jsonschema:"required,description=Fact or operational note to persist in the store"`
-	Expiry string `json:"expiry,omitempty" jsonschema_description:"Optional expiry as RFC3339 timestamp, duration (24h, 7d) or UTC clock time (05:30Z = next occurrence)"`
-	Scope  string `json:"scope,omitempty" jsonschema:"description=Optional lane ID or scope"`
-	Reason string `json:"reason,omitempty" jsonschema:"description=Reason for recording this note"`
+	ID       string `json:"id,omitempty" jsonschema:"description=Optional directive ID"`
+	Fact     string `json:"fact" jsonschema:"required,description=Fact or operational note to persist in the store"`
+	Kind     string `json:"-" jsonschema:"-"`
+	Expiry   string `json:"expiry,omitempty" jsonschema_description:"Optional expiry as RFC3339 timestamp, duration (24h, 7d) or UTC clock time (05:30Z = next occurrence)"`
+	Scope    string `json:"scope,omitempty" jsonschema:"description=Optional lane ID or scope"`
+	Reason   string `json:"reason,omitempty" jsonschema:"description=Reason for recording this note"`
+	Contract bool   `json:"contract,omitempty" jsonschema:"description=Optional: true to record this directive in the shared run contract"`
 }
 
 // DirectiveRevokeParams holds parameters for the directive.revoke tool.
@@ -183,6 +232,18 @@ type PlannerRequestParams struct {
 	Reason  string `json:"reason" jsonschema:"required,description=Why replanning or plan reconciliation is needed"`
 	PlanRef string `json:"plan_ref,omitempty" jsonschema:"description=Optional Nebula plan post reference"`
 	Urgent  bool   `json:"urgent,omitempty" jsonschema:"description=Whether replanning is urgent"`
+}
+
+// ReadLaneParams holds parameters for the read.lane inspection tool.
+type ReadLaneParams struct {
+	LaneID   string   `json:"lane_id" jsonschema:"required,description=Lane ID to inspect (from the snapshot Lanes table)"`
+	Path     string   `json:"path,omitempty" jsonschema:"description=Relative file or directory path to read or list in the lane worktree, run dir, or pushed branch (defaults to '.' when no program is set)"`
+	Program  string   `json:"program,omitempty" jsonschema:"description=Optional read-only command to run in the lane session/branch (git, rg, grep, sha256sum, shasum, jq, wc, ls, cat, head, tail, stat)"`
+	Command  string   `json:"command,omitempty" jsonschema:"description=Optional read-only command line (alias for program + args)"`
+	Ref      string   `json:"ref,omitempty" jsonschema:"description=Optional git ref or branch to inspect when reading from the lane branch"`
+	Reason   string   `json:"reason,omitempty" jsonschema:"description=Optional reason for inspecting raw lane evidence"`
+	Args     []string `json:"args,omitempty" jsonschema:"description=Arguments for program when running a read-only command"`
+	MaxBytes int      `json:"max_bytes,omitempty" jsonschema:"description=Maximum bytes to return"`
 }
 
 // ReadLaneReportParams holds parameters for the read.lane_report tool.
@@ -216,6 +277,7 @@ type ProposedAction struct {
 	BacklogClose    *BacklogCloseParams    `json:"-"`
 	LaneSpawn       *LaneSpawnParams       `json:"-"`
 	LaneSteer       *LaneSteerParams       `json:"-"`
+	LaneForward     *LaneForwardParams     `json:"-"`
 	LaneRetry       *LaneRetryParams       `json:"-"`
 	LaneStop        *LaneStopParams        `json:"-"`
 	LaneWait        *LaneWaitParams        `json:"-"`
@@ -226,6 +288,7 @@ type ProposedAction struct {
 	DirectiveNote   *DirectiveNoteParams   `json:"-"`
 	DirectiveRevoke *DirectiveRevokeParams `json:"-"`
 	PlannerRequest  *PlannerRequestParams  `json:"-"`
+	ReadLane        *ReadLaneParams        `json:"-"`
 	ReadLaneReport  *ReadLaneReportParams  `json:"-"`
 	ReadPR          *ReadPRParams          `json:"-"`
 	ReadCI          *ReadCIParams          `json:"-"`
@@ -263,6 +326,10 @@ func NormalizeToolName(name string) string {
 		return ToolDirectiveRevoke
 	case "mail.resolve", "mail_resolve", "worker.question.dismiss", "question.dismiss", "mail_dismiss":
 		return ToolMailDismiss
+	case "lane.inspect", "lane_inspect", "read.lane_inspect", "read_lane_inspect", "read_lane":
+		return ToolReadLane
+	case "lane_forward", "forward", "lane.forward_finding", "lane_forward_finding":
+		return ToolLaneForward
 	case "lane.expected_wait", "lane_expected_wait", "expected_wait", "lane_wait":
 		return ToolLaneWait
 	}
@@ -278,9 +345,9 @@ func NormalizeToolName(name string) string {
 func isKnownTool(tool string) bool {
 	switch tool {
 	case ToolBacklogAdd, ToolBacklogUpdate, ToolBacklogReorder, ToolBacklogClose,
-		ToolLaneSpawn, ToolLaneSteer, ToolLaneRetry, ToolLaneStop, ToolLaneWait,
+		ToolLaneSpawn, ToolLaneSteer, ToolLaneForward, ToolLaneRetry, ToolLaneStop, ToolLaneWait,
 		ToolOwnerAsk, ToolOwnerAnswer, ToolMailAnswer, ToolMailDismiss, ToolDirectiveNote, ToolDirectiveRevoke, ToolPlannerRequest,
-		ToolReadLaneReport, ToolReadPR, ToolReadCI:
+		ToolReadLane, ToolReadLaneReport, ToolReadPR, ToolReadCI:
 		return true
 	default:
 		return false
@@ -288,18 +355,29 @@ func isKnownTool(tool string) bool {
 }
 
 type jsonAliases struct {
-	ID          string `json:"id"`
-	MsgID       string `json:"msg_id"`
-	Item        string `json:"item"`
-	Lane        string `json:"lane"`
-	Recipe      string `json:"recipe"`
-	Message     string `json:"message"`
-	Body        string `json:"body"`
-	Note        string `json:"note"`
-	Brief       string `json:"brief"`
-	Text        string `json:"text"`
-	ExpiresAt   string `json:"expires_at"`
-	DirectiveID string `json:"directive_id"`
+	ID           string `json:"id"`
+	MsgID        string `json:"msg_id"`
+	Item         string `json:"item"`
+	Lane         string `json:"lane"`
+	FromLane     string `json:"from_lane"`
+	SourceLane   string `json:"source_lane"`
+	SourceLaneID string `json:"source_lane_id"`
+	ToLane       string `json:"to_lane"`
+	TargetLane   string `json:"target_lane"`
+	TargetLaneID string `json:"target_lane_id"`
+	Recipe       string `json:"recipe"`
+	Message      string `json:"message"`
+	Body         string `json:"body"`
+	Note         string `json:"note"`
+	Finding      string `json:"finding"`
+	Brief        string `json:"brief"`
+	Text         string `json:"text"`
+	File         string `json:"file"`
+	Cmd          string `json:"cmd"`
+	WorkerModel  string `json:"worker_model"`
+	Kind         string `json:"kind"`
+	ExpiresAt    string `json:"expires_at"`
+	DirectiveID  string `json:"directive_id"`
 }
 
 func decodeAliases(raw []byte) jsonAliases {
@@ -370,10 +448,11 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 		if err != nil {
 			return act, err
 		}
-		if p.ItemID == "" || p.LaneID == "" || (p.RecipeOverride == "" && p.RecipeName == "") {
+		if p.ItemID == "" || p.LaneID == "" || p.Model == "" || (p.RecipeOverride == "" && p.RecipeName == "") {
 			a := decodeAliases(trimmed)
 			p.ItemID = cmp.Or(p.ItemID, a.Item)
 			p.LaneID = cmp.Or(p.LaneID, a.Lane)
+			p.Model = cmp.Or(p.Model, a.WorkerModel)
 			if p.RecipeOverride == "" && p.RecipeName == "" {
 				p.RecipeOverride = a.Recipe
 			}
@@ -397,15 +476,31 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 		act.LaneID = p.LaneID
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Note))
 
+	case ToolLaneForward:
+		p, err := decodeParams[LaneForwardParams](canonical, trimmed)
+		if err != nil {
+			return act, err
+		}
+		if p.FromLaneID == "" || p.ToLaneID == "" || p.Excerpt == "" {
+			a := decodeAliases(trimmed)
+			p.FromLaneID = cmp.Or(p.FromLaneID, a.FromLane, a.SourceLaneID, a.SourceLane)
+			p.ToLaneID = cmp.Or(p.ToLaneID, a.ToLane, a.TargetLaneID, a.TargetLane, a.Lane)
+			p.Excerpt = cmp.Or(p.Excerpt, a.Finding, a.Note, a.Message, a.Body, a.Text)
+		}
+		act.LaneForward = p
+		act.LaneID = strings.TrimSpace(p.ToLaneID)
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Excerpt))
+
 	case ToolLaneRetry:
 		p, err := decodeParams[LaneRetryParams](canonical, trimmed)
 		if err != nil {
 			return act, err
 		}
-		if p.LaneID == "" || p.Note == "" {
+		if p.LaneID == "" || p.Note == "" || p.Model == "" {
 			a := decodeAliases(trimmed)
 			p.LaneID = cmp.Or(p.LaneID, a.Lane)
 			p.Note = cmp.Or(p.Note, a.Brief)
+			p.Model = cmp.Or(p.Model, a.WorkerModel)
 		}
 		act.LaneRetry = p
 		act.LaneID = p.LaneID
@@ -501,6 +596,10 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 			p.Fact = cmp.Or(p.Fact, a.Text)
 			p.Expiry = cmp.Or(p.Expiry, a.ExpiresAt)
 		}
+		if strings.EqualFold(strings.TrimSpace(p.Kind), string(store.DirectiveContract)) ||
+			strings.EqualFold(strings.TrimSpace(p.Scope), string(store.DirectiveContract)) {
+			p.Contract = true
+		}
 		act.DirectiveNote = p
 		act.LaneID = p.Scope
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), strings.TrimSpace(p.Fact))
@@ -524,6 +623,21 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 		}
 		act.PlannerRequest = p
 		act.Reason = strings.TrimSpace(p.Reason)
+
+	case ToolReadLane:
+		p, err := decodeParams[ReadLaneParams](canonical, trimmed)
+		if err != nil {
+			return act, err
+		}
+		if p.LaneID == "" || p.Path == "" || p.Command == "" {
+			a := decodeAliases(trimmed)
+			p.LaneID = cmp.Or(p.LaneID, a.Lane)
+			p.Path = cmp.Or(p.Path, a.File)
+			p.Command = cmp.Or(p.Command, a.Cmd)
+		}
+		act.ReadLane = p
+		act.LaneID = strings.TrimSpace(p.LaneID)
+		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("inspect lane %s", p.LaneID))
 
 	case ToolReadLaneReport:
 		p, err := decodeParams[ReadLaneReportParams](canonical, trimmed)
@@ -576,8 +690,10 @@ type StateView struct {
 	VersionRecipes map[string]recipe.Recipe
 	MaxBriefBytes  int
 	Memories       []store.MemoryEntry
+	AllowedModels  []string
 	OwnerAsks      map[string]controller.OwnerAsk
 	Directives     map[string]store.Directive
+	Settings       store.RunSettings
 }
 
 // LoadStateView loads the current Run, Lanes, Backlog, and Recipes from st into
@@ -624,6 +740,7 @@ func loadStateViewWithCache(
 	if err != nil {
 		return nil, err
 	}
+	settings, _ := st.Runs().GetSettings(ctx, runID)
 
 	view := &StateView{
 		Now:            clk.Now().UTC(),
@@ -636,6 +753,7 @@ func loadStateViewWithCache(
 		Memories:       memories,
 		OwnerAsks:      make(map[string]controller.OwnerAsk),
 		Directives:     make(map[string]store.Directive, len(directives)),
+		Settings:       settings,
 	}
 	runDone := isRunStateDone(run, lanes, backlog)
 	for i := range directives {
@@ -710,6 +828,293 @@ func (s *StateView) BacklogItem(id string) (store.BacklogItem, bool) {
 	return it, ok
 }
 
+// ObjectiveMentionsReadyItem reports whether s.Run.Objective is not done and
+// explicitly mentions itemID as ready/next work (so proactive staffing can
+// spawn work named in the objective even before a separate backlog.add call).
+func (s *StateView) ObjectiveMentionsReadyItem(itemID string) (store.BacklogItem, bool) {
+	itemID = strings.TrimSpace(itemID)
+	if s == nil || s.Run == nil || itemID == "" {
+		return store.BacklogItem{}, false
+	}
+	obj := strings.TrimSpace(s.Run.Objective)
+	if obj == "" || store.ObjectiveIsDone(obj) {
+		return store.BacklogItem{}, false
+	}
+	nextSec := strings.TrimSpace(store.ExtractNextSection(obj))
+	searchText := nextSec
+	if searchText == "" {
+		if !containsReadyWorkMarker(obj) {
+			return store.BacklogItem{}, false
+		}
+		searchText = obj
+	} else if store.IsDoneOrEmptyNext(nextSec) {
+		return store.BacklogItem{}, false
+	}
+	matchedBullet := false
+	for _, line := range strings.Split(searchText, "\n") {
+		if strings.EqualFold(extractReadyBulletItemID(line, nextSec != ""), itemID) {
+			matchedBullet = true
+			break
+		}
+	}
+	if !matchedBullet {
+		return store.BacklogItem{}, false
+	}
+	title := extractObjectiveItemTitle(cmp.Or(nextSec, obj), itemID)
+	return store.BacklogItem{
+		ID:       itemID,
+		RunID:    s.Run.ID,
+		Title:    cmp.Or(title, itemID),
+		Priority: store.PriorityP1,
+		Status:   store.BacklogOpen,
+	}, true
+}
+
+// FirstObjectiveReadyItem returns the highest-priority open ready item from the
+// backlog or the run objective's Next/ready section when lanes have idle capacity.
+func (s *StateView) FirstObjectiveReadyItem() (store.BacklogItem, bool) {
+	if s == nil || s.Run == nil || s.Settings.Paused {
+		return store.BacklogItem{}, false
+	}
+	obj := strings.TrimSpace(s.Run.Objective)
+	if obj == "" || store.ObjectiveIsDone(obj) {
+		return store.BacklogItem{}, false
+	}
+	nextSec := strings.TrimSpace(store.ExtractNextSection(obj))
+	if nextSec == "" && !containsReadyWorkMarker(obj) {
+		return store.BacklogItem{}, false
+	}
+	if nextSec != "" && store.IsDoneOrEmptyNext(nextSec) {
+		return store.BacklogItem{}, false
+	}
+	for id := range s.Directives {
+		dir := s.Directives[id]
+		if strings.HasPrefix(dir.Ref, ownerAskRefPrefix) {
+			continue
+		}
+		if isHoldDirectiveText(dir.Text) {
+			return store.BacklogItem{}, false
+		}
+	}
+
+	var best *store.BacklogItem
+	for id := range s.Backlog {
+		it := s.Backlog[id]
+		if it.Status != store.BacklogOpen {
+			continue
+		}
+		ready := true
+		for _, depID := range it.DependsOn {
+			dep, ok := s.BacklogItem(depID)
+			if !ok || dep.Status != store.BacklogDone {
+				ready = false
+				break
+			}
+		}
+		if !ready {
+			continue
+		}
+		if existing, hasLane := s.Lane(it.ID); hasLane && existing.Status != lane.StatusPlanned {
+			continue
+		}
+		_, r, _ := s.ResolveSpawnRecipe(LaneSpawnParams{ItemID: it.ID, RecipeName: it.RecipeName})
+		if maxConcurrent := s.EffectiveMaxConcurrentLanes(r); maxConcurrent > 0 && s.RunningLaneCount() >= maxConcurrent {
+			continue
+		}
+		if best == nil || it.Priority < best.Priority || (it.Priority == best.Priority && it.Order < best.Order) || (it.Priority == best.Priority && it.Order == best.Order && it.ID < best.ID) {
+			cp := it
+			best = &cp
+		}
+	}
+	if best != nil {
+		return *best, true
+	}
+
+	searchText := cmp.Or(nextSec, obj)
+	for _, line := range strings.Split(searchText, "\n") {
+		candID := extractReadyBulletItemID(line, nextSec != "")
+		if candID == "" {
+			continue
+		}
+		if _, exists := s.BacklogItem(candID); exists {
+			continue
+		}
+		if existing, hasLane := s.Lane(candID); hasLane && existing.Status != lane.StatusPlanned {
+			continue
+		}
+		item, ok := s.ObjectiveMentionsReadyItem(candID)
+		if !ok {
+			continue
+		}
+		_, r, _ := s.ResolveSpawnRecipe(LaneSpawnParams{ItemID: item.ID})
+		if maxConcurrent := s.EffectiveMaxConcurrentLanes(r); maxConcurrent > 0 && s.RunningLaneCount() >= maxConcurrent {
+			continue
+		}
+		return item, true
+	}
+	return store.BacklogItem{}, false
+}
+
+func extractReadyBulletItemID(line string, inNextSection bool) string {
+	raw := strings.TrimSpace(line)
+	if raw == "" {
+		return ""
+	}
+	lowerRaw := strings.ToLower(raw)
+	hasBulletOrMarker := strings.HasPrefix(raw, "-") ||
+		strings.HasPrefix(raw, "*") ||
+		(len(raw) >= 2 && raw[0] >= '0' && raw[0] <= '9' && (raw[1] == '.' || raw[1] == ')')) ||
+		strings.HasPrefix(lowerRaw, "next:") ||
+		strings.HasPrefix(lowerRaw, "ready:") ||
+		strings.HasPrefix(lowerRaw, "ready work:") ||
+		strings.HasPrefix(lowerRaw, "todo:")
+	if !inNextSection && !hasBulletOrMarker {
+		return ""
+	}
+	return extractFirstReadyItemID(raw)
+}
+
+func extractFirstReadyItemID(line string) string {
+	trimmed := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "-*0123456789.)[] \t"))
+	lower := strings.ToLower(trimmed)
+	for _, prefix := range []string{"next:", "ready:", "ready work:", "todo:"} {
+		if strings.HasPrefix(lower, prefix) {
+			trimmed = strings.TrimSpace(trimmed[len(prefix):])
+			break
+		}
+	}
+	if trimmed == "" {
+		return ""
+	}
+	for _, tok := range strings.FieldsFunc(trimmed, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == ':' || r == ',' || r == ';' || r == '(' || r == ')' || r == '`' || r == '[' || r == ']'
+	}) {
+		clean := strings.ToLower(strings.Trim(tok, "._-"))
+		if clean == "" {
+			continue
+		}
+		switch clean {
+		case "start", "spawn", "staff", "implement", "build", "run", "the", "next", "ready", "open", "todo",
+			"piece", "item", "lane", "work", "task", "phase", "step", "for", "and", "with", "from", "in", "on", "of", "to", "a", "an":
+			continue
+		}
+		valid := true
+		for i := 0; i < len(clean); i++ {
+			if !isIdentChar(clean[i]) {
+				valid = false
+				break
+			}
+		}
+		if valid && len(clean) >= 2 {
+			return clean
+		}
+	}
+	return ""
+}
+
+func containsReadyWorkMarker(s string) bool {
+	lower := strings.ToLower(s)
+	for _, kw := range []string{"next:", "## next", "# next", "ready:", "ready work", "todo:", "- [ ]"} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsIdentifierToken(text, id string) bool {
+	lowerText := strings.ToLower(text)
+	lowerID := strings.ToLower(strings.TrimSpace(id))
+	if lowerID == "" {
+		return false
+	}
+	offset := 0
+	for offset <= len(lowerText)-len(lowerID) {
+		idx := strings.Index(lowerText[offset:], lowerID)
+		if idx < 0 {
+			return false
+		}
+		start := offset + idx
+		end := start + len(lowerID)
+		leftOK := start == 0 || !isIdentChar(lowerText[start-1])
+		rightOK := end == len(lowerText) || !isIdentChar(lowerText[end])
+		if leftOK && rightOK {
+			return true
+		}
+		offset = start + 1
+	}
+	return false
+}
+
+func isIdentChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '-' || b == '_'
+}
+
+func extractObjectiveItemTitle(text, itemID string) string {
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "-*0123456789.)[] \t"))
+		if trimmed == "" || !containsIdentifierToken(trimmed, itemID) {
+			continue
+		}
+		idx := strings.Index(strings.ToLower(trimmed), strings.ToLower(itemID))
+		if idx >= 0 {
+			rest := strings.TrimSpace(trimmed[idx+len(itemID):])
+			rest = strings.TrimLeft(rest, ":—–-()[] \t")
+			if rest != "" {
+				return rest
+			}
+		}
+		return trimmed
+	}
+	return itemID
+}
+
+func isModelAllowed(modelName string, allowed []string) bool {
+	trimmed := strings.TrimSpace(modelName)
+	if trimmed == "" {
+		return true
+	}
+	if len(allowed) == 0 {
+		allowed = DefaultAllowedModels
+	}
+	return slices.ContainsFunc(allowed, func(m string) bool {
+		return strings.EqualFold(strings.TrimSpace(m), trimmed)
+	})
+}
+
+func isFastestWorkerModel(modelName string) bool {
+	lower := strings.ToLower(strings.TrimSpace(modelName))
+	return lower == "fastest" || lower == "haiku" || strings.Contains(lower, "haiku") || lower == "gpt-5.4-mini" || strings.HasSuffix(lower, "-mini")
+}
+
+// ResolveWorkerModel maps policy tier aliases (strongest, mid, cheaper, fastest)
+// to concrete worker model identifiers for harness, leaving explicit model names
+// unchanged.
+func ResolveWorkerModel(modelName, harness string) string {
+	trimmed := strings.TrimSpace(modelName)
+	lower := strings.ToLower(trimmed)
+	isCodex := strings.EqualFold(strings.TrimSpace(harness), "codex") || strings.EqualFold(strings.TrimSpace(harness), "openai")
+	switch lower {
+	case "strongest":
+		if isCodex {
+			return "gpt-6.1-sol"
+		}
+		return "opus"
+	case "mid", "cheaper":
+		if isCodex {
+			return "gpt-5.4"
+		}
+		return "sonnet"
+	case "fastest":
+		if isCodex {
+			return "gpt-5.4-mini"
+		}
+		return "haiku"
+	default:
+		return trimmed
+	}
+}
+
 func (s *StateView) resolveRecipeName(name string) string {
 	if name != "" {
 		return name
@@ -730,7 +1135,7 @@ func (s *StateView) RecipeByName(name string) (recipe.Recipe, bool) {
 	if r, ok := s.Recipes[name]; ok {
 		return r, true
 	}
-	if name == recipe.DefaultName {
+	if name == recipe.DefaultName || (s.Run != nil && name == s.Run.DefaultRecipe) {
 		return recipe.Default(), true
 	}
 	return recipe.Recipe{}, false
@@ -809,6 +1214,16 @@ func (s *StateView) EffectiveMaxBriefBytes(r recipe.Recipe) int {
 		return s.MaxBriefBytes
 	}
 	return DefaultMaxBriefBytes
+}
+
+// EffectiveMaxConcurrentLanes returns the active concurrency limit for r,
+// taking the tighter of r.Limits.MaxConcurrentLanes and s.Settings.ConcurrencyCap.
+func (s *StateView) EffectiveMaxConcurrentLanes(r recipe.Recipe) int {
+	maxConcurrent := r.Limits.MaxConcurrentLanes
+	if s != nil && s.Settings.ConcurrencyCap > 0 && (maxConcurrent <= 0 || s.Settings.ConcurrencyCap < maxConcurrent) {
+		maxConcurrent = s.Settings.ConcurrencyCap
+	}
+	return maxConcurrent
 }
 
 // Invariant is a deterministic rule a proposed Dispatcher action must not violate.
@@ -934,6 +1349,18 @@ func checkNoMergeOutsideRecipe(st *StateView, act ProposedAction) error {
 			r, _ := st.RecipeForLane(ln)
 			if r.MergePolicy.Mode != recipe.MergeModeSelf && containsDirectMergeInstruction(act.LaneSteer.Note) {
 				return fmt.Errorf("steer note instructs lane to merge directly, but recipe %q has merge mode %q",
+					r.Name, r.MergePolicy.Mode)
+			}
+		}
+
+	case ToolLaneForward:
+		if act.LaneForward == nil {
+			return nil
+		}
+		if ln, ok := st.Lane(act.LaneForward.ToLaneID); ok {
+			r, _ := st.RecipeForLane(ln)
+			if r.MergePolicy.Mode != recipe.MergeModeSelf && containsDirectMergeInstruction(act.LaneForward.Excerpt) {
+				return fmt.Errorf("forwarded excerpt instructs lane to merge directly, but recipe %q has merge mode %q",
 					r.Name, r.MergePolicy.Mode)
 			}
 		}
@@ -1213,6 +1640,18 @@ func checkBriefSizeCap(st *StateView, act ProposedAction) error {
 			return fmt.Errorf("steer note size %d bytes exceeds cap of %d bytes", len(act.LaneSteer.Note), maxBytes)
 		}
 
+	case ToolLaneForward:
+		if act.LaneForward == nil {
+			return errors.New("missing lane.forward parameters")
+		}
+		if strings.TrimSpace(act.LaneForward.Excerpt) == "" {
+			return errors.New("excerpt is required for lane.forward")
+		}
+		maxBytes := st.maxBriefBytesForLane(act.LaneForward.ToLaneID)
+		if len(act.LaneForward.Excerpt) > maxBytes {
+			return fmt.Errorf("forwarded excerpt size %d bytes exceeds cap of %d bytes", len(act.LaneForward.Excerpt), maxBytes)
+		}
+
 	case ToolLaneRetry:
 		if act.LaneRetry == nil || act.LaneRetry.Note == "" {
 			return nil
@@ -1228,12 +1667,24 @@ func checkBriefSizeCap(st *StateView, act ProposedAction) error {
 func checkLaneExists(st *StateView, act ProposedAction) error {
 	switch act.Tool {
 	case ToolLaneSteer, ToolLaneRetry, ToolLaneStop, ToolLaneWait,
-		ToolReadLaneReport, ToolReadPR, ToolReadCI:
+		ToolReadLane, ToolReadLaneReport, ToolReadPR, ToolReadCI:
 		if strings.TrimSpace(act.LaneID) == "" {
 			return errors.New("lane_id is required")
 		}
 		if _, ok := st.Lane(act.LaneID); !ok {
 			return fmt.Errorf("lane %q is not in the store", act.LaneID)
+		}
+	case ToolLaneForward:
+		if act.LaneForward == nil || strings.TrimSpace(act.LaneForward.ToLaneID) == "" {
+			return errors.New("to_lane_id is required")
+		}
+		if _, ok := st.Lane(strings.TrimSpace(act.LaneForward.ToLaneID)); !ok {
+			return fmt.Errorf("target lane %q is not in the store", act.LaneForward.ToLaneID)
+		}
+		if from := strings.TrimSpace(act.LaneForward.FromLaneID); from != "" {
+			if _, ok := st.Lane(from); !ok {
+				return fmt.Errorf("source lane %q is not in the store", from)
+			}
 		}
 	case ToolOwnerAsk:
 		if act.OwnerAsk != nil && strings.TrimSpace(act.OwnerAsk.LaneID) != "" {
@@ -1315,13 +1766,19 @@ func checkSpawnInvariants(st *StateView, act ProposedAction) error {
 	if p == nil {
 		return errors.New("missing lane.spawn parameters")
 	}
+	if st != nil && st.Settings.Paused {
+		return errors.New("run is paused (cost guard or owner pause)")
+	}
 	itemID := strings.TrimSpace(p.ItemID)
 	if itemID == "" {
 		return errors.New("item_id is required")
 	}
 	item, ok := st.BacklogItem(itemID)
 	if !ok {
-		return fmt.Errorf("backlog item %q does not exist", itemID)
+		item, ok = st.ObjectiveMentionsReadyItem(itemID)
+		if !ok {
+			return fmt.Errorf("backlog item %q does not exist", itemID)
+		}
 	}
 	if item.Status.Terminal() {
 		return fmt.Errorf("backlog item %q is already %s", itemID, item.Status)
@@ -1358,9 +1815,25 @@ func checkSpawnInvariants(st *StateView, act ProposedAction) error {
 	if !hasRecipe && strings.TrimSpace(p.RecipeName) != "" {
 		return fmt.Errorf("unknown recipe %q", p.RecipeName)
 	}
-	if r.Limits.MaxConcurrentLanes > 0 && st.RunningLaneCount() >= r.Limits.MaxConcurrentLanes {
+	if strings.TrimSpace(p.Model) != "" {
+		var allowedModels []string
+		if st != nil {
+			allowedModels = st.AllowedModels
+		}
+		if !isModelAllowed(p.Model, allowedModels) {
+			if len(allowedModels) == 0 {
+				allowedModels = DefaultAllowedModels
+			}
+			return fmt.Errorf("model %q is not in the allowed models list %v", p.Model, allowedModels)
+		}
+		if firstPhase := r.FirstPhase(); firstPhase == recipe.PhaseReview && (isFastestWorkerModel(p.Model) || isFastestWorkerModel(ResolveWorkerModel(p.Model, ""))) {
+			return fmt.Errorf("model %q cannot be used for verification/review phase %q (never use fastest model for verification)", p.Model, firstPhase)
+		}
+	}
+	maxConcurrent := st.EffectiveMaxConcurrentLanes(r)
+	if maxConcurrent > 0 && st.RunningLaneCount() >= maxConcurrent {
 		return fmt.Errorf("concurrency limit reached (%d/%d running lanes)",
-			st.RunningLaneCount(), r.Limits.MaxConcurrentLanes)
+			st.RunningLaneCount(), maxConcurrent)
 	}
 	return nil
 }
@@ -1379,6 +1852,34 @@ func checkLaneActionState(st *StateView, act ProposedAction) error {
 			return fmt.Errorf("cannot steer lane %q before a session or terminal has started", ln.ID)
 		}
 
+	case ToolLaneForward:
+		if act.LaneForward == nil {
+			return errors.New("missing lane.forward parameters")
+		}
+		toID := strings.TrimSpace(act.LaneForward.ToLaneID)
+		fromID := strings.TrimSpace(act.LaneForward.FromLaneID)
+		if fromID != "" {
+			if strings.EqualFold(fromID, toID) {
+				return fmt.Errorf("cannot forward finding from lane %q to itself", toID)
+			}
+			if srcLn, ok := st.Lane(fromID); ok {
+				if srcLn.Status == lane.StatusPlanned && srcLn.SessionID == "" && srcLn.TerminalID == "" &&
+					len(srcLn.Sessions) == 0 && len(srcLn.Terminals) == 0 {
+					return fmt.Errorf("cannot forward finding from lane %q before a session or terminal has started", srcLn.ID)
+				}
+			}
+		}
+		ln, ok := st.Lane(toID)
+		if !ok {
+			return nil
+		}
+		if ln.Status.Terminal() {
+			return fmt.Errorf("cannot forward finding to lane %q in terminal status %s", ln.ID, ln.Status)
+		}
+		if ln.SessionID == "" && ln.TerminalID == "" {
+			return fmt.Errorf("cannot forward finding to lane %q before a session or terminal has started", ln.ID)
+		}
+
 	case ToolLaneRetry:
 		ln, ok := st.Lane(act.LaneID)
 		if !ok {
@@ -1389,6 +1890,23 @@ func checkLaneActionState(st *StateView, act ProposedAction) error {
 		}
 		if ln.Status == lane.StatusDone {
 			return fmt.Errorf("lane %q is already done", ln.ID)
+		}
+		if act.LaneRetry != nil && strings.TrimSpace(act.LaneRetry.Model) != "" {
+			var allowedModels []string
+			if st != nil {
+				allowedModels = st.AllowedModels
+			}
+			if !isModelAllowed(act.LaneRetry.Model, allowedModels) {
+				if len(allowedModels) == 0 {
+					allowedModels = DefaultAllowedModels
+				}
+				return fmt.Errorf("model %q is not in the allowed models list %v", act.LaneRetry.Model, allowedModels)
+			}
+			r, _ := st.RecipeForLane(ln)
+			targetPhase := cmp.Or(strings.TrimSpace(act.LaneRetry.Phase), ln.Phase, r.FirstPhase())
+			if targetPhase == recipe.PhaseReview && (isFastestWorkerModel(act.LaneRetry.Model) || isFastestWorkerModel(ResolveWorkerModel(act.LaneRetry.Model, ""))) {
+				return fmt.Errorf("model %q cannot be used for verification/review phase %q (never use fastest model for verification)", act.LaneRetry.Model, targetPhase)
+			}
 		}
 
 	case ToolLaneStop:

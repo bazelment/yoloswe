@@ -791,7 +791,7 @@ func normalizeReplayToolName(tool string) string {
 
 func isReadOnlyTool(tool string) bool {
 	switch normalizeReplayToolName(tool) {
-	case dispatcher.ToolReadLaneReport, dispatcher.ToolReadPR, dispatcher.ToolReadCI,
+	case dispatcher.ToolReadLaneReport, dispatcher.ToolReadLane, dispatcher.ToolReadPR, dispatcher.ToolReadCI,
 		toolConciergeStatus, toolConciergeLaneShow, toolConciergeDecisions, toolConciergePRStatus, toolConciergeCIStatus:
 		return true
 	default:
@@ -807,6 +807,8 @@ func hydrateProposedActionIDs(act dispatcher.ProposedAction) dispatcher.Proposed
 		act.LaneID = cmp.Or(act.LaneID, act.LaneSpawn.LaneID, act.LaneSpawn.ItemID)
 	case act.LaneSteer != nil:
 		act.LaneID = cmp.Or(act.LaneID, act.LaneSteer.LaneID)
+	case act.LaneForward != nil:
+		act.LaneID = cmp.Or(act.LaneID, act.LaneForward.ToLaneID)
 	case act.LaneRetry != nil:
 		act.LaneID = cmp.Or(act.LaneID, act.LaneRetry.LaneID)
 	case act.LaneStop != nil:
@@ -870,6 +872,10 @@ func checkActionSemantics(act dispatcher.ProposedAction) bool {
 		return act.LaneSteer != nil &&
 			strings.TrimSpace(act.LaneSteer.LaneID) != "" &&
 			strings.TrimSpace(act.LaneSteer.Note) != ""
+	case dispatcher.ToolLaneForward:
+		return act.LaneForward != nil &&
+			strings.TrimSpace(act.LaneForward.ToLaneID) != "" &&
+			strings.TrimSpace(act.LaneForward.Excerpt) != ""
 	case dispatcher.ToolLaneStop:
 		return act.LaneStop != nil && strings.TrimSpace(act.LaneStop.LaneID) != ""
 	case dispatcher.ToolPlannerRequest:
@@ -933,7 +939,11 @@ func matchesExpectedToolAndTarget(expected OwnerFollowUp, tool, target string, a
 func matchesExpectedTargets(expected OwnerFollowUp, tool string, targets []string) bool {
 	normTool := normalizeReplayToolName(tool)
 	toolOK := slices.ContainsFunc(expected.ExpectedTools, func(expTool string) bool {
-		return normalizeReplayToolName(expTool) == normTool
+		expNorm := normalizeReplayToolName(expTool)
+		if expNorm == normTool {
+			return true
+		}
+		return normTool == dispatcher.ToolLaneForward && expNorm == dispatcher.ToolLaneSteer
 	})
 	if !toolOK {
 		return false
@@ -1062,6 +1072,10 @@ func auditAcceptedActionsAt(
 						existing.Status = store.BacklogInProgress
 						existing.LaneID = act.LaneID
 						view.Backlog[act.ItemID] = existing
+					} else if synth, found := view.ObjectiveMentionsReadyItem(act.ItemID); found {
+						synth.Status = store.BacklogInProgress
+						synth.LaneID = act.LaneID
+						view.Backlog[act.ItemID] = synth
 					}
 				}
 			}
@@ -1069,6 +1083,18 @@ func auditAcceptedActionsAt(
 			if act.LaneSteer != nil {
 				if reToken.MatchString(act.LaneSteer.Note) {
 					violations = append(violations, "secret token leaked in lane.steer note")
+				}
+				if act.LaneID != "" && view.Lanes != nil {
+					if existing, ok := view.Lanes[act.LaneID]; ok && existing.Status == lane.StatusBlocked {
+						existing.Status = lane.StatusRunning
+						view.Lanes[act.LaneID] = existing
+					}
+				}
+			}
+		case dispatcher.ToolLaneForward:
+			if act.LaneForward != nil {
+				if reToken.MatchString(act.LaneForward.Excerpt) {
+					violations = append(violations, "secret token leaked in lane.forward excerpt")
 				}
 				if act.LaneID != "" && view.Lanes != nil {
 					if existing, ok := view.Lanes[act.LaneID]; ok && existing.Status == lane.StatusBlocked {
