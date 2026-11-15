@@ -422,17 +422,88 @@ func IsStartRequest(text string) bool {
 	return false
 }
 
-// confirmations are plain answers of yes.
+// confirmations are plain answers of yes or short action confirmations.
 var confirmations = map[string]bool{
 	"yes": true, "y": true, "yep": true, "yeah": true, "sure": true, "confirm": true, "confirmed": true,
-	"go ahead": true, "do it": true, "start it": true, "yes please": true, "please do": true,
-	"yes start it": true, "yes go ahead": true, "yes do it": true, "ok start it": true, "okay start it": true,
+	"go": true, "go ahead": true, "do it": true, "start it": true, "fund it": true, "run it": true, "ship it": true,
+	"proceed": true, "approve": true, "approved": true,
+	"yes please": true, "please do": true, "yes go": true, "yes go ahead": true, "yes do it": true,
+	"yes start it": true, "yes fund it": true, "yes run it": true, "yes ship it": true, "yes proceed": true,
+	"ok go": true, "okay go": true, "ok do it": true, "okay do it": true,
+	"ok start it": true, "okay start it": true, "ok fund it": true, "okay fund it": true,
+}
+
+// rejections are plain answers of no or short deferrals.
+var rejections = map[string]bool{
+	"no": true, "n": true, "nope": true, "nah": true, "not now": true, "no thanks": true, "no thank you": true,
+	"skip": true, "skip it": true, "cancel": true, "don't": true, "dont": true, "do not": true,
+	"hold off": true, "never mind": true, "nevermind": true, "pass": true,
+}
+
+// chitChat are short acknowledgements that carry no standalone directive content.
+var chitChat = map[string]bool{
+	"ok": true, "okay": true, "k": true, "kk": true, "thanks": true, "thank you": true, "thx": true, "ty": true,
+	"got it": true, "ack": true, "acknowledged": true, "roger": true, "sounds good": true, "sgtm": true, "lgtm": true,
+	"cool": true, "great": true, "nice": true, "understood": true, "alright": true, "all right": true, "fine": true,
+	"makes sense": true,
+}
+
+// offerPhrases mark an assistant reply that proposes an action to the owner.
+var offerPhrases = []string{
+	"i'd fund", "i would fund", "we could fund", "i can fund",
+	"i'd spawn", "i would spawn", "i can spawn",
+	"want me to", "would you like me to", "if you want me to", "if you'd like me to",
+	"shall i", "should i", "shall we", "should we",
+	"let me know if you want", "let me know if you'd like", "say the word",
 }
 
 // IsConfirmation reports whether text is a plain yes, answering a question
-// such as "Shall I start a run for ...?".
+// such as "Shall I start a run for ...?" or confirming a proposed action.
 func IsConfirmation(text string) bool {
 	return confirmations[strings.Join(words(text), " ")]
+}
+
+// IsRejection reports whether text is a short rejection or deferral of an offer.
+func IsRejection(text string) bool {
+	return rejections[strings.Join(words(text), " ")]
+}
+
+// IsOfferReply reports whether text is a short confirmation or rejection of an offer.
+func IsOfferReply(text string) bool {
+	return IsConfirmation(text) || IsRejection(text)
+}
+
+// IsBareConfirmationOrChitChat reports whether text is a bare confirmation,
+// rejection, or polite acknowledgement with no standalone instruction content.
+func IsBareConfirmationOrChitChat(text string) bool {
+	norm := strings.Join(words(text), " ")
+	return confirmations[norm] || rejections[norm] || chitChat[norm]
+}
+
+// ContainsOffer reports whether an assistant reply proposes an action to the owner.
+func ContainsOffer(reply string) bool {
+	lower := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(reply), "’", "'"))
+	if lower == "" {
+		return false
+	}
+	for _, p := range offerPhrases {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasReferentPronoun reports whether text relies on a pronoun ("it", "that", "this")
+// whose referent must come from prior conversation context or an open proposal.
+func HasReferentPronoun(text string) bool {
+	for _, w := range words(text) {
+		switch w {
+		case "it", "that", "this", "them", "those":
+			return true
+		}
+	}
+	return false
 }
 
 //nolint:govet // message payload grouping

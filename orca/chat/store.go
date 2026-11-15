@@ -74,6 +74,15 @@ type StoreBackend struct {
 	seenDecs           map[string]bool
 	seenAsks           map[string]bool
 	pendingOutcomeRuns map[string]bool
+	exchanges          []chatExchange
+}
+
+// ProposalAskIDPrefix prefixes pending action proposals stored in the open-question table.
+const ProposalAskIDPrefix = "proposal-"
+
+type chatExchange struct {
+	owner string
+	orca  string
 }
 
 const (
@@ -133,6 +142,9 @@ func (b *StoreBackend) Attach(st store.Store, runID string) error {
 	defer b.mu.Unlock()
 	old := b.store
 	b.store, b.runID, b.lastDirective = st, runID, lastDirective{}
+	b.cacheMu.Lock()
+	b.exchanges = nil
+	b.cacheMu.Unlock()
 	b.seedSeenDispatcherRun(context.Background(), st, runID)
 	if b.OnAttach != nil {
 		b.OnAttach(st, runID)
@@ -1107,16 +1119,358 @@ func (b *StoreBackend) directive(ctx context.Context, st store.Store, runID stri
 
 // ownerMessage queues an urgent dispatcher event and wakes an adopted
 // controller driving runID.
-func (b *StoreBackend) ownerMessage(ctx context.Context, st store.Store, runID, text string) error {
-	payload, err := json.Marshal(mailbox.Message{Owner: true, From: "owner", Body: text})
+func (b *StoreBackend) ownerMessage(ctx context.Context, st store.Store, runID, body, summary string) error {
+	payload, err := json.Marshal(mailbox.Message{Owner: true, From: "owner", Body: body})
 	if err != nil {
 		return err
 	}
-	if _, err := st.Events().Append(ctx, store.Event{RunID: runID, Kind: store.EventOwnerMessage, Source: "owner", Summary: text, Payload: payload, Urgent: true}); err != nil {
+	if _, err := st.Events().Append(ctx, store.Event{RunID: runID, Kind: store.EventOwnerMessage, Source: "owner", Summary: cmp.Or(summary, body), Payload: payload, Urgent: true}); err != nil {
 		return err
 	}
 	b.Wake(runID)
 	return nil
+}
+
+// RecordProposal records a pending action proposal in the open-question store
+// so the router's Open questions block includes it and a subsequent owner
+// confirmation ("yes fund it", "yes", "do it") routes to the dispatcher with
+// the proposal's self-contained spec.
+func (b *StoreBackend) RecordProposal(ctx context.Context, runID, summary, spec string) (string, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.recordProposalLocked(ctx, b.store, runID, summary, spec)
+}
+
+func (b *StoreBackend) recordProposalLocked(ctx context.Context, st store.Store, runID, summary, spec string) (string, error) {
+	if st == nil {
+		return "", nil
+	}
+	spec = strings.TrimSpace(spec)
+	summary = strings.TrimSpace(summary)
+	if spec == "" {
+		spec = summary
+	}
+	if spec == "" {
+		return "", nil
+	}
+	if summary != "" && !strings.Contains(spec, summary) {
+		spec = summary + ": " + spec
+	}
+	targetRun := strings.TrimSpace(runID)
+	if targetRun == "" {
+		targetRun = b.proposalTargetRun(ctx, spec)
+	}
+	if targetRun == "" {
+		return "", nil
+	}
+	if dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: targetRun, ActiveOnly: true}); err == nil {
+		for i := range dirs {
+			if strings.HasPrefix(dirs[i].Ref, "owner_ask:"+ProposalAskIDPrefix) {
+				_ = st.Directives().UpdateStatus(ctx, targetRun, dirs[i].ID, store.DirectiveHandled)
+			}
+		}
+	}
+	askID := ProposalAskIDPrefix + strings.ToLower(rand.Text()[:8])
+	ask := controller.OwnerAsk{
+		ID:       askID,
+		RunID:    targetRun,
+		Question: spec,
+	}
+	raw, err := json.Marshal(ask)
+	if err != nil {
+		return "", err
+	}
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:     "ask-" + askID,
+		RunID:  targetRun,
+		Kind:   store.DirectiveInstruction,
+		Source: store.DirectiveSourceConcierge,
+		Text:   string(raw),
+		Ref:    "owner_ask:" + askID,
+		Status: store.DirectiveActive,
+	}); err != nil {
+		return "", err
+	}
+	b.cacheMu.Lock()
+	if b.seenAsks == nil {
+		b.seenAsks = map[string]bool{}
+	}
+	b.seenAsks[seenAskKey(targetRun, askID)] = true
+	b.cacheMu.Unlock()
+	return askID, nil
+}
+
+// proposalTargetRun selects the run a pending proposal belongs to; caller holds b.mu.
+func (b *StoreBackend) proposalTargetRun(ctx context.Context, text string) string {
+	held, err := b.heldRuns(ctx)
+	if err != nil || len(held) == 0 {
+		return ""
+	}
+	if namedHeld := named(held, text); len(namedHeld) == 1 {
+		return namedHeld[0]
+	}
+	if lanes, lErr := b.lanes(ctx, held); lErr == nil {
+		var byLane []string
+		for i := range lanes {
+			if l := &lanes[i]; Mentions(text, l.lane.ID) && !slices.Contains(byLane, l.run) {
+				byLane = append(byLane, l.run)
+			}
+		}
+		if len(byLane) == 1 {
+			return byLane[0]
+		}
+	}
+	if len(held) > 1 {
+		if b.frontDesk() {
+			return held[1]
+		}
+		if run, rErr := b.store.Runs().Get(ctx, b.runID); rErr == nil && !b.live(run) {
+			return held[1]
+		}
+		return b.runID
+	}
+	if b.frontDesk() {
+		// An empty front-desk chat asking "Shall I start a run to ...?" is
+		// handled by concierge run.start confirmation, not a dispatcher proposal.
+		if strings.Contains(strings.ToLower(text), "start a run") {
+			return ""
+		}
+		tRun, refusal, tErr := b.frontDeskTarget(ctx, text)
+		if tErr == nil && refusal == "" && tRun != "" {
+			if _, gErr := b.store.Runs().Get(ctx, tRun); gErr == nil {
+				return tRun
+			}
+		}
+		return ""
+	}
+	if strings.Contains(strings.ToLower(text), "start a run") {
+		if run, rErr := b.store.Runs().Get(ctx, b.runID); rErr != nil || !b.live(run) {
+			return ""
+		}
+	}
+	return b.runID
+}
+
+func (b *StoreBackend) latestProposalID(ctx context.Context) string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.store == nil {
+		return ""
+	}
+	held, err := b.heldRuns(ctx)
+	if err != nil {
+		return ""
+	}
+	var latest string
+	for _, rID := range held {
+		dirs, dErr := b.store.Directives().List(ctx, store.DirectiveFilter{RunID: rID, ActiveOnly: true})
+		if dErr != nil {
+			continue
+		}
+		for i := range dirs {
+			if after, ok := strings.CutPrefix(dirs[i].Ref, "owner_ask:"+ProposalAskIDPrefix); ok {
+				latest = ProposalAskIDPrefix + after
+			}
+		}
+	}
+	return latest
+}
+
+// ObserveConciergeReply records an owner/concierge exchange and creates a
+// pending proposal if the concierge reply proposes an action.
+func (b *StoreBackend) ObserveConciergeReply(ctx context.Context, userText, reply string) {
+	b.recordExchange(userText, reply)
+	if ContainsOffer(reply) {
+		_, _ = b.RecordProposal(ctx, "", "", reply)
+	}
+}
+
+func (b *StoreBackend) recordExchange(ownerText, orcaText string) {
+	ownerText = strings.TrimSpace(ownerText)
+	orcaText = strings.TrimSpace(orcaText)
+	if ownerText == "" && orcaText == "" {
+		return
+	}
+	b.cacheMu.Lock()
+	defer b.cacheMu.Unlock()
+	if ownerText == "" && len(b.exchanges) > 0 && b.exchanges[len(b.exchanges)-1].orca == "" {
+		b.exchanges[len(b.exchanges)-1].orca = orcaText
+		return
+	}
+	b.exchanges = append(b.exchanges, chatExchange{owner: ownerText, orca: orcaText})
+	if len(b.exchanges) > 6 {
+		b.exchanges = slices.Clone(b.exchanges[len(b.exchanges)-6:])
+	}
+}
+
+func (b *StoreBackend) recentExchanges(limit int) []chatExchange {
+	b.cacheMu.Lock()
+	defer b.cacheMu.Unlock()
+	if len(b.exchanges) == 0 || limit <= 0 {
+		return nil
+	}
+	start := max(len(b.exchanges)-limit, 0)
+	return slices.Clone(b.exchanges[start:])
+}
+
+func truncateExchangePart(s string, maxBytes int) string {
+	s = strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+	if len(s) <= maxBytes {
+		return s
+	}
+	for n := maxBytes; n > 0; n-- {
+		if utf8.RuneStart(s[n]) {
+			return s[:n] + "..."
+		}
+	}
+	return s[:maxBytes] + "..."
+}
+
+func (b *StoreBackend) conversationWindow(ctx context.Context, st store.Store, runID string) string {
+	ex := b.recentExchanges(3)
+	if len(ex) == 0 && st != nil {
+		// Fall back to persisted concierge turns if no in-memory exchange is cached.
+		var threadRuns []string
+		if b.runID != "" {
+			threadRuns = append(threadRuns, b.runID)
+		}
+		if runID != "" && !slices.Contains(threadRuns, runID) {
+			threadRuns = append(threadRuns, runID)
+		}
+		for _, rID := range threadRuns {
+			threads, err := st.Threads().ListThreads(ctx, store.ThreadFilter{RunID: rID, Role: store.ThreadRoleConcierge})
+			if err != nil {
+				continue
+			}
+			for i := range threads {
+				turns, tErr := st.Threads().ListTurns(ctx, threads[i].ID)
+				if tErr != nil {
+					continue
+				}
+				for j := range turns {
+					tr := &turns[j]
+					if tr.Status != store.TurnStatusCompleted {
+						continue
+					}
+					items, _ := st.Threads().ListItems(ctx, tr.ThreadID, tr.ID, 0, 0)
+					var reply string
+					for k := range items {
+						if items[k].Kind == store.ItemKindAssistantMessage && strings.TrimSpace(items[k].Content) != "" {
+							reply = strings.TrimSpace(items[k].Content)
+						}
+					}
+					if strings.TrimSpace(tr.Input) != "" || reply != "" {
+						ex = append(ex, chatExchange{owner: tr.Input, orca: reply})
+					}
+				}
+			}
+		}
+		if len(ex) > 3 {
+			ex = ex[len(ex)-3:]
+		}
+	}
+	if len(ex) == 0 {
+		return ""
+	}
+	var parts []string
+	for i := range ex {
+		ownerPart := truncateExchangePart(ex[i].owner, 160)
+		orcaPart := truncateExchangePart(ex[i].orca, 320)
+		switch {
+		case ownerPart != "" && orcaPart != "":
+			parts = append(parts, fmt.Sprintf("[turn %d] owner: %s -> orca: %s", i+1, ownerPart, orcaPart))
+		case ownerPart != "":
+			parts = append(parts, fmt.Sprintf("[turn %d] owner: %s", i+1, ownerPart))
+		case orcaPart != "":
+			parts = append(parts, fmt.Sprintf("[turn %d] orca: %s", i+1, orcaPart))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Recent chat context: " + strings.Join(parts, " | ")
+}
+
+func (b *StoreBackend) withConversationWindow(text, convWindow string) string {
+	if convWindow == "" || strings.Contains(text, convWindow) {
+		return text
+	}
+	return text + " (" + convWindow + ")"
+}
+
+func (b *StoreBackend) activeProposal(ctx context.Context, st store.Store, runID string) (*store.Directive, controller.OwnerAsk) {
+	if st == nil {
+		return nil, controller.OwnerAsk{}
+	}
+	candidates := []string{runID}
+	if b.runID != "" && !slices.Contains(candidates, b.runID) {
+		candidates = append(candidates, b.runID)
+	}
+	now := b.now()
+	var bestDir *store.Directive
+	var bestAsk controller.OwnerAsk
+	for _, rID := range candidates {
+		if rID == "" {
+			continue
+		}
+		dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: rID, ActiveOnly: true})
+		if err != nil {
+			continue
+		}
+		for i := range dirs {
+			d := dirs[i]
+			if !strings.HasPrefix(d.Ref, "owner_ask:"+ProposalAskIDPrefix) {
+				continue
+			}
+			if d.ExpiresAt != nil && !now.Before(*d.ExpiresAt) {
+				continue
+			}
+			var ask controller.OwnerAsk
+			if err := json.Unmarshal([]byte(d.Text), &ask); err != nil {
+				continue
+			}
+			bestDir = &d
+			bestAsk = ask
+		}
+	}
+	return bestDir, bestAsk
+}
+
+func matchesProposal(text, spec string) bool {
+	if IsOfferReply(text) {
+		return true
+	}
+	norm := strings.Join(words(text), " ")
+	for p := range confirmations {
+		if strings.HasPrefix(norm, p+" ") && len(words(text)) <= 8 {
+			return true
+		}
+	}
+	if HasReferentPronoun(text) && len(words(text)) <= 8 {
+		return true
+	}
+	return false
+}
+
+func (b *StoreBackend) hasNonProposalOpenAsk(ctx context.Context, st store.Store, runID string) bool {
+	if st == nil || runID == "" {
+		return false
+	}
+	now := b.now()
+	if qs, err := mailbox.OpenLaneQuestions(ctx, st, runID, now); err == nil && len(qs) > 0 {
+		return true
+	}
+	dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	if err != nil {
+		return false
+	}
+	for i := range dirs {
+		ref := dirs[i].Ref
+		if strings.HasPrefix(ref, "owner_ask:") && !strings.HasPrefix(ref, "owner_ask:"+ProposalAskIDPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *StoreBackend) live(run *store.Run) bool {
@@ -1128,7 +1482,23 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 		if b.Stream == nil {
 			return fmt.Errorf("concierge unavailable")
 		}
-		return b.Stream(ctx, text, emit)
+		beforeProp := b.latestProposalID(ctx)
+		var replyBuf strings.Builder
+		wrapEmit := func(s string) {
+			replyBuf.WriteString(s)
+			if emit != nil {
+				emit(s)
+			}
+		}
+		err := b.Stream(ctx, text, wrapEmit)
+		if err == nil {
+			reply := strings.TrimSpace(replyBuf.String())
+			b.recordExchange(text, reply)
+			if ContainsOffer(reply) && b.latestProposalID(ctx) == beforeProp {
+				_, _ = b.RecordProposal(ctx, "", "", reply)
+			}
+		}
+		return err
 	}
 	if d.Handler != router.Planner && d.Handler != router.Dispatcher {
 		return fmt.Errorf("unsupported handler %q", d.Handler)
@@ -1137,9 +1507,10 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 	st := b.store
 	runID, ack, err := b.target(ctx, text)
 	var (
-		queuedDispatcher bool
-		stepStore        store.Store
-		closeStepStore   bool
+		queuedDispatcher    bool
+		unresolvedBareReply bool
+		stepStore           store.Store
+		closeStepStore      bool
 	)
 	switch {
 	case err != nil || ack != "":
@@ -1149,6 +1520,10 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 	default:
 		if d.Handler == router.Dispatcher {
 			b.seedSeenDispatcherRun(ctx, st, runID)
+			propDir, _ := b.activeProposal(ctx, st, runID)
+			hasAsk := b.hasNonProposalOpenAsk(ctx, st, runID)
+			convWin := b.conversationWindow(ctx, st, runID)
+			unresolvedBareReply = propDir == nil && !hasAsk && convWin == "" && IsBareConfirmationOrChitChat(text) && HasReferentPronoun(text)
 		}
 		var live bool
 		live, err = b.deliver(ctx, st, runID, d.Handler, text)
@@ -1179,11 +1554,16 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 			}
 			b.mu.RUnlock()
 		}
+		if unresolvedBareReply && (len(outcomes) == 0 || (len(outcomes) == 1 && outcomes[0] == "dispatcher: no action taken")) {
+			outcomes = []string{fmt.Sprintf("dispatcher: What does %q refer to? No pending proposal or recent context resolves \"it\".", text)}
+		}
 		if len(outcomes) > 0 {
 			ack += "\n" + strings.Join(outcomes, "\n")
 		} else if !closeStepStore {
 			b.markPendingOutcomeRun(runID)
 		}
+	} else if unresolvedBareReply {
+		ack += fmt.Sprintf("\ndispatcher: What does %q refer to? No pending proposal or recent context resolves \"it\".", text)
 	}
 	if err == nil && emit != nil {
 		emit(ack)
@@ -1194,20 +1574,68 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 // deliver writes an owner instruction for handler to runID in st and reports
 // whether a controller holds the run's lease and so will act on it now.
 func (b *StoreBackend) deliver(ctx context.Context, st store.Store, runID string, handler router.Handler, text string) (bool, error) {
+	propDir, propAsk := b.activeProposal(ctx, st, runID)
+	convWindow := b.conversationWindow(ctx, st, runID)
 	switch handler {
 	case router.Planner:
-		if err := b.directive(ctx, st, runID, store.DirectivePlanImport, text, ""); err != nil {
+		delivered := text
+		if propDir != nil && matchesProposal(text, propAsk.Question) {
+			_ = st.Directives().UpdateStatus(ctx, propDir.RunID, propDir.ID, store.DirectiveHandled)
+			if IsRejection(text) {
+				run, err := st.Runs().Get(ctx, runID)
+				if err != nil {
+					return false, err
+				}
+				return b.live(run), nil
+			}
+			delivered = fmt.Sprintf("%s (owner: %s)", strings.TrimSpace(propAsk.Question), text)
+			if convWindow != "" {
+				delivered = b.withConversationWindow(delivered, convWindow)
+			}
+		} else if convWindow != "" && (IsOfferReply(text) || HasReferentPronoun(text)) {
+			delivered = b.withConversationWindow(text, convWindow)
+		}
+		if err := b.directive(ctx, st, runID, store.DirectivePlanImport, delivered, ""); err != nil {
 			return false, err
 		}
 	case router.Dispatcher:
-		// Chat routing chooses the Dispatcher, but cannot infer which open ask
-		// (if any) this message answers. Let the Dispatcher decide from its
-		// snapshot and always preserve the owner message as a fresh instruction.
-		if err := b.directive(ctx, st, runID, store.DirectiveInstruction, text, ""); err != nil {
-			return false, err
-		}
-		if err := b.ownerMessage(ctx, st, runID, text); err != nil {
-			return false, err
+		switch {
+		case propDir != nil && matchesProposal(text, propAsk.Question):
+			_ = st.Directives().UpdateStatus(ctx, propDir.RunID, propDir.ID, store.DirectiveHandled)
+			if IsRejection(text) {
+				summary := fmt.Sprintf("Owner rejected proposal %q (owner: %s)", strings.TrimSpace(propAsk.Question), text)
+				if err := b.ownerMessage(ctx, st, runID, text, b.withConversationWindow(summary, convWindow)); err != nil {
+					return false, err
+				}
+			} else {
+				delivered := fmt.Sprintf("%s (owner: %s)", strings.TrimSpace(propAsk.Question), text)
+				if err := b.directive(ctx, st, runID, store.DirectiveInstruction, delivered, ""); err != nil {
+					return false, err
+				}
+				if err := b.ownerMessage(ctx, st, runID, delivered, b.withConversationWindow(delivered, convWindow)); err != nil {
+					return false, err
+				}
+			}
+		case IsBareConfirmationOrChitChat(text):
+			// A bare confirmation, rejection, or chit-chat ("yes", "no", "ok", "thanks", "yes fund it")
+			// with no resolved proposal must not become a standing DirectiveInstruction.
+			hasOpenAsk := b.hasNonProposalOpenAsk(ctx, st, runID)
+			summary := text
+			if convWindow != "" {
+				summary = b.withConversationWindow(text, convWindow)
+			} else if !hasOpenAsk {
+				summary = fmt.Sprintf("%s (unresolved confirmation: no pending proposal, open question, or recent chat context resolves what %q refers to; ask in chat via owner.ask what \"it\" is and do not record a standing directive)", text, text)
+			}
+			if err := b.ownerMessage(ctx, st, runID, text, summary); err != nil {
+				return false, err
+			}
+		default:
+			if err := b.directive(ctx, st, runID, store.DirectiveInstruction, text, ""); err != nil {
+				return false, err
+			}
+			if err := b.ownerMessage(ctx, st, runID, text, b.withConversationWindow(text, convWindow)); err != nil {
+				return false, err
+			}
 		}
 	}
 	run, err := st.Runs().Get(ctx, runID)
@@ -1399,7 +1827,7 @@ func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st 
 	}
 	for i := range asks {
 		a := &asks[i]
-		if strings.HasPrefix(a.ask.ID, "cost-guard-") {
+		if strings.HasPrefix(a.ask.ID, "cost-guard-") || strings.HasPrefix(a.ask.ID, ProposalAskIDPrefix) {
 			continue
 		}
 		id := cmp.Or(a.ask.ID, a.ask.Question)
@@ -1552,6 +1980,10 @@ func (b *StoreBackend) collectDispatcherOutcomes(ctx context.Context, st store.S
 				}
 				if line := formatDispatcherTurnOutcome(ctx, st, tr, byTurn[tr.ID]); line != "" {
 					out = append(out, line)
+					b.recordExchange("", line)
+					if ContainsOffer(line) {
+						_, _ = b.recordProposalLocked(ctx, st, runID, "", strings.TrimPrefix(line, "dispatcher: "))
+					}
 				}
 			}
 		}
