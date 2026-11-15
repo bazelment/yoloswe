@@ -1,0 +1,7 @@
+orca> [1mGoal:[22m verify whether that flag needs action before
+      the release cut.
+
+      • [1mStatus:[22m lane [36morca-ui[39m is running; checking whether
+        that flag needs action.
+      • [1mNext:[22m inspect design doc ([4mhttps://example.com/orca[24m)
+        and run tests.

@@ -823,3 +823,43 @@ func TestConciergeInstructionAfterUnrelatedQuestionAddressesInstruction(t *testi
 		t.Fatalf("resolveTargetRun with multiple held runs = %v, want ambiguity error", err)
 	}
 }
+
+func TestConciergeEmitsToolCallLinesExceptRunStart(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	clk := clock.NewRealClock()
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	if err := st.Runs().Create(ctx, store.Run{ID: frontDeskRunID, Objective: "front desk"}); err != nil {
+		t.Fatal(err)
+	}
+
+	client := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("call-1", ToolConciergeStatus, []byte(`{"run_id":"front-desk"}`)),
+				model.NewToolUseBlock("call-2", ToolRunStart, []byte(`{"goal":"ship chat ui"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Started run.")),
+		},
+	)
+	c := NewConcierge(frontDeskRunID, st, clk, client, "fake-concierge")
+	c.RunStart = func(_ context.Context, _ string) (string, error) {
+		return "run-new-1", nil
+	}
+
+	var emittedTools []string
+	turnCtx := chatui.WithToolEmitter(ctx, func(line string) {
+		emittedTools = append(emittedTools, line)
+	})
+	if _, err := c.Ask(turnCtx, "start a run to ship chat ui"); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if !slices.Equal(emittedTools, []string{"→ status front-desk"}) {
+		t.Fatalf("emittedTools = %q, want only [\"→ status front-desk\"] (excluding run.start)", emittedTools)
+	}
+}

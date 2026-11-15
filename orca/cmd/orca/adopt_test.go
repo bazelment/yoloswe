@@ -774,6 +774,35 @@ func TestRestartExecsStartupPathWithSameArgvAndReplacedBinary(t *testing.T) {
 	if strings.Contains(out.String(), "you> /status") {
 		t.Fatalf("chat processed input after /restart:\n%s", out.String())
 	}
+
+	// Verify the restarted session with no held runs prints "orca restarted (version a -> b)"
+	// instead of "reattached front-desk".
+	for _, kv := range gotEnv {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == restartEnvVar {
+			t.Setenv(k, v)
+		}
+	}
+	startupVersion = "commit-new-222"
+	var outRestarted, errRestarted bytes.Buffer
+	if err := Execute(t.Context(), args, strings.NewReader("/exit\n"), &outRestarted, &errRestarted); err != nil {
+		t.Fatalf("Execute restarted session: %v\nstderr:\n%s", err, errRestarted.String())
+	}
+	if !strings.Contains(outRestarted.String(), "orca restarted (version commit-old-111 -> commit-new-222)") {
+		t.Fatalf("restarted output missing 'orca restarted (version commit-old-111 -> commit-new-222)':\n%s", outRestarted.String())
+	}
+	if strings.Contains(outRestarted.String(), "reattached front-desk") {
+		t.Fatalf("restarted output with no held runs must not say 'reattached front-desk':\n%s", outRestarted.String())
+	}
+
+	// Verify legacy ORCA_RESTARTED_FROM_PID without ":<version>" reports "unknown -> <newVer>".
+	t.Setenv(restartEnvVar, "12345")
+	var outLegacy, errLegacy bytes.Buffer
+	if err := Execute(t.Context(), args, strings.NewReader("/exit\n"), &outLegacy, &errLegacy); err != nil {
+		t.Fatalf("Execute legacy restarted session: %v\nstderr:\n%s", err, errLegacy.String())
+	}
+	if !strings.Contains(outLegacy.String(), "orca restarted (version unknown -> commit-new-222)") {
+		t.Fatalf("legacy restarted output missing 'orca restarted (version unknown -> commit-new-222)':\n%s", outLegacy.String())
+	}
 }
 
 func TestRestartTargetFailingVersionCheckLeavesChatRunning(t *testing.T) {
