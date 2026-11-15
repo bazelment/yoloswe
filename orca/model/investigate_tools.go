@@ -612,8 +612,11 @@ func isAllowedSearchFlag(prog, flag string) (takesNumericValue, takesPatternValu
 		return true, false, true
 	case "-n", "--line-number", "-i", "--ignore-case", "-F", "--fixed-strings", "-w", "--word-regexp",
 		"-c", "--count", "-l", "--files-with-matches", "-v", "--invert-match", "-H", "--with-filename",
-		"-h", "--no-filename", "-E", "--extended-regexp",
+		"-h", "--no-filename",
 		"-ni", "-in", "-Fni", "-nF", "-Fn", "--color=never":
+		return false, false, true
+	}
+	if prog == "grep" && (flag == "-E" || flag == "--extended-regexp") {
 		return false, false, true
 	}
 	if strings.HasPrefix(flag, "--regexp=") && len(flag) > len("--regexp=") {

@@ -1942,8 +1942,16 @@ func (d *Dispatcher) syncRunContract(ctx context.Context, runID string) {
 			Message:    msg,
 		}); sErr == nil {
 			d.mu.Lock()
+			if d.contractBroadcasts == nil {
+				d.contractBroadcasts = make(map[string]map[string]bool)
+			}
+			byRun := d.contractBroadcasts[runID]
+			if byRun == nil {
+				byRun = make(map[string]bool)
+				d.contractBroadcasts[runID] = byRun
+			}
 			for j := range unsent {
-				d.contractBroadcasts[runID][contractDirectiveKey(&unsent[j])+"\x00"+ln.ID] = true
+				byRun[contractDirectiveKey(&unsent[j])+"\x00"+ln.ID] = true
 			}
 			d.mu.Unlock()
 		} else if d.cfg.Logger != nil {
@@ -2209,7 +2217,7 @@ func isIdleTick(events []store.Event) bool {
 		return false
 	}
 	for i := range events {
-		if events[i].Kind != store.EventTimer {
+		if events[i].Kind != store.EventTimer || strings.TrimSpace(events[i].LaneID) != "" {
 			return false
 		}
 	}

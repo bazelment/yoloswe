@@ -1346,8 +1346,9 @@ func (d *sqliteDirectiveStore) Add(ctx context.Context, dir Directive) error {
 			cp.Kind = DirectiveStanding
 		}
 	}
-	if cp.Contract && cp.Kind != DirectiveContract && strings.TrimSpace(cp.Scope) == "" {
-		cp.Scope = string(DirectiveContract)
+	if cp.IsContract() {
+		cp.Kind = DirectiveContract
+		cp.Contract = true
 	}
 	if cp.Source == "" {
 		cp.Source = DirectiveSourceOwner

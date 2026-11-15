@@ -1279,6 +1279,8 @@ func TestReadOnlyCommandAndReadLaneConfinement(t *testing.T) {
 		{name: "cat without file rejected", prog: "cat", args: []string{"-n"}, wantErr: true},
 		{name: "rg valid pattern and file", prog: "rg", args: []string{"-n", "seed_bytes", "summary.json"}, wantErr: false},
 		{name: "rg without file rejected", prog: "rg", args: []string{"-n", "seed_bytes"}, wantErr: true},
+		{name: "rg encoding flag -E rejected", prog: "rg", args: []string{"-E", "seed_bytes", "summary.json"}, wantErr: true},
+		{name: "grep extended-regexp -E allowed", prog: "grep", args: []string{"-E", "seed_bytes", "summary.json"}, wantErr: false},
 		{name: "grep recursive flag rejected", prog: "grep", args: []string{"-r", "seed_bytes", "summary.json"}, wantErr: true},
 		{name: "rg pre flag rejected", prog: "rg", args: []string{"--pre=sh", "seed_bytes", "summary.json"}, wantErr: true},
 	} {
@@ -1428,7 +1430,7 @@ func TestProactiveStaffingAndObjectiveReadyItemRules(t *testing.T) {
 	clk, st, drv := setupTestEnv(t)
 	ctx := t.Context()
 
-	if err := st.Runs().UpdateObjective(ctx, "run-1", "Deliver diskless sandbox.\n\nNext:\n- lazyblk-perf: benchmark lazy block device vs local disk\n- cache-warmup: prewarm chunk index", ""); err != nil {
+	if err := st.Runs().UpdateObjective(ctx, "run-1", "Deliver diskless sandbox.\n\nNext:\n- Implement the lazy block device benchmark\n- lazyblk-perf: benchmark lazy block device vs local disk\n- cache-warmup: prewarm chunk index", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1439,10 +1441,13 @@ func TestProactiveStaffingAndObjectiveReadyItemRules(t *testing.T) {
 	if _, ok := view.ObjectiveMentionsReadyItem("lazyblk-perf"); !ok {
 		t.Fatal("ObjectiveMentionsReadyItem(lazyblk-perf) = false, want true")
 	}
-	for _, proseWord := range []string{"diskless", "sandbox", "local", "disk", "benchmark"} {
+	for _, proseWord := range []string{"diskless", "sandbox", "local", "disk", "benchmark", "lazy", "block", "device"} {
 		if _, ok := view.ObjectiveMentionsReadyItem(proseWord); ok {
 			t.Fatalf("ObjectiveMentionsReadyItem(%q) = true, want false for prose word", proseWord)
 		}
+	}
+	if firstReady, ok := view.FirstObjectiveReadyItem(); !ok || firstReady.ID != "lazyblk-perf" {
+		t.Fatalf("FirstObjectiveReadyItem() = (%+v, %v), want lazyblk-perf (not prose word)", firstReady, ok)
 	}
 
 	// Seed one running lane; default MaxConcurrentLanes is 4, so idle tick should staff the next ready item.
@@ -1465,10 +1470,21 @@ func TestProactiveStaffingAndObjectiveReadyItemRules(t *testing.T) {
 
 	fake := model.NewFakeClient(
 		endTurnResponse("No action."),
+		endTurnResponse("Lane timer."),
 		endTurnResponse("At cap."),
 		endTurnResponse("Empty batch."),
 	)
 	d := dispatcher.New(dispatcher.Config{}, st, drv, clk, fake)
+
+	// Lane-scoped timer event (LaneID != "") must not be treated as a run-level idle tick.
+	evLaneTimer, _ := st.Events().Append(ctx, store.Event{RunID: "run-1", LaneID: "lazyblk-perf", Kind: store.EventTimer, Class: store.EventClassJudgment, Summary: "lane wait deadline"})
+	resLaneTimer, err := d.Dispatch(ctx, "run-1", []store.Event{evLaneTimer})
+	if err != nil {
+		t.Fatalf("Dispatch lane timer: %v", err)
+	}
+	if len(resLaneTimer.Accepted) != 0 {
+		t.Fatalf("resLaneTimer.Accepted = %+v, want 0 proactive spawns on lane-scoped timer", resLaneTimer.Accepted)
+	}
 
 	ev1, _ := st.Events().Append(ctx, store.Event{RunID: "run-1", Kind: store.EventTimer, Class: store.EventClassJudgment, Summary: "idle tick 1"})
 	res1, err := d.Dispatch(ctx, "run-1", []store.Event{ev1})
@@ -1556,7 +1572,14 @@ func TestContractOrderingRevokeAndModelPolicyInvariants(t *testing.T) {
 	}
 	invs := dispatcher.DefaultInvariants()
 
-	// 1. DefaultAllowedModels is enforced even when AllowedModels is unset.
+	// 1. DefaultAllowedModels is enforced even when AllowedModels is unset, and directive.note decodes kind="contract".
+	noteKindAct, err := dispatcher.ParseAction("dn-kind", dispatcher.ToolDirectiveNote, json.RawMessage(`{"fact":"contract rule via kind","kind":"contract"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noteKindAct.DirectiveNote == nil || !noteKindAct.DirectiveNote.Contract {
+		t.Fatalf("ParseAction(directive.note kind=contract) = %+v, want Contract=true", noteKindAct.DirectiveNote)
+	}
 	badModelAct, err := dispatcher.ParseAction("m1", dispatcher.ToolLaneSpawn, json.RawMessage(`{"item_id":"item-tier","model":"unknown-model-xyz","brief":"do work"}`))
 	if err != nil {
 		t.Fatal(err)

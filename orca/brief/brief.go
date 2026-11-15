@@ -76,15 +76,9 @@ func RenderWithContract(text string, directives []store.Directive, memories []st
 	}
 	var b strings.Builder
 	b.WriteString(text)
-	// Mechanical cleanup and review phases receive their task only through the
-	// goal line. Their phase skill is the complete instruction and must not be
-	// followed by task descriptions or memory bodies.
-	trimmed := strings.TrimSpace(text)
-	if strings.HasPrefix(trimmed, "/simplify") || strings.HasPrefix(trimmed, "/pr-polish") {
-		return text, nil
-	}
 	contractSection := FormatRunContract(directives)
-	if strings.TrimSpace(text) == "" {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
 		if contractSection != "" {
 			b.WriteString("\n")
 			b.WriteString(strings.TrimSuffix(contractSection, "\n"))
@@ -106,6 +100,12 @@ func RenderWithContract(text string, directives []store.Directive, memories []st
 			return "", fmt.Errorf("%w: run contract would exceed worker brief cap %d", store.ErrInvalidArgument, maxBytes)
 		}
 		b.WriteString(block)
+	}
+	// Mechanical cleanup and review phases receive their task only through the
+	// goal line. Their phase skill is the complete instruction and must not be
+	// followed by task descriptions or memory bodies.
+	if strings.HasPrefix(trimmed, "/simplify") || strings.HasPrefix(trimmed, "/pr-polish") {
+		return b.String(), nil
 	}
 	var applicable []store.MemoryEntry
 	for i := range memories {

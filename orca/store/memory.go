@@ -631,6 +631,7 @@ func (d *memDirectiveStore) Add(_ context.Context, dir Directive) error {
 		}
 	}
 	if cp.IsContract() {
+		cp.Kind = DirectiveContract
 		cp.Contract = true
 	}
 	if cp.Source == "" {

@@ -591,10 +591,11 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 		if err != nil {
 			return act, err
 		}
-		if p.Fact == "" || p.Expiry == "" {
+		if p.Fact == "" || p.Expiry == "" || p.Kind == "" {
 			a := decodeAliases(trimmed)
 			p.Fact = cmp.Or(p.Fact, a.Text)
 			p.Expiry = cmp.Or(p.Expiry, a.ExpiresAt)
+			p.Kind = cmp.Or(p.Kind, a.Kind)
 		}
 		if strings.EqualFold(strings.TrimSpace(p.Kind), string(store.DirectiveContract)) ||
 			strings.EqualFold(strings.TrimSpace(p.Scope), string(store.DirectiveContract)) {
@@ -975,7 +976,13 @@ func extractReadyBulletItemID(line string, inNextSection bool) string {
 }
 
 func extractFirstReadyItemID(line string) string {
-	trimmed := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "-*0123456789.)[] \t"))
+	trimmed := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "-*0123456789.) \t"))
+	for _, cb := range []string{"[ ]", "[x]", "[X]"} {
+		if strings.HasPrefix(trimmed, cb) {
+			trimmed = strings.TrimSpace(trimmed[len(cb):])
+			break
+		}
+	}
 	lower := strings.ToLower(trimmed)
 	for _, prefix := range []string{"next:", "ready:", "ready work:", "todo:"} {
 		if strings.HasPrefix(lower, prefix) {
@@ -986,30 +993,48 @@ func extractFirstReadyItemID(line string) string {
 	if trimmed == "" {
 		return ""
 	}
-	for _, tok := range strings.FieldsFunc(trimmed, func(r rune) bool {
+	firstExplicit := hasExplicitLeadingItemID(trimmed)
+	for tokIdx, tok := range strings.FieldsFunc(trimmed, func(r rune) bool {
 		return r == ' ' || r == '\t' || r == ':' || r == ',' || r == ';' || r == '(' || r == ')' || r == '`' || r == '[' || r == ']'
 	}) {
-		clean := strings.ToLower(strings.Trim(tok, "._-"))
+		clean := strings.ToLower(strings.Trim(tok, "._-*"))
 		if clean == "" {
 			continue
 		}
 		switch clean {
 		case "start", "spawn", "staff", "implement", "build", "run", "the", "next", "ready", "open", "todo",
-			"piece", "item", "lane", "work", "task", "phase", "step", "for", "and", "with", "from", "in", "on", "of", "to", "a", "an":
+			"piece", "item", "lane", "work", "task", "phase", "step", "for", "and", "with", "from", "in", "on", "of", "to", "a", "an",
+			"note", "goal", "status", "summary", "when", "after", "once", "if", "then", "none", "done", "complete", "completed":
+			continue
+		}
+		if len(clean) < 2 || clean[0] < 'a' || clean[0] > 'z' {
 			continue
 		}
 		valid := true
+		hasSlugOrDigit := false
 		for i := 0; i < len(clean); i++ {
 			if !isIdentChar(clean[i]) {
 				valid = false
 				break
 			}
+			if clean[i] == '-' || clean[i] == '_' || (clean[i] >= '0' && clean[i] <= '9') {
+				hasSlugOrDigit = true
+			}
 		}
-		if valid && len(clean) >= 2 {
+		if valid && (hasSlugOrDigit || (tokIdx == 0 && firstExplicit)) {
 			return clean
 		}
 	}
 	return ""
+}
+
+func hasExplicitLeadingItemID(trimmed string) bool {
+	if strings.HasPrefix(trimmed, "`") || strings.HasPrefix(trimmed, "[") {
+		return true
+	}
+	firstField := strings.Fields(trimmed)[0]
+	firstField = strings.Trim(firstField, "*")
+	return strings.HasSuffix(firstField, ":")
 }
 
 func containsReadyWorkMarker(s string) bool {

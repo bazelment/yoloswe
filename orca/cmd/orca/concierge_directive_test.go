@@ -208,3 +208,21 @@ func TestConciergeDirectiveRefusesUnheldRun(t *testing.T) {
 		}
 	}
 }
+
+func TestConciergeDirectiveAcceptsContractKind(t *testing.T) {
+	t.Parallel()
+	b, st, _ := frontDeskWithAdoptedRuns(t, heldRun)
+	const rule = "Never modify .github/workflows without owner approval"
+	c := NewConcierge(frontDeskRunID, st, nil, scriptedModel(
+		toolUse("dir", ToolDirectiveSubmit, `{"kind":"contract","text":"`+rule+`"}`),
+		textAnswer("Saved contract rule."),
+	), DefaultConciergeModel)
+	wireChatConcierge(c, b)
+	if _, err := c.Ask(t.Context(), rule); err != nil {
+		t.Fatal(err)
+	}
+	dirs := conciergeDirectives(t, st, heldRun)
+	if len(dirs) != 1 || !dirs[0].IsContract() || !dirs[0].Contract || dirs[0].Kind != store.DirectiveContract || dirs[0].Text != rule {
+		t.Fatalf("directives on %s = %+v, want 1 contract directive", heldRun, dirs)
+	}
+}

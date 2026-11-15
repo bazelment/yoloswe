@@ -51,6 +51,25 @@ func TestMemoryDriver_FreshPhasesUseCurrentRunMemories(t *testing.T) {
 	if next != "/pr-polish-nebula\n\nGoal: Review task" {
 		t.Fatalf("next phase has stale or foreign guidance: %s", next)
 	}
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:       "dir-contract",
+		RunID:    "run-a",
+		Kind:     store.DirectiveContract,
+		Contract: true,
+		Text:     "Keep PR diffs focused on the assigned package.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: "run-a", LaneID: "lane-a", Brief: "/pr-polish-nebula\n\nGoal: Review task"}); err != nil {
+		t.Fatal(err)
+	}
+	withContract := raw.PhaseStarts[1].Brief
+	if !strings.Contains(withContract, "## Run Contract\n- [dir-contract] Keep PR diffs focused on the assigned package.") {
+		t.Fatalf("review phase brief missing run contract: %s", withContract)
+	}
+	if strings.Contains(withContract, "## Memories for this task") {
+		t.Fatalf("review phase brief must not include memories: %s", withContract)
+	}
 	save("memory-too-large", "run", "run-a", strings.Repeat("x", brief.DefaultMaxBytes))
 	if _, err := driver.SpawnSession(ctx, lane.SpawnRequest{RunID: "run-a", LaneID: "too-large", Brief: "Task"}); err != nil {
 		t.Fatalf("oversize memory should be truncated, got %v", err)

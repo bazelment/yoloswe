@@ -1998,12 +1998,13 @@ func (c *Concierge) handleDirectiveSubmit(
 	if text == "" {
 		return directiveReceipt{}, "", fmt.Errorf("%w: directive text is required", store.ErrInvalidArgument)
 	}
-	kind := store.DirectiveKind(strings.ToLower(strings.TrimSpace(p.Kind)))
-	switch kind {
-	case store.DirectiveStanding, store.DirectiveInstruction, store.DirectiveRecipeEdit, store.DirectivePlanImport:
-	case "":
+	rawKind := strings.TrimSpace(p.Kind)
+	var kind store.DirectiveKind
+	if rawKind == "" {
 		kind = store.DirectiveInstruction
-	default:
+	} else if parsed, err := memorychat.ParseDirectiveKind(rawKind); err == nil {
+		kind = parsed
+	} else {
 		return directiveReceipt{}, "", fmt.Errorf("%w: invalid directive kind %q", store.ErrInvalidArgument, p.Kind)
 	}
 	// The directive goes to the run it is about, which at the front desk is
