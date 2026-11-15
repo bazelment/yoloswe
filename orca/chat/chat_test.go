@@ -234,6 +234,47 @@ func TestStoreStatusSlashAndInlineAnswer(t *testing.T) {
 	}
 }
 
+func TestOwnerDirectiveSpawnFailureStaysVisible(t *testing.T) {
+	ctx := t.Context()
+	st := store.NewMemoryStore(nil)
+	defer st.Close()
+	if err := st.Runs().Create(ctx, store.Run{ID: "run", Objective: "measure memory"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Backlog().Add(ctx, store.BacklogItem{RunID: "run", ID: "mem-overhead", Title: "memory overhead", Status: store.BacklogOpen, Priority: store.PriorityP1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Directives().Add(ctx, store.Directive{ID: "dir-1", RunID: "run", Source: store.DirectiveSourceConcierge, Kind: store.DirectiveInstruction, Text: "start mem-overhead", Status: store.DirectiveActive}); err != nil {
+		t.Fatal(err)
+	}
+	b := NewStoreBackend(st, "run")
+	b.TrackPendingOutcome("run")
+	th, err := st.Threads().StartThread(ctx, store.Thread{ID: "dispatcher", RunID: "run", Role: store.ThreadRoleDispatcher, Status: store.ThreadStatusRunning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := st.Threads().StartTurn(ctx, store.Turn{ID: "turn", ThreadID: th.ID, RunID: "run", Status: store.TurnStatusRunning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Threads().CompleteTurn(ctx, th.ID, turn.ID, store.TurnStatusCompleted, model.Usage{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Decisions().Append(ctx, store.Decision{RunID: "run", Actor: "dispatcher", TurnID: turn.ID, Tool: "lane.spawn", Vetted: true, Result: "error: repo unavailable", Args: json.RawMessage(`{"item_id":"mem-overhead"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := b.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Outcomes) != 1 || !strings.Contains(snap.Outcomes[0], "mem-overhead spawn failed: repo unavailable") {
+		t.Fatalf("outcomes = %v", snap.Outcomes)
+	}
+	if !strings.Contains(snap.Status, "📋 1 queued: mem-overhead (spawn failed)") {
+		t.Fatalf("status = %q", snap.Status)
+	}
+}
+
 func TestThreeHandlersDispatch(t *testing.T) {
 	st := store.NewMemoryStore(nil)
 	defer st.Close()

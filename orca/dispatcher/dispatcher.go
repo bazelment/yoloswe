@@ -992,8 +992,33 @@ func (d *Dispatcher) handleRawToolCall(
 			if state != nil {
 				state.rejected = append(state.rejected, invErr.msg)
 			}
+			if act.Tool == ToolLaneSpawn && act.LaneSpawn != nil {
+				_ = d.recordSpawnFailureAsk(ctx, runID, *act.LaneSpawn, invErr)
+			}
 			_ = d.recordDecision(ctx, runID, state, act, false, "rejected: "+invErr.msg, d.clock.Now().Sub(start))
 			return "", fmt.Errorf("invariant violation: %s", invErr.msg)
+		}
+		if act.Tool == ToolLaneSpawn && act.LaneSpawn != nil {
+			// A driver/network failure gets one immediate retry. Other failures
+			// become an owner question so the failed owner request remains visible.
+			if isTransientSpawnError(execErr) {
+				if state != nil {
+					state.view = nil
+				}
+				retryView, viewErr := loadStateViewWithCache(ctx, d.store, d.clock, runID, d.cfg.MaxBriefBytes, nil)
+				if viewErr == nil {
+					retryResult, retryErr := d.applyVettedAction(ctx, runID, state, retryView, act)
+					if retryErr == nil {
+						if state != nil {
+							state.accepted = append(state.accepted, act)
+						}
+						_ = d.recordDecision(ctx, runID, state, act, true, retryResult, d.clock.Now().Sub(start))
+						return retryResult, nil
+					}
+					execErr = retryErr
+				}
+			}
+			_ = d.recordSpawnFailureAsk(ctx, runID, *act.LaneSpawn, execErr)
 		}
 		_ = d.recordDecision(ctx, runID, state, act, true, "error: "+execErr.Error(), d.clock.Now().Sub(start))
 		return "", execErr
@@ -1009,6 +1034,59 @@ func (d *Dispatcher) handleRawToolCall(
 		return "", err
 	}
 	return result, nil
+}
+
+func isTransientSpawnError(err error) bool {
+	s := strings.ToLower(err.Error())
+	for _, marker := range []string{"timeout", "timed out", "temporar", "connection reset", "connection refused", "rate limit", "unavailable", "network"} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Dispatcher) recordSpawnFailureAsk(ctx context.Context, runID string, p LaneSpawnParams, spawnErr error) error {
+	itemID := strings.TrimSpace(p.ItemID)
+	if existing, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true}); err == nil {
+		for i := range existing {
+			if strings.HasPrefix(existing[i].Ref, ownerAskRefPrefix) && strings.Contains(existing[i].Text, itemID) {
+				return nil
+			}
+		}
+	}
+	question := fmt.Sprintf("lane.spawn for %s failed: %s; retry or needs you?", cmp.Or(itemID, strings.TrimSpace(p.LaneID), "requested item"), oneLine(spawnErr.Error()))
+	ask := controller.OwnerAsk{
+		ID:       d.nextID("ask-spawn"),
+		RunID:    runID,
+		LaneID:   strings.TrimSpace(p.LaneID),
+		Question: question,
+		Options:  []string{"retry", "needs you"},
+		Default:  "needs you",
+		Deadline: d.clock.Now().UTC().Add(30 * time.Minute),
+	}
+	if err := ask.Validate(); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(ask)
+	if err != nil {
+		return err
+	}
+	return d.store.Directives().Add(ctx, store.Directive{
+		ID:        "ask-" + ask.ID,
+		RunID:     runID,
+		Kind:      store.DirectiveInstruction,
+		Source:    store.DirectiveSourceDispatcher,
+		Scope:     ask.LaneID,
+		Ref:       ownerAskRefPrefix + ask.ID,
+		Text:      string(raw),
+		ExpiresAt: &ask.Deadline,
+		Status:    store.DirectiveActive,
+	})
+}
+
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
 }
 
 // isFanOutTool reports whether a tool may repeat or combine within a batch:
@@ -1435,6 +1513,16 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	}
 	if err := d.store.Backlog().Update(ctx, updatedItem, ActorDispatcher, fmt.Sprintf("spawned lane %s", ln.ID)); err != nil {
 		return "", err
+	}
+	// The owner directive that requested this item has now been acted on; keep
+	// the durable decision, but remove it from the pending footer.
+	if dirs, listErr := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true}); listErr == nil {
+		for i := range dirs {
+			dir := &dirs[i]
+			if (dir.Source == store.DirectiveSourceOwner || dir.Source == store.DirectiveSourceConcierge) && strings.Contains(strings.ToLower(dir.Text), strings.ToLower(item.ID)) {
+				_ = d.store.Directives().UpdateStatus(ctx, runID, dir.ID, store.DirectiveHandled)
+			}
+		}
 	}
 
 	if selectedModel != "" {
