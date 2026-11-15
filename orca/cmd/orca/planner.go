@@ -920,9 +920,8 @@ func (p *Planner) askStream(
 		return ask, nil
 	}
 
-	var appliedSummary string
 	reg := p.buildChatToolRegistryForRun(st, *run, effectiveRef, icfg, hostRun, func(callCtx context.Context, rec PlanReconciliation) (string, error) {
-		if len(rec.AddItems) == 0 && len(rec.UpdateItems) == 0 && len(rec.DropItemIDs) == 0 && strings.TrimSpace(rec.Objective) == "" && len(rec.Conflicts) == 0 {
+		if len(rec.AddItems) == 0 && len(rec.UpdateItems) == 0 && len(rec.DropItemIDs) == 0 && strings.TrimSpace(rec.Objective) == "" && strings.TrimSpace(rec.PlanRef) == "" && len(rec.Conflicts) == 0 && len(rec.UnmappedPhrases) == 0 {
 			return cmp.Or(strings.TrimSpace(rec.Summary), "No plan changes proposed"), nil
 		}
 		propQ := strings.TrimSpace(rec.Summary)
@@ -936,7 +935,11 @@ func (p *Planner) askStream(
 		if propQ == "" {
 			propQ = "Approve proposed Planner changes"
 		}
-		ask, err := recordProposal(callCtx, planreader.ProposeWorkParams{Question: propQ, Description: propQ})
+		rawRec, err := json.Marshal(rec)
+		if err != nil {
+			return "", err
+		}
+		ask, err := recordProposal(callCtx, planreader.ProposeWorkParams{Question: propQ, Description: propQ + "\n\nStructured reconciliation (held for owner approval):\n" + string(rawRec)})
 		if err != nil {
 			return "", err
 		}
@@ -1060,9 +1063,6 @@ func (p *Planner) askStream(
 		}
 	}
 
-	if answer == "" && appliedSummary != "" {
-		answer = appliedSummary
-	}
 	if loopErr == nil && emitFn != nil && !emitted && answer != "" {
 		emitFn(answer)
 		_, _ = st.Threads().AppendItem(cleanupCtx, store.Item{

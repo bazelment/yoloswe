@@ -563,9 +563,10 @@ func runChatSession(
 		err := backend.WithRun(func(runStore store.Store, activeRun string) error {
 			runID := activeRun
 			if requested := strings.TrimSpace(targetRun); requested != "" {
-				if _, getErr := runStore.Runs().Get(askCtx, requested); getErr == nil {
-					runID = requested
+				if requested != activeRun {
+					return fmt.Errorf("planner target run %q is not the attached active run %q", requested, activeRun)
 				}
+				runID = requested
 			}
 			var askErr error
 			ans, askErr = chatPlanner.askStream(askCtx, runStore, runID, q, findings, concierge.investigateConfig(askCtx), backend.ReadHostRun, emit)
