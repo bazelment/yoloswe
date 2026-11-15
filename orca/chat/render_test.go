@@ -1558,29 +1558,33 @@ func TestFormatBackgroundEventClassification(t *testing.T) {
 
 func TestRenderSyncTickAndProductionViewIsolation(t *testing.T) {
 	t.Parallel()
-	// 1. Production Models constructed by New leave sync nil and never set View.ForegroundColor.
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 6, 10, 0, 0, time.UTC))
+
+	// 1. Production Models constructed by New leave sync nil, never set View.ForegroundColor,
+	// and schedule Init's 18ms initPrintMsg tick via Model.tick.
 	prod := New(t.Context(), "front-desk", nil, nil)
+	prod.Clock = clk
 	if prod.sync != nil {
 		t.Fatal("New() set non-nil sync on production Model")
 	}
 	if fg := prod.View().ForegroundColor; fg != nil {
 		t.Fatalf("production View().ForegroundColor = %v, want nil", fg)
 	}
+	prodBatch, ok := prod.Init()().(tea.BatchMsg)
+	if !ok || len(prodBatch) == 0 {
+		t.Fatalf("prod.Init() returned %#v, want non-empty tea.BatchMsg", prodBatch)
+	}
+	clk.Advance(18 * time.Millisecond)
+	if msg := prodBatch[0](); msg != (initPrintMsg{}) {
+		t.Fatalf("prod.Init() tick msg = %#v, want initPrintMsg{}", msg)
+	}
 
 	// 2. Model.tick uses the injected Clock on Advance and returns nil on context cancellation.
-	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 6, 10, 0, 0, time.UTC))
 	m := New(t.Context(), "front-desk", nil, nil)
 	m.Clock = clk
 	tickCmd := m.tick(50*time.Millisecond, func(time.Time) tea.Msg { return spinnerTickMsg{} })
-	tickDone := make(chan tea.Msg, 1)
-	go func() { tickDone <- tickCmd() }()
-	select {
-	case msg := <-tickDone:
-		t.Fatalf("tick fired before clock advance: %v", msg)
-	default:
-	}
 	clk.Advance(50 * time.Millisecond)
-	if msg := <-tickDone; msg != (spinnerTickMsg{}) {
+	if msg := tickCmd(); msg != (spinnerTickMsg{}) {
 		t.Fatalf("tick msg = %#v, want spinnerTickMsg{}", msg)
 	}
 

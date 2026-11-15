@@ -215,7 +215,11 @@ func (s *renderSync) onFlush(st frameState) {
 	ready := st.readyForInit
 	s.mu.Unlock()
 	// Closing initFlushed via sync.Once wakes any goroutine already blocked in
-	// Init's select as well as any future select that runs after onFlush.
+	// Init's select as well as any future select that runs after onFlush. In
+	// Bubble Tea v2, cursedRenderer.flush holds cursedRenderer.mu across
+	// cellbuf.Resize, colorful.MakeColor (flushProbe.RGBA), scr.Flush, and
+	// io.Copy(s.w, &buf), and cursedRenderer.insertAbove (tea.Println) acquires
+	// the same mutex, so tea.Println cannot run until flush finishes writing.
 	if ready {
 		s.initOnce.Do(func() {
 			close(s.initFlushed)
@@ -531,44 +535,42 @@ func (m Model) headerLine() string {
 }
 func (m Model) Init() tea.Cmd {
 	if m.poll {
+		var initTick tea.Cmd
 		if m.sync == nil {
-			// Delay initial scrollback emission by one 60fps render frame (18ms) so
-			// Bubble Tea processes the initial WindowSizeMsg and snapshotMsg before
-			// tea.Println writes the header and resumed transcript above the prompt.
-			// Any lines printed before initPrintMsg arrives are queued in pendingPrint
-			// to preserve strict output ordering.
-			initTick := m.tick(18*time.Millisecond, func(time.Time) tea.Msg { return initPrintMsg{} })
-			return tea.Batch(initTick, m.refresh(), m.nextPoll())
-		}
-		// When renderSync is attached (in tests), wait until Bubble Tea processes
-		// the initial WindowSizeMsg and snapshotMsg AND flushes the initial inline
-		// frame (resizing cellbuf to the inline view height) before tea.Println
-		// inserts the header and resumed transcript above the prompt. If onFlush
-		// already closed initFlushed before initTick runs, <-sync.initFlushed
-		// returns immediately; if no flush ever arrives (e.g. non-TTY output),
-		// tmr.C provides a bounded fallback so Init cannot deadlock.
-		sync, ctx := m.sync, m.ctx
-		fallback := sync.initFallback
-		if fallback <= 0 {
-			fallback = 2 * time.Second
-		}
-		initTick := func() tea.Msg {
-			tmr := time.NewTimer(fallback)
-			defer tmr.Stop()
-			if ctx != nil {
-				select {
-				case <-sync.initFlushed:
-				case <-tmr.C:
-				case <-ctx.Done():
-					return nil
+			// Production default (sync == nil): delay initial scrollback emission
+			// by one 60fps render frame (18ms) so Bubble Tea processes the initial
+			// WindowSizeMsg and snapshotMsg before tea.Println writes the header
+			// and resumed transcript above the prompt.
+			initTick = m.tick(18*time.Millisecond, func(time.Time) tea.Msg { return initPrintMsg{} })
+		} else {
+			// When renderSync is attached (in tests), wait until Bubble Tea processes
+			// the initial WindowSizeMsg and snapshotMsg AND flushes the initial inline
+			// frame (resizing cellbuf to the inline view height) before tea.Println
+			// inserts the header and resumed transcript above the prompt. If onFlush
+			// already closed initFlushed before initTick runs, <-sync.initFlushed
+			// returns immediately; if no flush ever arrives (e.g. non-TTY output),
+			// wall-clock tmr.C provides a bounded fallback (cursedRenderer ticks on
+			// wall-clock time while tests hold FakeClock paused during initial setup).
+			sync, ctx := m.sync, m.ctx
+			fallback := cmp.Or(sync.initFallback, 2*time.Second)
+			initTick = func() tea.Msg {
+				tmr := time.NewTimer(fallback)
+				defer tmr.Stop()
+				if ctx != nil {
+					select {
+					case <-sync.initFlushed:
+					case <-tmr.C:
+					case <-ctx.Done():
+						return nil
+					}
+				} else {
+					select {
+					case <-sync.initFlushed:
+					case <-tmr.C:
+					}
 				}
-			} else {
-				select {
-				case <-sync.initFlushed:
-				case <-tmr.C:
-				}
+				return initPrintMsg{}
 			}
-			return initPrintMsg{}
 		}
 		return tea.Batch(initTick, m.refresh(), m.nextPoll())
 	}

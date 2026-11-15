@@ -56,16 +56,20 @@ func TestPlanChangeReachesPlanner(t *testing.T) {
 type routeFunc func(context.Context, string) (router.Decision, error)
 
 func (f routeFunc) Route(ctx context.Context, s string) (router.Decision, error) { return f(ctx, s) }
-func waitText(t *testing.T, tm *teatest.TestModel, text string) {
+func waitText(t *testing.T, tm *teatest.TestModel, texts ...string) {
 	t.Helper()
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		s := string(b)
-		if strings.Contains(s, text) || strings.Contains(SanitizeText(s), text) {
-			return true
-		}
+		san := SanitizeText(s)
 		probe := newFakeTerminal(160, 50)
 		probe.write(s)
-		return !probe.incompleteEsc && strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), text)
+		screen := strings.Join(probe.nonEmptyLines(), "\n")
+		for _, text := range texts {
+			if !strings.Contains(s, text) && !strings.Contains(san, text) && (probe.incompleteEsc || !strings.Contains(screen, text)) {
+				return false
+			}
+		}
+		return true
 	}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(5*time.Millisecond))
 }
 func submit(tm *teatest.TestModel, s string) {
@@ -198,7 +202,7 @@ func TestStoreStatusSlashAndInlineAnswer(t *testing.T) {
 		waitText(t, tm, s.want)
 	}
 	submit(tm, "yes")
-	waitText(t, tm, "→ dispatcher: yes")
+	waitText(t, tm, "→ dispatcher: yes", "Saved for the dispatcher of run run")
 	finish(t, tm)
 	evs, err := st.Events().List(ctx, store.EventFilter{RunID: "run"})
 	if err != nil {
