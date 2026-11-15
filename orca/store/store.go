@@ -646,13 +646,12 @@ func ListActiveDirectives(ctx context.Context, st Store, runID string, now time.
 	if err != nil {
 		return nil, err
 	}
-	inactiveIDs := make(map[string]bool, len(allDirs))
+	inactiveIDs := inactiveDirectiveIDs(allDirs, now)
 	seenActive := make(map[string]bool, len(allDirs))
 	out := make([]Directive, 0, len(allDirs))
 	for i := range allDirs {
 		d := allDirs[i]
-		if d.Status != DirectiveActive || (!now.IsZero() && d.ExpiresAt != nil && !now.Before(*d.ExpiresAt)) {
-			inactiveIDs[d.ID] = true
+		if inactiveIDs[d.ID] {
 			continue
 		}
 		seenActive[d.ID] = true
@@ -685,6 +684,17 @@ func ListActiveDirectives(ctx context.Context, st Store, runID string, now time.
 	return out, nil
 }
 
+func inactiveDirectiveIDs(dirs []Directive, now time.Time) map[string]bool {
+	inactive := make(map[string]bool, len(dirs))
+	for i := range dirs {
+		d := &dirs[i]
+		if d.Status != DirectiveActive || (!now.IsZero() && d.ExpiresAt != nil && !now.Before(*d.ExpiresAt)) {
+			inactive[d.ID] = true
+		}
+	}
+	return inactive
+}
+
 // FilterUserFacingDirectives filters out internal machine records from dirs.
 func FilterUserFacingDirectives(dirs []Directive) []Directive {
 	out := make([]Directive, 0, len(dirs))
@@ -715,13 +725,7 @@ func FilterActiveMemories(ctx context.Context, st Store, runID string, memories 
 	if err != nil || len(allDirs) == 0 {
 		return memories
 	}
-	inactiveIDs := make(map[string]bool, len(allDirs))
-	for i := range allDirs {
-		d := &allDirs[i]
-		if d.Status != DirectiveActive || (!now.IsZero() && d.ExpiresAt != nil && !now.Before(*d.ExpiresAt)) {
-			inactiveIDs[d.ID] = true
-		}
-	}
+	inactiveIDs := inactiveDirectiveIDs(allDirs, now)
 	if len(inactiveIDs) == 0 {
 		return memories
 	}
