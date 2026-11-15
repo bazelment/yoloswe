@@ -575,9 +575,7 @@ func IsBusyProcess(cmd string) bool {
 func WorkingInputWaiting(text string) bool {
 	lower := strings.ToLower(text)
 	return strings.Contains(lower, "timer running") ||
-		strings.Contains(lower, "checking back in") ||
-		strings.Contains(lower, "task(s)") ||
-		strings.Contains(lower, "task-")
+		strings.Contains(lower, "checking back in")
 }
 
 type Driver = LaneDriver

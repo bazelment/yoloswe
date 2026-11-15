@@ -1471,13 +1471,6 @@ func (d *Dispatcher) applyLaneSteer(ctx context.Context, runID string, view *Sta
 			return "", err
 		}
 	}
-	if ln.Status == lane.StatusBlocked {
-		ln.Status = lane.StatusRunning
-	}
-	ln.LastEventAt = d.clock.Now().UTC()
-	if err := d.store.Lanes().Upsert(ctx, ln); err != nil {
-		return "", err
-	}
 	resolved, err := d.resolveOrcaEscalation(ctx, runID, &ln, "steer")
 	if err != nil {
 		return "", err
@@ -1519,17 +1512,20 @@ func (d *Dispatcher) applyLaneForward(ctx context.Context, runID string, view *S
 			return "", err
 		}
 	}
-	if target.Status == lane.StatusBlocked {
-		target.Status = lane.StatusRunning
-	}
-	target.LastEventAt = d.clock.Now().UTC()
-	if err := d.store.Lanes().Upsert(ctx, target); err != nil {
+	resolved, err := d.resolveOrcaEscalation(ctx, runID, &target, "forward")
+	if err != nil {
 		return "", err
 	}
+	result := ""
 	if from != "" {
-		return fmt.Sprintf("forwarded finding from lane %s to lane %s", from, target.ID), nil
+		result = fmt.Sprintf("forwarded finding from lane %s to lane %s", from, target.ID)
+	} else {
+		result = fmt.Sprintf("forwarded finding to lane %s", target.ID)
 	}
-	return fmt.Sprintf("forwarded finding to lane %s", target.ID), nil
+	if resolved != "" {
+		result = resolved + "; " + result
+	}
+	return result, nil
 }
 
 func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *StateView, p LaneRetryParams) (string, error) {
@@ -1562,6 +1558,12 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 	var sessionID, terminalID string
 
 	selectedModel := strings.TrimSpace(p.Model)
+	if selectedModel == "" {
+		selectedModel = d.runWorkerFallbackModel(ctx, runID)
+	}
+	if selectedModel == "" {
+		selectedModel = d.chosenLaneModel(ctx, runID, ln.ID)
+	}
 	if selectedModel != "" {
 		var harness string
 		if len(targetPhase.Agents) > 0 {
@@ -1632,6 +1634,40 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 		result = resolved + "; " + result
 	}
 	return result, nil
+}
+
+const runWorkerFallbackRefPrefix = "worker-fallback:"
+
+func (d *Dispatcher) chosenLaneModel(ctx context.Context, runID, laneID string) string {
+	decs, err := d.store.Decisions().List(ctx, store.DecisionFilter{RunID: runID, LaneID: laneID})
+	if err != nil {
+		return ""
+	}
+	for i := len(decs) - 1; i >= 0; i-- {
+		if decs[i].Actor == ActorDispatcher && (decs[i].Tool == ToolLaneSpawn || decs[i].Tool == ToolLaneRetry) && strings.TrimSpace(decs[i].Model) != "" {
+			return strings.TrimSpace(decs[i].Model)
+		}
+	}
+	return ""
+}
+
+func (d *Dispatcher) runWorkerFallbackModel(ctx context.Context, runID string) string {
+	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, Scope: "run", ActiveOnly: true})
+	if err != nil {
+		return ""
+	}
+	for i := range dirs {
+		if !strings.HasPrefix(dirs[i].Ref, runWorkerFallbackRefPrefix) {
+			continue
+		}
+		var spec struct {
+			Model string `json:"model"`
+		}
+		if json.Unmarshal([]byte(dirs[i].Text), &spec) == nil {
+			return strings.TrimSpace(spec.Model)
+		}
+	}
+	return ""
 }
 
 func (d *Dispatcher) spawnLaneSession(
@@ -1808,10 +1844,10 @@ func (d *Dispatcher) resolveOrcaEscalation(ctx context.Context, runID string, ln
 	resolved := ""
 	if ln.Status == lane.StatusBlocked {
 		ln.Status = lane.StatusRunning
-		ln.LastEventAt = d.clock.Now().UTC()
-		if err := d.store.Lanes().Upsert(ctx, *ln); err != nil {
-			return "", err
-		}
+	}
+	ln.LastEventAt = d.clock.Now().UTC()
+	if err := d.store.Lanes().Upsert(ctx, *ln); err != nil {
+		return "", err
 	}
 	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, Scope: ln.ID, ActiveOnly: true})
 	if err != nil {
