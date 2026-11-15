@@ -711,16 +711,29 @@ func TestFormatToolCallTargetSelectionBranches(t *testing.T) {
 	}
 }
 
-func TestFormatTranscriptAndNarrowWideCJKWidths(t *testing.T) {
+func TestFormatReplyNarrowAndWideCJKPreservesCharacters(t *testing.T) {
 	t.Parallel()
-	// Narrow width (< 10 cols) and wide CJK runes wrap without panicking or losing characters.
 	cjk := "**状態:** テスト実行中 確認完了"
 	narrow := FormatReply(cjk, 8, false)
 	if len(narrow) < 2 || !strings.HasPrefix(narrow[0], "orca> ") {
 		t.Fatalf("narrow CJK FormatReply = %q", narrow)
 	}
+	var stripped []string
+	for i, line := range narrow {
+		if i == 0 {
+			line = strings.TrimPrefix(line, "orca> ")
+		} else {
+			line = strings.TrimPrefix(line, "      ")
+		}
+		stripped = append(stripped, line)
+	}
+	if got, want := strings.Join(stripped, " "), "状態: テスト実行中 確認完了"; got != want {
+		t.Fatalf("narrow CJK characters lost:\ngot:  %q\nwant: %q", got, want)
+	}
+}
 
-	// FormatTranscript preserves explicit header summary, formats turns, and appends tail lines.
+func TestFormatTranscriptSummaryAndTurns(t *testing.T) {
+	t.Parallel()
 	lines := []string{
 		"4 earlier turns; /log to see them",
 		"you> check lane",
@@ -741,5 +754,32 @@ func TestFormatTranscriptAndNarrowWideCJKWidths(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("FormatTranscript plain output missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestStreamPreviewMultiLineAndChunkedAppends(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, want string
+		chunks     []string
+	}{
+		{"single-line-chunks", "orca> first second", []string{"first ", "second"}},
+		{"multi-line-shows-last", "orca> line two", []string{"line one\n", "line two"}},
+		{"trailing-newline", "orca> line two", []string{"line one\nline two\n"}},
+		{"internal-blank-line-whitespace-tail", "orca> line three", []string{"line one\n   \nline three"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := New(t.Context(), "front-desk", nil, nil)
+			m.streaming = true
+			ch := make(chan streamMsg, 1)
+			for _, chunk := range tc.chunks {
+				next, _ := m.Update(streamMsg{text: chunk, ch: ch})
+				m = next.(Model)
+			}
+			if got := m.streamPreview(); got != tc.want {
+				t.Fatalf("streamPreview() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

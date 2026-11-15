@@ -703,9 +703,6 @@ func (m Model) statusFooter() string {
 	}
 	return "\n" + strings.Join(out, "\n")
 }
-func expandTabs(s string) string {
-	return sanitizeText(s)
-}
 func effectiveWidth(width int) int {
 	if width > 1 {
 		return width - 1
@@ -713,14 +710,14 @@ func effectiveWidth(width int) int {
 	return width
 }
 func wrapPhysicalLines(s string, width int) []string {
-	s = expandTabs(s)
+	s = SanitizeText(s)
 	if width <= 1 {
 		return strings.Split(s, "\n")
 	}
 	return strings.Split(runewidth.Wrap(s, effectiveWidth(width)), "\n")
 }
 func truncateLine(s string, width int) string {
-	s = expandTabs(s)
+	s = SanitizeText(s)
 	if width <= 0 {
 		return s
 	}

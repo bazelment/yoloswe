@@ -37,7 +37,7 @@ type styledSpan struct {
 // When tty is false, markdown syntax is stripped to plain text without ANSI escapes.
 func FormatReply(text string, width int, tty bool) []string {
 	text = strings.TrimPrefix(text, replyPrefix)
-	text = expandTabs(text)
+	text = SanitizeText(text)
 	text = strings.Trim(text, "\n")
 	if strings.TrimSpace(text) == "" {
 		return []string{replyPrefix}
@@ -143,7 +143,7 @@ func FormatReply(text string, width int, tty bool) []string {
 // wrapping and bold styling on a TTY.
 func FormatUserLine(text string, width int, tty bool) []string {
 	text = strings.TrimPrefix(text, userPrefix)
-	text = expandTabs(strings.TrimSpace(text))
+	text = SanitizeText(strings.TrimSpace(text))
 	bodyWidth := 0
 	if width > 0 {
 		total := effectiveWidth(width)
@@ -184,7 +184,7 @@ func RouteEcho(handler, text string, fallback bool) string {
 // FormatDimLine renders a routing or tool-call line ("→ ...") as a single dim
 // line on a TTY or plain text when piped.
 func FormatDimLine(text string, width int, tty bool) []string {
-	text = expandTabs(strings.TrimSpace(text))
+	text = SanitizeText(strings.TrimSpace(text))
 	if !tty {
 		if width > 0 {
 			return []string{truncateLine(text, width)}
@@ -199,9 +199,10 @@ func FormatDimLine(text string, width int, tty bool) []string {
 }
 
 func renderStyledLine(text string, style spanStyle, width int, tty bool) string {
-	text = expandTabs(text)
 	if width > 0 {
 		text = truncateLine(text, width)
+	} else {
+		text = SanitizeText(text)
 	}
 	return renderLineSpans([]styledSpan{{text: text, style: style}}, tty)
 }
@@ -217,7 +218,7 @@ func FormatToolCall(name string, rawInput []byte, defaultRunID string) string {
 		for _, k := range keys {
 			if v, ok := fields[k]; ok {
 				if s, ok := v.(string); ok {
-					if clean := strings.TrimSpace(expandTabs(s)); clean != "" {
+					if clean := strings.TrimSpace(SanitizeText(s)); clean != "" {
 						return clean
 					}
 				}
@@ -304,7 +305,7 @@ func FormatTranscript(lines []string, maxTurns, width int, tty bool) []string {
 	}
 
 	for _, raw := range lines {
-		raw = expandTabs(raw)
+		raw = SanitizeText(raw)
 		trimmed := strings.TrimSpace(raw)
 		if trimmed == "" {
 			continue
@@ -632,10 +633,10 @@ func wrapSpans(spans []styledSpan, maxWidth int, tty bool) []string {
 	return lines
 }
 
-// sanitizeText strips terminal escape sequences (CSI, OSC, 2-byte ESC) and
+// SanitizeText strips terminal escape sequences (CSI, OSC, 2-byte ESC) and
 // C0/C1 control characters (other than '\n', with '\t' expanded to 4 spaces)
 // so untrusted text cannot reposition the cursor or inject ANSI sequences.
-func sanitizeText(s string) string {
+func SanitizeText(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	runes := []rune(s)
@@ -698,7 +699,7 @@ func sanitizeText(s string) string {
 }
 
 func sanitizeInline(s string) string {
-	return strings.ReplaceAll(sanitizeText(s), "\n", " ")
+	return strings.ReplaceAll(SanitizeText(s), "\n", " ")
 }
 
 func renderLineSpans(spans []styledSpan, tty bool) string {

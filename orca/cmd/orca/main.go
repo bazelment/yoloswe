@@ -567,7 +567,7 @@ func runChatSession(
 		if err := backend.Dispatch(ctx, d, question, func(s string) { reply.WriteString(s) }); err != nil {
 			return nil, err
 		}
-		_, err = fmt.Fprintln(stdout, reply.String())
+		_, err = fmt.Fprintln(stdout, chatui.SanitizeText(reply.String()))
 		return nil, err
 	}
 	var heldLines []string
