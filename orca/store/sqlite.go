@@ -810,6 +810,10 @@ func (b *sqliteBacklogStore) Add(ctx context.Context, item BacklogItem) error {
 		return fmt.Errorf("%w: invalid status %q", ErrInvalidArgument, cp.Status)
 	}
 
+	if !cp.NoMerge && IsNoMergeBacklogItem(cp) {
+		cp.NoMerge = true
+	}
+
 	s := b.s()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -843,12 +847,12 @@ func (b *sqliteBacklogStore) Add(ctx context.Context, item BacklogItem) error {
 	return execInsertNew(ctx, s.db, fmt.Errorf("%w: backlog item %q in run %q", ErrAlreadyExists, cp.ID, cp.RunID), `
 INSERT INTO backlog_items (
     run_id, id, title, description, acceptance, priority, priority_rank, sort_order,
-    status, lane_id, recipe_name, depends_on_json, tags_json, history_json, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    status, lane_id, recipe_name, no_merge, depends_on_json, tags_json, history_json, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (run_id, id) DO NOTHING`,
 		cp.RunID, cp.ID, cp.Title, cp.Description, cp.Acceptance,
 		string(cp.Priority), cp.Priority.Rank(), cp.Order,
-		string(cp.Status), cp.LaneID, cp.RecipeName,
+		string(cp.Status), cp.LaneID, cp.RecipeName, boolInt(cp.NoMerge),
 		dependsJSON, tagsJSON, historyJSON,
 		formatTime(cp.CreatedAt), formatTime(cp.UpdatedAt),
 	)
@@ -860,12 +864,12 @@ func scanBacklogItem(scanner rowScanner) (*BacklogItem, error) {
 		priorityStr, statusStr          string
 		dependsJSON, tagsJSON, histJSON string
 		createdStr, updatedStr          string
-		priorityRank                    int
+		priorityRank, noMergeInt        int
 	)
 	err := scanner.Scan(
 		&item.RunID, &item.ID, &item.Title, &item.Description, &item.Acceptance,
 		&priorityStr, &priorityRank, &item.Order,
-		&statusStr, &item.LaneID, &item.RecipeName,
+		&statusStr, &item.LaneID, &item.RecipeName, &noMergeInt,
 		&dependsJSON, &tagsJSON, &histJSON,
 		&createdStr, &updatedStr,
 	)
@@ -874,6 +878,7 @@ func scanBacklogItem(scanner rowScanner) (*BacklogItem, error) {
 	}
 	item.Priority = Priority(priorityStr)
 	item.Status = BacklogStatus(statusStr)
+	item.NoMerge = noMergeInt != 0
 	if item.CreatedAt, err = parseTime(createdStr); err != nil {
 		return nil, err
 	}
@@ -897,7 +902,7 @@ func scanBacklogItem(scanner rowScanner) (*BacklogItem, error) {
 
 const selectBacklogColumns = `
 SELECT run_id, id, title, description, acceptance, priority, priority_rank, sort_order,
-       status, lane_id, recipe_name, depends_on_json, tags_json, history_json, created_at, updated_at
+       status, lane_id, recipe_name, no_merge, depends_on_json, tags_json, history_json, created_at, updated_at
 FROM backlog_items`
 
 func getBacklogItem(ctx context.Context, q queryRower, runID, itemID string) (*BacklogItem, error) {
@@ -939,6 +944,9 @@ func (b *sqliteBacklogStore) Update(ctx context.Context, item BacklogItem, actor
 
 	now := s.now()
 	cp := item.Clone()
+	if !cp.NoMerge && (existing.NoMerge || IsNoMergeBacklogItem(cp)) {
+		cp.NoMerge = true
+	}
 	cp.CreatedAt = existing.CreatedAt
 	cp.UpdatedAt = now
 	cp.History = append(slices.Clone(existing.History), BacklogHistoryEntry{
@@ -963,10 +971,10 @@ func (b *sqliteBacklogStore) Update(ctx context.Context, item BacklogItem, actor
 	_, err = tx.ExecContext(ctx, `
 UPDATE backlog_items
 SET title = ?, description = ?, acceptance = ?, priority = ?, priority_rank = ?, sort_order = ?,
-    status = ?, lane_id = ?, recipe_name = ?, depends_on_json = ?, tags_json = ?, history_json = ?, updated_at = ?
+    status = ?, lane_id = ?, recipe_name = ?, no_merge = ?, depends_on_json = ?, tags_json = ?, history_json = ?, updated_at = ?
 WHERE run_id = ? AND id = ?`,
 		cp.Title, cp.Description, cp.Acceptance, string(cp.Priority), cp.Priority.Rank(), cp.Order,
-		string(cp.Status), cp.LaneID, cp.RecipeName, dependsJSON, tagsJSON, historyJSON, formatTime(cp.UpdatedAt),
+		string(cp.Status), cp.LaneID, cp.RecipeName, boolInt(cp.NoMerge), dependsJSON, tagsJSON, historyJSON, formatTime(cp.UpdatedAt),
 		cp.RunID, cp.ID,
 	)
 	if err != nil {

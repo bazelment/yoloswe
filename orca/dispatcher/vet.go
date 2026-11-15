@@ -97,10 +97,12 @@ type BacklogAddParams struct {
 	DependsOn   []string `json:"depends_on,omitempty" jsonschema:"description=IDs of backlog items this item depends on"`
 	Tags        []string `json:"tags,omitempty" jsonschema:"description=Optional classification tags"`
 	Order       int      `json:"order,omitempty" jsonschema:"description=Explicit sort order within priority"`
+	NoMerge     bool     `json:"no_merge,omitempty" jsonschema:"description=Optional: true when this is a report-only or no-merge task that must stop after review and never run integrate"`
 }
 
 // BacklogUpdateParams holds parameters for the backlog.update tool.
 type BacklogUpdateParams struct {
+	NoMerge     *bool    `json:"no_merge,omitempty" jsonschema:"description=Optional: true when this is a report-only or no-merge task that must stop after review and never run integrate"`
 	ID          string   `json:"id" jsonschema:"required,description=Backlog item ID to update"`
 	Title       string   `json:"title,omitempty" jsonschema:"description=Updated title"`
 	Description string   `json:"description,omitempty" jsonschema:"description=Updated description"`
@@ -137,6 +139,7 @@ type LaneSpawnParams struct {
 	BaseBranch     string `json:"base_branch,omitempty" jsonschema:"description=Optional base branch name"`
 	Reason         string `json:"reason,omitempty" jsonschema:"description=Reason for spawning this lane"`
 	Model          string `json:"model,omitempty" jsonschema:"description=Optional worker model override from the allowed list"`
+	NoMerge        bool   `json:"no_merge,omitempty" jsonschema:"description=Optional: true when this lane is a report-only or no-merge task that must stop after review and never run integrate"`
 }
 
 // LaneSteerParams holds parameters for the lane.steer tool.
@@ -632,6 +635,7 @@ func ParseAction(callID, toolName string, raw json.RawMessage) (ProposedAction, 
 		if p.ID == "" {
 			p.ID = decodeAliases(trimmed).DirectiveID
 		}
+		p.ID = store.NormalizeDirectiveID(p.ID)
 		act.DirectiveRevoke = p
 		act.ItemID = p.ID
 		act.Reason = cmp.Or(strings.TrimSpace(p.Reason), fmt.Sprintf("revoke directive %s", p.ID))
@@ -763,15 +767,17 @@ func loadStateViewWithCache(
 	if err != nil {
 		return nil, err
 	}
+	now := clk.Now().UTC()
 	memories, _ := st.Memories().List(ctx, store.MemoryFilter{RunID: runID})
-	directives, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	memories = store.FilterActiveMemories(ctx, st, runID, memories, now)
+	directives, err := store.ListActiveDirectives(ctx, st, runID, now)
 	if err != nil {
 		return nil, err
 	}
 	settings, _ := st.Runs().GetSettings(ctx, runID)
 
 	view := &StateView{
-		Now:            clk.Now().UTC(),
+		Now:            now,
 		Run:            run,
 		Lanes:          make(map[string]lane.Lane, len(lanes)),
 		Backlog:        make(map[string]store.BacklogItem, len(backlog)),
@@ -783,13 +789,8 @@ func loadStateViewWithCache(
 		Directives:     make(map[string]store.Directive, len(directives)),
 		Settings:       settings,
 	}
-	runDone := isRunStateDone(run, lanes, backlog)
 	for i := range directives {
 		d := directives[i]
-		if runDone && !strings.HasPrefix(d.Ref, ownerAskRefPrefix) && isHoldDirectiveText(d.Text) {
-			_ = st.Directives().UpdateStatus(ctx, runID, d.ID, store.DirectiveExpired)
-			continue
-		}
 		if d.ExpiresAt == nil || view.Now.Before(*d.ExpiresAt) {
 			view.Directives[d.ID] = d
 		}
@@ -1196,12 +1197,21 @@ func (s *StateView) RecipeByName(name string) (recipe.Recipe, bool) {
 // RecipeForLane resolves the pinned or latest recipe for ln.
 func (s *StateView) RecipeForLane(ln lane.Lane) (recipe.Recipe, bool) {
 	name := s.resolveRecipeName(ln.RecipeName)
+	var r recipe.Recipe
+	var ok bool
 	if s != nil && ln.RecipeVersion > 0 {
-		if r, ok := s.VersionRecipes[recipeVersionKey(name, ln.RecipeVersion)]; ok {
-			return r, true
+		r, ok = s.VersionRecipes[recipeVersionKey(name, ln.RecipeVersion)]
+	}
+	if !ok {
+		r, ok = s.RecipeByName(name)
+	}
+	if ok && s != nil {
+		itemID := cmp.Or(ln.ItemID, ln.ID)
+		if item, hasItem := s.BacklogItem(itemID); (hasItem && (item.NoMerge || store.IsNoMergeBacklogItem(item))) || store.IsNoMergeText(ln.Title) {
+			r = recipe.WithoutIntegrate(r)
 		}
 	}
-	return s.RecipeByName(name)
+	return r, ok
 }
 
 // ResolveSpawnRecipe resolves the base recipe and effective recipe (including
@@ -1222,6 +1232,9 @@ func (s *StateView) ResolveSpawnRecipe(p LaneSpawnParams) (base recipe.Recipe, e
 		} else {
 			effective = CompileRecipeOverride(base, override)
 		}
+	}
+	if p.NoMerge || item.NoMerge || store.IsNoMergeBacklogItem(item) || store.IsNoMergeText(p.Brief) {
+		effective = recipe.WithoutIntegrate(effective)
 	}
 	return base, effective, hasBase
 }
@@ -2115,11 +2128,11 @@ func checkDirectiveAndPlannerInvariants(st *StateView, act ProposedAction) error
 
 	case ToolDirectiveRevoke:
 		p := act.DirectiveRevoke
-		if p == nil || strings.TrimSpace(p.ID) == "" {
+		if p == nil || store.NormalizeDirectiveID(p.ID) == "" {
 			return errors.New("id is required for directive.revoke")
 		}
 		if st != nil && st.Directives != nil {
-			id := strings.TrimSpace(p.ID)
+			id := store.NormalizeDirectiveID(p.ID)
 			dir, inDirs := st.Directives[id]
 			if !inDirs {
 				return fmt.Errorf("active directive %q does not exist in the snapshot", id)
@@ -2413,19 +2426,6 @@ func checkRunCloseout(st *StateView, p *RunCloseoutParams) error {
 		return err
 	}
 	return nil
-}
-
-// isRunStateDone reports whether every lane and backlog item is terminal (including
-// adopted task-backed backlog items whose corresponding lane is terminal) and the
-// run objective's Next: directive is done.
-func isRunStateDone(run *store.Run, lanes []lane.Lane, backlog []store.BacklogItem) bool {
-	if err := CheckRunTerminal(lanes, backlog, false); err != nil {
-		return false
-	}
-	if run != nil && isObjectiveDoneText(run.Objective) {
-		return true
-	}
-	return false
 }
 
 func isObjectiveDoneText(objective string) bool {

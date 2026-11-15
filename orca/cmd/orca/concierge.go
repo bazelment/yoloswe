@@ -1343,7 +1343,7 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 	if err != nil {
 		return "", err
 	}
-	dirs, err := c.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	dirs, err := store.ListActiveDirectives(ctx, c.store, runID, c.clock.Now().UTC())
 	if err != nil {
 		return "", err
 	}
@@ -1488,7 +1488,7 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 		}
 	}
 
-	if freshDirs, dErr := c.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true}); dErr == nil {
+	if freshDirs, dErr := store.ListActiveDirectives(ctx, c.store, runID, c.clock.Now().UTC()); dErr == nil {
 		dirs = freshDirs
 	}
 	openQs := c.openQuestionsForRun(ctx, runID, dirs, unescalatedQs)
@@ -1499,9 +1499,10 @@ func (c *Concierge) formatRunStatusReport(ctx context.Context, runID string) (st
 		}
 	}
 
-	fmt.Fprintf(&b, "\nActive Directives (%d):\n", len(dirs))
-	for i := range dirs {
-		d := dirs[i]
+	userDirs := store.FilterUserFacingDirectives(dirs)
+	fmt.Fprintf(&b, "\nActive Directives (%d):\n", len(userDirs))
+	for i := range userDirs {
+		d := userDirs[i]
 		fmt.Fprintf(&b, "- [%s] kind=%s source=%s scope=%s: %s\n",
 			d.ID, d.Kind, d.Source, cmp.Or(d.Scope, "run"), d.Text)
 	}
@@ -1689,6 +1690,12 @@ func (c *Concierge) laneNextStep(
 			rec = *loaded
 		} else if loaded, err := c.store.Recipes().Get(ctx, run.ID, recName, 0); err == nil && loaded != nil {
 			rec = *loaded
+		}
+		itemID := cmp.Or(ln.ItemID, ln.ID)
+		if itemID != "" && c.store.Backlog() != nil {
+			if item, err := c.store.Backlog().Get(ctx, run.ID, itemID); err == nil && item != nil && (item.NoMerge || store.IsNoMergeBacklogItem(*item)) {
+				rec = recipe.WithoutIntegrate(rec)
+			}
 		}
 	}
 	if ln.Phase == "" && len(rec.Phases) > 0 {
@@ -2118,7 +2125,7 @@ func (c *Concierge) handleDirectiveRevoke(
 	threadID, turnID, quote string,
 	p DirectiveRevokeParams,
 ) (string, error) {
-	id := strings.TrimSpace(p.ID)
+	id := store.NormalizeDirectiveID(p.ID)
 	if id == "" {
 		return "", fmt.Errorf("%w: directive id is required", store.ErrInvalidArgument)
 	}

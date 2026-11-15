@@ -364,21 +364,22 @@ func trailingSeqNumber(id string) int64 {
 
 //nolint:govet // state groups are ordered by execution concerns.
 type turnExecState struct {
-	view          *StateView
-	pinnedRecipes map[string]recipe.Recipe
-	turnUsage     map[int]model.Usage
-	turnUsed      map[int]bool
-	events        []store.Event
-	threadID      string
-	turnID        string
-	decisions     []store.Decision
-	accepted      []ProposedAction
-	rejected      []string
-	currentTurn   int
-	nextActionSeq int
-	traceID       string
-	input         string
-	model         string
+	view                  *StateView
+	pinnedRecipes         map[string]recipe.Recipe
+	autoRevokedDirectives map[string]store.Directive
+	turnUsage             map[int]model.Usage
+	turnUsed              map[int]bool
+	events                []store.Event
+	threadID              string
+	turnID                string
+	decisions             []store.Decision
+	accepted              []ProposedAction
+	rejected              []string
+	currentTurn           int
+	nextActionSeq         int
+	traceID               string
+	input                 string
+	model                 string
 }
 
 // Dispatch executes one judgment batch turn and returns its structured BatchResult.
@@ -581,6 +582,7 @@ func (d *Dispatcher) memoryIndexSection(ctx context.Context, runID string) strin
 	if err != nil {
 		return ""
 	}
+	ms = store.FilterActiveMemories(ctx, d.store, runID, ms, d.clock.Now().UTC())
 	return "\n\n## Memory Index\n" + store.MemoryIndex(ms)
 }
 
@@ -924,6 +926,11 @@ func (d *Dispatcher) handleRawToolCall(
 			return "", err
 		}
 		if state != nil {
+			for k := range state.autoRevokedDirectives {
+				if _, exists := view.Directives[k]; !exists {
+					view.Directives[k] = state.autoRevokedDirectives[k]
+				}
+			}
 			state.view = view
 		}
 	}
@@ -1178,6 +1185,10 @@ func (d *Dispatcher) applyBacklogAdd(ctx context.Context, runID string, p Backlo
 		DependsOn:   slices.Clone(p.DependsOn),
 		Tags:        slices.Clone(p.Tags),
 		Order:       p.Order,
+		NoMerge:     p.NoMerge,
+	}
+	if !item.NoMerge && store.IsNoMergeBacklogItem(item) {
+		item.NoMerge = true
 	}
 	if err := d.store.Backlog().Add(ctx, item); err != nil {
 		return "", err
@@ -1217,6 +1228,11 @@ func (d *Dispatcher) applyBacklogUpdate(ctx context.Context, runID string, view 
 	}
 	if p.Tags != nil {
 		updated.Tags = slices.Clone(p.Tags)
+	}
+	if p.NoMerge != nil {
+		updated.NoMerge = *p.NoMerge
+	} else if store.IsNoMergeBacklogItem(updated) {
+		updated.NoMerge = true
 	}
 	if err := d.store.Backlog().Update(ctx, updated, ActorDispatcher, strings.TrimSpace(p.Reason)); err != nil {
 		return "", err
@@ -1258,6 +1274,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 
 	base, resolved, _ := view.ResolveSpawnRecipe(p)
 	r := base
+	noMerge := p.NoMerge || item.NoMerge || store.IsNoMergeBacklogItem(item) || store.IsNoMergeText(p.Brief) || store.IsNoMergeText(p.RecipeOverride)
 
 	override := strings.TrimSpace(p.RecipeOverride)
 	if override != "" {
@@ -1273,6 +1290,9 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 				}
 			} else {
 				return "", fmt.Errorf("natural-language recipe override %q requires a recipe compiler", override)
+			}
+			if noMerge {
+				compiled = recipe.WithoutIntegrate(compiled)
 			}
 			compiled.RunID = runID
 			compiled.Name = fmt.Sprintf("override-%s", laneID)
@@ -1295,6 +1315,9 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 			}
 			r = saved
 		}
+	}
+	if noMerge {
+		r = recipe.WithoutIntegrate(r)
 	}
 
 	firstPhaseName := r.FirstPhase()
@@ -1375,6 +1398,9 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	updatedItem := item.Clone()
 	updatedItem.Status = store.BacklogInProgress
 	updatedItem.LaneID = ln.ID
+	if noMerge {
+		updatedItem.NoMerge = true
+	}
 	if override != "" {
 		updatedItem.RecipeName = r.Name
 	}
@@ -1995,16 +2021,31 @@ func (d *Dispatcher) syncRunContract(ctx context.Context, runID string) {
 }
 
 func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, state *turnExecState, view *StateView, p DirectiveRevokeParams) (string, error) {
-	id := strings.TrimSpace(p.ID)
+	id := store.NormalizeDirectiveID(p.ID)
 	if id == "" {
 		return "", fmt.Errorf("%w: directive id is required", store.ErrInvalidArgument)
 	}
 	dir, err := d.store.Directives().Get(ctx, runID, id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return "", fmt.Errorf("directive %q not found: %w", id, err)
+			if state != nil {
+				if autoDir, ok := state.autoRevokedDirectives[id]; ok {
+					dir = &autoDir
+					err = nil
+				}
+			}
+			if err != nil && view != nil {
+				if vDir, ok := view.Directives[id]; ok {
+					dir = &vDir
+					err = nil
+				}
+			}
+			if err != nil {
+				return "", fmt.Errorf("directive %q not found: %w", id, err)
+			}
+		} else {
+			return "", err
 		}
-		return "", err
 	}
 	if state != nil && len(state.events) > 0 && !slices.ContainsFunc(state.events, func(ev store.Event) bool {
 		return ev.Kind == store.EventOwnerMessage
@@ -2016,8 +2057,8 @@ func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, sta
 	if dir != nil && strings.HasPrefix(strings.TrimSpace(dir.Ref), ownerAskRefPrefix) {
 		return "", fmt.Errorf("%w: directive %q is an open owner question (%s); use owner.answer to resolve it", store.ErrInvalidArgument, id, dir.Ref)
 	}
-	if err := d.store.Directives().UpdateStatus(ctx, runID, id, store.DirectiveRevoked); err != nil {
-		return "", err
+	if uErr := d.store.Directives().UpdateStatus(ctx, runID, id, store.DirectiveRevoked); uErr != nil && !errors.Is(uErr, store.ErrNotFound) {
+		return "", uErr
 	}
 	if memErr := d.store.Memories().Delete(ctx, "", id); memErr != nil && !errors.Is(memErr, store.ErrNotFound) {
 		return "", memErr
@@ -2025,7 +2066,31 @@ func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, sta
 	if view != nil && view.Directives != nil {
 		delete(view.Directives, id)
 	}
-	if dir.IsContract() {
+	if state != nil && state.autoRevokedDirectives != nil {
+		delete(state.autoRevokedDirectives, id)
+	}
+	if dir != nil && d.shouldSweepAllHoldsOnRevoke(state, *dir) && view != nil {
+		for otherID := range view.Directives {
+			od := view.Directives[otherID]
+			if otherID == id || strings.HasPrefix(strings.TrimSpace(od.Ref), ownerAskRefPrefix) {
+				continue
+			}
+			isHold := isHoldDirectiveText(od.Text)
+			isOwnerHoldLiftChat := strings.HasPrefix(od.ID, "chat-") && od.Source == store.DirectiveSourceOwner && ownerMessageLiftsHold(od.Text, store.Directive{})
+			if !isHold && !isOwnerHoldLiftChat {
+				continue
+			}
+			_ = d.store.Directives().UpdateStatus(ctx, runID, otherID, store.DirectiveRevoked)
+			_ = d.store.Memories().Delete(ctx, "", otherID)
+			if state != nil {
+				if state.autoRevokedDirectives == nil {
+					state.autoRevokedDirectives = make(map[string]store.Directive)
+				}
+				state.autoRevokedDirectives[otherID] = od
+			}
+		}
+	}
+	if dir != nil && dir.IsContract() {
 		d.syncRunContract(ctx, runID)
 		if drv := d.laneDriver(); drv != nil {
 			if lanes, listErr := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID}); listErr == nil {
@@ -2041,6 +2106,29 @@ func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, sta
 		}
 	}
 	return fmt.Sprintf("revoked directive %s", id), nil
+}
+
+func (d *Dispatcher) shouldSweepAllHoldsOnRevoke(state *turnExecState, revoked store.Directive) bool {
+	revokedIsHoldOrLift := isHoldDirectiveText(revoked.Text) ||
+		(revoked.Source == store.DirectiveSourceOwner && ownerMessageLiftsHold(revoked.Text, store.Directive{}))
+	if !revokedIsHoldOrLift || state == nil {
+		return false
+	}
+	for i := range state.events {
+		ev := &state.events[i]
+		if ev.Kind != store.EventOwnerMessage {
+			continue
+		}
+		text := strings.TrimSpace(ev.Summary + " " + string(ev.Payload))
+		lower := strings.ToLower(text)
+		if strings.Contains(lower, "keep") || strings.Contains(lower, "except") {
+			return false
+		}
+		if ownerMessageLiftsHold(text, store.Directive{}) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Dispatcher) canRevokeDirectiveWithoutBatchOwnerMsg(ctx context.Context, runID string, view *StateView, dir *store.Directive) bool {
@@ -3153,11 +3241,8 @@ func CompileRecipeOverride(base recipe.Recipe, override string) recipe.Recipe {
 		out.MergePolicy.Mode = recipe.MergeModeManual
 	case containsOverridePhrase(lower, "analysis only") || containsOverridePhrase(lower, "no merge") ||
 		containsOverridePhrase(lower, "skip merge") || containsOverridePhrase(lower, "without merge") ||
-		containsOverridePhrase(lower, "merge_mode=none"):
-		out = removePhaseFromRecipe(out, recipe.PhaseIntegrate)
-		out.MergePolicy.Mode = recipe.MergeModeNone
-		out.MergePolicy.RequireReviewPass = false
-		out.MergePolicy.RequireCIGreen = false
+		containsOverridePhrase(lower, "merge_mode=none") || store.IsNoMergeText(lower):
+		out = recipe.WithoutIntegrate(out)
 	}
 
 	return out

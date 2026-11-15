@@ -118,10 +118,7 @@ func BuildSnapshot(
 		return Snapshot{}, err
 	}
 
-	directives, err := st.Directives().List(ctx, store.DirectiveFilter{
-		RunID:      runID,
-		ActiveOnly: true,
-	})
+	directives, err := store.ListActiveDirectives(ctx, st, runID, now)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -129,6 +126,7 @@ func BuildSnapshot(
 	if err != nil {
 		return Snapshot{}, err
 	}
+	memories = store.FilterActiveMemories(ctx, st, runID, memories, now)
 
 	allBacklog, err := st.Backlog().List(ctx, store.BacklogFilter{
 		RunID: runID,
@@ -290,7 +288,11 @@ func BuildSnapshot(
 			if it.Status == store.BacklogOpen && depsDone(it, statusByID) {
 				readiness = " ready"
 			}
-			fmt.Fprintf(&row, "- **%s** [%s #%d %s%s]", it.ID, it.Priority, it.Order, it.Status, readiness)
+			noMergeTag := ""
+			if it.NoMerge || store.IsNoMergeBacklogItem(it) {
+				noMergeTag = " no_merge"
+			}
+			fmt.Fprintf(&row, "- **%s** [%s #%d %s%s%s]", it.ID, it.Priority, it.Order, it.Status, readiness, noMergeTag)
 			if it.LaneID != "" {
 				fmt.Fprintf(&row, " lane=%s", it.LaneID)
 			}

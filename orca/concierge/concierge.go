@@ -515,6 +515,7 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 
 	systemPrompt := c.cfg.SystemPrompt
 	if memories, memErr := c.store.Memories().List(ctx, store.MemoryFilter{RunID: runID}); memErr == nil {
+		memories = store.FilterActiveMemories(ctx, c.store, runID, memories, c.clock.Now().UTC())
 		systemPrompt += "\n\n## Canonical Memory Index\n" + store.MemoryIndex(memories)
 	}
 
@@ -854,10 +855,7 @@ func (c *Concierge) execStatus(ctx context.Context, runID string, p StatusParams
 		return "", err
 	}
 
-	directives, err := c.store.Directives().List(ctx, store.DirectiveFilter{
-		RunID:      runID,
-		ActiveOnly: true,
-	})
+	directives, err := store.ListUserFacingActiveDirectives(ctx, c.store, runID, now)
 	if err != nil {
 		return "", err
 	}
@@ -1448,7 +1446,7 @@ func (c *Concierge) execDirectiveSubmit(
 // revoke open owner_ask directives and returns a wrapped store.ErrNotFound
 // when the directive does not exist.
 func RevokeDirective(ctx context.Context, st store.Store, runID, id string, fallbackRunIDs ...string) (string, error) {
-	id = strings.TrimSpace(id)
+	id = store.NormalizeDirectiveID(id)
 	if id == "" {
 		return runID, fmt.Errorf("%w: directive.revoke requires id", store.ErrInvalidArgument)
 	}
@@ -1466,6 +1464,30 @@ func RevokeDirective(ctx context.Context, st store.Store, runID, id string, fall
 			}
 		}
 	}
+	if errors.Is(err, store.ErrNotFound) {
+		candidates := append([]string{runID}, fallbackRunIDs...)
+		for _, candidate := range candidates {
+			if candidate == "" {
+				continue
+			}
+			active, aErr := store.ListActiveDirectives(ctx, st, candidate, time.Time{})
+			if aErr != nil {
+				continue
+			}
+			for i := range active {
+				if active[i].ID == id {
+					runID = candidate
+					cp := active[i]
+					dir = &cp
+					err = nil
+					break
+				}
+			}
+			if dir != nil {
+				break
+			}
+		}
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return runID, fmt.Errorf("directive %q not found: %w", id, err)
@@ -1475,8 +1497,8 @@ func RevokeDirective(ctx context.Context, st store.Store, runID, id string, fall
 	if dir != nil && strings.HasPrefix(strings.TrimSpace(dir.Ref), "owner_ask:") {
 		return runID, fmt.Errorf("%w: directive %q is an open owner question (%s); use owner.answer to resolve it", store.ErrInvalidArgument, id, dir.Ref)
 	}
-	if err := st.Directives().UpdateStatus(ctx, runID, id, store.DirectiveRevoked); err != nil {
-		return runID, err
+	if uErr := st.Directives().UpdateStatus(ctx, runID, id, store.DirectiveRevoked); uErr != nil && !errors.Is(uErr, store.ErrNotFound) {
+		return runID, uErr
 	}
 	if memErr := st.Memories().Delete(ctx, "", id); memErr != nil && !errors.Is(memErr, store.ErrNotFound) {
 		return runID, memErr
@@ -1519,7 +1541,7 @@ func (c *Concierge) execDirectiveRevoke(
 	p DirectiveRevokeParams,
 ) (string, error) {
 	start := c.clock.Now()
-	id := strings.TrimSpace(p.ID)
+	id := store.NormalizeDirectiveID(p.ID)
 	if _, err := RevokeDirective(ctx, c.store, runID, id); err != nil {
 		return "", err
 	}

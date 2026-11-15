@@ -2269,14 +2269,20 @@ func (c *Controller) advanceByRecipe(
 
 	delete(c.pendingVerdicts, ln.ID)
 
-	switch mech.To {
+	noMerge := r.MergePolicy.Mode == recipe.MergeModeNone || c.isNoMergeLane(ctx, ln)
+	target := mech.To
+	if target == recipe.PhaseIntegrate && noMerge {
+		target = recipe.TargetComplete
+	}
+
+	switch target {
 	case recipe.TargetComplete:
 		if r.MergePolicy.RequireReviewPass && recipeHasReviewPhase(r) {
 			if (ln.PRHead != "" || ln.ApprovalSHA != "") && ln.ApprovalStale() {
 				return c.blockLaneForJudgment(ctx, ln)
 			}
 		}
-		if r.MergePolicy.RequireCIGreen && !ciGreen {
+		if r.MergePolicy.RequireCIGreen && !noMerge && !ciGreen {
 			return c.blockLaneForJudgment(ctx, ln)
 		}
 
@@ -2298,7 +2304,9 @@ func (c *Controller) advanceByRecipe(
 		}
 		if !already {
 			ln.Status = lane.StatusDone
-			ln.MergeSHA = cmp.Or(ln.MergeSHA, ln.PRHead)
+			if !noMerge {
+				ln.MergeSHA = cmp.Or(ln.MergeSHA, ln.PRHead)
+			}
 			if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
 				return store.EventClassUnclassified, err
 			}
@@ -3398,6 +3406,24 @@ func (c *Controller) buildBrief(ctx context.Context, ln *lane.Lane, r *recipe.Re
 	return lane.AppendReportInstructions(strings.Join(parts, "\n\n"), reportInstructions, r.Limits.MaxBriefBytes)
 }
 
+func (c *Controller) isNoMergeLane(ctx context.Context, ln *lane.Lane) bool {
+	if ln == nil {
+		return false
+	}
+	if store.IsNoMergeText(ln.Title) {
+		return true
+	}
+	itemID := cmp.Or(ln.ItemID, ln.ID)
+	if itemID != "" && c.store != nil && c.store.Backlog() != nil {
+		if item, err := c.store.Backlog().Get(ctx, c.cfg.RunID, itemID); err == nil && item != nil {
+			if item.NoMerge || store.IsNoMergeBacklogItem(*item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (c *Controller) resolveRecipe(ctx context.Context, ln *lane.Lane) (*recipe.Recipe, error) {
 	name := ln.RecipeName
 	if name == "" {
@@ -3408,14 +3434,19 @@ func (c *Controller) resolveRecipe(ctx context.Context, ln *lane.Lane) (*recipe.
 		}
 	}
 	r, err := c.store.Recipes().Get(ctx, c.cfg.RunID, name, ln.RecipeVersion)
-	if err == nil {
-		return r, nil
-	}
 	if errors.Is(err, store.ErrNotFound) && name == recipe.DefaultName {
 		def := recipe.Default()
-		return &def, nil
+		r = &def
+		err = nil
 	}
-	return nil, err
+	if err != nil {
+		return nil, err
+	}
+	if r != nil && c.isNoMergeLane(ctx, ln) {
+		stripped := recipe.WithoutIntegrate(*r)
+		return &stripped, nil
+	}
+	return r, nil
 }
 
 func (c *Controller) extractReport(ctx context.Context, ln *lane.Lane, ev store.Event) (LaneReportPayload, error) {

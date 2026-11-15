@@ -201,6 +201,14 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 				if err := d.store.Backlog().Update(ctx, item, controller.ActorController, "adopt host task"); err != nil {
 					return err
 				}
+			} else if item.NoMerge {
+				if existingItem, gErr := d.store.Backlog().Get(ctx, r.ID, item.ID); gErr == nil && existingItem != nil && !existingItem.NoMerge {
+					existingItem.NoMerge = true
+					if existingItem.Description == "" && item.Description != "" {
+						existingItem.Description = item.Description
+					}
+					_ = d.store.Backlog().Update(ctx, *existingItem, controller.ActorController, "mark no-merge from host brief")
+				}
 			}
 		}
 	}
@@ -402,11 +410,14 @@ func expireHoldDirectivesIfRunDone(ctx context.Context, st store.Store, runID st
 	}
 	for i := range dirs {
 		d := &dirs[i]
-		if d.Kind != store.DirectiveStanding && d.Kind != store.DirectiveInstruction {
+		if d.Kind != store.DirectiveStanding && d.Kind != store.DirectiveInstruction && d.Kind != store.DirectiveNote {
 			continue
 		}
 		if dispatcher.IsHoldDirectiveText(d.Text) {
 			_ = st.Directives().UpdateStatus(ctx, runID, d.ID, store.DirectiveExpired)
+			if st.Memories() != nil {
+				_ = st.Memories().Delete(ctx, "", d.ID)
+			}
 		}
 	}
 }
@@ -1107,7 +1118,8 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 				case lane.StatusBlocked:
 					status = store.BacklogBlocked
 				}
-				items = append(items, store.BacklogItem{ID: ln.ID, RunID: r.ID, LaneID: ln.ID, Title: ln.Title, Description: mission, Priority: priority, Status: status, DependsOn: task.DependsOn})
+				noMerge := store.IsNoMergeText(mission) || store.IsNoMergeText(ln.Title) || store.IsNoMergeText(task.Brief)
+				items = append(items, store.BacklogItem{ID: ln.ID, RunID: r.ID, LaneID: ln.ID, Title: ln.Title, Description: mission, Priority: priority, Status: status, DependsOn: task.DependsOn, NoMerge: noMerge})
 				ln.PRHead, ln.ApprovalSHA, ln.MergeSHA, ln.Checks, ln.BaseCommit, ln.Worktree = task.PRHead, task.ApprovalSHA, task.MergeSHA, task.Checks, task.BaseCommit, task.Worktree
 				for phase, rounds := range task.Terminals {
 					normPhase, _ := normalizeHostPhaseName(phase, hasExplicitClean)

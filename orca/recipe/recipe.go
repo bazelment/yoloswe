@@ -572,3 +572,44 @@ func Default() Recipe {
 		},
 	}
 }
+
+// WithoutIntegrate returns a copy of r with the integrate phase removed,
+// transitions into integrate rewritten to complete, and MergePolicy.Mode set
+// to MergeModeNone.
+func WithoutIntegrate(r Recipe) Recipe {
+	out := r.Clone()
+	out.MergePolicy.Mode = MergeModeNone
+	out.MergePolicy.RequireReviewPass = false
+	out.MergePolicy.RequireCIGreen = false
+	if len(out.Phases) <= 1 {
+		return out
+	}
+	var nextPhase string
+	for _, tr := range out.Transitions {
+		if tr.From == PhaseIntegrate && tr.On.Verdict == OutcomeDone {
+			nextPhase = tr.To
+			break
+		}
+	}
+	if nextPhase == "" {
+		nextPhase = TargetComplete
+	}
+	out.Phases = slices.DeleteFunc(out.Phases, func(p Phase) bool {
+		return p.Name == PhaseIntegrate
+	})
+	var updatedTransitions []Transition
+	for _, tr := range out.Transitions {
+		if tr.From == PhaseIntegrate {
+			continue
+		}
+		if tr.To == PhaseIntegrate {
+			tr.To = nextPhase
+			if nextPhase == TargetComplete {
+				tr.On.CIGreen = false
+			}
+		}
+		updatedTransitions = append(updatedTransitions, tr)
+	}
+	out.Transitions = updatedTransitions
+	return out
+}

@@ -1876,6 +1876,9 @@ func (b *StoreBackend) runCommand(ctx context.Context, fields []string) (string,
 	case "/undo":
 		if last := b.lastDirective; last.id != "" {
 			b.lastDirective = lastDirective{}
+			if b.store.Memories() != nil {
+				_ = b.store.Memories().Delete(ctx, "", last.id)
+			}
 			return "directive revoked", b.store.Directives().UpdateStatus(ctx, last.run, last.id, store.DirectiveRevoked)
 		}
 		return b.memory.Undo(ctx, b.store)

@@ -240,6 +240,114 @@ type BacklogItem struct {
 	Tags        []string              `json:"tags,omitempty"`
 	History     []BacklogHistoryEntry `json:"history,omitempty"`
 	Order       int                   `json:"order"`
+	NoMerge     bool                  `json:"no_merge,omitempty"`
+}
+
+// IsNoMergeBacklogItem reports whether item is marked no-merge or its title,
+// description, or acceptance criteria state that the task is report-only /
+// no-merge.
+func IsNoMergeBacklogItem(item BacklogItem) bool {
+	return item.NoMerge ||
+		IsNoMergeText(item.Title) ||
+		IsNoMergeText(item.Description) ||
+		IsNoMergeText(item.Acceptance)
+}
+
+// IsNoMergeText reports whether text specifies a report-only, analysis-only, or
+// no-merge task that must stop after review without running integrate or merging.
+func IsNoMergeText(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return false
+	}
+	for _, phrase := range []string{
+		"do not merge anything",
+		"don't merge anything",
+		"dont merge anything",
+		"never merge anything",
+		"do not merge this",
+		"don't merge this",
+		"dont merge this",
+		"never merge this",
+		"report-only",
+		"report only",
+		"analysis-only",
+		"analysis only",
+		"measurement/report",
+		"measurement-only",
+		"measurement only",
+		"merge_mode=none",
+		"merge: none",
+		"skip merge",
+		"without merging",
+		"without merge",
+	} {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	for _, tok := range []string{"no-merge", "no_merge"} {
+		if containsNoMergePhrase(lower, tok, true) {
+			return true
+		}
+	}
+	for _, phrase := range []string{"no merge", "do not merge", "don't merge", "dont merge", "never merge"} {
+		if containsNoMergePhrase(lower, phrase, false) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsNoMergePhrase(s, phrase string, allowAnyContinuation bool) bool {
+	isWordByte := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
+	}
+	for offset := 0; offset <= len(s)-len(phrase); {
+		idx := strings.Index(s[offset:], phrase)
+		if idx < 0 {
+			return false
+		}
+		start := offset + idx
+		end := start + len(phrase)
+		leftOK := start == 0 || !isWordByte(s[start-1])
+		rightOK := end == len(s) || !isWordByte(s[end])
+		if leftOK && rightOK {
+			if allowAnyContinuation {
+				return true
+			}
+			rest := strings.TrimLeft(s[end:], " \t")
+			for _, suffix := range []string{"phase", "step", "task", "item", "lane"} {
+				if strings.HasPrefix(rest, suffix) {
+					after := rest[len(suffix):]
+					if after == "" || !isWordByte(after[0]) {
+						rest = strings.TrimLeft(after, " \t")
+						break
+					}
+				}
+			}
+			if rest == "" {
+				return true
+			}
+			switch rest[0] {
+			case '.', ';', ')', ':', '|', '\n', '\r', '!':
+				return true
+			case ',':
+				if phrase == "no merge" {
+					return true
+				}
+			case '-':
+				if strings.HasPrefix(rest, "--") || strings.HasPrefix(rest, "- ") {
+					return true
+				}
+			}
+			if strings.HasPrefix(rest, "—") || strings.HasPrefix(rest, "–") {
+				return true
+			}
+		}
+		offset = start + 1
+	}
+	return false
 }
 
 func (b BacklogItem) Clone() BacklogItem {

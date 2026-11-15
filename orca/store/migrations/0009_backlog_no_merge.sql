@@ -1,0 +1,1 @@
+ALTER TABLE backlog_items ADD COLUMN no_merge INTEGER NOT NULL DEFAULT 0;
