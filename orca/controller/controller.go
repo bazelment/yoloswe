@@ -291,6 +291,7 @@ type Controller struct {
 	unpushedSince      map[string]time.Time
 	releaseRetries     map[string]int
 	pendingStops       map[string]int
+	sessionHealthCache map[string]lane.SessionHealth
 	watchErrors        chan error
 	wakeCh             chan struct{}
 	cancelRun          context.CancelFunc
@@ -678,6 +679,8 @@ func (c *Controller) Run(ctx context.Context) error {
 func (c *Controller) Step(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.sessionHealthCache = make(map[string]lane.SessionHealth)
+	defer func() { c.sessionHealthCache = nil }()
 
 	if c.killed {
 		return ErrControllerStopped
@@ -1489,7 +1492,7 @@ func (c *Controller) checkLaneDiskHealth(ctx context.Context, ln *lane.Lane) err
 	if !ok || ln == nil || (strings.TrimSpace(ln.SessionID) == "" && strings.TrimSpace(ln.TerminalID) == "") {
 		return nil
 	}
-	health, err := hr.LaneSessionHealth(ctx, *ln)
+	health, err := c.laneSessionHealth(ctx, *ln, hr)
 	if err != nil {
 		return nil
 	}
@@ -3022,8 +3025,25 @@ func (c *Controller) sessionIsBusy(ctx context.Context, ln lane.Lane) bool {
 	if !ok {
 		return false
 	}
-	health, err := hr.LaneSessionHealth(ctx, ln)
+	health, err := c.laneSessionHealth(ctx, ln, hr)
 	return err == nil && health.HasBusyProcess()
+}
+
+func (c *Controller) laneSessionHealth(ctx context.Context, ln lane.Lane, hr lane.SessionHealthReader) (lane.SessionHealth, error) {
+	key := ln.ID
+	if key == "" {
+		key = ln.SessionID + "\x00" + ln.TerminalID
+	}
+	if health, ok := c.sessionHealthCache[key]; ok {
+		return health, nil
+	}
+	health, err := hr.LaneSessionHealth(ctx, ln)
+	if c.sessionHealthCache != nil {
+		if err == nil {
+			c.sessionHealthCache[key] = health
+		}
+	}
+	return health, err
 }
 
 func (c *Controller) laneIsWorkingOrBusy(ctx context.Context, ln lane.Lane) bool {
