@@ -366,6 +366,7 @@ func NewRunner(
 		StallTimeout:      cfg.StallTimeout,
 		StallTimeoutSet:   cfg.HasExplicitStallTimeout(),
 		ConcurrencyCap:    cfg.ConcurrencyCap,
+		MaxCostPerHourUSD: cfg.MaxCostPerHourUSD,
 	}, st, drv, clk, controller.JudgeFunc(r.judgeBatch), boxes...)
 
 	r.controller = ctrl
@@ -520,8 +521,13 @@ func (r *Runner) Bootstrap(ctx context.Context) error {
 		}
 	}
 	settings, settingsErr := r.store.Runs().GetSettings(ctx, runID)
-	if settingsErr == nil && settings.ConcurrencyCap == 0 && settings.StallTimeout == 0 {
-		_ = r.store.Runs().UpdateSettings(ctx, runID, store.RunSettings{ConcurrencyCap: r.cfg.ConcurrencyCap, StallTimeout: r.cfg.StallTimeout})
+	if settingsErr == nil && settings.ConcurrencyCap == 0 && settings.StallTimeout == 0 && settings.MaxCostPerHourUSD == 0 && !settings.CostGuardDisabled {
+		_ = r.store.Runs().UpdateSettings(ctx, runID, store.RunSettings{
+			ConcurrencyCap:    r.cfg.ConcurrencyCap,
+			StallTimeout:      r.cfg.StallTimeout,
+			MaxCostPerHourUSD: r.cfg.MaxCostPerHourUSD,
+			CostGuardDisabled: r.cfg.MaxCostPerHourUSD == 0,
+		})
 	}
 
 	if err := r.ensureLease(ctx); err != nil {
@@ -636,6 +642,11 @@ func (r *Runner) Step(ctx context.Context) error {
 		r.cfg.ConcurrencyCap = settings.ConcurrencyCap
 		if settings.StallTimeout > 0 {
 			r.cfg.StallTimeout = settings.StallTimeout
+		}
+		if settings.CostGuardDisabled {
+			r.cfg.MaxCostPerHourUSD = 0
+		} else if settings.MaxCostPerHourUSD > 0 {
+			r.cfg.MaxCostPerHourUSD = settings.MaxCostPerHourUSD
 		}
 		r.controller.SetRuntimeSettings(settings)
 		if settings.Paused {

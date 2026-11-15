@@ -2266,3 +2266,101 @@ func TestControllerMergedPRBeforeRetry(t *testing.T) {
 		t.Fatalf("planned merged lane = %+v, want StatusDone PR=5707 MergeSHA=merged-sha-5707", plannedLn)
 	}
 }
+
+func TestControllerCostGuardPausesTurnsAtLimit(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+
+	for i, cost := range []float64{3.25, 2.50} {
+		if _, err := st.Decisions().Append(ctx, store.Decision{
+			RunID:    "run-1",
+			Category: store.DecisionJudgment,
+			Actor:    "dispatcher",
+			Tool:     "dispatcher.turn",
+			Reason:   "prior turn",
+			Result:   "ok",
+			CostUSD:  cost,
+			Vetted:   true,
+		}); err != nil {
+			t.Fatalf("Append decision %d: %v", i, err)
+		}
+	}
+
+	ctrl := controller.New(controller.Config{
+		RunID:             "run-1",
+		MaxCostPerHourUSD: 5.0,
+	}, st, drv, clk, judge)
+
+	if _, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventMail,
+		Urgent:  true,
+		Summary: "urgent mail event while over cost limit",
+	}); err != nil {
+		t.Fatalf("Append event: %v", err)
+	}
+
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	if judge.BatchCount() != 0 {
+		t.Fatalf("judge batches when cost guard exceeded = %d, want 0", judge.BatchCount())
+	}
+	settings, err := st.Runs().GetSettings(ctx, "run-1")
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if !settings.Paused {
+		t.Fatalf("run settings Paused = false, want true when cost guard limit is reached")
+	}
+	if settings.MaxCostPerHourUSD != 0 {
+		t.Fatalf("run settings MaxCostPerHourUSD = %.2f, want 0 (fallback limit must not overwrite run setting)", settings.MaxCostPerHourUSD)
+	}
+
+	// If the owner unpauses while still over the hourly limit, the next Step must
+	// re-pause the run and record another cost.guard decision.
+	settings.Paused = false
+	if err := st.Runs().UpdateSettings(ctx, "run-1", settings); err != nil {
+		t.Fatalf("UpdateSettings(unpause): %v", err)
+	}
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step after unpause: %v", err)
+	}
+	settingsAfter, err := st.Runs().GetSettings(ctx, "run-1")
+	if err != nil {
+		t.Fatalf("GetSettings after unpause: %v", err)
+	}
+	if !settingsAfter.Paused {
+		t.Fatalf("run settings Paused after unpause while over limit = false, want true")
+	}
+
+	// If the owner explicitly disables the cost guard (max_cost_per_hour_usd=0),
+	// SetRuntimeSettings and EnforceCostGuard must honor the disabled setting
+	// instead of falling back to the startup $5 limit.
+	settingsAfter.Paused = false
+	settingsAfter.MaxCostPerHourUSD = 0
+	settingsAfter.CostGuardDisabled = true
+	if err := st.Runs().UpdateSettings(ctx, "run-1", settingsAfter); err != nil {
+		t.Fatalf("UpdateSettings(disable cost guard): %v", err)
+	}
+	ctrl.SetRuntimeSettings(settingsAfter)
+	if _, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventMail,
+		Urgent:  true,
+		Summary: "urgent mail after cost guard disabled",
+	}); err != nil {
+		t.Fatalf("Append event after disable: %v", err)
+	}
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step after cost guard disabled: %v", err)
+	}
+	settingsDisabled, err := st.Runs().GetSettings(ctx, "run-1")
+	if err != nil {
+		t.Fatalf("GetSettings after disable: %v", err)
+	}
+	if settingsDisabled.Paused {
+		t.Fatalf("run settings Paused when CostGuardDisabled=true = true, want false")
+	}
+}

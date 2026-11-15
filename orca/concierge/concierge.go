@@ -69,8 +69,15 @@ type Config struct {
 	RunControl       func(context.Context, string, string) (string, error)
 	RunStart         func(context.Context, string, string) (string, error)
 	OnDirective      DirectiveHandler
+	AgentBackend     model.AgentBackend
+	Provider         string
+	Effort           string
+	LLMGatewayURL    string
+	ClaudeBin        string
+	CodexBin         string
 	Model            string
 	SystemPrompt     string
+	Investigate      model.InvestigateConfig
 	MaxTurns         int
 	MaxTokens        int
 	MaxReadBytes     int
@@ -149,11 +156,12 @@ type RunStartParams struct {
 	Goal string `json:"goal" jsonschema:"required,description=Goal for a new run"`
 }
 type RunSettingsParams struct {
-	Action         string `json:"action" jsonschema:"required,enum=get,enum=set"`
-	ConcurrencyCap *int   `json:"concurrency_cap,omitempty"`
-	StallTimeout   string `json:"stall_timeout,omitempty"`
-	Paused         *bool  `json:"paused,omitempty"`
-	Words          string `json:"words,omitempty"`
+	Action            string   `json:"action" jsonschema:"required,enum=get,enum=set"`
+	ConcurrencyCap    *int     `json:"concurrency_cap,omitempty"`
+	StallTimeout      string   `json:"stall_timeout,omitempty"`
+	Paused            *bool    `json:"paused,omitempty"`
+	MaxCostPerHourUSD *float64 `json:"max_cost_per_hour_usd,omitempty" jsonschema:"description=Optional maximum spend in USD per rolling hour (0 disables the cost guard)"`
+	Words             string   `json:"words,omitempty"`
 }
 
 // Control validates and runs a pause, resume or stop command.
@@ -251,9 +259,15 @@ type Concierge struct {
 	lastResult  *TurnResult
 	editors     map[string]*MemoryEditor
 	lastEditors map[string]*MemoryEditor
+	sessions    model.AgentSessionMap
 	cfg         Config
 	seq         int64
 	mu          sync.Mutex
+}
+
+// Close closes any cached CLI agent sessions held by the Concierge.
+func (c *Concierge) Close() error {
+	return c.sessions.Close()
 }
 
 // New constructs a new Concierge.
@@ -402,7 +416,7 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 	if c.store == nil {
 		return nil, errors.New("orca/concierge: store is required")
 	}
-	if c.client == nil {
+	if c.client == nil && c.cfg.AgentBackend != model.AgentBackendCLI {
 		return nil, errors.New("orca/concierge: model client is required")
 	}
 	question = strings.TrimSpace(question)
@@ -500,24 +514,36 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 	if memories, memErr := c.store.Memories().List(ctx, store.MemoryFilter{RunID: runID}); memErr == nil {
 		systemPrompt += "\n\n## Canonical Memory Index\n" + store.MemoryIndex(memories)
 	}
-	req := model.Request{
-		Model:     c.cfg.Model,
-		System:    systemPrompt,
-		Messages:  msgs,
-		Tools:     reg.Definitions(),
-		MaxTokens: c.cfg.MaxTokens,
-	}
 
-	loopRes, loopErr := model.RunToolLoop(
-		ctx,
-		c.client,
-		req,
-		reg,
-		model.WithMaxTurns(c.cfg.MaxTurns),
-		model.WithOnTurn(func(_ int, resp model.Response) {
-			state.turnUsage = resp.Usage
-			state.turnUsageRecorded = false
-			if txt := strings.TrimSpace(resp.Text()); txt != "" {
+	var (
+		usage     model.Usage
+		turnCount int
+		answer    string
+		loopErr   error
+	)
+	if c.cfg.AgentBackend == model.AgentBackendCLI {
+		turnRes, cliErr := store.RunRoleAgentTurn(ctx, c.store.Threads(), &c.sessions, threadID, threadID, turnID, ActorConcierge, model.AgentSessionConfig{
+			Provider:      c.cfg.Provider,
+			Model:         c.cfg.Model,
+			SystemPrompt:  systemPrompt,
+			Effort:        c.cfg.Effort,
+			LLMGatewayURL: c.cfg.LLMGatewayURL,
+			ClaudeBin:     c.cfg.ClaudeBin,
+			CodexBin:      c.cfg.CodexBin,
+		}, model.AgentTurnRequest{
+			Prompt:       userContent,
+			Model:        c.cfg.Model,
+			SystemPrompt: systemPrompt,
+			Registry:     reg,
+			MaxToolCalls: c.cfg.MaxTurns,
+		}, nil)
+		loopErr = cliErr
+		if turnRes != nil {
+			usage = turnRes.Usage
+			turnCount = turnRes.TurnCount
+			answer = strings.TrimSpace(turnRes.Text)
+			if answer != "" {
+				txt := answer
 				if state.memoryEcho != "" {
 					txt = state.memoryEcho
 				}
@@ -528,45 +554,72 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 					Content:  txt,
 				})
 			}
-			for _, tc := range resp.ToolCalls() {
-				if !reg.Has(tc.Name) {
-					toolName := tc.Name
-					reg.Register(model.ToolDefinition{Name: toolName}, func(callCtx context.Context, raw json.RawMessage) (string, error) {
-						return c.handleRawToolCall(callCtx, runID, state, toolName, raw)
+		}
+		store.AttributeTurnUsage(cleanupCtx, c.store.Decisions(), runID, state.decisions, usage)
+	} else {
+		req := model.Request{
+			Model:     c.cfg.Model,
+			System:    systemPrompt,
+			Messages:  msgs,
+			Tools:     reg.Definitions(),
+			MaxTokens: c.cfg.MaxTokens,
+		}
+
+		loopRes, lErr := model.RunToolLoop(
+			ctx,
+			c.client,
+			req,
+			reg,
+			model.WithMaxTurns(c.cfg.MaxTurns),
+			model.WithOnTurn(func(_ int, resp model.Response) {
+				state.turnUsage = resp.Usage
+				state.turnUsageRecorded = false
+				if txt := strings.TrimSpace(resp.Text()); txt != "" {
+					if state.memoryEcho != "" {
+						txt = state.memoryEcho
+					}
+					_, _ = c.store.Threads().AppendItem(cleanupCtx, store.Item{
+						ThreadID: threadID,
+						TurnID:   turnID,
+						Kind:     store.ItemKindAssistantMessage,
+						Content:  txt,
 					})
 				}
-			}
-		}),
-		model.WithOnToolCall(func(_ int, call model.ToolCall, resBlock model.ContentBlock) {
-			_, _ = c.store.Threads().AppendItem(cleanupCtx, store.Item{
-				ThreadID: threadID,
-				TurnID:   turnID,
-				Kind:     store.ItemKindToolCall,
-				Name:     call.Name,
-				CallID:   call.ID,
-				Payload:  call.Input,
-			})
-			_, _ = c.store.Threads().AppendItem(cleanupCtx, store.Item{
-				ThreadID: threadID,
-				TurnID:   turnID,
-				Kind:     store.ItemKindToolResult,
-				Name:     call.Name,
-				CallID:   call.ID,
-				Content:  resBlock.Content,
-				IsError:  resBlock.IsError,
-			})
-		}),
-	)
-
-	var (
-		usage     model.Usage
-		turnCount int
-		answer    string
-	)
-	if loopRes != nil {
-		usage = loopRes.Usage
-		turnCount = loopRes.TurnCount
-		answer = strings.TrimSpace(loopRes.Response.Text())
+				for _, tc := range resp.ToolCalls() {
+					if !reg.Has(tc.Name) {
+						toolName := tc.Name
+						reg.Register(model.ToolDefinition{Name: toolName}, func(callCtx context.Context, raw json.RawMessage) (string, error) {
+							return c.handleRawToolCall(callCtx, runID, state, toolName, raw)
+						})
+					}
+				}
+			}),
+			model.WithOnToolCall(func(_ int, call model.ToolCall, resBlock model.ContentBlock) {
+				_, _ = c.store.Threads().AppendItem(cleanupCtx, store.Item{
+					ThreadID: threadID,
+					TurnID:   turnID,
+					Kind:     store.ItemKindToolCall,
+					Name:     call.Name,
+					CallID:   call.ID,
+					Payload:  call.Input,
+				})
+				_, _ = c.store.Threads().AppendItem(cleanupCtx, store.Item{
+					ThreadID: threadID,
+					TurnID:   turnID,
+					Kind:     store.ItemKindToolResult,
+					Name:     call.Name,
+					CallID:   call.ID,
+					Content:  resBlock.Content,
+					IsError:  resBlock.IsError,
+				})
+			}),
+		)
+		loopErr = lErr
+		if loopRes != nil {
+			usage = loopRes.Usage
+			turnCount = loopRes.TurnCount
+			answer = strings.TrimSpace(loopRes.Response.Text())
+		}
 	}
 
 	if state.memoryEcho != "" {
@@ -620,17 +673,22 @@ func (c *Concierge) loadThreadMessages(ctx context.Context, threadID string) ([]
 		return nil, err
 	}
 	var msgs []model.Message
+	var pendingUser string
 	for i := range items {
 		it := items[i]
+		txt := strings.TrimSpace(it.Content)
+		if txt == "" {
+			continue
+		}
 		switch it.Kind {
 		case store.ItemKindUserMessage:
-			if strings.TrimSpace(it.Content) != "" {
-				msgs = append(msgs, model.NewUserMessage(it.Content))
-			}
+			pendingUser = it.Content
 		case store.ItemKindAssistantMessage:
-			if strings.TrimSpace(it.Content) != "" {
-				msgs = append(msgs, model.NewAssistantMessage(model.NewTextBlock(it.Content)))
+			if pendingUser != "" {
+				msgs = append(msgs, model.NewUserMessage(pendingUser))
+				pendingUser = ""
 			}
+			msgs = append(msgs, model.NewAssistantMessage(model.NewTextBlock(it.Content)))
 		}
 	}
 	return msgs, nil
@@ -643,6 +701,9 @@ func (c *Concierge) buildToolRegistry(runID string, state *conciergeTurnState) *
 		reg.Register(def, func(ctx context.Context, raw json.RawMessage) (string, error) {
 			return c.handleRawToolCall(ctx, runID, state, def.Name, raw)
 		})
+	}
+	if c.cfg.AgentBackend == model.AgentBackendCLI || c.cfg.Investigate.RunDir != "" || c.cfg.Investigate.RepoDir != "" {
+		model.RegisterInvestigationTools(reg, c.cfg.Investigate)
 	}
 	return reg
 }
@@ -812,9 +873,15 @@ func (c *Concierge) execStatus(ctx context.Context, runID string, p StatusParams
 	fmt.Fprintf(&b, "Run: %s\n", run.ID)
 	fmt.Fprintf(&b, "Now: %s\n", now.Format(time.RFC3339))
 	fmt.Fprintf(&b, "Objective: %s\n", cmp.Or(strings.TrimSpace(run.Objective), "(none)"))
+	if store.ObjectiveIsDone(run.Objective) {
+		b.WriteString("Current Status: DONE (latest Next: says run is done; no open work — ignore older Open/Next sections above)\n")
+	}
+	if curNext := store.ExtractNextSection(run.Objective); curNext != "" {
+		fmt.Fprintf(&b, "Current Next: %s\n", curNext)
+	}
 	fmt.Fprintf(&b, "PlanRef: %s\n", cmp.Or(strings.TrimSpace(run.PlanRef), "(none)"))
 	fmt.Fprintf(&b, "DefaultRecipe: %s\n", cmp.Or(strings.TrimSpace(run.DefaultRecipe), recipe.DefaultName))
-	fmt.Fprintf(&b, "Settings: concurrency_cap=%d stall_timeout=%s paused=%t\n", settings.ConcurrencyCap, settings.StallTimeout, settings.Paused)
+	fmt.Fprintf(&b, "Settings: %s\n", settings.String())
 	if run.Lease != nil {
 		fmt.Fprintf(&b, "Lease: holder=%s expires=%s expired=%t\n",
 			run.Lease.HolderID, run.Lease.ExpiresAt.UTC().Format(time.RFC3339), run.Lease.Expired(now))
@@ -904,13 +971,17 @@ func (c *Concierge) execStatus(ctx context.Context, runID string, p StatusParams
 	return truncateUTF8(b.String(), c.cfg.MaxReadBytes), nil
 }
 
+func formatRunSettingsSummary(s store.RunSettings) string {
+	return s.String()
+}
+
 func (c *Concierge) execRunSettings(ctx context.Context, runID string, p RunSettingsParams) (string, error) {
 	current, err := c.store.Runs().GetSettings(ctx, runID)
 	if err != nil {
 		return "", err
 	}
 	if p.Action == "" || p.Action == "get" {
-		return fmt.Sprintf("run settings: concurrency_cap=%d stall_timeout=%s paused=%t", current.ConcurrencyCap, current.StallTimeout, current.Paused), nil
+		return "run settings: " + formatRunSettingsSummary(current), nil
 	}
 	if p.Action != "set" {
 		return "", fmt.Errorf("run.settings action must be get or set")
@@ -932,15 +1003,23 @@ func (c *Concierge) execRunSettings(ctx context.Context, runID string, p RunSett
 	if p.Paused != nil {
 		next.Paused = *p.Paused
 	}
+	if p.MaxCostPerHourUSD != nil {
+		if *p.MaxCostPerHourUSD < 0 {
+			return "", fmt.Errorf("run.settings max_cost_per_hour_usd must be >= 0")
+		}
+		next.MaxCostPerHourUSD = *p.MaxCostPerHourUSD
+		next.CostGuardDisabled = *p.MaxCostPerHourUSD == 0
+	}
 	if err := c.store.Runs().UpdateSettings(ctx, runID, next); err != nil {
 		return "", err
 	}
+	summary := formatRunSettingsSummary(next)
 	words := cmp.Or(strings.TrimSpace(p.Words), "owner updated run settings")
-	_, err = c.store.Decisions().Append(ctx, store.Decision{ID: c.nextID("settings"), RunID: runID, Category: store.DecisionJudgment, Actor: ActorConcierge, Tool: ToolRunSettings, Reason: words, Result: fmt.Sprintf("concurrency_cap=%d stall_timeout=%s paused=%t", next.ConcurrencyCap, next.StallTimeout, next.Paused), Vetted: true})
+	_, err = c.store.Decisions().Append(ctx, store.Decision{ID: c.nextID("settings"), RunID: runID, Category: store.DecisionJudgment, Actor: ActorConcierge, Tool: ToolRunSettings, Reason: words, Result: summary, Vetted: true})
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("run settings updated: concurrency_cap=%d stall_timeout=%s paused=%t", next.ConcurrencyCap, next.StallTimeout, next.Paused), nil
+	return "run settings updated: " + summary, nil
 }
 
 func (c *Concierge) execLaneShow(ctx context.Context, runID string, p LaneShowParams) (string, error) {

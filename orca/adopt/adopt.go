@@ -27,6 +27,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bazelment/yoloswe/orca/store"
 )
 
 const (
@@ -173,12 +175,27 @@ func sanitizeObjectivePlanLines(dir, obj string) string {
 }
 
 func isEmptyNextText(s string) bool {
-	switch strings.ToLower(strings.Trim(strings.TrimSpace(s), ".")) {
-	case "", "none", "n/a", "nil", "done", "complete", "completed", "nothing", "-":
-		return true
-	default:
-		return false
-	}
+	return store.IsDoneOrEmptyNext(s)
+}
+
+// IsDoneOrEmptyNext reports whether a Next: value indicates there is no remaining work.
+func IsDoneOrEmptyNext(s string) bool {
+	return store.IsDoneOrEmptyNext(s)
+}
+
+func hasExplicitNextSection(sources ...string) bool {
+	return store.HasExplicitNextSection(sources...)
+}
+
+// ObjectiveIsDone reports whether the latest Next: or status lines in md
+// declare the run done/complete with no remaining work.
+func ObjectiveIsDone(md string) bool {
+	return store.ObjectiveIsDone(md)
+}
+
+// CurrentNextSection extracts the latest Next: line or # Next section from sources.
+func CurrentNextSection(sources ...string) string {
+	return store.ExtractNextSection(sources...)
 }
 
 var uncheckedTaskItemRE = regexp.MustCompile(`(?m)^\s*(?:[-*+]|\d+[.)])\s+\[\s\]`)
@@ -186,12 +203,19 @@ var uncheckedTaskItemRE = regexp.MustCompile(`(?m)^\s*(?:[-*+]|\d+[.)])\s+\[\s\]
 // HasNextWork reports whether the run's objective/progress states open Next:
 // work or unchecked items beyond the currently imported lanes.
 func (r Run) HasNextWork() bool {
+	if ObjectiveIsDone(r.Objective) || (r.Objective == "" && ObjectiveIsDone(r.Progress)) {
+		return false
+	}
 	next := strings.TrimSpace(r.Next)
+	hasExplicit := next != "" || hasExplicitNextSection(r.Objective, r.Progress)
 	if next == "" && r.Objective != "" {
 		next = strings.TrimSpace(extractNextSection(r.Objective))
 	}
 	if !isEmptyNextText(next) {
 		return true
+	}
+	if hasExplicit {
+		return false
 	}
 	return uncheckedTaskItemRE.MatchString(r.Objective)
 }
@@ -555,55 +579,7 @@ func extractPlanPath(dir string, sources ...string) string {
 }
 
 func extractNextSection(sources ...string) string {
-	for _, src := range sources {
-		lines := strings.Split(src, "\n")
-		for i := 0; i < len(lines); i++ {
-			trimmed := strings.TrimSpace(lines[i])
-			clean := strings.TrimLeft(trimmed, "-* \t")
-			lower := strings.ToLower(clean)
-			if strings.HasPrefix(lower, "next:") {
-				rest := strings.TrimSpace(clean[len("next:"):])
-				var parts []string
-				if rest != "" {
-					parts = append(parts, rest)
-				}
-				for j := i + 1; j < len(lines); j++ {
-					nextLine := lines[j]
-					nextTrim := strings.TrimSpace(nextLine)
-					if nextTrim == "" || strings.HasPrefix(nextTrim, "#") {
-						break
-					}
-					if strings.HasPrefix(nextLine, " ") || strings.HasPrefix(nextLine, "\t") || strings.HasPrefix(nextTrim, "- ") || strings.HasPrefix(nextTrim, "* ") {
-						parts = append(parts, nextTrim)
-						continue
-					}
-					break
-				}
-				if len(parts) > 0 {
-					return strings.Join(parts, "\n")
-				}
-			}
-			if strings.HasPrefix(trimmed, "#") {
-				heading := strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "#")))
-				if heading == "next" || strings.HasPrefix(heading, "next ") || strings.HasPrefix(heading, "next:") {
-					var parts []string
-					for j := i + 1; j < len(lines); j++ {
-						nextTrim := strings.TrimSpace(lines[j])
-						if strings.HasPrefix(nextTrim, "#") {
-							break
-						}
-						if nextTrim != "" {
-							parts = append(parts, nextTrim)
-						}
-					}
-					if len(parts) > 0 {
-						return strings.Join(parts, "\n")
-					}
-				}
-			}
-		}
-	}
-	return ""
+	return store.ExtractNextSection(sources...)
 }
 
 // stripMarker drops orca's stand-down lines and surrounding blank space.

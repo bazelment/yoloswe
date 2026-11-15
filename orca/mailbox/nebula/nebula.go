@@ -29,10 +29,12 @@ type Config struct {
 
 //nolint:govet // logical field grouping
 type Mailbox struct {
-	c      Config
-	mu     sync.Mutex
-	cursor string
-	seen   map[string]struct{}
+	c           Config
+	mu          sync.Mutex
+	cursor      string
+	seen        map[string]struct{}
+	adoptCutoff time.Time
+	store       store.Store
 }
 
 func New(c Config) (*Mailbox, error) {
@@ -47,6 +49,28 @@ func New(c Config) (*Mailbox, error) {
 	}
 	return &Mailbox{c: c, seen: make(map[string]struct{})}, nil
 }
+
+// SetAdoptCutoff configures the adopt timestamp so mail older than cutoff is
+// marked as already seen and summarized once rather than replayed per message.
+func (m *Mailbox) SetAdoptCutoff(cutoff time.Time, st store.Store) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !cutoff.IsZero() {
+		m.adoptCutoff = cutoff.UTC()
+	}
+	if st != nil {
+		m.store = st
+	}
+}
+
+// SyncAdoptCutoff polls the mailbox once and marks any mail older than the
+// adopt cutoff as already seen, recording a single summary event and decision.
+func (m *Mailbox) SyncAdoptCutoff(ctx context.Context) error {
+	m.seedFromStore(ctx)
+	_, err := m.pollOnce(ctx)
+	return err
+}
+
 func (m *Mailbox) req(ctx context.Context, method, path string, body any) (map[string]any, error) {
 	var r *http.Request
 	var err error
@@ -84,6 +108,11 @@ func (m *Mailbox) Answer(ctx context.Context, msgID, body string) error {
 	_, err := m.req(ctx, http.MethodPost, path, map[string]any{"answer": body, "body": body, "runId": m.c.RunID})
 	return err
 }
+func (m *Mailbox) Dismiss(ctx context.Context, msgID, reason string) error {
+	path := "/api/mail/" + url.PathEscape(msgID) + "/dismiss"
+	_, err := m.req(ctx, http.MethodPost, path, map[string]any{"reason": reason, "body": reason, "status": "dismissed", "runId": m.c.RunID})
+	return err
+}
 func (m *Mailbox) Reply(ctx context.Context, laneID, msgID, body string) error {
 	payload := map[string]any{"inReplyTo": msgID, "body": body, "runId": m.c.RunID}
 	if laneID != "" {
@@ -104,6 +133,150 @@ func (m *Mailbox) AskOwner(ctx context.Context, q mailbox.Question) (string, err
 	}
 	return "", nil
 }
+
+func (m *Mailbox) isOlderThanAdopt(ctx context.Context, msg mailbox.Message) bool {
+	m.mu.Lock()
+	cutoff := m.adoptCutoff
+	st := m.store
+	m.mu.Unlock()
+	if cutoff.IsZero() {
+		return false
+	}
+	ts, ok := msg.ParseCreatedAt()
+	if !ok || ts.After(cutoff) {
+		return false
+	}
+	if msg.IsQuestion() && !msg.IsClosedOrAnswered() && st != nil && strings.TrimSpace(msg.LaneID) != "" {
+		if ln, err := st.Lanes().Get(ctx, m.c.RunID, strings.TrimSpace(msg.LaneID)); err == nil && ln != nil && !ln.Status.Terminal() && strings.TrimSpace(ln.MergeSHA) == "" {
+			if !mailbox.IsAnswered(ctx, st, m.c.RunID, msg.ID, "") {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (m *Mailbox) pollOnce(ctx context.Context) ([]store.Event, error) {
+	q := url.Values{}
+	host := m.c.Host || (strings.TrimSpace(m.c.SessionID) == "" && strings.TrimSpace(os.Getenv("NEBULA_SESSION_ID")) == "")
+	if host {
+		q.Set("box", "host")
+		q.Set("run", m.c.RunID)
+	}
+	cur := m.getCursor()
+	if cur != "" {
+		q.Set("cursor", cur)
+	}
+	v, err := m.req(ctx, http.MethodGet, "/api/mail?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	st := m.store
+	m.mu.Unlock()
+
+	nextCursor, _ := v["nextCursor"].(string)
+	arr, ok := v["messages"].([]any)
+	if !ok {
+		return nil, nil
+	}
+	pageOK := true
+	msgs := make([]mailbox.Message, 0, len(arr))
+	keys := make([]string, 0, len(arr))
+	unseen := make([]bool, 0, len(arr))
+	lastUnseen := -1
+	for i, raw := range arr {
+		b, marshalErr := json.Marshal(raw)
+		if marshalErr != nil {
+			pageOK = false
+			break
+		}
+		var msg mailbox.Message
+		if unmarshalErr := json.Unmarshal(b, &msg); unmarshalErr != nil {
+			pageOK = false
+			break
+		}
+		key := m.messageSeenKey(msg)
+		isUnseen := !m.checkOrMarkSeen(key, false)
+		if isUnseen {
+			lastUnseen = i
+		}
+		msgs = append(msgs, msg)
+		keys = append(keys, key)
+		unseen = append(unseen, isUnseen)
+	}
+	if !pageOK {
+		return nil, nil
+	}
+
+	var (
+		oldMsgs  []mailbox.Message
+		oldKeys  []string
+		oldIDs   []string
+		appended []store.Event
+	)
+	for i := range msgs {
+		msg := msgs[i]
+		key := keys[i]
+		if !unseen[i] {
+			continue
+		}
+		if m.isOlderThanAdopt(ctx, msg) {
+			m.checkOrMarkSeen(key, true)
+			oldMsgs = append(oldMsgs, msg)
+			oldKeys = append(oldKeys, key)
+			if msg.ID != "" {
+				oldIDs = append(oldIDs, msg.ID)
+			}
+			continue
+		}
+		if i == lastUnseen && nextCursor != "" && msg.Cursor == "" {
+			msg.Cursor = nextCursor
+		}
+		ev, appendErr := mailbox.AppendEvent(ctx, m.c.Events, m.c.RunID, msg)
+		if appendErr != nil {
+			pageOK = false
+			break
+		}
+		m.checkOrMarkSeen(key, true)
+		appended = append(appended, ev)
+	}
+	if len(oldMsgs) > 0 {
+		summary := mailbox.FormatAdoptMailSummary(oldMsgs)
+		payload, _ := json.Marshal(mailbox.AdoptMailSummaryPayload{
+			Cursor:     nextCursor,
+			SeenKeys:   oldKeys,
+			MessageIDs: oldIDs,
+			Count:      len(oldMsgs),
+		})
+		summaryEv, sErr := m.c.Events.Append(ctx, store.Event{
+			RunID:   m.c.RunID,
+			Kind:    store.EventMail,
+			Class:   store.EventClassAuto,
+			Source:  mailbox.AdoptMailSummarySource,
+			Summary: summary,
+			Payload: payload,
+		})
+		if sErr == nil {
+			appended = append([]store.Event{summaryEv}, appended...)
+		}
+		if st != nil {
+			_, _ = st.Decisions().Append(ctx, store.Decision{
+				RunID:  m.c.RunID,
+				Actor:  "controller",
+				Tool:   mailbox.AdoptMailSummaryTool,
+				Reason: "mark host mail older than adopt as seen",
+				Result: summary,
+				Vetted: true,
+			})
+		}
+	}
+	if pageOK && nextCursor != "" {
+		m.setCursor(nextCursor)
+	}
+	return appended, nil
+}
+
 func (m *Mailbox) Watch(ctx context.Context) (<-chan store.Event, error) {
 	m.seedFromStore(ctx)
 	out := make(chan store.Event)
@@ -112,67 +285,13 @@ func (m *Mailbox) Watch(ctx context.Context) (<-chan store.Event, error) {
 		ticker := time.NewTicker(m.c.PollInterval)
 		defer ticker.Stop()
 		for {
-			q := url.Values{}
-			host := m.c.Host || (strings.TrimSpace(m.c.SessionID) == "" && strings.TrimSpace(os.Getenv("NEBULA_SESSION_ID")) == "")
-			if host {
-				q.Set("box", "host")
-				q.Set("run", m.c.RunID)
-			}
-			cur := m.getCursor()
-			if cur != "" {
-				q.Set("cursor", cur)
-			}
-			v, err := m.req(ctx, http.MethodGet, "/api/mail?"+q.Encode(), nil)
+			appended, err := m.pollOnce(ctx)
 			if err == nil {
-				nextCursor, _ := v["nextCursor"].(string)
-				if arr, ok := v["messages"].([]any); ok {
-					pageOK := true
-					msgs := make([]mailbox.Message, 0, len(arr))
-					keys := make([]string, 0, len(arr))
-					lastUnseen := -1
-					for i, raw := range arr {
-						b, marshalErr := json.Marshal(raw)
-						if marshalErr != nil {
-							pageOK = false
-							break
-						}
-						var msg mailbox.Message
-						if unmarshalErr := json.Unmarshal(b, &msg); unmarshalErr != nil {
-							pageOK = false
-							break
-						}
-						key := m.messageSeenKey(msg)
-						if !m.checkOrMarkSeen(key, false) {
-							lastUnseen = i
-						}
-						msgs = append(msgs, msg)
-						keys = append(keys, key)
-					}
-					if pageOK {
-						for i := range msgs {
-							msg := msgs[i]
-							key := keys[i]
-							if m.checkOrMarkSeen(key, false) {
-								continue
-							}
-							if i == lastUnseen && nextCursor != "" && msg.Cursor == "" {
-								msg.Cursor = nextCursor
-							}
-							ev, appendErr := mailbox.AppendEvent(ctx, m.c.Events, m.c.RunID, msg)
-							if appendErr != nil {
-								pageOK = false
-								break
-							}
-							m.checkOrMarkSeen(key, true)
-							select {
-							case out <- ev:
-							case <-ctx.Done():
-								return
-							}
-						}
-					}
-					if pageOK && nextCursor != "" {
-						m.setCursor(nextCursor)
+				for i := range appended {
+					select {
+					case out <- appended[i]:
+					case <-ctx.Done():
+						return
 					}
 				}
 			}
@@ -204,6 +323,25 @@ func (m *Mailbox) seedFromStore(ctx context.Context) {
 	}
 	for i := range evs {
 		ev := &evs[i]
+		if ev.Source == mailbox.AdoptMailSummarySource && len(ev.Payload) > 0 {
+			var sum mailbox.AdoptMailSummaryPayload
+			if json.Unmarshal(ev.Payload, &sum) == nil {
+				for _, k := range sum.SeenKeys {
+					if k != "" {
+						m.seen[k] = struct{}{}
+					}
+				}
+				for _, id := range sum.MessageIDs {
+					if id != "" {
+						m.seen[id] = struct{}{}
+					}
+				}
+				if sum.Cursor != "" {
+					m.cursor = sum.Cursor
+				}
+			}
+			continue
+		}
 		var msg mailbox.Message
 		if len(ev.Payload) > 0 && json.Unmarshal(ev.Payload, &msg) == nil {
 			if key := m.messageSeenKey(msg); key != "" {

@@ -79,7 +79,36 @@ func (m Message) IsQuestion() bool {
 // IsClosedOrAnswered reports whether a question message is already answered or closed.
 func (m Message) IsClosedOrAnswered() bool {
 	st := strings.ToLower(strings.TrimSpace(m.Status))
-	return st == "answered" || st == "closed" || st == "resolved" || strings.TrimSpace(m.Answer) != ""
+	switch st {
+	case "answered", "closed", "resolved", "withdrawn", "dismissed", "obsolete", "cancelled", "canceled", "superseded", "expired":
+		return true
+	}
+	if strings.TrimSpace(m.Answer) != "" {
+		return true
+	}
+	lowerBody := strings.ToLower(strings.TrimSpace(m.Body))
+	if strings.HasPrefix(lowerBody, "withdrawn:") ||
+		strings.HasPrefix(lowerBody, "[withdrawn]") ||
+		strings.Contains(lowerBody, "(withdrawn") ||
+		strings.Contains(lowerBody, "question withdrawn") {
+		return true
+	}
+	return false
+}
+
+// ParseCreatedAt parses CreatedAt if present (accepting RFC3339Nano or RFC3339).
+func (m Message) ParseCreatedAt() (time.Time, bool) {
+	raw := strings.TrimSpace(m.CreatedAt)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return t.UTC(), true
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t.UTC(), true
+	}
+	return time.Time{}, false
 }
 
 // UnmarshalJSON accepts both canonical snake_case fields and Nebula /api/mail camelCase fields.
@@ -129,6 +158,89 @@ type Mailbox interface {
 type Responder interface {
 	Answer(ctx context.Context, msgID, body string) error
 	Reply(ctx context.Context, laneID, msgID, body string) error
+}
+
+// Dismisser is an optional interface implemented by mailboxes that support
+// dismissing or resolving a stale/obsolete question (`nebula mail dismiss`).
+type Dismisser interface {
+	Dismiss(ctx context.Context, msgID, reason string) error
+}
+
+// Dismiss closes a stale/obsolete lane question on box if supported.
+func Dismiss(ctx context.Context, box Mailbox, msg Message, reason string) error {
+	if box == nil {
+		return nil
+	}
+	msg.Normalize()
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "stale or obsolete question"
+	}
+	if msg.ID != "" {
+		if d, ok := box.(Dismisser); ok {
+			return d.Dismiss(ctx, msg.ID, reason)
+		}
+		if r, ok := box.(Responder); ok && msg.IsQuestion() {
+			return r.Answer(ctx, msg.ID, "dismissed: "+reason)
+		}
+	}
+	return nil
+}
+
+// AdoptMailSummarySource is the Event.Source used for the single adopt mail summary event.
+const AdoptMailSummarySource = "adopt.mail_summary"
+
+// AdoptMailSummaryTool is the Decision.Tool used for the single adopt mail summary decision.
+const AdoptMailSummaryTool = "mail.adopt_summary"
+
+// AdoptMailSummaryPayload records the messages marked seen during adopt.
+type AdoptMailSummaryPayload struct {
+	Cursor     string   `json:"cursor,omitempty"`
+	SeenKeys   []string `json:"seen_keys,omitempty"`
+	MessageIDs []string `json:"message_ids,omitempty"`
+	Count      int      `json:"count"`
+}
+
+// AdoptCutoffSetter is implemented by mailboxes that can mark mail older than
+// an adopt cutoff as already seen and emit a single summary line.
+type AdoptCutoffSetter interface {
+	SetAdoptCutoff(cutoff time.Time, st store.Store)
+	SyncAdoptCutoff(ctx context.Context) error
+}
+
+// FormatAdoptMailSummary renders a concise one-line summary for host mails
+// marked seen on adopt.
+func FormatAdoptMailSummary(msgs []Message) string {
+	if len(msgs) == 0 {
+		return ""
+	}
+	var previews []string
+	for i := range msgs {
+		if len(previews) >= 4 {
+			break
+		}
+		m := msgs[i]
+		m.Normalize()
+		who := strings.TrimSpace(cmp.Or(m.LaneID, m.From, "host"))
+		body := strings.Join(strings.Fields(strings.TrimSpace(m.Body)), " ")
+		if len(body) > 48 {
+			body = body[:48] + "..."
+		}
+		if body != "" {
+			previews = append(previews, who+": "+body)
+		} else {
+			previews = append(previews, who)
+		}
+	}
+	suffix := ""
+	if len(previews) > 0 {
+		suffix = " (" + strings.Join(previews, "; ")
+		if len(msgs) > len(previews) {
+			suffix += fmt.Sprintf("; +%d more", len(msgs)-len(previews))
+		}
+		suffix += ")"
+	}
+	return fmt.Sprintf("adopted mail summary: %d prior host message(s) marked seen%s", len(msgs), suffix)
 }
 
 // Respond answers a lane question on its message ID, replies to a lane note with
@@ -270,18 +382,47 @@ func IsAnswered(ctx context.Context, st store.Store, runID, msgID, eventID strin
 	return (msgID != "" && answered[msgID]) || (eventID != "" && answered[eventID])
 }
 
+// IsQuestionObsoleteOrClosed reports whether an owner ask or lane question is
+// already answered, withdrawn, dismissed, or belongs to a completed/merged lane.
+func IsQuestionObsoleteOrClosed(ctx context.Context, st store.Store, runID, laneID, msgID, eventID, questionText string) bool {
+	if st == nil || strings.TrimSpace(runID) == "" {
+		return false
+	}
+	lowerQ := strings.ToLower(strings.TrimSpace(questionText))
+	if strings.HasPrefix(lowerQ, "withdrawn:") ||
+		strings.HasPrefix(lowerQ, "[withdrawn]") ||
+		strings.Contains(lowerQ, "(withdrawn") ||
+		strings.Contains(lowerQ, "question withdrawn") {
+		return true
+	}
+	if laneID = strings.TrimSpace(laneID); laneID != "" {
+		if ln, err := st.Lanes().Get(ctx, runID, laneID); err == nil && ln != nil {
+			if ln.Status.Terminal() || strings.TrimSpace(ln.MergeSHA) != "" {
+				return true
+			}
+		}
+	}
+	msgID = strings.TrimSpace(msgID)
+	eventID = strings.TrimSpace(eventID)
+	if msgID == "" && eventID == "" {
+		return false
+	}
+	return IsAnswered(ctx, st, runID, msgID, eventID)
+}
+
 func collectAnsweredMailState(ctx context.Context, st store.Store, runID string, now time.Time) (map[string]bool, map[string]string, []decodedMail, error) {
 	answered := make(map[string]bool)
 	escalatedAskID := make(map[string]string)
 	if st == nil {
 		return answered, escalatedAskID, nil, nil
 	}
-	evs, err := st.Events().List(ctx, store.EventFilter{
-		RunID: runID,
-		Kinds: []store.EventKind{store.EventMail},
-	})
-	if err != nil || len(evs) == 0 {
-		return answered, escalatedAskID, nil, err
+	obsoleteLane := make(map[string]bool)
+	if lanes, lErr := st.Lanes().List(ctx, store.LaneFilter{RunID: runID}); lErr == nil {
+		for i := range lanes {
+			if lanes[i].Status.Terminal() || strings.TrimSpace(lanes[i].MergeSHA) != "" {
+				obsoleteLane[strings.TrimSpace(lanes[i].ID)] = true
+			}
+		}
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -316,6 +457,19 @@ func collectAnsweredMailState(ctx context.Context, st store.Store, runID string,
 				}
 				if json.Unmarshal([]byte(d.Text), &ask) == nil {
 					askID := cmp.Or(strings.TrimSpace(ask.ID), strings.TrimPrefix(d.Ref, "owner_ask:"), strings.TrimPrefix(d.ID, "owner_ask:"))
+					laneID := strings.TrimSpace(cmp.Or(ask.LaneID, d.Scope))
+					if obsoleteLane[laneID] {
+						if ask.ID != "" {
+							answered[ask.ID] = true
+						}
+						if ask.SourceEventID != "" {
+							answered[ask.SourceEventID] = true
+						}
+						if ask.SourceMessageID != "" {
+							answered[ask.SourceMessageID] = true
+						}
+						continue
+					}
 					if d.Status == store.DirectiveHandled && !heldAskIDs[askID] {
 						if ask.ID != "" {
 							answered[ask.ID] = true
@@ -348,7 +502,8 @@ func collectAnsweredMailState(ctx context.Context, st store.Store, runID string,
 			if !dec.Vetted || res == "" || strings.HasPrefix(res, "error:") || strings.HasPrefix(res, "rejected:") {
 				continue
 			}
-			if dec.Tool == "worker.question.answer" || dec.Tool == "mail.answer" {
+			switch dec.Tool {
+			case "worker.question.answer", "mail.answer", "mail.dismiss", "mail.resolve", "worker.question.dismiss", "question.dismiss":
 				var args struct {
 					MessageID string `json:"message_id"`
 					ID        string `json:"id"`
@@ -368,17 +523,36 @@ func collectAnsweredMailState(ctx context.Context, st store.Store, runID string,
 			}
 		}
 	}
+	evs, err := st.Events().List(ctx, store.EventFilter{
+		RunID: runID,
+		Kinds: []store.EventKind{store.EventMail},
+	})
+	if err != nil || len(evs) == 0 {
+		return answered, escalatedAskID, nil, err
+	}
 	decoded := make([]decodedMail, 0, len(evs))
 	for i := range evs {
 		ev := evs[i]
+		if ev.Source == AdoptMailSummarySource {
+			var sum AdoptMailSummaryPayload
+			if len(ev.Payload) > 0 && json.Unmarshal(ev.Payload, &sum) == nil {
+				for _, id := range sum.MessageIDs {
+					if id != "" {
+						answered[id] = true
+					}
+				}
+			}
+			continue
+		}
 		var msg Message
 		if len(ev.Payload) == 0 || json.Unmarshal(ev.Payload, &msg) != nil {
 			continue
 		}
+		laneID := strings.TrimSpace(cmp.Or(msg.LaneID, ev.LaneID))
 		if msg.InReplyTo != "" {
 			answered[msg.InReplyTo] = true
 		}
-		if msg.IsClosedOrAnswered() {
+		if msg.IsClosedOrAnswered() || obsoleteLane[laneID] {
 			if msg.ID != "" {
 				answered[msg.ID] = true
 			}

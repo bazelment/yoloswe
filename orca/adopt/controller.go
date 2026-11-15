@@ -20,6 +20,7 @@ import (
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
+	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/mailbox"
 	"github.com/bazelment/yoloswe/orca/recipe"
@@ -34,18 +35,19 @@ const escalationAskTTL = 24 * time.Hour
 
 // Controllers attaches host runs to orca's deterministic lane lifecycle.
 type Controllers struct {
-	ctx          context.Context
-	store        store.Store
-	driver       lane.LaneDriver
-	clock        clock.Clock
-	judges       JudgeFactory
-	Mailboxes    func(runID string) []mailbox.Mailbox
-	PRProbe      controller.PRProbe
-	Planner      func(ctx context.Context, runID, reason, planRef string) error
-	ledgerScript *string
-	runs         map[string]*controlledRun
-	starting     map[string]*startup
-	mu           sync.Mutex
+	ctx               context.Context
+	store             store.Store
+	driver            lane.LaneDriver
+	clock             clock.Clock
+	judges            JudgeFactory
+	Mailboxes         func(runID string) []mailbox.Mailbox
+	PRProbe           controller.PRProbe
+	Planner           func(ctx context.Context, runID, reason, planRef string) error
+	ledgerScript      *string
+	runs              map[string]*controlledRun
+	starting          map[string]*startup
+	MaxCostPerHourUSD float64
+	mu                sync.Mutex
 }
 
 //nolint:govet // field alignment
@@ -264,6 +266,16 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	if setter, ok := dispatch.(interface{ SetMailboxes(...mailbox.Mailbox) }); ok && len(boxes) > 0 {
 		setter.SetMailboxes(boxes...)
 	}
+	adoptedAt := parseAdoptCutoff(generation, d.clock)
+	for i := range boxes {
+		if setter, ok := boxes[i].(mailbox.AdoptCutoffSetter); ok {
+			setter.SetAdoptCutoff(adoptedAt, runStore)
+			_ = setter.SyncAdoptCutoff(ctx)
+		}
+	}
+	if !r.HasNextWork() || ObjectiveIsDone(r.Objective) {
+		expireHoldDirectivesIfRunDone(ctx, runStore, r.ID)
+	}
 	runDriver := d.driver
 	if runDriver != nil {
 		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: runStore}
@@ -274,10 +286,11 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		}
 	}
 	ctrl = controller.New(controller.Config{
-		RunID:         r.ID,
-		HolderID:      holder,
-		PRProbe:       d.PRProbe,
-		JudgeLaneMail: true,
+		RunID:             r.ID,
+		HolderID:          holder,
+		PRProbe:           d.PRProbe,
+		JudgeLaneMail:     true,
+		MaxCostPerHourUSD: d.MaxCostPerHourUSD,
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
 	cr := &controlledRun{
@@ -337,6 +350,64 @@ func markerGeneration(marker string) string {
 		return strings.TrimSpace(s[:open])
 	}
 	return strings.TrimSpace(s)
+}
+
+func parseAdoptCutoff(marker string, clk clock.Clock) time.Time {
+	gen := markerGeneration(marker)
+	if gen != "" {
+		if t, err := time.Parse(time.RFC3339Nano, gen); err == nil {
+			return t.UTC()
+		}
+		if t, err := time.Parse(time.RFC3339, gen); err == nil {
+			return t.UTC()
+		}
+	}
+	if clk != nil {
+		return clk.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func expireHoldDirectivesIfRunDone(ctx context.Context, st store.Store, runID string) {
+	if st == nil || strings.TrimSpace(runID) == "" {
+		return
+	}
+	lanes, err := st.Lanes().List(ctx, store.LaneFilter{RunID: runID})
+	if err != nil {
+		return
+	}
+	for i := range lanes {
+		if !lanes[i].Status.Terminal() {
+			return
+		}
+	}
+	items, err := st.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
+	if err != nil {
+		return
+	}
+	terminalLanes := make(map[string]bool, len(lanes))
+	for i := range lanes {
+		terminalLanes[lanes[i].ID] = true
+	}
+	for i := range items {
+		it := &items[i]
+		if !it.Status.Terminal() && !terminalLanes[it.ID] && !terminalLanes[it.LaneID] {
+			return
+		}
+	}
+	dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	if err != nil {
+		return
+	}
+	for i := range dirs {
+		d := &dirs[i]
+		if d.Kind != store.DirectiveStanding && d.Kind != store.DirectiveInstruction {
+			continue
+		}
+		if dispatcher.IsHoldDirectiveText(d.Text) {
+			_ = st.Directives().UpdateStatus(ctx, runID, d.ID, store.DirectiveExpired)
+		}
+	}
 }
 
 func sameAdoptionGeneration(storedPlanRef, currentMarker string) bool {
@@ -522,7 +593,15 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 		return false, nil
 	}
 	curRun := cr.syncer.CurrentRun()
-	if !curRun.HasNextWork() {
+	if !curRun.HasNextWork() || ObjectiveIsDone(curRun.Objective) {
+		expireHoldDirectivesIfRunDone(ctx, d.store, runID)
+		return false, nil
+	}
+	now := d.clock.Now().UTC()
+	if paused, _, _, _, _ := store.EnforceCostGuard(ctx, d.store, runID, now, d.MaxCostPerHourUSD); paused {
+		return false, nil
+	}
+	if settings, sErr := d.store.Runs().GetSettings(ctx, runID); sErr == nil && settings.Paused {
 		return false, nil
 	}
 	lanes, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
@@ -552,7 +631,6 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 	if err != nil {
 		return false, err
 	}
-	now := d.clock.Now().UTC()
 	for i := range dirs {
 		dir := &dirs[i]
 		if strings.HasPrefix(dir.Ref, ownerAskRef) && (dir.ExpiresAt == nil || now.Before(*dir.ExpiresAt)) {
@@ -582,6 +660,7 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 	}
 	err = plannerFn(ctx, runID, reason.String(), planRef)
 	stop()
+	_, _, _, _, _ = store.EnforceCostGuard(ctx, d.store, runID, d.clock.Now().UTC(), d.MaxCostPerHourUSD)
 	if err != nil {
 		if ctx.Err() != nil {
 			cr.syncer.ClearPlanned(planKey)

@@ -227,3 +227,386 @@ type RecipeStore interface {
 	ListVersions(ctx context.Context, runID, name string) ([]Recipe, error)
 	ListLatest(ctx context.Context, runID string) ([]Recipe, error)
 }
+
+// EstimateUsageCostUSD estimates model usage cost from a model name or actor role.
+func EstimateUsageCostUSD(modelOrRole string, inputTokens, outputTokens int64) float64 {
+	if inputTokens <= 0 && outputTokens <= 0 {
+		return 0
+	}
+	lower := strings.ToLower(strings.TrimSpace(modelOrRole))
+	modelName := lower
+	switch lower {
+	case "", "dispatcher", "concierge", "controller":
+		modelName = "sonnet"
+	case "planner":
+		modelName = "opus"
+	case "router":
+		modelName = "haiku"
+	}
+	return model.CalculateCost(modelName, model.Usage{InputTokens: inputTokens, OutputTokens: outputTokens}, nil)
+}
+
+// IsDoneOrEmptyNext reports whether a Next: value indicates there is no remaining work.
+func IsDoneOrEmptyNext(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	exact := strings.TrimRight(lower, ".! \t")
+	if isDoneToken(exact) {
+		return true
+	}
+	for _, prefix := range []string{
+		"run done ", "swarm done ", "nothing left ", "no open work ", "no remaining work ",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	cutIdx := -1
+	cutSep := ""
+	for _, sep := range []string{".", ";", ":", "—", " - ", " (", ",", "\n"} {
+		if idx := strings.Index(lower, sep); idx > 0 && (cutIdx < 0 || idx < cutIdx) {
+			cutIdx = idx
+			cutSep = sep
+		}
+	}
+	if cutIdx > 0 {
+		lead := strings.TrimSpace(lower[:cutIdx])
+		rest := strings.TrimSpace(lower[cutIdx+len(cutSep):])
+		if cutSep == ";" && (strings.Contains(rest, "pending") || strings.Contains(rest, "todo") || strings.Contains(rest, "open") || strings.Contains(rest, "start ") || strings.Contains(rest, "staff ")) {
+			return false
+		}
+		if isDoneToken(lead) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDoneToken(tok string) bool {
+	switch tok {
+	case "", "none", "n/a", "na", "nil", "nothing", "-", "done", "complete", "completed", "finished",
+		"all done", "all complete", "run done", "run complete", "swarm done",
+		"no open work", "no remaining work", "nothing left", "nothing left to do", "no open work remaining", "no loop armed":
+		return true
+	}
+	return false
+}
+
+// HasExplicitNextSection reports whether any source contains a Next: line or # Next heading.
+func HasExplicitNextSection(sources ...string) bool {
+	for _, src := range sources {
+		for _, line := range strings.Split(src, "\n") {
+			trimmed := strings.TrimSpace(line)
+			clean := strings.TrimLeft(trimmed, "-* \t")
+			lower := strings.ToLower(clean)
+			if strings.HasPrefix(lower, "next:") {
+				return true
+			}
+			if strings.HasPrefix(trimmed, "#") {
+				heading := strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "#")))
+				if heading == "next" || strings.HasPrefix(heading, "next ") || strings.HasPrefix(heading, "next:") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ExtractNextSection returns the latest non-empty Next: line or # Next section from sources.
+func ExtractNextSection(sources ...string) string {
+	for _, src := range sources {
+		lines := strings.Split(src, "\n")
+		var found string
+		for i := 0; i < len(lines); i++ {
+			trimmed := strings.TrimSpace(lines[i])
+			clean := strings.TrimLeft(trimmed, "-* \t")
+			lower := strings.ToLower(clean)
+			if strings.HasPrefix(lower, "next:") {
+				rest := strings.TrimSpace(clean[len("next:"):])
+				var parts []string
+				if rest != "" {
+					parts = append(parts, rest)
+				}
+				for j := i + 1; j < len(lines); j++ {
+					nextLine := lines[j]
+					nextTrim := strings.TrimSpace(nextLine)
+					if nextTrim == "" || strings.HasPrefix(nextTrim, "#") {
+						break
+					}
+					nxtClean := strings.ToLower(strings.TrimLeft(nextTrim, "-* \t"))
+					if strings.HasPrefix(nxtClean, "next:") {
+						break
+					}
+					if strings.HasPrefix(nextLine, " ") || strings.HasPrefix(nextLine, "\t") || strings.HasPrefix(nextTrim, "- ") || strings.HasPrefix(nextTrim, "* ") {
+						parts = append(parts, nextTrim)
+						continue
+					}
+					break
+				}
+				if len(parts) > 0 {
+					found = strings.Join(parts, "\n")
+				}
+			}
+			if strings.HasPrefix(trimmed, "#") {
+				heading := strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "#")))
+				if heading == "next" || strings.HasPrefix(heading, "next ") || strings.HasPrefix(heading, "next:") {
+					var parts []string
+					for j := i + 1; j < len(lines); j++ {
+						nextTrim := strings.TrimSpace(lines[j])
+						if strings.HasPrefix(nextTrim, "#") {
+							break
+						}
+						if nextTrim != "" {
+							parts = append(parts, nextTrim)
+						}
+					}
+					if len(parts) > 0 {
+						found = strings.Join(parts, "\n")
+					}
+				}
+			}
+		}
+		if found != "" {
+			return found
+		}
+	}
+	return ""
+}
+
+// ObjectiveIsDone reports whether the latest Next: or status lines in md
+// declare the run done/complete with no remaining work.
+func ObjectiveIsDone(md string) bool {
+	if strings.TrimSpace(md) == "" {
+		return false
+	}
+	if HasExplicitNextSection(md) {
+		next := strings.TrimSpace(ExtractNextSection(md))
+		return IsDoneOrEmptyNext(next)
+	}
+	lines := strings.Split(md, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		clean := strings.ToLower(strings.TrimLeft(strings.TrimSpace(lines[i]), "-*# \t"))
+		if clean == "" {
+			continue
+		}
+		if strings.Contains(clean, "run done") ||
+			strings.HasPrefix(clean, "status: done") ||
+			strings.HasPrefix(clean, "status: complete") ||
+			strings.HasPrefix(clean, "state: done") ||
+			strings.HasPrefix(clean, "state: complete") {
+			return true
+		}
+	}
+	return false
+}
+
+// HourlyRunCostUSD computes the spend in USD for runID over the trailing hour
+// ending at now, deduplicating costs recorded on both Decisions and Turns.
+func HourlyRunCostUSD(ctx context.Context, st Store, runID string, now time.Time) (float64, error) {
+	if st == nil || strings.TrimSpace(runID) == "" {
+		return 0, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	windowStart := now.Add(-time.Hour)
+
+	decs, err := st.Decisions().List(ctx, DecisionFilter{RunID: runID, SinceTime: &windowStart})
+	if err != nil {
+		return 0, err
+	}
+	byTurn := map[string]float64{}
+	var unlinkedDecCost float64
+	for i := range decs {
+		d := &decs[i]
+		if !d.CreatedAt.IsZero() && d.CreatedAt.Before(windowStart) {
+			continue
+		}
+		if d.Tool == "metrics.snapshot" || d.Tool == "cost.guard" || d.Tool == "mail.adopt_summary" {
+			continue
+		}
+		c := d.CostUSD
+		if c <= 0 {
+			c = EstimateUsageCostUSD(cmp.Or(d.Model, d.Actor), d.InputTokens, d.OutputTokens)
+		}
+		if c <= 0 {
+			continue
+		}
+		if d.TurnID != "" {
+			byTurn[d.TurnID] += c
+		} else {
+			unlinkedDecCost += c
+		}
+	}
+
+	threads, err := st.Threads().ListThreads(ctx, ThreadFilter{RunID: runID})
+	if err != nil {
+		return 0, err
+	}
+	var linkedTurnExtra, unlinkedTurnCost float64
+	for i := range threads {
+		if !threads[i].UpdatedAt.IsZero() && threads[i].UpdatedAt.Before(windowStart) {
+			continue
+		}
+		turns, err := st.Threads().ListTurns(ctx, threads[i].ID)
+		if err != nil {
+			return 0, err
+		}
+		for j := range turns {
+			t := &turns[j]
+			ts := t.StartedAt
+			if ts.IsZero() && t.CompletedAt != nil {
+				ts = *t.CompletedAt
+			}
+			if !ts.IsZero() && ts.Before(windowStart) {
+				continue
+			}
+			tc := t.CostUSD
+			if tc <= 0 {
+				tc = EstimateUsageCostUSD(string(threads[i].Role), t.InputTokens, t.OutputTokens)
+			}
+			if tc <= 0 {
+				continue
+			}
+			if decCost, ok := byTurn[t.ID]; ok {
+				if tc > decCost {
+					linkedTurnExtra += tc - decCost
+				}
+			} else {
+				unlinkedTurnCost += tc
+			}
+		}
+	}
+
+	var total float64
+	for _, c := range byTurn {
+		total += c
+	}
+	total += linkedTurnExtra + max(unlinkedDecCost, unlinkedTurnCost)
+	return total, nil
+}
+
+// EnforceCostGuard checks whether runID has reached or exceeded its configured
+// hourly spend limit (from RunSettings.MaxCostPerHourUSD or fallbackLimit).
+// When reached, it pauses the run (RunSettings.Paused = true), records an
+// owner notification directive and vetted cost.guard decision once per breach,
+// and returns (true, spent, limit, message, nil).
+func EnforceCostGuard(ctx context.Context, st Store, runID string, now time.Time, fallbackLimit float64) (bool, float64, float64, string, error) {
+	if st == nil || strings.TrimSpace(runID) == "" {
+		return false, 0, 0, "", nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	settings, err := st.Runs().GetSettings(ctx, runID)
+	if err != nil {
+		return false, 0, 0, "", err
+	}
+	if settings.CostGuardDisabled {
+		return false, 0, 0, "", nil
+	}
+	limit := settings.MaxCostPerHourUSD
+	if limit <= 0 {
+		limit = fallbackLimit
+	}
+	if limit <= 0 {
+		return false, 0, 0, "", nil
+	}
+	spent, err := HourlyRunCostUSD(ctx, st, runID, now)
+	if err != nil {
+		return false, 0, limit, "", err
+	}
+	if spent < limit {
+		return false, spent, limit, "", nil
+	}
+
+	wasPaused := settings.Paused
+	msg := fmt.Sprintf("Cost guard paused turns for run %s: spent $%.2f in the last hour (limit $%.2f/hr).", runID, spent, limit)
+	if !wasPaused {
+		settings.Paused = true
+		if uErr := st.Runs().UpdateSettings(ctx, runID, settings); uErr != nil {
+			return true, spent, limit, msg, uErr
+		}
+	}
+
+	askID := "cost-guard-" + runID
+	dirID := "ask-" + askID
+	if existing, dErr := st.Directives().Get(ctx, runID, dirID); dErr != nil || existing == nil {
+		askPayload, _ := json.Marshal(struct {
+			ID       string `json:"id"`
+			RunID    string `json:"run_id"`
+			Question string `json:"question"`
+		}{
+			ID:       askID,
+			RunID:    runID,
+			Question: msg,
+		})
+		_ = st.Directives().Add(ctx, Directive{
+			ID:        dirID,
+			RunID:     runID,
+			Kind:      DirectiveInstruction,
+			Scope:     "run",
+			Ref:       "owner_ask:" + askID,
+			Text:      string(askPayload),
+			Status:    DirectiveActive,
+			CreatedAt: now,
+		})
+	} else if existing.Status != DirectiveActive {
+		_ = st.Directives().UpdateStatus(ctx, runID, dirID, DirectiveActive)
+	}
+
+	windowStart := now.Add(-time.Hour)
+	existingDecs, _ := st.Decisions().List(ctx, DecisionFilter{RunID: runID, SinceTime: &windowStart})
+	alreadyRecorded := false
+	for i := range existingDecs {
+		if existingDecs[i].Tool != "cost.guard" {
+			continue
+		}
+		if existingDecs[i].CreatedAt.IsZero() || !existingDecs[i].CreatedAt.Before(windowStart) {
+			alreadyRecorded = true
+			break
+		}
+	}
+	if !wasPaused || !alreadyRecorded {
+		_, _ = st.Decisions().Append(ctx, Decision{
+			RunID:     runID,
+			Actor:     "controller",
+			Tool:      "cost.guard",
+			Reason:    fmt.Sprintf("hourly spend $%.2f reached limit $%.2f/hr", spent, limit),
+			Result:    msg,
+			Vetted:    true,
+			CreatedAt: now,
+		})
+		payload, _ := json.Marshal(struct {
+			RunID   string  `json:"run_id"`
+			Message string  `json:"message"`
+			Spent   float64 `json:"spent_usd"`
+			Limit   float64 `json:"limit_usd"`
+		}{
+			RunID:   runID,
+			Message: msg,
+			Spent:   spent,
+			Limit:   limit,
+		})
+		_, _ = st.Events().Append(ctx, Event{
+			ID:        "cost-guard-" + runID,
+			RunID:     runID,
+			Kind:      EventMail,
+			Class:     EventClassAuto,
+			Source:    "cost.guard",
+			Summary:   msg,
+			Payload:   payload,
+			CreatedAt: now,
+		})
+		return true, spent, limit, msg, nil
+	}
+	return true, spent, limit, "", nil
+}

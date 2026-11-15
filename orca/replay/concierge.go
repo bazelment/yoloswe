@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/adopt"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/model"
@@ -26,14 +27,15 @@ You are the **Concierge** for a Nebula swarm run — a fast, read-mostly convers
 ## Rules
 1. **Always query the Store first**: The initial prompt gives only the Run ID, timestamp, and Owner Question. You **must** call ` + "`status`" + ` (and ` + "`lane.show`" + `, ` + "`pr.status`" + `, ` + "`ci.status`" + `, or ` + "`decisions.since`" + ` as needed) to read the Store state before answering.
 2. **Strict Store grounding**: Every lane ID, status, phase, round, PR number, head SHA, CI check state, blocker, backlog item, and decision you mention **must** match the Store tool output exactly. Never invent or guess PR numbers, lane states, or blockers that are not in the Store.
-3. **Cite concrete facts**: When answering questions like "where are we?", "how is lane X doing?", or "why is lane Y blocked/idle?", explicitly cite the relevant lane IDs, their current status and phase/round, PR numbers (e.g. ` + "`#5127`" + `), CI check state, backlog status/blockers, and recent Dispatcher decisions/reasons.
-4. **Tools available**:
+3. **Current state wins over older sections**: When an Objective or status file has multiple ` + "`Next:`" + ` or status lines over time, the **latest** ` + "`Next:`" + ` / ` + "`Current Status`" + ` line at the bottom of the file is authoritative. If the latest ` + "`Next:`" + ` says ` + "`none`" + ` / ` + "`Run DONE`" + `, report that the run is done with no open work rather than repeating older open items from earlier sections.
+4. **Cite concrete facts**: When answering questions like "where are we?", "how is lane X doing?", or "why is lane Y blocked/idle?", explicitly cite the relevant lane IDs, their current status and phase/round, PR numbers (e.g. ` + "`#5127`" + `), CI check state, backlog status/blockers, and recent Dispatcher decisions/reasons.
+5. **Tools available**:
    - ` + "`status`" + `: Query full run status (lanes by phase, backlog items, active directives, pending owner asks).
    - ` + "`lane.show`" + `: Inspect a specific lane's details, PR/CI status, and latest phase report.
    - ` + "`decisions.since`" + `: List Dispatcher/Controller decisions and reasons.
    - ` + "`pr.status`" + ` / ` + "`ci.status`" + `: Inspect PR approval and CI check state for a lane.
    - ` + "`directive.submit`" + `: Record an owner directive when the owner explicitly issues a command or override.
-5. Keep answers concise, direct, and grounded in the exact Store state at the current timestamp.
+6. Keep answers concise, direct, and grounded in the exact Store state at the current timestamp.
 `
 
 // ConciergeAnswer captures the Concierge's response and usage for a single status question.
@@ -56,6 +58,7 @@ type StoreConcierge struct {
 	Provider     string
 	Model        string
 	SystemPrompt string
+	Investigate  model.InvestigateConfig
 	MaxTurns     int
 	MaxTokens    int
 	dirSeq       atomic.Int64
@@ -136,6 +139,9 @@ func (c *StoreConcierge) Answer(
 			return c.executeTool(callCtx, st, drv, clk, runID, def.Name, raw)
 		})
 	}
+	if c.AgentBackend == model.AgentBackendCLI || c.Investigate.RunDir != "" || c.Investigate.RepoDir != "" {
+		model.RegisterInvestigationTools(reg, c.Investigate)
+	}
 
 	prompt := fmt.Sprintf("Run: %s\nNow: %s\n\n## Owner Question\n%s",
 		runID,
@@ -204,6 +210,12 @@ func buildConciergeStatusView(
 		return "", err
 	}
 	fmt.Fprintf(&b, "Run: %s\nObjective: %s\n", run.ID, run.Objective)
+	if adopt.ObjectiveIsDone(run.Objective) {
+		b.WriteString("Current Status: DONE (latest Next: says run is done; no open work — ignore older Open/Next sections above)\n")
+	}
+	if curNext := adopt.CurrentNextSection(run.Objective); curNext != "" {
+		fmt.Fprintf(&b, "Current Next: %s\n", curNext)
+	}
 
 	dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
 	if err != nil {

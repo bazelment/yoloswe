@@ -20,7 +20,6 @@ import (
 	"github.com/bazelment/yoloswe/orca/concierge"
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/mailbox"
-	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/router"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -270,6 +269,10 @@ func (b *StoreBackend) asks(ctx context.Context, runs []string) ([]openAsk, erro
 			a := openAsk{run: run, scope: d.Scope}
 			if err := json.Unmarshal([]byte(d.Text), &a.ask); err != nil {
 				return nil, fmt.Errorf("owner ask %s in run %s: %w", d.ID, run, err)
+			}
+			if mailbox.IsQuestionObsoleteOrClosed(ctx, b.store, run, cmp.Or(a.ask.LaneID, d.Scope), a.ask.SourceMessageID, a.ask.SourceEventID, a.ask.Question) {
+				_ = b.store.Directives().UpdateStatus(ctx, run, d.ID, store.DirectiveHandled)
+				continue
 			}
 			if srcID := cmp.Or(a.ask.SourceMessageID, a.ask.SourceEventID); srcID != "" {
 				if ts, ok := mailCreated[srcID]; ok && !ts.IsZero() {
@@ -559,42 +562,25 @@ func (b *StoreBackend) view(ctx context.Context, includeLive bool) (runView, []l
 	return v, groups, nil
 }
 
-func estimateTokenCostUSD(modelOrRole string, inputTokens, outputTokens int64) float64 {
-	if inputTokens <= 0 && outputTokens <= 0 {
-		return 0
-	}
-	lower := strings.ToLower(strings.TrimSpace(modelOrRole))
-	modelName := lower
-	switch lower {
-	case "", "dispatcher", "concierge":
-		modelName = "sonnet"
-	case "planner":
-		modelName = "opus"
-	case "router":
-		modelName = "haiku"
-	}
-	return model.CalculateCost(modelName, model.Usage{InputTokens: inputTokens, OutputTokens: outputTokens}, nil)
-}
-
 func decisionCostUSD(d *store.Decision) float64 {
 	if d.CostUSD > 0 {
 		return d.CostUSD
 	}
-	return estimateTokenCostUSD(cmp.Or(d.Model, d.Actor), d.InputTokens, d.OutputTokens)
+	return store.EstimateUsageCostUSD(cmp.Or(d.Model, d.Actor), d.InputTokens, d.OutputTokens)
 }
 
 func turnCostUSD(t *store.Turn, role string) float64 {
 	if t.CostUSD > 0 {
 		return t.CostUSD
 	}
-	return estimateTokenCostUSD(role, t.InputTokens, t.OutputTokens)
+	return store.EstimateUsageCostUSD(role, t.InputTokens, t.OutputTokens)
 }
 
 func threadCostUSD(th *store.Thread) float64 {
 	if th.CostUSD > 0 {
 		return th.CostUSD
 	}
-	return estimateTokenCostUSD(string(th.Role), th.InputTokens, th.OutputTokens)
+	return store.EstimateUsageCostUSD(string(th.Role), th.InputTokens, th.OutputTokens)
 }
 
 func (b *StoreBackend) eventCostToday(ctx context.Context, st store.Store, runID string, start time.Time) (float64, error) {
@@ -1290,6 +1276,7 @@ func (b *StoreBackend) seedSeenDispatcherRun(ctx context.Context, st store.Store
 	}
 	threads, _ := st.Threads().ListThreads(ctx, store.ThreadFilter{RunID: runID, Role: store.ThreadRoleDispatcher})
 	decs, _ := st.Decisions().List(ctx, store.DecisionFilter{RunID: runID, Actor: "dispatcher"})
+	ctrlDecs, _ := st.Decisions().List(ctx, store.DecisionFilter{RunID: runID, Actor: "controller"})
 	b.cacheMu.Lock()
 	defer b.cacheMu.Unlock()
 	if b.seenTurns == nil {
@@ -1309,6 +1296,11 @@ func (b *StoreBackend) seedSeenDispatcherRun(ctx context.Context, st store.Store
 	for i := range decs {
 		b.seenDecs[seenDecKey(runID, decs[i].Seq)] = true
 	}
+	for i := range ctrlDecs {
+		if ctrlDecs[i].Tool == mailbox.AdoptMailSummaryTool || ctrlDecs[i].Tool == "cost.guard" {
+			b.seenDecs[seenDecKey(runID, ctrlDecs[i].Seq)] = true
+		}
+	}
 }
 
 func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st store.Store, held []string) []string {
@@ -1320,7 +1312,7 @@ func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st 
 		}
 	}
 	b.cacheMu.Unlock()
-	if len(runs) == 0 {
+	if len(runs) == 0 && b.Adoption == nil {
 		return nil
 	}
 	var out []string
@@ -1333,6 +1325,48 @@ func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st 
 			out = append(out, res...)
 		}
 	}
+	for _, runID := range held {
+		if slices.Contains(runs, runID) {
+			continue
+		}
+		if res := b.collectControllerNotices(ctx, st, runID); len(res) > 0 {
+			out = append(out, res...)
+		}
+	}
+	return out
+}
+
+func (b *StoreBackend) collectControllerNotices(ctx context.Context, st store.Store, runID string) []string {
+	if st == nil || runID == "" {
+		return nil
+	}
+	ctrlDecs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: runID, Actor: "controller"})
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for i := range ctrlDecs {
+		d := &ctrlDecs[i]
+		if d.Tool != mailbox.AdoptMailSummaryTool && d.Tool != "cost.guard" {
+			continue
+		}
+		decKey := seenDecKey(runID, d.Seq)
+		b.cacheMu.Lock()
+		if b.seenDecs == nil {
+			b.seenDecs = map[string]bool{}
+		}
+		seen := b.seenDecs[decKey]
+		if !seen {
+			b.seenDecs[decKey] = true
+		}
+		b.cacheMu.Unlock()
+		if seen {
+			continue
+		}
+		if txt := oneLineSummary(cmp.Or(d.Result, d.Reason)); txt != "" {
+			out = append(out, txt)
+		}
+	}
 	return out
 }
 
@@ -1342,6 +1376,7 @@ func (b *StoreBackend) collectDispatcherOutcomes(ctx context.Context, st store.S
 	}
 	var out []string
 	for _, runID := range runs {
+		out = append(out, b.collectControllerNotices(ctx, st, runID)...)
 		threads, err := st.Threads().ListThreads(ctx, store.ThreadFilter{RunID: runID, Role: store.ThreadRoleDispatcher})
 		if err != nil {
 			continue

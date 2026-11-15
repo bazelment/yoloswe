@@ -23,6 +23,8 @@ import (
 	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/lane/nebula"
+	"github.com/bazelment/yoloswe/orca/mailbox"
+	mailboxnebula "github.com/bazelment/yoloswe/orca/mailbox/nebula"
 	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/planner"
 	"github.com/bazelment/yoloswe/orca/recipe"
@@ -1408,6 +1410,13 @@ func TestAdoptObjectiveAndCheckpointHelpers(t *testing.T) {
 			t.Fatalf("expected HasNextWork() = false for Next: %s, got true (Next=%q)", doneNext, rDone.Next)
 		}
 	}
+	for _, activeNext := range []string{"Complete the M3 review", "Finished X; start M4", "(a) staff M4", ".github workflow fix"} {
+		obj := "Goal: active\nNext: " + activeNext + "\n"
+		rActive := Run{Objective: obj, Next: extractNextSection(obj)}
+		if !rActive.HasNextWork() {
+			t.Fatalf("expected HasNextWork() = true for Next: %s, got false (Next=%q)", activeNext, rActive.Next)
+		}
+	}
 	multiNext := extractNextSection("Goal: g\nNext:\n- step 1\n- step 2\n\nMilestones:\n- [x] M1\n")
 	if multiNext != "- step 1\n- step 2" {
 		t.Fatalf("extractNextSection(multi-line) = %q, want %q", multiNext, "- step 1\n- step 2")
@@ -2282,5 +2291,184 @@ func TestAdoptStartAndHoldIntentParityWithDispatcher(t *testing.T) {
 		if gotDispHold != tc.wantHold {
 			t.Fatalf("hold intent(%q): dispatcher=%v, want %v", tc.text, gotDispHold, tc.wantHold)
 		}
+	}
+}
+
+func TestAdoptOldHostMailsZeroDispatcherTurns(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), ".swarm")
+	adoptTime := time.Date(2026, 11, 15, 2, 2, 0, 0, time.UTC)
+	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", adoptTime.Add(-3*time.Hour))
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"squash",
+"phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high"},{"name":"review","kind":"claude","model":"sonnet","effort":"high"}]},
+"tasks":[
+{"id":"m1-base","title":"base prompts","branch":"swarm-lane/`+nsRun+`/m1-base","priority":"p1","status":"done","phase":"review","round":1,"session_id":"sess-m1","terminals":{"review":{"1":"term-m1-review"}},"pr":5604,"pr_head":"aaa","approval_sha":"aaa","merge_sha":"mmm","verdict":"pass"},
+{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"done","phase":"review","round":1,"session_id":"sess-m2","terminals":{"review":{"1":"term-m2-review"}},"pr":5811,"pr_head":"bbb","approval_sha":"bbb","merge_sha":"nnn","verdict":"pass"}]}
+`)
+	write(t, filepath.Join(dir, "OBJECTIVE.md"), "# 20261114-trial-m1\n\nGoal: trial m1.\n- [ ] Open: hand interventions 6-7\n\nNext: none. Run DONE 22:25Z — all lanes merged (#5604, #5811). PLAN.md log + post updated. No loop armed.\n")
+
+	var mailPolls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/api/mail" {
+			mailPolls.Add(1)
+			_, _ = io.WriteString(w, `{"messages":[
+				{"id":"mail-1","lane":"m2-gaps3","question":true,"status":"withdrawn","body":"m2-gaps3 question 1 (withdrawn 04547e4e)","createdAt":"2026-11-14T19:10:00Z"},
+				{"id":"mail-2","lane":"m2-gaps3","question":true,"body":"m2-gaps3 question 2 before #5811 merged","createdAt":"2026-11-14T20:15:00Z"},
+				{"id":"mail-3","from":"deploy-bot","body":"deploy notice: staging red on commit 111","createdAt":"2026-11-14T21:00:00Z"},
+				{"id":"mail-4","from":"deploy-bot","body":"deploy notice: staging red on commit 222","createdAt":"2026-11-14T21:30:00Z"},
+				{"id":"mail-5","from":"deploy-bot","body":"deploy notice: staging red on commit 333","createdAt":"2026-11-14T22:00:00Z"},
+				{"id":"mail-6","from":"host","body":"unread-mail reminder: check host inbox","createdAt":"2026-11-14T22:20:00Z"}
+			],"nextCursor":"cur-6"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	clk := clock.NewFakeClock(adoptTime)
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+	if err := st.Directives().Add(t.Context(), store.Directive{
+		ID:        "hold-stale-1",
+		RunID:     nsRun,
+		Kind:      store.DirectiveStanding,
+		Source:    store.DirectiveSourceOwner,
+		Scope:     "run",
+		Text:      "Do not start M4 until I confirm",
+		Status:    store.DirectiveActive,
+		CreatedAt: adoptTime.Add(-2 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var dispatcherTurns atomic.Int32
+	var plannerTurns atomic.Int32
+	controllers := NewControllers(t.Context(), st, drv, clk, func(string, func(context.Context, string, string, string) error) controller.Judge {
+		return controller.JudgeFunc(func(_ context.Context, _ string, _ []store.Event) error {
+			dispatcherTurns.Add(1)
+			return nil
+		})
+	})
+	controllers.Planner = func(_ context.Context, _, _, _ string) error {
+		plannerTurns.Add(1)
+		return nil
+	}
+	controllers.Mailboxes = func(runID string) []mailbox.Mailbox {
+		box, err := mailboxnebula.New(mailboxnebula.Config{
+			BaseURL:      srv.URL,
+			Token:        "test-token",
+			RunID:        runID,
+			Events:       st.Events(),
+			Host:         true,
+			PollInterval: 10 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return []mailbox.Mailbox{box}
+	}
+
+	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
+	s := nsService(root, loop, label)
+	s.Now = func() time.Time { return adoptTime }
+	s.Driver = controllers
+	r, err := s.Adopt(t.Context(), nsRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+	waitFor(t, func() bool { return mailPolls.Load() >= 2 })
+	if err := controllers.Step(t.Context(), nsRun); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := dispatcherTurns.Load(); got != 0 {
+		t.Fatalf("dispatcher turns for 6 old host mails on adopt = %d, want 0", got)
+	}
+	if got := plannerTurns.Load(); got != 0 {
+		t.Fatalf("planner turns on done run = %d, want 0", got)
+	}
+	decs, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: nsRun})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summaryCount int
+	for _, d := range decs {
+		if d.Tool == "mail.adopt_summary" {
+			summaryCount++
+		}
+	}
+	if summaryCount != 1 {
+		t.Fatalf("mail.adopt_summary decisions = %d, want 1 (decisions=%+v)", summaryCount, decs)
+	}
+	holdDir, err := st.Directives().Get(t.Context(), nsRun, "hold-stale-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if holdDir.Status != store.DirectiveExpired {
+		t.Fatalf("stale hold directive status on done run = %q, want %q", holdDir.Status, store.DirectiveExpired)
+	}
+
+	// Verify that an open question from a live (running) lane and a message with
+	// missing createdAt are NOT suppressed by SetAdoptCutoff.
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{
+		ID:     "m3-live",
+		RunID:  "run-live-adopt",
+		Status: lane.StatusRunning,
+		Phase:  "swe",
+		Round:  1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var livePolls atomic.Int32
+	srvLive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/api/mail" {
+			livePolls.Add(1)
+			_, _ = io.WriteString(w, `{"messages":[
+				{"id":"mail-live-q","lane":"m3-live","question":true,"body":"open question from running lane before adopt","createdAt":"2026-11-14T23:00:00Z"},
+				{"id":"mail-no-ts","from":"host","body":"timestamp-less host message"}
+			],"nextCursor":"cur-live"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srvLive.Close()
+	boxLive, err := mailboxnebula.New(mailboxnebula.Config{
+		BaseURL:      srvLive.URL,
+		Token:        "test-token",
+		RunID:        "run-live-adopt",
+		Events:       st.Events(),
+		Host:         true,
+		PollInterval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	boxLive.SetAdoptCutoff(adoptTime, st)
+	watchCtx, cancelWatch := context.WithCancel(t.Context())
+	defer cancelWatch()
+	chLive, err := boxLive.Watch(watchCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotSummaries []string
+	for i := 0; i < 2; i++ {
+		select {
+		case ev := <-chLive:
+			if ev.Source == mailbox.AdoptMailSummarySource {
+				t.Fatalf("unexpected adopt mail summary event on live question / timestamp-less mail: %+v", ev)
+			}
+			gotSummaries = append(gotSummaries, ev.Summary)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for live question / timestamp-less mail event %d", i+1)
+		}
+	}
+	joined := strings.Join(gotSummaries, "\n")
+	if !strings.Contains(joined, "open question from running lane before adopt") || !strings.Contains(joined, "timestamp-less host message") {
+		t.Fatalf("live mail events = %q, want both open question and timestamp-less message", joined)
 	}
 }

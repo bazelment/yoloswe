@@ -106,16 +106,58 @@ func detectBinaryVersion(binPath string) string {
 			return rev
 		}
 	}
-	if binPath != "" {
-		if f, err := os.Open(binPath); err == nil {
-			defer f.Close()
+	for _, candidate := range []string{binPath, "/proc/self/exe"} {
+		if candidate == "" {
+			continue
+		}
+		if f, err := os.Open(candidate); err == nil {
 			h := sha256.New()
-			if _, err := io.Copy(h, f); err == nil {
+			_, copyErr := io.Copy(h, f)
+			_ = f.Close()
+			if copyErr == nil {
 				return fmt.Sprintf("%x", h.Sum(nil)[:6])
 			}
 		}
 	}
 	return "dev"
+}
+
+func recordRunningVersion(resolvedStore, baseDir, ver string) string {
+	var primaryPath string
+	if dbPath, ok := strings.CutPrefix(strings.TrimSpace(resolvedStore), "sqlite:"); ok && dbPath != "" && dbPath != ":memory:" {
+		if filepath.Base(dbPath) == "orca.db" {
+			primaryPath = filepath.Join(filepath.Dir(dbPath), "running-version")
+		} else {
+			primaryPath = dbPath + ".running-version"
+		}
+	}
+	frontDeskDir := filepath.Join(strings.TrimSpace(baseDir), frontDeskRunID)
+	frontDeskVerFile := filepath.Join(frontDeskDir, "running-version")
+
+	var prev string
+	for _, candidate := range []string{primaryPath, frontDeskVerFile} {
+		if candidate == "" {
+			continue
+		}
+		if data, err := os.ReadFile(candidate); err == nil {
+			if s := strings.TrimSpace(string(data)); s != "" {
+				prev = s
+				break
+			}
+		}
+	}
+	ver = strings.TrimSpace(ver)
+	if ver != "" && ver != "unknown" {
+		if primaryPath != "" {
+			_ = os.WriteFile(primaryPath, []byte(ver+"\n"), 0o644)
+		}
+		if primaryPath != frontDeskVerFile && strings.TrimSpace(baseDir) != "" {
+			if info, err := os.Stat(frontDeskDir); err == nil && info.IsDir() {
+				_ = os.WriteFile(frontDeskVerFile, []byte(ver+"\n"), 0o644)
+			}
+		}
+	}
+	return prev
 }
 
 func currentVersion() string {
@@ -370,6 +412,7 @@ func runChatSession(
 	if restartedFrom != "" {
 		_ = os.Unsetenv(restartEnvVar)
 	}
+	sessionStartVersion := currentVersion()
 	if cfg.Prompt == "" && len(posArgs) == 0 && isTerminal(stderr) {
 		// The chat screen owns the terminal; log lines written to it would
 		// tear the screen, so they go to a file.
@@ -419,6 +462,7 @@ func runChatSession(
 	} else if err := ensureChatRun(ctx, st, cfg); err != nil {
 		return nil, err
 	}
+	recordedPrevVer := recordRunningVersion(resolvedStore, chatStoreBaseDir(cfg), sessionStartVersion)
 
 	client, err := openModelClient(cfg, clk)
 	if err != nil {
@@ -432,6 +476,19 @@ func runChatSession(
 	)
 
 	concierge := NewConcierge(storeCfg.RunID, st, clk, roleClient(client, cfg, "concierge"), cfg.Models.Concierge)
+	concierge.AgentBackend = effectiveAgentBackend(cfg, client)
+	concierge.Provider = cfg.Models.Roles["concierge"].Provider
+	if concierge.AgentBackend == model.AgentBackendCLI && strings.TrimSpace(cfg.ModelProvider) == "" && cfg.Models.Roles["dispatcher"].Provider == "anthropic" && concierge.Provider == "openai" {
+		concierge.Provider = "anthropic"
+		if concierge.modelName == DefaultOpenAIConciergeModel {
+			concierge.modelName = DefaultConciergeModel
+		}
+	}
+	concierge.Effort = cfg.Models.Roles["concierge"].Effort
+	concierge.LLMGatewayURL = cfg.LLMGatewayURL
+	concierge.ClaudeBin = cfg.ClaudeBin
+	concierge.CodexBin = cfg.CodexBin
+	concierge.Investigate = runInvestigateConfig(storeCfg)
 	concierge.Logger = logger
 	wireChatConcierge(concierge, backend)
 	defer func() { _ = concierge.Close(context.WithoutCancel(ctx)) }()
@@ -522,7 +579,7 @@ func runChatSession(
 		if err != nil {
 			return "", err
 		}
-		oldVer := currentVersion()
+		oldVer := cmp.Or(sessionStartVersion, currentVersion())
 		lines := []string{fmt.Sprintf("restarting orca (%s -> %s): %s", oldVer, newVer, target)}
 		seenDetached := map[string]bool{}
 		for _, child := range detachedChildren {
@@ -589,7 +646,10 @@ func runChatSession(
 	var reattachLines []string
 	if restartedFrom != "" {
 		_, oldVer, _ := strings.Cut(restartedFrom, ":")
-		reattachLines = chatui.FormatRestartStatus(oldVer, currentVersion(), heldLines)
+		if strings.TrimSpace(oldVer) == "" || strings.EqualFold(strings.TrimSpace(oldVer), "unknown") {
+			oldVer = recordedPrevVer
+		}
+		reattachLines = chatui.FormatRestartStatus(oldVer, cmp.Or(sessionStartVersion, currentVersion()), heldLines)
 	} else {
 		reattachLines = heldLines
 	}

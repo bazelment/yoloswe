@@ -376,8 +376,8 @@ func TestSQLiteStoreReopenIdenticalState(t *testing.T) {
 	if before.ControllerCursor.Seq != 2 {
 		t.Fatalf("ControllerCursor.Seq = %d, want 2 (monotonic)", before.ControllerCursor.Seq)
 	}
-	if !slices.Equal(before.AppliedMigrations, []string{"0001_init.sql", "0002_memory_notes.sql", "0003_decision_trace.sql", "0004_lane_base_commit.sql", "0005_run_settings.sql", "0006_run_repository.sql", "0007_thread_resume_id.sql"}) {
-		t.Fatalf("AppliedMigrations = %v, want all migrations through 0007", before.AppliedMigrations)
+	if !slices.Equal(before.AppliedMigrations, []string{"0001_init.sql", "0002_memory_notes.sql", "0003_decision_trace.sql", "0004_lane_base_commit.sql", "0005_run_settings.sql", "0006_run_repository.sql", "0007_thread_resume_id.sql", "0008_cost_guard.sql"}) {
+		t.Fatalf("AppliedMigrations = %v, want all migrations through 0008", before.AppliedMigrations)
 	}
 
 	if err := st1.Close(); err != nil {
@@ -572,5 +572,178 @@ func TestMemoryUpgradeAndDurability(t *testing.T) {
 	notes, err := st.Notes().List(ctx, store.NoteFilter{RunID: "run-1"})
 	if err != nil || len(notes) != 1 {
 		t.Fatalf("notes after reopen = %+v, %v", notes, err)
+	}
+}
+
+func TestObjectiveDoneAndCostGuardHelpers(t *testing.T) {
+	t.Parallel()
+	for _, doneNext := range []string{
+		"",
+		"none",
+		"done.",
+		"N/A",
+		"complete",
+		"completed",
+		"nothing left",
+		"nothing left to do",
+		"No open work remaining",
+		"Done — all merged",
+		"Done; PR merged",
+		"Run DONE 22:25Z",
+		"none, all merged",
+		"Complete (all lanes merged)",
+		"none. Run DONE 22:25Z — all lanes merged (#5604, #5811). PLAN.md log + post updated. No loop armed.",
+		"Run complete — all PRs merged",
+	} {
+		if !store.IsDoneOrEmptyNext(doneNext) {
+			t.Fatalf("IsDoneOrEmptyNext(%q) = false, want true", doneNext)
+		}
+	}
+	for _, activeNext := range []string{
+		"Complete the M3 review",
+		"Completed M1; start M2",
+		"Finished X; start M4",
+		"(a) staff M4",
+		".github workflow fix",
+		"run complete; deploy pending",
+		"when #5786 merges, staff a lane for 6-7",
+	} {
+		if store.IsDoneOrEmptyNext(activeNext) {
+			t.Fatalf("IsDoneOrEmptyNext(%q) = true, want false", activeNext)
+		}
+		obj := "# Run\nGoal: test\nNext: " + activeNext + "\n"
+		if store.ObjectiveIsDone(obj) {
+			t.Fatalf("ObjectiveIsDone(%q) = true, want false", obj)
+		}
+	}
+	if got := store.ExtractNextSection("Next: staff M4\n\nNext:\n"); got != "staff M4" {
+		t.Fatalf("ExtractNextSection with trailing bare Next: = %q, want %q", got, "staff M4")
+	}
+	if got := store.ExtractNextSection("Next:\n", "Next: fallback step\n"); got != "fallback step" {
+		t.Fatalf("ExtractNextSection multi-source fallthrough = %q, want %q", got, "fallback step")
+	}
+
+	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 2, 0, 0, 0, time.UTC))
+	path := filepath.Join(t.TempDir(), "cost.db")
+	st, err := store.OpenSQLite(path, clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:        "run-cost",
+		Objective: "Goal: cost test\nNext: Complete the M3 review",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runs().UpdateSettings(ctx, "run-cost", store.RunSettings{
+		ConcurrencyCap:    2,
+		StallTimeout:      15 * time.Minute,
+		MaxCostPerHourUSD: 7.5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gotSettings, err := st.Runs().GetSettings(ctx, "run-cost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotSettings.MaxCostPerHourUSD != 7.5 || gotSettings.String() != "concurrency_cap=2 stall_timeout=15m0s paused=false max_cost_per_hour_usd=$7.50" {
+		t.Fatalf("GetSettings = %+v (%q), want MaxCostPerHourUSD=7.5", gotSettings, gotSettings.String())
+	}
+
+	// Reset MaxCostPerHourUSD to 0 so EnforceCostGuard uses fallbackLimit without persisting it.
+	gotSettings.MaxCostPerHourUSD = 0
+	if err := st.Runs().UpdateSettings(ctx, "run-cost", gotSettings); err != nil {
+		t.Fatal(err)
+	}
+
+	// Record a turn 2 hours ago (outside 1h window) and a turn 10 minutes ago (inside 1h window)
+	// that has both a thread turn and a decision with the same TurnID.
+	if _, err := st.Decisions().Append(ctx, store.Decision{
+		RunID:    "run-cost",
+		Category: store.DecisionJudgment,
+		Actor:    "dispatcher",
+		Tool:     "dispatcher.turn",
+		CostUSD:  10.0,
+		Vetted:   true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(2 * time.Hour)
+	if _, err := st.Threads().StartThread(ctx, store.Thread{ID: "thr-1", RunID: "run-cost", Role: store.ThreadRoleDispatcher}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Threads().StartTurn(ctx, store.Turn{ID: "turn-1", ThreadID: "thr-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Threads().CompleteTurn(ctx, "thr-1", "turn-1", store.TurnStatusCompleted, model.Usage{CostUSD: 6.0}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Decisions().Append(ctx, store.Decision{
+		RunID:    "run-cost",
+		ThreadID: "thr-1",
+		TurnID:   "turn-1",
+		Category: store.DecisionJudgment,
+		Actor:    "dispatcher",
+		Tool:     "lane.noop",
+		CostUSD:  6.0,
+		Vetted:   true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	spent, err := store.HourlyRunCostUSD(ctx, st, "run-cost", clk.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spent != 6.0 {
+		t.Fatalf("HourlyRunCostUSD = %.2f, want 6.00 (old turn excluded, same-turn decision deduplicated)", spent)
+	}
+
+	exceeded, _, _, msg, err := store.EnforceCostGuard(ctx, st, "run-cost", clk.Now(), 5.0)
+	if err != nil || !exceeded || msg == "" {
+		t.Fatalf("EnforceCostGuard(1) = (%v, %q, %v), want (true, non-empty, nil)", exceeded, msg, err)
+	}
+	afterGuard, err := st.Runs().GetSettings(ctx, "run-cost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterGuard.Paused || afterGuard.MaxCostPerHourUSD != 0 {
+		t.Fatalf("settings after fallback cost guard = %+v, want Paused=true and MaxCostPerHourUSD=0", afterGuard)
+	}
+
+	// Owner unpauses while still over the hourly limit; next EnforceCostGuard re-pauses and emits a new notice.
+	afterGuard.Paused = false
+	if err := st.Runs().UpdateSettings(ctx, "run-cost", afterGuard); err != nil {
+		t.Fatal(err)
+	}
+	exceeded2, _, _, msg2, err := store.EnforceCostGuard(ctx, st, "run-cost", clk.Now(), 5.0)
+	if err != nil || !exceeded2 || msg2 == "" {
+		t.Fatalf("EnforceCostGuard(after unpause) = (%v, %q, %v), want (true, non-empty, nil)", exceeded2, msg2, err)
+	}
+
+	// Owner explicitly disables the cost guard (max_cost_per_hour_usd=0 -> CostGuardDisabled=true);
+	// verify SQLite round-trip and that EnforceCostGuard does not substitute fallbackLimit.
+	if err := st.Runs().UpdateSettings(ctx, "run-cost", store.RunSettings{
+		ConcurrencyCap:    2,
+		StallTimeout:      15 * time.Minute,
+		MaxCostPerHourUSD: 0,
+		CostGuardDisabled: true,
+		Paused:            false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	disabledSettings, err := st.Runs().GetSettings(ctx, "run-cost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !disabledSettings.CostGuardDisabled || disabledSettings.MaxCostPerHourUSD != 0 {
+		t.Fatalf("disabledSettings = %+v, want CostGuardDisabled=true MaxCostPerHourUSD=0", disabledSettings)
+	}
+	exceeded3, _, _, _, err := store.EnforceCostGuard(ctx, st, "run-cost", clk.Now(), 5.0)
+	if err != nil || exceeded3 {
+		t.Fatalf("EnforceCostGuard with CostGuardDisabled=true = (%v, %v), want (false, nil)", exceeded3, err)
 	}
 }

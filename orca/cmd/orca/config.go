@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -59,6 +60,7 @@ const (
 	DefaultOpenAIConciergeModel  = "gpt-6.1-sol"
 	DefaultOpenAIPlannerModel    = "gpt-6-astra"
 	DefaultConcurrencyCap        = 4
+	DefaultMaxCostPerHourUSD     = 5.0
 	DefaultStoreSpec             = "sqlite"
 	DefaultDriverKind            = "nebula"
 	DefaultAgentBackend          = model.AgentBackendCLI
@@ -199,6 +201,7 @@ type Config struct {
 	PollInterval          time.Duration `json:"poll_interval,omitempty"`
 	JudgmentDebounce      time.Duration `json:"judgment_debounce,omitempty"`
 	StallTimeout          time.Duration `json:"stall_timeout,omitempty"`
+	MaxCostPerHourUSD     float64       `json:"max_cost_per_hour_usd,omitempty"`
 	ConcurrencyCap        int           `json:"concurrency_cap,omitempty"`
 	MaxSteps              int           `json:"max_steps,omitempty"`
 	Once                  bool          `json:"once,omitempty"`
@@ -209,6 +212,7 @@ type Config struct {
 	fakeAutoSet           bool
 	stallTimeoutSet       bool
 	stallTimeoutFlagSet   bool
+	maxCostPerHourSet     bool
 	agentBackendDefaulted bool
 }
 
@@ -275,6 +279,17 @@ func (c Config) withDefaults() Config {
 	if c.StallTimeout <= 0 {
 		c.StallTimeout = controller.DefaultStallTimeout
 	}
+	if !c.maxCostPerHourSet && c.MaxCostPerHourUSD <= 0 {
+		if raw := strings.TrimSpace(os.Getenv("ORCA_MAX_COST_PER_HOUR_USD")); raw != "" {
+			if v, err := strconv.ParseFloat(raw, 64); err == nil && v >= 0 {
+				c.MaxCostPerHourUSD = v
+				c.maxCostPerHourSet = true
+			}
+		}
+	}
+	if !c.maxCostPerHourSet && c.MaxCostPerHourUSD <= 0 {
+		c.MaxCostPerHourUSD = DefaultMaxCostPerHourUSD
+	}
 	c.LogLevel = cmp.Or(strings.ToLower(strings.TrimSpace(c.LogLevel)), "info")
 	c.LogFormat = cmp.Or(strings.ToLower(strings.TrimSpace(c.LogFormat)), "json")
 	return c
@@ -321,6 +336,9 @@ func (c Config) Validate(requireDriver bool) error {
 	if c.ConcurrencyCap < 0 {
 		return fmt.Errorf("orca: --concurrency-cap must be >= 0, got %d", c.ConcurrencyCap)
 	}
+	if c.MaxCostPerHourUSD < 0 {
+		return fmt.Errorf("orca: --max-cost-per-hour-usd must be >= 0, got %g", c.MaxCostPerHourUSD)
+	}
 	return nil
 }
 
@@ -347,6 +365,9 @@ func LoadConfigFile(path string, base Config) (Config, error) {
 		}
 		if _, ok := raw["stall_timeout"]; ok {
 			fileCfg.stallTimeoutSet = fileCfg.StallTimeout > 0
+		}
+		if _, ok := raw["max_cost_per_hour_usd"]; ok {
+			fileCfg.maxCostPerHourSet = true
 		}
 	}
 	return mergeConfig(fileCfg, base), nil
@@ -395,6 +416,10 @@ func mergeConfig(lower, higher Config) Config {
 	}
 	if higher.ConcurrencyCap != 0 {
 		out.ConcurrencyCap = higher.ConcurrencyCap
+	}
+	if higher.maxCostPerHourSet || higher.MaxCostPerHourUSD != 0 {
+		out.MaxCostPerHourUSD = higher.MaxCostPerHourUSD
+		out.maxCostPerHourSet = true
 	}
 	if higher.stallTimeoutFlagSet {
 		out.StallTimeout = higher.StallTimeout
@@ -506,6 +531,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	}
 
 	fs.IntVar(&cfg.ConcurrencyCap, "concurrency-cap", 0, "Maximum concurrent active lanes")
+	fs.Float64Var(&cfg.MaxCostPerHourUSD, "max-cost-per-hour-usd", 0, "Maximum per-run spend in USD per hour before pausing turns (default $5.00/h, 0 = unlimited)")
 	fs.Var(&recipes, "recipe-file", "Recipe file path (.json compiled recipe or plain-text NL source; repeatable)")
 	fs.StringVar(&cfg.ReplayPath, "replay", "", "Recorded model replay JSON path for deterministic execution")
 	fs.StringVar(&cfg.RecordPath, "record", "", "Path to record model request/response exchanges")
@@ -547,6 +573,8 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 		case "stall-timeout":
 			cfg.stallTimeoutFlagSet = true
 			cfg.stallTimeoutSet = cfg.StallTimeout > 0
+		case "max-cost-per-hour-usd":
+			cfg.maxCostPerHourSet = true
 		}
 	})
 
