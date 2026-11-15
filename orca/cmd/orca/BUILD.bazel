@@ -65,6 +65,7 @@ go_test(
         "//orca/lane",
         "//orca/mailbox",
         "//orca/mailbox/fake",
+        "//orca/mailbox/nebula",
         "//orca/model",
         "//orca/planner",
         "//orca/recipe",

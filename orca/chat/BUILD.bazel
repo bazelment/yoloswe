@@ -6,6 +6,7 @@ go_library(
         "chat.go",
         "hostlive.go",
         "lineedit.go",
+        "render.go",
         "store.go",
         "swarms.go",
     ],
@@ -30,9 +31,16 @@ go_test(
     srcs = [
         "adopted_test.go",
         "chat_test.go",
+        "render_test.go",
         "swarms_test.go",
     ],
+    data = glob(["testdata/**"]),
     embed = [":chat"],
+    embedsrcs = [
+        "testdata/reply_60.golden",
+        "testdata/reply_188.golden",
+        "testdata/turn_piped.golden",
+    ],
     deps = [
         "//orca/adopt",
         "//orca/clock",
@@ -45,6 +53,7 @@ go_test(
         "//orca/router",
         "//orca/store",
         "@com_github_charmbracelet_x_exp_teatest_v2//:teatest",
+        "@com_github_mattn_go_runewidth//:go-runewidth",
         "@land_charm_bubbletea_v2//:bubbletea",
     ],
 )

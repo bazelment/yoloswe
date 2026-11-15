@@ -459,6 +459,9 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 			}
 		}),
 		model.WithOnToolCall(func(_ int, call model.ToolCall, resBlock model.ContentBlock) {
+			if call.Name != ToolRunStart {
+				chat.EmitToolCall(ctx, call.Name, call.Input, c.runID)
+			}
 			_, _ = c.store.Threads().AppendItem(cleanupCtx, store.Item{
 				ThreadID: threadID,
 				TurnID:   turnID,

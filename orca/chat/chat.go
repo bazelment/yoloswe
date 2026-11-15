@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,21 @@ import (
 
 	"github.com/bazelment/yoloswe/orca/router"
 )
+
+type toolEmitterKey struct{}
+
+// WithToolEmitter attaches a callback to ctx that receives live tool-call lines
+// while a turn is running.
+func WithToolEmitter(ctx context.Context, emit func(string)) context.Context {
+	return context.WithValue(ctx, toolEmitterKey{}, emit)
+}
+
+// EmitToolCall formats and emits a live tool-call line if ctx carries a tool emitter.
+func EmitToolCall(ctx context.Context, name string, rawInput []byte, defaultRunID string) {
+	if emit, ok := ctx.Value(toolEmitterKey{}).(func(string)); ok && emit != nil {
+		emit(FormatToolCall(name, rawInput, defaultRunID))
+	}
+}
 
 type AskFunc func(context.Context, string) (string, error)
 type DispatchFunc func(context.Context, router.Decision, string, func(string)) error
@@ -59,6 +75,7 @@ func commandUsage() string {
 //nolint:govet
 type Model struct {
 	poll                 bool
+	initPrinted          bool
 	refreshing           bool
 	restarting           bool
 	restartMessage       string
@@ -71,11 +88,14 @@ type Model struct {
 	Backend              Backend
 	runID, input, status string
 	streamBuf            string
+	initLines            []string
+	pendingPrint         []string
 	lines                []string
 	queued               []string
 	busy, streaming      bool
 	width                int
 	streamLine           int
+	turnCount            int
 	// cursor is the input cursor's byte offset.
 	cursor int
 	// hints are rendered below the prompt.
@@ -88,7 +108,11 @@ func New(ctx context.Context, runID string, ask AskFunc, r router.Router) Model 
 
 // WithTranscript adds earlier conversation lines above new input.
 func (m Model) WithTranscript(lines []string) Model {
+	m.initLines = append(m.initLines, lines...)
 	m.lines = append(m.lines, lines...)
+	if len(lines) > 0 {
+		m.turnCount = 1
+	}
 	return m
 }
 
@@ -184,6 +208,9 @@ func IsConfirmation(text string) bool {
 type pollMsg struct{}
 
 //nolint:govet // message payload grouping
+type initPrintMsg struct{}
+
+//nolint:govet // message payload grouping
 type snapshotMsg struct {
 	snapshot Snapshot
 	err      error
@@ -213,6 +240,7 @@ type runIDsMsg struct {
 //nolint:govet // message payload grouping
 type streamMsg struct {
 	text string
+	tool string
 	err  error
 	done bool
 	ch   <-chan streamMsg
@@ -245,13 +273,47 @@ func (m Model) pollInterval() time.Duration {
 func (m Model) nextPoll() tea.Cmd {
 	return tea.Tick(m.pollInterval(), func(time.Time) tea.Msg { return pollMsg{} })
 }
+func (m Model) currentRunID() string {
+	runID := m.runID
+	if backend, ok := m.Backend.(*StoreBackend); ok {
+		runID = cmp.Or(backend.RunID(), runID)
+	}
+	return runID
+}
+func (m Model) headerLine() string {
+	return "orca chat — run " + m.currentRunID()
+}
 func (m Model) Init() tea.Cmd {
 	if m.poll {
-		return tea.Batch(m.printLines(m.lines...), m.refresh(), m.nextPoll())
+		initTick := tea.Tick(18*time.Millisecond, func(time.Time) tea.Msg { return initPrintMsg{} })
+		return tea.Batch(initTick, m.refresh(), m.nextPoll())
 	}
 	return m.refresh()
 }
-func (m Model) printLines(blocks ...string) tea.Cmd {
+func (m *Model) flushInitPrint() tea.Cmd {
+	if m.initPrinted || !m.poll {
+		return nil
+	}
+	m.initPrinted = true
+	rows := []string{m.headerLine()}
+	if len(m.initLines) > 0 {
+		rows = append(rows, FormatTranscript(m.initLines, defaultMaxTurns, m.width, true)...)
+	}
+	rows = append(rows, m.pendingPrint...)
+	m.pendingPrint = nil
+	return tea.Println(strings.Join(rows, "\n"))
+}
+func (m *Model) printRawLines(rows ...string) tea.Cmd {
+	if !m.poll || len(rows) == 0 {
+		return nil
+	}
+	if !m.initPrinted {
+		m.pendingPrint = append(m.pendingPrint, rows...)
+		return nil
+	}
+	return tea.Println(strings.Join(rows, "\n"))
+}
+func (m *Model) printLines(blocks ...string) tea.Cmd {
 	if !m.poll || len(blocks) == 0 {
 		return nil
 	}
@@ -259,43 +321,33 @@ func (m Model) printLines(blocks ...string) tea.Cmd {
 	for _, b := range blocks {
 		rows = append(rows, wrapPhysicalLines(b, m.width)...)
 	}
-	if len(rows) == 0 {
-		return nil
-	}
-	cmds := make([]tea.Cmd, 0, len(rows))
-	cmds = append(cmds, tea.Println(rows[0]))
-	for _, row := range rows[1:] {
-		cmds = append(cmds, tea.Println(row))
-	}
-	return tea.Sequence(cmds...)
+	return m.printRawLines(rows...)
 }
 func (m *Model) flushStream(done bool) []string {
-	if done {
-		m.streaming = false
-		if m.streamBuf == "" {
-			return nil
-		}
-		out := wrapPhysicalLines(m.streamBuf, m.width)
-		m.streamBuf = ""
-		return out
+	if !done {
+		return nil
 	}
-	var out []string
-	if idx := strings.LastIndexByte(m.streamBuf, '\n'); idx >= 0 {
-		out = append(out, wrapPhysicalLines(m.streamBuf[:idx], m.width)...)
-		m.streamBuf = m.streamBuf[idx+1:]
+	m.streaming = false
+	raw := strings.TrimPrefix(m.streamBuf, replyPrefix)
+	m.streamBuf = ""
+	if m.streamLine >= 0 && m.streamLine < len(m.lines) {
+		m.lines[m.streamLine] = strings.Join(FormatReply(raw, m.width, false), "\n")
 	}
-	if m.width > 1 && runewidth.StringWidth(m.streamBuf) >= m.width {
-		wrapped := wrapPhysicalLines(m.streamBuf, m.width)
-		if len(wrapped) > 1 {
-			out = append(out, wrapped[:len(wrapped)-1]...)
-			m.streamBuf = wrapped[len(wrapped)-1]
-		}
+	if raw == "" {
+		return nil
 	}
-	return out
+	return FormatReply(raw, m.width, m.poll)
 }
 func (m Model) submit(text string) (Model, tea.Cmd) {
+	var rawRows []string
+	if m.turnCount > 0 {
+		m.lines = append(m.lines, "")
+		rawRows = append(rawRows, "")
+	}
+	m.turnCount++
 	userLine := "you> " + text
 	m.lines = append(m.lines, userLine)
+	rawRows = append(rawRows, FormatUserLine(text, m.width, m.poll)...)
 	m.busy = true
 	var runCmd tea.Cmd
 	if strings.HasPrefix(text, "/") {
@@ -312,10 +364,12 @@ func (m Model) submit(text string) (Model, tea.Cmd) {
 	} else {
 		runCmd = m.route(text)
 	}
-	return m, tea.Sequence(m.printLines(userLine), runCmd)
+	printCmd := m.printRawLines(rawRows...)
+	return m, tea.Sequence(printCmd, runCmd)
 }
 func (m Model) finishTurn(printed ...string) (tea.Model, tea.Cmd) {
 	m.busy = false
+	printCmd := m.printRawLines(printed...)
 	var nextCmd tea.Cmd
 	if len(m.queued) > 0 {
 		next := m.queued[0]
@@ -323,7 +377,7 @@ func (m Model) finishTurn(printed ...string) (tea.Model, tea.Cmd) {
 		m, nextCmd = m.submit(next)
 	}
 	refresh := m.requestRefresh()
-	return m, tea.Sequence(m.printLines(printed...), nextCmd, refresh)
+	return m, tea.Sequence(printCmd, nextCmd, refresh)
 }
 func receive(ctx context.Context, ch <-chan streamMsg) tea.Cmd {
 	return func() tea.Msg {
@@ -377,12 +431,18 @@ func (m Model) dispatch(d router.Decision, text string) tea.Cmd {
 			case <-m.ctx.Done():
 			}
 		}
+		turnCtx := WithToolEmitter(m.ctx, func(line string) {
+			select {
+			case ch <- streamMsg{tool: line}:
+			case <-m.ctx.Done():
+			}
+		})
 		var err error
 		if m.Dispatch != nil {
-			err = m.Dispatch(m.ctx, d, text, emit)
+			err = m.Dispatch(turnCtx, d, text, emit)
 		} else if d.Handler == router.Concierge && m.ask != nil {
 			var s string
-			s, err = m.ask(m.ctx, text)
+			s, err = m.ask(turnCtx, text)
 			emit(s)
 		} else {
 			err = fmt.Errorf("no handler for %s", d.Handler)
@@ -396,6 +456,9 @@ func (m Model) dispatch(d router.Decision, text string) tea.Cmd {
 }
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch x := msg.(type) {
+	case initPrintMsg:
+		cmd := m.flushInitPrint()
+		return m, cmd
 	case pollMsg:
 		if !m.poll {
 			return m, nil
@@ -414,7 +477,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.questions = x.snapshot.Questions
 		if len(x.snapshot.Outcomes) > 0 {
 			m.lines = append(m.lines, x.snapshot.Outcomes...)
-			return m, m.printLines(x.snapshot.Outcomes...)
+			cmd := m.printLines(x.snapshot.Outcomes...)
+			return m, cmd
 		}
 	case commandMsg:
 		out := x.text
@@ -428,12 +492,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.restartMessage = x.text
 			return m, tea.Quit
 		}
-		return m.finishTurn(out)
+		return m.finishTurn(wrapPhysicalLines(out, m.width)...)
 	case routeMsg:
 		if x.err != nil {
 			errLine := "error: " + x.err.Error()
 			m.lines = append(m.lines, errLine)
-			return m.finishTurn(errLine)
+			return m.finishTurn(wrapPhysicalLines(errLine, m.width)...)
 		}
 		echo := "→ " + string(x.decision.Handler) + ": " + x.text
 		if x.decision.Fallback {
@@ -442,9 +506,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lines = append(m.lines, echo, "orca> ")
 		m.streamLine = len(m.lines) - 1
 		m.streaming = true
-		m.streamBuf = "orca> "
-		return m, tea.Sequence(m.printLines(echo), m.dispatch(x.decision, x.text))
+		m.streamBuf = ""
+		routeRows := FormatRouteLine(string(x.decision.Handler), x.text, x.decision.Fallback, m.width, m.poll)
+		printCmd := m.printRawLines(routeRows...)
+		return m, tea.Sequence(printCmd, m.dispatch(x.decision, x.text))
 	case streamMsg:
+		if x.tool != "" {
+			m.lines = slices.Insert(m.lines, m.streamLine, x.tool)
+			m.streamLine++
+			toolRows := FormatDimLine(x.tool, m.width, m.poll)
+			printCmd := m.printRawLines(toolRows...)
+			return m, tea.Sequence(printCmd, receive(m.ctx, x.ch))
+		}
 		if x.text != "" {
 			m.lines[m.streamLine] += x.text
 			m.streamBuf += x.text
@@ -454,12 +527,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if x.err != nil {
 				errLine := "error: " + x.err.Error()
 				m.lines = append(m.lines, errLine)
-				printed = append(printed, errLine)
+				printed = append(printed, wrapPhysicalLines(errLine, m.width)...)
 			}
 			return m.finishTurn(printed...)
 		}
-		printed := m.flushStream(false)
-		return m, tea.Sequence(m.printLines(printed...), receive(m.ctx, x.ch))
+		return m, receive(m.ctx, x.ch)
 	case runIDsMsg:
 		if x.input == m.input {
 			m.completeArg(x.ids, x.err)
@@ -583,24 +655,27 @@ func commonPrefix(s []string) string {
 	return p
 }
 
+func (m Model) streamPreview() string {
+	s := strings.TrimPrefix(m.streamBuf, replyPrefix)
+	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", " ")
+	return replyPrefix + s
+}
+
 func (m Model) View() tea.View {
-	runID := m.runID
-	if backend, ok := m.Backend.(*StoreBackend); ok {
-		runID = cmp.Or(backend.RunID(), runID)
+	var top strings.Builder
+	if m.streaming {
+		top.WriteString(truncateLine(m.streamPreview(), m.width))
+		top.WriteByte('\n')
 	}
-	stream := ""
-	if m.streaming && m.streamBuf != "" {
-		stream = "\n" + truncateLine(m.streamBuf, m.width)
-	}
-	questions := ""
 	for _, q := range m.questions {
-		questions += "\n" + truncateLine("owner question> "+q, m.width)
+		top.WriteString(truncateLine("owner question> "+q, m.width))
+		top.WriteByte('\n')
 	}
 	hints := ""
 	if len(m.hints) > 0 {
 		hints = "\n" + truncateLine("  "+strings.Join(m.hints, "  "), m.width)
 	}
-	return tea.NewView("orca chat — run " + runID + stream + questions + "\n\n> " + m.inputView() + hints + m.statusFooter())
+	return tea.NewView(top.String() + "\n> " + m.inputView() + hints + m.statusFooter())
 }
 func (m Model) statusFooter() string {
 	if m.status == "" {

@@ -474,6 +474,7 @@ func TestRunsSwitchUnderPollAndView(t *testing.T) {
 			default:
 			}
 			_ = m.View()
+			_ = m.headerLine()
 			if msg, ok := m.refresh()().(snapshotMsg); !ok || msg.err != nil {
 				done <- fmt.Errorf("poll snapshot: %+v", msg)
 				return
@@ -496,8 +497,11 @@ func TestRunsSwitchUnderPollAndView(t *testing.T) {
 	if strings.Join(attached, ",") != "run-b" || b.RunID() != "run-b" {
 		t.Fatalf("attached=%v RunID=%q", attached, b.RunID())
 	}
-	if v := m.View().Content; !strings.HasPrefix(v, "orca chat — run run-b\n") {
-		t.Fatalf("view header = %q", v)
+	if h := m.headerLine(); h != "orca chat — run run-b" {
+		t.Fatalf("headerLine = %q, want orca chat — run run-b", h)
+	}
+	if v := m.View().Content; strings.Contains(v, "orca chat — run") {
+		t.Fatalf("view re-prints header: %q", v)
 	}
 	if s, err := b.Snapshot(t.Context()); err != nil || !strings.HasPrefix(s.Status, "goal: second") {
 		t.Fatalf("snapshot after switch = %+v, %v", s, err)

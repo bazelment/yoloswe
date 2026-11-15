@@ -538,7 +538,7 @@ func runChatSession(
 				lines = append(lines, formatDetachedRunLine(lr.ID, spec))
 			}
 		}
-		env := append(os.Environ(), fmt.Sprintf("%s=%d", restartEnvVar, os.Getpid()))
+		env := append(os.Environ(), fmt.Sprintf("%s=%d:%s", restartEnvVar, os.Getpid(), oldVer))
 		reexec = &restartRequest{
 			path: target,
 			argv: append([]string{target}, execArgs...),
@@ -571,17 +571,25 @@ func runChatSession(
 		_, err = fmt.Fprintln(stdout, reply.String())
 		return nil, err
 	}
-	var reattachLines []string
+	var heldLines []string
 	reattachedSet := map[string]bool{}
 	for i := range restartedRuns {
 		r := &restartedRuns[i]
 		reattachedSet[r.ID] = true
-		reattachLines = append(reattachLines, fmt.Sprintf("reattached %s (%d lanes, driving again, pid %d)", r.ID, len(r.Lanes), os.Getpid()))
+		heldLines = append(heldLines, fmt.Sprintf("reattached %s (%d lanes, driving again, pid %d)", r.ID, len(r.Lanes), os.Getpid()))
 	}
 	if !frontDesk && !reattachedSet[storeCfg.RunID] && restartedFrom != "" {
-		reattachLines = append(reattachLines, fmt.Sprintf("reattached %s (driving again, pid %d)", storeCfg.RunID, os.Getpid()))
-	} else if len(reattachLines) == 0 && restartedFrom != "" {
-		reattachLines = append(reattachLines, fmt.Sprintf("reattached %s (pid %d, version %s)", storeCfg.RunID, os.Getpid(), currentVersion()))
+		heldLines = append(heldLines, fmt.Sprintf("reattached %s (driving again, pid %d)", storeCfg.RunID, os.Getpid()))
+	}
+	var reattachLines []string
+	if restartedFrom != "" {
+		_, oldVer, ok := strings.Cut(restartedFrom, ":")
+		if !ok || oldVer == "" {
+			oldVer = currentVersion()
+		}
+		reattachLines = chatui.FormatRestartStatus(oldVer, currentVersion(), heldLines)
+	} else {
+		reattachLines = heldLines
 	}
 	if !isTerminal(stdin) {
 		for _, line := range reattachLines {
@@ -632,21 +640,40 @@ func chatHolder(runID string) (holder string, former []string) {
 	return adopt.ChatHolder(frontDeskRunID), []string{adopt.ChatHolder("")}
 }
 
-// resumedLines bounds displayed resumed history.
-const resumedLines = 6
+// resumedTurns bounds displayed resumed turns on startup.
+const resumedTurns = 3
 
 // transcriptLines renders the tail of resumed history.
 func transcriptLines(history []model.Message) []string {
-	if len(history) == 0 {
+	plain := plainHistory(history)
+	if len(plain) == 0 {
 		return nil
 	}
-	lines := []string{fmt.Sprintf("(resumed conversation: %d earlier messages)", len(history))}
-	for _, m := range history[max(len(history)-resumedLines, 0):] {
-		prefix := "you> "
-		if m.Role == model.RoleAssistant {
-			prefix = "orca> "
+	var turns [][]model.Message
+	var cur []model.Message
+	for _, m := range plain {
+		if m.Role == model.RoleUser && len(cur) > 0 {
+			turns = append(turns, cur)
+			cur = nil
 		}
-		lines = append(lines, prefix+m.Text())
+		cur = append(cur, m)
+	}
+	if len(cur) > 0 {
+		turns = append(turns, cur)
+	}
+	var lines []string
+	if len(turns) > resumedTurns {
+		lines = append(lines, fmt.Sprintf("%d earlier turns; /log to see them", len(turns)-resumedTurns))
+		turns = turns[len(turns)-resumedTurns:]
+	}
+	for _, turn := range turns {
+		for _, m := range turn {
+			prefix := "you> "
+			if m.Role == model.RoleAssistant {
+				prefix = "orca> "
+			}
+			lines = append(lines, prefix+m.Text())
+		}
 	}
 	return lines
 }
