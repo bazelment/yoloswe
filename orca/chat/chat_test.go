@@ -60,8 +60,13 @@ func waitText(t *testing.T, tm *teatest.TestModel, text string) {
 	t.Helper()
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		s := string(b)
-		return strings.Contains(s, text) || strings.Contains(SanitizeText(s), text)
-	}, teatest.WithDuration(5*time.Second))
+		if strings.Contains(s, text) || strings.Contains(SanitizeText(s), text) {
+			return true
+		}
+		probe := newFakeTerminal(160, 50)
+		probe.write(s)
+		return !probe.incompleteEsc && strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), text)
+	}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(5*time.Millisecond))
 }
 func submit(tm *teatest.TestModel, s string) {
 	tm.Type(s)
