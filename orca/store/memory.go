@@ -741,6 +741,22 @@ func (d *memDecisionStore) List(_ context.Context, filter DecisionFilter) ([]Dec
 	return out, nil
 }
 
+func (d *memDecisionStore) SetUsage(_ context.Context, runID string, seq int64, usage model.Usage) error {
+	s := d.s()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	decs := s.decisions[runID]
+	for i := range decs {
+		if decs[i].Seq == seq {
+			decs[i].InputTokens = usage.InputTokens
+			decs[i].OutputTokens = usage.OutputTokens
+			decs[i].CostUSD = usage.CostUSD
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: decision seq %d in run %q", ErrNotFound, seq, runID)
+}
+
 type memEventStore MemoryStore
 
 func (e *memEventStore) s() *MemoryStore { return (*MemoryStore)(e) }
@@ -918,6 +934,19 @@ func (t *memThreadStore) SetThreadGoal(_ context.Context, threadID, goal string)
 		return fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
 	}
 	th.Goal = goal
+	th.UpdatedAt = s.now()
+	return nil
+}
+
+func (t *memThreadStore) SetThreadResumeID(_ context.Context, threadID, resumeID string) error {
+	s := t.s()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	th, ok := s.threads[threadID]
+	if !ok {
+		return fmt.Errorf("%w: thread %q", ErrNotFound, threadID)
+	}
+	th.ResumeID = strings.TrimSpace(resumeID)
 	th.UpdatedAt = s.now()
 	return nil
 }

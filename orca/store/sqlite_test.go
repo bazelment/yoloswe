@@ -317,6 +317,9 @@ func TestSQLiteStoreReopenIdenticalState(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Threads.StartThread: %v", err)
 	}
+	if err := st1.Threads().SetThreadResumeID(ctx, "th-main", "sess-reopen-1"); err != nil {
+		t.Fatalf("Threads.SetThreadResumeID: %v", err)
+	}
 	if err := st1.Threads().SteerTurn(ctx, "th-main", "", "Queued steer before turn 1"); err != nil {
 		t.Fatalf("Threads.SteerTurn(queued): %v", err)
 	}
@@ -373,8 +376,8 @@ func TestSQLiteStoreReopenIdenticalState(t *testing.T) {
 	if before.ControllerCursor.Seq != 2 {
 		t.Fatalf("ControllerCursor.Seq = %d, want 2 (monotonic)", before.ControllerCursor.Seq)
 	}
-	if !slices.Equal(before.AppliedMigrations, []string{"0001_init.sql", "0002_memory_notes.sql", "0003_decision_trace.sql", "0004_lane_base_commit.sql", "0005_run_settings.sql", "0006_run_repository.sql"}) {
-		t.Fatalf("AppliedMigrations = %v, want all migrations through 0006", before.AppliedMigrations)
+	if !slices.Equal(before.AppliedMigrations, []string{"0001_init.sql", "0002_memory_notes.sql", "0003_decision_trace.sql", "0004_lane_base_commit.sql", "0005_run_settings.sql", "0006_run_repository.sql", "0007_thread_resume_id.sql"}) {
+		t.Fatalf("AppliedMigrations = %v, want all migrations through 0007", before.AppliedMigrations)
 	}
 
 	if err := st1.Close(); err != nil {

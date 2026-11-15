@@ -52,6 +52,8 @@ type ConciergeRunner interface {
 // StoreConcierge is the default ConciergeRunner backed by store.Store and model.ModelClient.
 type StoreConcierge struct {
 	Client       model.ModelClient
+	AgentBackend model.AgentBackend
+	Provider     string
 	Model        string
 	SystemPrompt string
 	MaxTurns     int
@@ -115,7 +117,7 @@ func (c *StoreConcierge) Answer(
 	clk clock.Clock,
 	runID, question string,
 ) (ConciergeAnswer, error) {
-	if c == nil || c.Client == nil {
+	if c == nil || (c.AgentBackend != model.AgentBackendCLI && c.Client == nil) {
 		return ConciergeAnswer{}, errors.New("orca/replay: concierge model client is required")
 	}
 	if clk == nil {
@@ -141,9 +143,36 @@ func (c *StoreConcierge) Answer(
 		strings.TrimSpace(question),
 	)
 
+	modelName := cmp.Or(strings.TrimSpace(c.Model), DefaultEvalModel)
+	sysPrompt := cmp.Or(c.SystemPrompt, ConciergeSystemPrompt)
+
+	if c.AgentBackend == model.AgentBackendCLI {
+		sess := model.NewAgentSession(model.AgentSessionConfig{
+			Provider:     c.Provider,
+			Model:        modelName,
+			SystemPrompt: sysPrompt,
+		})
+		defer func() { _ = sess.Close() }()
+		res, err := sess.Turn(ctx, model.AgentTurnRequest{
+			Prompt:       prompt,
+			Model:        modelName,
+			SystemPrompt: sysPrompt,
+			Registry:     reg,
+		})
+		if err != nil {
+			return ConciergeAnswer{}, err
+		}
+		return ConciergeAnswer{
+			Answer:    strings.TrimSpace(res.Text),
+			ToolCalls: toolCalls,
+			Usage:     res.Usage,
+			TurnCount: res.TurnCount,
+		}, nil
+	}
+
 	req := model.Request{
-		Model:     cmp.Or(strings.TrimSpace(c.Model), DefaultEvalModel),
-		System:    cmp.Or(c.SystemPrompt, ConciergeSystemPrompt),
+		Model:     modelName,
+		System:    sysPrompt,
 		Messages:  []model.Message{model.NewUserMessage(prompt)},
 		Tools:     reg.Definitions(),
 		MaxTokens: cmp.Or(c.MaxTokens, 1024),

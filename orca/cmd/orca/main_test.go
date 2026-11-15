@@ -2544,3 +2544,46 @@ func TestConfigStallTimeoutExplicitPrecedence(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentBackendFlag_SelectsLoopOrCLI(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		fileBody string
+		want     model.AgentBackend
+		args     []string
+		wantErr  bool
+	}{
+		{name: "default", want: DefaultAgentBackend},
+		{name: "flag loop", args: []string{"--agent-backend", "loop"}, want: model.AgentBackendLoop},
+		{name: "flag cli", args: []string{"--agent-backend", "cli"}, want: model.AgentBackendCLI},
+		{name: "file cli", fileBody: `{"agent_backend":"cli"}`, want: model.AgentBackendCLI},
+		{name: "flag overrides file", fileBody: `{"agent_backend":"cli"}`, args: []string{"--agent-backend", "loop"}, want: model.AgentBackendLoop},
+		{name: "invalid flag", args: []string{"--agent-backend", "bogus"}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			args := append([]string(nil), tc.args...)
+			if tc.fileBody != "" {
+				path := filepath.Join(t.TempDir(), "config.json")
+				if err := os.WriteFile(path, []byte(tc.fileBody), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				args = append(args, "--config", path)
+			}
+			cfg, _, err := parseFlags("run", args, io.Discard)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for args=%v, got nil (backend=%q)", args, cfg.AgentBackend)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseFlags(%v): %v", args, err)
+			}
+			if cfg.AgentBackend != tc.want {
+				t.Fatalf("cfg.AgentBackend = %q, want %q", cfg.AgentBackend, tc.want)
+			}
+		})
+	}
+}

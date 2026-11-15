@@ -11,6 +11,7 @@ go_test(
     name = "integration_test",
     size = "medium",
     srcs = ["live_test.go"],
+    data = ["//orca/cmd/orca"],
     env_inherit = [
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
@@ -24,5 +25,10 @@ go_test(
         "local",
         "manual",
     ],
-    deps = ["//orca/model"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//orca/clock",
+        "//orca/model",
+        "//orca/store",
+    ],
 )

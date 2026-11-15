@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/adopt"
@@ -78,16 +79,11 @@ func newAdoption(ctx context.Context, cfg Config, h hostSwarms, holder string, f
 		return nil, h.off
 	}
 	prProbe := adoptedPRProbe(h, st)
-	var pln *Planner
-	if client != nil {
-		pln = NewPlanner(st, clk, roleClient(client, cfg, "planner"), cfg.Models.Planner, logger)
-	}
-	ctrls := adopt.NewControllers(ctx, st, h.client, clk, adoptedDispatchers(cfg, st, h.client, clk, client, logger, prProbe, pln))
+	judges, plannerFn := adoptedDispatchers(ctx, cfg, h, st, h.client, clk, client, logger, prProbe)
+	ctrls := adopt.NewControllers(ctx, st, h.client, clk, judges)
 	ctrls.PRProbe = prProbe
 	ctrls.Mailboxes = adoptedMailboxes(cfg, st)
-	if pln != nil {
-		ctrls.Planner = pln.HandlePlannerRequest
-	}
+	ctrls.Planner = plannerFn
 	return &adopt.Service{
 		Importer:           h.importer,
 		Labeler:            h.client,
@@ -169,27 +165,133 @@ func adoptedPRProbe(h hostSwarms, st store.Store) controller.PRProbe {
 	}
 }
 
-// adoptedDispatchers gives each adopted run the dispatcher `orca run` uses,
-// so owner instructions and escalations on that run are judged.
-func adoptedDispatchers(cfg Config, st store.Store, lanes *nebula.Driver, clk clock.Clock, client model.ModelClient, logger *slog.Logger, prProbe controller.PRProbe, pln *Planner) adopt.JudgeFactory {
-	if client == nil {
-		return nil
+func newAdoptedPlanner(cfg Config, h hostSwarms, st store.Store, clk clock.Clock, client model.ModelClient, logger *slog.Logger, backend model.AgentBackend, runID string) (*Planner, model.InvestigateConfig) {
+	var runDir string
+	if runID != "" {
+		runDir, _ = h.importer.Find(runID)
 	}
-	return func(_ string, answer func(context.Context, string, string, string) error) controller.Judge {
-		dcfg := dispatcher.Config{
-			Model:          cfg.Models.Dispatcher,
-			Provider:       cfg.Models.Roles["dispatcher"].Provider,
-			PromptVersion:  dispatcher.SystemPromptVersion,
-			HardBatchModel: cfg.Models.DispatcherHard,
-			Logger:         logger,
-			PRProbe:        prProbe,
+	investigate := model.InvestigateConfig{
+		RunDir:  runDir,
+		RepoDir: model.ResolveGitTopLevel(""),
+	}
+	planner := NewPlanner(st, clk, roleClient(client, cfg, "planner"), cfg.Models.Planner, logger)
+	planner.critic = roleClient(client, cfg, "critic")
+	planner.criticModel = cfg.Models.Roles["critic"].Model
+	planner.providerName = cfg.Models.Roles["planner"].Provider
+	planner.criticProvider = cfg.Models.Roles["critic"].Provider
+	planner.effort = cfg.Models.Roles["planner"].Effort
+	planner.agentBackend = backend
+	planner.investigate = investigate
+	planner.claudeBin = cfg.ClaudeBin
+	planner.codexBin = cfg.CodexBin
+	return planner, investigate
+}
+
+// adoptedDispatchers gives each adopted run the dispatcher and planner `orca run`
+// uses, so owner instructions, escalations, and backlog-drained replans on that
+// run share the same per-run Planner and investigation roots.
+func adoptedDispatchers(
+	ctx context.Context,
+	cfg Config,
+	h hostSwarms,
+	st store.Store,
+	lanes *nebula.Driver,
+	clk clock.Clock,
+	client model.ModelClient,
+	logger *slog.Logger,
+	prProbe controller.PRProbe,
+) (adopt.JudgeFactory, func(context.Context, string, string, string) error) {
+	backend := effectiveAgentBackend(cfg, client)
+	if client == nil && backend != model.AgentBackendCLI {
+		return nil, nil
+	}
+	var (
+		mu       sync.Mutex
+		planners = make(map[string]*Planner)
+	)
+	if ctx != nil {
+		context.AfterFunc(ctx, func() {
+			mu.Lock()
+			active := planners
+			planners = make(map[string]*Planner)
+			mu.Unlock()
+			for _, p := range active {
+				if p != nil {
+					_ = p.Close()
+				}
+			}
+		})
+	}
+	judges := func(runID string, answer func(context.Context, string, string, string) error) controller.Judge {
+		planner, investigate := newAdoptedPlanner(cfg, h, st, clk, client, logger, backend, runID)
+		mu.Lock()
+		prev := planners[runID]
+		planners[runID] = planner
+		mu.Unlock()
+		if prev != nil {
+			_ = prev.Close()
 		}
-		if pln != nil {
-			dcfg.OnPlannerRequest = pln.HandlePlannerRequest
-			dcfg.RecipeCompiler = pln
-		}
-		disp := dispatcher.New(dcfg, st, lanes, clk, roleClient(client, cfg, "dispatcher"))
+
+		disp := dispatcher.New(dispatcher.Config{
+			AgentBackend:     backend,
+			Investigate:      investigate,
+			Model:            cfg.Models.Dispatcher,
+			Provider:         cfg.Models.Roles["dispatcher"].Provider,
+			Effort:           cfg.Models.Roles["dispatcher"].Effort,
+			ClaudeBin:        cfg.ClaudeBin,
+			CodexBin:         cfg.CodexBin,
+			PromptVersion:    dispatcher.SystemPromptVersion,
+			HardBatchModel:   cfg.Models.DispatcherHard,
+			RecipeCompiler:   planner,
+			OnPlannerRequest: planner.HandlePlannerRequest,
+			Logger:           logger,
+			PRProbe:          prProbe,
+		}, st, lanes, clk, roleClient(client, cfg, "dispatcher"))
 		disp.SetOwnerAnswer(answer)
-		return disp
+		return &adoptedJudge{
+			Dispatcher: disp,
+			planner:    planner,
+			onClose: func() {
+				mu.Lock()
+				if planners[runID] == planner {
+					delete(planners, runID)
+				}
+				mu.Unlock()
+			},
+		}
 	}
+	plannerFn := func(pCtx context.Context, runID, reason, planRef string) error {
+		mu.Lock()
+		planner := planners[runID]
+		mu.Unlock()
+		if planner != nil {
+			return planner.HandlePlannerRequest(pCtx, runID, reason, planRef)
+		}
+		tmpPlanner, _ := newAdoptedPlanner(cfg, h, st, clk, client, logger, backend, runID)
+		defer func() { _ = tmpPlanner.Close() }()
+		return tmpPlanner.HandlePlannerRequest(pCtx, runID, reason, planRef)
+	}
+	return judges, plannerFn
+}
+
+type adoptedJudge struct {
+	*dispatcher.Dispatcher
+	planner *Planner
+	onClose func()
+}
+
+func (j *adoptedJudge) Close() error {
+	if j.onClose != nil {
+		j.onClose()
+	}
+	var err error
+	if j.Dispatcher != nil {
+		err = j.Dispatcher.Close()
+	}
+	if j.planner != nil {
+		if pErr := j.planner.Close(); pErr != nil && err == nil {
+			err = pErr
+		}
+	}
+	return err
 }

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/model"
@@ -96,6 +97,7 @@ type ThreadStore interface {
 	ListThreads(ctx context.Context, filter ThreadFilter) ([]Thread, error)
 	UpdateThreadStatus(ctx context.Context, threadID string, status ThreadStatus) error
 	SetThreadGoal(ctx context.Context, threadID, goal string) error
+	SetThreadResumeID(ctx context.Context, threadID, resumeID string) error
 	ForkThread(ctx context.Context, parentThreadID, newThreadID, upToTurnID string) (Thread, error)
 	StartTurn(ctx context.Context, turn Turn) (Turn, error)
 	SteerTurn(ctx context.Context, threadID, turnID, message string) error
@@ -104,6 +106,38 @@ type ThreadStore interface {
 	ListTurns(ctx context.Context, threadID string) ([]Turn, error)
 	AppendItem(ctx context.Context, item Item) (Item, error)
 	ListItems(ctx context.Context, threadID, turnID string, limit, offset int) ([]Item, error)
+}
+
+// AppendMCPToolCallItems records a tool_call item and its matching tool_result
+// item on threads for an observed MCP tool invocation.
+func AppendMCPToolCallItems(
+	ctx context.Context,
+	threads ThreadStore,
+	threadID, turnID, callID, name string,
+	args json.RawMessage,
+	output string,
+	isError bool,
+) {
+	if threads == nil || threadID == "" {
+		return
+	}
+	_, _ = threads.AppendItem(ctx, Item{
+		ThreadID: threadID,
+		TurnID:   turnID,
+		Kind:     ItemKindToolCall,
+		Name:     name,
+		CallID:   callID,
+		Payload:  args,
+	})
+	_, _ = threads.AppendItem(ctx, Item{
+		ThreadID: threadID,
+		TurnID:   turnID,
+		Kind:     ItemKindToolResult,
+		Name:     name,
+		CallID:   callID,
+		Content:  output,
+		IsError:  isError,
+	})
 }
 
 // RecipeStore persists versioned natural-language recipes and their compiled forms.

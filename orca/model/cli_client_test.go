@@ -1,12 +1,17 @@
 package model_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bazelment/yoloswe/orca/model"
@@ -131,6 +136,226 @@ func TestCLIFailureAndCancellation(t *testing.T) {
 	_, err = client.CreateMessage(ctx, model.Request{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel=%v", err)
+	}
+}
+
+func TestInvestigateTools_ReadFileConfinementAndSymlinkEscape(t *testing.T) {
+	t.Parallel()
+	runDir := t.TempDir()
+	repoDir := t.TempDir()
+	outsideDir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(runDir, "OBJECTIVE.md"), []byte("line1\nline2\nline3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secretFile := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(secretFile, []byte("outside-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(runDir, "escape.md")
+	if err := os.Symlink(secretFile, symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := model.NewToolRegistry()
+	model.RegisterInvestigationTools(reg, model.InvestigateConfig{
+		RunDir:  runDir,
+		RepoDir: repoDir,
+	})
+
+	// 1. Valid bounded read inside runDir.
+	res := reg.Execute(t.Context(), model.ToolCall{
+		ID:    "c1",
+		Name:  model.ToolReadFile,
+		Input: json.RawMessage(`{"path":"OBJECTIVE.md","max_bytes":5}`),
+	})
+	if res.IsError || !strings.Contains(res.Content, "line1") || !strings.Contains(res.Content, "...[truncated]") {
+		t.Fatalf("valid read_file = %+v", res)
+	}
+
+	// 2. Relative path traversal rejected.
+	if res := reg.Execute(t.Context(), model.ToolCall{
+		ID:    "c2",
+		Name:  model.ToolReadFile,
+		Input: json.RawMessage(`{"path":"../secret.txt"}`),
+	}); !res.IsError {
+		t.Fatalf("expected path traversal rejection, got %+v", res)
+	}
+
+	// 3. Relative symlink escaping runDir rejected.
+	if res := reg.Execute(t.Context(), model.ToolCall{
+		ID:    "c3",
+		Name:  model.ToolReadFile,
+		Input: json.RawMessage(`{"path":"escape.md"}`),
+	}); !res.IsError {
+		t.Fatalf("expected relative symlink escape rejection, got %+v", res)
+	}
+
+	// 4. Absolute path to symlink inside runDir pointing outside runDir rejected.
+	absReq, _ := json.Marshal(model.ReadFileParams{
+		Path: symlinkPath,
+	})
+	if res := reg.Execute(t.Context(), model.ToolCall{
+		ID:    "c4",
+		Name:  model.ToolReadFile,
+		Input: absReq,
+	}); !res.IsError {
+		t.Fatalf("expected absolute symlink escape rejection, got %+v", res)
+	}
+}
+
+func TestValidateReadOnlyCommand(t *testing.T) {
+	t.Parallel()
+	allowed := [][]string{
+		{"gh", "pr", "view", "417"},
+		{"gh", "pr", "checks", "417"},
+		{"gh", "run", "view", "12345"},
+		{"nebula", "post", "get", "286c9d4f-9da3-4787-aa66-bd97aa21f947"},
+		{"nebula", "mail", "list"},
+		{"nebula", "session", "list"},
+	}
+	for _, cmd := range allowed {
+		if err := model.ValidateReadOnlyCommand(cmd[0], cmd[1:]); err != nil {
+			t.Errorf("ValidateReadOnlyCommand(%v) unexpected error: %v", cmd, err)
+		}
+	}
+
+	denied := [][]string{
+		{"gh", "api", "repos/bazelment/yoloswe/pulls/417/merge"},
+		{"gh", "pr", "merge", "417"},
+		{"gh", "pr", "view", "417", "--web"},
+		{"gh", "pr", "view", "417", "-w"},
+		{"nebula", "mail", "send", "--body", "hi"},
+		{"nebula", "phase", "report", "--outcome", "done"},
+		{"bash", "-c", "echo hi"},
+	}
+	for _, cmd := range denied {
+		if err := model.ValidateReadOnlyCommand(cmd[0], cmd[1:]); err == nil {
+			t.Errorf("ValidateReadOnlyCommand(%v) expected error, got nil", cmd)
+		}
+	}
+}
+
+func TestMCPToolBridge_SerializationMaxCallsAndHTTPGuards(t *testing.T) {
+	t.Parallel()
+	reg := model.NewToolRegistry()
+
+	var inFlight atomic.Int32
+	var maxConcurrent atomic.Int32
+	entered := make(chan struct{}, 8)
+	release := make(chan struct{})
+
+	reg.Register(model.ToolDefinition{
+		Name:        "lane.spawn",
+		Description: "Spawn a lane",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+	}, func(_ context.Context, _ json.RawMessage) (string, error) {
+		cur := inFlight.Add(1)
+		for {
+			prev := maxConcurrent.Load()
+			if cur <= prev || maxConcurrent.CompareAndSwap(prev, cur) {
+				break
+			}
+		}
+		entered <- struct{}{}
+		<-release
+		inFlight.Add(-1)
+		return "ok", nil
+	})
+
+	bridge := model.NewMCPToolBridge(reg)
+	bridge.SetMaxCalls(2)
+
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := bridge.HandleToolCall(t.Context(), "lane_spawn", json.RawMessage(`{}`)); err != nil {
+				t.Errorf("HandleToolCall error: %v", err)
+			}
+		}()
+	}
+
+	// First call enters handler; second call must wait on bridge.execMu.
+	<-entered
+	close(release)
+	<-entered
+	wg.Wait()
+
+	if got := maxConcurrent.Load(); got != 1 {
+		t.Fatalf("max concurrent tool handler executions = %d, want 1 (serialized)", got)
+	}
+
+	// Third call exceeds MaxCalls(2) and returns an error result.
+	res, err := bridge.HandleToolCall(t.Context(), "lane_spawn", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("HandleToolCall 3 error: %v", err)
+	}
+	if res == nil || !res.IsError {
+		t.Fatalf("expected 3rd call to be rejected by MaxCalls, got %+v", res)
+	}
+
+	// Clearing registry rejects late calls after turn ends.
+	bridge.SetRegistry(nil)
+	lateRes, err := bridge.HandleToolCall(t.Context(), "lane_spawn", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("late HandleToolCall error: %v", err)
+	}
+	if lateRes == nil || !lateRes.IsError {
+		t.Fatalf("expected late call after SetRegistry(nil) to fail, got %+v", lateRes)
+	}
+
+	// ServeHTTP guards: reject GET, Origin header, and non-JSON Content-Type.
+	getRec := httptest.NewRecorder()
+	bridge.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, "/mcp", nil))
+	if getRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /mcp status = %d, want %d", getRec.Code, http.StatusMethodNotAllowed)
+	}
+
+	originReq := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader([]byte(`{}`)))
+	originReq.Header.Set("Origin", "https://evil.example")
+	originReq.Header.Set("Content-Type", "application/json")
+	originRec := httptest.NewRecorder()
+	bridge.ServeHTTP(originRec, originReq)
+	if originRec.Code != http.StatusForbidden {
+		t.Fatalf("POST /mcp with Origin status = %d, want %d", originRec.Code, http.StatusForbidden)
+	}
+
+	ctReq := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader([]byte(`{}`)))
+	ctReq.Header.Set("Content-Type", "text/plain")
+	ctRec := httptest.NewRecorder()
+	bridge.ServeHTTP(ctRec, ctReq)
+	if ctRec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("POST /mcp with text/plain status = %d, want %d", ctRec.Code, http.StatusUnsupportedMediaType)
+	}
+}
+
+func TestMCPToolBridge_WireNameMapping(t *testing.T) {
+	t.Parallel()
+	reg := model.NewToolRegistry()
+	var observedName string
+	reg.Register(model.ToolDefinition{
+		Name:        "read.lane_report",
+		Description: "Read lane report",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+	}, func(_ context.Context, _ json.RawMessage) (string, error) {
+		return "report-body", nil
+	})
+	bridge := model.NewMCPToolBridge(reg)
+	bridge.SetObserver(func(name string, _ json.RawMessage, _ string, _ bool) {
+		observedName = name
+	})
+	tools := bridge.Tools()
+	if len(tools) != 1 || tools[0].Name != "read_lane_report" {
+		t.Fatalf("Tools = %+v, want [read_lane_report]", tools)
+	}
+	res, err := bridge.HandleToolCall(t.Context(), "mcp__orca__read_lane_report", json.RawMessage(`{}`))
+	if err != nil || res == nil || res.IsError {
+		t.Fatalf("HandleToolCall(mcp__orca__read_lane_report) = %+v, %v", res, err)
+	}
+	if observedName != "read.lane_report" {
+		t.Fatalf("observed canonical tool name = %q, want read.lane_report", observedName)
 	}
 }
 

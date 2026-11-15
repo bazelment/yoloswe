@@ -61,20 +61,27 @@ type Config struct {
 	Logger *slog.Logger
 	// Temperature is the sampling temperature for judgment turns. Nil omits it
 	// from the request: newer models reject the parameter outright.
-	Temperature    *float64
-	Model          string
-	Provider       string
-	PromptVersion  string
-	HardBatchModel string
-	SystemPrompt   string
-	ThreadID       string
-	Mailboxes      []mailbox.Mailbox
-	Invariants     []Invariant
-	Snapshot       SnapshotConfig
-	MaxTurns       int
-	MaxTokens      int
-	MaxBriefBytes  int
-	MaxReadBytes   int
+	Temperature      *float64
+	Investigate      model.InvestigateConfig
+	AgentBackend     model.AgentBackend
+	Model            string
+	Provider         string
+	Effort           string
+	ClaudeBin        string
+	CodexBin         string
+	PromptVersion    string
+	HardBatchModel   string
+	SystemPrompt     string
+	ThreadID         string
+	Mailboxes        []mailbox.Mailbox
+	Invariants       []Invariant
+	Snapshot         SnapshotConfig
+	MaxTurns         int
+	MaxTokens        int
+	MaxBriefBytes    int
+	MaxReadBytes     int
+	MaxSessionTokens int
+	MaxSessionTurns  int
 	// AllowMultiAction lifts the one-primary-action-per-batch contract
 	// (checkOnePrimaryAction). Production leaves it false; tests that script
 	// every tool into a single batch set it.
@@ -82,9 +89,18 @@ type Config struct {
 }
 
 func (c Config) withDefaults() Config {
+	if c.AgentBackend == "" {
+		c.AgentBackend = model.AgentBackendLoop
+	}
 	c.Model = cmp.Or(strings.TrimSpace(c.Model), DefaultModel)
 	c.HardBatchModel = cmp.Or(strings.TrimSpace(c.HardBatchModel), DefaultHardBatchModel)
-	c.SystemPrompt = cmp.Or(c.SystemPrompt, SystemPrompt)
+	if c.SystemPrompt == "" {
+		if c.AgentBackend == model.AgentBackendCLI {
+			c.SystemPrompt = CLISystemPrompt
+		} else {
+			c.SystemPrompt = SystemPrompt
+		}
+	}
 	if len(c.Invariants) == 0 {
 		c.Invariants = DefaultInvariants()
 	}
@@ -119,13 +135,15 @@ type BatchResult struct {
 }
 
 // Dispatcher handles debounced judgment batches from the Controller by building
-// a compact Store snapshot, running a bounded tool loop on ModelClient, vetting
-// every tool call against deterministic invariants, and logging decisions.
+// a compact Store snapshot, running a bounded tool loop on ModelClient (or a
+// long-lived CLI agent session), vetting every tool call against deterministic
+// invariants, and logging decisions.
 type Dispatcher struct {
 	store      store.Store
 	driver     lane.LaneDriver
 	clock      clock.Clock
 	client     model.ModelClient
+	sessions   model.AgentSessionMap
 	lastResult *BatchResult
 	cfg        Config
 	seq        int64
@@ -150,6 +168,21 @@ func New(
 		clock:  clk,
 		client: client,
 	}
+}
+
+// Session returns the active CLI AgentSession for runID, if any.
+func (d *Dispatcher) Session(runID string) *model.AgentSession {
+	return d.sessions.Session(runID)
+}
+
+// CloseRun stops and removes the CLI AgentSession for runID, if any.
+func (d *Dispatcher) CloseRun(runID string) error {
+	return d.sessions.CloseRun(runID)
+}
+
+// Close stops all active CLI AgentSessions managed by this Dispatcher.
+func (d *Dispatcher) Close() error {
+	return d.sessions.Close()
 }
 
 // SetOwnerAnswer installs the controller-owned resolution path for owner.answer.
@@ -315,7 +348,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	if d.store == nil {
 		return nil, errors.New("orca/dispatcher: store is required")
 	}
-	if d.client == nil {
+	if d.cfg.AgentBackend != model.AgentBackendCLI && d.client == nil {
 		return nil, errors.New("orca/dispatcher: model client is required")
 	}
 
@@ -379,85 +412,91 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	modelName := d.selectModel(events)
 	state.model = modelName
 
-	req := model.Request{
-		Model:       modelName,
-		System:      d.systemPromptWithMemories(ctx, runID),
-		Messages:    []model.Message{model.NewUserMessage(snap.Text)},
-		Tools:       toolsForBatch(reg.Definitions(), events),
-		MaxTokens:   d.cfg.MaxTokens,
-		Temperature: d.cfg.Temperature,
-	}
-
-	var followedUp bool
-	loopRes, loopErr := model.RunToolLoop(
-		ctx,
-		retryOnTruncationClient{
-			inner: d.client,
-			followUp: func(callCtx context.Context, resp *model.Response) string {
-				if followedUp {
-					return ""
-				}
-				nudge := d.followUpSpawnNudge(callCtx, runID, events, state, resp)
-				if nudge != "" {
-					followedUp = true
-				}
-				return nudge
-			},
-		},
-		req,
-		reg,
-		model.WithMaxTurns(d.cfg.MaxTurns),
-		model.WithToolCallLog(d.cfg.Logger, ActorDispatcher),
-		model.WithOnTurn(func(turn int, resp model.Response) {
-			state.currentTurn = turn
-			state.turnUsage[turn] = resp.Usage
-			if txt := strings.TrimSpace(resp.Text()); txt != "" {
-				_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
-					ThreadID: threadID,
-					TurnID:   turnID,
-					Kind:     store.ItemKindAssistantMessage,
-					Content:  txt,
-				})
-			}
-			for _, tc := range resp.ToolCalls() {
-				if !reg.Has(tc.Name) {
-					toolName := tc.Name
-					reg.Register(model.ToolDefinition{Name: toolName}, func(callCtx context.Context, raw json.RawMessage) (string, error) {
-						return d.handleRawToolCall(callCtx, runID, state, toolName, raw)
-					})
-				}
-			}
-		}),
-		model.WithOnToolCall(func(_ int, call model.ToolCall, resBlock model.ContentBlock) {
-			_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
-				ThreadID: threadID,
-				TurnID:   turnID,
-				Kind:     store.ItemKindToolCall,
-				Name:     call.Name,
-				CallID:   call.ID,
-				Payload:  call.Input,
-			})
-			_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
-				ThreadID: threadID,
-				TurnID:   turnID,
-				Kind:     store.ItemKindToolResult,
-				Name:     call.Name,
-				CallID:   call.ID,
-				Content:  resBlock.Content,
-				IsError:  resBlock.IsError,
-			})
-		}),
-	)
-
 	var (
 		usage     model.Usage
 		turnCount int
 		summary   string
+		loopErr   error
 	)
-	if loopRes != nil {
-		usage = loopRes.Usage
-		turnCount = loopRes.TurnCount
-		summary = strings.TrimSpace(loopRes.Response.Text())
+
+	if d.cfg.AgentBackend == model.AgentBackendCLI {
+		usage, turnCount, summary, loopErr = d.dispatchCLITurn(ctx, cleanupCtx, runID, threadID, turnID, modelName, snap.Text, events, state)
+	} else {
+		req := model.Request{
+			Model:       modelName,
+			System:      d.systemPromptWithMemories(ctx, runID),
+			Messages:    []model.Message{model.NewUserMessage(snap.Text)},
+			Tools:       toolsForBatch(reg.Definitions(), events),
+			MaxTokens:   d.cfg.MaxTokens,
+			Temperature: d.cfg.Temperature,
+		}
+
+		var followedUp bool
+		var loopRes *model.ToolLoopResult
+		loopRes, loopErr = model.RunToolLoop(
+			ctx,
+			retryOnTruncationClient{
+				inner: d.client,
+				followUp: func(callCtx context.Context, resp *model.Response) string {
+					if followedUp {
+						return ""
+					}
+					nudge := d.followUpSpawnNudge(callCtx, runID, events, state, resp)
+					if nudge != "" {
+						followedUp = true
+					}
+					return nudge
+				},
+			},
+			req,
+			reg,
+			model.WithMaxTurns(d.cfg.MaxTurns),
+			model.WithToolCallLog(d.cfg.Logger, ActorDispatcher),
+			model.WithOnTurn(func(turn int, resp model.Response) {
+				state.currentTurn = turn
+				state.turnUsage[turn] = resp.Usage
+				if txt := strings.TrimSpace(resp.Text()); txt != "" {
+					_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
+						ThreadID: threadID,
+						TurnID:   turnID,
+						Kind:     store.ItemKindAssistantMessage,
+						Content:  txt,
+					})
+				}
+				for _, tc := range resp.ToolCalls() {
+					if !reg.Has(tc.Name) {
+						toolName := tc.Name
+						reg.Register(model.ToolDefinition{Name: toolName}, func(callCtx context.Context, raw json.RawMessage) (string, error) {
+							return d.handleRawToolCall(callCtx, runID, state, toolName, raw)
+						})
+					}
+				}
+			}),
+			model.WithOnToolCall(func(_ int, call model.ToolCall, resBlock model.ContentBlock) {
+				_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
+					ThreadID: threadID,
+					TurnID:   turnID,
+					Kind:     store.ItemKindToolCall,
+					Name:     call.Name,
+					CallID:   call.ID,
+					Payload:  call.Input,
+				})
+				_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
+					ThreadID: threadID,
+					TurnID:   turnID,
+					Kind:     store.ItemKindToolResult,
+					Name:     call.Name,
+					CallID:   call.ID,
+					Content:  resBlock.Content,
+					IsError:  resBlock.IsError,
+				})
+			}),
+		)
+		if loopRes != nil {
+			usage = loopRes.Usage
+			turnCount = loopRes.TurnCount
+			summary = strings.TrimSpace(loopRes.Response.Text())
+		}
 	}
 
 	turnStatus := store.TurnStatusCompleted
@@ -618,6 +657,102 @@ func (d *Dispatcher) buildToolRegistry(runID string, state *turnExecState) *mode
 		return d.handleRawToolCall(ctx, runID, state, mailAnswerToolDef.Name, raw)
 	})
 	return reg
+}
+
+func (d *Dispatcher) buildCLIToolRegistry(runID string, state *turnExecState, events []store.Event) *model.ToolRegistry {
+	reg := model.NewToolRegistry()
+	defs := make([]model.ToolDefinition, 0, len(dispatcherToolDefs)+1)
+	defs = append(defs, dispatcherToolDefs...)
+	defs = append(defs, mailAnswerToolDef)
+	defs = toolsForBatch(defs, events)
+	for i := range defs {
+		def := defs[i]
+		reg.Register(def, func(ctx context.Context, raw json.RawMessage) (string, error) {
+			return d.handleRawToolCall(ctx, runID, state, def.Name, raw)
+		})
+	}
+	model.RegisterInvestigationTools(reg, d.cfg.Investigate)
+	return reg
+}
+
+func (d *Dispatcher) sessionForRun(ctx context.Context, runID, threadID, modelName string) *model.AgentSession {
+	var resumeID string
+	if th, err := d.store.Threads().GetThread(ctx, threadID); err == nil && th != nil {
+		resumeID = strings.TrimSpace(th.ResumeID)
+	}
+	return d.sessions.GetOrCreate(runID, model.AgentSessionConfig{
+		Provider:         d.cfg.Provider,
+		Model:            modelName,
+		Effort:           d.cfg.Effort,
+		SystemPrompt:     d.systemPromptWithMemories(ctx, runID),
+		ResumeID:         resumeID,
+		ClaudeBin:        d.cfg.ClaudeBin,
+		CodexBin:         d.cfg.CodexBin,
+		MaxSessionTokens: d.cfg.MaxSessionTokens,
+		MaxSessionTurns:  d.cfg.MaxSessionTurns,
+	})
+}
+
+func (d *Dispatcher) dispatchCLITurn(
+	ctx context.Context,
+	cleanupCtx context.Context,
+	runID string,
+	threadID string,
+	turnID string,
+	modelName string,
+	promptText string,
+	events []store.Event,
+	state *turnExecState,
+) (model.Usage, int, string, error) {
+	sess := d.sessionForRun(ctx, runID, threadID, modelName)
+	cliReg := d.buildCLIToolRegistry(runID, state, events)
+
+	var callSeq int
+	turnRes, err := sess.Turn(ctx, model.AgentTurnRequest{
+		Prompt:       promptText,
+		Model:        modelName,
+		SystemPrompt: d.systemPromptWithMemories(ctx, runID),
+		Registry:     cliReg,
+		MaxToolCalls: d.cfg.MaxTurns,
+		Observer: func(name string, args json.RawMessage, output string, isError bool) {
+			callSeq++
+			callID := fmt.Sprintf("mcp-%d", callSeq)
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Info("tool call",
+					"actor", ActorDispatcher,
+					"tool", name,
+					"is_error", isError,
+				)
+			}
+			store.AppendMCPToolCallItems(cleanupCtx, d.store.Threads(), threadID, turnID, callID, name, args, output, isError)
+		},
+	})
+
+	if sessID := sess.SessionID(); sessID != "" {
+		_ = d.store.Threads().SetThreadResumeID(cleanupCtx, threadID, sessID)
+	}
+	if err != nil {
+		return model.Usage{}, 0, "", err
+	}
+	if turnRes.Text != "" {
+		_, _ = d.store.Threads().AppendItem(cleanupCtx, store.Item{
+			ThreadID: threadID,
+			TurnID:   turnID,
+			Kind:     store.ItemKindAssistantMessage,
+			Content:  turnRes.Text,
+		})
+	}
+	if len(state.decisions) > 0 && state.decisions[0].InputTokens == 0 && (turnRes.Usage.TotalTokens() > 0 || turnRes.Usage.CostUSD > 0) {
+		state.decisions[0].InputTokens = turnRes.Usage.InputTokens
+		state.decisions[0].OutputTokens = turnRes.Usage.OutputTokens
+		state.decisions[0].CostUSD = turnRes.Usage.CostUSD
+		if u, ok := d.store.Decisions().(interface {
+			SetUsage(context.Context, string, int64, model.Usage) error
+		}); ok && state.decisions[0].Seq > 0 {
+			_ = u.SetUsage(cleanupCtx, runID, state.decisions[0].Seq, turnRes.Usage)
+		}
+	}
+	return turnRes.Usage, turnRes.TurnCount, turnRes.Text, nil
 }
 
 type invariantViolationError struct {

@@ -3,15 +3,23 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "model",
     srcs = [
+        "agent_session.go",
         "cli_client.go",
         "http_client.go",
+        "investigate_tools.go",
+        "mcp_bridge.go",
         "model.go",
         "openai_client.go",
         "tool_name_codec.go",
     ],
     importpath = "github.com/bazelment/yoloswe/orca/model",
     visibility = ["//visibility:public"],
-    deps = ["//orca/clock"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/codex",
+        "//agent-cli-wrapper/protocol",
+        "//orca/clock",
+    ],
 )
 
 go_test(

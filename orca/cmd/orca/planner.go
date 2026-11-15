@@ -86,13 +86,19 @@ type Planner struct {
 	clock          clock.Clock
 	client         model.ModelClient
 	critic         model.ModelClient
-	criticModel    string
-	providerName   string
-	criticProvider string
 	planReader     planreader.PlanReader
 	compiler       *recipe.Compiler
 	logger         *slog.Logger
+	sessions       model.AgentSessionMap
+	criticModel    string
+	providerName   string
+	criticProvider string
+	effort         string
+	agentBackend   model.AgentBackend
+	claudeBin      string
+	codexBin       string
 	modelName      string
+	investigate    model.InvestigateConfig
 }
 
 var _ dispatcher.RecipeCompiler = (*Planner)(nil)
@@ -125,6 +131,21 @@ func NewPlanner(
 		modelName:  modelName,
 		planReader: planreader.NewPlanReader(nil),
 	}
+}
+
+// Session returns the active CLI AgentSession for runID, if any.
+func (p *Planner) Session(runID string) *model.AgentSession {
+	return p.sessions.Session(runID)
+}
+
+// CloseRun stops and removes the CLI AgentSession for runID, if any.
+func (p *Planner) CloseRun(runID string) error {
+	return p.sessions.CloseRun(runID)
+}
+
+// Close stops all active CLI AgentSessions managed by this Planner.
+func (p *Planner) Close() error {
+	return p.sessions.Close()
 }
 
 func (p *Planner) nextID(prefix string) string {
@@ -310,7 +331,7 @@ func (p *Planner) runReconciliation(
 	}()
 	var reconciled PlanReconciliation
 
-	if p.client == nil {
+	if p.agentBackend != model.AgentBackendCLI && p.client == nil {
 		return errors.New("orca: planning requires a model client")
 	}
 	memories, err := p.store.Memories().List(ctx, store.MemoryFilter{RunID: runID})
@@ -332,7 +353,7 @@ func (p *Planner) runReconciliation(
 		Tools:     []model.ToolDefinition{planTool(SubmitPlanReconcileTool), planTool(SubmitOpenPlanTool)},
 		MaxTokens: 16384,
 	}
-	draft, open, draftUsage, err := p.proposePlan(ctx, req, true)
+	draft, open, draftUsage, err := p.proposePlan(ctx, runID, threadID, turnID, req, true)
 	usage = usage.Add(draftUsage)
 	plannerUsage = plannerUsage.Add(draftUsage)
 	if err != nil {
@@ -391,7 +412,7 @@ func (p *Planner) runReconciliation(
 				}
 				req.Messages = []model.Message{model.NewUserMessage(prompt + "\n\nYour first draft:\n" + string(raw) + "\n\nCritic feedback:\n" + critique.Text() + "\n\nRevise once and submit the final plan using submit_plan_reconciliation.")}
 				req.Tools = []model.ToolDefinition{planTool(SubmitPlanReconcileTool)}
-				revised, _, revisedUsage, err := p.proposePlan(ctx, req, false)
+				revised, _, revisedUsage, err := p.proposePlan(ctx, runID, threadID, turnID, req, false)
 				usage = usage.Add(revisedUsage)
 				plannerUsage = plannerUsage.Add(revisedUsage)
 				if err != nil {
@@ -413,7 +434,10 @@ func planTool(name string) model.ToolDefinition {
 	return model.ToolDefinition{Name: name, Description: "Submit the approach in summary, objective, backlog diff and conflicts", InputSchema: slices.Clone(submitPlanReconcileSchema)}
 }
 
-func (p *Planner) proposePlan(ctx context.Context, req model.Request, allowOpen bool) (PlanReconciliation, bool, model.Usage, error) {
+func (p *Planner) proposePlan(ctx context.Context, runID, threadID, turnID string, req model.Request, allowOpen bool) (PlanReconciliation, bool, model.Usage, error) {
+	if p.agentBackend == model.AgentBackendCLI {
+		return p.proposePlanCLI(ctx, runID, threadID, turnID, req, allowOpen)
+	}
 	resp, err := p.client.CreateMessage(ctx, req)
 	if err != nil {
 		return PlanReconciliation{}, false, model.Usage{}, err
@@ -430,6 +454,93 @@ func (p *Planner) proposePlan(ctx context.Context, req model.Request, allowOpen 
 		return rec, false, resp.Usage, fmt.Errorf("decode planner submission: %w", err)
 	}
 	return rec, calls[0].Name == SubmitOpenPlanTool, resp.Usage, nil
+}
+
+func (p *Planner) sessionForRun(ctx context.Context, runID, threadID, systemPrompt string) *model.AgentSession {
+	var resumeID string
+	if p.store != nil && threadID != "" {
+		if th, err := p.store.Threads().GetThread(ctx, threadID); err == nil && th != nil {
+			resumeID = strings.TrimSpace(th.ResumeID)
+		}
+	}
+	return p.sessions.GetOrCreate(runID, model.AgentSessionConfig{
+		Provider:     p.providerName,
+		Model:        p.modelName,
+		Effort:       p.effort,
+		SystemPrompt: systemPrompt,
+		ResumeID:     resumeID,
+		ClaudeBin:    p.claudeBin,
+		CodexBin:     p.codexBin,
+	})
+}
+
+func (p *Planner) proposePlanCLI(ctx context.Context, runID, threadID, turnID string, req model.Request, allowOpen bool) (PlanReconciliation, bool, model.Usage, error) {
+	reg := model.NewToolRegistry()
+	var (
+		submitted     bool
+		submittedOpen bool
+		submittedRec  PlanReconciliation
+	)
+	registerSubmit := func(name string, isOpen bool) {
+		reg.Register(planTool(name), func(_ context.Context, raw json.RawMessage) (string, error) {
+			if submitted {
+				return "plan submission already recorded", nil
+			}
+			var rec PlanReconciliation
+			if err := json.Unmarshal(raw, &rec); err != nil {
+				return "", fmt.Errorf("decode %s: %w", name, err)
+			}
+			submitted = true
+			submittedOpen = isOpen
+			submittedRec = rec
+			return "plan submission recorded", nil
+		})
+	}
+	registerSubmit(SubmitPlanReconcileTool, false)
+	if allowOpen {
+		registerSubmit(SubmitOpenPlanTool, true)
+	}
+	model.RegisterInvestigationTools(reg, p.investigate)
+
+	userPrompt := ""
+	if len(req.Messages) > 0 {
+		userPrompt = req.Messages[len(req.Messages)-1].Text()
+	}
+
+	sess := p.sessionForRun(ctx, runID, threadID, req.System)
+	cleanupCtx := context.WithoutCancel(ctx)
+	var callSeq int
+	turnRes, err := sess.Turn(ctx, model.AgentTurnRequest{
+		Prompt:       userPrompt,
+		Model:        p.modelName,
+		SystemPrompt: req.System,
+		Registry:     reg,
+		MaxToolCalls: model.DefaultMaxTurns,
+		Observer: func(name string, args json.RawMessage, output string, isError bool) {
+			if p.store == nil || threadID == "" {
+				return
+			}
+			callSeq++
+			callID := fmt.Sprintf("mcp-%d", callSeq)
+			store.AppendMCPToolCallItems(cleanupCtx, p.store.Threads(), threadID, turnID, callID, name, args, output, isError)
+		},
+	})
+	if p.store != nil && threadID != "" {
+		if sessID := sess.SessionID(); sessID != "" {
+			_ = p.store.Threads().SetThreadResumeID(cleanupCtx, threadID, sessID)
+		}
+	}
+	if err != nil {
+		return PlanReconciliation{}, false, model.Usage{}, err
+	}
+	var usage model.Usage
+	if turnRes != nil {
+		usage = turnRes.Usage
+	}
+	if !submitted {
+		return PlanReconciliation{}, false, usage, errors.New("orca: planner must submit exactly one plan")
+	}
+	return submittedRec, submittedOpen, usage, nil
 }
 
 func (p *Planner) applyReconciliation(
@@ -560,6 +671,41 @@ func (p *Planner) applyReconciliation(
 }
 
 func (p *Planner) startPlannerTurn(ctx context.Context, runID, goal, input string) (string, string, error) {
+	if p.agentBackend == model.AgentBackendCLI {
+		threadID := "planner-" + runID
+		th, err := p.store.Threads().GetThread(ctx, threadID)
+		if err != nil || th == nil {
+			started, sErr := p.store.Threads().StartThread(ctx, store.Thread{
+				ID:     threadID,
+				RunID:  runID,
+				Role:   store.ThreadRolePlanner,
+				Goal:   goal,
+				Status: store.ThreadStatusIdle,
+			})
+			if sErr != nil {
+				return "", "", sErr
+			}
+			th = &started
+		} else if th.Status == store.ThreadStatusArchived {
+			_ = p.store.Threads().UpdateThreadStatus(ctx, threadID, store.ThreadStatusIdle)
+		}
+		turnID := p.nextID(th.ID + "-turn")
+		if _, err := p.store.Threads().StartTurn(ctx, store.Turn{
+			ID:       turnID,
+			ThreadID: th.ID,
+			RunID:    runID,
+			Input:    input,
+		}); err != nil {
+			return "", "", err
+		}
+		_, _ = p.store.Threads().AppendItem(ctx, store.Item{
+			ThreadID: th.ID,
+			TurnID:   turnID,
+			Kind:     store.ItemKindUserMessage,
+			Content:  input,
+		})
+		return th.ID, turnID, nil
+	}
 	threadID := p.nextID("planner-" + runID)
 	th, err := p.store.Threads().StartThread(ctx, store.Thread{
 		ID:     threadID,
@@ -611,6 +757,9 @@ func (p *Planner) completePlannerTurn(
 		errMsg = turnErr.Error()
 	}
 	_ = p.store.Threads().CompleteTurn(cleanupCtx, threadID, turnID, status, usage, errMsg)
+	if p.agentBackend == model.AgentBackendCLI {
+		return nil
+	}
 	return p.store.Threads().UpdateThreadStatus(cleanupCtx, threadID, store.ThreadStatusArchived)
 }
 

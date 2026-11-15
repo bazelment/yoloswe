@@ -18,9 +18,10 @@ import (
 	"github.com/bazelment/yoloswe/orca/replay"
 )
 
-func liveClientFromEnv(t *testing.T) model.ModelClient {
+func liveClientFromEnv(t *testing.T, agentBackend model.AgentBackend) model.ModelClient {
 	t.Helper()
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("ORCH_MODEL_PROVIDER")), "openai") {
+	provider := strings.ToLower(strings.TrimSpace(os.Getenv("ORCH_MODEL_PROVIDER")))
+	if provider == "openai" {
 		if strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) == "" && strings.TrimSpace(os.Getenv("NEBULA_LLM_KEY")) == "" {
 			t.Skip("skipping live OpenAI eval: no key")
 		}
@@ -29,6 +30,9 @@ func liveClientFromEnv(t *testing.T) model.ModelClient {
 	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) == "" &&
 		strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")) == "" &&
 		strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")) == "" {
+		if agentBackend == model.AgentBackendCLI || provider == "claude-cli" {
+			return model.NewCLIClient("claude-cli")
+		}
 		t.Skip("skipping live Gate 2 replay eval: none of ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or ANTHROPIC_BASE_URL is set")
 	}
 	return model.NewHTTPClient(
@@ -38,7 +42,15 @@ func liveClientFromEnv(t *testing.T) model.ModelClient {
 }
 
 func TestValidationGate2ReplayEval(t *testing.T) {
-	client := liveClientFromEnv(t)
+	var agentBackend model.AgentBackend
+	if raw := cmp.Or(strings.TrimSpace(os.Getenv("ORCA_AGENT_BACKEND")), strings.TrimSpace(os.Getenv("ORCH_AGENT_BACKEND"))); raw != "" {
+		parsed, pErr := model.ParseAgentBackend(raw)
+		if pErr != nil {
+			t.Fatalf("parse agent backend: %v", pErr)
+		}
+		agentBackend = parsed
+	}
+	client := liveClientFromEnv(t, agentBackend)
 
 	var (
 		ds  *replay.Dataset
@@ -82,12 +94,16 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 		modelName = "gpt-6.1-sol"
 	}
 	concierge := replay.NewStoreConcierge(client)
+	concierge.AgentBackend = agentBackend
+	concierge.Provider = strings.TrimSpace(os.Getenv("ORCH_MODEL_PROVIDER"))
 	concierge.Model = modelName
 
 	rep, err := replay.Evaluate(t.Context(), ds, replay.EvalConfig{
 		Client:    client,
 		Concierge: concierge,
 		DispatcherConfig: dispatcher.Config{
+			AgentBackend:   agentBackend,
+			Provider:       strings.TrimSpace(os.Getenv("ORCH_MODEL_PROVIDER")),
 			Model:          modelName,
 			HardBatchModel: modelName,
 			MaxTurns:       4,
@@ -118,8 +134,8 @@ func TestValidationGate2ReplayEval(t *testing.T) {
 	for i := range rep.QuestionResults {
 		qr := &rep.QuestionResults[i]
 		if !qr.Accurate {
-			t.Logf("QUESTION MISS %s (run=%s): missing=%v forbidden=%v answer=%q",
-				qr.ID, qr.RunID, qr.MissingFacts, qr.ViolatedForbidden, qr.Answer)
+			t.Logf("QUESTION MISS %s (run=%s): error=%q missing=%v forbidden=%v answer=%q",
+				qr.ID, qr.RunID, qr.Error, qr.MissingFacts, qr.ViolatedForbidden, qr.Answer)
 		}
 	}
 

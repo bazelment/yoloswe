@@ -1521,6 +1521,16 @@ ORDER BY seq ASC`, filter.RunID, filter.SinceSeq)
 	return out, rows.Err()
 }
 
+func (d *sqliteDecisionStore) SetUsage(ctx context.Context, runID string, seq int64, usage model.Usage) error {
+	s := d.s()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return execRequireRow(ctx, s.db, fmt.Errorf("%w: decision seq %d in run %q", ErrNotFound, seq, runID),
+		`UPDATE decisions SET input_tokens = ?, output_tokens = ?, cost_usd = ? WHERE run_id = ? AND seq = ?`,
+		usage.InputTokens, usage.OutputTokens, usage.CostUSD, runID, seq,
+	)
+}
+
 type sqliteEventStore SQLiteStore
 
 func (e *sqliteEventStore) s() *SQLiteStore { return (*SQLiteStore)(e) }
@@ -1677,7 +1687,7 @@ type sqliteThreadStore SQLiteStore
 func (t *sqliteThreadStore) s() *SQLiteStore { return (*SQLiteStore)(t) }
 
 const selectThreadColumns = `
-SELECT id, run_id, role, goal, parent_thread_id, forked_at_turn_id, status,
+SELECT id, run_id, role, goal, parent_thread_id, forked_at_turn_id, resume_id, status,
        queued_steers_json, input_tokens, output_tokens, cost_usd, created_at, updated_at
 FROM threads`
 
@@ -1689,7 +1699,7 @@ func scanThread(scanner rowScanner) (*Thread, error) {
 		createdStr, updatedStr string
 	)
 	err := scanner.Scan(
-		&th.ID, &th.RunID, &roleStr, &th.Goal, &th.ParentThreadID, &th.ForkedAtTurnID,
+		&th.ID, &th.RunID, &roleStr, &th.Goal, &th.ParentThreadID, &th.ForkedAtTurnID, &th.ResumeID,
 		&statusStr, &queuedJSON, &th.InputTokens, &th.OutputTokens, &th.CostUSD,
 		&createdStr, &updatedStr,
 	)
@@ -1854,11 +1864,11 @@ func (t *sqliteThreadStore) StartThread(ctx context.Context, th Thread) (Thread,
 
 	err = execInsertNew(ctx, s.db, fmt.Errorf("%w: thread %q", ErrAlreadyExists, th.ID), `
 INSERT INTO threads (
-    id, run_id, role, goal, parent_thread_id, forked_at_turn_id, status,
+    id, run_id, role, goal, parent_thread_id, forked_at_turn_id, resume_id, status,
     queued_steers_json, input_tokens, output_tokens, cost_usd, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO NOTHING`,
-		cp.ID, cp.RunID, string(cp.Role), cp.Goal, cp.ParentThreadID, cp.ForkedAtTurnID,
+		cp.ID, cp.RunID, string(cp.Role), cp.Goal, cp.ParentThreadID, cp.ForkedAtTurnID, strings.TrimSpace(cp.ResumeID),
 		string(cp.Status), queuedJSON, cp.InputTokens, cp.OutputTokens, cp.CostUSD,
 		formatTime(cp.CreatedAt), formatTime(cp.UpdatedAt),
 	)
@@ -1924,6 +1934,15 @@ func (t *sqliteThreadStore) SetThreadGoal(ctx context.Context, threadID, goal st
 	defer s.mu.Unlock()
 	return execRequireRow(ctx, s.db, fmt.Errorf("%w: thread %q", ErrNotFound, threadID),
 		`UPDATE threads SET goal = ?, updated_at = ? WHERE id = ?`, goal, formatTime(s.now()), threadID,
+	)
+}
+
+func (t *sqliteThreadStore) SetThreadResumeID(ctx context.Context, threadID, resumeID string) error {
+	s := t.s()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return execRequireRow(ctx, s.db, fmt.Errorf("%w: thread %q", ErrNotFound, threadID),
+		`UPDATE threads SET resume_id = ?, updated_at = ? WHERE id = ?`, strings.TrimSpace(resumeID), formatTime(s.now()), threadID,
 	)
 }
 

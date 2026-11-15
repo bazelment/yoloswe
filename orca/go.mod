@@ -4,8 +4,19 @@ go 1.25.0
 
 require (
 	charm.land/bubbletea/v2 v2.1.1
+	github.com/bazelment/yoloswe/agent-cli-wrapper v0.0.0
+	github.com/bazelment/yoloswe/swarm-queen v0.0.0-20261114212212-f1c7c8b567d1
 	github.com/charmbracelet/x/exp/teatest/v2 v2.0.0-20261101151554-27ecf3e4d454
 	modernc.org/sqlite v1.37.0
+)
+
+require (
+	github.com/bahlo/generic-list-go v0.2.0 // indirect
+	github.com/buger/jsonparser v1.1.2 // indirect
+	github.com/invopop/jsonschema v0.13.0 // indirect
+	github.com/mailru/easyjson v0.7.7 // indirect
+	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 require (
@@ -23,7 +34,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/mattn/go-runewidth v0.0.30 // indirect
+	github.com/mattn/go-runewidth v0.0.30
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
@@ -37,3 +48,7 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.9.1 // indirect
 )
+
+replace github.com/bazelment/yoloswe/agent-cli-wrapper => ../agent-cli-wrapper
+
+replace github.com/bazelment/yoloswe/swarm-queen => ../swarm-queen

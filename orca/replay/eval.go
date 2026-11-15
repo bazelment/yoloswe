@@ -494,6 +494,7 @@ func EvaluateMoment(
 		dispCfg.MaxTurns = 3
 	}
 	disp := dispatcher.New(dispCfg, st, drv, clk, client)
+	defer func() { _ = disp.Close() }()
 	res, err := disp.Dispatch(ctx, m.RunID, appended)
 	// Exhausting the turn cap is a miss for this moment, not a run abort.
 	exhausted := errors.Is(err, model.ErrMaxTurnsExceeded)

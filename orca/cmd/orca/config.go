@@ -61,6 +61,7 @@ const (
 	DefaultConcurrencyCap        = 4
 	DefaultStoreSpec             = "sqlite"
 	DefaultDriverKind            = "nebula"
+	DefaultAgentBackend          = model.AgentBackendCLI
 )
 
 var (
@@ -164,47 +165,51 @@ func (m RoleModels) withDefaults(provider string, httpConfigured bool) RoleModel
 
 // Config holds the runtime configuration for orca `run` and `chat`.
 type Config struct {
-	ModelProvider    string     `json:"model_provider,omitempty"`
-	Models           RoleModels `json:"models"`
-	RunID            string     `json:"run_id,omitempty"`
-	Goal             string     `json:"goal,omitempty"`
-	Objective        string     `json:"objective,omitempty"`
-	PlanRef          string     `json:"plan_ref,omitempty"`
-	Plan             string     `json:"plan,omitempty"`
-	Repository       string     `json:"repository,omitempty"`
-	StoreSpec        string     `json:"store,omitempty"`
-	StoreBaseDir     string     `json:"store_base_dir,omitempty"`
-	DriverKind       string     `json:"driver,omitempty"`
-	LLMGatewayURL    string     `json:"llm_gateway_url,omitempty"`
-	NebulaAPIURL     string     `json:"nebula_api_url,omitempty"`
-	NebulaToken      string     `json:"nebula_token,omitempty"`
-	HolderID         string     `json:"holder_id,omitempty"`
-	ReplayPath       string     `json:"replay_path,omitempty"`
-	RecordPath       string     `json:"record_path,omitempty"`
-	FakeScenarioPath string     `json:"fake_scenario_path,omitempty"`
-	LogLevel         string     `json:"log_level,omitempty"`
-	LogFormat        string     `json:"log_format,omitempty"`
-	Prompt           string     `json:"prompt,omitempty"`
-	ReportDay        string     `json:"report_day,omitempty"`
-	RecipeFiles      []string   `json:"recipe_files,omitempty"`
+	AgentBackend     model.AgentBackend `json:"agent_backend,omitempty"`
+	ModelProvider    string             `json:"model_provider,omitempty"`
+	Models           RoleModels         `json:"models"`
+	RunID            string             `json:"run_id,omitempty"`
+	Goal             string             `json:"goal,omitempty"`
+	Objective        string             `json:"objective,omitempty"`
+	PlanRef          string             `json:"plan_ref,omitempty"`
+	Plan             string             `json:"plan,omitempty"`
+	Repository       string             `json:"repository,omitempty"`
+	StoreSpec        string             `json:"store,omitempty"`
+	StoreBaseDir     string             `json:"store_base_dir,omitempty"`
+	DriverKind       string             `json:"driver,omitempty"`
+	LLMGatewayURL    string             `json:"llm_gateway_url,omitempty"`
+	NebulaAPIURL     string             `json:"nebula_api_url,omitempty"`
+	NebulaToken      string             `json:"nebula_token,omitempty"`
+	HolderID         string             `json:"holder_id,omitempty"`
+	ReplayPath       string             `json:"replay_path,omitempty"`
+	RecordPath       string             `json:"record_path,omitempty"`
+	FakeScenarioPath string             `json:"fake_scenario_path,omitempty"`
+	LogLevel         string             `json:"log_level,omitempty"`
+	LogFormat        string             `json:"log_format,omitempty"`
+	Prompt           string             `json:"prompt,omitempty"`
+	ReportDay        string             `json:"report_day,omitempty"`
+	ClaudeBin        string             `json:"-"`
+	CodexBin         string             `json:"-"`
+	RecipeFiles      []string           `json:"recipe_files,omitempty"`
 	// launchArgs are the command-line flags a controller launched from this
 	// invocation inherits; see controllerFlags.
-	launchArgs          []string
-	LeaseTTL            time.Duration `json:"lease_ttl,omitempty"`
-	HeartbeatInterval   time.Duration `json:"heartbeat_interval,omitempty"`
-	PollInterval        time.Duration `json:"poll_interval,omitempty"`
-	JudgmentDebounce    time.Duration `json:"judgment_debounce,omitempty"`
-	StallTimeout        time.Duration `json:"stall_timeout,omitempty"`
-	ConcurrencyCap      int           `json:"concurrency_cap,omitempty"`
-	MaxSteps            int           `json:"max_steps,omitempty"`
-	Once                bool          `json:"once,omitempty"`
-	Standing            bool          `json:"standing,omitempty"`
-	FakeAutoComplete    bool          `json:"fake_auto_complete,omitempty"`
-	onceSet             bool
-	standingSet         bool
-	fakeAutoSet         bool
-	stallTimeoutSet     bool
-	stallTimeoutFlagSet bool
+	launchArgs            []string
+	LeaseTTL              time.Duration `json:"lease_ttl,omitempty"`
+	HeartbeatInterval     time.Duration `json:"heartbeat_interval,omitempty"`
+	PollInterval          time.Duration `json:"poll_interval,omitempty"`
+	JudgmentDebounce      time.Duration `json:"judgment_debounce,omitempty"`
+	StallTimeout          time.Duration `json:"stall_timeout,omitempty"`
+	ConcurrencyCap        int           `json:"concurrency_cap,omitempty"`
+	MaxSteps              int           `json:"max_steps,omitempty"`
+	Once                  bool          `json:"once,omitempty"`
+	Standing              bool          `json:"standing,omitempty"`
+	FakeAutoComplete      bool          `json:"fake_auto_complete,omitempty"`
+	onceSet               bool
+	standingSet           bool
+	fakeAutoSet           bool
+	stallTimeoutSet       bool
+	stallTimeoutFlagSet   bool
+	agentBackendDefaulted bool
 }
 
 // HasExplicitStallTimeout reports whether --stall-timeout or its config value was set.
@@ -214,6 +219,22 @@ func (c Config) withDefaults() Config {
 	c.Objective = cmp.Or(c.Goal, c.Objective)
 	if strings.TrimSpace(c.Goal) != "" && !c.Standing {
 		c.Once = true
+	}
+	rawBackend := ""
+	if !c.agentBackendDefaulted {
+		rawBackend = strings.TrimSpace(string(c.AgentBackend))
+	}
+	rawBackend = cmp.Or(rawBackend, strings.TrimSpace(os.Getenv("ORCA_AGENT_BACKEND")), strings.TrimSpace(os.Getenv("ORCH_AGENT_BACKEND")))
+	if rawBackend == "" {
+		c.agentBackendDefaulted = true
+		if strings.TrimSpace(c.ReplayPath) != "" {
+			c.AgentBackend = model.AgentBackendLoop
+		} else {
+			c.AgentBackend = DefaultAgentBackend
+		}
+	} else {
+		c.agentBackendDefaulted = false
+		c.AgentBackend = model.AgentBackend(strings.ToLower(rawBackend))
 	}
 	c.ModelProvider = strings.ToLower(cmp.Or(strings.TrimSpace(c.ModelProvider), strings.TrimSpace(os.Getenv("ORCH_MODEL_PROVIDER"))))
 	c.Models = c.Models.withDefaults(c.ModelProvider, hasModelEnvironment() || strings.TrimSpace(c.LLMGatewayURL) != "")
@@ -261,6 +282,9 @@ func (c Config) withDefaults() Config {
 
 // Validate checks that c has valid required fields for command execution.
 func (c Config) Validate(requireDriver bool) error {
+	if _, err := model.ParseAgentBackend(string(c.AgentBackend)); err != nil {
+		return fmt.Errorf("orca: %w", err)
+	}
 	provider := strings.ToLower(strings.TrimSpace(c.ModelProvider))
 	if provider != "" && provider != "anthropic" && provider != "openai" && provider != "claude-cli" && provider != "codex-cli" {
 		return fmt.Errorf("orca: unsupported model provider %q (want anthropic, openai, claude-cli, or codex-cli)", c.ModelProvider)
@@ -332,6 +356,7 @@ func mergeConfig(lower, higher Config) Config {
 	out := lower
 	out.Models.Roles = maps.Clone(lower.Models.Roles)
 	out.RunID = cmp.Or(higher.RunID, lower.RunID)
+	out.AgentBackend = cmp.Or(higher.AgentBackend, lower.AgentBackend)
 	out.ModelProvider = cmp.Or(higher.ModelProvider, lower.ModelProvider)
 	out.Goal = cmp.Or(higher.Goal, lower.Goal)
 	out.Objective = cmp.Or(higher.Objective, lower.Objective)
@@ -432,12 +457,14 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.SetOutput(errOut)
 
 	var (
-		cfg        Config
-		configPath string
-		recipes    stringSliceFlag
+		cfg          Config
+		configPath   string
+		agentBackend string
+		recipes      stringSliceFlag
 	)
 
 	fs.StringVar(&configPath, "config", "", "Optional path to JSON config file")
+	fs.StringVar(&agentBackend, "agent-backend", "", "Agent execution backend for dispatcher and planner: loop or cli")
 	fs.StringVar(&cfg.RunID, "run", "", "Swarm run ID (optional with --goal)")
 	fs.StringVar(&cfg.Objective, "objective", "", "Run objective when creating or updating the run")
 	fs.StringVar(&cfg.Goal, "goal", "", "Run goal to plan at startup (generates a run ID if omitted)")
@@ -499,6 +526,13 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, nil, err
+	}
+	if strings.TrimSpace(agentBackend) != "" {
+		parsed, err := model.ParseAgentBackend(agentBackend)
+		if err != nil {
+			return Config{}, nil, err
+		}
+		cfg.AgentBackend = parsed
 	}
 	launchArgs := controllerFlags(fs, args[:len(args)-len(fs.Args())])
 	cfg.RecipeFiles = recipes
@@ -696,6 +730,29 @@ func (f modelClientFunc) CreateMessage(ctx context.Context, req model.Request) (
 	return f(ctx, req)
 }
 
+type providerRoutingClient struct {
+	fn modelClientFunc
+}
+
+func (c *providerRoutingClient) CreateMessage(ctx context.Context, req model.Request) (*model.Response, error) {
+	return c.fn(ctx, req)
+}
+
+func isDefaultRoutingClient(client model.ModelClient) bool {
+	_, ok := client.(*providerRoutingClient)
+	return ok
+}
+
+func effectiveAgentBackend(cfg Config, client model.ModelClient) model.AgentBackend {
+	if cfg.agentBackendDefaulted && !isDefaultRoutingClient(client) {
+		return model.AgentBackendLoop
+	}
+	if cfg.AgentBackend == "" {
+		return DefaultAgentBackend
+	}
+	return cfg.AgentBackend
+}
+
 func openModelClient(cfg Config, clk clock.Clock) (model.ModelClient, error) {
 	if strings.TrimSpace(cfg.ReplayPath) != "" {
 		return model.LoadFakeClient(cfg.ReplayPath)
@@ -717,14 +774,14 @@ func openModelClient(cfg Config, clk clock.Clock) (model.ModelClient, error) {
 		anthropicOpts = append(anthropicOpts, model.WithBaseURL(cfg.LLMGatewayURL))
 	}
 	clients := map[string]model.ModelClient{"openai": model.NewOpenAIClient(openOpts...), "anthropic": model.NewHTTPClient(anthropicOpts...), "claude-cli": model.NewCLIClient("claude-cli"), "codex-cli": model.NewCLIClient("codex-cli")}
-	var client model.ModelClient = modelClientFunc(func(ctx context.Context, req model.Request) (*model.Response, error) {
+	var client model.ModelClient = &providerRoutingClient{fn: func(ctx context.Context, req model.Request) (*model.Response, error) {
 		provider := cmp.Or(req.Metadata["provider"], cfg.ModelProvider, "openai")
 		selected, ok := clients[provider]
 		if !ok {
 			return nil, fmt.Errorf("orca: unsupported provider %q", provider)
 		}
 		return selected.CreateMessage(ctx, req)
-	})
+	}}
 	if cfg.RecordPath != "" {
 		client = model.NewRecordingFakeClient(cfg.RecordPath, client)
 	}
