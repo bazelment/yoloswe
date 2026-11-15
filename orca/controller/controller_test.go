@@ -1304,17 +1304,17 @@ func (d *writeAheadCheckDriver) Stop(ctx context.Context, req lane.StopRequest) 
 	if err != nil || len(decs) == 0 {
 		d.t.Fatalf("Stop executed without prior decision: err=%v decs=%+v", err, decs)
 	}
-	for i := len(decs) - 1; i >= 0; i-- {
-		switch decs[i].Tool {
-		case controller.ToolLaneStall,
-			controller.ToolPhaseAdvance + ".intent",
-			controller.ToolPhaseRework + ".intent",
-			controller.ToolPhaseRetry + ".intent",
-			"phase.launch.intent":
-			return d.FakeDriver.Stop(ctx, req)
-		}
+	last := decs[len(decs)-1]
+	switch last.Tool {
+	case controller.ToolLaneStall,
+		controller.ToolPhaseStart + ".intent",
+		controller.ToolPhaseAdvance + ".intent",
+		controller.ToolPhaseRework + ".intent",
+		controller.ToolPhaseRetry + ".intent",
+		"phase.launch.intent":
+		return d.FakeDriver.Stop(ctx, req)
 	}
-	d.t.Fatalf("driver Stop on lane %q executed BEFORE Decision was written to DecisionStore (decisions=%+v)", req.LaneID, decs)
+	d.t.Fatalf("driver Stop on lane %q executed BEFORE Decision was written to DecisionStore (last=%q, decisions=%+v)", req.LaneID, last.Tool, decs)
 	return nil
 }
 
@@ -2761,7 +2761,8 @@ func TestControllerStallLadderNudgeThenActivityWithinWaitAndBusyProcess(t *testi
 			t.Fatalf("Step (activity within wait): %v", err)
 		}
 
-		// Advance past the original 10m nudge wait window and emit no_activity -> still no fresh terminal.
+		// Advance past the original 10m nudge wait window and emit no_activity -> still no fresh terminal
+		// because the +3m activity re-based the 10m wait window.
 		clk.Advance(8 * time.Minute)
 		appendLaneWatchEvent(t, st, ln.ID, ln.TerminalID, lane.EventNoActivity)
 		if err := ctrl.Step(ctx); err != nil {
@@ -2769,6 +2770,16 @@ func TestControllerStallLadderNudgeThenActivityWithinWaitAndBusyProcess(t *testi
 		}
 		if len(drv.PhaseStarts) != 0 || len(drv.Stops) != 0 {
 			t.Fatalf("after nudge + activity within wait: starts=%d stops=%d, want 0, 0", len(drv.PhaseStarts), len(drv.Stops))
+		}
+
+		// Once the lane stays quiet past the re-based 10m wait window (at +11m after the activity),
+		// Step advances to a fresh terminal even without a second driver EventNoActivity pulse.
+		clk.Advance(3 * time.Minute)
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatalf("Step (after re-based wait window expired): %v", err)
+		}
+		if len(drv.PhaseStarts) != 1 || len(drv.Stops) != 1 {
+			t.Fatalf("after re-based wait window expired: starts=%d stops=%d, want 1, 1", len(drv.PhaseStarts), len(drv.Stops))
 		}
 	})
 

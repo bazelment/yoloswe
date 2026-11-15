@@ -1420,12 +1420,18 @@ func TestStartPhaseTerminalStopsPreviousAndPrehandoverTerminalsAndRefusesStaleSt
 		WorkBranch: "swarm-lane/run-1/m5-finish",
 		Metadata:   map[string]string{"swarmRun": "run-1", "swarmLane": "m5-finish"},
 	}
-	// Pre-handover terminal 19f8df22 still running idle in the session.
+	// Pre-handover terminal 19f8df22 still running idle in the session, plus an operator shell terminal.
 	srv.terminals["19f8df22"] = &nebula.TerminalInfo{
 		ID:            "19f8df22",
 		CodeSessionID: "sess-stale",
 		Status:        "idle",
 		AgentState:    "idle",
+	}
+	srv.terminals["operator-shell"] = &nebula.TerminalInfo{
+		ID:            "operator-shell",
+		CodeSessionID: "sess-stale",
+		Kind:          "shell",
+		Status:        "running",
 	}
 	srv.mu.Unlock()
 
@@ -1444,9 +1450,13 @@ func TestStartPhaseTerminalStopsPreviousAndPrehandoverTerminalsAndRefusesStaleSt
 
 	srv.mu.Lock()
 	preStatus := srv.terminals["19f8df22"].Status
+	shellStatus := srv.terminals["operator-shell"].Status
 	srv.mu.Unlock()
 	if preStatus != "stopped" {
 		t.Fatalf("pre-handover terminal 19f8df22 status = %q, want stopped", preStatus)
+	}
+	if shellStatus != "running" {
+		t.Fatalf("operator shell terminal status = %q, want running", shellStatus)
 	}
 
 	reviewRes, err := drv.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
@@ -1500,8 +1510,8 @@ func TestLaneGitStateAndSessionHealth(t *testing.T) {
 		ID:         "lane-git",
 		RunID:      "run-1",
 		SessionID:  "sess-git",
-		Branch:     "swarm-lane/run-1/lane-git",
-		BaseBranch: "main",
+		Branch:     "origin/swarm-lane/run-1/lane-git$(touch /tmp/pwn)",
+		BaseBranch: "origin/main",
 	}
 
 	gs, err := drv.LaneGitState(ctx, ln)
@@ -1510,6 +1520,27 @@ func TestLaneGitStateAndSessionHealth(t *testing.T) {
 	}
 	if gs.UnpushedCommits != 2 || len(gs.DirtyFiles) != 2 || gs.OldestUnpushedAt != time.Unix(1763179000, 0).UTC() {
 		t.Fatalf("LaneGitState = %+v, want 2 commits, 2 dirty files, oldest 1763179000", gs)
+	}
+
+	srv.mu.Lock()
+	var gitCmd []string
+	for _, call := range srv.calls {
+		if call.Method == http.MethodPost && call.Path == "/api/code-sessions/sess-git/exec" {
+			var req struct {
+				Command []string `json:"command"`
+			}
+			if json.Unmarshal([]byte(call.Body), &req) == nil && len(req.Command) == 6 {
+				gitCmd = req.Command
+				break
+			}
+		}
+	}
+	srv.mu.Unlock()
+	if len(gitCmd) != 6 || gitCmd[3] != "--" || gitCmd[4] != "main" || gitCmd[5] != "swarm-lane/run-1/lane-git$(touch /tmp/pwn)" {
+		t.Fatalf("LaneGitState exec command = %#v, want positional ['sh','-c',script,'--','main','swarm-lane/run-1/lane-git$(touch /tmp/pwn)']", gitCmd)
+	}
+	if strings.Contains(gitCmd[2], "lane-git") || strings.Contains(gitCmd[2], "origin/origin/") {
+		t.Fatalf("LaneGitState script interpolated branch/base into shell source: %s", gitCmd[2])
 	}
 
 	health, err := drv.LaneSessionHealth(ctx, ln)
@@ -1569,20 +1600,60 @@ func TestWatchWorkingTerminalAndQuietDeduplication(t *testing.T) {
 
 	ch := drv.Watch(ctx, "run-watch")
 
-	// Over 10 polls while the terminal's AgentState is "working", Watch must emit 0 EventNoActivity events.
-	for poll := 1; poll <= 10; poll++ {
-		fc.Advance(time.Minute)
-		select {
-		case ev := <-ch:
-			t.Fatalf("poll %d: unexpected Watch event while working: %+v", poll, ev)
-		case <-time.After(4 * time.Millisecond):
+	sessionPolls := func() int {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		n := 0
+		for _, c := range srv.calls {
+			if c.Method == http.MethodGet && c.Path == "/api/code-sessions" {
+				n++
+			}
+		}
+		return n
+	}
+	waitCompletedPollsAfter := func(base, count int) {
+		t.Helper()
+		deadline := time.NewTimer(5 * time.Second)
+		defer deadline.Stop()
+		// When GET /api/code-sessions has been called base+count+1 times,
+		// at least `count` full Watch iterations that started after `base` have completed.
+		for sessionPolls() < base+count+1 {
+			select {
+			case <-deadline.C:
+				t.Fatalf("timed out waiting for %d completed Watch polls after %d (got %d)", count, base, sessionPolls())
+			default:
+			}
 		}
 	}
 
-	// Mark terminal idle: Watch should emit EventNoActivity once for the quiet period, not on every subsequent poll.
+	// Over 10 polls while the terminal's AgentState is "working", Watch must emit 0 EventNoActivity events.
+	for poll := 1; poll <= 10; poll++ {
+		base := sessionPolls()
+		fc.Advance(time.Minute)
+		waitCompletedPollsAfter(base, 1)
+		select {
+		case ev := <-ch:
+			t.Fatalf("poll %d: unexpected Watch event while working: %+v", poll, ev)
+		default:
+		}
+	}
+
+	// Add a second session in the same run whose terminal is idle while the first stays working:
+	// Watch must still emit EventNoActivity once for the idle terminal rather than suppressing across the run.
 	srv.mu.Lock()
-	srv.terminals[res.TerminalID].AgentState = "idle"
+	srv.sessions["sess-idle"] = &nebula.SessionInfo{
+		ID:       "sess-idle",
+		Status:   "ready",
+		Metadata: map[string]string{"swarmRun": "run-watch", "swarmLane": "lane-idle"},
+	}
+	srv.terminals["term-idle"] = &nebula.TerminalInfo{
+		ID:            "term-idle",
+		CodeSessionID: "sess-idle",
+		Status:        "running",
+		AgentState:    "idle",
+	}
 	srv.mu.Unlock()
+	waitCompletedPollsAfter(sessionPolls(), 1)
 	fc.Advance(time.Minute)
 
 	select {
@@ -1590,16 +1661,18 @@ func TestWatchWorkingTerminalAndQuietDeduplication(t *testing.T) {
 		if ev.Kind != lane.EventNoActivity {
 			t.Fatalf("got event kind %q, want %q", ev.Kind, lane.EventNoActivity)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for single EventNoActivity after becoming idle")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for EventNoActivity when sibling lane terminal is idle")
 	}
 
 	for poll := 1; poll <= 5; poll++ {
+		base := sessionPolls()
 		fc.Advance(time.Minute)
+		waitCompletedPollsAfter(base, 1)
 		select {
 		case ev := <-ch:
 			t.Fatalf("subsequent quiet poll %d emitted duplicate event: %+v", poll, ev)
-		case <-time.After(4 * time.Millisecond):
+		default:
 		}
 	}
 }

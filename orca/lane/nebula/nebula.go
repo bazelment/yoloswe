@@ -293,13 +293,38 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 		defer ticker.Stop()
 		last := d.clock.Now()
 		quietEmitted := false
+		quietTerminals := make(map[string]bool)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 			}
-			activeWorking := false
+			hasWorking := false
+			hasIdle := false
+			hasUnreportedIdle := false
+			var idleTermIDs []string
+			seenPollTerms := make(map[string]bool)
+			recordTerminalActivity := func(termID, status, agentState string) {
+				if termID == "" || seenPollTerms[termID] {
+					return
+				}
+				st := strings.ToLower(strings.TrimSpace(status))
+				if st == "stopped" || st == "failed" || st == "exited" || st == "terminated" || st == "deleted" {
+					return
+				}
+				seenPollTerms[termID] = true
+				if isWorkingAgentState(agentState) {
+					hasWorking = true
+					delete(quietTerminals, termID)
+					return
+				}
+				hasIdle = true
+				idleTermIDs = append(idleTermIDs, termID)
+				if !quietTerminals[termID] {
+					hasUnreportedIdle = true
+				}
+			}
 			var sessions []SessionInfo
 			if err := d.doJSON(ctx, http.MethodGet, "/api/code-sessions", nil, &struct {
 				Sessions *[]SessionInfo `json:"sessions"`
@@ -313,16 +338,16 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 					if err != nil {
 						continue
 					}
+					laneID := sess.Metadata["swarmLane"]
 					for i := range detail.Terminals {
 						tm := &detail.Terminals[i]
-						if isWorkingAgentState(tm.AgentState) {
-							activeWorking = true
+						if !d.isStaleTerminal(runID, laneID, tm.ID) {
+							recordTerminalActivity(tm.ID, tm.Status, tm.AgentState)
 						}
 						if started[tm.ID] {
 							continue
 						}
 						started[tm.ID] = true
-						laneID := sess.Metadata["swarmLane"]
 						go d.watchStream(ctx, StreamRequest{Events: d.events, RunID: runID, LaneID: laneID, SessionID: sess.ID, TerminalID: tm.ID, StopOnExit: true})
 					}
 				}
@@ -337,9 +362,9 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				if target.terminalID == "" {
 					continue
 				}
-				if !activeWorking {
-					if state, err := d.TerminalAgentState(ctx, target.terminalID); err == nil && isWorkingAgentState(state) {
-						activeWorking = true
+				if !seenPollTerms[target.terminalID] && !d.isStaleTerminal(runID, target.laneID, target.terminalID) {
+					if term, err := d.GetTerminal(ctx, target.terminalID); err == nil && term != nil {
+						recordTerminalActivity(target.terminalID, term.Status, term.AgentState)
 					}
 				}
 				// Polling the report endpoint is the host-safe fallback: an
@@ -356,6 +381,7 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 						}
 						last = d.clock.Now()
 						quietEmitted = false
+						clear(quietTerminals)
 					}
 				}
 				if started[target.terminalID] {
@@ -392,20 +418,25 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 					}
 					last = d.clock.Now()
 					quietEmitted = false
+					clear(quietTerminals)
 				}
 			}
-			if activeWorking {
+			if hasWorking && !hasIdle {
 				last = d.clock.Now()
 				quietEmitted = false
+				clear(quietTerminals)
 				continue
 			}
-			if !quietEmitted && d.clock.Now().Sub(last) >= time.Minute {
+			if d.clock.Now().Sub(last) >= time.Minute && (!quietEmitted || hasUnreportedIdle) {
 				select {
 				case out <- lane.Event{Kind: lane.EventNoActivity, RunID: runID, Since: last}:
 				case <-ctx.Done():
 					return
 				}
 				quietEmitted = true
+				for _, id := range idleTermIDs {
+					quietTerminals[id] = true
+				}
 			}
 		}
 	}()
@@ -1075,21 +1106,34 @@ func (d *Driver) stopOtherSessionTerminals(ctx context.Context, runID, laneID, s
 		d.stoppedTerminals[prev] = true
 	}
 	d.activeTerminals[key] = keepTerminalID
+	currSessID := d.currSessID
 	d.mu.Unlock()
 
 	if prev != "" && prev != keepTerminalID {
 		_ = d.Stop(ctx, lane.StopRequest{RunID: runID, LaneID: laneID, SessionID: sessionID, TerminalID: prev, Reason: "superseded by new phase terminal"})
 	}
-	if sessionID == "" {
+	if sessionID == "" || (currSessID != "" && sessionID == currSessID) {
 		return
 	}
 	detail, err := d.GetSession(ctx, sessionID)
 	if err != nil || detail == nil {
 		return
 	}
+	sessLane := strings.TrimSpace(detail.Session.Metadata["swarmLane"])
+	trimmedLane := strings.TrimSpace(laneID)
+	if sessLane != "" && trimmedLane != "" && sessLane != trimmedLane {
+		return
+	}
 	for i := range detail.Terminals {
 		tm := &detail.Terminals[i]
 		if tm.ID == "" || tm.ID == keepTerminalID || tm.ID == prev {
+			continue
+		}
+		kind := strings.ToLower(strings.TrimSpace(tm.Kind))
+		if kind == "shell" || kind == "bash" || kind == "sh" || kind == "operator" {
+			continue
+		}
+		if termLane := strings.TrimSpace(tm.Env["SNL_GH_LANE"]); termLane != "" && trimmedLane != "" && termLane != trimmedLane {
 			continue
 		}
 		st := strings.ToLower(strings.TrimSpace(tm.Status))
@@ -1262,30 +1306,32 @@ func (d *Driver) LaneGitState(ctx context.Context, ln lane.Lane) (lane.GitState,
 	if strings.TrimSpace(ln.SessionID) == "" {
 		return lane.GitState{}, nil
 	}
-	branch := strings.TrimSpace(ln.Branch)
-	base := cmp.Or(strings.TrimSpace(ln.BaseBranch), d.baseBranch, "main")
-	script := fmt.Sprintf(`set -e
-ref="origin/%s"
-if [ -n %q ] && git rev-parse --verify "origin/%s" >/dev/null 2>&1; then
-  ref="origin/%s"
+	branch := strings.TrimPrefix(strings.TrimSpace(ln.Branch), "origin/")
+	base := strings.TrimPrefix(cmp.Or(strings.TrimSpace(ln.BaseBranch), d.baseBranch, "main"), "origin/")
+	const script = `set -e
+base="$1"
+branch="$2"
+ref="origin/$base"
+if [ -n "$branch" ] && git rev-parse --verify "origin/$branch" >/dev/null 2>&1; then
+  ref="origin/$branch"
 fi
 count=$(git rev-list --count "$ref..HEAD" 2>/dev/null || echo 0)
-oldest=$(git log --reverse --format=%%ct "$ref..HEAD" 2>/dev/null | head -n 1)
-printf "COMMITS:%%s\nOLDEST_COMMIT:%%s\n" "$count" "$oldest"
+oldest=$(git log --reverse --format=%ct "$ref..HEAD" 2>/dev/null | head -n 1)
+printf "COMMITS:%s\nOLDEST_COMMIT:%s\n" "$count" "$oldest"
 git status --porcelain 2>/dev/null | while IFS= read -r line; do
   [ -z "$line" ] && continue
-  file=$(printf "%%s" "$line" | cut -c4-)
+  file=$(printf "%s" "$line" | cut -c4-)
   case "$file" in
     *" -> "*) file=${file##* -> } ;;
   esac
   if [ "$file" = ".claude/settings.local.json" ]; then
     continue
   fi
-  mtime=$(stat -c %%Y "$file" 2>/dev/null || echo 0)
-  printf "DIRTY:%%s\t%%s\n" "$mtime" "$file"
+  mtime=$(stat -c %Y "$file" 2>/dev/null || echo 0)
+  printf "DIRTY:%s\t%s\n" "$mtime" "$file"
 done
-`, base, branch, branch, branch)
-	res, err := d.ExecSession(ctx, ln.SessionID, []string{"sh", "-c", script})
+`
+	res, err := d.ExecSession(ctx, ln.SessionID, []string{"sh", "-c", script, "--", base, branch})
 	if err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {

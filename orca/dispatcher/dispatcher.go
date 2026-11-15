@@ -1526,7 +1526,7 @@ func (d *Dispatcher) applyLaneWait(ctx context.Context, runID string, view *Stat
 	if err != nil {
 		return "", err
 	}
-	ref := "named-wait:" + ln.ID
+	ref := controller.NamedWaitRefPrefix + ln.ID
 	if existing, listErr := d.store.Directives().List(ctx, store.DirectiveFilter{
 		RunID:      runID,
 		Scope:      ln.ID,

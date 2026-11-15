@@ -57,9 +57,8 @@ func reportPath(runDir, runID, laneID, phase string, round int) string {
 }
 
 var (
-	_ lane.LaneDriver          = (*Driver)(nil)
-	_ lane.GitStateReader      = (*Driver)(nil)
-	_ lane.SessionHealthReader = (*Driver)(nil)
+	_ lane.LaneDriver     = (*Driver)(nil)
+	_ lane.GitStateReader = (*Driver)(nil)
 )
 
 func (d *Driver) ReportInstructions(runID, laneID, phase string, round int) string {
@@ -241,11 +240,9 @@ func (d *Driver) LaneGitState(ctx context.Context, ln lane.Lane) (lane.GitState,
 	if worktree == "" {
 		return lane.GitState{}, nil
 	}
-	ref := cmp.Or(strings.TrimSpace(ln.BaseBranch), "origin/main")
-	if !strings.HasPrefix(ref, "origin/") && ref != "" {
-		ref = "origin/" + ref
-	}
-	if branch := strings.TrimSpace(ln.Branch); branch != "" {
+	base := strings.TrimPrefix(cmp.Or(strings.TrimSpace(ln.BaseBranch), "main"), "origin/")
+	ref := "origin/" + base
+	if branch := strings.TrimPrefix(strings.TrimSpace(ln.Branch), "origin/"); branch != "" {
 		if err := exec.CommandContext(ctx, "git", "-C", worktree, "rev-parse", "--verify", "origin/"+branch).Run(); err == nil {
 			ref = "origin/" + branch
 		}
@@ -288,11 +285,6 @@ func (d *Driver) LaneGitState(ctx context.Context, ln lane.Lane) (lane.GitState,
 		st.OldestUnpushedAt = time.Unix(oldest, 0).UTC()
 	}
 	return st, nil
-}
-
-// LaneSessionHealth inspects local disk usage and busy processes.
-func (d *Driver) LaneSessionHealth(_ context.Context, _ lane.Lane) (lane.SessionHealth, error) {
-	return lane.SessionHealth{}, nil
 }
 
 // ReleaseSession stops the local bramble session after lane completion.
@@ -366,6 +358,7 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 		lastStatus := map[string]string{}
 		lastActivity := time.Now()
 		quietEmitted := false
+		quietSessions := map[string]bool{}
 		t := time.NewTicker(d.poll)
 		defer t.Stop()
 		for {
@@ -378,7 +371,10 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 			if err != nil {
 				continue
 			}
-			working := false
+			hasWorking := false
+			hasIdle := false
+			hasUnreportedIdle := false
+			var idleSessions []string
 			for i := range ss {
 				s := &ss[i]
 				d.mu.RLock()
@@ -404,12 +400,14 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 					delete(lastStatus, s.ID)
 					lastActivity = time.Now()
 					quietEmitted = false
+					clear(quietSessions)
 				}
 				kind := lane.EventExited
 				status := strings.ToLower(s.Status)
 				switch status {
 				case "working", "busy":
-					working = true
+					hasWorking = true
+					delete(quietSessions, s.ID)
 					delete(lastStatus, s.ID)
 					continue
 				case "waiting", "wait", "waiting_for_input", "input.waiting":
@@ -422,6 +420,11 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 					kind = lane.EventTurnEndedNoReport
 				case "exited", "exit", "dead", "failed", "done", "complete", "completed", "stopped":
 				default:
+					hasIdle = true
+					idleSessions = append(idleSessions, s.ID)
+					if !quietSessions[s.ID] {
+						hasUnreportedIdle = true
+					}
 					delete(lastStatus, s.ID)
 					continue
 				}
@@ -436,19 +439,24 @@ func (d *Driver) Watch(ctx context.Context, runID string) <-chan lane.Event {
 				lastStatus[s.ID] = status
 				lastActivity = time.Now()
 				quietEmitted = false
+				clear(quietSessions)
 			}
-			if working {
+			if hasWorking && !hasIdle {
 				lastActivity = time.Now()
 				quietEmitted = false
+				clear(quietSessions)
 				continue
 			}
-			if !quietEmitted && time.Since(lastActivity) >= d.inactivityAfter {
+			if time.Since(lastActivity) >= d.inactivityAfter && (!quietEmitted || hasUnreportedIdle) {
 				select {
 				case out <- lane.Event{Kind: lane.EventNoActivity, RunID: runID, Since: lastActivity}:
 				case <-ctx.Done():
 					return
 				}
 				quietEmitted = true
+				for _, id := range idleSessions {
+					quietSessions[id] = true
+				}
 			}
 		}
 	}()
