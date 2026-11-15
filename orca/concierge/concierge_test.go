@@ -789,6 +789,26 @@ func TestConcierge_DirectiveRevokeRemovesDirectiveAndDecisionRecorded(t *testing
 	if mem, mErr := st.Memories().Get(ctx, "", "does-not-exist"); mErr != nil || mem == nil {
 		t.Fatalf("standalone memory entry should not be deleted when directive row is missing, got %+v, %v", mem, mErr)
 	}
+
+	// Revoking an open owner_ask directive must also be rejected in the Concierge.
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:        "ask-q1",
+		RunID:     "run-1",
+		Kind:      store.DirectiveInstruction,
+		Source:    store.DirectiveSourceDispatcher,
+		Ref:       "owner_ask:q1",
+		Text:      `{"id":"q1","run_id":"run-1","question":"Proceed?","options":["yes","no"],"default":"yes"}`,
+		Status:    store.DirectiveActive,
+		CreatedAt: clk.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := concierge.RevokeDirective(ctx, st, "run-1", "ask-q1"); !errors.Is(err, store.ErrInvalidArgument) {
+		t.Fatalf("RevokeDirective(owner_ask) = %v, want ErrInvalidArgument", err)
+	}
+	if askDir, gErr := st.Directives().Get(ctx, "run-1", "ask-q1"); gErr != nil || askDir.Status != store.DirectiveActive {
+		t.Fatalf("ask-q1 after rejected revoke = %+v, %v, want active", askDir, gErr)
+	}
 }
 
 func TestConcierge_KeepTheHoldOnAdoptedRunCreatesNoStandingNoNewLanesRule(t *testing.T) {

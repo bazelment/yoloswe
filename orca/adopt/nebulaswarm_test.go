@@ -2171,12 +2171,14 @@ func TestAdoptedSelfMergeRecipeHasNoControllerMergePhase(t *testing.T) {
 	}
 
 	// Negative check: prose mentioning "no review", negated "do not self-merge",
-	// a goal mentioning "add self-merge support", or "Self-merge: disabled"
-	// must NOT flip merge policy to self or drop the review phase.
+	// a goal mentioning "add self-merge support", "Self-merge: disabled", or
+	// unlabelled free-text prose in OBJECTIVE.md must NOT flip merge policy to
+	// self or drop the review phase.
 	for _, negObj := range []string{
 		"# 20261114-trial-m1\n\nGoal: ensure no review comments are dropped.\nMerge rule: lanes must not self-merge; controller merges after review.\n",
 		"# 20261114-trial-m1\n\nGoal: add self-merge support to the recipe compiler.\n",
 		"# 20261114-trial-m1\n\nSelf-merge: disabled\n",
+		"# 20261114-trial-m1\n\nIn this run, a lane merges once pr-polish finishes.\n",
 	} {
 		write(t, filepath.Join(dir, "OBJECTIVE.md"), negObj)
 		write(t, filepath.Join(dir, "clean.brief"), "Note: self-merge is discussed in docs.")
@@ -2205,7 +2207,7 @@ func TestAdoptedSelfMergeRecipeHasNoControllerMergePhase(t *testing.T) {
 	}
 
 	// Self-merge rule variants: "Merge mode: self", "Merge: self", "merge_mode=self",
-	// and unprefixed prose "In this run, a lane merges once pr-polish finishes."
+	// and explicit "Merge rule:" / "## Merge rule" with "without controller".
 	for _, tc := range []struct {
 		name         string
 		objective    string
@@ -2224,8 +2226,13 @@ func TestAdoptedSelfMergeRecipeHasNoControllerMergePhase(t *testing.T) {
 			objective: "# 20261114-trial-m1\n\nmerge_mode=self\n",
 		},
 		{
-			name:         "unprefixed prose lane merges once pr-polish finishes",
-			objective:    "# 20261114-trial-m1\n\nIn this run, a lane merges once pr-polish finishes.\n",
+			name:         "explicit merge rule without controller",
+			objective:    "# 20261114-trial-m1\n\nMerge rule: a lane merges once pr-polish finishes without controller intervention.\n",
+			wantNoReview: true,
+		},
+		{
+			name:         "merge rule markdown section",
+			objective:    "# 20261114-trial-m1\n\n## Merge rule\nA lane merges once pr-polish finishes.\n",
 			wantNoReview: true,
 		},
 	} {

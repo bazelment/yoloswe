@@ -1362,21 +1362,23 @@ func (c *Concierge) execDirectiveSubmit(
 }
 
 // RevokeDirective marks directive id revoked on runID (or the first matching
-// fallbackRunIDs entry) and deletes any matching memory entry. It returns a
-// wrapped store.ErrNotFound when the directive does not exist.
+// fallbackRunIDs entry) and deletes any matching memory entry. It refuses to
+// revoke open owner_ask directives and returns a wrapped store.ErrNotFound
+// when the directive does not exist.
 func RevokeDirective(ctx context.Context, st store.Store, runID, id string, fallbackRunIDs ...string) (string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return runID, fmt.Errorf("%w: directive.revoke requires id", store.ErrInvalidArgument)
 	}
-	err := st.Directives().UpdateStatus(ctx, runID, id, store.DirectiveRevoked)
+	dir, err := st.Directives().Get(ctx, runID, id)
 	if errors.Is(err, store.ErrNotFound) {
 		for _, candidate := range fallbackRunIDs {
 			if candidate == "" || candidate == runID {
 				continue
 			}
-			if uErr := st.Directives().UpdateStatus(ctx, candidate, id, store.DirectiveRevoked); uErr == nil {
+			if d, gErr := st.Directives().Get(ctx, candidate, id); gErr == nil && d != nil {
 				runID = candidate
+				dir = d
 				err = nil
 				break
 			}
@@ -1386,6 +1388,12 @@ func RevokeDirective(ctx context.Context, st store.Store, runID, id string, fall
 		if errors.Is(err, store.ErrNotFound) {
 			return runID, fmt.Errorf("directive %q not found: %w", id, err)
 		}
+		return runID, err
+	}
+	if dir != nil && strings.HasPrefix(strings.TrimSpace(dir.Ref), "owner_ask:") {
+		return runID, fmt.Errorf("%w: directive %q is an open owner question (%s); use owner.answer to resolve it", store.ErrInvalidArgument, id, dir.Ref)
+	}
+	if err := st.Directives().UpdateStatus(ctx, runID, id, store.DirectiveRevoked); err != nil {
 		return runID, err
 	}
 	if memErr := st.Memories().Delete(ctx, "", id); memErr != nil && !errors.Is(memErr, store.ErrNotFound) {

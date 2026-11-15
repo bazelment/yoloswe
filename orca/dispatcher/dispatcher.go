@@ -1463,10 +1463,17 @@ func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, sta
 	}) {
 		return "", &invariantViolationError{msg: "directive.revoke [run]: requires an owner_msg event in the batch"}
 	}
-	if err := d.store.Directives().UpdateStatus(ctx, runID, id, store.DirectiveRevoked); err != nil {
+	dir, err := d.store.Directives().Get(ctx, runID, id)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return "", fmt.Errorf("directive %q not found: %w", id, err)
 		}
+		return "", err
+	}
+	if dir != nil && strings.HasPrefix(strings.TrimSpace(dir.Ref), ownerAskRefPrefix) {
+		return "", fmt.Errorf("%w: directive %q is an open owner question (%s); use owner.answer to resolve it", store.ErrInvalidArgument, id, dir.Ref)
+	}
+	if err := d.store.Directives().UpdateStatus(ctx, runID, id, store.DirectiveRevoked); err != nil {
 		return "", err
 	}
 	if memErr := d.store.Memories().Delete(ctx, "", id); memErr != nil && !errors.Is(memErr, store.ErrNotFound) {

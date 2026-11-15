@@ -1945,7 +1945,7 @@ func (c *Concierge) handleDirectiveRevoke(
 		c.Wake(runID)
 	}
 	rawArgs, _ := json.Marshal(p)
-	_, _ = memorychat.AppendDirectiveRevokeDecision(
+	if _, err := memorychat.AppendDirectiveRevokeDecision(
 		ctx,
 		c.store,
 		cmp.Or(runID, c.runID),
@@ -1956,6 +1956,8 @@ func (c *Concierge) handleDirectiveRevoke(
 		rawArgs,
 		model.Usage{},
 		0,
-	)
+	); err != nil {
+		return "", err
+	}
 	return fmt.Sprintf("Revoked directive %s on run %s", id, runID), nil
 }

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1107,17 +1108,45 @@ func normalizeHostPhaseName(name string, hasExplicitClean bool) (string, bool) {
 	}
 }
 
+var explicitMergeRuleLineRE = regexp.MustCompile(`(?i)^\s*(?:[-*+]\s*)?(?:merge(?:\s+rule|\s+rules|\s+policy|\s+mode|_rule|_policy|_mode)?|self[-_\s]?merge)\s*[:=]\s*(.+)$`)
+
+func isMergeSectionHeading(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "#") {
+		return false
+	}
+	heading := strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "#")))
+	heading = strings.TrimSuffix(heading, ":")
+	switch heading {
+	case "merge", "merge rule", "merge rules", "merge policy", "merge mode":
+		return true
+	default:
+		return false
+	}
+}
+
 func extractMergeRuleText(configMergeRule, objectiveText string) string {
 	var parts []string
 	if trimmed := strings.TrimSpace(configMergeRule); trimmed != "" {
 		parts = append(parts, trimmed)
 	}
+	inMergeSection := false
 	for _, line := range strings.Split(objectiveText, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(strings.ToLower(trimmed), "goal:") {
+		if trimmed == "" {
 			continue
 		}
-		parts = append(parts, trimmed)
+		if strings.HasPrefix(trimmed, "#") {
+			inMergeSection = isMergeSectionHeading(trimmed)
+			continue
+		}
+		if m := explicitMergeRuleLineRE.FindStringSubmatch(trimmed); len(m) == 2 {
+			parts = append(parts, trimmed)
+			continue
+		}
+		if inMergeSection {
+			parts = append(parts, trimmed)
+		}
 	}
 	return strings.Join(parts, "\n")
 }
@@ -1140,7 +1169,7 @@ func splitMergeRuleClauses(s string) []string {
 
 func isNegatedMergeRuleClause(clause string) bool {
 	norm := adoptNormalizeContractions(clause)
-	for _, neg := range []string{"not", "no", "never", "dont", "cannot", "cant", "without", "forbid", "disable", "disabled", "off", "false", "none", "manual", "controller"} {
+	for _, neg := range []string{"not", "no", "never", "dont", "cannot", "cant", "forbid", "disable", "disabled", "off", "false", "none", "manual"} {
 		if adoptContainsWholeWord(norm, neg) {
 			return true
 		}
