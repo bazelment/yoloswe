@@ -820,3 +820,18 @@ func testRetryWaits(t *testing.T, provider, header string, wantWaits []time.Dura
 		t.Fatalf("active timers = %d, want 0", clk.Waiters())
 	}
 }
+
+func TestSchemaFor_CommaDescriptionsAndSkipTag(t *testing.T) {
+	t.Parallel()
+	type sampleParams struct {
+		Hidden string `json:"hidden,omitempty" jsonschema:"-"`
+		Filter string `json:"filter,omitempty" jsonschema:"description=Include decision, token, cost, and idle metrics"`
+	}
+	raw := string(model.SchemaFor[sampleParams]())
+	if strings.Contains(raw, `"hidden"`) {
+		t.Fatalf("SchemaFor included jsonschema:\"-\" field: %s", raw)
+	}
+	if !strings.Contains(raw, "Include decision, token, cost, and idle metrics") {
+		t.Fatalf("SchemaFor truncated comma-containing description: %s", raw)
+	}
+}

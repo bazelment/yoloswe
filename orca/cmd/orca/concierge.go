@@ -1580,14 +1580,18 @@ func (c *Concierge) isRunHeldByOrca(ctx context.Context, runID string, run *stor
 	if runID == frontDeskRunID || slices.Contains(c.heldRunIDs(ctx), runID) {
 		return true
 	}
-	if strings.HasPrefix(strings.TrimSpace(hostRun.Holder), "orca") {
+	if isOrcaHolderID(hostRun.Holder) {
 		return true
 	}
 	if run != nil && run.Lease != nil && !run.Lease.Expired(now) {
-		holder := strings.TrimSpace(run.Lease.HolderID)
-		return strings.HasPrefix(holder, "orca")
+		return isOrcaHolderID(run.Lease.HolderID)
 	}
 	return false
+}
+
+func isOrcaHolderID(holder string) bool {
+	holder = strings.TrimSpace(holder)
+	return strings.HasPrefix(holder, "orca") || strings.HasPrefix(holder, "controller")
 }
 
 func (c *Concierge) openQuestionsForRun(ctx context.Context, runID string, dirs []store.Directive, laneQs []mailbox.OpenQuestion) []string {
