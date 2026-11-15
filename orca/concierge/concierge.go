@@ -1008,6 +1008,7 @@ func (c *Concierge) execRunSettings(ctx context.Context, runID string, p RunSett
 			return "", fmt.Errorf("run.settings max_cost_per_hour_usd must be >= 0")
 		}
 		next.MaxCostPerHourUSD = *p.MaxCostPerHourUSD
+		next.CostGuardDisabled = *p.MaxCostPerHourUSD == 0
 	}
 	if err := c.store.Runs().UpdateSettings(ctx, runID, next); err != nil {
 		return "", err

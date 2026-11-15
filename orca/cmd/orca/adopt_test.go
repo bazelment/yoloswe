@@ -2242,3 +2242,42 @@ func TestAdoptedHandlePlannerRequestWithRelativePlanAndConfinement(t *testing.T)
 		t.Fatal("expected HandlePlannerRequest to reject unconfined local file /etc/passwd")
 	}
 }
+
+func TestConfigMaxCostPerHourDefaultAndExplicitZero(t *testing.T) {
+	// Default when unset is DefaultMaxCostPerHourUSD ($5.00/h).
+	t.Setenv("ORCA_MAX_COST_PER_HOUR_USD", "")
+	cfgDefault := (Config{}).withDefaults()
+	if cfgDefault.MaxCostPerHourUSD != DefaultMaxCostPerHourUSD {
+		t.Fatalf("default MaxCostPerHourUSD = %.2f, want %.2f", cfgDefault.MaxCostPerHourUSD, DefaultMaxCostPerHourUSD)
+	}
+
+	// Explicit --max-cost-per-hour-usd=0 disables the guard (stays 0).
+	cfgFlagZero, _, err := parseFlags("run", []string{"--run", "r1", "--goal", "g", "--max-cost-per-hour-usd", "0"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseFlags(--max-cost-per-hour-usd 0): %v", err)
+	}
+	cfgFlagZero = cfgFlagZero.withDefaults()
+	if cfgFlagZero.MaxCostPerHourUSD != 0 {
+		t.Fatalf("flag --max-cost-per-hour-usd 0 got %.2f, want 0", cfgFlagZero.MaxCostPerHourUSD)
+	}
+
+	// Explicit ORCA_MAX_COST_PER_HOUR_USD=0 disables the guard (stays 0).
+	t.Setenv("ORCA_MAX_COST_PER_HOUR_USD", "0")
+	cfgEnvZero := (Config{}).withDefaults()
+	if cfgEnvZero.MaxCostPerHourUSD != 0 {
+		t.Fatalf("env ORCA_MAX_COST_PER_HOUR_USD=0 got %.2f, want 0", cfgEnvZero.MaxCostPerHourUSD)
+	}
+	t.Setenv("ORCA_MAX_COST_PER_HOUR_USD", "")
+
+	// Explicit "max_cost_per_hour_usd": 0 in config JSON disables the guard (stays 0).
+	cfgPath := filepath.Join(t.TempDir(), "orca.json")
+	writeFile(t, cfgPath, `{"run_id":"r1","goal":"g","max_cost_per_hour_usd":0}`)
+	cfgFileZero, _, err := parseFlags("run", []string{"--config", cfgPath}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseFlags(--config with max_cost_per_hour_usd:0): %v", err)
+	}
+	cfgFileZero = cfgFileZero.withDefaults()
+	if cfgFileZero.MaxCostPerHourUSD != 0 {
+		t.Fatalf("config file max_cost_per_hour_usd:0 got %.2f, want 0", cfgFileZero.MaxCostPerHourUSD)
+	}
+}

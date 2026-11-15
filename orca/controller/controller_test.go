@@ -2334,4 +2334,33 @@ func TestControllerCostGuardPausesTurnsAtLimit(t *testing.T) {
 	if !settingsAfter.Paused {
 		t.Fatalf("run settings Paused after unpause while over limit = false, want true")
 	}
+
+	// If the owner explicitly disables the cost guard (max_cost_per_hour_usd=0),
+	// SetRuntimeSettings and EnforceCostGuard must honor the disabled setting
+	// instead of falling back to the startup $5 limit.
+	settingsAfter.Paused = false
+	settingsAfter.MaxCostPerHourUSD = 0
+	settingsAfter.CostGuardDisabled = true
+	if err := st.Runs().UpdateSettings(ctx, "run-1", settingsAfter); err != nil {
+		t.Fatalf("UpdateSettings(disable cost guard): %v", err)
+	}
+	ctrl.SetRuntimeSettings(settingsAfter)
+	if _, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		Kind:    store.EventMail,
+		Urgent:  true,
+		Summary: "urgent mail after cost guard disabled",
+	}); err != nil {
+		t.Fatalf("Append event after disable: %v", err)
+	}
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatalf("Step after cost guard disabled: %v", err)
+	}
+	settingsDisabled, err := st.Runs().GetSettings(ctx, "run-1")
+	if err != nil {
+		t.Fatalf("GetSettings after disable: %v", err)
+	}
+	if settingsDisabled.Paused {
+		t.Fatalf("run settings Paused when CostGuardDisabled=true = true, want false")
+	}
 }

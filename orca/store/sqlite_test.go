@@ -585,6 +585,13 @@ func TestObjectiveDoneAndCostGuardHelpers(t *testing.T) {
 		"complete",
 		"completed",
 		"nothing left",
+		"nothing left to do",
+		"No open work remaining",
+		"Done — all merged",
+		"Done; PR merged",
+		"Run DONE 22:25Z",
+		"none, all merged",
+		"Complete (all lanes merged)",
 		"none. Run DONE 22:25Z — all lanes merged (#5604, #5811). PLAN.md log + post updated. No loop armed.",
 		"Run complete — all PRs merged",
 	} {
@@ -608,6 +615,12 @@ func TestObjectiveDoneAndCostGuardHelpers(t *testing.T) {
 		if store.ObjectiveIsDone(obj) {
 			t.Fatalf("ObjectiveIsDone(%q) = true, want false", obj)
 		}
+	}
+	if got := store.ExtractNextSection("Next: staff M4\n\nNext:\n"); got != "staff M4" {
+		t.Fatalf("ExtractNextSection with trailing bare Next: = %q, want %q", got, "staff M4")
+	}
+	if got := store.ExtractNextSection("Next:\n", "Next: fallback step\n"); got != "fallback step" {
+		t.Fatalf("ExtractNextSection multi-source fallthrough = %q, want %q", got, "fallback step")
 	}
 
 	ctx := t.Context()
@@ -709,5 +722,28 @@ func TestObjectiveDoneAndCostGuardHelpers(t *testing.T) {
 	exceeded2, _, _, msg2, err := store.EnforceCostGuard(ctx, st, "run-cost", clk.Now(), 5.0)
 	if err != nil || !exceeded2 || msg2 == "" {
 		t.Fatalf("EnforceCostGuard(after unpause) = (%v, %q, %v), want (true, non-empty, nil)", exceeded2, msg2, err)
+	}
+
+	// Owner explicitly disables the cost guard (max_cost_per_hour_usd=0 -> CostGuardDisabled=true);
+	// verify SQLite round-trip and that EnforceCostGuard does not substitute fallbackLimit.
+	if err := st.Runs().UpdateSettings(ctx, "run-cost", store.RunSettings{
+		ConcurrencyCap:    2,
+		StallTimeout:      15 * time.Minute,
+		MaxCostPerHourUSD: 0,
+		CostGuardDisabled: true,
+		Paused:            false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	disabledSettings, err := st.Runs().GetSettings(ctx, "run-cost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !disabledSettings.CostGuardDisabled || disabledSettings.MaxCostPerHourUSD != 0 {
+		t.Fatalf("disabledSettings = %+v, want CostGuardDisabled=true MaxCostPerHourUSD=0", disabledSettings)
+	}
+	exceeded3, _, _, _, err := store.EnforceCostGuard(ctx, st, "run-cost", clk.Now(), 5.0)
+	if err != nil || exceeded3 {
+		t.Fatalf("EnforceCostGuard with CostGuardDisabled=true = (%v, %v), want (false, nil)", exceeded3, err)
 	}
 }

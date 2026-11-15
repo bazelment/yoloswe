@@ -254,24 +254,43 @@ func IsDoneOrEmptyNext(s string) bool {
 	}
 	lower := strings.ToLower(trimmed)
 	exact := strings.TrimRight(lower, ".! \t")
-	switch exact {
-	case "", "none", "n/a", "nil", "nothing", "-", "done", "complete", "completed", "finished",
-		"all done", "all complete", "run done", "run complete", "swarm done",
-		"no open work", "no remaining work", "nothing left", "no loop armed":
+	if isDoneToken(exact) {
 		return true
 	}
 	for _, prefix := range []string{
-		"none.", "none;", "none:", "none —", "none -", "none (",
-		"n/a.", "n/a;", "n/a:", "n/a —", "n/a -", "n/a (",
-		"run done.", "run done:", "run done —", "run done -", "run done (",
-		"run complete.", "run complete:", "run complete —", "run complete -", "run complete (",
-		"swarm done.", "swarm done:", "swarm done —", "swarm done -", "swarm done (",
-		"no open work.", "no open work —", "no open work -",
-		"no remaining work.", "no remaining work —", "no remaining work -",
+		"run done ", "swarm done ", "nothing left ", "no open work ", "no remaining work ",
 	} {
 		if strings.HasPrefix(lower, prefix) {
 			return true
 		}
+	}
+	cutIdx := -1
+	cutSep := ""
+	for _, sep := range []string{".", ";", ":", "—", " - ", " (", ",", "\n"} {
+		if idx := strings.Index(lower, sep); idx > 0 && (cutIdx < 0 || idx < cutIdx) {
+			cutIdx = idx
+			cutSep = sep
+		}
+	}
+	if cutIdx > 0 {
+		lead := strings.TrimSpace(lower[:cutIdx])
+		rest := strings.TrimSpace(lower[cutIdx+len(cutSep):])
+		if cutSep == ";" && (strings.Contains(rest, "pending") || strings.Contains(rest, "todo") || strings.Contains(rest, "open") || strings.Contains(rest, "start ") || strings.Contains(rest, "staff ")) {
+			return false
+		}
+		if isDoneToken(lead) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDoneToken(tok string) bool {
+	switch tok {
+	case "", "none", "n/a", "na", "nil", "nothing", "-", "done", "complete", "completed", "finished",
+		"all done", "all complete", "run done", "run complete", "swarm done",
+		"no open work", "no remaining work", "nothing left", "nothing left to do", "no open work remaining", "no loop armed":
+		return true
 	}
 	return false
 }
@@ -297,12 +316,11 @@ func HasExplicitNextSection(sources ...string) bool {
 	return false
 }
 
-// ExtractNextSection returns the latest Next: line or # Next section from sources.
+// ExtractNextSection returns the latest non-empty Next: line or # Next section from sources.
 func ExtractNextSection(sources ...string) string {
 	for _, src := range sources {
 		lines := strings.Split(src, "\n")
 		var found string
-		var matched bool
 		for i := 0; i < len(lines); i++ {
 			trimmed := strings.TrimSpace(lines[i])
 			clean := strings.TrimLeft(trimmed, "-* \t")
@@ -329,8 +347,9 @@ func ExtractNextSection(sources ...string) string {
 					}
 					break
 				}
-				found = strings.Join(parts, "\n")
-				matched = true
+				if len(parts) > 0 {
+					found = strings.Join(parts, "\n")
+				}
 			}
 			if strings.HasPrefix(trimmed, "#") {
 				heading := strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "#")))
@@ -345,12 +364,13 @@ func ExtractNextSection(sources ...string) string {
 							parts = append(parts, nextTrim)
 						}
 					}
-					found = strings.Join(parts, "\n")
-					matched = true
+					if len(parts) > 0 {
+						found = strings.Join(parts, "\n")
+					}
 				}
 			}
 		}
-		if matched {
+		if found != "" {
 			return found
 		}
 	}
@@ -489,6 +509,9 @@ func EnforceCostGuard(ctx context.Context, st Store, runID string, now time.Time
 	settings, err := st.Runs().GetSettings(ctx, runID)
 	if err != nil {
 		return false, 0, 0, "", err
+	}
+	if settings.CostGuardDisabled {
+		return false, 0, 0, "", nil
 	}
 	limit := settings.MaxCostPerHourUSD
 	if limit <= 0 {

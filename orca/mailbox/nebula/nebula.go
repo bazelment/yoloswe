@@ -34,7 +34,6 @@ type Mailbox struct {
 	cursor      string
 	seen        map[string]struct{}
 	adoptCutoff time.Time
-	adoptSynced bool
 	store       store.Store
 }
 
@@ -68,7 +67,7 @@ func (m *Mailbox) SetAdoptCutoff(cutoff time.Time, st store.Store) {
 // adopt cutoff as already seen, recording a single summary event and decision.
 func (m *Mailbox) SyncAdoptCutoff(ctx context.Context) error {
 	m.seedFromStore(ctx)
-	_, err := m.pollOnce(ctx, true)
+	_, err := m.pollOnce(ctx)
 	return err
 }
 
@@ -147,9 +146,9 @@ func (m *Mailbox) isOlderThanAdopt(ctx context.Context, msg mailbox.Message) boo
 	if !ok || ts.After(cutoff) {
 		return false
 	}
-	if msg.IsQuestion() && !msg.IsClosedOrAnswered() && !mailbox.IsQuestionObsoleteOrClosed(ctx, st, m.c.RunID, msg.LaneID, msg.ID, "", msg.Body) {
-		if st != nil && strings.TrimSpace(msg.LaneID) != "" {
-			if ln, err := st.Lanes().Get(ctx, m.c.RunID, strings.TrimSpace(msg.LaneID)); err == nil && ln != nil && !ln.Status.Terminal() && strings.TrimSpace(ln.MergeSHA) == "" {
+	if msg.IsQuestion() && !msg.IsClosedOrAnswered() && st != nil && strings.TrimSpace(msg.LaneID) != "" {
+		if ln, err := st.Lanes().Get(ctx, m.c.RunID, strings.TrimSpace(msg.LaneID)); err == nil && ln != nil && !ln.Status.Terminal() && strings.TrimSpace(ln.MergeSHA) == "" {
+			if !mailbox.IsAnswered(ctx, st, m.c.RunID, msg.ID, "") {
 				return false
 			}
 		}
@@ -157,7 +156,7 @@ func (m *Mailbox) isOlderThanAdopt(ctx context.Context, msg mailbox.Message) boo
 	return true
 }
 
-func (m *Mailbox) pollOnce(ctx context.Context, _ bool) ([]store.Event, error) {
+func (m *Mailbox) pollOnce(ctx context.Context) ([]store.Event, error) {
 	q := url.Values{}
 	host := m.c.Host || (strings.TrimSpace(m.c.SessionID) == "" && strings.TrimSpace(os.Getenv("NEBULA_SESSION_ID")) == "")
 	if host {
@@ -173,7 +172,6 @@ func (m *Mailbox) pollOnce(ctx context.Context, _ bool) ([]store.Event, error) {
 		return nil, err
 	}
 	m.mu.Lock()
-	m.adoptSynced = true
 	st := m.store
 	m.mu.Unlock()
 
@@ -287,7 +285,7 @@ func (m *Mailbox) Watch(ctx context.Context) (<-chan store.Event, error) {
 		ticker := time.NewTicker(m.c.PollInterval)
 		defer ticker.Stop()
 		for {
-			appended, err := m.pollOnce(ctx, false)
+			appended, err := m.pollOnce(ctx)
 			if err == nil {
 				for i := range appended {
 					select {
@@ -341,7 +339,6 @@ func (m *Mailbox) seedFromStore(ctx context.Context) {
 				if sum.Cursor != "" {
 					m.cursor = sum.Cursor
 				}
-				m.adoptSynced = true
 			}
 			continue
 		}

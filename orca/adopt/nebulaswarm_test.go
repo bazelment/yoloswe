@@ -2455,11 +2455,20 @@ func TestAdoptOldHostMailsZeroDispatcherTurns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var gotSummaries []string
 	for i := 0; i < 2; i++ {
 		select {
-		case <-chLive:
+		case ev := <-chLive:
+			if ev.Source == mailbox.AdoptMailSummarySource {
+				t.Fatalf("unexpected adopt mail summary event on live question / timestamp-less mail: %+v", ev)
+			}
+			gotSummaries = append(gotSummaries, ev.Summary)
 		case <-time.After(2 * time.Second):
 			t.Fatalf("timed out waiting for live question / timestamp-less mail event %d", i+1)
 		}
+	}
+	joined := strings.Join(gotSummaries, "\n")
+	if !strings.Contains(joined, "open question from running lane before adopt") || !strings.Contains(joined, "timestamp-less host message") {
+		t.Fatalf("live mail events = %q, want both open question and timestamp-less message", joined)
 	}
 }

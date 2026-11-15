@@ -302,10 +302,12 @@ func (c *Controller) SetRuntimeSettings(settings store.RunSettings) {
 		c.cfg.StallTimeout = settings.StallTimeout
 		c.stallTimeoutSet = true
 	}
-	if settings.MaxCostPerHourUSD > 0 {
+	if settings.CostGuardDisabled {
+		c.cfg.MaxCostPerHourUSD = 0
+	} else if settings.MaxCostPerHourUSD > 0 {
 		c.cfg.MaxCostPerHourUSD = settings.MaxCostPerHourUSD
 	}
-	if settings.StallTimeout <= 0 && settings.ConcurrencyCap == 0 && settings.MaxCostPerHourUSD <= 0 && !settings.Paused {
+	if settings.StallTimeout <= 0 && settings.ConcurrencyCap == 0 && settings.MaxCostPerHourUSD <= 0 && !settings.CostGuardDisabled && !settings.Paused {
 		return
 	}
 	if settings.ConcurrencyCap >= 0 {

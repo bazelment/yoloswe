@@ -1173,6 +1173,7 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 					return "", fmt.Errorf("run.settings max_cost_per_hour_usd must be >= 0")
 				}
 				next.MaxCostPerHourUSD = *p.MaxCostPerHourUSD
+				next.CostGuardDisabled = *p.MaxCostPerHourUSD == 0
 			}
 			if err := c.store.Runs().UpdateSettings(ctx, targetRun, next); err != nil {
 				return "", err
