@@ -206,29 +206,33 @@ func phaseEmoji(phase string) (emoji string, style spanStyle) {
 func classifyBackgroundEvent(clean string) (emoji string, style spanStyle) {
 	lower := strings.ToLower(clean)
 	switch {
-	case strings.HasPrefix(lower, "cost guard") || strings.Contains(lower, "cost.guard") || strings.Contains(lower, "paused by cost"):
+	case strings.HasPrefix(lower, "cost guard"):
 		return "🛑", styleRed | styleBold
 	case strings.HasPrefix(lower, "pr merged"):
 		return "🎉", styleMagenta | styleBold
 	case strings.HasPrefix(lower, "lane question"):
 		return "❓", styleYellow | styleBold
-	case (strings.HasPrefix(lower, "lane ") || strings.HasPrefix(lower, "lane advanced:")) && (strings.Contains(lower, " advanced:") || strings.Contains(lower, " completed:")):
+	case isLaneLifecycleNotice(lower):
 		return "🔄", styleCyan
 	case strings.HasPrefix(lower, "dispatcher failed:"):
 		return "✗", styleRed
 	case strings.HasPrefix(lower, "dispatcher:"):
 		return "⚡", styleYellow
-	case strings.Contains(lower, "merged"):
-		return "🎉", styleMagenta | styleBold
-	case strings.Contains(lower, "question") || strings.Contains(lower, "escalat") || strings.Contains(lower, "owner_ask") || strings.Contains(lower, "ask:"):
-		return "❓", styleYellow | styleBold
-	case strings.Contains(lower, "advance") || strings.Contains(lower, "phase.") || strings.Contains(lower, "lane.") || strings.Contains(lower, "rework"):
-		return "🔄", styleCyan
-	case strings.Contains(lower, "failed"):
-		return "✗", styleRed
 	default:
 		return "•", styleCyan
 	}
+}
+
+func isLaneLifecycleNotice(lower string) bool {
+	rest, ok := strings.CutPrefix(lower, "lane ")
+	if !ok {
+		return false
+	}
+	if strings.HasPrefix(rest, "advanced:") || strings.HasPrefix(rest, "completed:") {
+		return true
+	}
+	laneID, tail, ok := strings.Cut(rest, " ")
+	return ok && laneID != "" && (strings.HasPrefix(tail, "advanced:") || strings.HasPrefix(tail, "completed:"))
 }
 
 // FormatBackgroundEvent renders a notable background event (lane advanced, PR

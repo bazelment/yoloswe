@@ -1359,28 +1359,6 @@ func (b *StoreBackend) seedSeenDispatcherRun(ctx context.Context, st store.Store
 	}
 }
 
-func (b *StoreBackend) hasRunningDispatcher(ctx context.Context, st store.Store, runID string) bool {
-	threads, err := st.Threads().ListThreads(ctx, store.ThreadFilter{RunID: runID, Role: store.ThreadRoleDispatcher})
-	if err != nil {
-		return false
-	}
-	for i := range threads {
-		if threads[i].Status == store.ThreadStatusRunning {
-			return true
-		}
-		turns, tErr := st.Threads().ListTurns(ctx, threads[i].ID)
-		if tErr != nil {
-			continue
-		}
-		for j := range turns {
-			if turns[j].Status == store.TurnStatusRunning {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st store.Store, held []string, asks []openAsk) []string {
 	b.cacheMu.Lock()
 	var runs []string
@@ -1393,7 +1371,7 @@ func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st 
 	var out []string
 	for _, runID := range runs {
 		res := b.collectDispatcherOutcomes(ctx, st, []string{runID}, true)
-		if len(res) > 0 || !b.hasRunningDispatcher(ctx, st, runID) {
+		if len(res) > 0 {
 			b.cacheMu.Lock()
 			delete(b.pendingOutcomeRuns, runID)
 			b.cacheMu.Unlock()
@@ -1478,7 +1456,7 @@ func formatControllerDecisionNotice(d *store.Decision, includeBackgroundEvents b
 		if txt == "" {
 			return ""
 		}
-		if !strings.Contains(strings.ToLower(txt), "cost guard") {
+		if !strings.HasPrefix(strings.ToLower(txt), "cost guard") {
 			return "cost guard: " + txt
 		}
 		return txt

@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,10 +27,11 @@ var goldenFS embed.FS
 // verify what remains visible on screen (and in scrollback) after Bubble Tea
 // cursor movements, line insertions, and erases.
 type fakeTerminal struct {
-	cells      [][]rune
-	scrollback []string
-	w, h       int
-	row, col   int
+	cells         [][]rune
+	scrollback    []string
+	w, h          int
+	row, col      int
+	incompleteEsc bool
 }
 
 func newFakeTerminal(w, h int) *fakeTerminal {
@@ -59,13 +61,14 @@ func (t *fakeTerminal) scrollUp() {
 }
 
 func (t *fakeTerminal) write(s string) {
+	t.incompleteEsc = false
 	runes := []rune(s)
 	for i := 0; i < len(runes); {
 		r := runes[i]
 		if r == '\x1b' {
 			if i+1 >= len(runes) {
-				i++
-				continue
+				t.incompleteEsc = true
+				return
 			}
 			next := runes[i+1]
 			if next == 'M' {
@@ -80,13 +83,15 @@ func (t *fakeTerminal) write(s string) {
 				for j < len(runes) && (runes[j] < 0x40 || runes[j] > 0x7e) {
 					j++
 				}
-				if j < len(runes) {
-					params := string(runes[i+2 : j])
-					cmd := runes[j]
-					t.handleCSI(params, cmd)
-					i = j + 1
-					continue
+				if j >= len(runes) {
+					t.incompleteEsc = true
+					return
 				}
+				params := string(runes[i+2 : j])
+				cmd := runes[j]
+				t.handleCSI(params, cmd)
+				i = j + 1
+				continue
 			}
 			i += 2
 			continue
@@ -410,6 +415,8 @@ func TestTurnLayoutWithToolCallsAndBlankLineBetweenTurns(t *testing.T) {
 	m := New(ctx, "front-desk", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
 		return router.Decision{Handler: router.Concierge, Confidence: 1}, nil
 	}))
+	m.width = 80
+	m.SpinnerInterval = -1
 	m.Dispatch = func(turnCtx context.Context, _ router.Decision, text string, emit func(string)) error {
 		if text == "check status" {
 			EmitToolCall(turnCtx, "status", []byte(`{"run_id":"front-desk"}`), "front-desk")
@@ -426,16 +433,21 @@ func TestTurnLayoutWithToolCallsAndBlankLineBetweenTurns(t *testing.T) {
 	waitCapture := func(substr string) {
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-			captured.Write(p)
-			return strings.Contains(captured.String(), substr)
+			probe := newFakeTerminal(80, 24)
+			probe.write(captured.String() + string(p))
+			if !probe.incompleteEsc && strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
+				captured.Write(p)
+				return true
+			}
+			return false
 		}, teatest.WithDuration(5*time.Second))
 	}
 	waitCapture("orca chat — run front-desk")
 
 	submit(tm, "check status")
-	waitCapture("Checks:")
+	waitCapture("• Checks: all green.")
 	submit(tm, "follow up")
-	waitCapture("Second turn reply.")
+	waitCapture("orca> Second turn reply.")
 	finish(t, tm)
 
 	rawBytes, err := io.ReadAll(tm.Output())
@@ -520,15 +532,23 @@ func TestRestartPrintsRecentTurnsAndRestartLineOnVisibleScreen(t *testing.T) {
 	b.FrontDesk = "front-desk"
 
 	m := New(ctx, "front-desk", nil, nil).WithTranscript(transcript)
+	m.width = 80
 	m.Backend = b
 
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
 	var captured strings.Builder
 	teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-		captured.Write(p)
-		s := captured.String()
-		idx := strings.Index(s, "orca restarted (version c00d67a -> 9f8e7d6)")
-		return idx >= 0 && strings.Contains(s[idx:], "front desk: no run yet")
+		probe := newFakeTerminal(80, 24)
+		probe.write(captured.String() + string(p))
+		if probe.incompleteEsc {
+			return false
+		}
+		screen := strings.Join(probe.nonEmptyLines(), "\n")
+		if strings.Contains(screen, "orca restarted (version c00d67a -> 9f8e7d6)") && strings.Contains(screen, "front desk: no run yet") {
+			captured.Write(p)
+			return true
+		}
+		return false
 	}, teatest.WithDuration(5*time.Second))
 	liveScreenBytes := captured.String()
 	finish(t, tm)
@@ -591,8 +611,11 @@ func TestHeaderPrintedOnceAcrossTurnsAndStatusRedraws(t *testing.T) {
 	waitCapture := func(substr string) {
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-			captured.Write(p)
-			return strings.Contains(captured.String(), substr)
+			if strings.Contains(captured.String()+string(p), substr) {
+				captured.Write(p)
+				return true
+			}
+			return false
 		}, teatest.WithDuration(5*time.Second))
 	}
 
@@ -801,6 +824,7 @@ func TestInnerLoopSpinnerUnderSlowTurnReplacedByReplyGolden(t *testing.T) {
 		return router.Decision{Handler: router.Concierge, Confidence: 1}, nil
 	}))
 	m.Now = clk.Now
+	m.width = 80
 	m.SpinnerInterval = -1 // deterministic frame stepping for golden comparison
 	m.Dispatch = func(turnCtx context.Context, _ router.Decision, _ string, emit func(string)) error {
 		<-step1Gate
@@ -820,9 +844,8 @@ func TestInnerLoopSpinnerUnderSlowTurnReplacedByReplyGolden(t *testing.T) {
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
 			probe := newFakeTerminal(80, 24)
-			probe.write(rawAll.String())
-			probe.write(string(p))
-			if strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
+			probe.write(rawAll.String() + string(p))
+			if !probe.incompleteEsc && strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
 				rawAll.Write(p)
 				vt = probe
 				return true
@@ -1034,6 +1057,7 @@ func TestHalfTypedInputSurvives50SpinnerFrames(t *testing.T) {
 		return router.Decision{Handler: router.Dispatcher, Confidence: 1}, nil
 	}))
 	m.Now = clk.Now
+	m.width = 80
 	m.SpinnerInterval = -1
 	m.status = "adopted: 20261114-trial-m1 | m5-finish review r1 PR #5899 (open, checks: 8 passed) 10m\nlanes: 5 (done:4, running:1; review:1) | open questions: 0 | cost today: $2.10"
 	m.Dispatch = func(_ context.Context, _ router.Decision, text string, emit func(string)) error {
@@ -1054,9 +1078,8 @@ func TestHalfTypedInputSurvives50SpinnerFrames(t *testing.T) {
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
 			probe := newFakeTerminal(80, 24)
-			probe.write(rawAll.String())
-			probe.write(string(p))
-			if strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
+			probe.write(rawAll.String() + string(p))
+			if !probe.incompleteEsc && strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
 				rawAll.Write(p)
 				vt = probe
 				return true
@@ -1092,7 +1115,7 @@ func TestHalfTypedInputSurvives50SpinnerFrames(t *testing.T) {
 		t.Fatalf("half-typed input disturbed after 50 spinner frames:\n%s", screenDuring50th)
 	}
 	if len(vt.scrollback) != 0 {
-		t.Fatalf("50 spinner frames leaked %d lines into scrollback: %q", len(vt.scrollback), vt.scrollback)
+		t.Fatalf("50 spinner frames leaked %d lines into scrollback: %q (raw=%q)", len(vt.scrollback), vt.scrollback, rawAll.String())
 	}
 
 	// Finish the first turn, complete the half-typed input, and submit.
@@ -1175,6 +1198,7 @@ func TestBackgroundEventsPrintedAboveInputColored(t *testing.T) {
 	b.Now = clk.Now
 
 	m := New(ctx, "run-1", nil, nil)
+	m.width = 100
 	m.PollInterval = 30 * time.Millisecond
 	m.SpinnerInterval = -1
 	m.Backend = b
@@ -1187,9 +1211,8 @@ func TestBackgroundEventsPrintedAboveInputColored(t *testing.T) {
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
 			probe := newFakeTerminal(100, 24)
-			probe.write(rawAll.String())
-			probe.write(string(p))
-			if strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
+			probe.write(rawAll.String() + string(p))
+			if !probe.incompleteEsc && strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
 				rawAll.Write(p)
 				vt = probe
 				return true
@@ -1339,7 +1362,15 @@ func TestStoreBackendSnapshotBackgroundActivityAndCostGuardState(t *testing.T) {
 		t.Fatalf("snap1 = %+v, want BackgroundActive=true role=dispatcher CostState=Normal", snap1)
 	}
 
-	// Complete the turn with $4.25 (85% of $5.00/hr limit -> CostStateNearLimit).
+	// Complete the turn with $4.25 (85% of $5.00/hr limit -> CostStateNearLimit)
+	// and verify the queued dispatcher outcome is still delivered even though snapQueuedIdle
+	// polled before the dispatcher thread existed.
+	if _, err := st.Threads().AppendItem(ctx, store.Item{
+		ThreadID: th.ID, TurnID: turn.ID, Kind: store.ItemKindAssistantMessage,
+		Content: "Checked all lanes; m5-finish is healthy.",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.Threads().CompleteTurn(ctx, th.ID, turn.ID, store.TurnStatusCompleted, model.Usage{CostUSD: 4.25}, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -1353,6 +1384,9 @@ func TestStoreBackendSnapshotBackgroundActivityAndCostGuardState(t *testing.T) {
 	}
 	if snap2.BackgroundActive || snap2.CostState != CostStateNearLimit {
 		t.Fatalf("snap2 = %+v, want BackgroundActive=false CostState=CostStateNearLimit", snap2)
+	}
+	if !slices.Contains(snap2.Outcomes, "dispatcher: Checked all lanes; m5-finish is healthy.") {
+		t.Fatalf("snap2.Outcomes = %v, want queued dispatcher outcome delivered after idle poll", snap2.Outcomes)
 	}
 
 	// Add $1.20 decision cost in the current hour ($5.45/hr -> CostStateOverLimit).
@@ -1379,6 +1413,7 @@ func TestAutoSpinnerTicksAdvanceFramesDuringSlowTurn(t *testing.T) {
 	m := New(ctx, "front-desk", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
 		return router.Decision{Handler: router.Planner, Confidence: 1}, nil
 	}))
+	m.width = 80
 	m.SpinnerInterval = 20 * time.Millisecond
 	m.Dispatch = func(_ context.Context, _ router.Decision, _ string, emit func(string)) error {
 		<-release
@@ -1391,19 +1426,103 @@ func TestAutoSpinnerTicksAdvanceFramesDuringSlowTurn(t *testing.T) {
 	waitScreen := func(substr string) {
 		t.Helper()
 		teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
-			rawAll.Write(p)
 			probe := newFakeTerminal(80, 24)
-			probe.write(rawAll.String())
-			return strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr)
+			probe.write(rawAll.String() + string(p))
+			if !probe.incompleteEsc && strings.Contains(strings.Join(probe.nonEmptyLines(), "\n"), substr) {
+				rawAll.Write(p)
+				return true
+			}
+			return false
 		}, teatest.WithDuration(5*time.Second))
 	}
 
 	waitScreen("orca chat — run front-desk")
 	submit(tm, "replan m5")
-	waitScreen("⠋ 🧭 planner")
-	waitScreen("⠙ 🧭 planner")
-	waitScreen("⠹ 🧭 planner")
+	teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
+		plain := SanitizeText(rawAll.String() + string(p))
+		if strings.Contains(plain, "⠋ 🧭 planner") &&
+			strings.Contains(plain, "⠙ 🧭 planner") &&
+			strings.Contains(plain, "⠹ 🧭 planner") {
+			rawAll.Write(p)
+			return true
+		}
+		return false
+	}, teatest.WithDuration(5*time.Second))
 	close(release)
 	waitScreen("orca> Plan updated.")
 	finish(t, tm)
+}
+
+func TestFormatBackgroundEventClassification(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		line     string
+		wantIcon string
+		wantSGR  string
+	}{
+		{
+			name:     "cost guard pause",
+			line:     "cost guard: paused turns for run-1 after $6.20/hr",
+			wantIcon: "🛑",
+			wantSGR:  "\x1b[1;31m",
+		},
+		{
+			name:     "PR merged",
+			line:     "PR merged (m5-finish): PR #5899 merged after failed check retry",
+			wantIcon: "🎉",
+			wantSGR:  "\x1b[1;35m",
+		},
+		{
+			name:     "lane question",
+			line:     "lane question (m5-finish): Cut release tag after review?",
+			wantIcon: "❓",
+			wantSGR:  "\x1b[1;33m",
+		},
+		{
+			name:     "lane advanced with lane ID",
+			line:     "lane m5-finish advanced: swe -> review",
+			wantIcon: "🔄",
+			wantSGR:  "\x1b[36m",
+		},
+		{
+			name:     "lane completed without lane ID",
+			line:     "lane completed: m5-finish done",
+			wantIcon: "🔄",
+			wantSGR:  "\x1b[36m",
+		},
+		{
+			name:     "dispatcher failed",
+			line:     "dispatcher failed: turn timed out after 30s",
+			wantIcon: "✗",
+			wantSGR:  "\x1b[31m",
+		},
+		{
+			name:     "dispatcher outcome",
+			line:     "dispatcher: lane.spawn (spawned m5-finish)",
+			wantIcon: "⚡",
+			wantSGR:  "\x1b[33m",
+		},
+		{
+			name:     "mail summary mentioning merged question advanced failed uses neutral bullet",
+			line:     "adopted mail summary: PR was merged after question about failed advanced check",
+			wantIcon: "•",
+			wantSGR:  "\x1b[36m",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := FormatBackgroundEvent(tc.line, 120, true)
+			if len(rows) != 1 {
+				t.Fatalf("FormatBackgroundEvent(%q) rows = %d, want 1", tc.line, len(rows))
+			}
+			plain := SanitizeText(rows[0])
+			if !strings.HasPrefix(plain, "  "+tc.wantIcon+" ") {
+				t.Fatalf("FormatBackgroundEvent(%q) plain = %q, want prefix %q", tc.line, plain, "  "+tc.wantIcon+" ")
+			}
+			if !strings.Contains(rows[0], tc.wantSGR) {
+				t.Fatalf("FormatBackgroundEvent(%q) = %q, missing SGR %q", tc.line, rows[0], tc.wantSGR)
+			}
+		})
+	}
 }
