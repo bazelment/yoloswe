@@ -410,6 +410,7 @@ var defaultPricing = func() map[string]ModelPricing {
 		"gpt-6.1-sol":                {InputPerMTok: 1.25, OutputPerMTok: 10},
 		"gpt-6-sol":                  {InputPerMTok: 1.25, OutputPerMTok: 10},
 		"gpt-6-astra":                {InputPerMTok: 1.25, OutputPerMTok: 10},
+		"gpt-5":                      {InputPerMTok: 1.25, OutputPerMTok: 10},
 		"opus":                       opus,
 		"claude-opus-4-7":            opus,
 		"claude-opus-4-6":            opus,
@@ -462,6 +463,8 @@ var pricingFamilies = []struct {
 	{family: "opus", fallback: "claude-opus-4-7"},
 	{family: "sonnet", fallback: "claude-sonnet-4-6"},
 	{family: "haiku", fallback: "claude-haiku-5-5"},
+	{family: "gpt-6", fallback: "gpt-6.1-sol"},
+	{family: "gpt-5", fallback: "gpt-6.1-sol"},
 }
 
 func lookupModelPricing(modelName string, pricing map[string]ModelPricing) (ModelPricing, bool) {
@@ -985,6 +988,13 @@ func RunToolLoop(
 		}
 
 		turnResp := resp.Clone()
+		if turnResp.Usage.CostUSD == 0 && (turnResp.Usage.InputTokens > 0 || turnResp.Usage.OutputTokens > 0 || turnResp.Usage.CacheReadInputTokens > 0 || turnResp.Usage.CacheCreationInputTokens > 0) {
+			modelName := turnResp.Model
+			if modelName == "" {
+				modelName = curReq.Model
+			}
+			turnResp.Usage.CostUSD = CalculateCost(modelName, turnResp.Usage, nil)
+		}
 		turns = append(turns, turnResp)
 		totalUsage = totalUsage.Add(turnResp.Usage)
 

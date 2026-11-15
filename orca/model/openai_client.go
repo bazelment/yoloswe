@@ -254,6 +254,12 @@ func (c *OpenAIClient) CreateMessage(ctx context.Context, req Request) (*Respons
 			}
 			c.mu.Lock()
 			resp.Usage.CostUSD = CalculateCost(resp.Model, resp.Usage, c.pricing)
+			if resp.Usage.CostUSD == 0 && req.Model != "" {
+				resp.Usage.CostUSD = CalculateCost(req.Model, resp.Usage, c.pricing)
+			}
+			if resp.Usage.CostUSD == 0 {
+				resp.Usage.CostUSD = CalculateCost(resp.Model, resp.Usage, nil)
+			}
 			c.totalUsage = c.totalUsage.Add(resp.Usage)
 			c.mu.Unlock()
 			return resp, nil

@@ -36,6 +36,7 @@ const (
 	ToolConciergeDecisions  = "decisions.since"
 	ToolConciergePRCI       = "pr.ci"
 	ToolDirectiveSubmit     = "directive.submit"
+	ToolDirectiveRevoke     = memorychat.ToolDirectiveRevoke
 	ToolMemorySubmit        = "memory.submit"
 	ToolMemoryUndo          = "memory.undo"
 	ToolMemoryRead          = "memory.read"
@@ -52,7 +53,7 @@ const (
 // ConciergeSystemPrompt is the system prompt for owner chat sessions.
 const ConciergeSystemPrompt = `You are the Nebula Swarm Concierge.
 When the owner states a new goal or asks to start work, call run.start with the goal text. Do not submit a generic directive for a new goal.
-You are the front desk for unclear or mixed messages: clarify with one question only if you must; otherwise save rules with memory.submit and forward plan changes or orders with directive.submit. Use run.control to pause, resume or stop execution. Use run.settings to tune concurrency and stall timeout.
+You are the front desk for unclear or mixed messages: clarify with one question only if you must; otherwise save rules with memory.submit, forward plan changes or orders with directive.submit, and revoke or clear active directives by id with directive.revoke. Use run.control to pause, resume or stop execution. Use run.settings to tune concurrency and stall timeout.
 Each answer must address only the question asked; never open with or repeat status or conclusions from earlier, unrelated turns or other runs.
 Answer the owner's questions accurately and concisely using read-only Store tools (status, lane.show, decisions.since, pr.ci). For runs this chat holds (including adopted runs), answer from the Store and live probes via status, lane.show, or pr.ci—do not call swarms for a held run. For questions about other swarms on this machine, call swarms once (pass the run filter when asking about a specific swarm) and answer from it.
 Never conflate activity (how many lanes finished or PRs merged) with progress toward the goal: build progress and "have we met the goal?" answers from the run's full Objective (goal, plan milestones, open items, and Next: work), naming what is met (with lane/PR evidence), what is open, and what is Next:. Never say the goal is met while any milestone, open item, or Next: step in the Objective remains open.
@@ -89,6 +90,12 @@ type DirectiveSubmitParams struct {
 	Scope  string `json:"scope,omitempty" jsonschema:"description=Optional lane ID or scope"`
 	Expiry string `json:"expiry,omitempty" jsonschema:"description=Optional RFC3339 timestamp or Go duration (e.g. 24h)"`
 	RunID  string `json:"run_id,omitempty" jsonschema:"description=Run the directive is about when the owner names one; defaults to the run this chat holds"`
+}
+
+type DirectiveRevokeParams struct {
+	ID     string `json:"id" jsonschema:"required,description=ID of an active directive to revoke or supersede"`
+	RunID  string `json:"run_id,omitempty" jsonschema:"description=Run the directive belongs to when the owner names one; defaults to the run this chat holds"`
+	Reason string `json:"reason,omitempty" jsonschema:"description=Optional reason for revoking or superseding the directive"`
 }
 
 // SwarmsParams optionally filters swarms by run ID or substring.
@@ -1065,6 +1072,12 @@ func (c *Concierge) buildToolRegistry(threadID, turnID, quote string, memoryEcho
 			return out, err
 		},
 	)
+	model.AddTool[DirectiveRevokeParams](reg, ToolDirectiveRevoke,
+		"Revoke or supersede an active standing directive or instruction by ID when the owner lifts, clears, or replaces it",
+		func(ctx context.Context, p DirectiveRevokeParams) (string, error) {
+			return c.handleDirectiveRevoke(ctx, threadID, turnID, quote, p)
+		},
+	)
 	model.AddTool[MemorySubmitParams](reg, ToolMemorySubmit, "Save an owner correction as memory", func(ctx context.Context, p MemorySubmitParams) (string, error) {
 		targetRun, err := c.resolveTargetRun(ctx, quote)
 		if err != nil {
@@ -1897,4 +1910,54 @@ func (c *Concierge) handleDirectiveSubmit(
 	})
 
 	return directiveReceipt{id: dir.ID, run: runID}, fmt.Sprintf("Submitted directive %s on run %s (kind=%s); %s", dir.ID, runID, dir.Kind, echo), nil
+}
+
+func (c *Concierge) handleDirectiveRevoke(
+	ctx context.Context,
+	threadID, turnID, quote string,
+	p DirectiveRevokeParams,
+) (string, error) {
+	id := strings.TrimSpace(p.ID)
+	if id == "" {
+		return "", fmt.Errorf("%w: directive id is required", store.ErrInvalidArgument)
+	}
+	var runID string
+	combinedText := strings.TrimSpace(quote + "\n" + id + "\n" + p.Reason)
+	if c.OwnerRun != nil {
+		var err error
+		if runID, err = c.OwnerRun(ctx, p.RunID, combinedText); err != nil {
+			return "", err
+		}
+	} else if named := strings.TrimSpace(p.RunID); named != "" {
+		runID = named
+	} else {
+		var err error
+		if runID, err = c.resolveTargetRun(ctx, combinedText); err != nil {
+			runID = c.runID
+		}
+	}
+	var err error
+	runID, err = memorychat.RevokeDirective(ctx, c.store, runID, id, c.heldRunIDs(ctx)...)
+	if err != nil {
+		return "", err
+	}
+	if c.Wake != nil && runID != "" {
+		c.Wake(runID)
+	}
+	rawArgs, _ := json.Marshal(p)
+	if _, err := memorychat.AppendDirectiveRevokeDecision(
+		ctx,
+		c.store,
+		cmp.Or(runID, c.runID),
+		threadID,
+		turnID,
+		id,
+		p.Reason,
+		rawArgs,
+		model.Usage{},
+		0,
+	); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Revoked directive %s on run %s", id, runID), nil
 }

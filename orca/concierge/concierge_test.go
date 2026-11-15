@@ -689,6 +689,128 @@ func TestConcierge_DirectiveSubmitWritesSourcedMemoryAndUndoRevokesAlias(t *test
 	}
 }
 
+func TestConcierge_DirectiveRevokeRemovesDirectiveAndDecisionRecorded(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupSeededStore(t)
+	ctx := t.Context()
+
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:        "dir-hold-m4",
+		RunID:     "run-1",
+		Kind:      store.DirectiveInstruction,
+		Source:    store.DirectiveSourceOwner,
+		Text:      "hold M4 until M3 finishes",
+		Status:    store.DirectiveActive,
+		CreatedAt: clk.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	client := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(model.NewToolUseBlock(
+				"call-revoke",
+				concierge.ToolDirectiveRevoke,
+				json.RawMessage(`{"id":"dir-hold-m4","reason":"owner cleared the hold on M4"}`),
+			)),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Revoked dir-hold-m4 on run-1.")),
+		},
+	)
+	c := concierge.New(concierge.Config{DisableCitations: true}, st, drv, clk, client)
+	if _, err := c.Ask(ctx, "run-1", "clear the hold on M4"); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+
+	dir, err := st.Directives().Get(ctx, "run-1", "dir-hold-m4")
+	if err != nil || dir.Status != store.DirectiveRevoked {
+		t.Fatalf("dir-hold-m4 after revoke = %+v, %v, want revoked", dir, err)
+	}
+	active, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: "run-1", ActiveOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range active {
+		if a.ID == "dir-hold-m4" {
+			t.Fatalf("active directives still include dir-hold-m4: %+v", active)
+		}
+	}
+	decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1", Actor: concierge.ActorConcierge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, d := range decs {
+		if d.Tool == concierge.ToolDirectiveRevoke && d.Vetted {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected vetted %q decision in %+v", concierge.ToolDirectiveRevoke, decs)
+	}
+
+	// Revoking a nonexistent directive must return a not-found error to the model
+	// rather than recording a vetted success decision, even if an unrelated memory
+	// entry with the same ID exists.
+	if _, err := st.Memories().Put(ctx, store.MemoryEntry{
+		ID:          "does-not-exist",
+		Name:        "Standalone memory",
+		Description: "not a directive",
+		Type:        "rule",
+		Scope:       "repo",
+		Source:      "test",
+		Body:        "not a directive",
+		ProposedBy:  "model",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clientNotFound := model.NewFakeClient(
+		model.Response{
+			StopReason: model.StopReasonToolUse,
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_revoke_missing", concierge.ToolDirectiveRevoke, json.RawMessage(`{"id":"does-not-exist","reason":"test missing"}`)),
+			),
+		},
+		model.Response{
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock("Directive was not found.")),
+		},
+	)
+	cNotFound := concierge.New(concierge.Config{DisableCitations: true}, st, drv, clk, clientNotFound)
+	if _, err := cNotFound.Ask(ctx, "run-1", "clear does-not-exist"); err != nil {
+		t.Fatalf("Ask missing directive: %v", err)
+	}
+	if len(clientNotFound.Requests) != 2 || !clientNotFound.Requests[1].Messages[2].Content[0].IsError {
+		t.Fatalf("expected error tool_result for nonexistent directive.revoke, got %+v", clientNotFound.Requests)
+	}
+	if mem, mErr := st.Memories().Get(ctx, "", "does-not-exist"); mErr != nil || mem == nil {
+		t.Fatalf("standalone memory entry should not be deleted when directive row is missing, got %+v, %v", mem, mErr)
+	}
+
+	// Revoking an open owner_ask directive must also be rejected in the Concierge.
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:        "ask-q1",
+		RunID:     "run-1",
+		Kind:      store.DirectiveInstruction,
+		Source:    store.DirectiveSourceDispatcher,
+		Ref:       "owner_ask:q1",
+		Text:      `{"id":"q1","run_id":"run-1","question":"Proceed?","options":["yes","no"],"default":"yes"}`,
+		Status:    store.DirectiveActive,
+		CreatedAt: clk.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := concierge.RevokeDirective(ctx, st, "run-1", "ask-q1"); !errors.Is(err, store.ErrInvalidArgument) {
+		t.Fatalf("RevokeDirective(owner_ask) = %v, want ErrInvalidArgument", err)
+	}
+	if askDir, gErr := st.Directives().Get(ctx, "run-1", "ask-q1"); gErr != nil || askDir.Status != store.DirectiveActive {
+		t.Fatalf("ask-q1 after rejected revoke = %+v, %v, want active", askDir, gErr)
+	}
+}
+
 func TestConcierge_KeepTheHoldOnAdoptedRunCreatesNoStandingNoNewLanesRule(t *testing.T) {
 	t.Parallel()
 	clk, st, drv := setupSeededStore(t)

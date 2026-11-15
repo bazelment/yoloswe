@@ -16,6 +16,7 @@ go_library(
         "//orca/concierge",
         "//orca/controller",
         "//orca/mailbox",
+        "//orca/model",
         "//orca/router",
         "//orca/store",
         "@com_github_mattn_go_runewidth//:go-runewidth",

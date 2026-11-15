@@ -20,6 +20,7 @@ import (
 	"github.com/bazelment/yoloswe/orca/concierge"
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/mailbox"
+	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/router"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -67,9 +68,12 @@ type StoreBackend struct {
 	memory        concierge.MemoryEditor
 	lastDirective lastDirective
 
-	cacheMu    sync.Mutex
-	prCache    map[string]cachedPR
-	usageCache map[string]runUsageCache
+	cacheMu            sync.Mutex
+	prCache            map[string]cachedPR
+	usageCache         map[string]runUsageCache
+	seenTurns          map[string]bool
+	seenDecs           map[string]bool
+	pendingOutcomeRuns map[string]bool
 }
 
 const (
@@ -103,7 +107,9 @@ type lastDirective struct{ run, id string }
 // NewStoreBackend returns a backend attached to runID in st. Close, or an
 // Attach to another store, closes st.
 func NewStoreBackend(st store.Store, runID string) *StoreBackend {
-	return &StoreBackend{store: st, runID: runID}
+	b := &StoreBackend{store: st, runID: runID}
+	b.seedSeenDispatcherRun(context.Background(), st, runID)
+	return b
 }
 
 // RunID returns the attached run.
@@ -127,6 +133,7 @@ func (b *StoreBackend) Attach(st store.Store, runID string) error {
 	defer b.mu.Unlock()
 	old := b.store
 	b.store, b.runID, b.lastDirective = st, runID, lastDirective{}
+	b.seedSeenDispatcherRun(context.Background(), st, runID)
 	if b.OnAttach != nil {
 		b.OnAttach(st, runID)
 	}
@@ -347,6 +354,7 @@ func (b *StoreBackend) lanes(ctx context.Context, runs []string) ([]heldLane, er
 // external probes never block Attach, Command, RunID, or Questions.
 func (b *StoreBackend) Snapshot(ctx context.Context) (Snapshot, error) {
 	b.mu.RLock()
+	st := b.store
 	v, groups, err := b.view(ctx, true)
 	var questions []string
 	if err == nil {
@@ -360,7 +368,16 @@ func (b *StoreBackend) Snapshot(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	v.liveLanes = b.renderLiveLanes(ctx, groups)
-	return v.snapshot(questions), nil
+	snap := v.snapshot(questions)
+	// Lock ordering: reacquire b.mu.RLock() after external live-lane probes and
+	// verify b.store == st so Attach/Close (which take b.mu.Lock()) cannot swap
+	// or close the store while pending outcomes are read.
+	b.mu.RLock()
+	if b.store == st && st != nil {
+		snap.Outcomes = b.collectPendingDispatcherOutcomes(ctx, st, v.held)
+	}
+	b.mu.RUnlock()
+	return snap, nil
 }
 
 // Questions returns the formatted open owner questions for all held runs.
@@ -459,7 +476,13 @@ func (b *StoreBackend) view(ctx context.Context, includeLive bool) (runView, []l
 	now := b.now()
 	start := now.UTC().Truncate(24 * time.Hour)
 	var groups []liveRunGroup
-	for _, id := range v.held {
+	costRuns := slices.Clone(v.held)
+	if b.FrontDesk != "" && !slices.Contains(costRuns, b.FrontDesk) {
+		if _, fErr := b.store.Runs().Get(ctx, b.FrontDesk); fErr == nil {
+			costRuns = append(costRuns, b.FrontDesk)
+		}
+	}
+	for _, id := range costRuns {
 		runLanes := liveByRun[id]
 		filter := store.DecisionFilter{RunID: id, SinceTime: &start}
 		if len(runLanes) > 0 {
@@ -478,9 +501,10 @@ func (b *StoreBackend) view(ctx context.Context, includeLive bool) (runView, []l
 			d := &decs[i]
 			if d.CreatedAt.IsZero() || !d.CreatedAt.Before(start) {
 				if d.Tool != "metrics.snapshot" {
-					v.cost += d.CostUSD
+					c := decisionCostUSD(d)
+					v.cost += c
 					if d.TurnID != "" {
-						turnDecisionCost[d.TurnID] += d.CostUSD
+						turnDecisionCost[d.TurnID] += c
 					}
 				}
 			}
@@ -501,13 +525,15 @@ func (b *StoreBackend) view(ctx context.Context, includeLive bool) (runView, []l
 			}
 			for j := range turns {
 				if turns[j].StartedAt.IsZero() || !turns[j].StartedAt.Before(start) {
-					if rem := turns[j].CostUSD - turnDecisionCost[turns[j].ID]; rem > 0 {
+					tc := turnCostUSD(&turns[j], string(threads[i].Role))
+					decCost := turnDecisionCost[turns[j].ID]
+					if rem := tc - decCost; rem > 0 {
 						v.cost += rem
 					}
 				}
 			}
 			if len(turns) == 0 && (threads[i].UpdatedAt.IsZero() || !threads[i].UpdatedAt.Before(start)) {
-				v.cost += threads[i].CostUSD
+				v.cost += threadCostUSD(&threads[i])
 			}
 		}
 		evCost, err := b.eventCostToday(ctx, b.store, id, start)
@@ -531,6 +557,44 @@ func (b *StoreBackend) view(ctx context.Context, includeLive bool) (runView, []l
 		}
 	}
 	return v, groups, nil
+}
+
+func estimateTokenCostUSD(modelOrRole string, inputTokens, outputTokens int64) float64 {
+	if inputTokens <= 0 && outputTokens <= 0 {
+		return 0
+	}
+	lower := strings.ToLower(strings.TrimSpace(modelOrRole))
+	modelName := lower
+	switch lower {
+	case "", "dispatcher", "concierge":
+		modelName = "sonnet"
+	case "planner":
+		modelName = "opus"
+	case "router":
+		modelName = "haiku"
+	}
+	return model.CalculateCost(modelName, model.Usage{InputTokens: inputTokens, OutputTokens: outputTokens}, nil)
+}
+
+func decisionCostUSD(d *store.Decision) float64 {
+	if d.CostUSD > 0 {
+		return d.CostUSD
+	}
+	return estimateTokenCostUSD(cmp.Or(d.Model, d.Actor), d.InputTokens, d.OutputTokens)
+}
+
+func turnCostUSD(t *store.Turn, role string) float64 {
+	if t.CostUSD > 0 {
+		return t.CostUSD
+	}
+	return estimateTokenCostUSD(role, t.InputTokens, t.OutputTokens)
+}
+
+func threadCostUSD(th *store.Thread) float64 {
+	if th.CostUSD > 0 {
+		return th.CostUSD
+	}
+	return estimateTokenCostUSD(string(th.Role), th.InputTokens, th.OutputTokens)
 }
 
 func (b *StoreBackend) eventCostToday(ctx context.Context, st store.Store, runID string, start time.Time) (float64, error) {
@@ -1034,15 +1098,26 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 		return fmt.Errorf("unsupported handler %q", d.Handler)
 	}
 	b.mu.RLock()
-	defer b.mu.RUnlock()
+	st := b.store
 	runID, ack, err := b.target(ctx, text)
+	var (
+		queuedDispatcher bool
+		stepStore        store.Store
+		closeStepStore   bool
+	)
 	switch {
 	case err != nil || ack != "":
 	case runID == "":
-		ack, err = b.deliverFromFrontDesk(ctx, d.Handler, text)
+		runID, stepStore, closeStepStore, ack, err = b.deliverFromFrontDesk(ctx, d.Handler, text)
+		queuedDispatcher = err == nil && d.Handler == router.Dispatcher && runID != ""
 	default:
+		if d.Handler == router.Dispatcher {
+			b.seedSeenDispatcherRun(ctx, st, runID)
+		}
 		var live bool
-		live, err = b.deliver(ctx, b.store, runID, d.Handler, text)
+		live, err = b.deliver(ctx, st, runID, d.Handler, text)
+		queuedDispatcher = err == nil && d.Handler == router.Dispatcher && (live || runID != b.runID)
+		stepStore = st
 		switch {
 		case runID != b.runID:
 			ack = fmt.Sprintf("Queued for the %s of adopted run %s: %s", d.Handler, runID, text)
@@ -1050,6 +1125,28 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 			ack = fmt.Sprintf("Queued for the %s: %s", d.Handler, text)
 		default:
 			ack = fmt.Sprintf("Saved for the %s of run %s, but no controller is running it; it will act when one starts: %s", d.Handler, b.runID, text)
+		}
+	}
+	b.mu.RUnlock()
+	if closeStepStore && stepStore != nil {
+		defer func() { _ = stepStore.Close() }()
+	}
+	if queuedDispatcher && stepStore != nil {
+		b.stepAdopted(ctx, runID)
+		var outcomes []string
+		if closeStepStore {
+			outcomes = b.collectDispatcherOutcomes(ctx, stepStore, []string{runID})
+		} else {
+			b.mu.RLock()
+			if b.store == stepStore {
+				outcomes = b.collectDispatcherOutcomes(ctx, stepStore, []string{runID})
+			}
+			b.mu.RUnlock()
+		}
+		if len(outcomes) > 0 {
+			ack += "\n" + strings.Join(outcomes, "\n")
+		} else if !closeStepStore {
+			b.markPendingOutcomeRun(runID)
 		}
 	}
 	if err == nil && emit != nil {
@@ -1125,26 +1222,267 @@ func (b *StoreBackend) frontDeskTarget(ctx context.Context, text string) (runID,
 }
 
 // deliverFromFrontDesk routes a front-desk instruction to a live held run.
-func (b *StoreBackend) deliverFromFrontDesk(ctx context.Context, handler router.Handler, text string) (string, error) {
+func (b *StoreBackend) deliverFromFrontDesk(ctx context.Context, handler router.Handler, text string) (target string, st store.Store, closeStore bool, ack string, err error) {
 	target, refusal, err := b.frontDeskTarget(ctx, text)
 	if err != nil || refusal != "" {
-		return refusal, err
+		return "", nil, false, refusal, err
 	}
-	st := b.store
+	st = b.store
 	if _, err := st.Runs().Get(ctx, target); err != nil {
 		if b.OpenRun == nil {
-			return "", fmt.Errorf("run %s is not reachable from this chat", target)
+			return "", nil, false, "", fmt.Errorf("run %s is not reachable from this chat", target)
 		}
 		if st, err = b.OpenRun(ctx, target); err != nil {
-			return "", err
+			return "", nil, false, "", err
 		}
-		defer func() { _ = st.Close() }()
+		closeStore = true
+	}
+	if handler == router.Dispatcher {
+		b.seedSeenDispatcherRun(ctx, st, target)
 	}
 	if live, err := b.deliver(ctx, st, target, handler, text); err != nil || !live {
+		if closeStore && st != nil {
+			_ = st.Close()
+		}
 		// The lease lapsed between listing and writing.
-		return fmt.Sprintf("Saved for the %s of run %s, but its controller stopped; it will act when one starts: %s", handler, target, text), err
+		return "", nil, false, fmt.Sprintf("Saved for the %s of run %s, but its controller stopped; it will act when one starts: %s", handler, target, text), err
 	}
-	return fmt.Sprintf("Queued for the %s of run %s, whose controller is running: %s", handler, target, text), nil
+	ack = fmt.Sprintf("Queued for the %s of run %s, whose controller is running: %s", handler, target, text)
+	return target, st, closeStore, ack, nil
+}
+
+func (b *StoreBackend) stepAdopted(ctx context.Context, runID string) {
+	if b.Adoption == nil || runID == "" {
+		return
+	}
+	stepper, ok := b.Adoption.Driver.(interface {
+		Step(context.Context, string) error
+	})
+	if !ok {
+		return
+	}
+	_ = stepper.Step(ctx, runID)
+}
+
+func seenTurnKey(runID, turnID string) string {
+	return runID + "\x00" + turnID
+}
+
+func seenDecKey(runID string, seq int64) string {
+	return runID + "\x00" + strconv.FormatInt(seq, 10)
+}
+
+func (b *StoreBackend) markPendingOutcomeRun(runID string) {
+	if runID == "" {
+		return
+	}
+	b.cacheMu.Lock()
+	defer b.cacheMu.Unlock()
+	if b.pendingOutcomeRuns == nil {
+		b.pendingOutcomeRuns = map[string]bool{}
+	}
+	b.pendingOutcomeRuns[runID] = true
+}
+
+func (b *StoreBackend) seedSeenDispatcherRun(ctx context.Context, st store.Store, runID string) {
+	if st == nil || runID == "" {
+		return
+	}
+	threads, _ := st.Threads().ListThreads(ctx, store.ThreadFilter{RunID: runID, Role: store.ThreadRoleDispatcher})
+	decs, _ := st.Decisions().List(ctx, store.DecisionFilter{RunID: runID, Actor: "dispatcher"})
+	b.cacheMu.Lock()
+	defer b.cacheMu.Unlock()
+	if b.seenTurns == nil {
+		b.seenTurns = map[string]bool{}
+	}
+	if b.seenDecs == nil {
+		b.seenDecs = map[string]bool{}
+	}
+	for i := range threads {
+		turns, _ := st.Threads().ListTurns(ctx, threads[i].ID)
+		for j := range turns {
+			if turns[j].Status != store.TurnStatusRunning {
+				b.seenTurns[seenTurnKey(runID, turns[j].ID)] = true
+			}
+		}
+	}
+	for i := range decs {
+		b.seenDecs[seenDecKey(runID, decs[i].Seq)] = true
+	}
+}
+
+func (b *StoreBackend) collectPendingDispatcherOutcomes(ctx context.Context, st store.Store, held []string) []string {
+	b.cacheMu.Lock()
+	var runs []string
+	for _, id := range held {
+		if b.pendingOutcomeRuns[id] {
+			runs = append(runs, id)
+		}
+	}
+	b.cacheMu.Unlock()
+	if len(runs) == 0 {
+		return nil
+	}
+	var out []string
+	for _, runID := range runs {
+		res := b.collectDispatcherOutcomes(ctx, st, []string{runID})
+		if len(res) > 0 {
+			b.cacheMu.Lock()
+			delete(b.pendingOutcomeRuns, runID)
+			b.cacheMu.Unlock()
+			out = append(out, res...)
+		}
+	}
+	return out
+}
+
+func (b *StoreBackend) collectDispatcherOutcomes(ctx context.Context, st store.Store, runs []string) []string {
+	if st == nil || len(runs) == 0 {
+		return nil
+	}
+	var out []string
+	for _, runID := range runs {
+		threads, err := st.Threads().ListThreads(ctx, store.ThreadFilter{RunID: runID, Role: store.ThreadRoleDispatcher})
+		if err != nil {
+			continue
+		}
+		decs, _ := st.Decisions().List(ctx, store.DecisionFilter{RunID: runID, Actor: "dispatcher"})
+		byTurn := map[string][]store.Decision{}
+		for i := range decs {
+			if decs[i].TurnID != "" {
+				byTurn[decs[i].TurnID] = append(byTurn[decs[i].TurnID], decs[i])
+			}
+		}
+		for i := range threads {
+			turns, tErr := st.Threads().ListTurns(ctx, threads[i].ID)
+			if tErr != nil {
+				continue
+			}
+			for j := range turns {
+				tr := &turns[j]
+				if tr.Status == store.TurnStatusRunning {
+					continue
+				}
+				turnKey := seenTurnKey(runID, tr.ID)
+				b.cacheMu.Lock()
+				if b.seenTurns == nil {
+					b.seenTurns = map[string]bool{}
+				}
+				seen := b.seenTurns[turnKey]
+				if !seen {
+					b.seenTurns[turnKey] = true
+					if b.seenDecs == nil {
+						b.seenDecs = map[string]bool{}
+					}
+					turnDecs := byTurn[tr.ID]
+					for k := range turnDecs {
+						b.seenDecs[seenDecKey(runID, turnDecs[k].Seq)] = true
+					}
+				}
+				b.cacheMu.Unlock()
+				if seen {
+					continue
+				}
+				if line := formatDispatcherTurnOutcome(ctx, st, tr, byTurn[tr.ID]); line != "" {
+					out = append(out, line)
+				}
+			}
+		}
+		for i := range decs {
+			d := &decs[i]
+			if d.TurnID != "" {
+				continue
+			}
+			decKey := seenDecKey(runID, d.Seq)
+			b.cacheMu.Lock()
+			if b.seenDecs == nil {
+				b.seenDecs = map[string]bool{}
+			}
+			seen := b.seenDecs[decKey]
+			if !seen {
+				b.seenDecs[decKey] = true
+			}
+			b.cacheMu.Unlock()
+			if seen {
+				continue
+			}
+			if !d.Vetted {
+				res := oneLineSummary(cmp.Or(d.Result, d.Reason, d.Tool))
+				if strings.HasPrefix(strings.ToLower(res), "dispatcher failed:") {
+					out = append(out, res)
+				} else {
+					out = append(out, "dispatcher failed: "+res)
+				}
+			} else if d.Tool != "noop" && d.Tool != "judgment.dispatch" {
+				out = append(out, fmt.Sprintf("dispatcher: %s (%s)", d.Tool, oneLineSummary(cmp.Or(d.Result, d.Reason))))
+			}
+		}
+	}
+	return out
+}
+
+func formatDispatcherTurnOutcome(ctx context.Context, st store.Store, tr *store.Turn, decs []store.Decision) string {
+	items, _ := st.Threads().ListItems(ctx, tr.ThreadID, tr.ID, 0, 0)
+	var assistantText string
+	for i := range items {
+		if items[i].Kind == store.ItemKindAssistantMessage {
+			if txt := strings.TrimSpace(items[i].Content); txt != "" {
+				assistantText = txt
+			}
+		}
+	}
+	if tr.Status == store.TurnStatusFailed || strings.TrimSpace(tr.Error) != "" {
+		return "dispatcher failed: " + oneLineSummary(cmp.Or(tr.Error, assistantText, "turn failed"))
+	}
+	var vetted, rejected []string
+	for i := range decs {
+		d := &decs[i]
+		if d.Tool == "noop" || d.Tool == "judgment.dispatch" {
+			continue
+		}
+		detail := oneLineSummary(cmp.Or(d.Result, d.Reason))
+		entry := d.Tool
+		if detail != "" {
+			entry += " (" + detail + ")"
+		}
+		if d.Vetted {
+			vetted = append(vetted, entry)
+		} else {
+			rejected = append(rejected, entry)
+		}
+	}
+	msg := oneLineSummary(assistantText)
+	switch {
+	case len(vetted) > 0:
+		acts := strings.Join(vetted, "; ")
+		if msg != "" && msg != acts {
+			return "dispatcher: " + acts + " — " + msg
+		}
+		return "dispatcher: " + acts
+	case len(rejected) > 0:
+		rejs := "rejected " + strings.Join(rejected, "; ")
+		if msg != "" {
+			return "dispatcher: " + rejs + " — " + msg
+		}
+		return "dispatcher: " + rejs
+	case msg != "":
+		return "dispatcher: " + msg
+	default:
+		return "dispatcher: no action taken"
+	}
+}
+
+func oneLineSummary(s string) string {
+	s = strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+	if len(s) <= 220 {
+		return s
+	}
+	for n := 220; n > 0; n-- {
+		if utf8.RuneStart(s[n]) {
+			return s[:n] + "..."
+		}
+	}
+	return s[:220] + "..."
 }
 
 // switchRun attaches to id when it is one of the runs ListRuns offers.

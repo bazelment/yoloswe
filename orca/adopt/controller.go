@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -47,6 +48,7 @@ type Controllers struct {
 	mu           sync.Mutex
 }
 
+//nolint:govet // field alignment
 type controlledRun struct {
 	controller *controller.Controller
 	syncer     *runLedgerSync
@@ -86,6 +88,17 @@ func (d *Controllers) Wake(runID string) {
 	if cr != nil {
 		cr.controller.Wake()
 	}
+}
+
+// Step executes one synchronous controller step for an active adopted run.
+func (d *Controllers) Step(ctx context.Context, runID string) error {
+	d.mu.Lock()
+	cr := d.runs[runID]
+	d.mu.Unlock()
+	if cr == nil {
+		return nil
+	}
+	return cr.controller.Step(ctx)
 }
 
 // Active reports whether this process currently runs a controller for runID.
@@ -266,7 +279,14 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		JudgeLaneMail: true,
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
-	cr := &controlledRun{controller: ctrl, syncer: syncer, cancel: cancel, done: make(chan struct{}), run: r, holder: holder}
+	cr := &controlledRun{
+		controller: ctrl,
+		syncer:     syncer,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+		run:        r,
+		holder:     holder,
+	}
 	d.mu.Lock()
 	s.cr = cr
 	d.mu.Unlock()
@@ -378,9 +398,35 @@ func (d *Controllers) judge(holder string, dispatch controller.Judge) controller
 		_, _ = d.RefreshObjective(ctx, runID)
 		var err error
 		if dispatch != nil {
+			var turnsBefore int
+			if d.store != nil {
+				if turns, tErr := d.store.Threads().ListTurns(ctx, "dispatcher-"+runID); tErr == nil {
+					turnsBefore = len(turns)
+				}
+			}
 			stop := d.keepLease(ctx, runID, holder)
 			err = dispatch.Judge(ctx, runID, events)
 			stop()
+			if err != nil {
+				if d.store != nil {
+					var turnsAfter int
+					if turns, tErr := d.store.Threads().ListTurns(ctx, "dispatcher-"+runID); tErr == nil {
+						turnsAfter = len(turns)
+					}
+					if turnsAfter == turnsBefore {
+						_, _ = d.store.Decisions().Append(ctx, store.Decision{
+							RunID:     runID,
+							Category:  store.DecisionJudgment,
+							Actor:     "dispatcher",
+							Tool:      controller.ToolJudgmentDispatch,
+							Reason:    "dispatcher turn failed",
+							Result:    "dispatcher failed: " + err.Error(),
+							Vetted:    false,
+							CreatedAt: d.clock.Now().UTC(),
+						})
+					}
+				}
+			}
 		}
 		d.syncRunLanes(ctx, runID)
 		if _, pErr := d.planNextWorkIfDrained(ctx, runID, "backlog_drained"); pErr != nil {
@@ -391,6 +437,43 @@ func (d *Controllers) judge(holder string, dispatch controller.Judge) controller
 		}
 		return d.askOwnerOnEscalation(ctx, runID, events)
 	})
+}
+
+func adoptNormalizeContractions(s string) string {
+	return strings.NewReplacer(
+		"don't", "dont",
+		"can't", "cant",
+		"won't", "wont",
+		"shouldn't", "shouldnt",
+		"didn't", "didnt",
+		"isn't", "isnt",
+		"wasn't", "wasnt",
+	).Replace(s)
+}
+
+func adoptContainsWholeWord(text, word string) bool {
+	if word == "" {
+		return false
+	}
+	for start := 0; start < len(text); {
+		idx := strings.Index(text[start:], word)
+		if idx < 0 {
+			return false
+		}
+		pos := start + idx
+		end := pos + len(word)
+		leftOK := pos == 0 || !isWordByte(text[pos-1])
+		rightOK := end == len(text) || !isWordByte(text[end])
+		if leftOK && rightOK {
+			return true
+		}
+		start = pos + 1
+	}
+	return false
+}
+
+func isWordByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
 
 func (d *Controllers) syncRunLanes(ctx context.Context, runID string) {
@@ -707,8 +790,12 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	workflow := defaultRecipe.Clone()
 	workflow.RunID = r.ID
 	workflow.Name = "adopted"
+	objectiveText := stripMarker(readText(filepath.Join(r.Dir, "OBJECTIVE.md")))
+	ruleText := extractMergeRuleText(st.Config.MergeRule, objectiveText)
 	if st.Config.MergePolicy != nil {
 		workflow.MergePolicy = *st.Config.MergePolicy
+	} else if strings.EqualFold(st.Config.Merge, "self") || strings.EqualFold(st.Config.Merge, "lane") || hasSelfMergeRule(ruleText) {
+		workflow.MergePolicy.Mode = recipe.MergeModeSelf
 	} else if r.Format == FormatNebulaSwarm && (st.Config.Merge == "" || st.Config.Merge == "none") {
 		// A nebula-swarm run without merge authority leaves its PRs to a person.
 		workflow.MergePolicy.Mode = recipe.MergeModeManual
@@ -719,10 +806,18 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	if !workflow.MergePolicy.Mode.Valid() {
 		return workflow, nil, nil, fmt.Errorf("invalid adopted merge mode %q", workflow.MergePolicy.Mode)
 	}
+	hasExplicitClean := false
+	for _, spec := range st.Config.Phases {
+		switch strings.ToLower(strings.TrimSpace(spec.Name)) {
+		case recipe.PhaseClean, "simplify":
+			hasExplicitClean = true
+		}
+	}
 	if len(st.Config.Phases) > 0 {
 		workflow.Phases = nil
 		for _, spec := range st.Config.Phases {
-			ph, ok := defaultRecipe.Phase(spec.Name)
+			canonical, isPolish := normalizeHostPhaseName(spec.Name, hasExplicitClean)
+			ph, ok := defaultRecipe.Phase(canonical)
 			if !ok {
 				return workflow, nil, nil, fmt.Errorf("unsupported host phase %q", spec.Name)
 			}
@@ -734,13 +829,43 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			} else if spec.Model != "" {
 				ph.Agents = []recipe.AgentSpec{spec.hostAgent.agent()}
 			}
+			promptFallback := spec.Prompt
+			if isPolish && strings.TrimSpace(promptFallback) == "" {
+				promptFallback = "Run /pr-polish-nebula."
+			}
 			if r.Format == FormatNebulaSwarm && (ph.Name == recipe.PhaseClean || ph.Name == recipe.PhaseReview) {
-				ph.BriefTemplate = nebulaSwarmPhaseBrief(r.Dir, ph.Name, spec.Prompt)
+				ph.BriefTemplate = nebulaSwarmPhaseBrief(r.Dir, ph.Name, promptFallback)
+			} else if strings.TrimSpace(promptFallback) != "" {
+				ph.BriefTemplate = strings.TrimSpace(promptFallback)
 			}
 			workflow.Phases = append(workflow.Phases, ph)
 		}
 	}
-	if workflow.MergePolicy.Mode == recipe.MergeModeManual || workflow.MergePolicy.Mode == recipe.MergeModeNone {
+	if workflow.MergePolicy.Mode == recipe.MergeModeSelf && mergesAfterCleanOrPolish(ruleText) {
+		hasReviewLane := false
+		for i := range r.Lanes {
+			norm, _ := normalizeHostPhaseName(r.Lanes[i].Phase, hasExplicitClean)
+			if norm == recipe.PhaseReview {
+				hasReviewLane = true
+				break
+			}
+		}
+		if !hasReviewLane {
+			if _, hasClean := workflow.Phase(recipe.PhaseClean); hasClean {
+				workflow.Phases = slices.DeleteFunc(workflow.Phases, func(ph recipe.Phase) bool {
+					return ph.Name == recipe.PhaseReview
+				})
+				if strings.Contains(strings.ToLower(ruleText), "pr-polish") {
+					for i := range workflow.Phases {
+						if workflow.Phases[i].Name == recipe.PhaseClean && strings.Contains(workflow.Phases[i].BriefTemplate, "/simplify-branch") {
+							workflow.Phases[i].BriefTemplate = "Run /pr-polish-nebula."
+						}
+					}
+				}
+			}
+		}
+	}
+	if workflow.MergePolicy.Mode != recipe.MergeModeController {
 		var phases []recipe.Phase
 		for _, ph := range workflow.Phases {
 			if ph.Name != recipe.PhaseIntegrate {
@@ -751,6 +876,9 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	} else if _, ok := workflow.Phase(recipe.PhaseIntegrate); !ok {
 		ph, _ := defaultRecipe.Phase(recipe.PhaseIntegrate)
 		workflow.Phases = append(workflow.Phases, ph)
+	}
+	if _, hasReview := workflow.Phase(recipe.PhaseReview); !hasReview {
+		workflow.MergePolicy.RequireReviewPass = false
 	}
 	workflow.Transitions = nil
 	for i := range workflow.Phases {
@@ -829,6 +957,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 				items = append(items, store.BacklogItem{ID: ln.ID, RunID: r.ID, LaneID: ln.ID, Title: ln.Title, Description: mission, Priority: priority, Status: status, DependsOn: task.DependsOn})
 				ln.PRHead, ln.ApprovalSHA, ln.MergeSHA, ln.Checks, ln.BaseCommit, ln.Worktree = task.PRHead, task.ApprovalSHA, task.MergeSHA, task.Checks, task.BaseCommit, task.Worktree
 				for phase, rounds := range task.Terminals {
+					normPhase, _ := normalizeHostPhaseName(phase, hasExplicitClean)
 					for round, id := range rounds {
 						n, err := strconv.Atoi(round)
 						if err != nil || id == "" {
@@ -837,7 +966,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 						if ln.Terminals == nil {
 							ln.Terminals = map[string]string{}
 						}
-						ln.Terminals[lane.PhaseRoundKey(phase, n)] = id
+						ln.Terminals[lane.PhaseRoundKey(normPhase, n)] = id
 					}
 				}
 				for key, terminal := range task.Sessions {
@@ -850,7 +979,8 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 				}
 			}
 		}
-		ln.RecordAttempt(imported.Phase, imported.Round, imported.Session, imported.Terminal)
+		normImportedPhase, _ := normalizeHostPhaseName(imported.Phase, hasExplicitClean)
+		ln.RecordAttempt(normImportedPhase, imported.Round, imported.Session, imported.Terminal)
 		lanes = append(lanes, ln)
 	}
 	return workflow, lanes, items, nil
@@ -938,6 +1068,179 @@ type hostPhase struct {
 	Name   string      `json:"name"`
 	Prompt string      `json:"prompt"`
 	Chain  []hostAgent `json:"chain"`
+}
+
+func (p *hostPhase) UnmarshalJSON(data []byte) error {
+	var name string
+	if err := json.Unmarshal(data, &name); err == nil {
+		*p = hostPhase{Name: strings.TrimSpace(name)}
+		return nil
+	}
+	type rawHostPhase hostPhase
+	var raw rawHostPhase
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = hostPhase(raw)
+	return nil
+}
+
+func normalizeHostPhaseName(name string, hasExplicitClean bool) (string, bool) {
+	trimmed := strings.TrimSpace(name)
+	switch strings.ToLower(trimmed) {
+	case "":
+		return "", false
+	case recipe.PhaseSWE, "implement", "code":
+		return recipe.PhaseSWE, false
+	case recipe.PhaseClean, "simplify":
+		return recipe.PhaseClean, false
+	case recipe.PhaseReview:
+		return recipe.PhaseReview, false
+	case recipe.PhaseIntegrate, "merge":
+		return recipe.PhaseIntegrate, false
+	case "pr-polish", "pr_polish", "polish":
+		if hasExplicitClean {
+			return recipe.PhaseReview, true
+		}
+		return recipe.PhaseClean, true
+	default:
+		return trimmed, false
+	}
+}
+
+var explicitMergeRuleLineRE = regexp.MustCompile(`(?i)^\s*(?:[-*+]\s*)?(?:merge(?:\s+rule|\s+rules|\s+policy|\s+mode|_rule|_policy|_mode)?|self[-_\s]?merge)\s*[:=]\s*(.+)$`)
+
+func isMergeSectionHeading(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "#") {
+		return false
+	}
+	heading := strings.ToLower(strings.TrimSpace(strings.TrimLeft(trimmed, "#")))
+	heading = strings.TrimSuffix(heading, ":")
+	switch heading {
+	case "merge", "merge rule", "merge rules", "merge policy", "merge mode":
+		return true
+	default:
+		return false
+	}
+}
+
+func extractMergeRuleText(configMergeRule, objectiveText string) string {
+	var parts []string
+	if trimmed := strings.TrimSpace(configMergeRule); trimmed != "" {
+		parts = append(parts, trimmed)
+	}
+	inMergeSection := false
+	for _, line := range strings.Split(objectiveText, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			inMergeSection = isMergeSectionHeading(trimmed)
+			continue
+		}
+		if m := explicitMergeRuleLineRE.FindStringSubmatch(trimmed); len(m) == 2 {
+			parts = append(parts, trimmed)
+			continue
+		}
+		if inMergeSection {
+			parts = append(parts, trimmed)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func splitMergeRuleClauses(s string) []string {
+	r := strings.NewReplacer(
+		"\n", "|",
+		".", "|",
+		";", "|",
+		"!", "|",
+		",", "|",
+		" — ", "|",
+		" – ", "|",
+		" and ", "|",
+		" then ", "|",
+		" but ", "|",
+	)
+	return strings.Split(r.Replace(s), "|")
+}
+
+func isNegatedMergeRuleClause(clause string) bool {
+	norm := adoptNormalizeContractions(clause)
+	for _, neg := range []string{"not", "no", "never", "dont", "cannot", "cant", "forbid", "disable", "disabled", "off", "false", "none", "manual"} {
+		if adoptContainsWholeWord(norm, neg) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSelfMergeRule(text string) bool {
+	lower := strings.ToLower(text)
+	for _, clause := range splitMergeRuleClauses(lower) {
+		clause = strings.TrimSpace(clause)
+		if clause == "" || isNegatedMergeRuleClause(clause) {
+			continue
+		}
+		for _, phrase := range []string{
+			"lanes self-merge",
+			"lane self-merges",
+			"merge themselves",
+			"merges itself",
+			"merge itself",
+			"merges its own pr",
+			"merge its own pr",
+			"lanes merge their own",
+			"lane merges its own",
+			"lane merges once",
+			"lanes merge once",
+			"merges once pr-polish",
+			"merge once pr-polish",
+			"merges after pr-polish",
+			"merge after pr-polish",
+			"merges once clean",
+			"merge once clean",
+			"merges after clean",
+			"merge after clean",
+			"merge_mode=self",
+			"merge mode: self",
+			"merge: self",
+			"merge rule: self-merge",
+			"merge policy: self-merge",
+		} {
+			if strings.Contains(clause, phrase) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mergesAfterCleanOrPolish(text string) bool {
+	lower := strings.ToLower(text)
+	for _, clause := range splitMergeRuleClauses(lower) {
+		clause = strings.TrimSpace(clause)
+		if clause == "" || isNegatedMergeRuleClause(clause) {
+			continue
+		}
+		for _, phrase := range []string{
+			"merges once pr-polish",
+			"merge once pr-polish",
+			"merges after pr-polish",
+			"merge after pr-polish",
+			"merges once clean",
+			"merge once clean",
+			"merges after clean",
+			"merge after clean",
+		} {
+			if strings.Contains(clause, phrase) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a hostAgent) agent() recipe.AgentSpec {

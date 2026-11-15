@@ -65,10 +65,11 @@ func (c *CLIClient) RunToolLoop(ctx context.Context, req Request, reg *ToolRegis
 }
 
 type cliEnvelope struct {
-	Result  string `json:"result"`
-	Model   string `json:"model"`
-	IsError bool   `json:"is_error"`
-	Usage   Usage  `json:"usage"`
+	Result       string  `json:"result"`
+	Model        string  `json:"model"`
+	IsError      bool    `json:"is_error"`
+	TotalCostUSD float64 `json:"total_cost_usd"`
+	Usage        Usage   `json:"usage"`
 }
 type cliReply struct {
 	Text  *string         `json:"text"`
@@ -154,13 +155,66 @@ func (c *CLIClient) CreateMessage(ctx context.Context, req Request) (*Response, 
 	if env.Model != "" {
 		resp.Model = env.Model
 	}
+	if resp.Usage.CostUSD == 0 && env.TotalCostUSD > 0 {
+		resp.Usage.CostUSD = env.TotalCostUSD
+	}
+	if resp.Usage.CostUSD == 0 {
+		modelName := resp.Model
+		if modelName == "" {
+			modelName = "sonnet"
+		}
+		resp.Usage.CostUSD = CalculateCost(modelName, resp.Usage, nil)
+	}
 	var reply cliReply
+	var replies []cliReply
 	text := strings.TrimSpace(env.Result)
 	// Both CLIs occasionally fence their otherwise valid JSON reply.
 	if strings.HasPrefix(text, "```json\n") && strings.HasSuffix(text, "\n```") {
 		text = strings.TrimSuffix(strings.TrimPrefix(text, "```json\n"), "\n```")
 	}
-	if json.Unmarshal([]byte(text), &reply) == nil && (reply.Tool != "" || reply.Name != "") {
+	if strings.HasPrefix(text, "[") && json.Unmarshal([]byte(text), &replies) == nil && len(replies) > 0 {
+		var blocks []ContentBlock
+		seenIDs := make(map[string]bool, len(replies))
+		unnamed := 0
+		for i, r := range replies {
+			name := strings.TrimSpace(r.Tool)
+			if name == "" {
+				name = strings.TrimSpace(r.Name)
+			}
+			if name == "" {
+				unnamed++
+				continue
+			}
+			if len(r.Input) == 0 {
+				r.Input = json.RawMessage("{}")
+			}
+			var input map[string]json.RawMessage
+			if err := json.Unmarshal(r.Input, &input); err != nil || input == nil {
+				return nil, fmt.Errorf("orca/model: CLI tool input must be a JSON object")
+			}
+			id := strings.TrimSpace(r.ID)
+			if id == "" || seenIDs[id] {
+				for seq := i + 1; ; seq++ {
+					candidate := fmt.Sprintf("cli-tool-%d", seq)
+					if !seenIDs[candidate] {
+						id = candidate
+						break
+					}
+				}
+			}
+			seenIDs[id] = true
+			blocks = append(blocks, NewToolUseBlock(id, name, r.Input))
+		}
+		if len(blocks) > 0 && unnamed > 0 {
+			return nil, fmt.Errorf("orca/model: CLI tool array entry missing tool name")
+		}
+		if len(blocks) > 0 {
+			resp.StopReason = StopReasonToolUse
+			resp.Message = NewAssistantMessage(blocks...)
+		} else {
+			resp.Message = NewAssistantMessage(NewTextBlock(env.Result))
+		}
+	} else if json.Unmarshal([]byte(text), &reply) == nil && (reply.Tool != "" || reply.Name != "") {
 		name := reply.Tool
 		if name == "" {
 			name = reply.Name
@@ -245,7 +299,7 @@ func buildCLIPrompt(req Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return `You are an orca model adapter. Follow the system instructions below and the supplied conversation. Do not use native CLI tools or inspect files. Select tools only from the supplied tool definitions. Return ONLY JSON with either {"text":"..."} or {"tool":"name","id":"unique-call-id","input":{...}}. A tool response will be supplied in the next conversation turn; use its result before choosing the next action. Tool arguments must match the input_schema. Do not wrap JSON in markdown.
+	return `You are an orca model adapter. Follow the system instructions below and the supplied conversation. Native CLI tools are disabled by design; every orchestrator tool listed in TOOL DEFINITIONS is available in this session and is invoked by returning JSON. Select tools only from TOOL DEFINITIONS. Return ONLY JSON with {"text":"..."}, {"tool":"name","id":"unique-call-id","input":{...}}, or a JSON array of such tool-call objects. A tool response will be supplied in the next conversation turn; use its result before choosing the next action. Tool arguments must match the input_schema. Do not wrap JSON in markdown.
 SYSTEM:
 ` + req.System + "\nCONVERSATION:\n" + string(messages) + "\nTOOL DEFINITIONS:\n" + string(tools) + "\n", nil
 }

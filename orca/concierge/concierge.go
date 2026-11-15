@@ -43,6 +43,7 @@ const (
 	ToolDecisionsSince  = "decisions.since"
 	ToolBacklog         = "backlog"
 	ToolDirectiveSubmit = "directive.submit"
+	ToolDirectiveRevoke = "directive.revoke"
 	ToolMemoryRead      = "memory.read"
 	ToolMemorySubmit    = "memory.submit"
 	ToolMemoryUndo      = "memory.undo"
@@ -135,6 +136,12 @@ type DirectiveSubmitParams struct {
 	Reason string `json:"reason,omitempty" jsonschema:"description=Optional reason for submitting the directive"`
 }
 
+// DirectiveRevokeParams holds parameters for the directive.revoke tool.
+type DirectiveRevokeParams struct {
+	ID     string `json:"id" jsonschema:"required,description=ID of an active directive to revoke or supersede"`
+	Reason string `json:"reason,omitempty" jsonschema:"description=Optional reason for revoking or superseding the directive"`
+}
+
 type RunControlParams struct {
 	Action string `json:"action" jsonschema:"required,enum=pause,enum=resume,enum=stop"`
 }
@@ -173,12 +180,17 @@ var conciergeToolDefs = []model.ToolDefinition{
 	{Name: ToolDecisionsSince, Description: "Read audit decisions from DecisionStore filtered by sequence, time, lane, actor, or category", InputSchema: model.SchemaFor[DecisionsSinceParams]()},
 	{Name: ToolBacklog, Description: "Read prioritized backlog items and mutation history from BacklogStore", InputSchema: model.SchemaFor[BacklogParams]()},
 	{Name: ToolDirectiveSubmit, Description: "Submit a typed owner directive (rule, plan_import, recipe_edit, order) to DirectiveStore", InputSchema: model.SchemaFor[DirectiveSubmitParams]()},
+	{Name: ToolDirectiveRevoke, Description: "Revoke or supersede an active directive by ID when the owner lifts, clears, or replaces it", InputSchema: model.SchemaFor[DirectiveRevokeParams]()},
 	{Name: ToolMemoryRead, Description: "Read the full body of a recalled memory", InputSchema: model.SchemaFor[MemoryReadParams]()},
 }
 
 // NormalizeToolName maps underscore aliases (e.g. "lane_show") to canonical dotted tool names.
 func NormalizeToolName(name string) string {
 	trimmed := strings.TrimSpace(name)
+	switch trimmed {
+	case "directive.supersede", "directive_supersede":
+		return ToolDirectiveRevoke
+	}
 	if isKnownTool(trimmed) {
 		return trimmed
 	}
@@ -193,7 +205,7 @@ func NormalizeToolName(name string) string {
 
 func isKnownTool(name string) bool {
 	switch name {
-	case ToolRunControl, ToolRunStart, ToolRunSettings, ToolStatus, ToolLaneShow, ToolDecisionsSince, ToolBacklog, ToolDirectiveSubmit, ToolMemoryRead, ToolMemorySubmit, ToolMemoryUndo:
+	case ToolRunControl, ToolRunStart, ToolRunSettings, ToolStatus, ToolLaneShow, ToolDecisionsSince, ToolBacklog, ToolDirectiveSubmit, ToolDirectiveRevoke, ToolMemoryRead, ToolMemorySubmit, ToolMemoryUndo:
 		return true
 	default:
 		return false
@@ -735,6 +747,12 @@ func (c *Concierge) handleRawToolCall(
 			return "", err
 		}
 		return c.execDirectiveSubmit(ctx, runID, state, trimmed, p)
+	case ToolDirectiveRevoke:
+		p, err := decodeToolParams[DirectiveRevokeParams](canonical, trimmed)
+		if err != nil {
+			return "", err
+		}
+		return c.execDirectiveRevoke(ctx, runID, state, trimmed, p)
 	case ToolMemoryRead:
 		p, err := decodeToolParams[MemoryReadParams](canonical, trimmed)
 		if err != nil {
@@ -1341,6 +1359,120 @@ func (c *Concierge) execDirectiveSubmit(
 	}
 
 	return resultMsg, nil
+}
+
+// RevokeDirective marks directive id revoked on runID (or the first matching
+// fallbackRunIDs entry) and deletes any matching memory entry. It refuses to
+// revoke open owner_ask directives and returns a wrapped store.ErrNotFound
+// when the directive does not exist.
+func RevokeDirective(ctx context.Context, st store.Store, runID, id string, fallbackRunIDs ...string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return runID, fmt.Errorf("%w: directive.revoke requires id", store.ErrInvalidArgument)
+	}
+	dir, err := st.Directives().Get(ctx, runID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		for _, candidate := range fallbackRunIDs {
+			if candidate == "" || candidate == runID {
+				continue
+			}
+			if d, gErr := st.Directives().Get(ctx, candidate, id); gErr == nil && d != nil {
+				runID = candidate
+				dir = d
+				err = nil
+				break
+			}
+		}
+	}
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return runID, fmt.Errorf("directive %q not found: %w", id, err)
+		}
+		return runID, err
+	}
+	if dir != nil && strings.HasPrefix(strings.TrimSpace(dir.Ref), "owner_ask:") {
+		return runID, fmt.Errorf("%w: directive %q is an open owner question (%s); use owner.answer to resolve it", store.ErrInvalidArgument, id, dir.Ref)
+	}
+	if err := st.Directives().UpdateStatus(ctx, runID, id, store.DirectiveRevoked); err != nil {
+		return runID, err
+	}
+	if memErr := st.Memories().Delete(ctx, "", id); memErr != nil && !errors.Is(memErr, store.ErrNotFound) {
+		return runID, memErr
+	}
+	return runID, nil
+}
+
+// AppendDirectiveRevokeDecision records a vetted directive.revoke decision row.
+func AppendDirectiveRevokeDecision(
+	ctx context.Context,
+	st store.Store,
+	runID, threadID, turnID, id, reason string,
+	rawArgs json.RawMessage,
+	usage model.Usage,
+	latencyMs int64,
+) (store.Decision, error) {
+	return st.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
+		RunID:        runID,
+		Category:     store.DecisionJudgment,
+		Actor:        ActorConcierge,
+		ThreadID:     threadID,
+		TurnID:       turnID,
+		Tool:         ToolDirectiveRevoke,
+		Reason:       cmp.Or(strings.TrimSpace(reason), fmt.Sprintf("owner revoked directive %s", id)),
+		Result:       fmt.Sprintf("revoked directive %s", id),
+		Args:         slices.Clone(rawArgs),
+		Vetted:       true,
+		InputTokens:  usage.InputTokens,
+		OutputTokens: usage.OutputTokens,
+		CostUSD:      usage.CostUSD,
+		LatencyMs:    max(latencyMs, 0),
+	})
+}
+
+func (c *Concierge) execDirectiveRevoke(
+	ctx context.Context,
+	runID string,
+	state *conciergeTurnState,
+	rawArgs json.RawMessage,
+	p DirectiveRevokeParams,
+) (string, error) {
+	start := c.clock.Now()
+	id := strings.TrimSpace(p.ID)
+	if _, err := RevokeDirective(ctx, c.store, runID, id); err != nil {
+		return "", err
+	}
+	var (
+		threadID string
+		turnID   string
+		usage    model.Usage
+	)
+	if state != nil {
+		threadID = state.threadID
+		turnID = state.turnID
+		if !state.turnUsageRecorded {
+			usage = state.turnUsage
+			state.turnUsageRecorded = true
+		}
+	}
+	dec, decErr := AppendDirectiveRevokeDecision(
+		ctx,
+		c.store,
+		runID,
+		threadID,
+		turnID,
+		id,
+		p.Reason,
+		rawArgs,
+		usage,
+		c.clock.Now().Sub(start).Milliseconds(),
+	)
+	if decErr != nil {
+		return "", decErr
+	}
+	if state != nil {
+		state.decisions = append(state.decisions, dec)
+	}
+	return dec.Result, nil
 }
 
 func (c *Concierge) resolveLaneScope(ctx context.Context, runID, scope string) string {
