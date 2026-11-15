@@ -299,7 +299,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	ctrl = controller.New(controller.Config{
 		RunID:             r.ID,
 		HolderID:          holder,
-		PRProbe:           d.PRProbe,
+		PRProbe:           d.runPRProbe(syncer),
 		JudgeLaneMail:     true,
 		MaxCostPerHourUSD: d.MaxCostPerHourUSD,
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
@@ -579,6 +579,47 @@ func (d *Controllers) RefreshObjective(ctx context.Context, runID string) (bool,
 	return cr.syncer.RefreshObjectiveIfChanged(ctx, d.store.Runs())
 }
 
+func (d *Controllers) runPRProbe(syncer *runLedgerSync) controller.PRProbe {
+	if d.PRProbe == nil {
+		return nil
+	}
+	return func(ctx context.Context, runID, branch string, pr int) (controller.PRStatus, error) {
+		if syncer != nil {
+			curRun := syncer.CurrentRun()
+			if strings.TrimSpace(curRun.Repo) == "" && strings.TrimSpace(curRun.RepoID) == "" && !hasGitCheckout(curRun.Dir) {
+				var storeRepo string
+				if d.store != nil && runID != "" {
+					if sr, err := d.store.Runs().Get(ctx, runID); err == nil && sr != nil {
+						storeRepo = strings.TrimSpace(sr.Repository)
+					}
+				}
+				if storeRepo == "" {
+					return controller.PRStatus{}, nil
+				}
+			}
+		}
+		return d.PRProbe(ctx, runID, branch, pr)
+	}
+}
+
+func hasGitCheckout(dir string) bool {
+	cur := strings.TrimSpace(dir)
+	if cur == "" {
+		return false
+	}
+	cur = filepath.Clean(cur)
+	for {
+		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
+		cur = parent
+	}
+}
+
 func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger string) (bool, error) {
 	cr := d.lookupRun(runID)
 	d.mu.Lock()
@@ -588,14 +629,6 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 		return false, nil
 	}
 	_, _ = cr.syncer.RefreshObjectiveIfChanged(ctx, d.store.Runs())
-	curRun := cr.syncer.CurrentRun()
-	now := d.clock.Now().UTC()
-	if paused, _, _, _, _ := store.EnforceCostGuard(ctx, d.store, runID, now, d.MaxCostPerHourUSD); paused {
-		return false, nil
-	}
-	if settings, sErr := d.store.Runs().GetSettings(ctx, runID); sErr == nil && settings.Paused {
-		return false, nil
-	}
 	lanes, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
 	if err != nil {
 		return false, err
@@ -607,6 +640,19 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 	if dispatcher.CheckRunTerminal(lanes, items, false) != nil {
 		return false, nil
 	}
+	curRun := cr.syncer.CurrentRun()
+	needsCloseout := shouldAutoCloseoutRun(curRun, lanes, items)
+	if !needsCloseout && (!curRun.HasNextWork() || ObjectiveIsDone(curRun.Objective)) {
+		expireHoldDirectivesIfRunDone(ctx, d.store, runID)
+		return false, nil
+	}
+	now := d.clock.Now().UTC()
+	if paused, _, _, _, _ := store.EnforceCostGuard(ctx, d.store, runID, now, d.MaxCostPerHourUSD); paused {
+		return false, nil
+	}
+	if settings, sErr := d.store.Runs().GetSettings(ctx, runID); sErr == nil && settings.Paused {
+		return false, nil
+	}
 	var doneSummary []string
 	for i := range items {
 		it := &items[i]
@@ -615,11 +661,6 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
 	if err != nil {
 		return false, err
-	}
-	needsCloseout := shouldAutoCloseoutRun(curRun, lanes, items)
-	if !needsCloseout && (!curRun.HasNextWork() || ObjectiveIsDone(curRun.Objective)) {
-		expireHoldDirectivesIfRunDone(ctx, d.store, runID)
-		return false, nil
 	}
 	for i := range dirs {
 		dir := &dirs[i]

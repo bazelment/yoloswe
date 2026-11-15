@@ -3100,4 +3100,47 @@ func TestCloseoutUnitHelpers(t *testing.T) {
 			t.Fatalf("UpdatePost request = (%s %s auth=%q md=%q)", gotMethod, gotPath, gotAuth, gotMarkdown)
 		}
 	})
+
+	t.Run("runPRProbe_skips_when_run_has_no_repo_or_git_checkout", func(t *testing.T) {
+		t.Parallel()
+		clk := clock.NewFakeClock(time.Date(2026, 11, 14, 6, 36, 0, 0, time.UTC))
+		st := store.NewMemoryStore(clk)
+		t.Cleanup(func() { _ = st.Close() })
+		if err := st.Runs().Create(t.Context(), store.Run{ID: "mid-review", Objective: "finish review"}); err != nil {
+			t.Fatal(err)
+		}
+		var calls atomic.Int32
+		controllers := NewControllers(t.Context(), st, lane.NewFakeDriver(), clk, nil)
+		controllers.PRProbe = func(_ context.Context, _, _ string, pr int) (controller.PRStatus, error) {
+			calls.Add(1)
+			return controller.PRStatus{State: "OPEN", Number: pr}, nil
+		}
+
+		noRepoDir := t.TempDir()
+		syncerNoRepo := newRunLedgerSync(Run{ID: "mid-review", Dir: noRepoDir}, clk, nil)
+		probe := controllers.runPRProbe(syncerNoRepo)
+		if got, err := probe(t.Context(), "mid-review", "lane-a", 42); err != nil || got != (controller.PRStatus{}) || calls.Load() != 0 {
+			t.Fatalf("runPRProbe without repo or git checkout = (%+v, %v), calls=%d; want empty, 0 calls", got, err, calls.Load())
+		}
+
+		syncerWithRepo := newRunLedgerSync(Run{ID: "mid-review", Dir: noRepoDir, Repo: "bazelment/yoloswe"}, clk, nil)
+		probeWithRepo := controllers.runPRProbe(syncerWithRepo)
+		if got, err := probeWithRepo(t.Context(), "mid-review", "lane-a", 42); err != nil || got.State != "OPEN" || calls.Load() != 1 {
+			t.Fatalf("runPRProbe with Repo = (%+v, %v), calls=%d; want OPEN, 1 call", got, err, calls.Load())
+		}
+
+		gitDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(gitDir, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		subRunDir := filepath.Join(gitDir, ".shared", "subagent-swarm", "mid-review")
+		if err := os.MkdirAll(subRunDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		syncerWithGit := newRunLedgerSync(Run{ID: "mid-review", Dir: subRunDir}, clk, nil)
+		probeWithGit := controllers.runPRProbe(syncerWithGit)
+		if got, err := probeWithGit(t.Context(), "mid-review", "lane-a", 42); err != nil || got.State != "OPEN" || calls.Load() != 2 {
+			t.Fatalf("runPRProbe inside git checkout = (%+v, %v), calls=%d; want OPEN, 2 calls", got, err, calls.Load())
+		}
+	})
 }
