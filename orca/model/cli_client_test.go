@@ -202,6 +202,25 @@ func TestInvestigateTools_ReadFileConfinementAndSymlinkEscape(t *testing.T) {
 	}); !res.IsError {
 		t.Fatalf("expected absolute symlink escape rejection, got %+v", res)
 	}
+
+	// 5. Sensitive paths inside allowed roots (.git, .env, .db) are rejected.
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{".git/config", ".env", ".env.local", "orca.db", "state.sqlite3"} {
+		full := filepath.Join(repoDir, rel)
+		if err := os.WriteFile(full, []byte("sensitive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		req, _ := json.Marshal(model.ReadFileParams{Path: rel})
+		if res := reg.Execute(t.Context(), model.ToolCall{
+			ID:    "sens-" + rel,
+			Name:  model.ToolReadFile,
+			Input: req,
+		}); !res.IsError {
+			t.Fatalf("expected sensitive path %q to be rejected, got %+v", rel, res)
+		}
+	}
 }
 
 func TestValidateReadOnlyCommand(t *testing.T) {
@@ -213,6 +232,12 @@ func TestValidateReadOnlyCommand(t *testing.T) {
 		{"nebula", "post", "get", "286c9d4f-9da3-4787-aa66-bd97aa21f947"},
 		{"nebula", "mail", "list"},
 		{"nebula", "session", "list"},
+		{"git", "status", "--short"},
+		{"git", "log", "-n", "5", "--oneline"},
+		{"git", "diff", "HEAD~1"},
+		{"git", "show", "HEAD"},
+		{"git", "rev-parse", "HEAD"},
+		{"git", "branch", "--show-current"},
 	}
 	for _, cmd := range allowed {
 		if err := model.ValidateReadOnlyCommand(cmd[0], cmd[1:]); err != nil {
@@ -227,6 +252,11 @@ func TestValidateReadOnlyCommand(t *testing.T) {
 		{"gh", "pr", "view", "417", "-w"},
 		{"nebula", "mail", "send", "--body", "hi"},
 		{"nebula", "phase", "report", "--outcome", "done"},
+		{"git", "push", "origin", "main"},
+		{"git", "branch", "-D", "feature"},
+		{"git", "-c", "core.pager=sh", "status"},
+		{"git", "diff", "--output=/tmp/leak"},
+		{"git", "diff", "--ext-diff"},
 		{"bash", "-c", "echo hi"},
 	}
 	for _, cmd := range denied {
@@ -407,4 +437,33 @@ func TestCLIMultiCallArrayAndCostFallbacks(t *testing.T) {
 			t.Fatalf("CalculateCost(custom-foo3-bar) = %v, want 0 for unknown model", got)
 		}
 	})
+}
+
+func TestDeterministicSessionWorkDirAndWorkDirError(t *testing.T) {
+	t.Parallel()
+	dir1 := model.DeterministicSessionWorkDir("", "run-42", "dispatcher")
+	dir2 := model.DeterministicSessionWorkDir("", "run-42", "dispatcher")
+	if dir1 == "" || dir1 != dir2 {
+		t.Fatalf("DeterministicSessionWorkDir mismatch: %q vs %q", dir1, dir2)
+	}
+	base := t.TempDir()
+	underBase := model.DeterministicSessionWorkDir(base, "run-42", "planner")
+	if !strings.HasPrefix(underBase, base) {
+		t.Fatalf("DeterministicSessionWorkDir(%q) = %q, want prefix %q", base, underBase, base)
+	}
+
+	// If WorkDir points to a regular file, Turn must surface the directory creation error.
+	blockingFile := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blockingFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sess := model.NewAgentSession(model.AgentSessionConfig{
+		Provider: "claude-cli",
+		Model:    "claude-sonnet-5-5",
+		WorkDir:  filepath.Join(blockingFile, "sub"),
+	})
+	defer func() { _ = sess.Close() }()
+	if _, err := sess.Turn(t.Context(), model.AgentTurnRequest{Prompt: "hello"}); err == nil {
+		t.Fatal("expected error when WorkDir parent is a file, got nil")
+	}
 }

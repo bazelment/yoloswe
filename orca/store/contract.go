@@ -1,7 +1,6 @@
 package store
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"slices"
@@ -477,23 +476,19 @@ func testDecisions(t *testing.T, factory Factory) {
 		t.Fatalf("List(SinceSeq=1) = %+v", since1)
 	}
 
-	if u, ok := st.Decisions().(interface {
-		SetUsage(context.Context, string, int64, model.Usage) error
-	}); ok {
-		if err := u.SetUsage(ctx, "run-1", dec1.Seq, model.Usage{
-			InputTokens:  400,
-			OutputTokens: 90,
-			CostUSD:      0.015,
-		}); err != nil {
-			t.Fatalf("SetUsage(dec1) error: %v", err)
-		}
-		allDecs, err := st.Decisions().List(ctx, DecisionFilter{RunID: "run-1"})
-		if err != nil {
-			t.Fatalf("List after SetUsage error: %v", err)
-		}
-		if len(allDecs) != 2 || allDecs[0].InputTokens != 400 || allDecs[0].OutputTokens != 90 || allDecs[0].CostUSD != 0.015 {
-			t.Fatalf("decision[0] after SetUsage = %+v, want 400/90/0.015", allDecs[0])
-		}
+	if err := st.Decisions().SetUsage(ctx, "run-1", dec1.Seq, model.Usage{
+		InputTokens:  400,
+		OutputTokens: 90,
+		CostUSD:      0.015,
+	}); err != nil {
+		t.Fatalf("SetUsage(dec1) error: %v", err)
+	}
+	allDecs, err := st.Decisions().List(ctx, DecisionFilter{RunID: "run-1"})
+	if err != nil {
+		t.Fatalf("List after SetUsage error: %v", err)
+	}
+	if len(allDecs) != 2 || allDecs[0].InputTokens != 400 || allDecs[0].OutputTokens != 90 || allDecs[0].CostUSD != 0.015 {
+		t.Fatalf("decision[0] after SetUsage = %+v, want 400/90/0.015", allDecs[0])
 	}
 }
 

@@ -67,6 +67,7 @@ type Config struct {
 	Model            string
 	Provider         string
 	Effort           string
+	LLMGatewayURL    string
 	ClaudeBin        string
 	CodexBin         string
 	PromptVersion    string
@@ -99,6 +100,13 @@ func (c Config) withDefaults() Config {
 			c.SystemPrompt = CLISystemPrompt
 		} else {
 			c.SystemPrompt = SystemPrompt
+		}
+	}
+	if strings.TrimSpace(c.PromptVersion) == "" || (c.AgentBackend == model.AgentBackendCLI && c.PromptVersion == SystemPromptVersion) {
+		if c.AgentBackend == model.AgentBackendCLI {
+			c.PromptVersion = CLISystemPromptVersion
+		} else {
+			c.PromptVersion = SystemPromptVersion
 		}
 	}
 	if len(c.Invariants) == 0 {
@@ -532,12 +540,16 @@ func (d *Dispatcher) Dispatch(ctx context.Context, runID string, events []store.
 	return res, nil
 }
 
-func (d *Dispatcher) systemPromptWithMemories(ctx context.Context, runID string) string {
+func (d *Dispatcher) memoryIndexSection(ctx context.Context, runID string) string {
 	ms, err := d.store.Memories().List(ctx, store.MemoryFilter{RunID: runID})
 	if err != nil {
-		return d.cfg.SystemPrompt
+		return ""
 	}
-	return d.cfg.SystemPrompt + "\n\n## Memory Index\n" + store.MemoryIndex(ms)
+	return "\n\n## Memory Index\n" + store.MemoryIndex(ms)
+}
+
+func (d *Dispatcher) systemPromptWithMemories(ctx context.Context, runID string) string {
+	return d.cfg.SystemPrompt + d.memoryIndexSection(ctx, runID)
 }
 
 func (d *Dispatcher) ensureThread(ctx context.Context, runID string) (string, error) {
@@ -659,38 +671,36 @@ func (d *Dispatcher) buildToolRegistry(runID string, state *turnExecState) *mode
 	return reg
 }
 
+func batchAllowsTool(toolName string, events []store.Event) error {
+	if isReadOnlyTool(toolName) && !batchNamesLane(events) {
+		return fmt.Errorf("%s is only available when the judgment batch contains a lane event", toolName)
+	}
+	if toolName == ToolMailAnswer && !batchHasLaneMail(events) {
+		return fmt.Errorf("%s is only available when the judgment batch contains inbound lane mail", toolName)
+	}
+	return nil
+}
+
+// buildCLIToolRegistry registers the full Dispatcher tool superset so the
+// long-lived CLI session's MCP tool list stays constant across run-level and
+// lane-level batches (avoiding subprocess restarts), while enforcing batch-level
+// tool eligibility inside the handler.
 func (d *Dispatcher) buildCLIToolRegistry(runID string, state *turnExecState, events []store.Event) *model.ToolRegistry {
 	reg := model.NewToolRegistry()
 	defs := make([]model.ToolDefinition, 0, len(dispatcherToolDefs)+1)
 	defs = append(defs, dispatcherToolDefs...)
 	defs = append(defs, mailAnswerToolDef)
-	defs = toolsForBatch(defs, events)
 	for i := range defs {
 		def := defs[i]
 		reg.Register(def, func(ctx context.Context, raw json.RawMessage) (string, error) {
+			if err := batchAllowsTool(def.Name, events); err != nil {
+				return "", err
+			}
 			return d.handleRawToolCall(ctx, runID, state, def.Name, raw)
 		})
 	}
 	model.RegisterInvestigationTools(reg, d.cfg.Investigate)
 	return reg
-}
-
-func (d *Dispatcher) sessionForRun(ctx context.Context, runID, threadID, modelName string) *model.AgentSession {
-	var resumeID string
-	if th, err := d.store.Threads().GetThread(ctx, threadID); err == nil && th != nil {
-		resumeID = strings.TrimSpace(th.ResumeID)
-	}
-	return d.sessions.GetOrCreate(runID, model.AgentSessionConfig{
-		Provider:         d.cfg.Provider,
-		Model:            modelName,
-		Effort:           d.cfg.Effort,
-		SystemPrompt:     d.systemPromptWithMemories(ctx, runID),
-		ResumeID:         resumeID,
-		ClaudeBin:        d.cfg.ClaudeBin,
-		CodexBin:         d.cfg.CodexBin,
-		MaxSessionTokens: d.cfg.MaxSessionTokens,
-		MaxSessionTurns:  d.cfg.MaxSessionTurns,
-	})
 }
 
 func (d *Dispatcher) dispatchCLITurn(
@@ -704,33 +714,38 @@ func (d *Dispatcher) dispatchCLITurn(
 	events []store.Event,
 	state *turnExecState,
 ) (model.Usage, int, string, error) {
-	sess := d.sessionForRun(ctx, runID, threadID, modelName)
 	cliReg := d.buildCLIToolRegistry(runID, state, events)
+	turnPrompt := promptText + d.memoryIndexSection(ctx, runID)
 
-	var callSeq int
-	turnRes, err := sess.Turn(ctx, model.AgentTurnRequest{
-		Prompt:       promptText,
-		Model:        modelName,
-		SystemPrompt: d.systemPromptWithMemories(ctx, runID),
-		Registry:     cliReg,
-		MaxToolCalls: d.cfg.MaxTurns,
-		Observer: func(name string, args json.RawMessage, output string, isError bool) {
-			callSeq++
-			callID := fmt.Sprintf("mcp-%d", callSeq)
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Info("tool call",
-					"actor", ActorDispatcher,
-					"tool", name,
-					"is_error", isError,
-				)
-			}
-			store.AppendMCPToolCallItems(cleanupCtx, d.store.Threads(), threadID, turnID, callID, name, args, output, isError)
+	turnRes, err := store.RunRoleAgentTurn(
+		ctx,
+		d.store.Threads(),
+		&d.sessions,
+		runID,
+		threadID,
+		turnID,
+		ActorDispatcher,
+		model.AgentSessionConfig{
+			Provider:         d.cfg.Provider,
+			Model:            modelName,
+			Effort:           d.cfg.Effort,
+			SystemPrompt:     d.cfg.SystemPrompt,
+			WorkDir:          model.DeterministicSessionWorkDir(d.cfg.Investigate.RunDir, runID, ActorDispatcher),
+			LLMGatewayURL:    d.cfg.LLMGatewayURL,
+			ClaudeBin:        d.cfg.ClaudeBin,
+			CodexBin:         d.cfg.CodexBin,
+			MaxSessionTokens: d.cfg.MaxSessionTokens,
+			MaxSessionTurns:  d.cfg.MaxSessionTurns,
 		},
-	})
-
-	if sessID := sess.SessionID(); sessID != "" {
-		_ = d.store.Threads().SetThreadResumeID(cleanupCtx, threadID, sessID)
-	}
+		model.AgentTurnRequest{
+			Prompt:       turnPrompt,
+			Model:        modelName,
+			SystemPrompt: d.cfg.SystemPrompt,
+			Registry:     cliReg,
+			MaxToolCalls: d.cfg.MaxTurns,
+		},
+		d.cfg.Logger,
+	)
 	if err != nil {
 		return model.Usage{}, 0, "", err
 	}
@@ -742,16 +757,7 @@ func (d *Dispatcher) dispatchCLITurn(
 			Content:  turnRes.Text,
 		})
 	}
-	if len(state.decisions) > 0 && state.decisions[0].InputTokens == 0 && (turnRes.Usage.TotalTokens() > 0 || turnRes.Usage.CostUSD > 0) {
-		state.decisions[0].InputTokens = turnRes.Usage.InputTokens
-		state.decisions[0].OutputTokens = turnRes.Usage.OutputTokens
-		state.decisions[0].CostUSD = turnRes.Usage.CostUSD
-		if u, ok := d.store.Decisions().(interface {
-			SetUsage(context.Context, string, int64, model.Usage) error
-		}); ok && state.decisions[0].Seq > 0 {
-			_ = u.SetUsage(cleanupCtx, runID, state.decisions[0].Seq, turnRes.Usage)
-		}
-	}
+	store.AttributeTurnUsage(cleanupCtx, d.store.Decisions(), runID, state.decisions, turnRes.Usage)
 	return turnRes.Usage, turnRes.TurnCount, turnRes.Text, nil
 }
 

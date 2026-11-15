@@ -72,8 +72,8 @@ type ReadFileParams struct {
 
 // ReadCmdParams holds parameters for the read.cmd investigation tool.
 type ReadCmdParams struct {
-	Program string   `json:"program" jsonschema:"required,enum=gh,enum=nebula,description=CLI program to run (gh or nebula)"`
-	Args    []string `json:"args" jsonschema:"required,description=Read-only command arguments (e.g. [\"pr\",\"view\",\"123\"] or [\"post\",\"get\",\"<id>\"])"`
+	Program string   `json:"program" jsonschema:"required,enum=gh,enum=nebula,enum=git,description=CLI program to run (gh, nebula, or git)"`
+	Args    []string `json:"args" jsonschema:"required,description=Read-only command arguments (e.g. [\"pr\",\"view\",\"123\"], [\"post\",\"get\",\"<id>\"], or [\"status\",\"--short\"])"`
 }
 
 // RegisterInvestigationTools adds read.file and read.cmd to reg when cfg.HasRoots() is true.
@@ -84,7 +84,7 @@ func RegisterInvestigationTools(reg *ToolRegistry, cfg InvestigateConfig) {
 	AddTool(reg, ToolReadFile, "Read a file or list a directory in the held run directory (e.g. OBJECTIVE.md, PROGRESS.md, ESCALATIONS.md, state.json, reports/) or repository checkout", func(_ context.Context, p ReadFileParams) (string, error) {
 		return executeReadFile(cfg, p)
 	})
-	AddTool(reg, ToolReadCmd, "Run a read-only gh or nebula inspection command (e.g. gh pr view/list/checks, nebula post get, nebula terminal logs, nebula mail list)", func(ctx context.Context, p ReadCmdParams) (string, error) {
+	AddTool(reg, ToolReadCmd, "Run a read-only gh, nebula, or git inspection command (e.g. gh pr view/list/checks, nebula post get, nebula terminal logs, nebula mail list, git status/log/diff/show)", func(ctx context.Context, p ReadCmdParams) (string, error) {
 		return executeReadCmd(ctx, cfg, p)
 	})
 }
@@ -160,6 +160,9 @@ func resolveSafePath(roots []string, rawPath string) (string, error) {
 		if err := verifySymlinkConfinement(roots, clean, rawPath); err != nil {
 			return "", err
 		}
+		if isSensitiveInvestigationPath(clean) {
+			return "", fmt.Errorf("read.file: path %q is restricted (sensitive or database file)", rawPath)
+		}
 		return clean, nil
 	}
 
@@ -176,6 +179,9 @@ func resolveSafePath(roots []string, rawPath string) (string, error) {
 			if err := verifySymlinkConfinement(roots, cand, rawPath); err != nil {
 				return "", err
 			}
+			if isSensitiveInvestigationPath(cand) {
+				return "", fmt.Errorf("read.file: path %q is restricted (sensitive or database file)", rawPath)
+			}
 			return cand, nil
 		}
 	}
@@ -185,7 +191,36 @@ func resolveSafePath(roots []string, rawPath string) (string, error) {
 	if err := verifySymlinkConfinement(roots, firstCandidate, rawPath); err != nil {
 		return "", err
 	}
+	if isSensitiveInvestigationPath(firstCandidate) {
+		return "", fmt.Errorf("read.file: path %q is restricted (sensitive or database file)", rawPath)
+	}
 	return firstCandidate, nil
+}
+
+func isSensitiveInvestigationPath(target string) bool {
+	if realTarget, err := filepath.EvalSymlinks(target); err == nil {
+		if hasSensitivePathComponent(realTarget) {
+			return true
+		}
+	}
+	return hasSensitivePathComponent(target)
+}
+
+func hasSensitivePathComponent(p string) bool {
+	clean := filepath.Clean(p)
+	for _, seg := range strings.Split(clean, string(filepath.Separator)) {
+		lower := strings.ToLower(strings.TrimSpace(seg))
+		if lower == ".git" || lower == ".env" || strings.HasPrefix(lower, ".env.") {
+			return true
+		}
+	}
+	base := strings.ToLower(filepath.Base(clean))
+	for _, suffix := range []string{".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm", ".sqlite-wal", ".sqlite-shm"} {
+		if strings.HasSuffix(base, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func verifySymlinkConfinement(roots []string, candidate, rawPath string) error {
@@ -253,8 +288,19 @@ func ResolveGitTopLevel(dir string) string {
 	}
 }
 
+// ResolveRunRepoDir resolves the git repository checkout for a run directory when
+// runDir is inside a git worktree, falling back to ResolveGitTopLevel(fallbackDir).
+func ResolveRunRepoDir(runDir, fallbackDir string) string {
+	if trimmed := strings.TrimSpace(runDir); trimmed != "" {
+		if top := ResolveGitTopLevel(trimmed); top != "" {
+			return top
+		}
+	}
+	return ResolveGitTopLevel(fallbackDir)
+}
+
 // ValidateReadOnlyCommand checks that program and args form a permitted
-// read-only gh or nebula inspection command.
+// read-only gh, nebula, or git inspection command.
 func ValidateReadOnlyCommand(program string, args []string) error {
 	_, _, err := normalizeReadOnlyCommand(program, args)
 	return err
@@ -335,8 +381,37 @@ func normalizeReadOnlyCommand(program string, args []string) (string, []string, 
 		}
 		return "", nil, fmt.Errorf("read.cmd: nebula %s %s is not a permitted read-only command", res, action)
 
+	case "git":
+		sub := cleanArgs[0]
+		if strings.HasPrefix(sub, "-") {
+			return "", nil, fmt.Errorf("read.cmd: git global flag %q is not permitted before subcommand", sub)
+		}
+		for _, arg := range cleanArgs[1:] {
+			if arg == "-c" || arg == "-o" || arg == "--output" || arg == "--ext-diff" || arg == "--textconv" ||
+				strings.HasPrefix(arg, "--output=") || strings.HasPrefix(arg, "--exec-path") ||
+				strings.HasPrefix(arg, "--git-dir") || strings.HasPrefix(arg, "--work-tree") ||
+				strings.HasPrefix(arg, "--config-env") {
+				return "", nil, fmt.Errorf("read.cmd: git flag %q is not permitted", arg)
+			}
+		}
+		switch sub {
+		case "status", "log", "diff", "show", "rev-parse":
+			return prog, cleanArgs, nil
+		case "branch":
+			for _, arg := range cleanArgs[1:] {
+				switch arg {
+				case "-a", "--all", "-r", "--remotes", "-v", "-vv", "--list", "-l", "--show-current":
+				default:
+					return "", nil, fmt.Errorf("read.cmd: git branch argument %q is not permitted in read-only mode", arg)
+				}
+			}
+			return prog, cleanArgs, nil
+		default:
+			return "", nil, fmt.Errorf("read.cmd: git %q is not a permitted read-only subcommand (allowed: status, log, diff, show, rev-parse, branch)", sub)
+		}
+
 	default:
-		return "", nil, fmt.Errorf("read.cmd: program %q is not permitted (only gh and nebula are allowed)", prog)
+		return "", nil, fmt.Errorf("read.cmd: program %q is not permitted (only gh, nebula, and git are allowed)", prog)
 	}
 }
 

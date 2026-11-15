@@ -323,6 +323,7 @@ func NewRunner(
 	planner.criticProvider = cfg.Models.Roles["critic"].Provider
 	planner.effort = cfg.Models.Roles["planner"].Effort
 	planner.agentBackend = backend
+	planner.llmGatewayURL = cfg.LLMGatewayURL
 	planner.investigate = investigate
 	planner.claudeBin = cfg.ClaudeBin
 	planner.codexBin = cfg.CodexBin
@@ -333,9 +334,9 @@ func NewRunner(
 		Model:            cfg.Models.Dispatcher,
 		Provider:         cfg.Models.Roles["dispatcher"].Provider,
 		Effort:           cfg.Models.Roles["dispatcher"].Effort,
+		LLMGatewayURL:    cfg.LLMGatewayURL,
 		ClaudeBin:        cfg.ClaudeBin,
 		CodexBin:         cfg.CodexBin,
-		PromptVersion:    dispatcher.SystemPromptVersion,
 		HardBatchModel:   cfg.Models.DispatcherHard,
 		RecipeCompiler:   planner,
 		OnPlannerRequest: planner.HandlePlannerRequest,
@@ -385,7 +386,7 @@ func runInvestigateConfig(cfg Config) model.InvestigateConfig {
 	}
 	return model.InvestigateConfig{
 		RunDir:  runDir,
-		RepoDir: model.ResolveGitTopLevel(""),
+		RepoDir: model.ResolveRunRepoDir(runDir, ""),
 	}
 }
 
@@ -914,6 +915,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		"holder_id", r.cfg.HolderID,
 		"store", r.cfg.StoreSpec,
 		"driver", r.cfg.DriverKind,
+		"agent_backend", r.cfg.AgentBackend,
 		"dispatcher_model", r.cfg.Models.Dispatcher,
 		"concierge_model", r.cfg.Models.Concierge,
 		"planner_model", r.cfg.Models.Planner,

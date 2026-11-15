@@ -1,8 +1,12 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/model"
@@ -80,6 +84,32 @@ type DirectiveStore interface {
 type DecisionStore interface {
 	Append(ctx context.Context, d Decision) (Decision, error)
 	List(ctx context.Context, filter DecisionFilter) ([]Decision, error)
+	SetUsage(ctx context.Context, runID string, seq int64, usage model.Usage) error
+}
+
+// AttributeTurnUsage attributes CLI turn usage to the first unattributed decision
+// row in decisions and persists it via DecisionStore.SetUsage.
+func AttributeTurnUsage(
+	ctx context.Context,
+	decisions DecisionStore,
+	runID string,
+	rows []Decision,
+	usage model.Usage,
+) {
+	if len(rows) == 0 || (usage.TotalTokens() <= 0 && usage.CostUSD <= 0) {
+		return
+	}
+	for i := range rows {
+		if rows[i].InputTokens == 0 && rows[i].OutputTokens == 0 && rows[i].CostUSD == 0 {
+			rows[i].InputTokens = usage.InputTokens
+			rows[i].OutputTokens = usage.OutputTokens
+			rows[i].CostUSD = usage.CostUSD
+			if decisions != nil && rows[i].Seq > 0 {
+				_ = decisions.SetUsage(ctx, runID, rows[i].Seq, usage)
+			}
+			return
+		}
+	}
 }
 
 // EventStore is an append-only event inbox with per-consumer monotonic cursors.
@@ -138,6 +168,56 @@ func AppendMCPToolCallItems(
 		Content:  output,
 		IsError:  isError,
 	})
+}
+
+// RunRoleAgentTurn executes one user turn on sessions for (runID, threadID, actor),
+// loading and persisting the thread's resume_id and recording observed MCP tool
+// calls as thread items.
+func RunRoleAgentTurn(
+	ctx context.Context,
+	threads ThreadStore,
+	sessions *model.AgentSessionMap,
+	runID, threadID, turnID, actor string,
+	sessCfg model.AgentSessionConfig,
+	req model.AgentTurnRequest,
+	logger *slog.Logger,
+) (*model.AgentTurnResult, error) {
+	if strings.TrimSpace(sessCfg.ResumeID) == "" && threads != nil && threadID != "" {
+		if th, err := threads.GetThread(ctx, threadID); err == nil && th != nil {
+			sessCfg.ResumeID = strings.TrimSpace(th.ResumeID)
+		}
+	}
+	if strings.TrimSpace(sessCfg.WorkDir) == "" {
+		sessCfg.WorkDir = model.DeterministicSessionWorkDir("", runID, cmp.Or(actor, "agent"))
+	}
+	sess := sessions.GetOrCreate(runID, sessCfg)
+
+	cleanupCtx := context.WithoutCancel(ctx)
+	prevObs := req.Observer
+	var callSeq int
+	req.Observer = func(name string, args json.RawMessage, output string, isError bool) {
+		callSeq++
+		callID := fmt.Sprintf("mcp-%d", callSeq)
+		if logger != nil && actor != "" {
+			logger.Info("tool call",
+				"actor", actor,
+				"tool", name,
+				"is_error", isError,
+			)
+		}
+		AppendMCPToolCallItems(cleanupCtx, threads, threadID, turnID, callID, name, args, output, isError)
+		if prevObs != nil {
+			prevObs(name, args, output, isError)
+		}
+	}
+
+	turnRes, err := sess.Turn(ctx, req)
+	if threads != nil && threadID != "" {
+		if sessID := sess.SessionID(); sessID != "" {
+			_ = threads.SetThreadResumeID(cleanupCtx, threadID, sessID)
+		}
+	}
+	return turnRes, err
 }
 
 // RecipeStore persists versioned natural-language recipes and their compiled forms.

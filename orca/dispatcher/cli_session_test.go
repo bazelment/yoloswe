@@ -311,6 +311,23 @@ func TestCLISession_DispatcherLaneSpawnVetterAndCost(t *testing.T) {
 	if turnRec.CostUSD != 0.0125 || turnRec.InputTokens != 120 {
 		t.Fatalf("Turn cost/tokens = %v / %d, want 0.0125 / 120", turnRec.CostUSD, turnRec.InputTokens)
 	}
+	th, err := st.Threads().GetThread(ctx, res.ThreadID)
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if th.InputTokens != 120 || th.OutputTokens != 45 || th.CostUSD != 0.0125 {
+		t.Fatalf("Thread totals = in:%d out:%d cost:%v, want 120/45/0.0125", th.InputTokens, th.OutputTokens, th.CostUSD)
+	}
+	if res.Decisions[0].InputTokens != 120 || res.Decisions[0].OutputTokens != 45 || res.Decisions[0].CostUSD != 0.0125 {
+		t.Fatalf("BatchResult.Decisions[0] usage = %+v, want 120/45/0.0125", res.Decisions[0])
+	}
+	storedDecs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1"})
+	if err != nil || len(storedDecs) != 2 {
+		t.Fatalf("stored Decisions = %+v, err=%v", storedDecs, err)
+	}
+	if storedDecs[0].InputTokens != 120 || storedDecs[0].OutputTokens != 45 || storedDecs[0].CostUSD != 0.0125 {
+		t.Fatalf("stored Decisions[0] usage = %+v, want 120/45/0.0125", storedDecs[0])
+	}
 }
 
 func TestCLISession_ResumeIDSurvivesSimulatedRestart(t *testing.T) {
@@ -356,6 +373,7 @@ func TestCLISession_ResumeIDSurvivesSimulatedRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("d1.Dispatch: %v", err)
 	}
+	workDir1 := d1.Session("run-1").WorkDir()
 	_ = d1.Close()
 
 	th, err := st.Threads().GetThread(ctx, res1.ThreadID)
@@ -382,6 +400,10 @@ func TestCLISession_ResumeIDSurvivesSimulatedRestart(t *testing.T) {
 	if _, err := d2.Dispatch(ctx, "run-1", []store.Event{ev2}); err != nil {
 		t.Fatalf("d2.Dispatch: %v", err)
 	}
+	workDir2 := d2.Session("run-1").WorkDir()
+	if workDir1 == "" || workDir1 != workDir2 {
+		t.Fatalf("Session WorkDir changed across restart: %q vs %q", workDir1, workDir2)
+	}
 
 	invocations := harness.readInvocations(t)
 	if len(invocations) != 2 {
@@ -393,6 +415,37 @@ func TestCLISession_ResumeIDSurvivesSimulatedRestart(t *testing.T) {
 	resumeIdx := slices.Index(invocations[1], "--resume")
 	if resumeIdx < 0 || resumeIdx+1 >= len(invocations[1]) || invocations[1][resumeIdx+1] != "sess-resume-42" {
 		t.Fatalf("second invocation missing --resume sess-resume-42: %v", invocations[1])
+	}
+
+	// Dispatching a 3rd turn on the SAME Dispatcher with a newly added memory and a lane event
+	// must reuse the live CLI subprocess (invocation count stays 2) rather than restarting it.
+	if _, err := st.Memories().Put(ctx, store.MemoryEntry{
+		ID:          "mem-1",
+		Name:        "Rule 1",
+		Description: "Keep sessions warm",
+		Body:        "Do not restart CLI sessions on memory changes.",
+		Scope:       "run",
+		RunID:       "run-1",
+		Type:        "rule",
+		ProposedBy:  "owner",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ev3, err := st.Events().Append(ctx, store.Event{
+		RunID:   "run-1",
+		LaneID:  "lane-1",
+		Kind:    store.EventLaneReport,
+		Class:   store.EventClassJudgment,
+		Summary: "lane reported",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d2.Dispatch(ctx, "run-1", []store.Event{ev3}); err != nil {
+		t.Fatalf("d2.Dispatch turn 3: %v", err)
+	}
+	if got := len(harness.readInvocations(t)); got != 2 {
+		t.Fatalf("CLI invocation count after warm turn with memory + lane batch = %d, want 2 (no subprocess restart)", got)
 	}
 }
 

@@ -464,7 +464,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	)
 
 	fs.StringVar(&configPath, "config", "", "Optional path to JSON config file")
-	fs.StringVar(&agentBackend, "agent-backend", "", "Agent execution backend for dispatcher and planner: loop or cli")
+	fs.StringVar(&agentBackend, "agent-backend", "", "Agent execution backend for dispatcher and planner: loop or cli (default "+string(DefaultAgentBackend)+")")
 	fs.StringVar(&cfg.RunID, "run", "", "Swarm run ID (optional with --goal)")
 	fs.StringVar(&cfg.Objective, "objective", "", "Run objective when creating or updating the run")
 	fs.StringVar(&cfg.Goal, "goal", "", "Run goal to plan at startup (generates a run ID if omitted)")
@@ -731,11 +731,11 @@ func (f modelClientFunc) CreateMessage(ctx context.Context, req model.Request) (
 }
 
 type providerRoutingClient struct {
-	fn modelClientFunc
+	inner model.ModelClient
 }
 
 func (c *providerRoutingClient) CreateMessage(ctx context.Context, req model.Request) (*model.Response, error) {
-	return c.fn(ctx, req)
+	return c.inner.CreateMessage(ctx, req)
 }
 
 func isDefaultRoutingClient(client model.ModelClient) bool {
@@ -774,18 +774,18 @@ func openModelClient(cfg Config, clk clock.Clock) (model.ModelClient, error) {
 		anthropicOpts = append(anthropicOpts, model.WithBaseURL(cfg.LLMGatewayURL))
 	}
 	clients := map[string]model.ModelClient{"openai": model.NewOpenAIClient(openOpts...), "anthropic": model.NewHTTPClient(anthropicOpts...), "claude-cli": model.NewCLIClient("claude-cli"), "codex-cli": model.NewCLIClient("codex-cli")}
-	var client model.ModelClient = &providerRoutingClient{fn: func(ctx context.Context, req model.Request) (*model.Response, error) {
+	var inner model.ModelClient = modelClientFunc(func(ctx context.Context, req model.Request) (*model.Response, error) {
 		provider := cmp.Or(req.Metadata["provider"], cfg.ModelProvider, "openai")
 		selected, ok := clients[provider]
 		if !ok {
 			return nil, fmt.Errorf("orca: unsupported provider %q", provider)
 		}
 		return selected.CreateMessage(ctx, req)
-	}}
+	})
 	if cfg.RecordPath != "" {
-		client = model.NewRecordingFakeClient(cfg.RecordPath, client)
+		inner = model.NewRecordingFakeClient(cfg.RecordPath, inner)
 	}
-	return client, nil
+	return &providerRoutingClient{inner: inner}, nil
 }
 
 func openNebulaDriver(cfg Config, st store.Store, clk clock.Clock) (*nebula.Driver, error) {

@@ -3,8 +3,11 @@
 // snapshot, runs a bounded tool loop, and vets every tool call against invariants.
 package dispatcher
 
-// SystemPromptVersion identifies the fixed system prompt revision compiled into the binary.
+// SystemPromptVersion identifies the fixed loop system prompt revision compiled into the binary.
 const SystemPromptVersion = "dispatcher-v5"
+
+// CLISystemPromptVersion identifies the system prompt revision for long-lived CLI agent sessions.
+const CLISystemPromptVersion = "dispatcher-cli-v1"
 
 const (
 	promptResponsibilities = `## Your Two Responsibilities
@@ -90,9 +93,9 @@ Complete your decisions within the turn budget and end your turn with a brief su
 
 // CLISystemPrompt is the role system prompt for long-lived CLI agent sessions,
 // trimmed to goal and judgment rather than loop/snapshot mechanics.
-const CLISystemPrompt = `# Nebula Orchestrator Dispatcher (` + SystemPromptVersion + `)
+const CLISystemPrompt = `# Nebula Orchestrator Dispatcher (` + CLISystemPromptVersion + `)
 
-You are the **Dispatcher** for a Nebula swarm run, running as a persistent agent session per held run. A deterministic Go Controller owns all waiting, mechanical phase transitions, CI polling, stall timers, and merge gates. You are invoked on each judgment event batch with the current Store snapshot and Orca's MCP tools. All mutations must go through Orca's tools (where invariants are vetted before execution). Use ` + "`memory_read`" + ` for relevant memory bodies and include applicable memories in worker briefs; when run/repo investigation tools (` + "`read_file`" + `, ` + "`read_cmd`" + `) are available, use them to inspect ` + "`OBJECTIVE.md`" + `, ` + "`PROGRESS.md`" + `, lane reports, or PR/Nebula state before deciding. Every tool call is recorded in the decision log and its payload is persisted by the tool, so a call never needs a ` + "`directive.note`" + ` copy of itself.
+You are the **Dispatcher** for a Nebula swarm run, running as a persistent agent session per held run. A deterministic Go Controller owns all waiting, mechanical phase transitions, CI polling, stall timers, and merge gates. You are invoked on each judgment event batch with the current Store snapshot and Orca's MCP tools (in MCP wire names, dots in tool names are replaced with underscores ` + "`_`" + `, e.g. ` + "`lane.spawn`" + ` is exposed as ` + "`lane_spawn`" + `). All mutations must go through Orca's tools (where invariants are vetted before execution). Use ` + "`memory_read`" + ` for relevant memory bodies and include applicable memories in worker briefs; when run/repo investigation tools (` + "`read_file`" + `, ` + "`read_cmd`" + `) are available, use them to inspect ` + "`OBJECTIVE.md`" + `, ` + "`PROGRESS.md`" + `, lane reports, or PR/Nebula state before deciding. Every tool call is recorded in the decision log and its payload is persisted by the tool, so a call never needs a ` + "`directive.note`" + ` copy of itself.
 
 ` + promptResponsibilities + `
 

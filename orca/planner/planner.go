@@ -296,6 +296,7 @@ type Config struct {
 	Provider         string
 	Model            string
 	Effort           string
+	LLMGatewayURL    string
 	ClaudeBin        string
 	CodexBin         string
 	SystemPrompt     string
@@ -504,20 +505,6 @@ func (p *Planner) startFreshThread(ctx context.Context, runID, goal string) (sto
 		return store.Thread{}, store.Turn{}, err
 	}
 	return th, turnRec, nil
-}
-
-func (p *Planner) sessionForRun(_ context.Context, runID string, th store.Thread) *model.AgentSession {
-	return p.sessions.GetOrCreate(runID, model.AgentSessionConfig{
-		Provider:         p.cfg.Provider,
-		Model:            p.cfg.Model,
-		Effort:           p.cfg.Effort,
-		SystemPrompt:     p.cfg.SystemPrompt,
-		ResumeID:         strings.TrimSpace(th.ResumeID),
-		ClaudeBin:        p.cfg.ClaudeBin,
-		CodexBin:         p.cfg.CodexBin,
-		MaxSessionTokens: p.cfg.MaxSessionTokens,
-		MaxSessionTurns:  p.cfg.MaxSessionTurns,
-	})
 }
 
 // DirectiveHandler returns a concierge.DirectiveHandler that triggers the Planner on plan_import and recipe_edit directives.
@@ -853,23 +840,36 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 
 	if p.cfg.AgentBackend == model.AgentBackendCLI {
 		model.RegisterInvestigationTools(reg, p.cfg.Investigate)
-		sess := p.sessionForRun(ctx, runID, th)
-		var callSeq int
-		turnRes, tErr := sess.Turn(ctx, model.AgentTurnRequest{
-			Prompt:       promptText,
-			Model:        p.cfg.Model,
-			SystemPrompt: p.cfg.SystemPrompt,
-			Registry:     reg,
-			MaxToolCalls: p.cfg.MaxTurns,
-			Observer: func(name string, args json.RawMessage, output string, isError bool) {
-				callSeq++
-				callID := fmt.Sprintf("mcp-%d", callSeq)
-				store.AppendMCPToolCallItems(cleanupCtx, p.store.Threads(), th.ID, turnRec.ID, callID, name, args, output, isError)
+		turnRes, tErr := store.RunRoleAgentTurn(
+			ctx,
+			p.store.Threads(),
+			&p.sessions,
+			runID,
+			th.ID,
+			turnRec.ID,
+			ActorPlanner,
+			model.AgentSessionConfig{
+				Provider:         p.cfg.Provider,
+				Model:            p.cfg.Model,
+				Effort:           p.cfg.Effort,
+				SystemPrompt:     p.cfg.SystemPrompt,
+				WorkDir:          model.DeterministicSessionWorkDir(p.cfg.Investigate.RunDir, runID, ActorPlanner),
+				ResumeID:         strings.TrimSpace(th.ResumeID),
+				LLMGatewayURL:    p.cfg.LLMGatewayURL,
+				ClaudeBin:        p.cfg.ClaudeBin,
+				CodexBin:         p.cfg.CodexBin,
+				MaxSessionTokens: p.cfg.MaxSessionTokens,
+				MaxSessionTurns:  p.cfg.MaxSessionTurns,
 			},
-		})
-		if sessID := sess.SessionID(); sessID != "" {
-			_ = p.store.Threads().SetThreadResumeID(cleanupCtx, th.ID, sessID)
-		}
+			model.AgentTurnRequest{
+				Prompt:       promptText,
+				Model:        p.cfg.Model,
+				SystemPrompt: p.cfg.SystemPrompt,
+				Registry:     reg,
+				MaxToolCalls: p.cfg.MaxTurns,
+			},
+			nil,
+		)
 		loopErr = tErr
 		if turnRes != nil {
 			usage = turnRes.Usage
@@ -883,19 +883,7 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 					Content:  modelText,
 				})
 			}
-			for i := range decisions {
-				if decisions[i].InputTokens == 0 && (usage.TotalTokens() > 0 || usage.CostUSD > 0) {
-					decisions[i].InputTokens = usage.InputTokens
-					decisions[i].OutputTokens = usage.OutputTokens
-					decisions[i].CostUSD = usage.CostUSD
-					if u, ok := p.store.Decisions().(interface {
-						SetUsage(context.Context, string, int64, model.Usage) error
-					}); ok && decisions[i].Seq > 0 {
-						_ = u.SetUsage(cleanupCtx, runID, decisions[i].Seq, usage)
-					}
-					break
-				}
-			}
+			store.AttributeTurnUsage(cleanupCtx, p.store.Decisions(), runID, decisions, usage)
 		}
 	} else {
 		req := model.Request{

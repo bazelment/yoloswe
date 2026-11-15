@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -847,6 +848,9 @@ type launchProbe struct {
 }
 
 func TestMain(m *testing.M) {
+	if os.Getenv("GO_WANT_FAKE_MAIN_PLANNER_CLAUDE_CLI") == "1" {
+		runFakeMainPlannerClaudeCLI()
+	}
 	if os.Getenv(launchProbeEnv) != "" && len(os.Args) > 1 {
 		cfg, _, err := parseFlags(os.Args[1], os.Args[2:], os.Stderr)
 		if err != nil {
@@ -2585,5 +2589,142 @@ func TestAgentBackendFlag_SelectsLoopOrCLI(t *testing.T) {
 				t.Fatalf("cfg.AgentBackend = %q, want %q", cfg.AgentBackend, tc.want)
 			}
 		})
+	}
+}
+
+func TestEffectiveAgentBackend_PreservesCLIWithRecordingWrapper(t *testing.T) {
+	t.Parallel()
+	cfg, _, err := parseFlags("run", nil, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing, err := openModelClient(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := effectiveAgentBackend(cfg, routing); got != model.AgentBackendCLI {
+		t.Fatalf("effectiveAgentBackend(routing) = %q, want cli", got)
+	}
+	recCfg := cfg
+	recCfg.RecordPath = filepath.Join(t.TempDir(), "rec.jsonl")
+	rec, err := openModelClient(recCfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := effectiveAgentBackend(recCfg, rec); got != model.AgentBackendCLI {
+		t.Fatalf("effectiveAgentBackend(recording) = %q, want cli", got)
+	}
+	fake := model.NewFakeClient()
+	if got := effectiveAgentBackend(cfg, fake); got != model.AgentBackendLoop {
+		t.Fatalf("effectiveAgentBackend(fake) = %q, want loop", got)
+	}
+}
+
+func runFakeMainPlannerClaudeCLI() {
+	streamFile := os.Getenv("FAKE_MAIN_PLANNER_CLAUDE_STREAM_FILE")
+	data, err := os.ReadFile(streamFile)
+	if err != nil {
+		os.Exit(1)
+	}
+	var lines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			lines = append(lines, trimmed)
+		}
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		inLine := strings.TrimSpace(scanner.Text())
+		if inLine == "" {
+			continue
+		}
+		var msg struct {
+			Type      string `json:"type"`
+			RequestID string `json:"request_id"`
+			Request   struct {
+				Subtype string `json:"subtype"`
+			} `json:"request"`
+		}
+		if json.Unmarshal([]byte(inLine), &msg) != nil {
+			continue
+		}
+		switch msg.Type {
+		case "control_request":
+			if msg.Request.Subtype == "initialize" {
+				fmt.Fprintf(os.Stdout, `{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{}}}`+"\n", msg.RequestID)
+			}
+		case "user":
+			for _, outLine := range lines {
+				fmt.Fprintln(os.Stdout, outLine)
+				var outEnv struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal([]byte(outLine), &outEnv) == nil && outEnv.Type == "control_request" {
+					for scanner.Scan() {
+						respLine := strings.TrimSpace(scanner.Text())
+						var ctrlResp struct {
+							Type string `json:"type"`
+						}
+						if json.Unmarshal([]byte(respLine), &ctrlResp) == nil && ctrlResp.Type == "control_response" {
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	os.Exit(0)
+}
+
+func TestMainPlanner_ProposePlanCLI(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	defer func() { _ = st.Close() }()
+
+	if err := st.Runs().Create(ctx, store.Run{ID: "run-cli-plan", Objective: "initial"}); err != nil {
+		t.Fatal(err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	streamPath := filepath.Join(dir, "main_planner_stream.jsonl")
+	streamContent := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"sess-main-plan-1","model":"claude-opus-5-5","cwd":"/tmp"}`,
+		`{"type":"control_request","request_id":"mcp-mp-1","request":{"subtype":"mcp_message","server_name":"orca","message":{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_plan_reconciliation","arguments":{"objective":"updated objective","summary":"Added item-main-cli","add_items":[{"id":"item-main-cli","title":"Main CLI item","acceptance":"green","priority":"p0"}]}}}}}`,
+		`{"type":"assistant","message":{"model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"Submitted plan."}]},"session_id":"sess-main-plan-1"}`,
+		`{"type":"result","subtype":"success","is_error":false,"session_id":"sess-main-plan-1","result":"Submitted plan.","num_turns":1,"duration_ms":20,"duration_api_ms":15,"total_cost_usd":0.015,"usage":{"input_tokens":150,"output_tokens":60}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(streamPath, []byte(streamContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binPath := filepath.Join(dir, "fake-main-planner-claude")
+	script := fmt.Sprintf("#!/bin/sh\nexport GO_WANT_FAKE_MAIN_PLANNER_CLAUDE_CLI=1\nexport FAKE_MAIN_PLANNER_CLAUDE_STREAM_FILE=%q\nexec %q\n", streamPath, exe)
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewPlanner(st, clk, nil, "claude-opus-5-5", nil)
+	p.providerName = "claude-cli"
+	p.agentBackend = model.AgentBackendCLI
+	p.claudeBin = binPath
+	p.investigate = model.InvestigateConfig{RunDir: dir}
+	t.Cleanup(func() { _ = p.Close() })
+
+	if err := p.HandlePlannerRequest(ctx, "run-cli-plan", "Add main CLI item", ""); err != nil {
+		t.Fatalf("HandlePlannerRequest: %v", err)
+	}
+	item, err := st.Backlog().Get(ctx, "run-cli-plan", "item-main-cli")
+	if err != nil || item.Title != "Main CLI item" {
+		t.Fatalf("Backlog item = %+v, err=%v", item, err)
+	}
+	decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-cli-plan"})
+	if err != nil || len(decs) != 1 || decs[0].InputTokens != 150 || decs[0].CostUSD != 0.015 {
+		t.Fatalf("Decisions = %+v, err=%v; want 150 tokens / 0.015 USD", decs, err)
 	}
 }

@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 )
 
 // AgentBackend selects how Dispatcher and Planner turns are executed.
@@ -54,6 +57,11 @@ func ParseAgentBackend(raw string) (AgentBackend, error) {
 }
 
 // AgentSessionConfig configures a long-lived CLI agent session for a run role.
+// For Claude sessions, built-in tools are disabled via WithTools("") and
+// WithDisallowedTools so the model can only invoke Orca's MCP tools. For Codex
+// sessions, the thread runs in a read-only sandbox inside WorkDir with
+// ApprovalPolicyNever and developer instructions restricting tool calls to the
+// Orca MCP server.
 type AgentSessionConfig struct {
 	Provider         string
 	Model            string
@@ -61,10 +69,43 @@ type AgentSessionConfig struct {
 	SystemPrompt     string
 	WorkDir          string
 	ResumeID         string
+	LLMGatewayURL    string
 	ClaudeBin        string
 	CodexBin         string
 	MaxSessionTokens int
 	MaxSessionTurns  int
+}
+
+// DeterministicSessionWorkDir returns a stable working directory path for a
+// (runID, role) CLI agent session so `claude --resume <id>` resolves the same
+// project conversation directory across process restarts and re-adoptions.
+func DeterministicSessionWorkDir(baseDir, runID, role string) string {
+	roleSeg := sanitizePathSegment(cmp.Or(strings.TrimSpace(role), "agent"))
+	if trimmedBase := strings.TrimSpace(baseDir); trimmedBase != "" {
+		if abs, err := filepath.Abs(trimmedBase); err == nil {
+			trimmedBase = abs
+		}
+		return filepath.Join(filepath.Clean(trimmedBase), ".orca-sessions", roleSeg)
+	}
+	runSeg := sanitizePathSegment(cmp.Or(strings.TrimSpace(runID), "default"))
+	return filepath.Join(os.TempDir(), "orca-agent-sessions", runSeg, roleSeg)
+}
+
+func sanitizePathSegment(raw string) string {
+	var b strings.Builder
+	for _, r := range raw {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "default"
+	}
+	return out
 }
 
 func (c AgentSessionConfig) withDefaults() AgentSessionConfig {
@@ -156,6 +197,16 @@ func (s *AgentSession) SessionID() string {
 	return s.sessionID
 }
 
+// WorkDir returns the configured or temporary working directory for this session.
+func (s *AgentSession) WorkDir() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if wd := strings.TrimSpace(s.cfg.WorkDir); wd != "" {
+		return wd
+	}
+	return s.tempWorkDir
+}
+
 // SetResumeID sets the session ID to resume when the session has not yet started
 // or after a simulated restart.
 func (s *AgentSession) SetResumeID(id string) {
@@ -216,10 +267,9 @@ func (s *AgentSession) Turn(ctx context.Context, req AgentTurnRequest) (*AgentTu
 		rotated = true
 	}
 
-	// If the tool set or system prompt changed across turns (e.g. a run-level
-	// turn followed by a lane-level turn with read.* tools, or a new memory added),
-	// restart the CLI process with --resume so it reloads tools/list and system
-	// prompt while keeping conversation context.
+	// If the tool set or system prompt changed across turns, restart the CLI
+	// process with --resume so it reloads tools/list and system prompt while
+	// keeping conversation context.
 	if s.started && (!slices.Equal(s.toolNames, newTools) || sysPromptChanged) {
 		prevID := s.sessionID
 		_ = s.stopLocked()
@@ -227,12 +277,17 @@ func (s *AgentSession) Turn(ctx context.Context, req AgentTurnRequest) (*AgentTu
 	}
 
 	resumingFromPrior := !s.started && s.sessionID != ""
+	priorResumeID := s.sessionID
 	effectiveModel := cmp.Or(strings.TrimSpace(req.Model), s.cfg.Model)
 	res, err := s.runTurnLocked(ctx, req.Prompt, effectiveModel, newTools)
 	if err != nil && resumingFromPrior && s.bridge.CallCount() == 0 && ctx.Err() == nil {
 		// If resuming a caller-supplied prior session ID failed before any tool
 		// call executed, fall back to a fresh session so a stale resume ID never
 		// wedges the run.
+		slog.Warn("agent session resume failed; rotating to fresh session",
+			"session_id", priorResumeID,
+			"error", err,
+		)
 		_ = s.stopLocked()
 		s.sessionID = ""
 		rotated = true
@@ -284,6 +339,10 @@ func (s *AgentSession) runTurnLocked(
 	}
 }
 
+func (s *AgentSession) resolvedGatewayURL() string {
+	return cmp.Or(strings.TrimSpace(s.cfg.LLMGatewayURL), strings.TrimSpace(os.Getenv("LLM_GATEWAY_URL")))
+}
+
 func (s *AgentSession) runClaudeTurnLocked(
 	ctx context.Context,
 	prompt string,
@@ -291,6 +350,10 @@ func (s *AgentSession) runClaudeTurnLocked(
 	newTools []string,
 ) (*AgentTurnResult, error) {
 	if !s.started || s.claudeSess == nil {
+		wd, err := s.ensureWorkDirLocked()
+		if err != nil {
+			return nil, err
+		}
 		bin := cmp.Or(strings.TrimSpace(s.cfg.ClaudeBin), strings.TrimSpace(os.Getenv("ORCA_CLAUDE_CLI")), strings.TrimSpace(os.Getenv("CLAUDE_BIN")), "claude")
 		cliModel := cliModelFlag("claude", effectiveModel)
 
@@ -313,13 +376,20 @@ func (s *AgentSession) runClaudeTurnLocked(
 		if cliModel != "" {
 			opts = append(opts, claude.WithModel(cliModel))
 		}
+		if gw := s.resolvedGatewayURL(); gw != "" {
+			opts = append(opts, claude.WithLLMEndpoint(llmendpoint.Endpoint{
+				BaseURL:   gw,
+				APIKeyEnv: "ANTHROPIC_API_KEY",
+				APIKey:    cmp.Or(os.Getenv("ANTHROPIC_API_KEY"), os.Getenv("ANTHROPIC_AUTH_TOKEN"), os.Getenv("NEBULA_LLM_KEY")),
+			}))
+		}
 		if effort := strings.TrimSpace(s.cfg.Effort); effort != "" {
 			opts = append(opts, claude.WithEffort(claude.EffortLevel(effort)))
 		}
 		if sys := strings.TrimSpace(s.cfg.SystemPrompt); sys != "" {
 			opts = append(opts, claude.WithSystemPrompt(sys))
 		}
-		if wd, wErr := s.ensureWorkDirLocked(); wErr == nil && wd != "" {
+		if wd != "" {
 			opts = append(opts, claude.WithWorkDir(wd))
 		}
 		if s.sessionID != "" {
@@ -399,18 +469,24 @@ func (s *AgentSession) ensureMCPServerLocked() (string, error) {
 
 func (s *AgentSession) ensureWorkDirLocked() (string, error) {
 	if wd := strings.TrimSpace(s.cfg.WorkDir); wd != "" {
-		return wd, nil
+		clean := filepath.Clean(wd)
+		if err := os.MkdirAll(clean, 0o700); err != nil {
+			return "", fmt.Errorf("orca/model: create session workdir %q: %w", clean, err)
+		}
+		return clean, nil
 	}
 	if s.tempWorkDir != "" {
 		return s.tempWorkDir, nil
 	}
 	dir, err := os.MkdirTemp("", "orca-agent-session-*")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("orca/model: create temp session workdir: %w", err)
 	}
 	s.tempWorkDir = dir
 	return dir, nil
 }
+
+const codexToolConfinementInstruction = "\n\nTool Confinement: Invoke ONLY the `orca` MCP server tools (`mcp__orca__*`). Never invoke built-in shell or filesystem tools."
 
 func (s *AgentSession) runCodexTurnLocked(
 	ctx context.Context,
@@ -419,6 +495,10 @@ func (s *AgentSession) runCodexTurnLocked(
 	newTools []string,
 ) (*AgentTurnResult, error) {
 	if !s.started || s.codexClient == nil || s.codexThread == nil {
+		wd, err := s.ensureWorkDirLocked()
+		if err != nil {
+			return nil, err
+		}
 		mcpURL, err := s.ensureMCPServerLocked()
 		if err != nil {
 			return nil, err
@@ -433,25 +513,34 @@ func (s *AgentSession) runCodexTurnLocked(
 			appArgs = append(appArgs, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
 		}
 
-		client := codex.NewClient(
+		clientOpts := []codex.ClientOption{
 			codex.WithCodexPath(bin),
-			codex.WithAppServerArgs(appArgs...),
-		)
+		}
+		if gw := s.resolvedGatewayURL(); gw != "" {
+			clientOpts = append(clientOpts, codex.WithLLMEndpoint(llmendpoint.Endpoint{
+				BaseURL:   gw,
+				APIKeyEnv: "OPENAI_API_KEY",
+				APIKey:    cmp.Or(os.Getenv("OPENAI_API_KEY"), os.Getenv("NEBULA_LLM_KEY")),
+				Wire:      llmendpoint.WireAPIResponses,
+			}))
+		}
+		clientOpts = append(clientOpts, codex.WithAppServerArgs(appArgs...))
+
+		client := codex.NewClient(clientOpts...)
 		// Start the long-lived app-server process with a non-cancelling context so
 		// a request-scoped first turn does not kill the subprocess on return.
 		if err := client.Start(context.WithoutCancel(ctx)); err != nil {
 			return nil, fmt.Errorf("orca/model: start codex app-server: %w", err)
 		}
 
+		devInstructions := strings.TrimSpace(s.cfg.SystemPrompt) + codexToolConfinementInstruction
 		threadCfg := map[string]interface{}{
 			"mcp_servers": map[string]interface{}{
 				"orca": map[string]interface{}{
 					"url": mcpURL,
 				},
 			},
-		}
-		if sys := strings.TrimSpace(s.cfg.SystemPrompt); sys != "" {
-			threadCfg["developer_instructions"] = sys
+			"developer_instructions": strings.TrimSpace(devInstructions),
 		}
 		if effort := strings.TrimSpace(s.cfg.Effort); effort != "" {
 			threadCfg["model_reasoning_effort"] = effort
@@ -465,7 +554,7 @@ func (s *AgentSession) runCodexTurnLocked(
 		if cliModel != "" {
 			threadOpts = append(threadOpts, codex.WithModel(cliModel))
 		}
-		if wd, wErr := s.ensureWorkDirLocked(); wErr == nil && wd != "" {
+		if wd != "" {
 			threadOpts = append(threadOpts, codex.WithWorkDir(wd))
 		}
 

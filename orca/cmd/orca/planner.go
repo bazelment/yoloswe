@@ -95,6 +95,7 @@ type Planner struct {
 	criticProvider string
 	effort         string
 	agentBackend   model.AgentBackend
+	llmGatewayURL  string
 	claudeBin      string
 	codexBin       string
 	modelName      string
@@ -456,24 +457,6 @@ func (p *Planner) proposePlan(ctx context.Context, runID, threadID, turnID strin
 	return rec, calls[0].Name == SubmitOpenPlanTool, resp.Usage, nil
 }
 
-func (p *Planner) sessionForRun(ctx context.Context, runID, threadID, systemPrompt string) *model.AgentSession {
-	var resumeID string
-	if p.store != nil && threadID != "" {
-		if th, err := p.store.Threads().GetThread(ctx, threadID); err == nil && th != nil {
-			resumeID = strings.TrimSpace(th.ResumeID)
-		}
-	}
-	return p.sessions.GetOrCreate(runID, model.AgentSessionConfig{
-		Provider:     p.providerName,
-		Model:        p.modelName,
-		Effort:       p.effort,
-		SystemPrompt: systemPrompt,
-		ResumeID:     resumeID,
-		ClaudeBin:    p.claudeBin,
-		CodexBin:     p.codexBin,
-	})
-}
-
 func (p *Planner) proposePlanCLI(ctx context.Context, runID, threadID, turnID string, req model.Request, allowOpen bool) (PlanReconciliation, bool, model.Usage, error) {
 	reg := model.NewToolRegistry()
 	var (
@@ -507,29 +490,37 @@ func (p *Planner) proposePlanCLI(ctx context.Context, runID, threadID, turnID st
 		userPrompt = req.Messages[len(req.Messages)-1].Text()
 	}
 
-	sess := p.sessionForRun(ctx, runID, threadID, req.System)
-	cleanupCtx := context.WithoutCancel(ctx)
-	var callSeq int
-	turnRes, err := sess.Turn(ctx, model.AgentTurnRequest{
-		Prompt:       userPrompt,
-		Model:        p.modelName,
-		SystemPrompt: req.System,
-		Registry:     reg,
-		MaxToolCalls: model.DefaultMaxTurns,
-		Observer: func(name string, args json.RawMessage, output string, isError bool) {
-			if p.store == nil || threadID == "" {
-				return
-			}
-			callSeq++
-			callID := fmt.Sprintf("mcp-%d", callSeq)
-			store.AppendMCPToolCallItems(cleanupCtx, p.store.Threads(), threadID, turnID, callID, name, args, output, isError)
-		},
-	})
-	if p.store != nil && threadID != "" {
-		if sessID := sess.SessionID(); sessID != "" {
-			_ = p.store.Threads().SetThreadResumeID(cleanupCtx, threadID, sessID)
-		}
+	var threads store.ThreadStore
+	if p.store != nil {
+		threads = p.store.Threads()
 	}
+	turnRes, err := store.RunRoleAgentTurn(
+		ctx,
+		threads,
+		&p.sessions,
+		runID,
+		threadID,
+		turnID,
+		ActorPlanner,
+		model.AgentSessionConfig{
+			Provider:      p.providerName,
+			Model:         p.modelName,
+			Effort:        p.effort,
+			SystemPrompt:  req.System,
+			WorkDir:       model.DeterministicSessionWorkDir(p.investigate.RunDir, runID, ActorPlanner),
+			LLMGatewayURL: p.llmGatewayURL,
+			ClaudeBin:     p.claudeBin,
+			CodexBin:      p.codexBin,
+		},
+		model.AgentTurnRequest{
+			Prompt:       userPrompt,
+			Model:        p.modelName,
+			SystemPrompt: req.System,
+			Registry:     reg,
+			MaxToolCalls: model.DefaultMaxTurns,
+		},
+		p.logger,
+	)
 	if err != nil {
 		return PlanReconciliation{}, false, model.Usage{}, err
 	}

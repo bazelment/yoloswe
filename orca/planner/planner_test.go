@@ -1,9 +1,11 @@
 package planner_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -934,5 +936,125 @@ func TestPlanner_MemoryBodiesReachContextAndRebrief(t *testing.T) {
 		if len(drv.Steers) != 1 || !strings.Contains(drv.Steers[0].Message, want) || strings.Contains(drv.Steers[0].Message, "Correction: random ports only.") {
 			t.Fatalf("planner rebrief omitted %q: %+v", want, drv.Steers)
 		}
+	}
+}
+
+func TestFakePlannerClaudeCLIHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_FAKE_PLANNER_CLAUDE_CLI") != "1" {
+		return
+	}
+	streamFile := os.Getenv("FAKE_PLANNER_CLAUDE_STREAM_FILE")
+	data, err := os.ReadFile(streamFile)
+	if err != nil {
+		os.Exit(1)
+	}
+	var lines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			lines = append(lines, trimmed)
+		}
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		inLine := strings.TrimSpace(scanner.Text())
+		if inLine == "" {
+			continue
+		}
+		var msg struct {
+			Type      string `json:"type"`
+			RequestID string `json:"request_id"`
+			Request   struct {
+				Subtype string `json:"subtype"`
+			} `json:"request"`
+		}
+		if json.Unmarshal([]byte(inLine), &msg) != nil {
+			continue
+		}
+		switch msg.Type {
+		case "control_request":
+			if msg.Request.Subtype == "initialize" {
+				fmt.Fprintf(os.Stdout, `{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{}}}`+"\n", msg.RequestID)
+			}
+		case "user":
+			for _, outLine := range lines {
+				fmt.Fprintln(os.Stdout, outLine)
+				var outEnv struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal([]byte(outLine), &outEnv) == nil && outEnv.Type == "control_request" {
+					for scanner.Scan() {
+						respLine := strings.TrimSpace(scanner.Text())
+						var ctrlResp struct {
+							Type string `json:"type"`
+						}
+						if json.Unmarshal([]byte(respLine), &ctrlResp) == nil && ctrlResp.Type == "control_response" {
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	os.Exit(0)
+}
+
+func TestPlanner_CLISessionBackend(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := seedPlannerStore(t)
+	ctx := t.Context()
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	streamPath := filepath.Join(dir, "planner_stream.jsonl")
+	streamContent := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"sess-planner-cli-1","model":"claude-opus-5-5","cwd":"/tmp"}`,
+		`{"type":"control_request","request_id":"mcp-plan-1","request":{"subtype":"mcp_message","server_name":"orca","message":{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_reconciliation","arguments":{"summary":"Add cli-planned item","backlog_diff":{"add":[{"id":"item-cli-plan","title":"CLI planned work","acceptance":"tests pass","priority":"p0"}]}}}}}}`,
+		`{"type":"assistant","message":{"model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"Reconciled plan via CLI session."}]},"session_id":"sess-planner-cli-1"}`,
+		`{"type":"result","subtype":"success","is_error":false,"session_id":"sess-planner-cli-1","result":"Reconciled plan via CLI session.","num_turns":1,"duration_ms":20,"duration_api_ms":15,"total_cost_usd":0.025,"usage":{"input_tokens":200,"output_tokens":80}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(streamPath, []byte(streamContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binPath := filepath.Join(dir, "fake-planner-claude")
+	script := fmt.Sprintf("#!/bin/sh\nexport GO_WANT_FAKE_PLANNER_CLAUDE_CLI=1\nexport FAKE_PLANNER_CLAUDE_STREAM_FILE=%q\nexec %q -test.run=^TestFakePlannerClaudeCLIHelper$ -- \"$@\"\n", streamPath, exe)
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	p := planner.New(planner.Config{
+		AgentBackend: model.AgentBackendCLI,
+		Provider:     "claude-cli",
+		Model:        "claude-opus-5-5",
+		ClaudeBin:    binPath,
+		Investigate: model.InvestigateConfig{
+			RunDir: dir,
+		},
+	}, st, drv, clk, nil)
+	t.Cleanup(func() { _ = p.Close() })
+
+	res, err := p.HandleSignal(ctx, planner.Signal{
+		RunID:  "run-1",
+		Kind:   planner.SignalEmptyBacklog,
+		Reason: "Plan next milestone via CLI",
+	})
+	if err != nil {
+		t.Fatalf("HandleSignal: %v", err)
+	}
+	if !slices.Contains(res.Applied.AddedItems, "item-cli-plan") {
+		t.Fatalf("AddedItems = %v, want item-cli-plan", res.Applied.AddedItems)
+	}
+	if res.Usage.InputTokens != 200 || res.Usage.OutputTokens != 80 || res.Usage.CostUSD != 0.025 {
+		t.Fatalf("Result.Usage = %+v, want 200/80/0.025", res.Usage)
+	}
+	th, err := st.Threads().GetThread(ctx, res.ThreadID)
+	if err != nil || th.ResumeID != "sess-planner-cli-1" {
+		t.Fatalf("Thread = %+v, err=%v; want ResumeID=sess-planner-cli-1", th, err)
+	}
+	if len(res.Decisions) == 0 || res.Decisions[0].InputTokens != 200 || res.Decisions[0].CostUSD != 0.025 {
+		t.Fatalf("Result.Decisions = %+v, want attributed usage 200/0.025", res.Decisions)
 	}
 }

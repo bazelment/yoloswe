@@ -172,7 +172,7 @@ func newAdoptedPlanner(cfg Config, h hostSwarms, st store.Store, clk clock.Clock
 	}
 	investigate := model.InvestigateConfig{
 		RunDir:  runDir,
-		RepoDir: model.ResolveGitTopLevel(""),
+		RepoDir: model.ResolveRunRepoDir(runDir, ""),
 	}
 	planner := NewPlanner(st, clk, roleClient(client, cfg, "planner"), cfg.Models.Planner, logger)
 	planner.critic = roleClient(client, cfg, "critic")
@@ -181,6 +181,7 @@ func newAdoptedPlanner(cfg Config, h hostSwarms, st store.Store, clk clock.Clock
 	planner.criticProvider = cfg.Models.Roles["critic"].Provider
 	planner.effort = cfg.Models.Roles["planner"].Effort
 	planner.agentBackend = backend
+	planner.llmGatewayURL = cfg.LLMGatewayURL
 	planner.investigate = investigate
 	planner.claudeBin = cfg.ClaudeBin
 	planner.codexBin = cfg.CodexBin
@@ -238,9 +239,9 @@ func adoptedDispatchers(
 			Model:            cfg.Models.Dispatcher,
 			Provider:         cfg.Models.Roles["dispatcher"].Provider,
 			Effort:           cfg.Models.Roles["dispatcher"].Effort,
+			LLMGatewayURL:    cfg.LLMGatewayURL,
 			ClaudeBin:        cfg.ClaudeBin,
 			CodexBin:         cfg.CodexBin,
-			PromptVersion:    dispatcher.SystemPromptVersion,
 			HardBatchModel:   cfg.Models.DispatcherHard,
 			RecipeCompiler:   planner,
 			OnPlannerRequest: planner.HandlePlannerRequest,
