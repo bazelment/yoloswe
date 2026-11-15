@@ -337,7 +337,7 @@ func TestStatusFooterAutoRefreshesWithoutDisturbingInput(t *testing.T) {
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(120, 30))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(120, 30))
 	vt := newFakeTerminal(120, 30)
 	var rawAll strings.Builder
 	waitScreen := func(substrs ...string) {
@@ -459,7 +459,7 @@ func TestReplyCompletesWhileTypingPreservesInputAndRedrawsAddNoScrollback(t *tes
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(100, 30))
 	vt := newFakeTerminal(100, 30)
 	var rawAll strings.Builder
 	waitScreen := func(substrs ...string) {
@@ -547,6 +547,12 @@ func TestReplyCompletesWhileTypingPreservesInputAndRedrawsAddNoScrollback(t *tes
 func TestSubmittedInputWhileBusyIsQueuedAndRouted(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
+	clk := clock.NewFakeClock(swarmNow)
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	if err := st.Runs().Create(ctx, store.Run{ID: "run-1", Objective: "queue while busy"}); err != nil {
+		t.Fatal(err)
+	}
 	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	dispatched := make(chan string, 4)
@@ -554,6 +560,8 @@ func TestSubmittedInputWhileBusyIsQueuedAndRouted(t *testing.T) {
 	m := New(ctx, "run-1", nil, routeFunc(func(context.Context, string) (router.Decision, error) {
 		return router.Decision{Handler: router.Concierge, Confidence: 1}, nil
 	}))
+	m.Clock = clk
+	m.Backend = NewStoreBackend(st, "run-1")
 	m.Dispatch = func(_ context.Context, _ router.Decision, text string, emit func(string)) error {
 		if text == "slow turn" {
 			close(firstStarted)
@@ -564,7 +572,7 @@ func TestSubmittedInputWhileBusyIsQueuedAndRouted(t *testing.T) {
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(100, 30))
 	vt := newFakeTerminal(100, 30)
 	var rawAll strings.Builder
 	waitScreenModel(t, tm, m, &vt, &rawAll, 100, 30, "orca chat — run run-1")
@@ -668,7 +676,7 @@ func TestCtrlUClearsInputBeforeTheNextCommand(t *testing.T) {
 	rec := commandRecorder{got: make(chan string, 1)}
 	m := New(t.Context(), "run", nil, nil)
 	m.Backend = rec
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(100, 30))
 	tm.Type("which swarms are active")
 	tm.Send(tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
 	submit(tm, "/status")

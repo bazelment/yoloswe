@@ -168,20 +168,26 @@ type frameState struct {
 	readyForInit bool
 }
 
+// renderSync coordinates Bubble Tea's asynchronous 36ms cursedRenderer flush
+// ticker with Model.Update/tea.Println in tests. It is nil in production
+// Models constructed by New, so production View() never sets ForegroundColor.
+//
 //nolint:govet
 type renderSync struct {
-	mu          sync.Mutex
-	rendered    frameState
-	flushed     frameState
-	notify      chan struct{}
-	initFlushed chan struct{}
-	initOnce    sync.Once
+	mu           sync.Mutex
+	rendered     frameState
+	flushed      frameState
+	notify       chan struct{}
+	initFlushed  chan struct{}
+	initOnce     sync.Once
+	initFallback time.Duration
 }
 
 func newRenderSync() *renderSync {
 	return &renderSync{
-		notify:      make(chan struct{}),
-		initFlushed: make(chan struct{}),
+		notify:       make(chan struct{}),
+		initFlushed:  make(chan struct{}),
+		initFallback: 2 * time.Second,
 	}
 }
 
@@ -208,6 +214,8 @@ func (s *renderSync) onFlush(st frameState) {
 	}
 	ready := st.readyForInit
 	s.mu.Unlock()
+	// Closing initFlushed via sync.Once wakes any goroutine already blocked in
+	// Init's select as well as any future select that runs after onFlush.
 	if ready {
 		s.initOnce.Do(func() {
 			close(s.initFlushed)
@@ -223,6 +231,8 @@ func (s *renderSync) state() (rendered, flushed frameState) {
 
 func (s *renderSync) wait(ctx context.Context, pred func(rendered, flushed frameState) bool) bool {
 	for {
+		// Evaluate pred and capture s.notify under s.mu so a concurrent
+		// recordView/onFlush cannot close notify between the check and select.
 		s.mu.Lock()
 		ok := pred(s.rendered, s.flushed)
 		ch := s.notify
@@ -320,7 +330,7 @@ func (m Model) turnElapsed() time.Duration {
 }
 
 func New(ctx context.Context, runID string, ask AskFunc, r router.Router) Model {
-	return Model{ctx: ctx, runID: runID, ask: ask, router: r, poll: true, sync: newRenderSync()}
+	return Model{ctx: ctx, runID: runID, ask: ask, router: r, poll: true}
 }
 
 // WithTranscript adds earlier conversation lines above new input.
@@ -521,23 +531,41 @@ func (m Model) headerLine() string {
 }
 func (m Model) Init() tea.Cmd {
 	if m.poll {
-		// Wait until Bubble Tea processes the initial WindowSizeMsg and
-		// snapshotMsg AND flushes the initial inline frame (resizing cellbuf to
-		// the inline view height) before tea.Println inserts the header and
-		// resumed transcript above the prompt. Any lines printed before
-		// initPrintMsg arrives are queued in pendingPrint to preserve strict
-		// output ordering.
+		if m.sync == nil {
+			// Delay initial scrollback emission by one 60fps render frame (18ms) so
+			// Bubble Tea processes the initial WindowSizeMsg and snapshotMsg before
+			// tea.Println writes the header and resumed transcript above the prompt.
+			// Any lines printed before initPrintMsg arrives are queued in pendingPrint
+			// to preserve strict output ordering.
+			initTick := m.tick(18*time.Millisecond, func(time.Time) tea.Msg { return initPrintMsg{} })
+			return tea.Batch(initTick, m.refresh(), m.nextPoll())
+		}
+		// When renderSync is attached (in tests), wait until Bubble Tea processes
+		// the initial WindowSizeMsg and snapshotMsg AND flushes the initial inline
+		// frame (resizing cellbuf to the inline view height) before tea.Println
+		// inserts the header and resumed transcript above the prompt. If onFlush
+		// already closed initFlushed before initTick runs, <-sync.initFlushed
+		// returns immediately; if no flush ever arrives (e.g. non-TTY output),
+		// tmr.C provides a bounded fallback so Init cannot deadlock.
 		sync, ctx := m.sync, m.ctx
+		fallback := sync.initFallback
+		if fallback <= 0 {
+			fallback = 2 * time.Second
+		}
 		initTick := func() tea.Msg {
-			if sync != nil {
-				if ctx != nil {
-					select {
-					case <-sync.initFlushed:
-					case <-ctx.Done():
-						return nil
-					}
-				} else {
-					<-sync.initFlushed
+			tmr := time.NewTimer(fallback)
+			defer tmr.Stop()
+			if ctx != nil {
+				select {
+				case <-sync.initFlushed:
+				case <-tmr.C:
+				case <-ctx.Done():
+					return nil
+				}
+			} else {
+				select {
+				case <-sync.initFlushed:
+				case <-tmr.C:
 				}
 			}
 			return initPrintMsg{}
@@ -632,6 +660,10 @@ func (m Model) finishTurn(printed ...string) (tea.Model, tea.Cmd) {
 		m, nextCmd = m.submit(next)
 	}
 	refresh := m.requestRefresh()
+	// Batch nextCmd and refresh after printCmd: requestRefresh() sets
+	// m.refreshing = true immediately, and nextCmd includes ensureSpinner()'s
+	// timer cmd, so sequencing refresh after nextCmd would block snapshotMsg
+	// behind the next turn's spinner timer.
 	return m, tea.Sequence(printCmd, tea.Batch(nextCmd, refresh))
 }
 func receive(ctx context.Context, ch <-chan streamMsg) tea.Cmd {

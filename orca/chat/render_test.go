@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/exp/teatest/v2"
 	"github.com/mattn/go-runewidth"
 
@@ -283,6 +284,14 @@ func (t *fakeTerminal) hasTurnSpinner() bool {
 	return false
 }
 
+func newTestModel(t *testing.T, m *Model, opts ...teatest.TestOption) *teatest.TestModel {
+	t.Helper()
+	if m.sync == nil {
+		m.sync = newRenderSync()
+	}
+	return teatest.NewTestModel(t, *m, opts...)
+}
+
 func waitScreenModel(t *testing.T, tm *teatest.TestModel, m Model, vt **fakeTerminal, rawAll *strings.Builder, w, h int, substrs ...string) {
 	t.Helper()
 	teatest.WaitFor(t, tm.Output(), func(p []byte) bool {
@@ -502,7 +511,7 @@ func TestTurnLayoutWithToolCallsAndBlankLineBetweenTurns(t *testing.T) {
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(80, 24))
 	var captured strings.Builder
 	waitCapture := func(substrs ...string) {
 		t.Helper()
@@ -603,7 +612,7 @@ func TestRestartPrintsRecentTurnsAndRestartLineOnVisibleScreen(t *testing.T) {
 	m.width = 80
 	m.Backend = b
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(80, 24))
 	var captured strings.Builder
 	var vt *fakeTerminal
 	waitScreenModel(t, tm, m, &vt, &captured, 80, 24, "orca restarted (version c00d67a -> 9f8e7d6)", "front desk: no run yet")
@@ -662,7 +671,7 @@ func TestHeaderPrintedOnceAcrossTurnsAndStatusRedraws(t *testing.T) {
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(80, 24))
 	var captured strings.Builder
 	waitCapture := func(substrs ...string) {
 		t.Helper()
@@ -888,7 +897,7 @@ func TestInnerLoopSpinnerUnderSlowTurnReplacedByReplyGolden(t *testing.T) {
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(80, 24))
 	vt := newFakeTerminal(80, 24)
 	var rawAll strings.Builder
 
@@ -1114,7 +1123,7 @@ func TestHalfTypedInputSurvives50SpinnerFrames(t *testing.T) {
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(80, 24))
 	vt := newFakeTerminal(80, 24)
 	var rawAll strings.Builder
 
@@ -1241,7 +1250,7 @@ func TestBackgroundEventsPrintedAboveInputColored(t *testing.T) {
 	m.SpinnerInterval = -1
 	m.Backend = b
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 24))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(100, 24))
 	vt := newFakeTerminal(100, 24)
 	var rawAll strings.Builder
 
@@ -1453,7 +1462,7 @@ func TestAutoSpinnerTicksAdvanceFramesDuringSlowTurn(t *testing.T) {
 		return nil
 	}
 
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 24))
+	tm := newTestModel(t, &m, teatest.WithInitialTermSize(80, 24))
 	vt := newFakeTerminal(80, 24)
 	var rawAll strings.Builder
 	waitScreen := func(substr string) {
@@ -1544,5 +1553,90 @@ func TestFormatBackgroundEventClassification(t *testing.T) {
 				t.Fatalf("FormatBackgroundEvent(%q) = %q, missing SGR %q", tc.line, rows[0], tc.wantSGR)
 			}
 		})
+	}
+}
+
+func TestRenderSyncTickAndProductionViewIsolation(t *testing.T) {
+	t.Parallel()
+	// 1. Production Models constructed by New leave sync nil and never set View.ForegroundColor.
+	prod := New(t.Context(), "front-desk", nil, nil)
+	if prod.sync != nil {
+		t.Fatal("New() set non-nil sync on production Model")
+	}
+	if fg := prod.View().ForegroundColor; fg != nil {
+		t.Fatalf("production View().ForegroundColor = %v, want nil", fg)
+	}
+
+	// 2. Model.tick uses the injected Clock on Advance and returns nil on context cancellation.
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 6, 10, 0, 0, time.UTC))
+	m := New(t.Context(), "front-desk", nil, nil)
+	m.Clock = clk
+	tickCmd := m.tick(50*time.Millisecond, func(time.Time) tea.Msg { return spinnerTickMsg{} })
+	tickDone := make(chan tea.Msg, 1)
+	go func() { tickDone <- tickCmd() }()
+	select {
+	case msg := <-tickDone:
+		t.Fatalf("tick fired before clock advance: %v", msg)
+	default:
+	}
+	clk.Advance(50 * time.Millisecond)
+	if msg := <-tickDone; msg != (spinnerTickMsg{}) {
+		t.Fatalf("tick msg = %#v, want spinnerTickMsg{}", msg)
+	}
+
+	cancelCtx, cancel := context.WithCancel(t.Context())
+	mCancel := New(cancelCtx, "front-desk", nil, nil)
+	mCancel.Clock = clk
+	cancelCmd := mCancel.tick(time.Hour, func(time.Time) tea.Msg { return pollMsg{} })
+	cancel()
+	if msg := cancelCmd(); msg != nil {
+		t.Fatalf("canceled tick msg = %#v, want nil", msg)
+	}
+
+	// 3. renderSync tracks rendered vs flushed sequence numbers, signals initFlushed once readyForInit,
+	// and unblocks wait() on state change or context cancellation.
+	sync := newRenderSync()
+	m.sync = sync
+	st1 := frameState{content: "frame-1", initPrinted: true, readyForInit: true}
+	probe1 := sync.recordView(st1)
+	r1, f1 := sync.state()
+	if r1.seq != 1 || f1.seq != 0 {
+		t.Fatalf("after first recordView: rendered.seq=%d flushed.seq=%d, want 1 and 0", r1.seq, f1.seq)
+	}
+	// Identical frameState does not bump rendered.seq.
+	_ = sync.recordView(st1)
+	if rDup, _ := sync.state(); rDup.seq != 1 {
+		t.Fatalf("duplicate recordView bumped rendered.seq to %d, want 1", rDup.seq)
+	}
+	if settled, _ := m.isSettled(); settled {
+		t.Fatal("isSettled() = true before flushProbe.RGBA() ran")
+	}
+	_, _, _, _ = probe1.RGBA()
+	select {
+	case <-sync.initFlushed:
+	default:
+		t.Fatal("flushProbe.RGBA() with readyForInit=true did not close initFlushed")
+	}
+	if settled, _ := m.isSettled(); !settled {
+		t.Fatal("isSettled() = false after flushProbe.RGBA() flushed latest seq")
+	}
+	if !sync.wait(t.Context(), func(r, f frameState) bool { return f.seq == r.seq && r.seq == 1 }) {
+		t.Fatal("sync.wait did not observe flushed.seq == 1")
+	}
+	if sync.wait(cancelCtx, func(r, f frameState) bool { return r.seq == 99 }) {
+		t.Fatal("sync.wait with canceled context returned true for unmet predicate")
+	}
+
+	// 4. Init's renderSync gate falls back after initFallback when no renderer flushes.
+	unflushed := New(t.Context(), "front-desk", nil, nil)
+	unflushed.Clock = clk
+	unflushed.sync = newRenderSync()
+	unflushed.sync.initFallback = 5 * time.Millisecond
+	initBatch, ok := unflushed.Init()().(tea.BatchMsg)
+	if !ok || len(initBatch) == 0 {
+		t.Fatalf("Init() returned %#v, want non-empty tea.BatchMsg", initBatch)
+	}
+	if msg := initBatch[0](); msg != (initPrintMsg{}) {
+		t.Fatalf("Init() fallback cmd returned %#v, want initPrintMsg{}", msg)
 	}
 }
