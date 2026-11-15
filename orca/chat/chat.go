@@ -88,6 +88,7 @@ type Model struct {
 	Backend              Backend
 	runID, input, status string
 	streamBuf            string
+	streamChunks         []string
 	initLines            []string
 	pendingPrint         []string
 	lines                []string
@@ -328,8 +329,9 @@ func (m *Model) flushStream(done bool) []string {
 		return nil
 	}
 	m.streaming = false
-	raw := strings.TrimPrefix(m.streamBuf, replyPrefix)
+	raw := strings.TrimPrefix(m.streamText(), replyPrefix)
 	m.streamBuf = ""
+	m.streamChunks = nil
 	if m.streamLine >= 0 && m.streamLine < len(m.lines) {
 		m.lines[m.streamLine] = strings.Join(FormatReply(raw, m.width, false), "\n")
 	}
@@ -499,14 +501,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lines = append(m.lines, errLine)
 			return m.finishTurn(wrapPhysicalLines(errLine, m.width)...)
 		}
-		echo := "→ " + string(x.decision.Handler) + ": " + x.text
-		if x.decision.Fallback {
-			echo += " (via fallback)"
-		}
+		echo := routeEcho(string(x.decision.Handler), x.text, x.decision.Fallback)
 		m.lines = append(m.lines, echo, "orca> ")
 		m.streamLine = len(m.lines) - 1
 		m.streaming = true
 		m.streamBuf = ""
+		m.streamChunks = nil
 		routeRows := FormatRouteLine(string(x.decision.Handler), x.text, x.decision.Fallback, m.width, m.poll)
 		printCmd := m.printRawLines(routeRows...)
 		return m, tea.Sequence(printCmd, m.dispatch(x.decision, x.text))
@@ -519,8 +519,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Sequence(printCmd, receive(m.ctx, x.ch))
 		}
 		if x.text != "" {
-			m.lines[m.streamLine] += x.text
-			m.streamBuf += x.text
+			m.streamChunks = append(m.streamChunks, x.text)
 		}
 		if x.done {
 			printed := m.flushStream(true)
@@ -656,9 +655,16 @@ func commonPrefix(s []string) string {
 }
 
 func (m Model) streamPreview() string {
-	s := strings.TrimPrefix(m.streamBuf, replyPrefix)
+	s := strings.TrimPrefix(m.streamText(), replyPrefix)
 	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", " ")
 	return replyPrefix + s
+}
+
+func (m Model) streamText() string {
+	if len(m.streamChunks) > 0 {
+		return strings.Join(m.streamChunks, "")
+	}
+	return m.streamBuf
 }
 
 func (m Model) View() tea.View {
@@ -687,7 +693,7 @@ func (m Model) statusFooter() string {
 	}
 	out := make([]string, len(raw))
 	for i, line := range raw {
-		out[i] = "\x1b[2m" + truncateLine(line, m.width) + "\x1b[22m"
+		out[i] = renderStyledLine(line, styleDim, m.width, true)
 	}
 	return "\n" + strings.Join(out, "\n")
 }

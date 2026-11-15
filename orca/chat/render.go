@@ -184,7 +184,7 @@ func FormatUserLine(text string, width int, tty bool) []string {
 		}
 		row := prefix + line
 		if tty {
-			row = "\x1b[1m" + row + "\x1b[22m"
+			row = renderStyledLine(row, styleBold, 0, true)
 		}
 		out[i] = row
 	}
@@ -194,11 +194,16 @@ func FormatUserLine(text string, width int, tty bool) []string {
 // FormatRouteLine renders a routing echo line ("→ concierge: ...") as a dim
 // line on a TTY or plain text when piped.
 func FormatRouteLine(handler, text string, fallback bool, width int, tty bool) []string {
+	echo := routeEcho(handler, text, fallback)
+	return FormatDimLine(echo, width, tty)
+}
+
+func routeEcho(handler, text string, fallback bool) string {
 	echo := "→ " + handler + ": " + text
 	if fallback {
 		echo += " (via fallback)"
 	}
-	return FormatDimLine(echo, width, tty)
+	return echo
 }
 
 // FormatDimLine renders a routing or tool-call line ("→ ...") as a single dim
@@ -215,7 +220,14 @@ func FormatDimLine(text string, width int, tty bool) []string {
 	if width > 0 {
 		line = truncateLine(line, width)
 	}
-	return []string{"\x1b[2m" + line + "\x1b[22m"}
+	return []string{renderStyledLine(line, styleDim, 0, true)}
+}
+
+func renderStyledLine(text string, style spanStyle, width int, tty bool) string {
+	if width > 0 {
+		text = truncateLine(text, width)
+	}
+	return renderLineSpans([]styledSpan{{text: text, style: style}}, tty)
 }
 
 // FormatToolCall summarizes a tool call as a single "→ <name> <target>" line.
@@ -350,7 +362,7 @@ func FormatTranscript(lines []string, maxTurns, width int, tty bool) []string {
 			continue
 		}
 		if tty {
-			out = append(out, "\x1b[2m"+h+"\x1b[22m")
+			out = append(out, renderStyledLine(h, styleDim, 0, true))
 		} else {
 			out = append(out, h)
 		}
@@ -358,7 +370,7 @@ func FormatTranscript(lines []string, maxTurns, width int, tty bool) []string {
 	if earlier > 0 && len(headerLines) == 0 {
 		summary := fmt.Sprintf("%d earlier turns; /log to see them", earlier)
 		if tty {
-			summary = "\x1b[2m" + summary + "\x1b[22m"
+			summary = renderStyledLine(summary, styleDim, 0, true)
 		}
 		out = append(out, summary)
 	}
@@ -387,7 +399,7 @@ func FormatTranscript(lines []string, maxTurns, width int, tty bool) []string {
 		}
 		for _, t := range tailLines {
 			if tty && (strings.HasPrefix(t, "orca restarted") || strings.HasPrefix(t, "reattached ")) {
-				out = append(out, "\x1b[2m"+t+"\x1b[22m")
+				out = append(out, renderStyledLine(t, styleDim, 0, true))
 			} else {
 				out = append(out, wrapPhysicalLines(t, width)...)
 			}
