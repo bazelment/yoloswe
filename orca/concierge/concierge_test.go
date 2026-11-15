@@ -1570,3 +1570,72 @@ func TestConciergeStatusAndSnapshotShareActiveDirectiveSet(t *testing.T) {
 		}
 	}
 }
+
+func TestConcierge_PlannerAskEscalationOneHop(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupSeededStore(t)
+	ctx := t.Context()
+
+	var (
+		gotRunID    string
+		gotQuestion string
+		gotFindings string
+	)
+	const plannerAnswer = "Planner analysis: cap guest RAM at 1 GiB using DAX/virtiofs and drop_caches."
+
+	// Script only ONE concierge model response (calling planner.ask). If the
+	// concierge tried to make a second model call after planner.ask, FakeClient
+	// would fail with "no more scripted responses".
+	client := model.NewFakeClient(
+		model.Response{
+			Model:      "claude-haiku-5-5",
+			StopReason: model.StopReasonToolUse,
+			Usage:      model.Usage{InputTokens: 200, OutputTokens: 40, CostUSD: 0.0003},
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock(
+					"tu_esc_1",
+					concierge.ToolPlannerAsk,
+					json.RawMessage(`{"question":"What is the best we can do if memory overhead is minimized?","findings":"lane-1 report shows 3.8 GiB page cache growth"}`),
+				),
+			),
+		},
+	)
+
+	conc := concierge.New(concierge.Config{
+		AskPlanner: func(_ context.Context, runID, question, findings string) (string, error) {
+			gotRunID = runID
+			gotQuestion = question
+			gotFindings = findings
+			return plannerAnswer, nil
+		},
+	}, st, drv, clk, client)
+
+	res, err := conc.Ask(ctx, "run-1", "What is the best we can do if memory overhead is minimized?")
+	if err != nil {
+		t.Fatalf("Ask with planner.ask escalation: %v", err)
+	}
+	if res.Answer != plannerAnswer {
+		t.Fatalf("Answer = %q, want %q", res.Answer, plannerAnswer)
+	}
+	if gotRunID != "run-1" {
+		t.Fatalf("gotRunID = %q, want run-1", gotRunID)
+	}
+	if gotQuestion != "What is the best we can do if memory overhead is minimized?" {
+		t.Fatalf("gotQuestion = %q", gotQuestion)
+	}
+	if gotFindings != "lane-1 report shows 3.8 GiB page cache growth" {
+		t.Fatalf("gotFindings = %q", gotFindings)
+	}
+	if len(client.Requests) != 1 {
+		t.Fatalf("expected exactly 1 concierge model call (one-hop escalation), got %d", len(client.Requests))
+	}
+	if res.TurnCount != 1 {
+		t.Fatalf("TurnCount = %d, want 1", res.TurnCount)
+	}
+	if !slices.Contains(res.ToolCalls, concierge.ToolPlannerAsk) {
+		t.Fatalf("ToolCalls = %v, want %s", res.ToolCalls, concierge.ToolPlannerAsk)
+	}
+	if len(res.Decisions) != 1 || res.Decisions[0].Tool != concierge.ToolPlannerAsk {
+		t.Fatalf("Decisions = %+v, want 1 planner.ask decision", res.Decisions)
+	}
+}

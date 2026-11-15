@@ -37,6 +37,12 @@ const (
 const (
 	ToolSubmitReconciliation = "submit_reconciliation"
 	ToolReadPlan             = "read.plan"
+	ToolProposeWork          = "propose_work"
+	ToolChat                 = "planner.chat"
+	ToolStatus               = "status"
+	ToolLaneShow             = "lane.show"
+	ToolBacklog              = "backlog"
+	ToolDecisionsSince       = "decisions.since"
 	ToolObjectiveUpdate      = "objective.update"
 	ToolBacklogAdd           = "backlog.add"
 	ToolBacklogUpdate        = "backlog.update"
@@ -55,6 +61,7 @@ const (
 	ModePlanImport Mode = "plan_import"
 	ModeRecipeEdit Mode = "recipe_edit"
 	ModeReplan     Mode = "replan"
+	ModeChat       Mode = "chat"
 )
 
 // SignalKind classifies a Controller or Dispatcher trigger signal to the Planner.
@@ -242,6 +249,36 @@ var readPlanToolDef = model.ToolDefinition{
 	Name:        ToolReadPlan,
 	Description: "Read a referenced plan document from a file path or Nebula post ID.",
 	InputSchema: model.SchemaFor[ReadPlanParams](),
+}
+
+// ProposeWorkParams holds parameters for the propose_work tool in Planner chat mode.
+type ProposeWorkParams struct {
+	ID          string   `json:"id,omitempty" jsonschema:"description=Optional proposal/ask ID"`
+	Question    string   `json:"question" jsonschema:"required,description=Proposed work or design decision question for the owner"`
+	Description string   `json:"description,omitempty" jsonschema:"description=Detailed summary of the proposed work or design constraint"`
+	LaneID      string   `json:"lane_id,omitempty" jsonschema:"description=Optional lane ID affected by the proposal"`
+	Default     string   `json:"default,omitempty" jsonschema:"description=Default choice if not answered before deadline"`
+	Deadline    string   `json:"deadline,omitempty" jsonschema:"description=Optional deadline duration or RFC3339 timestamp (default 30m)"`
+	Options     []string `json:"options,omitempty" jsonschema:"description=Concrete options for the owner (default: approve_proposal, reject_proposal)"`
+}
+
+// ChatStatusParams holds parameters for the read-only status tool in Planner chat mode.
+type ChatStatusParams struct{}
+
+// ChatLaneShowParams holds parameters for the read-only lane.show tool in Planner chat mode.
+type ChatLaneShowParams struct {
+	LaneID string `json:"lane_id" jsonschema:"required,description=Exact lane ID to inspect"`
+}
+
+// ChatBacklogParams holds parameters for the read-only backlog tool in Planner chat mode.
+type ChatBacklogParams struct {
+	Status string `json:"status,omitempty" jsonschema:"enum=open,enum=in_progress,enum=blocked,enum=done,enum=dropped,description=Optional status filter"`
+}
+
+// ChatDecisionsSinceParams holds parameters for the read-only decisions.since tool in Planner chat mode.
+type ChatDecisionsSinceParams struct {
+	SinceSeq int64 `json:"since_seq,omitempty" jsonschema:"description=Return decisions with seq > since_seq"`
+	Limit    int   `json:"limit,omitempty" jsonschema:"description=Maximum decisions to return"`
 }
 
 // AppliedChanges summarizes the mutations applied to the Store by a Reconciliation.
@@ -1854,4 +1891,754 @@ func MatchesObjectivePlanRef(objective, planRef string) bool {
 		}
 	}
 	return false
+}
+
+// Ask answers a complex design, research, trade-off, or plan/constraint question
+// in chat using the strongest model, grounded in the run's contract, plan, and
+// lane reports, and streams its conversational answer via emit.
+func (p *Planner) Ask(ctx context.Context, runID, question string, emit func(string)) (*Result, error) {
+	return p.AskWithFindings(ctx, runID, question, "", emit)
+}
+
+// AskWithFindings answers question in chat, incorporating optional partial findings
+// escalated from the Concierge.
+func (p *Planner) AskWithFindings(ctx context.Context, runID, question, findings string, emit func(string)) (*Result, error) {
+	if p.store == nil {
+		return nil, errors.New("orca/planner: store is required")
+	}
+	if p.cfg.AgentBackend != model.AgentBackendCLI && p.client == nil {
+		return nil, errors.New("orca/planner: model client is required")
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, fmt.Errorf("%w: run_id is required", store.ErrInvalidArgument)
+	}
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return nil, fmt.Errorf("%w: question is required", store.ErrInvalidArgument)
+	}
+	start := p.clock.Now()
+
+	run, err := p.store.Runs().Get(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	var planDoc *PlanDocument
+	effectiveRef := strings.TrimSpace(run.PlanRef)
+	if IsAdoptionMarker(effectiveRef) {
+		effectiveRef = ExtractObjectivePlanRef(run.Objective)
+	}
+	if effectiveRef != "" && p.cfg.PlanReader != nil {
+		if doc, readErr := p.cfg.PlanReader.ReadPlan(ctx, effectiveRef); readErr == nil {
+			planDoc = &doc
+		}
+	}
+
+	goal := fmt.Sprintf("Planner chat for run %s: %s", runID, question)
+	th, turnRec, err := p.startPlannerTurn(ctx, runID, goal)
+	if err != nil {
+		return nil, err
+	}
+	cleanupCtx := context.WithoutCancel(ctx)
+
+	promptText, err := p.buildChatPrompt(ctx, *run, planDoc, question, findings, turnRec.Steers)
+	if err != nil {
+		_ = p.store.Threads().CompleteTurn(cleanupCtx, th.ID, turnRec.ID, store.TurnStatusFailed, model.Usage{}, err.Error())
+		return nil, err
+	}
+
+	if _, err := p.store.Threads().AppendItem(ctx, store.Item{
+		ThreadID: th.ID,
+		TurnID:   turnRec.ID,
+		Kind:     store.ItemKindUserMessage,
+		Content:  question,
+	}); err != nil {
+		_ = p.store.Threads().CompleteTurn(cleanupCtx, th.ID, turnRec.ID, store.TurnStatusFailed, model.Usage{}, err.Error())
+		return nil, err
+	}
+	if _, err := p.store.Threads().AppendItem(ctx, store.Item{
+		ThreadID: th.ID,
+		TurnID:   turnRec.ID,
+		Kind:     store.ItemKindSnapshot,
+		Content:  promptText,
+	}); err != nil {
+		_ = p.store.Threads().CompleteTurn(cleanupCtx, th.ID, turnRec.ID, store.TurnStatusFailed, model.Usage{}, err.Error())
+		return nil, err
+	}
+
+	var (
+		reconciled *Reconciliation
+		applied    AppliedChanges
+		decisions  []store.Decision
+		turnUsage  model.Usage
+	)
+
+	recordProposal := func(callCtx context.Context, pw ProposeWorkParams) (controller.OwnerAsk, error) {
+		opts := slices.Clone(pw.Options)
+		defOpt := strings.TrimSpace(pw.Default)
+		if len(opts) == 0 {
+			opts = []string{"approve_proposal", "reject_proposal"}
+			if defOpt == "" {
+				defOpt = "approve_proposal"
+			} else if !slices.Contains(opts, defOpt) {
+				opts = append([]string{defOpt}, opts...)
+			}
+		} else if defOpt == "" || !slices.Contains(opts, defOpt) {
+			defOpt = opts[0]
+		}
+		q := strings.TrimSpace(pw.Question)
+		desc := cmp.Or(strings.TrimSpace(pw.Description), q)
+		ask, askErr := p.registerReconcileAsk(callCtx, runID, p.clock.Now().UTC(), ConflictPoint{
+			ID:          cmp.Or(strings.TrimSpace(pw.ID), p.nextID("proposal")),
+			Description: desc,
+			LaneID:      strings.TrimSpace(pw.LaneID),
+			Question:    q,
+			Options:     opts,
+			Default:     defOpt,
+			Deadline:    strings.TrimSpace(pw.Deadline),
+		})
+		if askErr != nil {
+			return controller.OwnerAsk{}, askErr
+		}
+		applied.OwnerAsks = append(applied.OwnerAsks, ask)
+		rawArgs, _ := json.Marshal(pw)
+		dec, decErr := p.store.Decisions().Append(callCtx, store.Decision{
+			RunID:         runID,
+			Category:      store.DecisionJudgment,
+			Actor:         ActorPlanner,
+			ThreadID:      th.ID,
+			TurnID:        turnRec.ID,
+			LaneID:        ask.LaneID,
+			Tool:          ToolProposeWork,
+			Reason:        desc,
+			Result:        fmt.Sprintf("recorded proposal %s (%s)", ask.ID, ask.Question),
+			Args:          rawArgs,
+			Vetted:        true,
+			Model:         p.cfg.Model,
+			PromptVersion: SystemPromptVersion,
+		})
+		if decErr == nil {
+			decisions = append(decisions, dec)
+		}
+		return ask, nil
+	}
+
+	reg := p.buildChatToolRegistry(*run, effectiveRef, &planDoc, func(callCtx context.Context, rec Reconciliation) (string, error) {
+		if reconciled != nil {
+			return FormatReconciliationSummary(runID, effectiveRef, *reconciled, applied), nil
+		}
+		cp := rec.Clone()
+		curApplied, curDecisions, applyErr := p.applyReconciliation(callCtx, *run, th.ID, turnRec.ID, effectiveRef, cp, turnUsage, p.clock.Now().Sub(start))
+		if applyErr != nil {
+			return "", applyErr
+		}
+		curApplied.OwnerAsks = append(slices.Clone(applied.OwnerAsks), curApplied.OwnerAsks...)
+		reconciled = &cp
+		applied = curApplied
+		decisions = append(decisions, curDecisions...)
+		if len(applied.OwnerAsks) == 0 && (len(cp.BacklogDiff.Add) > 0 || len(cp.BacklogDiff.Update) > 0 || len(cp.BacklogDiff.Drop) > 0 || strings.TrimSpace(cp.Objective) != "") {
+			propSummary := strings.TrimSpace(cp.Summary)
+			if propSummary == "" && len(cp.BacklogDiff.Add) > 0 {
+				var titles []string
+				for i := range cp.BacklogDiff.Add {
+					titles = append(titles, cp.BacklogDiff.Add[i].Title)
+				}
+				propSummary = "Approve proposed backlog work: " + strings.Join(titles, "; ")
+			}
+			if propSummary == "" {
+				propSummary = FormatReconciliationSummary(runID, effectiveRef, cp, applied)
+			}
+			_, _ = recordProposal(callCtx, ProposeWorkParams{
+				Question:    propSummary,
+				Description: propSummary,
+			})
+		}
+		return FormatReconciliationSummary(runID, effectiveRef, cp, applied), nil
+	}, recordProposal)
+
+	var (
+		usage     model.Usage
+		turnCount int
+		answer    string
+		loopErr   error
+		emitted   bool
+	)
+
+	if p.cfg.AgentBackend == model.AgentBackendCLI {
+		turnRes, tErr := store.RunRoleAgentTurn(
+			ctx,
+			p.store.Threads(),
+			&p.sessions,
+			runID,
+			th.ID,
+			turnRec.ID,
+			ActorPlanner,
+			model.AgentSessionConfig{
+				Provider:         p.cfg.Provider,
+				Model:            p.cfg.Model,
+				Effort:           p.cfg.Effort,
+				SystemPrompt:     ChatSystemPrompt,
+				WorkDir:          model.DeterministicSessionWorkDir(cmp.Or(p.cfg.Investigate.RunDir, p.cfg.Investigate.RepoDir), runID, ActorPlanner),
+				ResumeID:         strings.TrimSpace(th.ResumeID),
+				LLMGatewayURL:    p.cfg.LLMGatewayURL,
+				ClaudeBin:        p.cfg.ClaudeBin,
+				CodexBin:         p.cfg.CodexBin,
+				MaxSessionTokens: p.cfg.MaxSessionTokens,
+				MaxSessionTurns:  p.cfg.MaxSessionTurns,
+			},
+			model.AgentTurnRequest{
+				Prompt:       promptText,
+				Model:        p.cfg.Model,
+				SystemPrompt: ChatSystemPrompt,
+				Registry:     reg,
+				MaxToolCalls: p.cfg.MaxTurns,
+			},
+			nil,
+		)
+		loopErr = tErr
+		if turnRes != nil {
+			usage = turnRes.Usage
+			turnCount = turnRes.TurnCount
+			answer = strings.TrimSpace(turnRes.Text)
+			if answer != "" {
+				if emit != nil {
+					emit(answer)
+					emitted = true
+				}
+				_, _ = p.store.Threads().AppendItem(cleanupCtx, store.Item{
+					ThreadID: th.ID,
+					TurnID:   turnRec.ID,
+					Kind:     store.ItemKindAssistantMessage,
+					Content:  answer,
+				})
+			}
+		}
+	} else {
+		req := model.Request{
+			Model:     p.cfg.Model,
+			System:    ChatSystemPrompt,
+			Messages:  []model.Message{model.NewUserMessage(promptText)},
+			Tools:     reg.Definitions(),
+			MaxTokens: p.cfg.MaxTokens,
+		}
+		loopRes, lErr := model.RunToolLoop(
+			ctx,
+			p.client,
+			req,
+			reg,
+			model.WithMaxTurns(p.cfg.MaxTurns),
+			model.WithOnTurn(func(_ int, resp model.Response) {
+				turnUsage = resp.Usage
+				if txt := strings.TrimSpace(resp.Text()); txt != "" {
+					answer = txt
+					if len(resp.ToolCalls()) == 0 && emit != nil {
+						emit(txt)
+						emitted = true
+					}
+					_, _ = p.store.Threads().AppendItem(cleanupCtx, store.Item{
+						ThreadID: th.ID,
+						TurnID:   turnRec.ID,
+						Kind:     store.ItemKindAssistantMessage,
+						Content:  txt,
+					})
+				}
+			}),
+			model.WithOnToolCall(func(_ int, call model.ToolCall, resBlock model.ContentBlock) {
+				_, _ = p.store.Threads().AppendItem(cleanupCtx, store.Item{
+					ThreadID: th.ID,
+					TurnID:   turnRec.ID,
+					Kind:     store.ItemKindToolCall,
+					Name:     call.Name,
+					CallID:   call.ID,
+					Payload:  call.Input,
+				})
+				_, _ = p.store.Threads().AppendItem(cleanupCtx, store.Item{
+					ThreadID: th.ID,
+					TurnID:   turnRec.ID,
+					Kind:     store.ItemKindToolResult,
+					Name:     call.Name,
+					CallID:   call.ID,
+					Content:  resBlock.Content,
+					IsError:  resBlock.IsError,
+				})
+			}),
+		)
+		loopErr = lErr
+		if loopRes != nil {
+			usage = loopRes.Usage
+			turnCount = loopRes.TurnCount
+			if finalTxt := strings.TrimSpace(loopRes.Response.Text()); finalTxt != "" {
+				answer = finalTxt
+			}
+		}
+	}
+
+	if answer == "" && reconciled != nil {
+		answer = FormatReconciliationSummary(runID, effectiveRef, *reconciled, applied)
+	}
+	if loopErr == nil && emit != nil && !emitted && answer != "" {
+		emit(answer)
+	}
+
+	if usage.CostUSD == 0 && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+		usage.CostUSD = store.EstimateUsageCostUSD(cmp.Or(p.cfg.Model, ActorPlanner), usage.InputTokens, usage.OutputTokens)
+	}
+
+	if loopErr == nil {
+		if len(decisions) > 0 {
+			store.AttributeTurnUsage(cleanupCtx, p.store.Decisions(), runID, decisions, usage)
+		} else {
+			dec, decErr := p.store.Decisions().Append(cleanupCtx, store.Decision{
+				RunID:         runID,
+				Category:      store.DecisionJudgment,
+				Actor:         ActorPlanner,
+				ThreadID:      th.ID,
+				TurnID:        turnRec.ID,
+				Tool:          ToolChat,
+				Reason:        singleLineSummary(question),
+				Result:        singleLineSummary(answer),
+				Vetted:        true,
+				Model:         p.cfg.Model,
+				PromptVersion: SystemPromptVersion,
+				InputTokens:   usage.InputTokens,
+				OutputTokens:  usage.OutputTokens,
+				CostUSD:       usage.CostUSD,
+				LatencyMs:     max(p.clock.Now().Sub(start).Milliseconds(), 0),
+			})
+			if decErr == nil {
+				decisions = append(decisions, dec)
+			}
+		}
+	}
+
+	turnStatus := store.TurnStatusCompleted
+	errMsg := ""
+	if loopErr != nil {
+		turnStatus = store.TurnStatusFailed
+		errMsg = loopErr.Error()
+	}
+	if compErr := p.store.Threads().CompleteTurn(cleanupCtx, th.ID, turnRec.ID, turnStatus, usage, errMsg); compErr != nil && loopErr == nil {
+		loopErr = compErr
+	}
+
+	res := &Result{
+		ThreadID:       th.ID,
+		TurnID:         turnRec.ID,
+		Mode:           ModeChat,
+		Model:          p.cfg.Model,
+		Summary:        answer,
+		Plan:           planDoc,
+		Reconciliation: reconciled,
+		Applied:        applied,
+		Decisions:      decisions,
+		Usage:          usage,
+		TurnCount:      turnCount,
+	}
+
+	p.mu.Lock()
+	p.lastResult = res
+	p.mu.Unlock()
+
+	if loopErr != nil {
+		return res, loopErr
+	}
+	return res, nil
+}
+
+func (p *Planner) buildChatPrompt(
+	ctx context.Context,
+	run store.Run,
+	planDoc *PlanDocument,
+	question, findings string,
+	steers []string,
+) (string, error) {
+	directives, err := p.store.Directives().List(ctx, store.DirectiveFilter{
+		RunID:      run.ID,
+		ActiveOnly: true,
+	})
+	if err != nil {
+		return "", err
+	}
+	backlogItems, err := p.store.Backlog().List(ctx, store.BacklogFilter{RunID: run.ID})
+	if err != nil {
+		return "", err
+	}
+	lanes, err := p.store.Lanes().List(ctx, store.LaneFilter{RunID: run.ID})
+	if err != nil {
+		return "", err
+	}
+	memories, err := p.store.Memories().List(ctx, store.MemoryFilter{RunID: run.ID})
+	if err != nil {
+		return "", err
+	}
+	reports := p.collectChatLaneReports(ctx, run.ID, lanes)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Planner Chat Context for Run `%s`\n", run.ID)
+	if len(steers) > 0 {
+		fmt.Fprintf(&b, "Steers: %s\n", strings.Join(steers, "; "))
+	}
+
+	b.WriteString("\n## Run Contract\n")
+	var contractDirs, otherDirs []store.Directive
+	for i := range directives {
+		d := directives[i]
+		if d.IsContract() || d.Kind == store.DirectiveStanding {
+			contractDirs = append(contractDirs, d)
+		} else {
+			otherDirs = append(otherDirs, d)
+		}
+	}
+	if len(contractDirs) == 0 {
+		b.WriteString("Contract & Standing Directives: (none)\n")
+	} else {
+		fmt.Fprintf(&b, "Contract & Standing Directives (%d):\n", len(contractDirs))
+		for i := range contractDirs {
+			d := &contractDirs[i]
+			fmt.Fprintf(&b, "- [%s] kind=%s scope=%s ref=%s: %s\n",
+				d.ID, d.Kind, cmp.Or(d.Scope, "run"), cmp.Or(d.Ref, "-"), d.Text)
+		}
+	}
+	memoryContext, err := brief.Render("", memories, 0)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(memoryContext) != "" {
+		b.WriteString(memoryContext)
+	}
+	if len(otherDirs) > 0 {
+		fmt.Fprintf(&b, "Active Directives (%d):\n", len(otherDirs))
+		for i := range otherDirs {
+			d := &otherDirs[i]
+			fmt.Fprintf(&b, "- [%s] kind=%s source=%s scope=%s ref=%s: %s\n",
+				d.ID, d.Kind, d.Source, cmp.Or(d.Scope, "run"), cmp.Or(d.Ref, "-"), d.Text)
+		}
+	}
+
+	b.WriteString("\n## Run Plan\n")
+	fmt.Fprintf(&b, "Current Objective: %s\n", cmp.Or(strings.TrimSpace(run.Objective), "(none)"))
+	fmt.Fprintf(&b, "Current PlanRef: %s\n", cmp.Or(strings.TrimSpace(run.PlanRef), "(none)"))
+	fmt.Fprintf(&b, "Default Recipe: %s\n", cmp.Or(strings.TrimSpace(run.DefaultRecipe), recipe.DefaultName))
+	if planDoc != nil {
+		fmt.Fprintf(&b, "\n### Referenced Plan (`%s`, source=%s)\n", planDoc.Ref, planDoc.SourceKind)
+		if planDoc.Title != "" {
+			fmt.Fprintf(&b, "Title: %s\n", planDoc.Title)
+		}
+		b.WriteString(planDoc.Content)
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "\n### Current Backlog (%d)\n", len(backlogItems))
+	if len(backlogItems) == 0 {
+		b.WriteString("(empty)\n")
+	} else {
+		for i := range backlogItems {
+			it := &backlogItems[i]
+			fmt.Fprintf(&b, "- %s [%s #%d %s] lane=%s title=%q acceptance=%q",
+				it.ID, it.Priority, it.Order, it.Status, cmp.Or(it.LaneID, "-"), it.Title, it.Acceptance)
+			if strings.TrimSpace(it.Description) != "" {
+				fmt.Fprintf(&b, " description=%q", it.Description)
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	fmt.Fprintf(&b, "\n## Lane Reports (%d lanes)\n", len(lanes))
+	if len(lanes) == 0 && len(reports) == 0 {
+		b.WriteString("(none)\n")
+	} else {
+		seenReportLanes := map[string]bool{}
+		for i := range lanes {
+			ln := &lanes[i]
+			seenReportLanes[ln.ID] = true
+			fmt.Fprintf(&b, "- %s: item=%s status=%s phase=%s round=%d pr=#%d checks=%s\n",
+				ln.ID, cmp.Or(ln.ItemID, "-"), ln.Status, cmp.Or(ln.Phase, "-"), ln.Round, ln.PR, cmp.Or(ln.Checks, "-"))
+			if rep := strings.TrimSpace(reports[ln.ID]); rep != "" {
+				for _, line := range strings.Split(rep, "\n") {
+					fmt.Fprintf(&b, "  %s\n", line)
+				}
+			}
+		}
+		for laneID, rep := range reports {
+			if seenReportLanes[laneID] || strings.TrimSpace(rep) == "" {
+				continue
+			}
+			fmt.Fprintf(&b, "- %s:\n", laneID)
+			for _, line := range strings.Split(strings.TrimSpace(rep), "\n") {
+				fmt.Fprintf(&b, "  %s\n", line)
+			}
+		}
+	}
+
+	if strings.TrimSpace(findings) != "" {
+		b.WriteString("\n## Concierge Partial Findings\n")
+		b.WriteString(strings.TrimSpace(findings))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n## Owner Question\n")
+	b.WriteString(strings.TrimSpace(question))
+	b.WriteString("\n")
+
+	return b.String(), nil
+}
+
+func (p *Planner) collectChatLaneReports(ctx context.Context, runID string, lanes []lane.Lane) map[string]string {
+	out := make(map[string]string, len(lanes))
+	if p.driver != nil {
+		for i := range lanes {
+			ln := &lanes[i]
+			termID := strings.TrimSpace(ln.TerminalID)
+			if termID != "" {
+				if rep, err := p.driver.ReadReport(ctx, runID, ln.ID, termID); err == nil && rep != nil {
+					out[ln.ID] = formatLaneReportSummary(*rep)
+					continue
+				}
+			}
+			for _, tID := range ln.Terminals {
+				if strings.TrimSpace(tID) == "" {
+					continue
+				}
+				if rep, err := p.driver.ReadReport(ctx, runID, ln.ID, tID); err == nil && rep != nil {
+					out[ln.ID] = formatLaneReportSummary(*rep)
+					break
+				}
+			}
+		}
+	}
+	if p.store != nil && p.store.Events() != nil {
+		if evs, err := p.store.Events().List(ctx, store.EventFilter{
+			RunID: runID,
+			Kinds: []store.EventKind{store.EventLaneReport},
+		}); err == nil {
+			for i := range evs {
+				ev := &evs[i]
+				laneID := cmp.Or(strings.TrimSpace(ev.LaneID), "run")
+				var rep lane.PhaseReport
+				if len(ev.Payload) > 0 && json.Unmarshal(ev.Payload, &rep) == nil && (rep.Outcome != "" || rep.Summary != "" || rep.Raw != "") {
+					if rep.LaneID != "" {
+						laneID = rep.LaneID
+					}
+					out[laneID] = formatLaneReportSummary(rep)
+					continue
+				}
+				text := strings.TrimSpace(ev.Summary)
+				if len(ev.Payload) > 0 {
+					var payloadStr string
+					if json.Unmarshal(ev.Payload, &payloadStr) == nil && strings.TrimSpace(payloadStr) != "" {
+						text = strings.TrimSpace(payloadStr)
+					} else if text == "" {
+						text = strings.TrimSpace(string(ev.Payload))
+					}
+				}
+				if text != "" {
+					out[laneID] = "Report: " + text
+				}
+			}
+		}
+	}
+	return out
+}
+
+func formatLaneReportSummary(rep lane.PhaseReport) string {
+	var lines []string
+	header := fmt.Sprintf("Report: phase=%s round=%d outcome=%s", cmp.Or(rep.Phase, "-"), rep.Round, cmp.Or(string(rep.Outcome), "-"))
+	if rep.HeadSHA != "" {
+		header += " head=" + rep.HeadSHA
+	}
+	if rep.PR > 0 {
+		header += fmt.Sprintf(" pr=#%d", rep.PR)
+	}
+	lines = append(lines, header)
+	if s := strings.TrimSpace(rep.Summary); s != "" {
+		lines = append(lines, "Summary: "+s)
+	}
+	if s := strings.TrimSpace(rep.RiskiestStep); s != "" {
+		lines = append(lines, "Riskiest step: "+s)
+	}
+	if s := strings.TrimSpace(rep.Observed); s != "" {
+		lines = append(lines, "Observed: "+s)
+	}
+	if s := strings.TrimSpace(rep.Verdict); s != "" {
+		lines = append(lines, "Verdict: "+s)
+	}
+	if s := strings.TrimSpace(rep.Reason); s != "" {
+		lines = append(lines, "Reason: "+s)
+	}
+	if s := strings.TrimSpace(rep.Ask); s != "" {
+		lines = append(lines, "Ask: "+s)
+	}
+	if s := strings.TrimSpace(rep.Raw); s != "" && rep.Summary == "" {
+		lines = append(lines, "Raw: "+s)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (p *Planner) buildChatToolRegistry(
+	run store.Run,
+	effectiveRef string,
+	planDoc **PlanDocument,
+	applyReconcile func(context.Context, Reconciliation) (string, error),
+	recordProposal func(context.Context, ProposeWorkParams) (controller.OwnerAsk, error),
+) *model.ToolRegistry {
+	reg := model.NewToolRegistry()
+	runID := run.ID
+
+	model.AddTool[ChatStatusParams](reg, ToolStatus,
+		"Read current run status, objective, settings, contract/active directives, backlog, and lanes",
+		func(callCtx context.Context, _ ChatStatusParams) (string, error) {
+			curRun, err := p.store.Runs().Get(callCtx, runID)
+			if err != nil {
+				return "", err
+			}
+			settings, _ := p.store.Runs().GetSettings(callCtx, runID)
+			items, _ := p.store.Backlog().List(callCtx, store.BacklogFilter{RunID: runID})
+			lanes, _ := p.store.Lanes().List(callCtx, store.LaneFilter{RunID: runID})
+			dirs, _ := p.store.Directives().List(callCtx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+			var b strings.Builder
+			fmt.Fprintf(&b, "Run: %s\nObjective: %s\nPlanRef: %s\nSettings: %s\n",
+				curRun.ID, cmp.Or(curRun.Objective, "(none)"), cmp.Or(curRun.PlanRef, "(none)"), settings.String())
+			fmt.Fprintf(&b, "Backlog (%d):\n", len(items))
+			for i := range items {
+				it := &items[i]
+				fmt.Fprintf(&b, "- %s [%s %s] lane=%s title=%q\n", it.ID, it.Priority, it.Status, cmp.Or(it.LaneID, "-"), it.Title)
+			}
+			fmt.Fprintf(&b, "Lanes (%d):\n", len(lanes))
+			for i := range lanes {
+				ln := &lanes[i]
+				fmt.Fprintf(&b, "- %s: status=%s phase=%s round=%d pr=#%d\n", ln.ID, ln.Status, cmp.Or(ln.Phase, "-"), ln.Round, ln.PR)
+			}
+			fmt.Fprintf(&b, "Active Directives (%d):\n", len(dirs))
+			for i := range dirs {
+				d := &dirs[i]
+				fmt.Fprintf(&b, "- [%s] kind=%s ref=%s: %s\n", d.ID, d.Kind, cmp.Or(d.Ref, "-"), d.Text)
+			}
+			return b.String(), nil
+		},
+	)
+
+	model.AddTool[ChatLaneShowParams](reg, ToolLaneShow,
+		"Inspect detailed lane state, latest phase report, and recent decisions for a lane",
+		func(callCtx context.Context, lp ChatLaneShowParams) (string, error) {
+			laneID := strings.TrimSpace(lp.LaneID)
+			if laneID == "" {
+				return "", fmt.Errorf("%w: lane_id is required", store.ErrInvalidArgument)
+			}
+			ln, err := p.store.Lanes().Get(callCtx, runID, laneID)
+			if err != nil {
+				return "", err
+			}
+			reports := p.collectChatLaneReports(callCtx, runID, []lane.Lane{*ln})
+			decs, _ := p.store.Decisions().List(callCtx, store.DecisionFilter{RunID: runID, LaneID: laneID, Limit: 10})
+			var b strings.Builder
+			fmt.Fprintf(&b, "Lane %s: item=%s status=%s phase=%s round=%d pr=#%d head=%s checks=%s\n",
+				ln.ID, cmp.Or(ln.ItemID, "-"), ln.Status, cmp.Or(ln.Phase, "-"), ln.Round, ln.PR, cmp.Or(ln.PRHead, "-"), cmp.Or(ln.Checks, "-"))
+			if rep := strings.TrimSpace(reports[ln.ID]); rep != "" {
+				b.WriteString(rep + "\n")
+			}
+			if len(decs) > 0 {
+				b.WriteString("Recent Decisions:\n")
+				for i := range decs {
+					d := &decs[i]
+					fmt.Fprintf(&b, "- seq=%d actor=%s tool=%s reason=%q result=%q\n", d.Seq, d.Actor, d.Tool, d.Reason, d.Result)
+				}
+			}
+			return b.String(), nil
+		},
+	)
+
+	model.AddTool[ChatBacklogParams](reg, ToolBacklog,
+		"List backlog items for the run, optionally filtered by status",
+		func(callCtx context.Context, bp ChatBacklogParams) (string, error) {
+			filter := store.BacklogFilter{RunID: runID}
+			if st := store.BacklogStatus(strings.TrimSpace(bp.Status)); st != "" {
+				filter.Statuses = []store.BacklogStatus{st}
+			}
+			items, err := p.store.Backlog().List(callCtx, filter)
+			if err != nil {
+				return "", err
+			}
+			if len(items) == 0 {
+				return "Backlog (0): (empty)", nil
+			}
+			var b strings.Builder
+			fmt.Fprintf(&b, "Backlog (%d):\n", len(items))
+			for i := range items {
+				it := &items[i]
+				fmt.Fprintf(&b, "- %s [%s #%d %s] lane=%s title=%q acceptance=%q\n",
+					it.ID, it.Priority, it.Order, it.Status, cmp.Or(it.LaneID, "-"), it.Title, it.Acceptance)
+			}
+			return b.String(), nil
+		},
+	)
+
+	model.AddTool[ChatDecisionsSinceParams](reg, ToolDecisionsSince,
+		"List recent decisions for the run since a sequence number",
+		func(callCtx context.Context, dp ChatDecisionsSinceParams) (string, error) {
+			limit := dp.Limit
+			if limit <= 0 {
+				limit = 20
+			}
+			decs, err := p.store.Decisions().List(callCtx, store.DecisionFilter{
+				RunID:    runID,
+				SinceSeq: dp.SinceSeq,
+				Limit:    limit,
+			})
+			if err != nil {
+				return "", err
+			}
+			var b strings.Builder
+			fmt.Fprintf(&b, "Decisions (%d):\n", len(decs))
+			for i := range decs {
+				d := &decs[i]
+				fmt.Fprintf(&b, "- seq=%d actor=%s tool=%s lane=%s reason=%q result=%q\n",
+					d.Seq, d.Actor, d.Tool, cmp.Or(d.LaneID, "-"), d.Reason, d.Result)
+			}
+			return b.String(), nil
+		},
+	)
+
+	reg.Register(readPlanToolDef, func(callCtx context.Context, raw json.RawMessage) (string, error) {
+		var rp ReadPlanParams
+		if err := json.Unmarshal(raw, &rp); err != nil {
+			return "", fmt.Errorf("decode %s: %w", ToolReadPlan, err)
+		}
+		ref := cmp.Or(strings.TrimSpace(rp.Ref), effectiveRef, strings.TrimSpace(run.PlanRef))
+		if ref == "" {
+			return "", fmt.Errorf("%w: plan ref is required", store.ErrInvalidArgument)
+		}
+		doc, readErr := p.cfg.PlanReader.ReadPlan(callCtx, ref)
+		if readErr != nil {
+			return "", readErr
+		}
+		if planDoc != nil {
+			*planDoc = &doc
+		}
+		return fmt.Sprintf("Plan Ref: %s (%s)\nTitle: %s\n\n%s", doc.Ref, doc.SourceKind, doc.Title, doc.Content), nil
+	})
+
+	reg.Register(SubmitReconciliationToolDefinition(), func(callCtx context.Context, raw json.RawMessage) (string, error) {
+		var rec Reconciliation
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			return "", fmt.Errorf("decode %s: %w", ToolSubmitReconciliation, err)
+		}
+		return applyReconcile(callCtx, rec)
+	})
+
+	model.AddTool[ProposeWorkParams](reg, ToolProposeWork,
+		"Record proposed work or a design decision proposal in the open-question store for owner approval",
+		func(callCtx context.Context, pw ProposeWorkParams) (string, error) {
+			ask, err := recordProposal(callCtx, pw)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("Recorded proposal %s in open questions: %s (options: %s; default: %s)",
+				ask.ID, ask.Question, strings.Join(ask.Options, " | "), ask.Default), nil
+		},
+	)
+
+	if p.cfg.Investigate.HasRoots() {
+		model.RegisterInvestigationTools(reg, p.cfg.Investigate)
+	}
+	return reg
 }

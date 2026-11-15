@@ -47,8 +47,8 @@ func TestOwnerChatDatasetCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cases) != 60 {
-		t.Fatalf("want 60 cases, got %d", len(cases))
+	if len(cases) != 68 {
+		t.Fatalf("want 68 cases, got %d", len(cases))
 	}
 	seen := map[string]bool{}
 	covered := map[string]bool{}
@@ -85,7 +85,7 @@ func TestOwnerChatSplitMatchesReplayHashSplit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tune) != 30 || len(holdout) != 30 {
+	if len(tune) != 34 || len(holdout) != 34 {
 		t.Fatalf("split sizes: %d/%d", len(tune), len(holdout))
 	}
 }

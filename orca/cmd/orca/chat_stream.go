@@ -32,6 +32,9 @@ func (s *chatStream) text(text string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.emit == nil {
+		return
+	}
 	if strings.TrimSpace(text) != "" {
 		s.emitted = true
 	}
@@ -42,7 +45,7 @@ func (s *chatStream) text(text string) {
 func (s *chatStream) complete(text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.emitted && strings.TrimSpace(text) != "" {
+	if s.emit != nil && !s.emitted && strings.TrimSpace(text) != "" {
 		s.emit(text)
 	}
 	s.emitted = false

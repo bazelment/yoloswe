@@ -564,3 +564,77 @@ func TestQueuedAcknowledgementNeedsLiveControllerLease(t *testing.T) {
 		})
 	}
 }
+
+func TestPlannerRoutedMessageStreamsPlannerAnswerInChat(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	st := newRunStore(t, store.Run{ID: "run-sandbox", Objective: "diskless sandbox with minimal guest RAM"}, true)
+	defer st.Close()
+	b := NewStoreBackend(st, "run-sandbox")
+	b.PlannerStream = func(callCtx context.Context, targetStore store.Store, runID, text string, emit func(string)) error {
+		th, err := targetStore.Threads().StartThread(callCtx, store.Thread{
+			ID:     "planner-" + runID + "-1",
+			RunID:  runID,
+			Role:   store.ThreadRolePlanner,
+			Goal:   text,
+			Status: store.ThreadStatusIdle,
+		})
+		if err != nil {
+			return err
+		}
+		turnRec, err := targetStore.Threads().StartTurn(callCtx, store.Turn{
+			ID:       th.ID + "-turn-1",
+			ThreadID: th.ID,
+			RunID:    runID,
+			Input:    text,
+		})
+		if err != nil {
+			return err
+		}
+		askRaw := `{"id":"proposal-dax","run_id":"run-sandbox","question":"Cap guest RAM at 1 GiB and use virtiofs DAX to bypass guest page cache","options":["approve_proposal","reject_proposal"],"default":"approve_proposal"}`
+		if err := targetStore.Directives().Add(callCtx, store.Directive{
+			ID:     "ask-proposal-dax",
+			RunID:  runID,
+			Kind:   store.DirectiveInstruction,
+			Source: store.DirectiveSourcePlanner,
+			Ref:    "owner_ask:proposal-dax",
+			Text:   askRaw,
+			Status: store.DirectiveActive,
+		}); err != nil {
+			return err
+		}
+		usage := model.Usage{InputTokens: 2000, OutputTokens: 400, CostUSD: 0.05}
+		if err := targetStore.Threads().CompleteTurn(callCtx, th.ID, turnRec.ID, store.TurnStatusCompleted, usage, ""); err != nil {
+			return err
+		}
+		if emit != nil {
+			emit("With virtiofs DAX or EROFS over virtio-pmem, the guest kernel maps host pages directly without duplicating fs cache in guest RAM, keeping overhead under 512 MiB.")
+		}
+		return nil
+	}
+
+	const ask = "I'm not completely against guest ram consumption, but up to 4GB seems to be high, can you research what's the best we can do if memory overhead is minimized, think about how kernel manages fs cache"
+	var streamed []string
+	if err := b.Dispatch(ctx, router.Decision{Handler: router.Planner, Confidence: 0.95}, ask, func(s string) {
+		streamed = append(streamed, s)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(streamed, "\n")
+	if strings.HasPrefix(got, "Queued for the planner") {
+		t.Fatalf("planner-routed message produced bare ack %q, want streamed planner answer", got)
+	}
+	if !strings.Contains(got, "virtiofs DAX") {
+		t.Fatalf("streamed planner answer = %q, want grounded answer", got)
+	}
+	snap, err := b.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snap.Status, "open questions: 1") || !strings.Contains(snap.Status, "cost today: $0.05") {
+		t.Fatalf("Snapshot.Status = %q, want open questions: 1 and cost today: $0.05", snap.Status)
+	}
+	if len(snap.Questions) != 1 || !strings.Contains(snap.Questions[0], "proposal-dax") {
+		t.Fatalf("Snapshot.Questions = %v, want proposal-dax", snap.Questions)
+	}
+}

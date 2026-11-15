@@ -47,6 +47,7 @@ const (
 	ToolMemoryRead      = "memory.read"
 	ToolMemorySubmit    = "memory.submit"
 	ToolMemoryUndo      = "memory.undo"
+	ToolPlannerAsk      = "planner.ask"
 )
 
 // Directive submission kinds accepted by directive.submit.
@@ -65,11 +66,16 @@ var ErrUncitedAnswer = errors.New("orca/concierge: answer does not cite store fa
 // DirectiveHandler is an optional callback invoked synchronously when directive.submit writes a directive.
 type DirectiveHandler func(ctx context.Context, runID string, dir store.Directive) (string, error)
 
+// PlannerAskHandler escalates a question (and optional partial findings) from
+// the Concierge to the Planner and returns the Planner's answer.
+type PlannerAskHandler func(ctx context.Context, runID, question, findings string) (string, error)
+
 // Config configures a Concierge instance.
 type Config struct {
 	RunControl       func(context.Context, string, string) (string, error)
 	RunStart         func(context.Context, string, string) (string, error)
 	OnDirective      DirectiveHandler
+	AskPlanner       PlannerAskHandler
 	AgentBackend     model.AgentBackend
 	Provider         string
 	Effort           string
@@ -165,6 +171,13 @@ type RunSettingsParams struct {
 	Words             string   `json:"words,omitempty"`
 }
 
+// PlannerAskParams holds parameters for escalating a complex question to the Planner.
+type PlannerAskParams struct {
+	Question string `json:"question" jsonschema:"required,description=The owner's design, research, trade-off, or constraint question to hand to the Planner"`
+	Findings string `json:"findings,omitempty" jsonschema:"description=Optional partial findings gathered so far"`
+	RunID    string `json:"run_id,omitempty" jsonschema:"description=Optional run ID when the owner names a specific run"`
+}
+
 // Control validates and runs a pause, resume or stop command.
 func Control(ctx context.Context, command func(context.Context, string) (string, error), p RunControlParams) (string, error) {
 	switch p.Action {
@@ -191,6 +204,7 @@ var conciergeToolDefs = []model.ToolDefinition{
 	{Name: ToolDirectiveSubmit, Description: "Submit a typed owner directive (rule, plan_import, recipe_edit, order) to DirectiveStore", InputSchema: model.SchemaFor[DirectiveSubmitParams]()},
 	{Name: ToolDirectiveRevoke, Description: "Revoke or supersede an active directive by ID when the owner lifts, clears, or replaces it", InputSchema: model.SchemaFor[DirectiveRevokeParams]()},
 	{Name: ToolMemoryRead, Description: "Read the full body of a recalled memory", InputSchema: model.SchemaFor[MemoryReadParams]()},
+	{Name: ToolPlannerAsk, Description: "Escalate a complex design, research, trade-off, or constraint question (plus any partial findings) to the Planner", InputSchema: model.SchemaFor[PlannerAskParams]()},
 }
 
 // NormalizeToolName maps underscore aliases (e.g. "lane_show") to canonical dotted tool names.
@@ -214,7 +228,7 @@ func NormalizeToolName(name string) string {
 
 func isKnownTool(name string) bool {
 	switch name {
-	case ToolRunControl, ToolRunStart, ToolRunSettings, ToolStatus, ToolLaneShow, ToolDecisionsSince, ToolBacklog, ToolDirectiveSubmit, ToolDirectiveRevoke, ToolMemoryRead, ToolMemorySubmit, ToolMemoryUndo:
+	case ToolRunControl, ToolRunStart, ToolRunSettings, ToolStatus, ToolLaneShow, ToolDecisionsSince, ToolBacklog, ToolDirectiveSubmit, ToolDirectiveRevoke, ToolMemoryRead, ToolMemorySubmit, ToolMemoryUndo, ToolPlannerAsk:
 		return true
 	default:
 		return false
@@ -412,6 +426,23 @@ type conciergeTurnState struct {
 	quote               string
 	editor              *MemoryEditor
 	memoryEcho          string
+	escalatedAnswer     string
+}
+
+type escalationModelClient struct {
+	inner model.ModelClient
+	state *conciergeTurnState
+}
+
+func (e *escalationModelClient) CreateMessage(ctx context.Context, req model.Request) (*model.Response, error) {
+	if e.state != nil && e.state.escalatedAnswer != "" {
+		return &model.Response{
+			Model:      req.Model,
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock(e.state.escalatedAnswer)),
+		}, nil
+	}
+	return e.inner.CreateMessage(ctx, req)
 }
 
 // AskInThread executes a single conversational turn on an existing Concierge thread.
@@ -571,7 +602,7 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 
 		loopRes, lErr := model.RunToolLoop(
 			ctx,
-			c.client,
+			&escalationModelClient{inner: c.client, state: state},
 			req,
 			reg,
 			model.WithMaxTurns(c.cfg.MaxTurns),
@@ -622,10 +653,16 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 		if loopRes != nil {
 			usage = loopRes.Usage
 			turnCount = loopRes.TurnCount
+			if state.escalatedAnswer != "" && turnCount > 1 {
+				turnCount--
+			}
 			answer = strings.TrimSpace(loopRes.Response.Text())
 		}
 	}
 
+	if state.escalatedAnswer != "" {
+		answer = state.escalatedAnswer
+	}
 	if state.memoryEcho != "" {
 		answer = state.memoryEcho
 	}
@@ -633,7 +670,7 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 	if loopErr == nil {
 		var citeErr error
 		citedFacts, citeErr = VerifyAnswerCitations(ctx, c.store, runID, answer, state.submittedDirectives)
-		if citeErr != nil && !c.cfg.DisableCitations && state.memoryEcho == "" {
+		if citeErr != nil && !c.cfg.DisableCitations && state.memoryEcho == "" && state.escalatedAnswer == "" {
 			loopErr = citeErr
 		}
 	}
@@ -832,9 +869,78 @@ func (c *Concierge) handleRawToolCall(
 		}
 		return fmt.Sprintf("[%s] %s\n%s\nsource: %s", m.ID, m.Name, m.Body, m.Source), nil
 
+	case ToolPlannerAsk:
+		p, err := decodeToolParams[PlannerAskParams](canonical, trimmed)
+		if err != nil {
+			return "", err
+		}
+		return c.execPlannerAsk(ctx, runID, state, trimmed, p)
+
 	default:
 		return "", fmt.Errorf("unsupported concierge tool %q", toolName)
 	}
+}
+
+func (c *Concierge) execPlannerAsk(
+	ctx context.Context,
+	runID string,
+	state *conciergeTurnState,
+	rawArgs json.RawMessage,
+	p PlannerAskParams,
+) (string, error) {
+	if c.cfg.AskPlanner == nil {
+		return "", fmt.Errorf("planner.ask unavailable")
+	}
+	start := c.clock.Now()
+	targetRun := cmp.Or(strings.TrimSpace(p.RunID), runID)
+	q := strings.TrimSpace(p.Question)
+	if q == "" && state != nil {
+		q = strings.TrimSpace(state.quote)
+	}
+	if q == "" {
+		return "", fmt.Errorf("%w: planner.ask requires question", store.ErrInvalidArgument)
+	}
+	ans, err := c.cfg.AskPlanner(ctx, targetRun, q, strings.TrimSpace(p.Findings))
+	if err != nil {
+		return "", err
+	}
+	ans = strings.TrimSpace(ans)
+	if state != nil && ans != "" {
+		state.escalatedAnswer = ans
+	}
+	var (
+		threadID string
+		turnID   string
+		usage    model.Usage
+	)
+	if state != nil {
+		threadID = state.threadID
+		turnID = state.turnID
+		if !state.turnUsageRecorded {
+			usage = state.turnUsage
+			state.turnUsageRecorded = true
+		}
+	}
+	dec, decErr := c.store.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
+		RunID:        targetRun,
+		Category:     store.DecisionJudgment,
+		Actor:        ActorConcierge,
+		ThreadID:     threadID,
+		TurnID:       turnID,
+		Tool:         ToolPlannerAsk,
+		Reason:       q,
+		Result:       ans,
+		Args:         slices.Clone(rawArgs),
+		Vetted:       true,
+		InputTokens:  usage.InputTokens,
+		OutputTokens: usage.OutputTokens,
+		CostUSD:      usage.CostUSD,
+		LatencyMs:    max(c.clock.Now().Sub(start).Milliseconds(), 0),
+	})
+	if decErr == nil && state != nil {
+		state.decisions = append(state.decisions, dec)
+	}
+	return ans, nil
 }
 
 func (c *Concierge) execStatus(ctx context.Context, runID string, p StatusParams) (string, error) {

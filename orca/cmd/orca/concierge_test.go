@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1162,5 +1163,117 @@ func TestConciergeAdoptReplyWording(t *testing.T) {
 	}
 	if strings.Contains(ans, "I can't adopt anything from this chat") {
 		t.Fatalf("adopt reply wording must not say 'I can't adopt anything from this chat': %q", ans)
+	}
+}
+
+func TestConciergeAndPlannerChat_EscalationAndPlannerStream(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 22, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+
+	const runID = "20261115-diskless-sandbox"
+	if err := st.Runs().Create(ctx, store.Run{
+		ID:         runID,
+		Repository: "bazelment/yoloswe",
+		Objective:  "Goal: diskless sandbox with minimal guest RAM overhead.",
+		PlanRef:    "docs/design/diskless-sandbox.md",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:     "contract-ram",
+		RunID:  runID,
+		Kind:   store.DirectiveContract,
+		Source: store.DirectiveSourceOwner,
+		Scope:  "run",
+		Text:   "Keep guest RAM consumption well below 4 GiB.",
+		Status: store.DirectiveActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	plannerClient := model.NewFakeClient(
+		model.Response{
+			Model:      DefaultPlannerModel,
+			StopReason: model.StopReasonToolUse,
+			Usage:      model.Usage{InputTokens: 900, OutputTokens: 150, CostUSD: 0.025},
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_prop_1", ToolPlannerProposeWork, json.RawMessage(`{
+					"question": "Approve 1 GiB guest-RAM cap + virtiofs DAX spike lane?",
+					"default": "approve",
+					"options": ["approve", "keep-current"]
+				}`)),
+			),
+		},
+		model.Response{
+			Model:      DefaultPlannerModel,
+			StopReason: model.StopReasonEndTurn,
+			Usage:      model.Usage{InputTokens: 1000, OutputTokens: 200, CostUSD: 0.030},
+			Message: model.NewAssistantMessage(
+				model.NewTextBlock("With DAX + virtiofs and page-cache reclamation, we can bound guest RAM to 768 MiB–1 GiB."),
+			),
+		},
+	)
+	chatPlanner := NewPlanner(st, clk, plannerClient, DefaultPlannerModel, nil)
+
+	// Concierge escalates via planner.ask on its first turn.
+	concClient := model.NewFakeClient(
+		model.Response{
+			Model:      DefaultConciergeModel,
+			StopReason: model.StopReasonToolUse,
+			Usage:      model.Usage{InputTokens: 200, OutputTokens: 40, CostUSD: 0.0004},
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("tu_ask_planner", ToolPlannerAsk, json.RawMessage(`{
+					"question": "I'm not completely against guest ram consumption, but up to 4GB seems to be high, can you research what's the best we can do if memory overhead is minimized, think about how kernel manages fs cache",
+					"findings": "Checked run contract: guest RAM budget must stay well below 4 GiB."
+				}`)),
+			),
+		},
+	)
+	c := NewConcierge(runID, st, clk, concClient, DefaultConciergeModel)
+	c.AskPlanner = func(askCtx context.Context, targetRun, q, findings string, emit func(string)) (string, error) {
+		return chatPlanner.AskStream(askCtx, st, cmp.Or(targetRun, runID), q, findings, nil, emit)
+	}
+
+	var chunks []string
+	if err := c.AskStream(ctx, "I'm not completely against guest ram consumption, but up to 4GB seems to be high, can you research what's the best we can do if memory overhead is minimized, think about how kernel manages fs cache", func(s string) {
+		chunks = append(chunks, s)
+	}); err != nil {
+		t.Fatalf("AskStream with planner.ask: %v", err)
+	}
+	joined := strings.Join(chunks, "\n")
+	if !strings.Contains(joined, "768 MiB–1 GiB") {
+		t.Fatalf("streamed output missing planner answer:\n%s", joined)
+	}
+	if len(concClient.Requests) != 1 {
+		t.Fatalf("expected 1 concierge model call (one-hop escalation), got %d", len(concClient.Requests))
+	}
+	if len(plannerClient.Requests) != 2 {
+		t.Fatalf("expected 2 planner model calls, got %d", len(plannerClient.Requests))
+	}
+	firstPlannerPrompt := plannerClient.Requests[0].Messages[0].Text()
+	for _, want := range []string{
+		"Keep guest RAM consumption well below 4 GiB.",
+		"Checked run contract: guest RAM budget must stay well below 4 GiB.",
+	} {
+		if !strings.Contains(firstPlannerPrompt, want) {
+			t.Fatalf("planner prompt missing %q:\n%s", want, firstPlannerPrompt)
+		}
+	}
+	dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	if err != nil {
+		t.Fatalf("list active directives: %v", err)
+	}
+	var foundProposal bool
+	for _, dir := range dirs {
+		if strings.HasPrefix(dir.Ref, "owner_ask:") && strings.Contains(dir.Text, "1 GiB guest-RAM cap") {
+			foundProposal = true
+			break
+		}
+	}
+	if !foundProposal {
+		t.Fatalf("expected pending work proposal directive, got %+v", dirs)
 	}
 }
