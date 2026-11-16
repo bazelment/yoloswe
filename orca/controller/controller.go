@@ -2232,7 +2232,7 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		}
 	}
 
-	if curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && (rep.Outcome == lane.OutcomeNoChange || strings.EqualFold(strings.TrimSpace(rep.Change), "none") || rep.Outcome == lane.OutcomeDone) {
+	if curPhase.Name == recipe.PhaseSWE && rep.PR == 0 && ln.PR == 0 && !c.reportOnlyNeedsJudgment(ln) && (rep.Outcome == lane.OutcomeNoChange || strings.EqualFold(strings.TrimSpace(rep.Change), "none") || rep.Outcome == lane.OutcomeDone) {
 		// A host run can prove a report-only lane without a local checkout or
 		// GitHub compare: the terminal's HEAD is the immutable base returned by
 		// the spawn response.
@@ -3347,6 +3347,18 @@ func (c *Controller) advanceHeld(ln *lane.Lane) bool {
 		return false
 	}
 	return c.cfg.HoldAdvance[ln.ID]
+}
+
+func (c *Controller) reportOnlyNeedsJudgment(ln *lane.Lane) bool {
+	if ln == nil {
+		return false
+	}
+	if c.advanceHeld(ln) {
+		return true
+	}
+	// Adopted SWE handbacks are the hand integrator's merge judgment. The
+	// normal recipe path records the judgment event and leaves the lane open.
+	return c.cfg.HostRun && strings.EqualFold(strings.TrimSpace(ln.Phase), recipe.PhaseSWE)
 }
 
 func (c *Controller) importedTerminalWorking(ln lane.Lane) bool {

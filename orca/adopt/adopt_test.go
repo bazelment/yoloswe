@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/clock"
+	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -145,6 +146,33 @@ func TestAdoptDecisionHostHolds(t *testing.T) {
 				t.Fatalf("reason=%q, want %q", got.Reason, tc.wantReason)
 			}
 		})
+	}
+}
+
+func TestMergeGateEvidenceUsesLaneEvidenceOnly(t *testing.T) {
+	t.Parallel()
+	r := Run{Objective: "Merge rule: require soak PASS", Context: "The gate is soak PASS.", IntegrateRule: "require soak PASS"}
+	ln := Lane{Report: "Outcome: done\n", LastEvent: "completed", Checks: ""}
+	if got := mergeGateEvidence(r, ln); got {
+		t.Fatal("merge gate evidence was inferred from the gate prose")
+	}
+	ln.Report = "Outcome: done\nSoak: PASS\n"
+	if got := mergeGateEvidence(r, ln); !got {
+		t.Fatal("lane-owned soak evidence was not recognized")
+	}
+}
+
+func TestControllerStateIntegratedLaneWinsHostHold(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"phases":[{"name":"swe"}]},"tasks":[{"id":"lane","phase":"swe","status":"running","merge_sha":"merged-sha"}]}`)
+	r := Run{ID: "adopted", Dir: dir, Format: FormatSubagentSwarm, Lanes: []Lane{{ID: "lane", Phase: "swe", Status: "running", HostHold: "held behind deploy", MergeSHA: "merged-sha", Integrated: true, PRState: "merged"}}}
+	_, lanes, _, err := controllerState(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lanes) != 1 || lanes[0].Status != lane.StatusDone || lanes[0].HostHoldReason != "" {
+		t.Fatalf("integrated held lane = %+v, want terminal without host hold", lanes)
 	}
 }
 

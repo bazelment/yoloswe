@@ -1243,6 +1243,13 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			// A nebula-swarm lane parked for its owner; checkpoint writes it back.
 			status = lane.StatusBlocked
 		}
+		terminal := integratedLane(*imported)
+		if terminal {
+			// Imported merge/close facts are authoritative even when a host
+			// ledger's status or hold marker is stale. Terminal lanes are never
+			// reopened by adoption.
+			status = lane.StatusDone
+		}
 		// Host-owned blocks and draft PRs are imported as blocked so every
 		// controller tick treats them as judgment-only. An owner/dispatcher
 		// answer can explicitly move the lane back to running.
@@ -1253,7 +1260,10 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		if hostHoldReason == "" && strings.EqualFold(imported.Status, "blocked") {
 			hostHoldReason = "blocked"
 		}
-		if hostHoldReason != "" {
+		if terminal {
+			hostHoldReason = ""
+		}
+		if hostHoldReason != "" && !terminal {
 			status = lane.StatusBlocked
 		}
 		if !status.Valid() {

@@ -552,13 +552,25 @@ func hostHoldReason(dir, laneID, current string) string {
 	for _, name := range []string{"ESCALATIONS.md", "PROGRESS.md", "CONTEXT.md", "OBJECTIVE.md"} {
 		for _, line := range strings.Split(readText(filepath.Join(dir, name)), "\n") {
 			trimmed := strings.TrimSpace(line)
-			lower := strings.ToLower(trimmed)
-			if trimmed != "" && containsWord(trimmed, laneID) && (strings.Contains(lower, "hold") || strings.Contains(lower, "park") || strings.Contains(lower, "blocked")) {
+			if trimmed != "" && containsWord(trimmed, laneID) && explicitHostHoldLine(trimmed) {
 				return clip(trimmed, 240)
 			}
 		}
 	}
 	return ""
+}
+
+func explicitHostHoldLine(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if strings.Contains(lower, "hold-advance") || strings.Contains(lower, "hold released") || strings.Contains(lower, "unblocked") {
+		return false
+	}
+	for _, marker := range []string{"hold", "hold_note", "park", "blocked", "blocked_on"} {
+		if strings.Contains(lower, marker+":") || strings.Contains(lower, marker+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 var (
@@ -696,7 +708,7 @@ type spawnFile struct {
 
 func importLane(dir string, l *ledgerLane) Lane {
 	x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: l.Status, Round: l.Round,
-		HostHold: firstNonEmpty(l.BlockedOn, l.HoldNote, l.Hold, l.Park, l.Note), PRDraft: l.PRDraft || l.Draft,
+		HostHold: firstNonEmpty(l.BlockedOn, l.HoldNote, l.Hold, l.Park), PRDraft: l.PRDraft || l.Draft,
 		PRState: l.PRState, MergeSHA: l.MergeSHA, Head: l.Head, Checks: l.Checks}
 	x.PRDraft = x.PRDraft || isDraftPR(x.PRState)
 	phase, sp := newestSpawn(dir, l.ID, l.Phase)
@@ -953,7 +965,7 @@ func (s *Service) DryRunDir(_ context.Context, dir string) (DryRunResult, error)
 	for i := range r.Lanes {
 		preview := previewLane(r, r.Lanes[i])
 		result.Lanes = append(result.Lanes, preview)
-		if preview.Move == "advance" || preview.Move == "integrate" {
+		if preview.Move != "none" && preview.Move != "wait" && preview.Move != "judge" {
 			mutating = append(mutating, preview.ID+":"+preview.Move)
 		} else if preview.Move == "judge" && preview.EvidencePresent {
 			judgments = append(judgments, preview.ID+":"+preview.Move)
@@ -1027,6 +1039,13 @@ func previewLane(r Run, ln Lane) DryRunLane {
 		p.Reason = "run is already terminal; no lifecycle move"
 		return p
 	}
+	if ln.HoldAdvance {
+		report := previewOutcome(ln.Report)
+		if report != "done" && report != "no-change" {
+			p.Move, p.Reason = "wait", "hold-advance requires orchestrator judgment"
+			return p
+		}
+	}
 	if strings.EqualFold(ln.TerminalState, "working") || strings.EqualFold(ln.TerminalState, "busy") {
 		p.Move, p.Reason = "wait", "terminal is working; adoption must not complete, release, or stop it"
 		return p
@@ -1099,20 +1118,39 @@ func mergeGate(r Run) string {
 }
 
 func mergeGateEvidence(r Run, ln Lane) bool {
-	text := strings.ToLower(strings.Join([]string{r.Objective, r.Context, r.IntegrateRule, ln.Report, ln.LastEvent, ln.Checks, ln.Head}, "\n"))
-	if strings.Contains(text, "exact head") && strings.TrimSpace(ln.Head) == "" {
+	gate := strings.ToLower(strings.Join([]string{r.Objective, r.Context, r.IntegrateRule}, "\n"))
+	evidence := strings.ToLower(strings.Join([]string{ln.Report, ln.LastEvent, ln.Checks}, "\n"))
+	if strings.Contains(gate, "exact head") && strings.TrimSpace(ln.Head) == "" {
 		return false
 	}
-	if strings.Contains(text, "soak") {
-		return strings.Contains(text, "soak pass") || strings.Contains(text, "soak: pass") || strings.Contains(text, "soak passed")
+	if strings.Contains(gate, "soak") {
+		return containsEvidenceAny(evidence, "soak pass", "soak: pass", "soak passed")
 	}
-	if strings.Contains(text, "a/b") || strings.Contains(text, "ab test") {
-		return strings.Contains(text, "a/b pass") || strings.Contains(text, "a/b: pass") || strings.Contains(text, "a/b passed")
+	if strings.Contains(gate, "a/b") || strings.Contains(gate, "ab test") {
+		return containsEvidenceAny(evidence, "a/b pass", "a/b: pass", "a/b passed", "ab test pass", "ab test: pass", "ab test passed")
 	}
-	if strings.Contains(text, "ci") || strings.Contains(text, "check") {
-		return strings.Contains(text, "green") || strings.Contains(text, "passed") || strings.Contains(text, "pass")
+	if strings.Contains(gate, "ci") || strings.Contains(gate, "check") {
+		return isGreenEvidence(ln.Checks)
 	}
 	return false
+}
+
+func containsEvidenceAny(text string, phrases ...string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func isGreenEvidence(checks string) bool {
+	switch strings.ToLower(strings.TrimSpace(checks)) {
+	case "green", "pass", "passed", "success", "ok", "true":
+		return true
+	default:
+		return false
+	}
 }
 
 func evidenceLabel(present bool, r Run, ln Lane) string {
