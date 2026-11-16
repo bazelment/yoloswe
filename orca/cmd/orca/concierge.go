@@ -2499,7 +2499,7 @@ func (c *Concierge) handleDirectiveSubmit(
 		Vetted:   true,
 	})
 
-	return directiveReceipt{id: dir.ID, run: runID}, fmt.Sprintf("Requested directive %s on run %s (kind=%s); I'll report when it spawns; %s", dir.ID, runID, dir.Kind, echo), nil
+	return directiveReceipt{id: dir.ID, run: runID}, fmt.Sprintf("Requested directive %s on run %s (kind=%s); I'll report the outcome; %s", dir.ID, runID, dir.Kind, echo), nil
 }
 
 func (c *Concierge) handleDirectiveRevoke(

@@ -165,6 +165,11 @@ type Dispatcher struct {
 	mu                 sync.Mutex
 }
 
+type spawnDriverError struct{ err error }
+
+func (e *spawnDriverError) Error() string { return e.err.Error() }
+func (e *spawnDriverError) Unwrap() error { return e.err }
+
 // New constructs a new Dispatcher.
 func New(
 	cfg Config,
@@ -1001,13 +1006,13 @@ func (d *Dispatcher) handleRawToolCall(
 		if act.Tool == ToolLaneSpawn && act.LaneSpawn != nil {
 			// A driver/network failure gets one immediate retry. Other failures
 			// become an owner question so the failed owner request remains visible.
-			if isTransientSpawnError(execErr) {
+			var driverErr *spawnDriverError
+			if errors.As(execErr, &driverErr) && isTransientSpawnError(driverErr) {
 				if state != nil {
-					state.view = nil
+					state.view = view
 				}
-				retryView, viewErr := loadStateViewWithCache(ctx, d.store, d.clock, runID, d.cfg.MaxBriefBytes, nil)
-				if viewErr == nil {
-					retryResult, retryErr := d.applyVettedAction(ctx, runID, state, retryView, act)
+				if view != nil {
+					retryResult, retryErr := d.applyVettedAction(ctx, runID, state, view, act)
 					if retryErr == nil {
 						if state != nil {
 							state.accepted = append(state.accepted, act)
@@ -1049,12 +1054,20 @@ func isTransientSpawnError(err error) bool {
 func (d *Dispatcher) recordSpawnFailureAsk(ctx context.Context, runID string, p LaneSpawnParams, spawnErr error) error {
 	itemID := strings.TrimSpace(p.ItemID)
 	if existing, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true}); err == nil {
+		requested := false
 		for i := range existing {
-			matchesItem := itemID != "" && strings.Contains(existing[i].Text, itemID)
-			matchesLane := itemID == "" && strings.TrimSpace(p.LaneID) != "" && strings.Contains(existing[i].Text, strings.TrimSpace(p.LaneID))
+			dir := &existing[i]
+			if (dir.Source == store.DirectiveSourceOwner || dir.Source == store.DirectiveSourceConcierge) && dir.Kind != store.DirectiveStanding && (mentionsExact(dir.Text, itemID) || mentionsExact(dir.Text, strings.TrimSpace(p.LaneID)) || dir.Scope == itemID || dir.Scope == strings.TrimSpace(p.LaneID)) {
+				requested = true
+			}
+			matchesItem := itemID != "" && mentionsExact(existing[i].Text, itemID)
+			matchesLane := itemID == "" && strings.TrimSpace(p.LaneID) != "" && mentionsExact(existing[i].Text, strings.TrimSpace(p.LaneID))
 			if strings.HasPrefix(existing[i].Ref, ownerAskRefPrefix) && (matchesItem || matchesLane) {
 				return nil
 			}
+		}
+		if !requested {
+			return nil
 		}
 	}
 	question := fmt.Sprintf("lane.spawn for %s failed: %s; retry or needs you?", cmp.Or(itemID, strings.TrimSpace(p.LaneID), "requested item"), singleLine(spawnErr.Error()))
@@ -1486,7 +1499,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		}
 		spawnRes, err := d.spawnLaneSession(ctx, drv, runID, view.Run.Repository, ln, firstPhase.Name, ln.Round, agent, workerBrief)
 		if err != nil {
-			return "", err
+			return "", &spawnDriverError{err: err}
 		}
 		ln.Status = lane.StatusRunning
 		if strings.TrimSpace(spawnRes.BaseCommit) != "" {
@@ -1517,8 +1530,10 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	if dirs, listErr := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true}); listErr == nil {
 		for i := range dirs {
 			dir := &dirs[i]
-			if (dir.Source == store.DirectiveSourceOwner || dir.Source == store.DirectiveSourceConcierge) && strings.Contains(strings.ToLower(dir.Text), strings.ToLower(item.ID)) {
-				_ = d.store.Directives().UpdateStatus(ctx, runID, dir.ID, store.DirectiveHandled)
+			if (dir.Source == store.DirectiveSourceOwner || dir.Source == store.DirectiveSourceConcierge) && dir.Kind != store.DirectiveStanding && mentionsExact(dir.Text, item.ID) {
+				if err := d.store.Directives().UpdateStatus(ctx, runID, dir.ID, store.DirectiveHandled); err != nil && d.cfg.Logger != nil {
+					d.cfg.Logger.Warn("marking owner directive handled after spawn", "directive", dir.ID, "item", item.ID, "error", err)
+				}
 			}
 		}
 	}
@@ -1529,6 +1544,28 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	}
 	return fmt.Sprintf("spawned lane %s for item %s on %s (round %d, recipe %s@v%d)",
 		ln.ID, item.ID, ln.Phase, ln.Round, ln.RecipeName, ln.RecipeVersion), nil
+}
+
+func mentionsExact(text, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	if needle == "" {
+		return false
+	}
+	isWord := func(r rune) bool {
+		return r == '_' || r == '-' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
+	}
+	for start := 0; ; {
+		i := strings.Index(text[start:], needle)
+		if i < 0 {
+			return false
+		}
+		i += start
+		end := i + len(needle)
+		if (i == 0 || !isWord(rune(text[i-1]))) && (end == len(text) || !isWord(rune(text[end]))) {
+			return true
+		}
+		start = i + 1
+	}
 }
 
 func (d *Dispatcher) reconcileLanePRState(ctx context.Context, runID string, ln *lane.Lane) (bool, string, error) {

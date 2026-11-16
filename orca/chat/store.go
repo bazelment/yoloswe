@@ -939,7 +939,17 @@ func (b *StoreBackend) pendingWorkSummary(ctx context.Context, runs []string) st
 	if len(items) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("📋 %d queued: %s", len(items), strings.Join(items, ", "))
+	const maxVisible = 3
+	total := len(items)
+	visible := items
+	if len(visible) > maxVisible {
+		visible = visible[:maxVisible]
+	}
+	more := total - len(visible)
+	if more > 0 {
+		return fmt.Sprintf("📋 %d queued: %s, +%d more", total, strings.Join(visible, ", "), more)
+	}
+	return fmt.Sprintf("📋 %d queued: %s", total, strings.Join(visible, ", "))
 }
 
 func (b *StoreBackend) failedSpawnItems(ctx context.Context, runID string) map[string]bool {
@@ -950,9 +960,7 @@ func (b *StoreBackend) failedSpawnItems(ctx context.Context, runID string) map[s
 	}
 	for i := range decs {
 		d := &decs[i]
-		result := strings.ToLower(d.Result)
-		failure := strings.Contains(result, "error") || strings.Contains(result, "failed") || strings.Contains(result, "rejected")
-		if d.Tool != "lane.spawn" || !failure {
+		if d.Tool != "lane.spawn" || !spawnDecisionFailed(d) {
 			continue
 		}
 		var p struct {
@@ -973,8 +981,7 @@ func (b *StoreBackend) failedSpawnItems(ctx context.Context, runID string) map[s
 			if json.Unmarshal(later.Args, &laterParams) != nil || laterParams.ItemID != p.ItemID {
 				continue
 			}
-			laterResult := strings.ToLower(later.Result)
-			if !strings.Contains(laterResult, "error") && !strings.Contains(laterResult, "failed") && !strings.Contains(laterResult, "rejected") {
+			if !spawnDecisionFailed(later) {
 				delete(out, p.ItemID)
 			}
 			break
@@ -1158,23 +1165,6 @@ func (b *StoreBackend) OwnerRun(ctx context.Context, run, text string) (string, 
 			return "", fmt.Errorf("run %s is not held by this chat (held: %s); /adopt or /runs it first", run, cmp.Or(strings.Join(runs, ", "), "none"))
 		}
 		return run, nil
-	}
-	// An unqualified owner reply belongs to the sole run with an open ask,
-	// even when that adopted controller is not the chat's attached run.
-	held, heldErr := b.heldRuns(ctx)
-	if heldErr == nil {
-		asks, asksErr := b.asks(ctx, held)
-		if asksErr == nil {
-			var asking []string
-			for i := range asks {
-				if !slices.Contains(asking, asks[i].run) {
-					asking = append(asking, asks[i].run)
-				}
-			}
-			if len(asking) == 1 {
-				return asking[0], nil
-			}
-		}
 	}
 	target, refusal, err := b.target(ctx, text)
 	switch {
@@ -2242,8 +2232,7 @@ func formatSpawnOutcome(d *store.Decision, detail string) string {
 	if item == "" {
 		return ""
 	}
-	lower := strings.ToLower(detail)
-	if strings.Contains(lower, "error") || strings.Contains(lower, "failed") || strings.Contains(lower, "rejected") {
+	if spawnDecisionFailed(d) {
 		reason := strings.TrimSpace(strings.TrimPrefix(detail, "error:"))
 		return fmt.Sprintf("✗ %s spawn failed: %s", item, cmp.Or(reason, detail))
 	}
@@ -2254,6 +2243,17 @@ func formatSpawnOutcome(d *store.Decision, detail string) string {
 		detail += ", model=" + p.Model
 	}
 	return fmt.Sprintf("▶ %s spawned (%s)", item, detail)
+}
+
+func spawnDecisionFailed(d *store.Decision) bool {
+	if d == nil || d.Tool != "lane.spawn" {
+		return false
+	}
+	if !d.Vetted {
+		return true
+	}
+	result := strings.ToLower(strings.TrimSpace(d.Result))
+	return strings.HasPrefix(result, "error:") || strings.HasPrefix(result, "rejected:") || strings.HasPrefix(result, "failed:")
 }
 
 func oneLineSummary(s string) string {
