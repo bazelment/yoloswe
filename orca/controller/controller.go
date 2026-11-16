@@ -1601,6 +1601,9 @@ func (c *Controller) detectStalls(ctx context.Context) error {
 	now := c.clock.Now().UTC()
 	for i := range running {
 		ln := running[i]
+		if !ln.AwaitingInputSince.IsZero() {
+			continue
+		}
 		if c.laneIsWorkingOrBusy(ctx, ln) || c.hasActiveExpectedWait(ctx, ln.ID, now) {
 			continue
 		}
