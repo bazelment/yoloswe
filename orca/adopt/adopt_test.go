@@ -146,9 +146,9 @@ func TestDryRunIntegrationEvidenceTable(t *testing.T) {
 
 //nolint:govet // compact table keeps each synthetic ledger shape readable.
 type g52Fixture struct {
-	name, target, event, mode, status, report, repoPath, url string
-	pr                                                       int
-	wantMove, wantReason                                     string
+	name, event, mode, status, report, repoPath, url string
+	pr                                               int
+	wantMove, wantReason                             string
 }
 
 func TestDryRunIntegrationEvidenceG52Table(t *testing.T) {
@@ -157,16 +157,16 @@ func TestDryRunIntegrationEvidenceG52Table(t *testing.T) {
 	mirror := filepath.Join(root, "mirror")
 	urlTemplate := "file://" + bare
 	fixtures := []g52Fixture{
-		{name: "a squash merged to main with feature target", target: "feat/x", pr: 41, report: "Outcome: done\n", wantMove: "none"},
-		{name: "b squash merged to feature without checkout", target: "feat/x", event: "feature-squash", pr: 41, report: "Outcome: done\n", wantMove: "none"},
-		{name: "c recorded checkout remains byte identical", target: "feat/x", repoPath: other, pr: 41, report: "Outcome: done\n", wantMove: "none"},
-		{name: "d analysis blocked report is finished", target: "feat/x", mode: "analysis", status: "done", report: "Outcome: blocked\nReason: report is blocked\n", wantMove: "none", wantReason: "analysis lane finished; no PR to integrate"},
-		{name: "e host note with matching squash", target: "feat/x", event: "note7", report: "Outcome: done\n", wantMove: "none"},
-		{name: "f host note without matching squash", target: "feat/x", event: "note700", report: "Outcome: done\n", wantMove: "judge", wantReason: "integration gate:"},
-		{name: "g open decision does not nominate", target: "feat/x", event: "open8", report: "Outcome: done\n", wantMove: "judge", wantReason: "integration gate:"},
-		{name: "h orch merge event", target: "feat/x", event: "orch-merge", report: "Outcome: done\n", wantMove: "none"},
-		{name: "i host blocked open PR waits", target: "feat/x", status: "blocked", event: "open", pr: 41, report: "Outcome: done\n", wantMove: "wait", wantReason: "host-held: blocked"},
-		{name: "j unreachable remote is judged", target: "feat/x", report: "Outcome: done\n", url: "file:///does/not/exist", wantMove: "judge", wantReason: "integration unknown: fetch target feat/x failed"},
+		{name: "a squash merged to main with feature target", pr: 41, report: "Outcome: done\n", wantMove: "none"},
+		{name: "b squash merged to feature without checkout", pr: 99, report: "Outcome: done\n", wantMove: "none"},
+		{name: "c recorded checkout remains byte identical", repoPath: other, pr: 41, report: "Outcome: done\n", wantMove: "none"},
+		{name: "d analysis blocked report is finished", mode: "analysis", status: "done", report: "Outcome: blocked\nReason: report is blocked\n", wantMove: "none", wantReason: "analysis lane finished; no PR to integrate"},
+		{name: "e host note with matching squash", event: "note7", report: "Outcome: done\n", wantMove: "none"},
+		{name: "f host note without matching squash", event: "note700", report: "Outcome: done\n", wantMove: "judge", wantReason: "integration gate:"},
+		{name: "g open decision does not nominate", event: "open8", report: "Outcome: done\n", wantMove: "judge", wantReason: "integration gate:"},
+		{name: "h orch merge event", event: "orch-merge", report: "Outcome: done\n", wantMove: "none"},
+		{name: "i host blocked open PR waits", status: "blocked", event: "open", pr: 41, report: "Outcome: done\n", wantMove: "wait", wantReason: "host-held: blocked"},
+		{name: "j unreachable remote is judged", report: "Outcome: done\n", url: "file://" + filepath.Join(root, "missing.git"), wantMove: "judge", wantReason: "integration unknown: fetch target feat/x failed"},
 	}
 	for _, tc := range fixtures {
 		t.Run(tc.name, func(t *testing.T) {
@@ -251,7 +251,7 @@ func g52RemoteFixture(t *testing.T) (root, bare, other, laneHead string) {
 	gitTest(t, seed, "checkout", "-B", "feat/x", base)
 	write(t, filepath.Join(seed, "feature.txt"), "feature\n")
 	gitTest(t, seed, "add", ".")
-	gitTest(t, seed, "commit", "-m", "lane work (#41)")
+	gitTest(t, seed, "commit", "-m", "lane work (#99)")
 	gitTest(t, seed, "push", "-u", "origin", "feat/x")
 	gitTest(t, root, "--git-dir", bare, "symbolic-ref", "HEAD", "refs/heads/main")
 	other = filepath.Join(root, "other")
@@ -295,8 +295,6 @@ func g52RunFixture(t *testing.T, root string, tc g52Fixture, laneHead string) st
 	detail := "started review"
 	kind := "started"
 	switch tc.event {
-	case "feature-squash":
-		detail = "finished"
 	case "note7":
 		kind, detail = "orch-note", "#7 MERGED to main abc1234"
 	case "note700":
@@ -327,6 +325,7 @@ func integrationFixture(t *testing.T, kind, target string, pr int, blocked bool,
 	gitTest(t, work, "commit", "-m", "base")
 	gitTest(t, work, "branch", "-M", "main")
 	gitTest(t, work, "push", "-u", "origin", "main")
+	gitTest(t, root, "--git-dir", bare, "symbolic-ref", "HEAD", "refs/heads/main")
 	base := strings.TrimSpace(gitTest(t, work, "rev-parse", "HEAD"))
 	gitTest(t, work, "checkout", "-B", "lane-1", base)
 	write(t, filepath.Join(work, "lane.txt"), kind+"\n")

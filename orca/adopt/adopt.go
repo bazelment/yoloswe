@@ -619,7 +619,7 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 	needsGit := false
 	for i := range r.Lanes {
 		ln := r.Lanes[i]
-		if !integratedLane(ln) && !strings.EqualFold(ln.Status, "blocked") && !(strings.EqualFold(ln.Mode, "analysis") && strings.EqualFold(ln.Status, "done")) {
+		if !integratedLane(ln) && !strings.EqualFold(ln.Status, "blocked") && !finishedAnalysisLane(ln) {
 			needsGit = true
 			break
 		}
@@ -659,10 +659,8 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 		refspecs = append(refspecs, "+refs/heads/"+branch+":refs/orca/"+branch)
 		fetchedRefs = append(fetchedRefs, "refs/orca/"+branch)
 	}
-	if remoteHeadAvailable(gitCtx, source) {
-		refspecs = append(refspecs, "+HEAD:refs/orca/HEAD")
-		fetchedRefs = append(fetchedRefs, "refs/orca/HEAD")
-	}
+	refspecs = append(refspecs, "+HEAD:refs/orca/HEAD")
+	fetchedRefs = append(fetchedRefs, "refs/orca/HEAD")
 	fetchArgs := append([]string{"-C", mirror, "fetch", "--no-tags", "--filter=tree:0", source}, refspecs...)
 	fetch := exec.CommandContext(gitCtx, "git", fetchArgs...)
 	fetch.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
@@ -670,26 +668,22 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 		r.IntegrationError = "fetch target " + cmp.Or(strings.TrimSpace(r.TargetBranch), "remote") + " failed: " + strings.TrimSpace(string(out))
 		return
 	}
-	allRefs := make([]string, 0, len(fetchedRefs))
 	for _, ref := range fetchedRefs {
 		if _, err := gitOutput(gitCtx, mirror, "rev-parse", "--verify", "--end-of-options", ref); err != nil {
 			r.IntegrationError = "read mirror refs failed: " + err.Error()
 			return
 		}
-		allRefs = append(allRefs, ref)
 	}
-	var subjects []string
-	for _, ref := range allRefs {
-		out, logErr := gitOutput(gitCtx, mirror, "log", "--format=%s", "--end-of-options", ref)
-		if logErr != nil {
-			r.IntegrationError = "read mirror history failed: " + logErr.Error()
-			return
-		}
-		subjects = append(subjects, strings.Split(string(out), "\n")...)
+	logArgs := append([]string{"log", "--format=%s", "--end-of-options"}, fetchedRefs...)
+	out, logErr := gitOutput(gitCtx, mirror, logArgs...)
+	if logErr != nil {
+		r.IntegrationError = "read mirror history failed: " + logErr.Error()
+		return
 	}
+	subjects := strings.Split(string(out), "\n")
 	for i := range r.Lanes {
 		ln := &r.Lanes[i]
-		if integratedLane(*ln) || strings.EqualFold(ln.Status, "blocked") || (strings.EqualFold(ln.Mode, "analysis") && strings.EqualFold(ln.Status, "done")) {
+		if integratedLane(*ln) || strings.EqualFold(ln.Status, "blocked") || finishedAnalysisLane(*ln) {
 			continue
 		}
 		head := strings.TrimSpace(ln.Head)
@@ -698,7 +692,7 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 			continue
 		}
 		if head != "" {
-			for _, ref := range allRefs {
+			for _, ref := range fetchedRefs {
 				if gitRun(gitCtx, mirror, "merge-base", "--is-ancestor", "--end-of-options", head, ref) == nil {
 					ln.Integrated = true
 					ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is an ancestor of mirror ref %s", shortSHA(head), strings.TrimPrefix(ref, "refs/orca/"))
@@ -730,6 +724,10 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 			ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is not in mirror refs and no squash subject ending (#%s)", cmp.Or(shortSHA(head), "missing"), prNumber(ln.PR))
 		}
 	}
+}
+
+func finishedAnalysisLane(ln Lane) bool {
+	return strings.EqualFold(strings.TrimSpace(ln.Mode), "analysis") && strings.EqualFold(strings.TrimSpace(ln.Status), "done")
 }
 
 func gitOutput(ctx context.Context, repo string, args ...string) ([]byte, error) {
@@ -797,13 +795,6 @@ func ensureGitMirror(ctx context.Context, r *Run, cfg GitMirror, source string) 
 		return "", err
 	}
 	return path, nil
-}
-
-func remoteHeadAvailable(ctx context.Context, source string) bool {
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--symref", source, "HEAD")
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	out, err := cmd.Output()
-	return err == nil && strings.Contains(string(out), "\tHEAD")
 }
 
 func validGitSHA(value string) bool {
@@ -1373,7 +1364,7 @@ func previewLane(r Run, ln Lane) DryRunLane {
 		p.Reason = "lane is already integrated, merged, or closed; no lifecycle move"
 		return p
 	}
-	if strings.EqualFold(strings.TrimSpace(ln.Mode), "analysis") && strings.EqualFold(strings.TrimSpace(ln.Status), "done") {
+	if finishedAnalysisLane(ln) {
 		p.Reason = "analysis lane finished; no PR to integrate"
 		return p
 	}
