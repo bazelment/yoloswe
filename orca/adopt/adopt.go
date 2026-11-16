@@ -17,6 +17,8 @@ package adopt
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -106,6 +108,11 @@ type Lane struct {
 	// never be revisited by adopt.
 	PRDraft, Integrated             bool
 	PRState, MergeSHA, Head, Checks string
+	// Mode is the host lane mode (for example "analysis").
+	Mode string
+	// MergeNotePRs are PR numbers nominated by host merge prose. They require
+	// commit evidence in the orca-owned mirror before integration is accepted.
+	MergeNotePRs []string
 	// TerminalState is the ledger's last recorded terminal state (nebula-swarm).
 	TerminalState string
 	// Report is the latest report's Outcome line; LastEvent the lane's newest
@@ -146,8 +153,11 @@ type Run struct {
 	// TargetBranch is the host run's merge target (for example main or a
 	// feature branch). Integration is judged against this branch, never GitHub.
 	TargetBranch string
-	// IntegrationError is set when the local checkout or target fetch could not
-	// be inspected. Such lanes must be judged, never treated as integrated.
+	// BaseBranch is the configured base branch. Integration evidence is
+	// collected from the target, base, and remote HEAD refs together.
+	BaseBranch string
+	// IntegrationError is set when the mirror source or fetch could not be
+	// inspected. Such lanes must be judged, never treated as integrated.
 	IntegrationError string
 	// RepoID is the run's Nebula repository id when the run records one.
 	RepoID string `json:",omitempty"`
@@ -456,7 +466,9 @@ type ledgerLane struct {
 	Draft          bool   `json:"draft"`
 	PRState        string `json:"pr_state"`
 	MergeSHA       string `json:"merge_sha"`
+	PRHead         string `json:"pr_head"`
 	Head           string `json:"head"`
+	Mode           string `json:"mode"`
 	Checks         string `json:"checks"`
 }
 
@@ -465,6 +477,7 @@ type ledger struct {
 		Goal      string      `json:"goal"`
 		Repo      string      `json:"repo"`
 		Target    string      `json:"target"`
+		Base      string      `json:"base"`
 		MergeRule string      `json:"merge_rule"`
 		Phases    []hostPhase `json:"phases"`
 	} `json:"config"`
@@ -519,6 +532,7 @@ func Read(dir string) (Run, error) {
 			applyRepoValue(&r, st.Config.Repo)
 		}
 		r.TargetBranch = strings.TrimSpace(st.Config.Target)
+		r.BaseBranch = strings.TrimSpace(st.Config.Base)
 		for i := range st.Tasks {
 			if isLocalRepoPath(st.Tasks[i].RepoURL) {
 				localRepoPaths = append(localRepoPaths, st.Tasks[i].RepoURL)
@@ -596,16 +610,16 @@ func isGitCheckout(path string) bool {
 	return exec.Command("git", "-C", path, "rev-parse", "--git-dir").Run() == nil
 }
 
-// applyIntegrationEvidence checks the host's own merge record and local Git
-// once per run. It deliberately has no GitHub dependency: GitHub state can be
-// stale for a feature-branch target and is not evidence that this lane landed.
-func applyIntegrationEvidence(ctx context.Context, r *Run) {
+// applyIntegrationEvidence obtains all integration evidence from one orca-owned
+// commit-only mirror per run. Recorded checkouts are read-only sources only.
+func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) {
 	if r == nil {
 		return
 	}
 	needsGit := false
 	for i := range r.Lanes {
-		if !integratedLane(r.Lanes[i]) {
+		ln := r.Lanes[i]
+		if !integratedLane(ln) && !strings.EqualFold(ln.Status, "blocked") && !finishedAnalysisLane(ln) {
 			needsGit = true
 			break
 		}
@@ -618,53 +632,58 @@ func applyIntegrationEvidence(ctx context.Context, r *Run) {
 	}
 	gitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if strings.TrimSpace(r.RepoPath) == "" {
-		r.IntegrationError = "no local checkout"
+	source, err := mirrorSourceURL(gitCtx, r, mirrorCfg)
+	if err != nil {
+		r.IntegrationError = "fetch target " + cmp.Or(strings.TrimSpace(r.TargetBranch), "remote") + " failed: " + err.Error()
 		return
 	}
-	if _, err := os.Stat(r.RepoPath); err != nil {
-		r.IntegrationError = "local checkout unavailable"
+	mirror, err := ensureGitMirror(gitCtx, r, mirrorCfg, source)
+	if err != nil {
+		r.IntegrationError = "fetch target " + cmp.Or(strings.TrimSpace(r.TargetBranch), "remote") + " failed: " + err.Error()
 		return
 	}
-	target := strings.TrimSpace(r.TargetBranch)
-	if target == "" {
-		r.IntegrationError = "run target branch is missing"
-		return
-	}
-	if !validGitBranch(gitCtx, r.RepoPath, target) {
-		r.IntegrationError = "invalid run target branch " + target
-		return
-	}
-	// Fetch exactly once for the run. Lane checks below only inspect the fetched
-	// target ref and never call a per-lane remote or GitHub API.
-	refspec := "+refs/heads/" + target + ":refs/remotes/origin/" + target
-	fetch := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "fetch", "--no-tags", "origin", refspec)
-	fetch.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	if err := fetch.Run(); err != nil {
-		r.IntegrationError = "fetch target " + target + " failed: " + err.Error()
-		return
-	}
-	targetRef := ""
-	for _, ref := range []string{"refs/remotes/origin/" + target, "refs/heads/" + target, target} {
-		if out, err := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "rev-parse", "--verify", "--end-of-options", ref).Output(); err == nil && strings.TrimSpace(string(out)) != "" {
-			targetRef = ref
-			break
+	branches := []string{}
+	for _, branch := range []string{r.TargetBranch, r.BaseBranch} {
+		branch = strings.TrimSpace(branch)
+		if branch != "" && !slices.Contains(branches, branch) {
+			branches = append(branches, branch)
 		}
 	}
-	if targetRef == "" {
-		r.IntegrationError = "fetched target " + target + " is unavailable"
+	refspecs := make([]string, 0, len(branches)+1)
+	fetchedRefs := make([]string, 0, len(branches)+1)
+	for _, branch := range branches {
+		if !validGitBranch(gitCtx, mirror, branch) {
+			r.IntegrationError = "fetch target " + branch + " failed: invalid branch"
+			return
+		}
+		refspecs = append(refspecs, "+refs/heads/"+branch+":refs/orca/"+branch)
+		fetchedRefs = append(fetchedRefs, "refs/orca/"+branch)
+	}
+	refspecs = append(refspecs, "+HEAD:refs/orca/HEAD")
+	fetchedRefs = append(fetchedRefs, "refs/orca/HEAD")
+	fetchArgs := append([]string{"-C", mirror, "fetch", "--no-tags", "--filter=tree:0", source}, refspecs...)
+	fetch := exec.CommandContext(gitCtx, "git", fetchArgs...)
+	fetch.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if out, err := fetch.CombinedOutput(); err != nil {
+		r.IntegrationError = "fetch target " + cmp.Or(strings.TrimSpace(r.TargetBranch), "remote") + " failed: " + strings.TrimSpace(string(out))
 		return
 	}
-	var targetSubjects []string
-	if out, err := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "log", "--format=%s", "--end-of-options", targetRef).Output(); err == nil {
-		targetSubjects = strings.Split(string(out), "\n")
-	} else {
-		r.IntegrationError = "read target history failed: " + err.Error()
+	for _, ref := range fetchedRefs {
+		if _, err := gitOutput(gitCtx, mirror, "rev-parse", "--verify", "--end-of-options", ref); err != nil {
+			r.IntegrationError = "read mirror refs failed: " + err.Error()
+			return
+		}
+	}
+	logArgs := append([]string{"log", "--format=%s", "--end-of-options"}, fetchedRefs...)
+	out, logErr := gitOutput(gitCtx, mirror, logArgs...)
+	if logErr != nil {
+		r.IntegrationError = "read mirror history failed: " + logErr.Error()
 		return
 	}
+	subjects := strings.Split(string(out), "\n")
 	for i := range r.Lanes {
 		ln := &r.Lanes[i]
-		if integratedLane(*ln) {
+		if integratedLane(*ln) || strings.EqualFold(ln.Status, "blocked") || finishedAnalysisLane(*ln) {
 			continue
 		}
 		head := strings.TrimSpace(ln.Head)
@@ -672,41 +691,122 @@ func applyIntegrationEvidence(ctx context.Context, r *Run) {
 			ln.IntegrationReason = "integration unknown: invalid lane head " + head
 			continue
 		}
-		if head == "" && strings.TrimSpace(ln.Branch) != "" {
-			if !validGitBranch(gitCtx, r.RepoPath, strings.TrimSpace(ln.Branch)) {
-				ln.IntegrationReason = "integration unknown: invalid lane branch " + strings.TrimSpace(ln.Branch)
-				continue
-			}
-			for _, ref := range []string{"refs/heads/" + ln.Branch, "refs/remotes/origin/" + ln.Branch, ln.Branch} {
-				if out, err := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "rev-parse", "--verify", "--end-of-options", ref).Output(); err == nil {
-					head = strings.TrimSpace(string(out))
-					break
-				}
-			}
-		}
-		if head == "" {
-			ln.IntegrationReason = "integration gate: missing lane head for target " + target
-			continue
-		}
-		if err := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "merge-base", "--is-ancestor", "--end-of-options", head, targetRef).Run(); err == nil {
-			ln.Integrated = true
-			ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is an ancestor of target %s", shortSHA(head), target)
-			continue
-		}
-		if pr := strings.TrimSpace(ln.PR); pr != "" {
-			suffix := "(#" + pr + ")"
-			for _, subject := range targetSubjects {
-				if strings.HasSuffix(strings.TrimSpace(subject), suffix) {
+		if head != "" {
+			for _, ref := range fetchedRefs {
+				if gitRun(gitCtx, mirror, "merge-base", "--is-ancestor", "--end-of-options", head, ref) == nil {
 					ln.Integrated = true
-					ln.IntegrationReason = fmt.Sprintf("integration gate: target %s has squash subject ending %s", target, suffix)
+					ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is an ancestor of mirror ref %s", shortSHA(head), strings.TrimPrefix(ref, "refs/orca/"))
 					break
 				}
 			}
 		}
 		if !ln.Integrated {
-			ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is not in target %s and no squash subject ending (#%s)", shortSHA(head), target, prNumber(ln.PR))
+			prs := append([]string{}, strings.TrimSpace(ln.PR))
+			prs = append(prs, ln.MergeNotePRs...)
+			for _, pr := range prs {
+				if pr == "" {
+					continue
+				}
+				suffix := "(#" + pr + ")"
+				for _, subject := range subjects {
+					if strings.HasSuffix(strings.TrimSpace(subject), suffix) {
+						ln.Integrated = true
+						ln.IntegrationReason = fmt.Sprintf("integration gate: mirror has squash subject ending %s", suffix)
+						break
+					}
+				}
+				if ln.Integrated {
+					break
+				}
+			}
+		}
+		if !ln.Integrated {
+			ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is not in mirror refs and no squash subject ending (#%s)", cmp.Or(shortSHA(head), "missing"), prNumber(ln.PR))
 		}
 	}
+}
+
+func finishedAnalysisLane(ln Lane) bool {
+	return strings.EqualFold(strings.TrimSpace(ln.Mode), "analysis") && strings.EqualFold(strings.TrimSpace(ln.Status), "done")
+}
+
+func gitOutput(ctx context.Context, repo string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repo}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	return cmd.Output()
+}
+
+func gitRun(ctx context.Context, repo string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repo}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	return cmd.Run()
+}
+
+func mirrorSourceURL(ctx context.Context, r *Run, cfg GitMirror) (string, error) {
+	if path := strings.TrimSpace(r.RepoPath); path != "" {
+		if _, err := os.Stat(path); err == nil {
+			if out, err := gitOutput(ctx, path, "config", "--get", "remote.origin.url"); err == nil && strings.TrimSpace(string(out)) != "" {
+				return strings.TrimSpace(string(out)), nil
+			}
+			if out, err := gitOutput(ctx, path, "rev-parse", "--is-bare-repository"); err == nil && strings.TrimSpace(string(out)) == "true" {
+				return path, nil
+			}
+		}
+	}
+	slug := strings.TrimSpace(r.Repo)
+	if slug == "" {
+		return "", errors.New("repository slug is missing")
+	}
+	tmpl := cfg.URLTemplate
+	if tmpl == "" {
+		tmpl = "https://github.com/%s.git"
+	}
+	if strings.Contains(tmpl, "%s") {
+		return fmt.Sprintf(tmpl, slug), nil
+	}
+	return strings.ReplaceAll(tmpl, "{slug}", slug), nil
+}
+
+func ensureGitMirror(ctx context.Context, r *Run, cfg GitMirror, source string) (string, error) {
+	root := strings.TrimSpace(cfg.CacheDir)
+	if root == "" {
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			// Sandboxed callers may deliberately omit HOME. Keep the same
+			// orca-owned layout in the process temp directory in that case.
+			cache = os.TempDir()
+		}
+		root = filepath.Join(cache, "orca", "git")
+	}
+	key := strings.TrimSpace(r.Repo)
+	if lane.IsRepositorySlug(key) {
+		parts := strings.Split(lane.NormalizeRepositorySlug(key), "/")
+		if len(parts) == 2 && safeMirrorPathPart(parts[0]) && safeMirrorPathPart(parts[1]) {
+			key = filepath.Join(parts...)
+		} else {
+			sum := sha256.Sum256([]byte(source))
+			key = filepath.Join("_local", hex.EncodeToString(sum[:]))
+		}
+	} else {
+		sum := sha256.Sum256([]byte(source))
+		key = filepath.Join("_local", hex.EncodeToString(sum[:]))
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", fmt.Errorf("create mirror cache: %w", err)
+	}
+	path := filepath.Join(root, key+".git")
+	if _, err := os.Stat(filepath.Join(path, "HEAD")); os.IsNotExist(err) {
+		if out, initErr := exec.CommandContext(ctx, "git", "init", "--bare", path).CombinedOutput(); initErr != nil {
+			return "", fmt.Errorf("init mirror: %v: %s", initErr, strings.TrimSpace(string(out)))
+		}
+	} else if err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func safeMirrorPathPart(part string) bool {
+	return part != "" && part != "." && part != ".." && !strings.ContainsAny(part, "/\\\x00\n\r")
 }
 
 func validGitSHA(value string) bool {
@@ -935,7 +1035,7 @@ type spawnFile struct {
 func importLane(dir string, l *ledgerLane) Lane {
 	x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: l.Status, Round: l.Round,
 		HostHold: ledgerHostHold(l.BlockedOn, l.HoldNote, l.Hold, l.Park, l.Note), PRDraft: l.PRDraft || l.Draft,
-		PRState: l.PRState, MergeSHA: l.MergeSHA, Head: l.Head, Checks: l.Checks}
+		PRState: l.PRState, MergeSHA: l.MergeSHA, Head: firstNonEmpty(l.PRHead, l.Head), Mode: l.Mode, Checks: l.Checks}
 	x.PRDraft = x.PRDraft || isDraftPR(x.PRState)
 	phase, sp := newestSpawn(dir, l.ID, l.Phase)
 	// The ledger records a terminal restart after spawn.json was written, so
@@ -1133,6 +1233,8 @@ type Watcher interface {
 }
 
 // Service adopts and releases host runs on behalf of one lease holder.
+//
+//nolint:govet // field grouping follows the public service configuration API.
 type Service struct {
 	Labeler Labeler
 	Watcher Watcher
@@ -1148,6 +1250,16 @@ type Service struct {
 	// restarted after stopWatcher stops a running loop (or when explicitly set
 	// > 0). Zero uses defaultLoopVerifyInterval when WatcherPIDs were stopped.
 	LoopVerifyInterval time.Duration
+	// Mirror controls the orca-owned commit-only repository used for integration
+	// evidence. Zero values use the user cache directory and GitHub URL template.
+	Mirror GitMirror
+}
+
+// GitMirror configures the local, commit-only mirror used by adoption. The URL
+// template may contain %s or {slug}; without either it is used literally.
+type GitMirror struct {
+	CacheDir    string
+	URLTemplate string
 }
 
 // DryRunResult describes the first adoption ticks without taking a lease or
@@ -1189,9 +1301,7 @@ func (s *Service) DryRun(ctx context.Context, id string) (DryRunResult, error) {
 
 // DryRunDir previews adoption from an explicit run directory. It never opens
 // a store, acquires a lease, calls a host adapter, or writes to the run
-// directory. When the run records a local checkout, it may fetch the target
-// branch there to obtain integration evidence; callers should use a disposable
-// checkout when that mutation is undesirable.
+// directory. Integration fetches update only the orca-owned commit-only mirror.
 func (s *Service) DryRunDir(ctx context.Context, dir string) (DryRunResult, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -1202,7 +1312,7 @@ func (s *Service) DryRunDir(ctx context.Context, dir string) (DryRunResult, erro
 	if err != nil {
 		return DryRunResult{}, err
 	}
-	applyIntegrationEvidence(ctx, &r)
+	applyIntegrationEvidence(ctx, &r, s.Mirror)
 	result := DryRunResult{Run: r, Moves: []string{"observe-first: read OBJECTIVE.md, CONTEXT.md, hold-advance files, and no-PR configuration"}}
 	mutating := make([]string, 0)
 	judgments := make([]string, 0)
@@ -1222,7 +1332,7 @@ func (s *Service) DryRunDir(ctx context.Context, dir string) (DryRunResult, erro
 	} else {
 		result.Verdict = "SAFE"
 	}
-	result.Moves = append(result.Moves, "adoption: no integrate, complete, release, retry, stop, or host state.json write; local target fetch may update the recorded checkout")
+	result.Moves = append(result.Moves, "adoption: no integrate, complete, release, retry, stop, or host state.json write; integration fetch updates only orca's commit-only mirror")
 	return result, nil
 }
 
@@ -1264,6 +1374,10 @@ func previewLane(r Run, ln Lane) DryRunLane {
 	}
 	if integratedLane(ln) {
 		p.Reason = "lane is already integrated, merged, or closed; no lifecycle move"
+		return p
+	}
+	if finishedAnalysisLane(ln) {
+		p.Reason = "analysis lane finished; no PR to integrate"
 		return p
 	}
 	report := previewOutcome(ln.Report)
@@ -1334,8 +1448,8 @@ func previewLane(r Run, ln Lane) DryRunLane {
 
 // Integration evidence decides only whether a terminal lane is already
 // integrated. A completed report from a lane with another recipe phase ahead
-// of it must still advance through that phase when the checkout was inspected;
-// an unavailable checkout or failed fetch is a safe judgment for every lane.
+// of it must still advance through that phase when the mirror was inspected;
+// an unavailable source or failed fetch is a safe judgment for every lane.
 func integrationJudgmentApplies(ln Lane) bool {
 	return strings.EqualFold(strings.TrimSpace(ln.Status), "done") || strings.TrimSpace(ln.Next) == ""
 }
@@ -1347,7 +1461,7 @@ func integrationJudgeReason(r Run, ln Lane) string {
 	if strings.TrimSpace(ln.IntegrationReason) != "" {
 		return strings.TrimSpace(ln.IntegrationReason)
 	}
-	return "integration gate: missing merge_sha, merged EVENTS record, and local target evidence"
+	return "integration gate: missing merge_sha, merged EVENTS record, and mirror evidence"
 }
 
 func laneHostHold(ln Lane) string {
@@ -1555,7 +1669,7 @@ func (s *Service) drive(ctx context.Context, dir string) (Run, error) {
 	if err != nil {
 		return Run{}, err
 	}
-	applyIntegrationEvidence(ctx, &r)
+	applyIntegrationEvidence(ctx, &r, s.Mirror)
 	if s.Driver != nil {
 		if err := s.Driver.Start(ctx, r); err != nil {
 			return Run{}, fmt.Errorf("start adopted run %s: %w (lease kept; retry /adopt or /release)", r.ID, err)

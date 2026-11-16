@@ -110,6 +110,22 @@ func TestDiscoversNebulaSwarmRun(t *testing.T) {
 	}
 }
 
+func TestLaneMergeNotePRsRequiresOwnMergedPhrase(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "EVENTS")
+	write(t, path,
+		"2026-11-16T01:00:00Z\tlane-1\torch-note\t#7 MERGED to main abc1234\n"+
+			"2026-11-16T01:01:00Z\tlane-1\tdecision\town lane #8: PR merged into main\n"+
+			"2026-11-16T01:02:00Z\tlane-1\tdecision\tblocked until #12 is merged\n"+
+			"2026-11-16T01:03:00Z\tlane-1\tdecision\trebased onto #30 (merged)\n"+"2026-11-16T01:04:00Z\tlane-1\tdecision\twill be merged once checks pass\n"+
+			"2026-11-16T01:05:00Z\tlane-1\tdecision\town lane #9: PR is OPEN, not merged\n")
+	got := laneMergeNotePRs(path)
+	want := map[string][]string{"lane-1": {"7", "8"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("laneMergeNotePRs() = %#v, want %#v", got, want)
+	}
+}
+
 func TestAdoptObserveFirstLeavesImportedWorkingLanesUntouched(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), ".swarm")
