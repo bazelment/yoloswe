@@ -2659,9 +2659,12 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		// retry. Its exit is not evidence that the worker failed an attempt.
 		return store.EventClassAuto, nil
 	}
-	// Any non-stale phase exit is fresh host evidence and supersedes the
-	// imported terminal marker, including quota and auth exits.
-	ln.TerminalState = ""
+	if payload.Kind == lane.EventTurnEndedNoReport || payload.Kind == lane.EventExited {
+		// The host ledger can lag the terminal handback. An explicit ended event
+		// supersedes its imported working marker; a live driver state below still
+		// vetoes completion or release when the agent is actually busy.
+		ln.TerminalState = ""
+	}
 	if settled, err := c.reconcileLanePRState(ctx, ln, ev.ID); settled || err != nil {
 		if err != nil {
 			return store.EventClassUnclassified, err
@@ -2802,9 +2805,6 @@ func (c *Controller) handleCI(ctx context.Context, ev *store.Event) (store.Event
 		}
 		return store.EventClassUnclassified, err
 	}
-	// A CI event is fresh host evidence and supersedes the imported terminal
-	// marker; later lifecycle checks still consult the live driver.
-	ln.TerminalState = ""
 	var payload CIPayload
 	if len(ev.Payload) > 0 {
 		_ = json.Unmarshal(ev.Payload, &payload)

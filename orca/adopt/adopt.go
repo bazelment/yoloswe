@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
@@ -893,8 +894,10 @@ func previewLane(r Run, ln Lane) DryRunLane {
 	}
 	report := previewOutcome(ln.Report)
 	switch {
-	case report == "needs-swe" || report == "blocked" || report == "needs-input":
-		p.Move, p.Reason = "retry", "lane report records failure and the lane is still active"
+	case report == string(lane.OutcomeNeedsSWE):
+		p.Move, p.Reason = "rework", "lane report requests SWE rework"
+	case report == string(lane.OutcomeBlocked) || report == string(lane.OutcomeNeedsInput):
+		p.Move, p.Reason = "wait", "lane report requires owner judgment"
 	case report == "done" || report == "no-change":
 		if !r.NoPR && (strings.EqualFold(ln.Phase, "review") || strings.EqualFold(ln.Phase, "clean")) && r.IntegrateRule != "" {
 			p.Move, p.Reason = "integrate", "completed report plus the run integrate rule permits the merge path"
@@ -907,14 +910,12 @@ func previewLane(r Run, ln Lane) DryRunLane {
 	return p
 }
 
-var previewOutcomeRE = regexp.MustCompile(`(?im)^\s*outcome\s*:\s*(done|no-change|needs-swe|blocked|needs-input)\b`)
-
 func previewOutcome(report string) string {
-	match := previewOutcomeRE.FindStringSubmatch(report)
-	if len(match) == 2 {
-		return strings.ToLower(match[1])
+	rep, err := lane.ParsePhaseReport(report)
+	if err != nil {
+		return ""
 	}
-	return ""
+	return string(rep.Outcome)
 }
 
 const defaultLoopVerifyInterval = 50 * time.Millisecond

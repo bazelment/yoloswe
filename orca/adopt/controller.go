@@ -322,9 +322,6 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			_ = setter.SyncAdoptCutoff(ctx)
 		}
 	}
-	if !r.HasNextWork() || ObjectiveIsDone(r.Objective) {
-		expireHoldDirectivesIfRunDone(ctx, runStore, r.ID)
-	}
 	runDriver := d.driver
 	if runDriver != nil {
 		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: runStore, syncer: syncer}
@@ -369,6 +366,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	if err := d.observeFirst(ctx, r, dispatch); err != nil {
 		cleanupFailedStart()
 		return err
+	}
+	if !r.HasNextWork() || ObjectiveIsDone(r.Objective) {
+		expireHoldDirectivesIfRunDone(ctx, runStore, r.ID)
 	}
 	// Fail synchronously if another process still holds the controller lease.
 	if err := ctrl.Step(ctx); err != nil {
@@ -1092,6 +1092,10 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	}
 	if st.Config.Target != "" {
 		workflow.MergePolicy.TargetBranch = st.Config.Target
+	}
+	if r.NoPR {
+		workflow = recipe.WithoutIntegrate(workflow)
+		workflow.MergePolicy.Mode = recipe.MergeModeNone
 	}
 	if !workflow.MergePolicy.Mode.Valid() {
 		return workflow, nil, nil, fmt.Errorf("invalid adopted merge mode %q", workflow.MergePolicy.Mode)
