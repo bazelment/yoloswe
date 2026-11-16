@@ -1254,7 +1254,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		// controller tick treats them as judgment-only. An owner/dispatcher
 		// answer can explicitly move the lane back to running.
 		hostHoldReason := strings.TrimSpace(imported.HostHold)
-		if hostHoldReason == "" && strings.EqualFold(previewOutcome(imported.Report), string(lane.OutcomeBlocked)) {
+		if hostHoldReason == "" && !(strings.EqualFold(imported.Mode, "analysis") && strings.EqualFold(imported.Status, "done")) && strings.EqualFold(previewOutcome(imported.Report), string(lane.OutcomeBlocked)) {
 			hostHoldReason = strings.TrimSpace(imported.ReportBlocker)
 		}
 		if hostHoldReason == "" && imported.PRDraft {

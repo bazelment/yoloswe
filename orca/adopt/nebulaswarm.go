@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -121,7 +122,9 @@ type nsLane struct {
 	Draft         bool                         `json:"draft"`
 	PRState       string                       `json:"pr_state"`
 	MergeSHA      string                       `json:"merge_sha"`
+	PRHead        string                       `json:"pr_head"`
 	Head          string                       `json:"head"`
+	Mode          string                       `json:"mode"`
 	Checks        string                       `json:"checks"`
 }
 
@@ -130,6 +133,7 @@ type nsLedger struct {
 		Goal         string      `json:"goal"`
 		Repo         string      `json:"repo"`
 		Target       string      `json:"target"`
+		Base         string      `json:"base"`
 		Orchestrator string      `json:"orchestrator_session_id"`
 		Phases       []hostPhase `json:"phases"`
 	} `json:"config"`
@@ -145,6 +149,7 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 	}
 	r.Goal, r.DrivenBy = st.Config.Goal, st.Config.Orchestrator
 	r.TargetBranch = strings.TrimSpace(st.Config.Target)
+	r.BaseBranch = strings.TrimSpace(st.Config.Base)
 	r.Phases = hostPhaseNames(st.Config.Phases)
 	if isLocalRepoPath(st.Config.Repo) && localRepoPaths != nil {
 		*localRepoPaths = append(*localRepoPaths, st.Config.Repo)
@@ -154,10 +159,10 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 	for i := range st.Tasks {
 		t := &st.Tasks[i]
 		round := max(t.Round, 1)
-		x := Lane{ID: t.ID, Title: t.Title, Branch: t.Branch, Phase: t.Phase, Status: t.Status, Round: t.Round,
+		x := Lane{ID: t.ID, Title: t.Title, Branch: t.Branch, Phase: t.Phase, Status: t.Status, Round: t.Round, Mode: t.Mode,
 			Session: t.SessionID, Terminal: t.Terminals[t.Phase][strconv.Itoa(round)], TerminalState: t.TerminalState,
 			HostHold: ledgerHostHold(t.BlockedOn, t.HoldNote, t.Hold, t.Park, t.Note), PRDraft: t.PRDraft || t.Draft,
-			PRState: t.PRState, MergeSHA: t.MergeSHA, Head: t.Head, Checks: t.Checks}
+			PRState: t.PRState, MergeSHA: t.MergeSHA, Head: firstNonEmpty(t.PRHead, t.Head), Checks: t.Checks}
 		x.PRDraft = x.PRDraft || isDraftPR(x.PRState)
 		if t.PR > 0 {
 			x.PR = strconv.Itoa(t.PR)
@@ -175,6 +180,7 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
 	events := laneEvents(filepath.Join(dir, "EVENTS"))
 	integratedEvents := laneIntegrationEvents(filepath.Join(dir, "EVENTS"))
+	mergeNotePRs := laneMergeNotePRs(filepath.Join(dir, "EVENTS"))
 	progress, escalations := readText(filepath.Join(dir, "PROGRESS.md")), readText(filepath.Join(dir, "ESCALATIONS.md"))
 	phases := make([]string, 0, len(phaseSpecs))
 	for _, p := range phaseSpecs {
@@ -189,6 +195,7 @@ func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
 		} else if eventLower == "closed" {
 			x.Integrated, x.PRState = true, "closed"
 		}
+		x.MergeNotePRs = mergeNotePRs[x.ID]
 		if x.ReportPath != "" {
 			report := readText(x.ReportPath)
 			x.Report = reportHeadline(report)
@@ -216,7 +223,7 @@ func laneIntegrationEvents(path string) map[string]string {
 			continue
 		}
 		kind := strings.ToLower(strings.TrimSpace(parts[2]))
-		if kind != "merged" && kind != "integrated" {
+		if kind != "merged" && kind != "integrated" && kind != "orch-merge" {
 			continue
 		}
 		detail := ""
@@ -224,6 +231,41 @@ func laneIntegrationEvents(path string) map[string]string {
 			detail = strings.TrimSpace(parts[3])
 		}
 		out[parts[1]] = clip(strings.Join([]string{parts[0], kind, detail}, " "), 240)
+	}
+	return out
+}
+
+var eventPRRE = regexp.MustCompile(`#(\d+)\b`)
+
+// laneMergeNotePRs extracts host merge prose from a lane's own EVENTS rows.
+// These nominations are deliberately not integration evidence by themselves;
+// applyIntegrationEvidence verifies the matching squash subject in the mirror.
+func laneMergeNotePRs(path string) map[string][]string {
+	out := map[string][]string{}
+	f, err := os.Open(path)
+	if err != nil {
+		return out
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		parts := strings.SplitN(sc.Text(), "\t", 4)
+		if len(parts) < 4 || strings.TrimSpace(parts[1]) == "" {
+			continue
+		}
+		detail := parts[3]
+		lower := strings.ToLower(detail)
+		if !strings.Contains(lower, "merged") || strings.Contains(lower, "not merged") || strings.Contains(lower, "unmerged") {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, match := range eventPRRE.FindAllStringSubmatch(detail, -1) {
+			if len(match) == 2 && !seen[match[1]] {
+				out[parts[1]] = append(out[parts[1]], match[1])
+				seen[match[1]] = true
+			}
+		}
 	}
 	return out
 }
