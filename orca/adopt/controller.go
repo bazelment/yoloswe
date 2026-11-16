@@ -254,7 +254,6 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			}
 		}
 	}
-	releasedOnAdopt := make(map[string]bool, len(lanes))
 	for i := range lanes {
 		ln := &lanes[i]
 		if resume {
@@ -269,15 +268,6 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		if err := d.store.Lanes().Upsert(ctx, *ln); err != nil {
 			return err
 		}
-		if ln.Status.Terminal() && ln.SessionID != "" && ln.SessionID != strings.TrimSpace(r.DrivenBy) {
-			if releaser, ok := d.driver.(lane.SessionReleaser); ok {
-				if err := releaser.ReleaseSession(ctx, ln.SessionID, true); err != nil {
-					slog.Warn("release completed lane session during adoption", "session", ln.SessionID, "error", err)
-				} else {
-					releasedOnAdopt[ln.SessionID] = true
-				}
-			}
-		}
 		if tracker, ok := d.driver.(interface{ TrackLane(lane.Lane) }); ok && !ln.Status.Terminal() {
 			tracker.TrackLane(*ln)
 		}
@@ -290,9 +280,6 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		boxes = d.Mailboxes(r.ID)
 	}
 	syncer := newRunLedgerSync(r, d.clock, lanes)
-	for sid := range releasedOnAdopt {
-		syncer.MarkSessionReleased(sid)
-	}
 	syncer.ledgerScript = d.ledgerScript
 	runStore := &adoptedStore{
 		Store: d.store,
@@ -353,6 +340,8 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		PRProbe:           d.runPRProbe(syncer),
 		JudgeLaneMail:     true,
 		MaxCostPerHourUSD: d.MaxCostPerHourUSD,
+		NoPR:              r.NoPR,
+		HoldAdvance:       holdAdvanceLanes(r),
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
 	cr := &controlledRun{
@@ -374,6 +363,10 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			_ = closer.Close()
 		}
 		close(cr.done)
+	}
+	if err := d.observeFirst(ctx, r, dispatch); err != nil {
+		cleanupFailedStart()
+		return err
 	}
 	// Fail synchronously if another process still holds the controller lease.
 	if err := ctrl.Step(ctx); err != nil {
@@ -399,6 +392,39 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	started = true
 	go d.supervise(runCtx, cr)
 	return nil
+}
+
+func holdAdvanceLanes(r Run) map[string]bool {
+	if len(r.Lanes) == 0 {
+		return nil
+	}
+	out := make(map[string]bool)
+	for i := range r.Lanes {
+		if r.Lanes[i].HoldAdvance {
+			out[r.Lanes[i].ID] = true
+		}
+	}
+	return out
+}
+
+func (d *Controllers) observeFirst(ctx context.Context, r Run, dispatch controller.Judge) error {
+	holds := make(map[string]string)
+	for i := range r.Lanes {
+		if !r.Lanes[i].HoldAdvance {
+			continue
+		}
+		p := filepath.Join(r.Dir, r.Lanes[i].ID+".hold-advance")
+		holds[r.Lanes[i].ID] = readText(p)
+	}
+	obs := controller.ContractObservation{Objective: r.FullObjective(), Context: r.Context, IntegrateRule: r.IntegrateRule, NoPR: r.NoPR, HoldAdvance: holds}
+	if observer, ok := dispatch.(controller.ContractObserver); ok {
+		return observer.ObserveRunContract(ctx, r.ID, obs)
+	}
+	// Test and embedded judges that do not expose the richer observer still get
+	// a durable gate record; no lane or host state is touched by this fallback.
+	args, _ := json.Marshal(obs)
+	_, err := d.store.Decisions().Append(ctx, store.Decision{RunID: r.ID, Category: store.DecisionJudgment, Actor: "dispatcher", Tool: "adopt.observe", Reason: "read host run contract before lifecycle actions", Result: "observe-first pass complete", Args: args, Vetted: true, CreatedAt: d.clock.Now().UTC()})
+	return err
 }
 
 const maxControllerRestarts = 5
@@ -1042,12 +1068,14 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	if err := json.Unmarshal(b, &st); err != nil {
 		return recipe.Recipe{}, nil, nil, err
 	}
+	r.NoPR = r.NoPR || st.Config.NoPR
 	defaultRecipe := recipe.Default()
 	workflow := defaultRecipe.Clone()
 	workflow.RunID = r.ID
 	workflow.Name = "adopted"
 	objectiveText := stripMarker(readText(filepath.Join(r.Dir, "OBJECTIVE.md")))
 	ruleText := extractMergeRuleText(st.Config.MergeRule, objectiveText)
+	r.IntegrateRule = ruleText
 	if st.Config.MergePolicy != nil {
 		workflow.MergePolicy = *st.Config.MergePolicy
 	} else if strings.EqualFold(st.Config.Merge, "self") || strings.EqualFold(st.Config.Merge, "lane") || hasSelfMergeRule(ruleText) {
@@ -1058,6 +1086,10 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	}
 	if st.Config.Target != "" {
 		workflow.MergePolicy.TargetBranch = st.Config.Target
+	}
+	if r.NoPR {
+		workflow = recipe.WithoutIntegrate(workflow)
+		workflow.MergePolicy.Mode = recipe.MergeModeNone
 	}
 	if !workflow.MergePolicy.Mode.Valid() {
 		return workflow, nil, nil, fmt.Errorf("invalid adopted merge mode %q", workflow.MergePolicy.Mode)
@@ -1185,7 +1217,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		if !status.Valid() {
 			return workflow, nil, nil, fmt.Errorf("lane %s: unsupported host status %q", imported.ID, imported.Status)
 		}
-		ln := lane.Lane{ItemID: imported.ID, ID: imported.ID, RunID: r.ID, Title: imported.Title, Branch: imported.Branch, Status: status, RecipeName: workflow.Name, RecipeVersion: 1, BaseBranch: st.Config.Base, Attempt: 1}
+		ln := lane.Lane{ItemID: imported.ID, ID: imported.ID, RunID: r.ID, Title: imported.Title, Branch: imported.Branch, Status: status, RecipeName: workflow.Name, RecipeVersion: 1, BaseBranch: st.Config.Base, Attempt: 1, TerminalState: imported.TerminalState}
 		ln.PR, _ = strconv.Atoi(imported.PR)
 		for j := range st.Tasks {
 			task := &st.Tasks[j]

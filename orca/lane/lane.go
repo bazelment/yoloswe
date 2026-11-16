@@ -42,33 +42,36 @@ func (s Status) Valid() bool {
 
 // Lane is one unit of work moving through a recipe's phases.
 type Lane struct {
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
-	LastEventAt   time.Time         `json:"last_event_at"`
-	Sessions      map[string]string `json:"sessions,omitempty"`
-	Terminals     map[string]string `json:"terminals,omitempty"`
-	ID            string            `json:"id"`
-	RunID         string            `json:"run_id"`
-	ItemID        string            `json:"item_id,omitempty"`
-	Title         string            `json:"title,omitempty"`
-	Branch        string            `json:"branch,omitempty"`
-	BaseBranch    string            `json:"base_branch,omitempty"`
-	BaseCommit    string            `json:"base_commit,omitempty"`
-	Worktree      string            `json:"worktree,omitempty"`
-	Status        Status            `json:"status"`
-	Phase         string            `json:"phase,omitempty"`
-	RecipeName    string            `json:"recipe_name,omitempty"`
-	SessionID     string            `json:"session_id,omitempty"`
-	TerminalID    string            `json:"terminal_id,omitempty"`
-	PRHead        string            `json:"pr_head,omitempty"`
-	ApprovalSHA   string            `json:"approval_sha,omitempty"`
-	MergeSHA      string            `json:"merge_sha,omitempty"`
-	Checks        string            `json:"checks,omitempty"`
-	LastEventID   string            `json:"last_event_id,omitempty"`
-	Round         int               `json:"round,omitempty"`
-	Attempt       int               `json:"attempt,omitempty"`
-	RecipeVersion int               `json:"recipe_version,omitempty"`
-	PR            int               `json:"pr,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
+	LastEventAt time.Time         `json:"last_event_at"`
+	Sessions    map[string]string `json:"sessions,omitempty"`
+	Terminals   map[string]string `json:"terminals,omitempty"`
+	ID          string            `json:"id"`
+	RunID       string            `json:"run_id"`
+	ItemID      string            `json:"item_id,omitempty"`
+	Title       string            `json:"title,omitempty"`
+	Branch      string            `json:"branch,omitempty"`
+	BaseBranch  string            `json:"base_branch,omitempty"`
+	BaseCommit  string            `json:"base_commit,omitempty"`
+	Worktree    string            `json:"worktree,omitempty"`
+	Status      Status            `json:"status"`
+	Phase       string            `json:"phase,omitempty"`
+	RecipeName  string            `json:"recipe_name,omitempty"`
+	SessionID   string            `json:"session_id,omitempty"`
+	TerminalID  string            `json:"terminal_id,omitempty"`
+	// TerminalState is an imported host terminal state. Keeping a known
+	// working/busy value prevents adoption from stopping or releasing it.
+	TerminalState string `json:"terminal_state,omitempty"`
+	PRHead        string `json:"pr_head,omitempty"`
+	ApprovalSHA   string `json:"approval_sha,omitempty"`
+	MergeSHA      string `json:"merge_sha,omitempty"`
+	Checks        string `json:"checks,omitempty"`
+	LastEventID   string `json:"last_event_id,omitempty"`
+	Round         int    `json:"round,omitempty"`
+	Attempt       int    `json:"attempt,omitempty"`
+	RecipeVersion int    `json:"recipe_version,omitempty"`
+	PR            int    `json:"pr,omitempty"`
 }
 
 func (l Lane) Clone() Lane {

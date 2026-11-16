@@ -102,6 +102,24 @@ type Judge interface {
 	Judge(ctx context.Context, runID string, events []store.Event) error
 }
 
+// ContractObservation is the read-only handover material an adopted run must
+// present to its dispatcher before lifecycle actions are enabled.
+//
+//nolint:govet // contract fields intentionally follow the textual handover shape.
+type ContractObservation struct {
+	NoPR          bool
+	Objective     string
+	Context       string
+	IntegrateRule string
+	HoldAdvance   map[string]string
+}
+
+// ContractObserver records an observe-first judgment without applying lane
+// transitions. Dispatchers implement this alongside Judge.
+type ContractObserver interface {
+	ObserveRunContract(context.Context, string, ContractObservation) error
+}
+
 // JudgeFunc adapts a function to the Judge interface.
 type JudgeFunc func(ctx context.Context, runID string, events []store.Event) error
 
@@ -170,6 +188,8 @@ type PRStatus struct {
 type PRProbe func(ctx context.Context, runID, branch string, pr int) (PRStatus, error)
 
 // Config configures a Controller instance for a single Run.
+//
+//nolint:govet // config fields are grouped by lifecycle concern.
 type Config struct {
 	// AnswerQuestion delegates interpretation of task text and notes to the
 	// dispatcher. An empty answer requests owner escalation.
@@ -194,6 +214,10 @@ type Config struct {
 	MaxCostPerHourUSD     float64
 	UnpushedWorkThreshold time.Duration
 	DiskPressurePercent   int
+	// NoPR marks an adopted host run whose lanes have no pull requests.
+	NoPR bool
+	// HoldAdvance parks imported lanes until their owner resolves the contract.
+	HoldAdvance map[string]bool
 }
 
 func (c Config) withDefaults() Config {
@@ -322,6 +346,8 @@ type terminalStateCacheEntry struct {
 }
 
 // Controller is the deterministic orchestration loop for a single Run.
+//
+//nolint:govet // state is grouped by synchronization and lifecycle concerns.
 type Controller struct {
 	batchFirstAt       time.Time
 	store              store.Store
@@ -2136,6 +2162,9 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 	if err != nil {
 		return store.EventClassJudgment, nil
 	}
+	// A report is the terminal's explicit handback. The imported host
+	// terminal_state may still say working until the host ledger catches up.
+	ln.TerminalState = ""
 	if rep.TerminalID != "" && ln.TerminalID != "" && rep.TerminalID != ln.TerminalID {
 		return store.EventClassAuto, nil
 	}
@@ -2222,6 +2251,9 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 }
 
 func (c *Controller) completeReportOnlyLane(ctx context.Context, ln *lane.Lane, ev *store.Event) (store.EventClass, error) {
+	if ln == nil || strings.EqualFold(strings.TrimSpace(ln.TerminalState), "working") || strings.EqualFold(strings.TrimSpace(ln.TerminalState), "busy") || c.laneIsWorkingOrBusy(ctx, *ln) {
+		return store.EventClassJudgment, nil
+	}
 	_, already, err := c.recordDecision(ctx, ToolLaneComplete, ln.ID,
 		"SWE reported no change and no remote work", "lane done (report-only)",
 		DecisionArgs{ActionKey: "report-only-complete:" + ln.ID + ":" + ln.AttemptKey(), EventID: ev.ID, FromPhase: ln.Phase, ToPhase: recipe.TargetComplete, Verdict: string(lane.OutcomeDone), Round: max(ln.Round, 1)})
@@ -2381,6 +2413,9 @@ func ReconcileLanePRState(
 }
 
 func (c *Controller) reconcileLanePRState(ctx context.Context, ln *lane.Lane, eventID string) (bool, error) {
+	if c.cfg.NoPR || c.advanceHeld(ln) || strings.EqualFold(strings.TrimSpace(ln.TerminalState), "working") || strings.EqualFold(strings.TrimSpace(ln.TerminalState), "busy") || c.laneIsWorkingOrBusy(ctx, *ln) {
+		return false, nil
+	}
 	settled, state, err := ReconcileLanePRState(ctx, c.cfg.PRProbe, c.store, nil, c.clock.Now(), c.cfg.RunID, ActorController, eventID, ln)
 	if !settled {
 		return false, err
@@ -2423,6 +2458,9 @@ func (c *Controller) advanceByRecipe(
 	verdict, reason, breaks string,
 	ev *store.Event,
 ) (store.EventClass, error) {
+	if c.advanceHeld(ln) {
+		return store.EventClassJudgment, nil
+	}
 	eventID := ""
 	if ev != nil {
 		eventID = ev.ID
@@ -2473,6 +2511,9 @@ func (c *Controller) advanceByRecipe(
 
 	switch target {
 	case recipe.TargetComplete:
+		if strings.EqualFold(strings.TrimSpace(ln.TerminalState), "working") || strings.EqualFold(strings.TrimSpace(ln.TerminalState), "busy") || c.laneIsWorkingOrBusy(ctx, *ln) {
+			return store.EventClassJudgment, nil
+		}
 		if r.MergePolicy.RequireReviewPass && recipeHasReviewPhase(r) {
 			if (ln.PRHead != "" || ln.ApprovalSHA != "") && ln.ApprovalStale() {
 				return c.blockLaneForJudgment(ctx, ln)
@@ -2596,6 +2637,9 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 	if ln.Status != lane.StatusRunning {
 		return store.EventClassAuto, nil
 	}
+	if c.advanceHeld(ln) {
+		return store.EventClassJudgment, nil
+	}
 
 	var payload PhaseExitPayload
 	if len(ev.Payload) > 0 {
@@ -2609,6 +2653,12 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		// Orca stopped this live terminal as part of a deliberate handover or
 		// retry. Its exit is not evidence that the worker failed an attempt.
 		return store.EventClassAuto, nil
+	}
+	if payload.Kind == lane.EventTurnEndedNoReport || payload.Kind == lane.EventExited {
+		// The host ledger can lag the terminal handback. An explicit ended event
+		// supersedes its imported working marker; a live driver state below still
+		// vetoes completion or release when the agent is actually busy.
+		ln.TerminalState = ""
 	}
 	if settled, err := c.reconcileLanePRState(ctx, ln, ev.ID); settled || err != nil {
 		if err != nil {
@@ -3251,10 +3301,20 @@ func (c *Controller) releaseLaneSession(ctx context.Context, ln *lane.Lane) erro
 	if ln == nil || strings.TrimSpace(ln.SessionID) == "" {
 		return nil
 	}
+	if strings.EqualFold(strings.TrimSpace(ln.TerminalState), "working") || strings.EqualFold(strings.TrimSpace(ln.TerminalState), "busy") || c.laneIsWorkingOrBusy(ctx, *ln) {
+		return nil
+	}
 	if r, ok := c.driver.(lane.SessionReleaser); ok {
 		return r.ReleaseSession(ctx, ln.SessionID)
 	}
 	return nil
+}
+
+func (c *Controller) advanceHeld(ln *lane.Lane) bool {
+	if ln == nil || c.cfg.HoldAdvance == nil {
+		return false
+	}
+	return c.cfg.HoldAdvance[ln.ID]
 }
 
 func (c *Controller) runRepository(ctx context.Context) string {

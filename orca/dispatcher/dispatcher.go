@@ -267,6 +267,33 @@ func (d *Dispatcher) Judge(ctx context.Context, runID string, events []store.Eve
 	return err
 }
 
+// ObserveRunContract is the adoption handover pass. It records the host
+// contract in the Store without invoking the model or any mutating lane tool;
+// Controllers only enable lifecycle ticks after this succeeds.
+func (d *Dispatcher) ObserveRunContract(ctx context.Context, runID string, obs controller.ContractObservation) error {
+	if d.store == nil {
+		return errors.New("orca/dispatcher: store is required")
+	}
+	hold := make([]string, 0, len(obs.HoldAdvance))
+	for laneID, text := range obs.HoldAdvance {
+		hold = append(hold, laneID+": "+strings.TrimSpace(text))
+	}
+	slices.Sort(hold)
+	fact := fmt.Sprintf("Adoption contract observed. Integrate rule: %s. No-PR: %t. Read OBJECTIVE.md and CONTEXT.md during adoption.", strings.TrimSpace(obs.IntegrateRule), obs.NoPR)
+	if len(hold) > 0 {
+		fact += " Hold-advance: " + strings.Join(hold, " | ")
+	}
+	// Keep the handover observation in the judgment log. A directive would be
+	// an owner-visible lifecycle input and would change the semantics of an
+	// adopted run before its first real dispatcher turn.
+	args, _ := json.Marshal(struct {
+		Observation controller.ContractObservation `json:"observation"`
+		Fact        string                         `json:"fact"`
+	}{Observation: obs, Fact: fact})
+	_, err := d.store.Decisions().Append(ctx, store.Decision{RunID: runID, Category: store.DecisionJudgment, Actor: ActorDispatcher, Tool: "adopt.observe", Reason: "read host run contract before lifecycle actions", Result: "observe-first pass complete", Args: args, Vetted: true, CreatedAt: d.clock.Now().UTC()})
+	return err
+}
+
 // Propose implements Advisor by running one model turn over snapshot and decoding
 // the proposed tool calls into a Proposal without mutating Store state.
 func (d *Dispatcher) Propose(ctx context.Context, snapshot string) (Proposal, error) {

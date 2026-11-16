@@ -233,7 +233,7 @@ func Execute(
 		explicitSubcmd = true
 	} else {
 		switch args[0] {
-		case "run", "chat", "report", "export":
+		case "run", "chat", "adopt", "report", "export":
 			subcmd = args[0]
 			explicitSubcmd = true
 			rest = args[1:]
@@ -270,6 +270,30 @@ func Execute(
 			return err
 		}
 		return executeChat(ctx, cfg, slices.Clone(args), posArgs, stdin, stdout, stderr, logger)
+	case "adopt":
+		if !cfg.DryRun {
+			return errors.New("orca adopt currently supports only --dry-run; use /adopt from chat for a live handover")
+		}
+		runID := strings.TrimSpace(cfg.RunID)
+		if runID == "" && len(posArgs) > 0 {
+			runID = strings.TrimSpace(posArgs[0])
+		}
+		if runID == "" {
+			return errors.New("orca adopt --dry-run requires a run id")
+		}
+		result, err := (&adopt.Service{Importer: adopt.Importer{}}).DryRun(ctx, runID)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(stdout, "adopt dry-run %s\n", result.Run.ID); err != nil {
+			return err
+		}
+		for _, move := range result.Moves {
+			if _, err := fmt.Fprintln(stdout, "- "+move); err != nil {
+				return err
+			}
+		}
+		return nil
 	case "report":
 		if err := cfg.Validate(false); err != nil {
 			return err
@@ -1146,7 +1170,7 @@ func printUsage(w io.Writer) {
   orca                                     Start or reattach to owner chat
   orca [run] --goal "<text>" [--standing] [--repo <owner/name>] [flags]
   orca chat [--run <id>] [--store sqlite:<path>|nebula] [--prompt "<question>"] [flags]`)
-	_, _ = fmt.Fprintln(w, "  orca report --run <id> [--day YYYY-MM-DD] [flags]\n  orca export --run <id> [flags]")
+	_, _ = fmt.Fprintln(w, "  orca adopt --dry-run <run-id>\n  orca report --run <id> [--day YYYY-MM-DD] [flags]\n  orca export --run <id> [flags]")
 	_, _ = fmt.Fprintf(w, "\nOrchestrator model defaults (flags and config override):\n  Dispatcher: %s\n  Planner:    %s\n  Critic:     %s (OpenAI; different vendor from Planner)\n", DefaultDispatcherModel, DefaultPlannerModel, DefaultOpenAIDispatcherModel)
 	_, _ = fmt.Fprintln(w, "Without HTTP credentials, Claude roles use claude-cli and the critic uses codex-cli.")
 }

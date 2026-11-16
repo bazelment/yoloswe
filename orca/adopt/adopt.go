@@ -82,6 +82,8 @@ func HeldByOrca(runDir string) (string, bool) {
 }
 
 // Lane is one ledger lane with the ownership of its current round.
+//
+//nolint:govet // fields mirror the two host ledger formats.
 type Lane struct {
 	ID, Title, Branch, Phase, Status string
 	// Session, Terminal and ReportPath belong to the lane's current round
@@ -90,6 +92,9 @@ type Lane struct {
 	// reports/<lane>.<phase>.r<round>.md). ReportPath is empty until that
 	// round reports.
 	Session, Terminal, ReportPath, PR string
+	// HoldAdvance is a host contract marker. Orca must wait for judgment before
+	// advancing this lane, even when its report says done.
+	HoldAdvance bool
 	// TerminalState is the ledger's last recorded terminal state (nebula-swarm).
 	TerminalState string
 	// Report is the latest report's Outcome line; LastEvent the lane's newest
@@ -99,6 +104,8 @@ type Lane struct {
 }
 
 // Run is a host swarm run directory.
+//
+//nolint:govet // fields mirror host discovery and handover metadata.
 type Run struct {
 	ID, Dir, Goal, Orchestrator, LastActivity string
 	// Format is FormatSubagentSwarm or FormatNebulaSwarm.
@@ -122,6 +129,8 @@ type Run struct {
 	// PlanPath is the plan file path or ref named in OBJECTIVE.md / PROGRESS.md.
 	// Next is the stated Next: work from OBJECTIVE.md (or PROGRESS.md).
 	Objective, PlanPath, Next string
+	Context, IntegrateRule    string
+	NoPR                      bool
 	// Progress and Escalations are PROGRESS.md and ESCALATIONS.md, clipped.
 	Progress, Escalations string
 	// Unchecked lists what discovery could not check for this run.
@@ -439,6 +448,7 @@ func Read(dir string) (Run, error) {
 		r.Repo = repoSlug(dir)
 	}
 	r.Objective = stripMarker(readText(filepath.Join(dir, "OBJECTIVE.md")))
+	r.Context = stripMarker(readText(filepath.Join(dir, "CONTEXT.md")))
 	r.Progress = clip(stripMarker(readText(filepath.Join(dir, "PROGRESS.md"))), 1500)
 	r.Escalations = clip(stripMarker(readText(filepath.Join(dir, "ESCALATIONS.md"))), 1500)
 	if r.Format == FormatNebulaSwarm {
@@ -471,6 +481,11 @@ func Read(dir string) (Run, error) {
 	}
 	r.PlanPath = extractPlanPath(dir, r.Objective, r.Progress)
 	r.Next = extractNextSection(r.Objective)
+	r.NoPR = runNoPR(dir, b)
+	r.IntegrateRule = extractMergeRuleText("", r.Objective+"\n"+r.Context)
+	for i := range r.Lanes {
+		r.Lanes[i].HoldAdvance = fileExists(filepath.Join(dir, r.Lanes[i].ID+".hold-advance"))
+	}
 	sort.Slice(r.Lanes, func(a, b int) bool { return r.Lanes[a].ID < r.Lanes[b].ID })
 	r.State = RunFinished
 	if runLive(&r) {
@@ -673,6 +688,37 @@ func newestSpawn(dir, laneID, currentPhase string) (string, spawnFile) {
 
 var prLine = regexp.MustCompile(`(?m)^\s*PR:\s*#?(\d+)\s*$`)
 
+func runNoPR(dir string, ledger []byte) bool {
+	var probe struct {
+		Config struct {
+			NoPR bool `json:"no_pr"`
+		} `json:"config"`
+	}
+	if json.Unmarshal(ledger, &probe) == nil && probe.Config.NoPR {
+		return true
+	}
+	if strings.TrimSpace(os.Getenv("SNL_RUN_ID")) == filepath.Base(dir) {
+		value := strings.TrimSpace(os.Getenv("SNL_NO_PR"))
+		if value != "" && value != "0" && !strings.EqualFold(value, "false") && !strings.EqualFold(value, "no") {
+			return true
+		}
+	}
+	// SNL_NO_PR is scoped by SNL_RUN_ID in the host env when present. Reading
+	// env.sh keeps dry-run/adopt deterministic without inheriting another run's
+	// process environment.
+	env := readText(filepath.Join(dir, "env.sh"))
+	for _, line := range strings.Split(env, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) != "SNL_NO_PR" {
+			continue
+		}
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		return value != "" && value != "0" && !strings.EqualFold(value, "false") && !strings.EqualFold(value, "no")
+	}
+	return false
+}
+
 func orchestrator(dir, holder string) string {
 	if holder != "" {
 		return orcaLabel
@@ -735,6 +781,30 @@ type Service struct {
 	// restarted after stopWatcher stops a running loop (or when explicitly set
 	// > 0). Zero uses defaultLoopVerifyInterval when WatcherPIDs were stopped.
 	LoopVerifyInterval time.Duration
+}
+
+// DryRunResult describes the first adoption ticks without taking a lease or
+// starting a controller.
+type DryRunResult struct {
+	Run   Run
+	Moves []string
+}
+
+// DryRun replays adoption's observe-first boundary from the host files only.
+// It is deliberately side-effect free and is safe to run against a copied run
+// directory before a live /adopt.
+func (s *Service) DryRun(ctx context.Context, id string) (DryRunResult, error) {
+	dir, err := s.Importer.Find(id)
+	if err != nil {
+		return DryRunResult{}, err
+	}
+	r, err := Read(dir)
+	if err != nil {
+		return DryRunResult{}, err
+	}
+	moves := []string{"observe-first: read OBJECTIVE.md, CONTEXT.md, hold-advance files, and no-PR configuration"}
+	moves = append(moves, "observe-first: no integrate, complete, release, retry, stop, or host state.json write")
+	return DryRunResult{Run: r, Moves: moves}, nil
 }
 
 const defaultLoopVerifyInterval = 50 * time.Millisecond
