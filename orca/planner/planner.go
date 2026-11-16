@@ -1971,7 +1971,6 @@ func (p *Planner) AskWithFindings(ctx context.Context, runID, question, findings
 		reconciled *Reconciliation
 		applied    AppliedChanges
 		decisions  []store.Decision
-		turnUsage  model.Usage
 	)
 
 	recordProposal := func(callCtx context.Context, pw ProposeWorkParams) (controller.OwnerAsk, error) {
@@ -1989,6 +1988,9 @@ func (p *Planner) AskWithFindings(ctx context.Context, runID, question, findings
 		}
 		q := strings.TrimSpace(pw.Question)
 		desc := cmp.Or(strings.TrimSpace(pw.Description), q)
+		if desc != "" && desc != q {
+			q += "\n\nProposal details (held for owner approval):\n" + desc
+		}
 		ask, askErr := p.registerReconcileAsk(callCtx, runID, p.clock.Now().UTC(), ConflictPoint{
 			ID:          cmp.Or(strings.TrimSpace(pw.ID), p.nextID("proposal")),
 			Description: desc,
@@ -2029,15 +2031,8 @@ func (p *Planner) AskWithFindings(ctx context.Context, runID, question, findings
 			return FormatReconciliationSummary(runID, effectiveRef, *reconciled, applied), nil
 		}
 		cp := rec.Clone()
-		curApplied, curDecisions, applyErr := p.applyReconciliation(callCtx, *run, th.ID, turnRec.ID, effectiveRef, cp, turnUsage, p.clock.Now().Sub(start))
-		if applyErr != nil {
-			return "", applyErr
-		}
-		curApplied.OwnerAsks = append(slices.Clone(applied.OwnerAsks), curApplied.OwnerAsks...)
 		reconciled = &cp
-		applied = curApplied
-		decisions = append(decisions, curDecisions...)
-		if len(applied.OwnerAsks) == 0 && (len(cp.BacklogDiff.Add) > 0 || len(cp.BacklogDiff.Update) > 0 || len(cp.BacklogDiff.Drop) > 0 || strings.TrimSpace(cp.Objective) != "") {
+		if len(cp.BacklogDiff.Add) > 0 || len(cp.BacklogDiff.Update) > 0 || len(cp.BacklogDiff.Drop) > 0 || strings.TrimSpace(cp.Objective) != "" || len(cp.Conflicts) > 0 || len(cp.Unmappable) > 0 {
 			propSummary := strings.TrimSpace(cp.Summary)
 			if propSummary == "" && len(cp.BacklogDiff.Add) > 0 {
 				var titles []string
@@ -2049,12 +2044,16 @@ func (p *Planner) AskWithFindings(ctx context.Context, runID, question, findings
 			if propSummary == "" {
 				propSummary = FormatReconciliationSummary(runID, effectiveRef, cp, applied)
 			}
+			rawRec, err := json.Marshal(cp)
+			if err != nil {
+				return "", err
+			}
 			_, _ = recordProposal(callCtx, ProposeWorkParams{
 				Question:    propSummary,
-				Description: propSummary,
+				Description: string(rawRec),
 			})
 		}
-		return FormatReconciliationSummary(runID, effectiveRef, cp, applied), nil
+		return FormatReconciliationSummary(runID, effectiveRef, cp, AppliedChanges{}), nil
 	}, recordProposal)
 
 	var (
@@ -2129,7 +2128,6 @@ func (p *Planner) AskWithFindings(ctx context.Context, runID, question, findings
 			reg,
 			model.WithMaxTurns(p.cfg.MaxTurns),
 			model.WithOnTurn(func(_ int, resp model.Response) {
-				turnUsage = resp.Usage
 				if txt := strings.TrimSpace(resp.Text()); txt != "" {
 					answer = txt
 					if len(resp.ToolCalls()) == 0 && emit != nil {

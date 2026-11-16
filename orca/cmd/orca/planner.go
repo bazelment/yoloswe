@@ -888,11 +888,16 @@ func (p *Planner) askStream(
 		}
 		now := p.clock.Now().UTC()
 		askID := cmp.Or(strings.TrimSpace(pw.ID), p.nextID("proposal"))
+		proposalDetails := strings.TrimSpace(pw.Description)
+		question := cmp.Or(strings.TrimSpace(pw.Question), proposalDetails, "Approve proposed work")
+		if proposalDetails != "" && proposalDetails != question {
+			question += "\n\nProposal details (held for owner approval):\n" + proposalDetails
+		}
 		ask := controller.OwnerAsk{
 			ID:       askID,
 			RunID:    runID,
 			LaneID:   strings.TrimSpace(pw.LaneID),
-			Question: cmp.Or(strings.TrimSpace(pw.Question), strings.TrimSpace(pw.Description), "Approve proposed work"),
+			Question: question,
 			Options:  opts,
 			Default:  defOpt,
 			Deadline: now.Add(DefaultConflictAskDeadline),

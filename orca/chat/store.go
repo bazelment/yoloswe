@@ -1520,7 +1520,7 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 	if d.Handler != router.Planner && d.Handler != router.Dispatcher {
 		return fmt.Errorf("unsupported handler %q", d.Handler)
 	}
-	if d.Handler == router.Planner && b.PlannerStream != nil {
+	if d.Handler == router.Planner && b.PlannerStream != nil && router.IsPlannerChatQuestion(text) {
 		handled, pErr := b.dispatchPlannerStream(ctx, text, emit)
 		if handled || pErr != nil {
 			return pErr

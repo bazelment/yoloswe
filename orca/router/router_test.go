@@ -53,6 +53,22 @@ func TestLLMThreeWayParse(t *testing.T) {
 		}
 	}
 }
+
+func TestIsPlannerChatQuestionSeparatesResearchFromPlanEdits(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{"can you research how kernel manages fs cache?", true},
+		{"what's the best way to minimize guest RAM overhead?", true},
+		{"change the plan to ship chat first", false},
+		{"drop the docs task", false},
+	} {
+		if got := IsPlannerChatQuestion(tc.text); got != tc.want {
+			t.Errorf("IsPlannerChatQuestion(%q) = %t, want %t", tc.text, got, tc.want)
+		}
+	}
+}
 func TestGeminiSingleChoiceAndOpenQuestion(t *testing.T) {
 	raw, err := os.ReadFile("testdata/gemini.json")
 	if err != nil {
