@@ -1057,11 +1057,11 @@ func (d *Dispatcher) recordSpawnFailureAsk(ctx context.Context, runID string, p 
 		requested := false
 		for i := range existing {
 			dir := &existing[i]
-			if (dir.Source == store.DirectiveSourceOwner || dir.Source == store.DirectiveSourceConcierge) && dir.Kind != store.DirectiveStanding && (mentionsExact(dir.Text, itemID) || mentionsExact(dir.Text, strings.TrimSpace(p.LaneID)) || dir.Scope == itemID || dir.Scope == strings.TrimSpace(p.LaneID)) {
+			if directiveRequestsItem(*dir, itemID, p.LaneID) {
 				requested = true
 			}
-			matchesItem := itemID != "" && mentionsExact(existing[i].Text, itemID)
-			matchesLane := itemID == "" && strings.TrimSpace(p.LaneID) != "" && mentionsExact(existing[i].Text, strings.TrimSpace(p.LaneID))
+			matchesItem := itemID != "" && store.Mentions(existing[i].Text, itemID)
+			matchesLane := itemID == "" && strings.TrimSpace(p.LaneID) != "" && store.Mentions(existing[i].Text, strings.TrimSpace(p.LaneID))
 			if strings.HasPrefix(existing[i].Ref, ownerAskRefPrefix) && (matchesItem || matchesLane) {
 				return nil
 			}
@@ -1530,7 +1530,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	if dirs, listErr := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true}); listErr == nil {
 		for i := range dirs {
 			dir := &dirs[i]
-			if (dir.Source == store.DirectiveSourceOwner || dir.Source == store.DirectiveSourceConcierge) && dir.Kind != store.DirectiveStanding && mentionsExact(dir.Text, item.ID) {
+			if directiveRequestsItem(*dir, item.ID, ln.ID) {
 				if err := d.store.Directives().UpdateStatus(ctx, runID, dir.ID, store.DirectiveHandled); err != nil && d.cfg.Logger != nil {
 					d.cfg.Logger.Warn("marking owner directive handled after spawn", "directive", dir.ID, "item", item.ID, "error", err)
 				}
@@ -1546,26 +1546,19 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		ln.ID, item.ID, ln.Phase, ln.Round, ln.RecipeName, ln.RecipeVersion), nil
 }
 
-func mentionsExact(text, needle string) bool {
-	needle = strings.TrimSpace(needle)
-	if needle == "" {
+func directiveRequestsItem(dir store.Directive, itemID, laneID string) bool {
+	if (dir.Source != store.DirectiveSourceOwner && dir.Source != store.DirectiveSourceConcierge) || dir.Kind == store.DirectiveStanding {
 		return false
 	}
-	isWord := func(r rune) bool {
-		return r == '_' || r == '-' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
-	}
-	for start := 0; ; {
-		i := strings.Index(text[start:], needle)
-		if i < 0 {
-			return false
+	for _, needle := range []string{strings.TrimSpace(itemID), strings.TrimSpace(laneID)} {
+		if needle == "" {
+			continue
 		}
-		i += start
-		end := i + len(needle)
-		if (i == 0 || !isWord(rune(text[i-1]))) && (end == len(text) || !isWord(rune(text[end]))) {
+		if strings.EqualFold(strings.TrimSpace(dir.Scope), needle) || store.Mentions(dir.Text, needle) || store.Mentions(dir.Ref, needle) {
 			return true
 		}
-		start = i + 1
 	}
+	return false
 }
 
 func (d *Dispatcher) reconcileLanePRState(ctx context.Context, runID string, ln *lane.Lane) (bool, string, error) {

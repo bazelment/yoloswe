@@ -13,7 +13,6 @@ import (
 	"sync"
 	"text/tabwriter"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/bazelment/yoloswe/orca/adopt"
@@ -923,7 +922,7 @@ func (b *StoreBackend) pendingWorkSummary(ctx context.Context, runs []string) st
 				if label != "" {
 					skip := false
 					for id := range seenItems {
-						if strings.Contains(strings.ToLower(label), strings.ToLower(id)) {
+						if Mentions(label, id) {
 							skip = true
 							break
 						}
@@ -1200,23 +1199,7 @@ func (b *StoreBackend) Wake(runID string) {
 
 // Mentions reports whether text contains id as a whole word.
 func Mentions(text, id string) bool {
-	if id == "" {
-		return false
-	}
-	idChar := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' }
-	for i := 0; ; {
-		j := strings.Index(text[i:], id)
-		if j < 0 {
-			return false
-		}
-		start, end := i+j, i+j+len(id)
-		before, _ := utf8.DecodeLastRuneInString(text[:start])
-		after, _ := utf8.DecodeRuneInString(text[end:])
-		if (start == 0 || !idChar(before)) && (end == len(text) || !idChar(after)) {
-			return true
-		}
-		i = start + 1
-	}
+	return store.Mentions(text, id)
 }
 
 // directive adds an owner directive to runID in st. /undo revokes the last

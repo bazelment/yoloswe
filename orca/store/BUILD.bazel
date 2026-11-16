@@ -4,6 +4,7 @@ go_library(
     name = "store",
     srcs = [
         "contract.go",
+        "matching.go",
         "memory.go",
         "sqlite.go",
         "store.go",
