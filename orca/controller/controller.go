@@ -756,10 +756,7 @@ func (c *Controller) Run(ctx context.Context) error {
 			return err
 		case <-pollTicker.C():
 		case <-c.wakeCh:
-		case watchErr := <-c.watchErrors:
-			if watchErr != nil {
-				slog.Warn("orca controller watch forwarder failed; continuing", "run", c.cfg.RunID, "error", watchErr)
-			}
+		case <-c.watchErrors:
 		}
 		if err := c.Step(runCtx); err != nil {
 			if IsUnrecoverable(err) {
@@ -770,20 +767,22 @@ func (c *Controller) Run(ctx context.Context) error {
 			}
 			slog.Warn("orca controller step failed; retrying", "run", c.cfg.RunID, "error", err)
 			timer := c.clock.NewTimer(retryDelay)
-			select {
-			case <-runCtx.Done():
-				timer.Stop()
-				return nil
-			case hbErr := <-heartbeatErr:
-				timer.Stop()
-				return hbErr
-			case watchErr := <-c.watchErrors:
-				timer.Stop()
-				if watchErr != nil {
-					slog.Warn("orca controller watch forwarder failed; continuing", "run", c.cfg.RunID, "error", watchErr)
+		retryWait:
+			for {
+				select {
+				case <-runCtx.Done():
+					timer.Stop()
+					return nil
+				case hbErr := <-heartbeatErr:
+					timer.Stop()
+					return hbErr
+				case <-c.watchErrors:
+					// The forwarder already logged the error and is retrying. Keep
+					// waiting for the step backoff so watch flapping cannot defeat it.
+					continue
+				case <-timer.C():
+					break retryWait
 				}
-				continue
-			case <-timer.C():
 			}
 			retryDelay = min(retryDelay*2, 1*time.Minute)
 			continue

@@ -1633,6 +1633,7 @@ func TestControllerRunRetriesTransientTerminalCreateAndKeepsLeaseHeartbeating(t 
 		runtime.Gosched()
 	}
 	close(drv.failWait)
+	deadline = time.Now().Add(2 * time.Second)
 	for clk.Waiters() < 2 {
 		if time.Now().After(deadline) {
 			t.Fatal("controller did not register its poll timer")

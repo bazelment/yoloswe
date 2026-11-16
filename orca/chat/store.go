@@ -1085,13 +1085,8 @@ func (b *StoreBackend) splitAdopted(adopted []string) (live, dead []string) {
 	if !ok {
 		return adopted, nil
 	}
-	status, hasStatus := b.Adoption.Driver.(interface{ ControllerStatus(string) string })
-	stopped, hasStopped := b.Adoption.Driver.(interface{ ControllerStopped(string) bool })
 	for _, id := range adopted {
 		if active.Active(id) {
-			live = append(live, id)
-		} else if hasStatus && (!hasStopped || !stopped.ControllerStopped(id)) && strings.TrimSpace(status.ControllerStatus(id)) != "" {
-			// The supervisor owns the durable queue while it backs off.
 			live = append(live, id)
 		} else {
 			dead = append(dead, id)
