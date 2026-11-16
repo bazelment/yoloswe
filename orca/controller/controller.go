@@ -62,6 +62,41 @@ const (
 // ErrControllerStopped is returned when Step or Run is called on a killed controller.
 var ErrControllerStopped = errors.New("orca/controller: controller stopped")
 
+// IsUnrecoverable reports whether an error means this controller can no longer
+// make progress. Transport and provider failures are intentionally retryable;
+// only lease ownership loss, a released run, cancellation, or an explicit
+// controller stop terminate the loop.
+func IsUnrecoverable(err error) bool {
+	return err != nil && (errors.Is(err, store.ErrLeaseHeld) ||
+		errors.Is(err, store.ErrLeaseNotHeld) || errors.Is(err, store.ErrNotFound) ||
+		errors.Is(err, ErrControllerStopped) || errors.Is(err, context.Canceled))
+}
+
+// IsTransient reports provider/network failures that should be retried by an
+// adopted controller instead of failing adoption itself.
+func IsTransient(err error) bool {
+	if err == nil || IsUnrecoverable(err) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	for _, token := range []string{"timeout", "deadline exceeded", "connection reset", "connection refused", "temporarily unavailable", "temporary failure", "temporary", "service unavailable"} {
+		if strings.Contains(s, token) {
+			return true
+		}
+	}
+	for _, token := range strings.FieldsFunc(s, func(r rune) bool {
+		return r < '0' || r > '9'
+	}) {
+		if len(token) == 3 && token[0] == '5' {
+			return true
+		}
+	}
+	return false
+}
+
 // Judge handles a debounced batch of orchestration events that require LLM judgment.
 type Judge interface {
 	Judge(ctx context.Context, runID string, events []store.Event) error
@@ -675,27 +710,117 @@ func (c *Controller) Run(ctx context.Context) error {
 	if err := c.StartWatches(runCtx); err != nil {
 		return err
 	}
+	// Acquire before starting the independent heartbeat. Step also renews the
+	// lease, but a slow provider call must never block heartbeat progress.
+	for {
+		c.mu.Lock()
+		err := c.ensureLease(runCtx)
+		c.mu.Unlock()
+		if err == nil {
+			break
+		}
+		if errors.Is(err, store.ErrLeaseHeld) || IsUnrecoverable(err) {
+			return err
+		}
+		slog.Warn("orca controller lease acquisition failed; retrying", "run", c.cfg.RunID, "error", err)
+		timer := c.clock.NewTimer(c.cfg.PollInterval)
+		select {
+		case <-runCtx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C():
+		}
+	}
+	heartbeatErr := make(chan error, 1)
+	heartbeatDone := make(chan struct{})
+	go c.runHeartbeat(runCtx, heartbeatErr, heartbeatDone)
+	defer close(heartbeatDone)
 
-	if err := c.Step(runCtx); err != nil && !errors.Is(err, store.ErrLeaseHeld) {
-		return err
+	if err := c.Step(runCtx); err != nil {
+		if IsUnrecoverable(err) && !errors.Is(err, context.Canceled) {
+			return err
+		}
+		slog.Warn("orca controller step failed; retrying", "run", c.cfg.RunID, "error", err)
 	}
 
 	pollTicker := c.clock.NewTicker(c.cfg.PollInterval)
 	defer pollTicker.Stop()
 
-	hbTicker := c.clock.NewTicker(c.cfg.HeartbeatInterval)
-	defer hbTicker.Stop()
+	retryDelay := c.cfg.PollInterval
 
 	for {
 		select {
 		case <-runCtx.Done():
 			return nil
-		case <-hbTicker.C():
+		case err := <-heartbeatErr:
+			return err
 		case <-pollTicker.C():
 		case <-c.wakeCh:
+		case watchErr := <-c.watchErrors:
+			if watchErr != nil {
+				return watchErr
+			}
 		}
-		if err := c.Step(runCtx); err != nil && !errors.Is(err, store.ErrLeaseHeld) && !errors.Is(err, ErrControllerStopped) {
-			return err
+		if err := c.Step(runCtx); err != nil {
+			if IsUnrecoverable(err) {
+				if errors.Is(err, context.Canceled) && runCtx.Err() != nil {
+					return nil
+				}
+				return err
+			}
+			slog.Warn("orca controller step failed; retrying", "run", c.cfg.RunID, "error", err)
+			timer := c.clock.NewTimer(retryDelay)
+			select {
+			case <-runCtx.Done():
+				timer.Stop()
+				return nil
+			case hbErr := <-heartbeatErr:
+				timer.Stop()
+				return hbErr
+			case watchErr := <-c.watchErrors:
+				timer.Stop()
+				return watchErr
+			case <-timer.C():
+			}
+			retryDelay = min(retryDelay*2, 1*time.Minute)
+			continue
+		}
+		retryDelay = c.cfg.PollInterval
+	}
+}
+
+func (c *Controller) runHeartbeat(ctx context.Context, errs chan<- error, done <-chan struct{}) {
+	ticker := c.clock.NewTicker(c.cfg.HeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			return
+		case <-ticker.C():
+			_, err := c.store.Runs().HeartbeatLease(ctx, c.cfg.RunID, c.cfg.HolderID, c.cfg.LeaseTTL)
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, store.ErrLeaseNotHeld) {
+				run, getErr := c.store.Runs().Get(ctx, c.cfg.RunID)
+				if getErr == nil && run != nil && run.Lease != nil && run.Lease.HolderID == c.cfg.HolderID && run.Lease.Expired(c.clock.Now()) {
+					if _, reacquireErr := c.store.Runs().AcquireLease(ctx, c.cfg.RunID, c.cfg.HolderID, c.cfg.LeaseTTL); reacquireErr == nil {
+						continue
+					} else {
+						err = reacquireErr
+					}
+				}
+			}
+			if errors.Is(err, store.ErrLeaseHeld) || errors.Is(err, store.ErrLeaseNotHeld) || errors.Is(err, store.ErrNotFound) {
+				select {
+				case errs <- err:
+				default:
+				}
+				return
+			}
+			slog.Warn("orca controller heartbeat failed; retrying", "run", c.cfg.RunID, "error", err)
 		}
 	}
 }
@@ -2980,7 +3105,6 @@ func (c *Controller) startLanePhase(
 	if err != nil {
 		return err
 	}
-
 	if ln.ItemID != "" {
 		if item, err := c.store.Backlog().Get(ctx, c.cfg.RunID, ln.ItemID); err == nil && item.Status == store.BacklogOpen {
 			item.Status = store.BacklogInProgress

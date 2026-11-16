@@ -445,19 +445,21 @@ func (b *StoreBackend) questions(ctx context.Context) ([]string, error) {
 //
 //nolint:govet // field order follows the doc
 type runView struct {
-	run       *store.Run
-	held      []string
-	lanes     []heldLane
-	liveLanes []string
-	asks      []openAsk
-	cost      float64
-	costState CostGuardState
-	bgActive  bool
-	bgRole    string
-	pending   string
-	desk      bool
-	statuses  map[string]int
-	phases    map[string]int
+	run              *store.Run
+	held             []string
+	lanes            []heldLane
+	liveLanes        []string
+	asks             []openAsk
+	cost             float64
+	costState        CostGuardState
+	bgActive         bool
+	bgRole           string
+	desk             bool
+	statuses         map[string]int
+	phases           map[string]int
+	controllerDown   string
+	controllerNotice string
+	pending          string
 }
 
 //nolint:govet // snapshot live-lane input grouping
@@ -482,6 +484,22 @@ func (b *StoreBackend) view(ctx context.Context, includeLive bool) (runView, []l
 		return runView{}, nil, err
 	}
 	if b.Adoption != nil {
+		if status, ok := b.Adoption.Driver.(interface{ ControllerStatus(string) string }); ok {
+			for _, id := range v.held {
+				if reason := strings.TrimSpace(status.ControllerStatus(id)); reason != "" {
+					v.controllerDown = reason
+					break
+				}
+			}
+		}
+		if notice, ok := b.Adoption.Driver.(interface{ ControllerNotice(string) string }); ok {
+			for _, id := range v.held {
+				if line := strings.TrimSpace(notice.ControllerNotice(id)); line != "" {
+					v.controllerNotice = line
+					break
+				}
+			}
+		}
 		if refresher, ok := b.Adoption.Driver.(interface {
 			RefreshObjective(context.Context, string) (bool, error)
 		}); ok {
@@ -883,6 +901,12 @@ func (v *runView) snapshot(questions []string) Snapshot {
 	if len(v.liveLanes) > 0 {
 		status = lead + " | " + strings.Join(v.liveLanes, " | ") + "\n" + totals
 	}
+	if v.controllerDown != "" {
+		status += "\n⚠ controller down: " + v.controllerDown
+	}
+	if v.controllerNotice != "" && v.controllerDown == "" {
+		status += "\n" + v.controllerNotice
+	}
 	return Snapshot{
 		Status:           status,
 		Questions:        questions,
@@ -1061,8 +1085,12 @@ func (b *StoreBackend) splitAdopted(adopted []string) (live, dead []string) {
 	if !ok {
 		return adopted, nil
 	}
+	status, hasStatus := b.Adoption.Driver.(interface{ ControllerStatus(string) string })
 	for _, id := range adopted {
 		if active.Active(id) {
+			live = append(live, id)
+		} else if hasStatus && strings.TrimSpace(status.ControllerStatus(id)) != "" {
+			// The supervisor owns the durable queue while it backs off.
 			live = append(live, id)
 		} else {
 			dead = append(dead, id)
@@ -1097,8 +1125,17 @@ func (b *StoreBackend) target(ctx context.Context, text string) (runID, refusal 
 	if err != nil {
 		return "", "", err
 	}
+	// A stopped adopted controller still owns a durable queue. Deliver the
+	// message so the supervisor's next restart can process it.
+	var down interface{ ControllerStatus(string) string }
+	if b.Adoption != nil && b.Adoption.Driver != nil {
+		down, _ = b.Adoption.Driver.(interface{ ControllerStatus(string) string })
+	}
 	for _, id := range dead {
 		if Mentions(text, id) {
+			if down != nil && strings.TrimSpace(down.ControllerStatus(id)) != "" {
+				return id, "", nil
+			}
 			return "", "", errNoLiveController(id)
 		}
 	}
@@ -1167,9 +1204,11 @@ func (b *StoreBackend) OwnerRun(ctx context.Context, run, text string) (string, 
 			return "", err
 		}
 		if slices.Contains(dead, run) {
-			return "", errNoLiveController(run)
+			if status, ok := b.Adoption.Driver.(interface{ ControllerStatus(string) string }); !ok || strings.TrimSpace(status.ControllerStatus(run)) == "" {
+				return "", errNoLiveController(run)
+			}
 		}
-		if !slices.Contains(runs, run) {
+		if !slices.Contains(dead, run) && !slices.Contains(runs, run) {
 			return "", fmt.Errorf("run %s is not held by this chat (held: %s); /adopt or /runs it first", run, cmp.Or(strings.Join(runs, ", "), "none"))
 		}
 		return run, nil

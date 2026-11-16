@@ -60,6 +60,11 @@ type controlledRun struct {
 	done       chan struct{}
 	holder     string
 	run        Run
+	statusMu   sync.RWMutex
+	downReason string
+	notice     string
+	restarts   int
+	stopped    bool
 }
 
 type startup struct {
@@ -119,6 +124,33 @@ func (d *Controllers) Active(runID string) bool {
 	default:
 		return true
 	}
+}
+
+// ControllerStatus returns a short owner-facing status for an adopted run.
+// An empty string means the controller is healthy.
+func (d *Controllers) ControllerStatus(runID string) string {
+	d.mu.Lock()
+	cr := d.runs[runID]
+	d.mu.Unlock()
+	if cr == nil {
+		return ""
+	}
+	cr.statusMu.RLock()
+	defer cr.statusMu.RUnlock()
+	return cr.downReason
+}
+
+// ControllerNotice returns the latest stop or restart line for an adopted run.
+func (d *Controllers) ControllerNotice(runID string) string {
+	d.mu.Lock()
+	cr := d.runs[runID]
+	d.mu.Unlock()
+	if cr == nil {
+		return ""
+	}
+	cr.statusMu.RLock()
+	defer cr.statusMu.RUnlock()
+	return cr.notice
 }
 
 func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
@@ -345,8 +377,11 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	// Fail synchronously if another process still holds the controller lease.
 	if err := ctrl.Step(ctx); err != nil {
-		cleanupFailedStart()
-		return err
+		if !controller.IsTransient(err) {
+			cleanupFailedStart()
+			return err
+		}
+		slog.Warn("adopted controller initial step failed; retrying", "run", r.ID, "error", err)
 	}
 	if planned, err := d.planNextWorkIfDrained(ctx, r.ID, "adopt"); err != nil {
 		slog.Warn("plan next work on adopt failed", "run", r.ID, "error", err)
@@ -362,14 +397,61 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	d.runs[r.ID] = cr
 	d.mu.Unlock()
 	started = true
-	go func() {
-		defer close(cr.done)
-		defer cancel()
-		if err := ctrl.Run(runCtx); err != nil && !errors.Is(err, controller.ErrControllerStopped) && runCtx.Err() == nil {
-			slog.Error("adopted controller stopped", "run", r.ID, "error", err)
-		}
-	}()
+	go d.supervise(runCtx, cr)
 	return nil
+}
+
+const maxControllerRestarts = 5
+
+func (d *Controllers) supervise(ctx context.Context, cr *controlledRun) {
+	defer close(cr.done)
+	defer cr.cancel()
+	for {
+		err := cr.controller.Run(ctx)
+		if err == nil || errors.Is(err, controller.ErrControllerStopped) || ctx.Err() != nil {
+			return
+		}
+		if controller.IsUnrecoverable(err) {
+			cr.statusMu.Lock()
+			cr.downReason = err.Error()
+			cr.notice = fmt.Sprintf("⚠ controller stopped: %s", err)
+			cr.stopped = true
+			cr.statusMu.Unlock()
+			slog.Error("adopted controller stopped", "run", cr.run.ID, "error", err)
+			return
+		}
+		cr.statusMu.Lock()
+		cr.downReason = err.Error()
+		cr.restarts++
+		restart := cr.restarts
+		cr.notice = fmt.Sprintf("⚠ controller down: %s", err)
+		cr.statusMu.Unlock()
+		slog.Warn("adopted controller restarting", "run", cr.run.ID, "attempt", restart, "error", err)
+		if restart > maxControllerRestarts {
+			cr.statusMu.Lock()
+			cr.stopped = true
+			cr.notice = fmt.Sprintf("⚠ controller stopped after %d restart attempts: %s", maxControllerRestarts, err)
+			cr.statusMu.Unlock()
+			return
+		}
+		// Controller.Run owns the heartbeat while it is active. Keep renewing
+		// during the supervisor's backoff so a transient stop cannot surrender
+		// the adopted run before the next restart.
+		stopLease := d.keepLease(ctx, cr.run.ID, cr.holder)
+		timer := d.clock.NewTimer(time.Duration(restart) * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			stopLease()
+			return
+		case <-timer.C():
+		}
+		stopLease()
+		cr.statusMu.Lock()
+		cr.downReason = ""
+		cr.notice = fmt.Sprintf("controller restarted (attempt %d)", restart)
+		cr.statusMu.Unlock()
+	}
 }
 
 func markerGeneration(marker string) string {

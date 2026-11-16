@@ -1573,9 +1573,87 @@ func TestControllerStaleApprovalAndRunLoop(t *testing.T) {
 	}
 }
 
+func TestControllerRunRetriesTransientTerminalCreateAndKeepsLeaseHeartbeating(t *testing.T) {
+	t.Parallel()
+	clk, st, base, judge := setupTestEnv(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	if err := st.Lanes().Upsert(ctx, lane.Lane{
+		ID: "lane-timeout", RunID: "run-1", Status: lane.StatusRunning,
+		Phase: recipe.PhaseReview, Round: 1, Attempt: 1,
+		SessionID: "session-timeout", TerminalID: "terminal-review",
+		PRHead: "sha-timeout", ApprovalSHA: "sha-timeout", Checks: "green",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	appendReportEvent(t, st, "lane-timeout", lane.PhaseReport{
+		Phase: recipe.PhaseReview, Outcome: lane.OutcomeDone, HeadSHA: "sha-timeout",
+	})
+	appendCIEvent(t, st, "lane-timeout", "green", "sha-timeout")
+	drv := &effectDriver{FakeDriver: base, failStart: true, failDone: make(chan struct{}), failWait: make(chan struct{}), started: make(chan struct{})}
+	ctrl := controller.New(controller.Config{
+		RunID: "run-1", HolderID: "controller-retry", LeaseTTL: 30 * time.Second,
+		HeartbeatInterval: 10 * time.Second, PollInterval: time.Second,
+	}, st, drv, clk, judge)
+	done := make(chan error, 1)
+	go func() { done <- ctrl.Run(ctx) }()
+
+	// The first integrate terminal create fails once. Wait for that call so the
+	// fake clock cannot advance past the retry timer before it is registered.
+	select {
+	case <-drv.failDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("controller did not reach the transient terminal-create failure")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for clk.Waiters() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("controller did not register its heartbeat timer")
+		}
+		runtime.Gosched()
+	}
+	close(drv.failWait)
+	for clk.Waiters() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("controller did not register its poll timer")
+		}
+		runtime.Gosched()
+	}
+	clk.Advance(time.Second)
+	select {
+	case <-drv.started:
+	case runErr := <-done:
+		t.Fatalf("phase launch retry stopped the controller: %v", runErr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("controller did not retry the terminal launch")
+	}
+	if len(drv.PhaseStarts) != 1 {
+		select {
+		case runErr := <-done:
+			t.Fatalf("phase starts = %d, run stopped with %v", len(drv.PhaseStarts), runErr)
+		default:
+		}
+		t.Fatalf("phase starts = %d, want one retry launch", len(drv.PhaseStarts))
+	}
+	clk.Advance(10 * time.Second)
+	runtime.Gosched()
+	run, err := st.Runs().Get(ctx, "run-1")
+	if err != nil || run.Lease == nil || !run.Lease.HeartbeatAt.After(run.Lease.AcquiredAt) {
+		t.Fatalf("run lease = %+v, err=%v, want a heartbeat after the transient failure", run.Lease, err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
 type effectDriver struct {
 	*lane.FakeDriver
 	afterStart func()
+	failDone   chan struct{}
+	failWait   chan struct{}
+	started    chan struct{}
 	failSteer  bool
 	failStart  bool
 }
@@ -1590,9 +1668,18 @@ func (d *effectDriver) Steer(ctx context.Context, req lane.SteerRequest) error {
 func (d *effectDriver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (lane.StartPhaseResult, error) {
 	if d.failStart {
 		d.failStart = false
-		return lane.StartPhaseResult{}, errors.New("start failed")
+		if d.failDone != nil {
+			close(d.failDone)
+		}
+		if d.failWait != nil {
+			<-d.failWait
+		}
+		return lane.StartPhaseResult{}, errors.New("terminal create: context deadline exceeded")
 	}
 	res, err := d.FakeDriver.StartPhaseTerminal(ctx, req)
+	if err == nil && d.started != nil {
+		close(d.started)
+	}
 	if d.afterStart != nil {
 		d.afterStart()
 	}
