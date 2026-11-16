@@ -33,10 +33,10 @@ func TestDryRunDirFixtures(t *testing.T) {
 		name, format, verdict string
 		make                  func(*testing.T) string
 	}{
-		{"subagent no-pr hold", FormatSubagentSwarm, "SAFE", fixtureSubagentNoPRHold},
-		{"subagent pr", FormatSubagentSwarm, "MOVES: lane-pr:integrate", fixtureSubagentPR},
+		{"subagent no-pr hold", FormatSubagentSwarm, "JUDGES: lane-hold:judge", fixtureSubagentNoPRHold},
+		{"subagent pr", FormatSubagentSwarm, "JUDGES: lane-pr:judge", fixtureSubagentPR},
 		{"nebula active", FormatNebulaSwarm, "SAFE", fixtureNebulaActive},
-		{"nebula closed", FormatNebulaSwarm, "SAFE", fixtureNebulaClosed},
+		{"nebula closed", FormatNebulaSwarm, "JUDGES: lane-closed:judge", fixtureNebulaClosed},
 	}
 	for _, tc := range fixtures {
 		t.Run(tc.name, func(t *testing.T) {
@@ -85,6 +85,144 @@ func TestDryRunDirFixtures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDryRunIntegrationEvidenceTable(t *testing.T) {
+	t.Parallel()
+	//nolint:govet // compact table readability is more useful than field packing in a test.
+	type fixture struct {
+		name, event, target string
+		status              string
+		pr                  int
+		blocked             bool
+		wantMove            string
+		wantReason          string
+	}
+	fixtures := []fixture{
+		{name: "historical merged event", event: "historical", target: "main", wantMove: "none"},
+		{name: "lane head ancestor", event: "ancestor", target: "main", wantMove: "none"},
+		{name: "squash subject", event: "squash", target: "main", pr: 42, wantMove: "none"},
+		{name: "feature target", event: "feature", target: "feat/run", wantMove: "none"},
+		{name: "missing target evidence", event: "missing", target: "main", wantMove: "judge", wantReason: "integration gate:"},
+		{name: "fetch failure", event: "missing", target: "does-not-exist", wantMove: "judge", wantReason: "integration unknown: fetch target does-not-exist failed"},
+		{name: "fetch failure judges mid-pipeline", event: "missing", target: "does-not-exist", status: "running", wantMove: "judge", wantReason: "integration unknown: fetch target does-not-exist failed"},
+		{name: "mid-pipeline lane advances", event: "missing", target: "main", status: "running", wantMove: "advance"},
+		{name: "blocked report", event: "blocked", target: "main", blocked: true, wantMove: "judge", wantReason: "orchestrator judgment: lane report blocked: credentials are unavailable"},
+	}
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			runDir, _, laneHead := integrationFixture(t, tc.event, tc.target, tc.pr, tc.blocked, tc.status)
+			result, err := (&Service{}).DryRunDir(t.Context(), runDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Lanes) != 1 {
+				t.Fatalf("lanes=%+v", result.Lanes)
+			}
+			got := result.Lanes[0]
+			t.Logf("dry-run %s: move=%s reason=%s evidence=%v head=%s", tc.name, got.Move, got.Reason, got.Evidence, laneHead)
+			if got.Move != tc.wantMove {
+				t.Fatalf("move=%q, want %q; result=%+v", got.Move, tc.wantMove, result)
+			}
+			if tc.wantReason != "" && got.Reason != tc.wantReason && !strings.Contains(got.Reason, tc.wantReason) {
+				t.Fatalf("reason=%q, want %q; result=%+v", got.Reason, tc.wantReason, result)
+			}
+			if tc.blocked {
+				adopted, err := Read(runDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, lanes, _, err := controllerState(adopted)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(lanes) != 1 || lanes[0].Status != lane.StatusBlocked || lanes[0].HostHoldReason != "credentials are unavailable" {
+					t.Fatalf("blocked report imported as %+v; want orchestrator hold with blocker text", lanes)
+				}
+			}
+		})
+	}
+}
+
+func integrationFixture(t *testing.T, kind, target string, pr int, blocked bool, status ...string) (runDir, repo, laneHead string) {
+	t.Helper()
+	root := t.TempDir()
+	bare := filepath.Join(root, "target.git")
+	work := filepath.Join(root, "work")
+	gitTest(t, root, "init", "--bare", bare)
+	gitTest(t, root, "init", work)
+	gitTest(t, work, "config", "user.email", "orca-test@example.invalid")
+	gitTest(t, work, "config", "user.name", "orca test")
+	gitTest(t, work, "remote", "add", "origin", bare)
+	write(t, filepath.Join(work, "base.txt"), "base\n")
+	gitTest(t, work, "add", ".")
+	gitTest(t, work, "commit", "-m", "base")
+	gitTest(t, work, "branch", "-M", "main")
+	gitTest(t, work, "push", "-u", "origin", "main")
+	base := strings.TrimSpace(gitTest(t, work, "rev-parse", "HEAD"))
+	gitTest(t, work, "checkout", "-B", "lane-1", base)
+	write(t, filepath.Join(work, "lane.txt"), kind+"\n")
+	gitTest(t, work, "add", ".")
+	subject := "lane work"
+	if kind == "squash" {
+		subject = "lane work (#42)"
+	}
+	gitTest(t, work, "commit", "-m", subject)
+	laneHead = strings.TrimSpace(gitTest(t, work, "rev-parse", "HEAD"))
+	switch kind {
+	case "ancestor":
+		gitTest(t, work, "checkout", "main")
+		gitTest(t, work, "merge", "--ff-only", "lane-1")
+		gitTest(t, work, "push", "origin", "main")
+	case "squash":
+		gitTest(t, work, "checkout", "main")
+		write(t, filepath.Join(work, "squash.txt"), "squash\n")
+		gitTest(t, work, "add", ".")
+		gitTest(t, work, "commit", "-m", subject)
+		gitTest(t, work, "push", "origin", "main")
+	case "feature":
+		gitTest(t, work, "checkout", "-B", target, base)
+		gitTest(t, work, "merge", "--ff-only", "lane-1")
+		gitTest(t, work, "push", "origin", target)
+	}
+	runDir = filepath.Join(root, "run")
+	if err := os.MkdirAll(filepath.Join(runDir, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prJSON := ""
+	prLine := ""
+	if pr > 0 {
+		prJSON = fmt.Sprintf(",\"pr\":%d", pr)
+		prLine = fmt.Sprintf("PR: %d\n", pr)
+	}
+	laneStatus := "done"
+	if len(status) > 0 && status[0] != "" {
+		laneStatus = status[0]
+	}
+	write(t, filepath.Join(runDir, "state.json"), fmt.Sprintf(`{"config":{"goal":"integration fixture","repo":%q,"target":%q,"orchestrator_session_id":"fixture","phases":[{"name":"review"}]},"tasks":[{"id":"lane-1","phase":"review","status":%q,"round":1,"head":%q%s}]}`, work, target, laneStatus, laneHead, prJSON))
+	report := fmt.Sprintf("Outcome: done\nHEAD: %s\n%s", laneHead, prLine)
+	if blocked {
+		report = "Outcome: blocked\nReason: credentials are unavailable\n"
+	}
+	write(t, filepath.Join(runDir, "reports", "lane-1.review.r1.md"), report)
+	events := ""
+	if kind == "historical" {
+		events = "2026-11-16T01:00:00Z\tlane-1\tmerged\t#99 old merge\n2026-11-16T02:00:00Z\tlane-1\tstarted\treview\n"
+	} else {
+		events = "2026-11-16T02:00:00Z\tlane-1\tstarted\treview\n"
+	}
+	write(t, filepath.Join(runDir, "EVENTS"), events)
+	return runDir, work, laneHead
+}
+
+func gitTest(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git -C %s %s: %v\n%s", dir, strings.Join(args, " "), err, out)
+	}
+	return string(out)
 }
 
 func TestAdoptDecisionHostHolds(t *testing.T) {

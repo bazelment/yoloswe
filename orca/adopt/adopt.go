@@ -111,7 +111,13 @@ type Lane struct {
 	// Report is the latest report's Outcome line; LastEvent the lane's newest
 	// EVENTS line; Next what the run files say comes next for the lane.
 	Report, LastEvent, Next string
-	Round                   int
+	// ReportBlocker is the text from an Outcome: blocked report. It is a
+	// host-owned hold so an adopted controller can carry it to orca judgment.
+	ReportBlocker string
+	// IntegrationReason records local-git evidence or the evidence still
+	// missing for this lane. It is intentionally textual for dry-run output.
+	IntegrationReason string
+	Round             int
 }
 
 // Run is a host swarm run directory.
@@ -134,6 +140,15 @@ type Run struct {
 	Loop string
 	// Repo is the run's owner/repo when the run records it.
 	Repo string
+	// RepoPath is the local checkout or bare repository recorded by the host,
+	// when one is available. It is used for local integration evidence only.
+	RepoPath string
+	// TargetBranch is the host run's merge target (for example main or a
+	// feature branch). Integration is judged against this branch, never GitHub.
+	TargetBranch string
+	// IntegrationError is set when the local checkout or target fetch could not
+	// be inspected. Such lanes must be judged, never treated as integrated.
+	IntegrationError string
 	// RepoID is the run's Nebula repository id when the run records one.
 	RepoID string `json:",omitempty"`
 	// Objective is OBJECTIVE.md, with the stand-down marker stripped.
@@ -449,6 +464,7 @@ type ledger struct {
 	Config struct {
 		Goal      string      `json:"goal"`
 		Repo      string      `json:"repo"`
+		Target    string      `json:"target"`
 		MergeRule string      `json:"merge_rule"`
 		Phases    []hostPhase `json:"phases"`
 	} `json:"config"`
@@ -502,6 +518,7 @@ func Read(dir string) (Run, error) {
 		} else {
 			applyRepoValue(&r, st.Config.Repo)
 		}
+		r.TargetBranch = strings.TrimSpace(st.Config.Target)
 		for i := range st.Tasks {
 			if isLocalRepoPath(st.Tasks[i].RepoURL) {
 				localRepoPaths = append(localRepoPaths, st.Tasks[i].RepoURL)
@@ -515,6 +532,7 @@ func Read(dir string) (Run, error) {
 	if r.Repo == "" && r.RepoID == "" {
 		applyOriginRepo(dir, &r, localRepoPaths)
 	}
+	r.RepoPath = firstLocalRepoPath(dir, localRepoPaths)
 	r.PlanPath = extractPlanPath(dir, r.Objective, r.Progress)
 	r.Next = extractNextSection(r.Objective)
 	r.NoPR = runNoPR(dir, b)
@@ -535,6 +553,196 @@ func Read(dir string) (Run, error) {
 		r.State = RunActive
 	}
 	return r, nil
+}
+
+func firstLocalRepoPath(runDir string, paths []string) string {
+	for _, raw := range paths {
+		p := strings.Trim(strings.TrimSpace(raw), `"'`)
+		if p == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(p), "file://") {
+			p = strings.TrimPrefix(p, "file://")
+		}
+		if p == "~" || strings.HasPrefix(p, "~/") {
+			home, err := os.UserHomeDir()
+			if err != nil || home == "" {
+				continue
+			}
+			p = filepath.Join(home, strings.TrimPrefix(p, "~/"))
+		} else if !filepath.IsAbs(p) {
+			p = filepath.Join(runDir, p)
+		}
+		p = filepath.Clean(p)
+		if info, err := os.Stat(p); err == nil && (info.IsDir() || strings.HasSuffix(p, ".git")) && isGitCheckout(p) {
+			return p
+		}
+	}
+	cur := filepath.Clean(runDir)
+	for depth := 0; depth < 8; depth++ {
+		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
+			return cur
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
+	}
+	return ""
+}
+
+func isGitCheckout(path string) bool {
+	return exec.Command("git", "-C", path, "rev-parse", "--git-dir").Run() == nil
+}
+
+// applyIntegrationEvidence checks the host's own merge record and local Git
+// once per run. It deliberately has no GitHub dependency: GitHub state can be
+// stale for a feature-branch target and is not evidence that this lane landed.
+func applyIntegrationEvidence(ctx context.Context, r *Run) {
+	if r == nil {
+		return
+	}
+	needsGit := false
+	for i := range r.Lanes {
+		if !integratedLane(r.Lanes[i]) {
+			needsGit = true
+			break
+		}
+	}
+	if !needsGit {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	gitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if strings.TrimSpace(r.RepoPath) == "" {
+		r.IntegrationError = "no local checkout"
+		return
+	}
+	if _, err := os.Stat(r.RepoPath); err != nil {
+		r.IntegrationError = "local checkout unavailable"
+		return
+	}
+	target := strings.TrimSpace(r.TargetBranch)
+	if target == "" {
+		r.IntegrationError = "run target branch is missing"
+		return
+	}
+	if !validGitBranch(gitCtx, r.RepoPath, target) {
+		r.IntegrationError = "invalid run target branch " + target
+		return
+	}
+	// Fetch exactly once for the run. Lane checks below only inspect the fetched
+	// target ref and never call a per-lane remote or GitHub API.
+	refspec := "+refs/heads/" + target + ":refs/remotes/origin/" + target
+	fetch := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "fetch", "--no-tags", "origin", refspec)
+	fetch.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if err := fetch.Run(); err != nil {
+		r.IntegrationError = "fetch target " + target + " failed: " + err.Error()
+		return
+	}
+	targetRef := ""
+	for _, ref := range []string{"refs/remotes/origin/" + target, "refs/heads/" + target, target} {
+		if out, err := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "rev-parse", "--verify", "--end-of-options", ref).Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+			targetRef = ref
+			break
+		}
+	}
+	if targetRef == "" {
+		r.IntegrationError = "fetched target " + target + " is unavailable"
+		return
+	}
+	var targetSubjects []string
+	if out, err := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "log", "--format=%s", "--end-of-options", targetRef).Output(); err == nil {
+		targetSubjects = strings.Split(string(out), "\n")
+	} else {
+		r.IntegrationError = "read target history failed: " + err.Error()
+		return
+	}
+	for i := range r.Lanes {
+		ln := &r.Lanes[i]
+		if integratedLane(*ln) {
+			continue
+		}
+		head := strings.TrimSpace(ln.Head)
+		if head != "" && !validGitSHA(head) {
+			ln.IntegrationReason = "integration unknown: invalid lane head " + head
+			continue
+		}
+		if head == "" && strings.TrimSpace(ln.Branch) != "" {
+			if !validGitBranch(gitCtx, r.RepoPath, strings.TrimSpace(ln.Branch)) {
+				ln.IntegrationReason = "integration unknown: invalid lane branch " + strings.TrimSpace(ln.Branch)
+				continue
+			}
+			for _, ref := range []string{"refs/heads/" + ln.Branch, "refs/remotes/origin/" + ln.Branch, ln.Branch} {
+				if out, err := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "rev-parse", "--verify", "--end-of-options", ref).Output(); err == nil {
+					head = strings.TrimSpace(string(out))
+					break
+				}
+			}
+		}
+		if head == "" {
+			ln.IntegrationReason = "integration gate: missing lane head for target " + target
+			continue
+		}
+		if err := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "merge-base", "--is-ancestor", "--end-of-options", head, targetRef).Run(); err == nil {
+			ln.Integrated = true
+			ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is an ancestor of target %s", shortSHA(head), target)
+			continue
+		}
+		if pr := strings.TrimSpace(ln.PR); pr != "" {
+			suffix := "(#" + pr + ")"
+			for _, subject := range targetSubjects {
+				if strings.HasSuffix(strings.TrimSpace(subject), suffix) {
+					ln.Integrated = true
+					ln.IntegrationReason = fmt.Sprintf("integration gate: target %s has squash subject ending %s", target, suffix)
+					break
+				}
+			}
+		}
+		if !ln.Integrated {
+			ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is not in target %s and no squash subject ending (#%s)", shortSHA(head), target, prNumber(ln.PR))
+		}
+	}
+}
+
+func validGitSHA(value string) bool {
+	if len(value) < 7 || len(value) > 64 {
+		return false
+	}
+	for _, c := range value {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func validGitBranch(ctx context.Context, repo, branch string) bool {
+	if branch == "" || strings.HasPrefix(branch, "-") || strings.ContainsAny(branch, "\x00\n\r") {
+		return false
+	}
+	check := exec.CommandContext(ctx, "git", "-C", repo, "check-ref-format", "--branch", branch)
+	check.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	return check.Run() == nil
+}
+
+func shortSHA(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
+
+func prNumber(pr string) string {
+	if strings.TrimSpace(pr) == "" {
+		return "PR"
+	}
+	return strings.TrimSpace(pr)
 }
 
 // hostHoldReason reads only scrubbed run-local metadata. It is intentionally
@@ -800,6 +1008,9 @@ func applyReportMetadata(ln *Lane, report string) {
 	if ln == nil {
 		return
 	}
+	if rep, err := lane.ParsePhaseReport(report); err == nil && rep.Outcome == lane.OutcomeBlocked {
+		ln.ReportBlocker = clip(strings.TrimSpace(cmp.Or(rep.Reason, rep.Summary, rep.Ask, "blocked report")), 240)
+	}
 	for _, raw := range strings.Split(report, "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(raw), ":")
 		if !ok {
@@ -977,9 +1188,11 @@ func (s *Service) DryRun(ctx context.Context, id string) (DryRunResult, error) {
 }
 
 // DryRunDir previews adoption from an explicit run directory. It never opens
-// a store, acquires a lease, calls a host adapter, or writes to the directory;
-// callers can safely point it at a scrubbed copy of a live run.
-func (s *Service) DryRunDir(_ context.Context, dir string) (DryRunResult, error) {
+// a store, acquires a lease, calls a host adapter, or writes to the run
+// directory. When the run records a local checkout, it may fetch the target
+// branch there to obtain integration evidence; callers should use a disposable
+// checkout when that mutation is undesirable.
+func (s *Service) DryRunDir(ctx context.Context, dir string) (DryRunResult, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		return DryRunResult{}, fmt.Errorf("%w: empty run directory", ErrRunNotFound)
@@ -989,6 +1202,7 @@ func (s *Service) DryRunDir(_ context.Context, dir string) (DryRunResult, error)
 	if err != nil {
 		return DryRunResult{}, err
 	}
+	applyIntegrationEvidence(ctx, &r)
 	result := DryRunResult{Run: r, Moves: []string{"observe-first: read OBJECTIVE.md, CONTEXT.md, hold-advance files, and no-PR configuration"}}
 	mutating := make([]string, 0)
 	judgments := make([]string, 0)
@@ -997,7 +1211,7 @@ func (s *Service) DryRunDir(_ context.Context, dir string) (DryRunResult, error)
 		result.Lanes = append(result.Lanes, preview)
 		if preview.Move != "none" && preview.Move != "wait" && preview.Move != "judge" {
 			mutating = append(mutating, preview.ID+":"+preview.Move)
-		} else if preview.Move == "judge" && preview.EvidencePresent {
+		} else if preview.Move == "judge" {
 			judgments = append(judgments, preview.ID+":"+preview.Move)
 		}
 	}
@@ -1008,7 +1222,7 @@ func (s *Service) DryRunDir(_ context.Context, dir string) (DryRunResult, error)
 	} else {
 		result.Verdict = "SAFE"
 	}
-	result.Moves = append(result.Moves, "adoption: no integrate, complete, release, retry, stop, or host state.json write")
+	result.Moves = append(result.Moves, "adoption: no integrate, complete, release, retry, stop, or host state.json write; local target fetch may update the recorded checkout")
 	return result, nil
 }
 
@@ -1039,11 +1253,23 @@ func previewLane(r Run, ln Lane) DryRunLane {
 	if ln.Integrated || ln.MergeSHA != "" {
 		p.Evidence = append(p.Evidence, "integrated")
 	}
+	if ln.IntegrationReason != "" {
+		p.Evidence = append(p.Evidence, ln.IntegrationReason)
+	}
+	if r.IntegrationError != "" {
+		p.Evidence = append(p.Evidence, "integration-unknown="+r.IntegrationError)
+	}
 	if r.NoPR {
 		p.Evidence = append(p.Evidence, "no-PR run")
 	}
 	if integratedLane(ln) {
 		p.Reason = "lane is already integrated, merged, or closed; no lifecycle move"
+		return p
+	}
+	report := previewOutcome(ln.Report)
+	if report == string(lane.OutcomeBlocked) {
+		p.Move = "judge"
+		p.Reason = "orchestrator judgment: lane report blocked: " + cmp.Or(ln.ReportBlocker, "blocked report")
 		return p
 	}
 	if ln.HoldAdvance {
@@ -1080,20 +1306,23 @@ func previewLane(r Run, ln Lane) DryRunLane {
 		p.Move, p.Reason = "wait", "terminal is working; adoption must not complete, release, or stop it"
 		return p
 	}
-	report := previewOutcome(ln.Report)
 	switch {
 	case report == string(lane.OutcomeNeedsSWE):
 		p.Move, p.Reason = "rework", "lane report requests SWE rework"
-	case report == string(lane.OutcomeBlocked) || report == string(lane.OutcomeNeedsInput):
-		p.Move, p.Reason = "wait", "lane report requires owner judgment"
+	case report == string(lane.OutcomeNeedsInput):
+		p.Move, p.Reason = "judge", "orchestrator judgment: lane report requires input: "+cmp.Or(ln.ReportBlocker, "lane report requires input")
 	case report == "done" || report == "no-change":
-		if ln.HoldAdvance || sweOnly(r, ln) {
+		if r.IntegrationError != "" {
+			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
+		} else if integrationJudgmentApplies(ln) && ln.IntegrationReason != "" {
+			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
+		} else if ln.HoldAdvance || sweOnly(r, ln) {
 			p.Move, p.Gate, p.EvidencePresent = "judge", mergeGate(r), mergeGateEvidence(r, ln)
 			p.Reason = fmt.Sprintf("%s evidence=%s", p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
 		} else if !r.NoPR && (strings.EqualFold(ln.Phase, "review") || strings.EqualFold(ln.Phase, "clean")) && r.IntegrateRule != "" {
 			p.Move, p.Reason = "integrate", "completed report plus the run integrate rule permits the merge path"
 		} else if strings.EqualFold(ln.Status, "done") {
-			p.Reason = "run or lane is already terminal; no lifecycle move"
+			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
 		} else {
 			p.Move, p.Reason = "advance", "completed report permits the next recipe phase"
 		}
@@ -1101,6 +1330,24 @@ func previewLane(r Run, ln Lane) DryRunLane {
 		p.Move, p.Reason = "wait", "no terminal handback or actionable report evidence"
 	}
 	return p
+}
+
+// Integration evidence decides only whether a terminal lane is already
+// integrated. A completed report from a lane with another recipe phase ahead
+// of it must still advance through that phase when the checkout was inspected;
+// an unavailable checkout or failed fetch is a safe judgment for every lane.
+func integrationJudgmentApplies(ln Lane) bool {
+	return strings.EqualFold(strings.TrimSpace(ln.Status), "done") || strings.TrimSpace(ln.Next) == ""
+}
+
+func integrationJudgeReason(r Run, ln Lane) string {
+	if strings.TrimSpace(r.IntegrationError) != "" {
+		return "integration unknown: " + strings.TrimSpace(r.IntegrationError)
+	}
+	if strings.TrimSpace(ln.IntegrationReason) != "" {
+		return strings.TrimSpace(ln.IntegrationReason)
+	}
+	return "integration gate: missing merge_sha, merged EVENTS record, and local target evidence"
 }
 
 func laneHostHold(ln Lane) string {
@@ -1150,6 +1397,9 @@ func sweOnly(r Run, ln Lane) bool {
 
 func mergeGate(r Run) string {
 	if gate := strings.TrimSpace(r.IntegrateRule); gate != "" {
+		if strings.EqualFold(gate, "merge gate evidence") {
+			return "run merge gate"
+		}
 		return clip(gate, 180)
 	}
 	return "run merge gate"
@@ -1305,6 +1555,7 @@ func (s *Service) drive(ctx context.Context, dir string) (Run, error) {
 	if err != nil {
 		return Run{}, err
 	}
+	applyIntegrationEvidence(ctx, &r)
 	if s.Driver != nil {
 		if err := s.Driver.Start(ctx, r); err != nil {
 			return Run{}, fmt.Errorf("start adopted run %s: %w (lease kept; retry /adopt or /release)", r.ID, err)
