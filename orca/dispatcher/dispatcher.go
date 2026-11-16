@@ -1050,12 +1050,14 @@ func (d *Dispatcher) recordSpawnFailureAsk(ctx context.Context, runID string, p 
 	itemID := strings.TrimSpace(p.ItemID)
 	if existing, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true}); err == nil {
 		for i := range existing {
-			if strings.HasPrefix(existing[i].Ref, ownerAskRefPrefix) && strings.Contains(existing[i].Text, itemID) {
+			matchesItem := itemID != "" && strings.Contains(existing[i].Text, itemID)
+			matchesLane := itemID == "" && strings.TrimSpace(p.LaneID) != "" && strings.Contains(existing[i].Text, strings.TrimSpace(p.LaneID))
+			if strings.HasPrefix(existing[i].Ref, ownerAskRefPrefix) && (matchesItem || matchesLane) {
 				return nil
 			}
 		}
 	}
-	question := fmt.Sprintf("lane.spawn for %s failed: %s; retry or needs you?", cmp.Or(itemID, strings.TrimSpace(p.LaneID), "requested item"), oneLine(spawnErr.Error()))
+	question := fmt.Sprintf("lane.spawn for %s failed: %s; retry or needs you?", cmp.Or(itemID, strings.TrimSpace(p.LaneID), "requested item"), singleLine(spawnErr.Error()))
 	ask := controller.OwnerAsk{
 		ID:       d.nextID("ask-spawn"),
 		RunID:    runID,
@@ -1083,10 +1085,6 @@ func (d *Dispatcher) recordSpawnFailureAsk(ctx context.Context, runID string, p 
 		ExpiresAt: &ask.Deadline,
 		Status:    store.DirectiveActive,
 	})
-}
-
-func oneLine(s string) string {
-	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
 }
 
 // isFanOutTool reports whether a tool may repeat or combine within a batch:

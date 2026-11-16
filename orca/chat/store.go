@@ -950,14 +950,34 @@ func (b *StoreBackend) failedSpawnItems(ctx context.Context, runID string) map[s
 	}
 	for i := range decs {
 		d := &decs[i]
-		if d.Tool != "lane.spawn" || !strings.Contains(strings.ToLower(d.Result), "error") && !strings.Contains(strings.ToLower(d.Result), "failed") && d.Vetted {
+		result := strings.ToLower(d.Result)
+		failure := strings.Contains(result, "error") || strings.Contains(result, "failed") || strings.Contains(result, "rejected")
+		if d.Tool != "lane.spawn" || !failure {
 			continue
 		}
 		var p struct {
 			ItemID string `json:"item_id"`
 		}
-		if json.Unmarshal(d.Args, &p) == nil && strings.TrimSpace(p.ItemID) != "" {
-			out[p.ItemID] = true
+		if json.Unmarshal(d.Args, &p) != nil || strings.TrimSpace(p.ItemID) == "" {
+			continue
+		}
+		out[p.ItemID] = true
+		for j := i + 1; j < len(decs); j++ {
+			later := &decs[j]
+			if later.Tool != "lane.spawn" {
+				continue
+			}
+			var laterParams struct {
+				ItemID string `json:"item_id"`
+			}
+			if json.Unmarshal(later.Args, &laterParams) != nil || laterParams.ItemID != p.ItemID {
+				continue
+			}
+			laterResult := strings.ToLower(later.Result)
+			if !strings.Contains(laterResult, "error") && !strings.Contains(laterResult, "failed") && !strings.Contains(laterResult, "rejected") {
+				delete(out, p.ItemID)
+			}
+			break
 		}
 	}
 	return out
