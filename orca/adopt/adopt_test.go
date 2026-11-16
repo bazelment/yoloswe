@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/clock"
+	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -83,6 +84,116 @@ func TestDryRunDirFixtures(t *testing.T) {
 				t.Fatalf("store rows changed:\n before=%v\n after=%v", beforeRows, afterRows)
 			}
 		})
+	}
+}
+
+func TestAdoptDecisionHostHolds(t *testing.T) {
+	t.Parallel()
+	// These are scrubbed ledger shapes, deliberately created under t.TempDir.
+	fixtures := []struct {
+		name, status, phase, taskExtra, report, hold string
+		wantMove, wantReason                         string
+	}{
+		{
+			name:   "swe-only done open PR is a merge judgment",
+			status: "done", phase: "swe", taskExtra: `,"pr":6113`, report: "Outcome: done\nPR: #6113\nHEAD: abc\n",
+			wantMove: "judge",
+		},
+		{
+			name:   "blocked host note wins",
+			status: "blocked", phase: "swe", taskExtra: `,"blocked_on":"held behind #6113 deploy"`, hold: "held behind #6113 deploy; then rebase, drop n2, re-measure at 80%\n",
+			report: "Outcome: done\n", wantMove: "wait", wantReason: "host-held: held behind #6113 deploy",
+		},
+		{
+			name:   "hold advance is orca judgment",
+			status: "running", phase: "swe", taskExtra: `,"pr":6113`, hold: "orchestrator integrates by hand; require CI green on exact head\n",
+			report: "Outcome: done\nPR: #6113\nHEAD: abc\n", wantMove: "judge",
+		},
+		{
+			name:   "integrated lane is terminal",
+			status: "done", phase: "integrate", taskExtra: `,"pr":6113,"merge_sha":"def"`, hold: "orchestrator integrates by hand\n",
+			report: "Outcome: done\n", wantMove: "none",
+		},
+	}
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), ".shared", "subagent-swarm", "fixture")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"adopt decision","phases":[{"name":"`+tc.phase+`"}]},"tasks":[{"id":"lane","phase":"`+tc.phase+`","status":"`+tc.status+`","round":1`+tc.taskExtra+`}]}`)
+			write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: adopt decision\n")
+			write(t, filepath.Join(dir, "lane."+tc.phase+".md"), tc.report)
+			if tc.hold != "" {
+				name := "lane.hold"
+				if tc.name == "hold advance is orca judgment" || tc.name == "integrated lane is terminal" {
+					name = "lane.hold-advance"
+				}
+				write(t, filepath.Join(dir, name), tc.hold)
+			}
+			result, err := (&Service{}).DryRunDir(t.Context(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Lanes) != 1 {
+				t.Fatalf("lanes=%+v", result.Lanes)
+			}
+			got := result.Lanes[0]
+			if got.Move != tc.wantMove {
+				t.Fatalf("move=%q, want %q; result=%+v", got.Move, tc.wantMove, result)
+			}
+			if tc.wantReason != "" && got.Reason != tc.wantReason {
+				t.Fatalf("reason=%q, want %q", got.Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestMergeGateEvidenceUsesLaneEvidenceOnly(t *testing.T) {
+	t.Parallel()
+	r := Run{Objective: "Merge rule: require soak PASS", Context: "The gate is soak PASS.", IntegrateRule: "require soak PASS"}
+	ln := Lane{Report: "Outcome: done\n", LastEvent: "completed", Checks: ""}
+	if got := mergeGateEvidence(r, ln); got {
+		t.Fatal("merge gate evidence was inferred from the gate prose")
+	}
+	ln.Report = "Outcome: done\nSoak: PASS\n"
+	if got := mergeGateEvidence(r, ln); !got {
+		t.Fatal("lane-owned soak evidence was not recognized")
+	}
+}
+
+func TestExplicitHostHoldLine(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		line string
+		want bool
+	}{
+		{"lane hold: behind deploy", true},
+		{"lane parked behind deploy", true},
+		{"lane blocked on: CI", true},
+		{"lane hold: none", false},
+		{"lane unblocked after deploy", false},
+		{"lane hold-advance contract", false},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
+			if got := explicitHostHoldLine(tc.line); got != tc.want {
+				t.Fatalf("explicitHostHoldLine(%q) = %v, want %v", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestControllerStateIntegratedLaneWinsHostHold(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"phases":[{"name":"swe"}]},"tasks":[{"id":"lane","phase":"swe","status":"running","merge_sha":"merged-sha"}]}`)
+	r := Run{ID: "adopted", Dir: dir, Format: FormatSubagentSwarm, Lanes: []Lane{{ID: "lane", Phase: "swe", Status: "running", HostHold: "held behind deploy", MergeSHA: "merged-sha", Integrated: true, PRState: "merged"}}}
+	_, lanes, _, err := controllerState(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lanes) != 1 || lanes[0].Status != lane.StatusDone || lanes[0].HostHoldReason != "" {
+		t.Fatalf("integrated held lane = %+v, want terminal without host hold", lanes)
 	}
 }
 

@@ -172,6 +172,52 @@ func TestAdoptObserveFirstLeavesImportedWorkingLanesUntouched(t *testing.T) {
 	}
 }
 
+func TestAdoptHeldLaneNeverIntegratesOnLiveTick(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), ".swarm")
+	runID := "20261116-held-merge-judgment"
+	dir := filepath.Join(root, runID)
+	if err := os.MkdirAll(filepath.Join(dir, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"held merge","repo":"repo-1","orchestrator_session_id":"host","merge":"none","phases":[{"name":"swe"}]},"tasks":[{"id":"held","title":"held lane","phase":"swe","status":"running","round":1,"pr":6113,"session_id":"host-session","terminals":{"swe":{"1":"host-terminal"}}}]}`)
+	write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: held merge\nMerge rule: require CI green on exact head.\n")
+	write(t, filepath.Join(dir, "CONTEXT.md"), "The orchestrator integrates by hand after a soak PASS.\n")
+	write(t, filepath.Join(dir, "EVENTS"), "")
+	write(t, filepath.Join(dir, "held.hold-advance"), "orchestrator integrates by hand; wait for soak PASS\n")
+	write(t, filepath.Join(dir, "reports", "held.swe.r1.md"), "Outcome: done\nPR: #6113\nHEAD: abc\n")
+	clk := clock.NewFakeClock(time.Date(2026, 11, 16, 5, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+	controllers := NewControllers(t.Context(), st, drv, clk, nil)
+	s := nsService(root, &fakeWatcher{running: false}, &fakeLabeler{label: "claude"})
+	s.Driver = controllers
+	r, err := s.Adopt(t.Context(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+	got, err := st.Lanes().Get(t.Context(), runID, "held")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != "swe" || got.Status != lane.StatusRunning {
+		t.Fatalf("held lane = %+v, want running SWE handback awaiting judgment", got)
+	}
+	if got.HostHoldReason != "" {
+		t.Fatalf("hold-advance was imported as a host block: %+v", got)
+	}
+	for _, start := range drv.PhaseStarts {
+		if start.Phase == recipe.PhaseIntegrate {
+			t.Fatalf("live adopt integrated held lane: %+v", start)
+		}
+	}
+	if len(drv.Stops) != 0 || len(drv.Releases) != 0 {
+		t.Fatalf("live adopt acted on held lane: stops=%v releases=%v", drv.Stops, drv.Releases)
+	}
+}
+
 // nsSnapshot is every regular file of a run directory (reports/ included),
 // leaving out the bridge log a release appends to.
 func nsSnapshot(t *testing.T, dir string) map[string]string {

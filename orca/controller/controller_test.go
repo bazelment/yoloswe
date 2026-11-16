@@ -967,6 +967,39 @@ func TestControllerReportOnlyCompletionSignals(t *testing.T) {
 	}
 }
 
+func TestControllerHostRunSWEReportOnlyRequiresJudgment(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+	adopted := recipe.Default().Clone()
+	adopted.RunID = "run-1"
+	adopted.Name = "host-swe"
+	adopted.Phases = []recipe.Phase{adopted.Phases[0]}
+	adopted.Transitions = []recipe.Transition{{From: recipe.PhaseSWE, To: recipe.TargetComplete, On: recipe.Condition{Verdict: recipe.OutcomeDone}}}
+	adopted.MergePolicy.Mode = recipe.MergeModeNone
+	if _, err := st.Recipes().Save(ctx, adopted); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-host", RunID: "run-1", Status: lane.StatusPlanned, RecipeName: adopted.Name, BaseCommit: "base-sha", Branch: "lane-host"}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1", HostRun: true, NoPR: true}, st, drv, clk, judge)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	appendReportEvent(t, st, "lane-host", lane.PhaseReport{Phase: recipe.PhaseSWE, Outcome: lane.OutcomeDone, HeadSHA: "base-sha"})
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := st.Lanes().Get(ctx, "run-1", "lane-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ln.Status == lane.StatusDone {
+		t.Fatalf("host SWE report-only lane completed without a merge judgment: %+v", ln)
+	}
+}
+
 func TestControllerReleaseFailureKeepsLaneCompleteAndRetries(t *testing.T) {
 	clk, st, base, judge := setupTestEnv(t)
 	drv := &lifecycleFailDriver{FakeDriver: base, releaseFailures: 1}

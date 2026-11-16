@@ -300,7 +300,8 @@ func Execute(
 		if _, err := fmt.Fprintf(stdout, "run: state=%s goal=%s\n", result.Run.State, result.Run.Goal); err != nil {
 			return err
 		}
-		for _, lane := range result.Lanes {
+		for i := range result.Lanes {
+			lane := &result.Lanes[i]
 			if _, err := fmt.Fprintf(stdout, "lane %s: phase=%s status=%s\n", lane.ID, lane.Phase, lane.Status); err != nil {
 				return err
 			}

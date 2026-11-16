@@ -48,8 +48,8 @@ func TestAdoptDryRunDirUsesExplicitCopiedRun(t *testing.T) {
 		"format=subagent-swarm-nebula",
 		"lane copied-lane: phase=swe status=running",
 		"evidence:",
-		"move: advance; reason:",
-		"MOVES: copied-lane:advance",
+		"move: judge; reason:",
+		"SAFE",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
