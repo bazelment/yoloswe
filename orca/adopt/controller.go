@@ -342,6 +342,8 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		MaxCostPerHourUSD: d.MaxCostPerHourUSD,
 		NoPR:              r.NoPR,
 		HoldAdvance:       holdAdvanceLanes(r),
+		HoldAdvanceCheck:  func(id string) bool { return fileExists(filepath.Join(r.Dir, id+".hold-advance")) },
+		ImportedHostState: true,
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
 	cr := &controlledRun{
@@ -1074,7 +1076,11 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	workflow.RunID = r.ID
 	workflow.Name = "adopted"
 	objectiveText := stripMarker(readText(filepath.Join(r.Dir, "OBJECTIVE.md")))
-	ruleText := extractMergeRuleText(st.Config.MergeRule, objectiveText)
+	contextText := stripMarker(readText(filepath.Join(r.Dir, "CONTEXT.md")))
+	ruleText := r.IntegrateRule
+	if strings.TrimSpace(ruleText) == "" {
+		ruleText = extractMergeRuleText(st.Config.MergeRule, objectiveText+"\n"+contextText)
+	}
 	r.IntegrateRule = ruleText
 	if st.Config.MergePolicy != nil {
 		workflow.MergePolicy = *st.Config.MergePolicy
@@ -1086,10 +1092,6 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	}
 	if st.Config.Target != "" {
 		workflow.MergePolicy.TargetBranch = st.Config.Target
-	}
-	if r.NoPR {
-		workflow = recipe.WithoutIntegrate(workflow)
-		workflow.MergePolicy.Mode = recipe.MergeModeNone
 	}
 	if !workflow.MergePolicy.Mode.Valid() {
 		return workflow, nil, nil, fmt.Errorf("invalid adopted merge mode %q", workflow.MergePolicy.Mode)
@@ -1191,7 +1193,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		}
 		if ph.Name == recipe.PhaseIntegrate {
 			ph.BriefTemplate += fmt.Sprintf("\nRun merge policy: mode=%s; target=%s; script=%s; require_review_pass=%t; require_ci_green=%t. %s", workflow.MergePolicy.Mode, workflow.MergePolicy.TargetBranch, workflow.MergePolicy.Script, workflow.MergePolicy.RequireReviewPass, workflow.MergePolicy.RequireCIGreen, st.Config.MergeRule)
-			if st.Config.NoPR {
+			if r.NoPR {
 				ph.BriefTemplate += "\nThis run uses branches without PRs; integrate the reviewed branch into the run target."
 				ph.ExitContract.RequiresPR = false
 			}

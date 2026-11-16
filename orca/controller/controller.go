@@ -218,6 +218,11 @@ type Config struct {
 	NoPR bool
 	// HoldAdvance parks imported lanes until their owner resolves the contract.
 	HoldAdvance map[string]bool
+	// HoldAdvanceCheck re-reads the host marker when a lifecycle decision is made.
+	// It lets an owner lift a hold without re-adopting the run.
+	HoldAdvanceCheck func(string) bool
+	// ImportedHostState marks TerminalState as a host-ledger adoption snapshot.
+	ImportedHostState bool
 }
 
 func (c Config) withDefaults() Config {
@@ -2162,12 +2167,12 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 	if err != nil {
 		return store.EventClassJudgment, nil
 	}
-	// A report is the terminal's explicit handback. The imported host
-	// terminal_state may still say working until the host ledger catches up.
-	ln.TerminalState = ""
 	if rep.TerminalID != "" && ln.TerminalID != "" && rep.TerminalID != ln.TerminalID {
 		return store.EventClassAuto, nil
 	}
+	// A report is the terminal's explicit handback. The imported host
+	// terminal_state may still say working until the host ledger catches up.
+	ln.TerminalState = ""
 	if strings.TrimSpace(rep.Summary) != "" {
 		_, err := c.store.Notes().Append(ctx, store.RunNote{ID: "report-" + ev.ID, RunID: c.cfg.RunID, TaskID: cmp.Or(ln.ItemID, ln.ID), Phase: rep.Phase, Text: rep.Summary})
 		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
@@ -2251,7 +2256,7 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 }
 
 func (c *Controller) completeReportOnlyLane(ctx context.Context, ln *lane.Lane, ev *store.Event) (store.EventClass, error) {
-	if ln == nil || strings.EqualFold(strings.TrimSpace(ln.TerminalState), "working") || strings.EqualFold(strings.TrimSpace(ln.TerminalState), "busy") || c.laneIsWorkingOrBusy(ctx, *ln) {
+	if ln == nil || c.laneMarkedWorking(ctx, *ln) {
 		return store.EventClassJudgment, nil
 	}
 	_, already, err := c.recordDecision(ctx, ToolLaneComplete, ln.ID,
@@ -2413,7 +2418,7 @@ func ReconcileLanePRState(
 }
 
 func (c *Controller) reconcileLanePRState(ctx context.Context, ln *lane.Lane, eventID string) (bool, error) {
-	if c.cfg.NoPR || c.advanceHeld(ln) || strings.EqualFold(strings.TrimSpace(ln.TerminalState), "working") || strings.EqualFold(strings.TrimSpace(ln.TerminalState), "busy") || c.laneIsWorkingOrBusy(ctx, *ln) {
+	if c.cfg.NoPR || c.advanceHeld(ln) || c.laneMarkedWorking(ctx, *ln) {
 		return false, nil
 	}
 	settled, state, err := ReconcileLanePRState(ctx, c.cfg.PRProbe, c.store, nil, c.clock.Now(), c.cfg.RunID, ActorController, eventID, ln)
@@ -2511,7 +2516,7 @@ func (c *Controller) advanceByRecipe(
 
 	switch target {
 	case recipe.TargetComplete:
-		if strings.EqualFold(strings.TrimSpace(ln.TerminalState), "working") || strings.EqualFold(strings.TrimSpace(ln.TerminalState), "busy") || c.laneIsWorkingOrBusy(ctx, *ln) {
+		if c.laneMarkedWorking(ctx, *ln) {
 			return store.EventClassJudgment, nil
 		}
 		if r.MergePolicy.RequireReviewPass && recipeHasReviewPhase(r) {
@@ -2654,12 +2659,9 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		// retry. Its exit is not evidence that the worker failed an attempt.
 		return store.EventClassAuto, nil
 	}
-	if payload.Kind == lane.EventTurnEndedNoReport || payload.Kind == lane.EventExited {
-		// The host ledger can lag the terminal handback. An explicit ended event
-		// supersedes its imported working marker; a live driver state below still
-		// vetoes completion or release when the agent is actually busy.
-		ln.TerminalState = ""
-	}
+	// Any non-stale phase exit is fresh host evidence and supersedes the
+	// imported terminal marker, including quota and auth exits.
+	ln.TerminalState = ""
 	if settled, err := c.reconcileLanePRState(ctx, ln, ev.ID); settled || err != nil {
 		if err != nil {
 			return store.EventClassUnclassified, err
@@ -2800,7 +2802,9 @@ func (c *Controller) handleCI(ctx context.Context, ev *store.Event) (store.Event
 		}
 		return store.EventClassUnclassified, err
 	}
-
+	// A CI event is fresh host evidence and supersedes the imported terminal
+	// marker; later lifecycle checks still consult the live driver.
+	ln.TerminalState = ""
 	var payload CIPayload
 	if len(ev.Payload) > 0 {
 		_ = json.Unmarshal(ev.Payload, &payload)
@@ -3301,7 +3305,7 @@ func (c *Controller) releaseLaneSession(ctx context.Context, ln *lane.Lane) erro
 	if ln == nil || strings.TrimSpace(ln.SessionID) == "" {
 		return nil
 	}
-	if strings.EqualFold(strings.TrimSpace(ln.TerminalState), "working") || strings.EqualFold(strings.TrimSpace(ln.TerminalState), "busy") || c.laneIsWorkingOrBusy(ctx, *ln) {
+	if c.laneMarkedWorking(ctx, *ln) {
 		return nil
 	}
 	if r, ok := c.driver.(lane.SessionReleaser); ok {
@@ -3311,10 +3315,28 @@ func (c *Controller) releaseLaneSession(ctx context.Context, ln *lane.Lane) erro
 }
 
 func (c *Controller) advanceHeld(ln *lane.Lane) bool {
-	if ln == nil || c.cfg.HoldAdvance == nil {
+	if ln == nil {
+		return false
+	}
+	if c.cfg.HoldAdvanceCheck != nil {
+		return c.cfg.HoldAdvanceCheck(ln.ID)
+	}
+	if c.cfg.HoldAdvance == nil {
 		return false
 	}
 	return c.cfg.HoldAdvance[ln.ID]
+}
+
+func (c *Controller) importedTerminalWorking(ln lane.Lane) bool {
+	if !c.cfg.ImportedHostState {
+		return false
+	}
+	state := strings.TrimSpace(ln.TerminalState)
+	return strings.EqualFold(state, "working") || strings.EqualFold(state, "busy")
+}
+
+func (c *Controller) laneMarkedWorking(ctx context.Context, ln lane.Lane) bool {
+	return c.importedTerminalWorking(ln) || c.laneIsWorkingOrBusy(ctx, ln)
 }
 
 func (c *Controller) runRepository(ctx context.Context) string {

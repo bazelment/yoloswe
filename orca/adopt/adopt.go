@@ -424,9 +424,10 @@ type ledgerLane struct {
 
 type ledger struct {
 	Config struct {
-		Goal   string      `json:"goal"`
-		Repo   string      `json:"repo"`
-		Phases []hostPhase `json:"phases"`
+		Goal      string      `json:"goal"`
+		Repo      string      `json:"repo"`
+		MergeRule string      `json:"merge_rule"`
+		Phases    []hostPhase `json:"phases"`
 	} `json:"config"`
 	Tasks []ledgerLane `json:"tasks"`
 }
@@ -483,7 +484,13 @@ func Read(dir string) (Run, error) {
 	r.PlanPath = extractPlanPath(dir, r.Objective, r.Progress)
 	r.Next = extractNextSection(r.Objective)
 	r.NoPR = runNoPR(dir, b)
-	r.IntegrateRule = extractMergeRuleText("", r.Objective+"\n"+r.Context)
+	var contract struct {
+		Config struct {
+			MergeRule string `json:"merge_rule"`
+		} `json:"config"`
+	}
+	_ = json.Unmarshal(b, &contract)
+	r.IntegrateRule = extractMergeRuleText(contract.Config.MergeRule, r.Objective+"\n"+r.Context)
 	for i := range r.Lanes {
 		r.Lanes[i].HoldAdvance = fileExists(filepath.Join(dir, r.Lanes[i].ID+".hold-advance"))
 	}
@@ -846,7 +853,7 @@ func (s *Service) DryRunDir(_ context.Context, dir string) (DryRunResult, error)
 	} else {
 		result.Verdict = "MOVES: " + strings.Join(mutating, ", ")
 	}
-	result.Moves = append(result.Moves, "observe-first: no integrate, complete, release, retry, stop, or host state.json write")
+	result.Moves = append(result.Moves, "adoption: no integrate, complete, release, retry, stop, or host state.json write")
 	return result, nil
 }
 
@@ -884,11 +891,11 @@ func previewLane(r Run, ln Lane) DryRunLane {
 		p.Move, p.Reason = "wait", "terminal is working; adoption must not complete, release, or stop it"
 		return p
 	}
-	report := strings.ToLower(ln.Report)
+	report := previewOutcome(ln.Report)
 	switch {
-	case strings.Contains(report, "failed"), strings.Contains(report, "failure"):
+	case report == "needs-swe" || report == "blocked" || report == "needs-input":
 		p.Move, p.Reason = "retry", "lane report records failure and the lane is still active"
-	case strings.Contains(report, "done"), strings.Contains(report, "pass"), strings.Contains(report, "complete"):
+	case report == "done" || report == "no-change":
 		if !r.NoPR && (strings.EqualFold(ln.Phase, "review") || strings.EqualFold(ln.Phase, "clean")) && r.IntegrateRule != "" {
 			p.Move, p.Reason = "integrate", "completed report plus the run integrate rule permits the merge path"
 		} else {
@@ -898,6 +905,16 @@ func previewLane(r Run, ln Lane) DryRunLane {
 		p.Move, p.Reason = "wait", "no terminal handback or actionable report evidence"
 	}
 	return p
+}
+
+var previewOutcomeRE = regexp.MustCompile(`(?im)^\s*outcome\s*:\s*(done|no-change|needs-swe|blocked|needs-input)\b`)
+
+func previewOutcome(report string) string {
+	match := previewOutcomeRE.FindStringSubmatch(report)
+	if len(match) == 2 {
+		return strings.ToLower(match[1])
+	}
+	return ""
 }
 
 const defaultLoopVerifyInterval = 50 * time.Millisecond
