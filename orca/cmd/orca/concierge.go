@@ -159,6 +159,9 @@ type Concierge struct {
 	AskPlanner func(ctx context.Context, runID, question, findings string, emit func(string)) (string, error)
 	// RecordProposal records a pending action proposal when a concierge reply offers an action.
 	RecordProposal func(ctx context.Context, runID, summary, spec string) (string, error)
+	// TrackDirective records that an owner directive is awaiting dispatcher
+	// action, so chat can report its eventual outcome.
+	TrackDirective func(ctx context.Context, runID string)
 	// Restart validates the startup binary and prepares an in-place re-exec.
 	Restart func(context.Context, string) (string, error)
 	// Logger receives one INFO line per tool call and a WARN on a budget stop.
@@ -240,6 +243,7 @@ func (c *Concierge) BindBackend(b *chat.StoreBackend) {
 	c.OwnerRun = b.OwnerRun
 	c.Wake = b.Wake
 	c.RecordProposal = b.RecordProposal
+	c.TrackDirective = func(ctx context.Context, runID string) { b.TrackPendingOutcome(runID) }
 	c.HeldRuns = b.HeldRuns
 	c.HostRun = b.ReadHostRun
 	c.probeFrom = func() chat.HostProbe {
@@ -2517,6 +2521,9 @@ func (c *Concierge) handleDirectiveSubmit(
 	if err := c.store.Directives().Add(ctx, dir); err != nil {
 		return directiveReceipt{}, "", err
 	}
+	if c.TrackDirective != nil && kind != store.DirectiveStanding {
+		c.TrackDirective(ctx, runID)
+	}
 	echo := "directive saved"
 	if expiresAt != nil {
 		echo = "directive is time-limited"
@@ -2565,7 +2572,7 @@ func (c *Concierge) handleDirectiveSubmit(
 		Vetted:   true,
 	})
 
-	return directiveReceipt{id: dir.ID, run: runID}, fmt.Sprintf("Submitted directive %s on run %s (kind=%s); %s", dir.ID, runID, dir.Kind, echo), nil
+	return directiveReceipt{id: dir.ID, run: runID}, fmt.Sprintf("Requested directive %s on run %s (kind=%s); I'll report the outcome; %s", dir.ID, runID, dir.Kind, echo), nil
 }
 
 func (c *Concierge) handleDirectiveRevoke(

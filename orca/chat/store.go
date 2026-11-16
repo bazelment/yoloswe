@@ -13,7 +13,6 @@ import (
 	"sync"
 	"text/tabwriter"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/bazelment/yoloswe/orca/adopt"
@@ -455,6 +454,7 @@ type runView struct {
 	costState CostGuardState
 	bgActive  bool
 	bgRole    string
+	pending   string
 	desk      bool
 	statuses  map[string]int
 	phases    map[string]int
@@ -504,6 +504,7 @@ func (b *StoreBackend) view(ctx context.Context, includeLive bool) (runView, []l
 	if v.asks, err = b.asks(ctx, v.held); err != nil {
 		return runView{}, nil, err
 	}
+	v.pending = b.pendingWorkSummary(ctx, v.held)
 	liveByRun := map[string][]store.Lane{}
 	for i := range v.lanes {
 		v.statuses[cmp.Or(string(v.lanes[i].lane.Status), "-")]++
@@ -875,6 +876,9 @@ func (v *runView) snapshot(questions []string) Snapshot {
 	}
 	totals := fmt.Sprintf("lanes: %s | open questions: %d | cost today: $%.2f",
 		laneCounts(len(v.lanes), v.statuses, v.phases), len(v.asks), v.cost)
+	if v.pending != "" {
+		totals += " | " + v.pending
+	}
 	status := lead + " | " + totals
 	if len(v.liveLanes) > 0 {
 		status = lead + " | " + strings.Join(v.liveLanes, " | ") + "\n" + totals
@@ -886,6 +890,112 @@ func (v *runView) snapshot(questions []string) Snapshot {
 		BackgroundRole:   v.bgRole,
 		CostState:        v.costState,
 	}
+}
+
+// pendingWorkSummary keeps owner-requested work visible in the pinned footer.
+// Open backlog items are queued work; a failed lane.spawn is called out on the
+// item itself so it cannot disappear between dispatcher turns.
+func (b *StoreBackend) pendingWorkSummary(ctx context.Context, runs []string) string {
+	var items []string
+	seenItems := map[string]bool{}
+	for _, runID := range runs {
+		backlog, err := b.store.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
+		if err == nil {
+			failed := b.failedSpawnItems(ctx, runID)
+			for i := range backlog {
+				if backlog[i].Status != store.BacklogOpen {
+					continue
+				}
+				label := backlog[i].ID
+				if failed[backlog[i].ID] {
+					label += " (spawn failed)"
+				}
+				items = append(items, label)
+				seenItems[backlog[i].ID] = true
+			}
+		}
+		dirs, err := b.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+		if err == nil {
+			for i := range dirs {
+				d := &dirs[i]
+				if d.Source != store.DirectiveSourceOwner && d.Source != store.DirectiveSourceConcierge {
+					continue
+				}
+				if d.Kind == store.DirectiveStanding || strings.HasPrefix(d.Ref, "chat:") {
+					continue
+				}
+				label := strings.TrimSpace(d.Text)
+				if label == "" {
+					label = strings.TrimSpace(d.Ref)
+				}
+				if label != "" {
+					skip := false
+					for id := range seenItems {
+						if Mentions(label, id) {
+							skip = true
+							break
+						}
+					}
+					if skip {
+						continue
+					}
+					items = append(items, oneLineSummary(label))
+				}
+			}
+		}
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	const maxVisible = 3
+	total := len(items)
+	visible := items
+	if len(visible) > maxVisible {
+		visible = visible[:maxVisible]
+	}
+	more := total - len(visible)
+	if more > 0 {
+		return fmt.Sprintf("📋 %d queued: %s, +%d more", total, strings.Join(visible, ", "), more)
+	}
+	return fmt.Sprintf("📋 %d queued: %s", total, strings.Join(visible, ", "))
+}
+
+func (b *StoreBackend) failedSpawnItems(ctx context.Context, runID string) map[string]bool {
+	out := map[string]bool{}
+	decs, err := b.store.Decisions().List(ctx, store.DecisionFilter{RunID: runID, Actor: "dispatcher"})
+	if err != nil {
+		return out
+	}
+	for i := range decs {
+		d := &decs[i]
+		if d.Tool != "lane.spawn" || !spawnDecisionFailed(d) {
+			continue
+		}
+		var p struct {
+			ItemID string `json:"item_id"`
+		}
+		if json.Unmarshal(d.Args, &p) != nil || strings.TrimSpace(p.ItemID) == "" {
+			continue
+		}
+		out[p.ItemID] = true
+		for j := i + 1; j < len(decs); j++ {
+			later := &decs[j]
+			if later.Tool != "lane.spawn" {
+				continue
+			}
+			var laterParams struct {
+				ItemID string `json:"item_id"`
+			}
+			if json.Unmarshal(later.Args, &laterParams) != nil || laterParams.ItemID != p.ItemID {
+				continue
+			}
+			if !spawnDecisionFailed(later) {
+				delete(out, p.ItemID)
+			}
+			break
+		}
+	}
+	return out
 }
 
 // statusReport is /status: the run and its goal, lanes by status and phase,
@@ -1098,23 +1208,7 @@ func (b *StoreBackend) Wake(runID string) {
 
 // Mentions reports whether text contains id as a whole word.
 func Mentions(text, id string) bool {
-	if id == "" {
-		return false
-	}
-	idChar := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' }
-	for i := 0; ; {
-		j := strings.Index(text[i:], id)
-		if j < 0 {
-			return false
-		}
-		start, end := i+j, i+j+len(id)
-		before, _ := utf8.DecodeLastRuneInString(text[:start])
-		after, _ := utf8.DecodeRuneInString(text[end:])
-		if (start == 0 || !idChar(before)) && (end == len(text) || !idChar(after)) {
-			return true
-		}
-		i = start + 1
-	}
+	return store.Mentions(text, id)
 }
 
 // directive adds an owner directive to runID in st. /undo revokes the last
@@ -1835,6 +1929,12 @@ func (b *StoreBackend) markPendingOutcomeRun(runID string) {
 	b.pendingOutcomeRuns[runID] = true
 }
 
+// TrackPendingOutcome marks a directive submitted by any owner-facing path for
+// outcome collection on the next snapshot.
+func (b *StoreBackend) TrackPendingOutcome(runID string) {
+	b.markPendingOutcomeRun(strings.TrimSpace(runID))
+}
+
 func (b *StoreBackend) seedSeenDispatcherRun(ctx context.Context, st store.Store, runID string) {
 	if st == nil || runID == "" {
 		return
@@ -2123,6 +2223,16 @@ func formatDispatcherTurnOutcome(ctx context.Context, st store.Store, tr *store.
 			continue
 		}
 		detail := oneLineSummary(cmp.Or(d.Result, d.Reason))
+		if d.Tool == "lane.spawn" {
+			if line := formatSpawnOutcome(d, detail); line != "" {
+				if d.Vetted {
+					vetted = append(vetted, line)
+				} else {
+					rejected = append(rejected, line)
+				}
+				continue
+			}
+		}
 		entry := d.Tool
 		if detail != "" {
 			entry += " (" + detail + ")"
@@ -2152,6 +2262,43 @@ func formatDispatcherTurnOutcome(ctx context.Context, st store.Store, tr *store.
 	default:
 		return "dispatcher: no action taken"
 	}
+}
+
+func formatSpawnOutcome(d *store.Decision, detail string) string {
+	var p struct {
+		ItemID string `json:"item_id"`
+		Model  string `json:"model"`
+	}
+	_ = json.Unmarshal(d.Args, &p)
+	item := strings.TrimSpace(p.ItemID)
+	if item == "" {
+		item = strings.TrimSpace(d.LaneID)
+	}
+	if item == "" {
+		return ""
+	}
+	if spawnDecisionFailed(d) {
+		reason := strings.TrimSpace(strings.TrimPrefix(detail, "error:"))
+		return fmt.Sprintf("✗ %s spawn failed: %s", item, cmp.Or(reason, detail))
+	}
+	if detail == "" {
+		detail = "spawned"
+	}
+	if p.Model != "" && !strings.Contains(detail, p.Model) {
+		detail += ", model=" + p.Model
+	}
+	return fmt.Sprintf("▶ %s spawned (%s)", item, detail)
+}
+
+func spawnDecisionFailed(d *store.Decision) bool {
+	if d == nil || d.Tool != "lane.spawn" {
+		return false
+	}
+	if !d.Vetted {
+		return true
+	}
+	result := strings.ToLower(strings.TrimSpace(d.Result))
+	return strings.HasPrefix(result, "error:") || strings.HasPrefix(result, "rejected:") || strings.HasPrefix(result, "failed:")
 }
 
 func oneLineSummary(s string) string {

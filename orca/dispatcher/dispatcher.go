@@ -165,6 +165,11 @@ type Dispatcher struct {
 	mu                 sync.Mutex
 }
 
+type spawnDriverError struct{ err error }
+
+func (e *spawnDriverError) Error() string { return e.err.Error() }
+func (e *spawnDriverError) Unwrap() error { return e.err }
+
 // New constructs a new Dispatcher.
 func New(
 	cfg Config,
@@ -992,8 +997,33 @@ func (d *Dispatcher) handleRawToolCall(
 			if state != nil {
 				state.rejected = append(state.rejected, invErr.msg)
 			}
+			if act.Tool == ToolLaneSpawn && act.LaneSpawn != nil {
+				_ = d.recordSpawnFailureAsk(ctx, runID, *act.LaneSpawn, invErr)
+			}
 			_ = d.recordDecision(ctx, runID, state, act, false, "rejected: "+invErr.msg, d.clock.Now().Sub(start))
 			return "", fmt.Errorf("invariant violation: %s", invErr.msg)
+		}
+		if act.Tool == ToolLaneSpawn && act.LaneSpawn != nil {
+			// A driver/network failure gets one immediate retry. Other failures
+			// become an owner question so the failed owner request remains visible.
+			var driverErr *spawnDriverError
+			if errors.As(execErr, &driverErr) && isTransientSpawnError(driverErr) {
+				if state != nil {
+					state.view = view
+				}
+				if view != nil {
+					retryResult, retryErr := d.applyVettedAction(ctx, runID, state, view, act)
+					if retryErr == nil {
+						if state != nil {
+							state.accepted = append(state.accepted, act)
+						}
+						_ = d.recordDecision(ctx, runID, state, act, true, retryResult, d.clock.Now().Sub(start))
+						return retryResult, nil
+					}
+					execErr = retryErr
+				}
+			}
+			_ = d.recordSpawnFailureAsk(ctx, runID, *act.LaneSpawn, execErr)
 		}
 		_ = d.recordDecision(ctx, runID, state, act, true, "error: "+execErr.Error(), d.clock.Now().Sub(start))
 		return "", execErr
@@ -1009,6 +1039,65 @@ func (d *Dispatcher) handleRawToolCall(
 		return "", err
 	}
 	return result, nil
+}
+
+func isTransientSpawnError(err error) bool {
+	s := strings.ToLower(err.Error())
+	for _, marker := range []string{"timeout", "timed out", "temporar", "connection reset", "connection refused", "rate limit", "unavailable", "network"} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Dispatcher) recordSpawnFailureAsk(ctx context.Context, runID string, p LaneSpawnParams, spawnErr error) error {
+	itemID := strings.TrimSpace(p.ItemID)
+	if existing, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true}); err == nil {
+		requested := false
+		for i := range existing {
+			dir := &existing[i]
+			if directiveRequestsItem(*dir, itemID, p.LaneID) {
+				requested = true
+			}
+			matchesItem := itemID != "" && store.Mentions(existing[i].Text, itemID)
+			matchesLane := itemID == "" && strings.TrimSpace(p.LaneID) != "" && store.Mentions(existing[i].Text, strings.TrimSpace(p.LaneID))
+			if strings.HasPrefix(existing[i].Ref, ownerAskRefPrefix) && (matchesItem || matchesLane) {
+				return nil
+			}
+		}
+		if !requested {
+			return nil
+		}
+	}
+	question := fmt.Sprintf("lane.spawn for %s failed: %s; retry or needs you?", cmp.Or(itemID, strings.TrimSpace(p.LaneID), "requested item"), singleLine(spawnErr.Error()))
+	ask := controller.OwnerAsk{
+		ID:       d.nextID("ask-spawn"),
+		RunID:    runID,
+		LaneID:   strings.TrimSpace(p.LaneID),
+		Question: question,
+		Options:  []string{"retry", "needs you"},
+		Default:  "needs you",
+		Deadline: d.clock.Now().UTC().Add(30 * time.Minute),
+	}
+	if err := ask.Validate(); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(ask)
+	if err != nil {
+		return err
+	}
+	return d.store.Directives().Add(ctx, store.Directive{
+		ID:        "ask-" + ask.ID,
+		RunID:     runID,
+		Kind:      store.DirectiveInstruction,
+		Source:    store.DirectiveSourceDispatcher,
+		Scope:     ask.LaneID,
+		Ref:       ownerAskRefPrefix + ask.ID,
+		Text:      string(raw),
+		ExpiresAt: &ask.Deadline,
+		Status:    store.DirectiveActive,
+	})
 }
 
 // isFanOutTool reports whether a tool may repeat or combine within a batch:
@@ -1410,7 +1499,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		}
 		spawnRes, err := d.spawnLaneSession(ctx, drv, runID, view.Run.Repository, ln, firstPhase.Name, ln.Round, agent, workerBrief)
 		if err != nil {
-			return "", err
+			return "", &spawnDriverError{err: err}
 		}
 		ln.Status = lane.StatusRunning
 		if strings.TrimSpace(spawnRes.BaseCommit) != "" {
@@ -1436,6 +1525,18 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	if err := d.store.Backlog().Update(ctx, updatedItem, ActorDispatcher, fmt.Sprintf("spawned lane %s", ln.ID)); err != nil {
 		return "", err
 	}
+	// The owner directive that requested this item has now been acted on; keep
+	// the durable decision, but remove it from the pending footer.
+	if dirs, listErr := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true}); listErr == nil {
+		for i := range dirs {
+			dir := &dirs[i]
+			if directiveRequestsItem(*dir, item.ID, ln.ID) {
+				if err := d.store.Directives().UpdateStatus(ctx, runID, dir.ID, store.DirectiveHandled); err != nil && d.cfg.Logger != nil {
+					d.cfg.Logger.Warn("marking owner directive handled after spawn", "directive", dir.ID, "item", item.ID, "error", err)
+				}
+			}
+		}
+	}
 
 	if selectedModel != "" {
 		return fmt.Sprintf("spawned lane %s for item %s on %s (round %d, recipe %s@v%d, model=%s)",
@@ -1443,6 +1544,21 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 	}
 	return fmt.Sprintf("spawned lane %s for item %s on %s (round %d, recipe %s@v%d)",
 		ln.ID, item.ID, ln.Phase, ln.Round, ln.RecipeName, ln.RecipeVersion), nil
+}
+
+func directiveRequestsItem(dir store.Directive, itemID, laneID string) bool {
+	if (dir.Source != store.DirectiveSourceOwner && dir.Source != store.DirectiveSourceConcierge) || dir.Kind == store.DirectiveStanding {
+		return false
+	}
+	for _, needle := range []string{strings.TrimSpace(itemID), strings.TrimSpace(laneID)} {
+		if needle == "" {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(dir.Scope), needle) || store.Mentions(dir.Text, needle) || store.Mentions(dir.Ref, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Dispatcher) reconcileLanePRState(ctx context.Context, runID string, ln *lane.Lane) (bool, string, error) {
