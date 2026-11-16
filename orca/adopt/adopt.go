@@ -97,6 +97,15 @@ type Lane struct {
 	// HoldAdvance is a host contract marker. Orca must wait for judgment before
 	// advancing this lane, even when its report says done.
 	HoldAdvance bool
+	// HostHold is a host-owned hold/block reason imported from the ledger or
+	// lane notes. It is deliberately textual so the dispatcher can name the
+	// evidence when it asks for a judgment.
+	HostHold string
+	// PRDraft and Integrated are host facts. A draft PR is held even when the
+	// report says done; an integrated/merged/closed lane is terminal and must
+	// never be revisited by adopt.
+	PRDraft, Integrated             bool
+	PRState, MergeSHA, Head, Checks string
 	// TerminalState is the ledger's last recorded terminal state (nebula-swarm).
 	TerminalState string
 	// Report is the latest report's Outcome line; LastEvent the lane's newest
@@ -133,6 +142,7 @@ type Run struct {
 	Objective, PlanPath, Next string
 	Context, IntegrateRule    string
 	NoPR                      bool
+	Phases                    []string
 	// Progress and Escalations are PROGRESS.md and ESCALATIONS.md, clipped.
 	Progress, Escalations string
 	// Unchecked lists what discovery could not check for this run.
@@ -410,6 +420,7 @@ func (i Importer) Find(id string) (string, error) {
 	return "", fmt.Errorf("run %q is ambiguous: %s", id, strings.Join(found, ", "))
 }
 
+//nolint:govet // fields mirror both host ledger versions and preserve their JSON names.
 type ledgerLane struct {
 	ID             string `json:"id"`
 	Title          string `json:"title"`
@@ -421,6 +432,17 @@ type ledgerLane struct {
 	RepoURL        string `json:"repo_url"`
 	PR             int    `json:"pr"`
 	Round          int    `json:"round"`
+	BlockedOn      string `json:"blocked_on"`
+	Hold           string `json:"hold"`
+	HoldNote       string `json:"hold_note"`
+	Park           string `json:"park"`
+	Note           string `json:"note"`
+	PRDraft        bool   `json:"pr_draft"`
+	Draft          bool   `json:"draft"`
+	PRState        string `json:"pr_state"`
+	MergeSHA       string `json:"merge_sha"`
+	Head           string `json:"head"`
+	Checks         string `json:"checks"`
 }
 
 type ledger struct {
@@ -431,6 +453,16 @@ type ledger struct {
 		Phases    []hostPhase `json:"phases"`
 	} `json:"config"`
 	Tasks []ledgerLane `json:"tasks"`
+}
+
+func hostPhaseNames(phases []hostPhase) []string {
+	out := make([]string, 0, len(phases))
+	for _, p := range phases {
+		if name := strings.TrimSpace(p.Name); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // Read imports the ledger (state.json) of one run directory and each lane's
@@ -464,6 +496,7 @@ func Read(dir string) (Run, error) {
 			return Run{}, fmt.Errorf("parse %s: %w", filepath.Join(dir, "state.json"), err)
 		}
 		r.Goal = st.Config.Goal
+		r.Phases = hostPhaseNames(st.Config.Phases)
 		if isLocalRepoPath(st.Config.Repo) {
 			localRepoPaths = append(localRepoPaths, st.Config.Repo)
 		} else {
@@ -494,6 +527,7 @@ func Read(dir string) (Run, error) {
 	r.IntegrateRule = extractMergeRuleText(contract.Config.MergeRule, r.Objective+"\n"+r.Context)
 	for i := range r.Lanes {
 		r.Lanes[i].HoldAdvance = fileExists(filepath.Join(dir, r.Lanes[i].ID+".hold-advance"))
+		r.Lanes[i].HostHold = hostHoldReason(dir, r.Lanes[i].ID, r.Lanes[i].HostHold)
 	}
 	sort.Slice(r.Lanes, func(a, b int) bool { return r.Lanes[a].ID < r.Lanes[b].ID })
 	r.State = RunFinished
@@ -501,6 +535,30 @@ func Read(dir string) (Run, error) {
 		r.State = RunActive
 	}
 	return r, nil
+}
+
+// hostHoldReason reads only scrubbed run-local metadata. It is intentionally
+// conservative: a prose line must name the lane and contain an explicit hold,
+// park, or block marker before it can veto a lifecycle action.
+func hostHoldReason(dir, laneID, current string) string {
+	if strings.TrimSpace(current) != "" {
+		return clip(strings.TrimSpace(current), 240)
+	}
+	for _, suffix := range []string{".hold", ".park", ".blocked", ".hold-note"} {
+		if text := strings.TrimSpace(readText(filepath.Join(dir, laneID+suffix))); text != "" {
+			return clip(text, 240)
+		}
+	}
+	for _, name := range []string{"ESCALATIONS.md", "PROGRESS.md", "CONTEXT.md", "OBJECTIVE.md"} {
+		for _, line := range strings.Split(readText(filepath.Join(dir, name)), "\n") {
+			trimmed := strings.TrimSpace(line)
+			lower := strings.ToLower(trimmed)
+			if trimmed != "" && containsWord(trimmed, laneID) && (strings.Contains(lower, "hold") || strings.Contains(lower, "park") || strings.Contains(lower, "blocked")) {
+				return clip(trimmed, 240)
+			}
+		}
+	}
+	return ""
 }
 
 var (
@@ -637,7 +695,10 @@ type spawnFile struct {
 }
 
 func importLane(dir string, l *ledgerLane) Lane {
-	x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: l.Status, Round: l.Round}
+	x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: l.Status, Round: l.Round,
+		HostHold: firstNonEmpty(l.BlockedOn, l.HoldNote, l.Hold, l.Park, l.Note), PRDraft: l.PRDraft || l.Draft,
+		PRState: l.PRState, MergeSHA: l.MergeSHA, Head: l.Head, Checks: l.Checks}
+	x.PRDraft = x.PRDraft || strings.Contains(strings.ToLower(strings.TrimSpace(x.PRState)), "draft")
 	phase, sp := newestSpawn(dir, l.ID, l.Phase)
 	// The ledger records a terminal restart after spawn.json was written, so
 	// its session and terminal are the newer ones when set.
@@ -659,6 +720,10 @@ func importLane(dir string, l *ledgerLane) Lane {
 	} else if m := prLine.FindStringSubmatch(report); m != nil {
 		x.PR = m[1]
 	}
+	if x.MergeSHA != "" {
+		x.Integrated = true
+	}
+	applyReportMetadata(&x, report)
 	return x
 }
 
@@ -696,6 +761,42 @@ func newestSpawn(dir, laneID, currentPhase string) (string, spawnFile) {
 }
 
 var prLine = regexp.MustCompile(`(?m)^\s*PR:\s*#?(\d+)\s*$`)
+
+func applyReportMetadata(ln *Lane, report string) {
+	if ln == nil {
+		return
+	}
+	for _, raw := range strings.Split(report, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(raw), ":")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "head", "sha", "commit":
+			ln.Head = firstNonEmpty(ln.Head, value)
+		case "checks", "ci":
+			ln.Checks = firstNonEmpty(ln.Checks, value)
+		case "draft", "pr draft":
+			ln.PRDraft = ln.PRDraft || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes")
+		case "pr state", "state":
+			if strings.Contains(strings.ToLower(value), "draft") {
+				ln.PRDraft = true
+			}
+			if strings.Contains(strings.ToLower(value), "merge") || strings.EqualFold(value, "closed") {
+				ln.PRState = value
+			}
+		case "merged", "integrated":
+			if strings.EqualFold(value, "true") || strings.EqualFold(value, "yes") {
+				ln.Integrated = true
+			}
+		case "merge sha", "merged sha":
+			if value != "" {
+				ln.MergeSHA, ln.Integrated = value, true
+			}
+		}
+	}
+}
 
 func runNoPR(dir string, ledger []byte) bool {
 	var probe struct {
@@ -808,12 +909,14 @@ type DryRunResult struct {
 //
 //nolint:govet // lane preview fields are intentionally grouped for report output.
 type DryRunLane struct {
-	ID       string
-	Phase    string
-	Status   string
-	Evidence []string
-	Move     string
-	Reason   string
+	ID              string
+	Phase           string
+	Status          string
+	Evidence        []string
+	Move            string
+	Reason          string
+	Gate            string
+	EvidencePresent bool
 }
 
 // DryRun replays adoption's observe-first boundary from the host files only.
@@ -842,17 +945,22 @@ func (s *Service) DryRunDir(_ context.Context, dir string) (DryRunResult, error)
 	}
 	result := DryRunResult{Run: r, Moves: []string{"observe-first: read OBJECTIVE.md, CONTEXT.md, hold-advance files, and no-PR configuration"}}
 	mutating := make([]string, 0)
+	judgments := make([]string, 0)
 	for i := range r.Lanes {
 		preview := previewLane(r, r.Lanes[i])
 		result.Lanes = append(result.Lanes, preview)
-		if preview.Move != "none" && preview.Move != "wait" {
+		if preview.Move == "advance" || preview.Move == "integrate" {
 			mutating = append(mutating, preview.ID+":"+preview.Move)
+		} else if preview.Move == "judge" && preview.EvidencePresent {
+			judgments = append(judgments, preview.ID+":"+preview.Move)
 		}
 	}
-	if len(mutating) == 0 {
-		result.Verdict = "SAFE"
-	} else {
+	if len(mutating) > 0 {
 		result.Verdict = "MOVES: " + strings.Join(mutating, ", ")
+	} else if len(judgments) > 0 {
+		result.Verdict = "JUDGES: " + strings.Join(judgments, ", ")
+	} else {
+		result.Verdict = "SAFE"
 	}
 	result.Moves = append(result.Moves, "adoption: no integrate, complete, release, retry, stop, or host state.json write")
 	return result, nil
@@ -876,16 +984,43 @@ func previewLane(r Run, ln Lane) DryRunLane {
 	if ln.PR != "" {
 		p.Evidence = append(p.Evidence, "pr=#"+ln.PR)
 	}
+	if ln.HostHold != "" {
+		p.Evidence = append(p.Evidence, "host-hold="+clip(ln.HostHold, 160))
+	}
+	if ln.PRDraft {
+		p.Evidence = append(p.Evidence, "draft PR")
+	}
+	if ln.Integrated || ln.MergeSHA != "" {
+		p.Evidence = append(p.Evidence, "integrated")
+	}
 	if r.NoPR {
 		p.Evidence = append(p.Evidence, "no-PR run")
 	}
-	if ln.HoldAdvance {
-		p.Evidence = append(p.Evidence, "hold-advance file present")
-		p.Move, p.Reason = "wait", "hold-advance requires an owner judgment"
+	if integratedLane(ln) {
+		p.Reason = "lane is already integrated, merged, or closed; no lifecycle move"
 		return p
 	}
-	if r.State == RunFinished || strings.EqualFold(ln.Status, "done") || strings.EqualFold(ln.Status, "failed") || strings.EqualFold(ln.Status, "needs-human") {
+	if ln.HoldAdvance {
+		p.Evidence = append(p.Evidence, "hold-advance file present")
+	}
+	if hostHold := laneHostHold(ln); hostHold != "" {
+		p.Move, p.Reason = "wait", "host-held: "+hostHold
+		return p
+	}
+	if strings.EqualFold(ln.Status, "blocked") {
+		p.Move, p.Reason = "wait", "host-held: blocked"
+		return p
+	}
+	if ln.PRDraft {
+		p.Move, p.Reason = "wait", "host-held: PR is draft"
+		return p
+	}
+	if strings.EqualFold(ln.Status, "failed") || strings.EqualFold(ln.Status, "needs-human") {
 		p.Reason = "run or lane is already terminal; no lifecycle move"
+		return p
+	}
+	if r.State == RunFinished && !reportDone(ln.Report) {
+		p.Reason = "run is already terminal; no lifecycle move"
 		return p
 	}
 	if strings.EqualFold(ln.TerminalState, "working") || strings.EqualFold(ln.TerminalState, "busy") {
@@ -899,8 +1034,13 @@ func previewLane(r Run, ln Lane) DryRunLane {
 	case report == string(lane.OutcomeBlocked) || report == string(lane.OutcomeNeedsInput):
 		p.Move, p.Reason = "wait", "lane report requires owner judgment"
 	case report == "done" || report == "no-change":
-		if !r.NoPR && (strings.EqualFold(ln.Phase, "review") || strings.EqualFold(ln.Phase, "clean")) && r.IntegrateRule != "" {
+		if ln.HoldAdvance || sweOnly(r, ln) {
+			p.Move, p.Gate, p.EvidencePresent = "judge", mergeGate(r, ln), mergeGateEvidence(r, ln)
+			p.Reason = fmt.Sprintf("%s evidence=%s", p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
+		} else if !r.NoPR && (strings.EqualFold(ln.Phase, "review") || strings.EqualFold(ln.Phase, "clean")) && r.IntegrateRule != "" {
 			p.Move, p.Reason = "integrate", "completed report plus the run integrate rule permits the merge path"
+		} else if strings.EqualFold(ln.Status, "done") {
+			p.Reason = "run or lane is already terminal; no lifecycle move"
 		} else {
 			p.Move, p.Reason = "advance", "completed report permits the next recipe phase"
 		}
@@ -908,6 +1048,80 @@ func previewLane(r Run, ln Lane) DryRunLane {
 		p.Move, p.Reason = "wait", "no terminal handback or actionable report evidence"
 	}
 	return p
+}
+
+func laneHostHold(ln Lane) string {
+	if strings.TrimSpace(ln.HostHold) != "" {
+		return clip(strings.TrimSpace(ln.HostHold), 240)
+	}
+	if strings.EqualFold(strings.TrimSpace(ln.Status), "blocked") {
+		return "blocked"
+	}
+	return ""
+}
+
+func integratedLane(ln Lane) bool {
+	if strings.EqualFold(strings.TrimSpace(ln.Phase), "integrate") && strings.EqualFold(strings.TrimSpace(ln.Status), "done") {
+		return true
+	}
+	if ln.Integrated || strings.TrimSpace(ln.MergeSHA) != "" {
+		return true
+	}
+	state := strings.ToLower(strings.TrimSpace(ln.PRState))
+	if state == "merged" || state == "closed" {
+		return true
+	}
+	event := strings.ToLower(ln.LastEvent)
+	return strings.Contains(event, "merged") || strings.Contains(event, "closed")
+}
+
+func reportDone(report string) bool {
+	outcome := previewOutcome(report)
+	return outcome == "done" || outcome == "no-change"
+}
+
+func sweOnly(r Run, ln Lane) bool {
+	if len(r.Phases) == 1 {
+		return strings.EqualFold(strings.TrimSpace(r.Phases[0]), "swe")
+	}
+	return len(r.Phases) == 0 && strings.EqualFold(strings.TrimSpace(ln.Phase), "swe") && strings.TrimSpace(ln.Next) == ""
+}
+
+func mergeGate(r Run, ln Lane) string {
+	if gate := strings.TrimSpace(r.IntegrateRule); gate != "" {
+		return clip(gate, 180)
+	}
+	return "run merge gate"
+}
+
+func mergeGateEvidence(r Run, ln Lane) bool {
+	text := strings.ToLower(strings.Join([]string{r.Objective, r.Context, r.IntegrateRule, ln.Report, ln.LastEvent, ln.Checks, ln.Head}, "\n"))
+	if strings.Contains(text, "exact head") && strings.TrimSpace(ln.Head) == "" {
+		return false
+	}
+	if strings.Contains(text, "soak") {
+		return strings.Contains(text, "soak pass") || strings.Contains(text, "soak: pass") || strings.Contains(text, "soak passed")
+	}
+	if strings.Contains(text, "a/b") || strings.Contains(text, "ab test") {
+		return strings.Contains(text, "a/b pass") || strings.Contains(text, "a/b: pass") || strings.Contains(text, "a/b passed")
+	}
+	if strings.Contains(text, "ci") || strings.Contains(text, "check") {
+		return strings.Contains(text, "green") || strings.Contains(text, "passed") || strings.Contains(text, "pass")
+	}
+	return false
+}
+
+func evidenceLabel(present bool, r Run, ln Lane) string {
+	if present {
+		return "present"
+	}
+	missing := "merge gate evidence"
+	if strings.TrimSpace(r.IntegrateRule) != "" {
+		missing = "missing: " + clip(r.IntegrateRule, 120)
+	} else if strings.TrimSpace(ln.Head) == "" {
+		missing = "missing: exact head and gate result"
+	}
+	return missing
 }
 
 func previewOutcome(report string) string {

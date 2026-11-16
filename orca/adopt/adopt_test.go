@@ -86,6 +86,68 @@ func TestDryRunDirFixtures(t *testing.T) {
 	}
 }
 
+func TestAdoptDecisionHostHolds(t *testing.T) {
+	t.Parallel()
+	// These are scrubbed ledger shapes, deliberately created under t.TempDir.
+	fixtures := []struct {
+		name, status, phase, taskExtra, report, hold string
+		wantMove, wantReason                         string
+	}{
+		{
+			name:   "swe-only done open PR is a merge judgment",
+			status: "done", phase: "swe", taskExtra: `,"pr":6113`, report: "Outcome: done\nPR: #6113\nHEAD: abc\n",
+			wantMove: "judge",
+		},
+		{
+			name:   "blocked host note wins",
+			status: "blocked", phase: "swe", taskExtra: `,"blocked_on":"held behind #6113 deploy"`, hold: "held behind #6113 deploy; then rebase, drop n2, re-measure at 80%\n",
+			report: "Outcome: done\n", wantMove: "wait", wantReason: "host-held: held behind #6113 deploy",
+		},
+		{
+			name:   "hold advance is orca judgment",
+			status: "running", phase: "swe", taskExtra: `,"pr":6113`, hold: "orchestrator integrates by hand; require CI green on exact head\n",
+			report: "Outcome: done\nPR: #6113\nHEAD: abc\n", wantMove: "judge",
+		},
+		{
+			name:   "integrated lane is terminal",
+			status: "done", phase: "integrate", taskExtra: `,"pr":6113,"merge_sha":"def"`, hold: "orchestrator integrates by hand\n",
+			report: "Outcome: done\n", wantMove: "none",
+		},
+	}
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), ".shared", "subagent-swarm", "fixture")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"adopt decision","phases":[{"name":"`+tc.phase+`"}]},"tasks":[{"id":"lane","phase":"`+tc.phase+`","status":"`+tc.status+`","round":1`+tc.taskExtra+`}]}`)
+			write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: adopt decision\n")
+			write(t, filepath.Join(dir, "lane."+tc.phase+".md"), tc.report)
+			if tc.hold != "" {
+				name := "lane.hold"
+				if tc.name == "hold advance is orca judgment" || tc.name == "integrated lane is terminal" {
+					name = "lane.hold-advance"
+				}
+				write(t, filepath.Join(dir, name), tc.hold)
+			}
+			result, err := (&Service{}).DryRunDir(t.Context(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Lanes) != 1 {
+				t.Fatalf("lanes=%+v", result.Lanes)
+			}
+			got := result.Lanes[0]
+			if got.Move != tc.wantMove {
+				t.Fatalf("move=%q, want %q; result=%+v", got.Move, tc.wantMove, result)
+			}
+			if tc.wantReason != "" && got.Reason != tc.wantReason {
+				t.Fatalf("reason=%q, want %q", got.Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
 type dryRunMutationLabeler struct{ t *testing.T }
 
 func (f *dryRunMutationLabeler) RunOrchestrator(context.Context, string) (string, error) {

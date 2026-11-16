@@ -1615,6 +1615,14 @@ func (d *Dispatcher) applyLaneSteer(ctx context.Context, runID string, view *Sta
 			return "", err
 		}
 	}
+	if ln.HostHoldReason != "" {
+		// A dispatcher steer is an explicit post-adoption instruction. It is the
+		// durable point at which a host hold may be lifted.
+		ln.HostHoldReason = ""
+		if ln.Status == lane.StatusBlocked {
+			ln.Status = lane.StatusRunning
+		}
+	}
 	ln.LastEventAt = d.clock.Now().UTC()
 	if err := d.store.Lanes().Upsert(ctx, ln); err != nil {
 		return "", err
@@ -1759,6 +1767,7 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 	d.markContractKnownForLane(runID, ln.ID, view.Directives)
 
 	ln.Status = lane.StatusRunning
+	ln.HostHoldReason = ""
 	ln.Attempt = 1
 	ln.RecordAttempt(targetPhase.Name, round, sessionID, terminalID)
 	ln.LastEventAt = d.clock.Now().UTC()
@@ -3836,6 +3845,7 @@ func (d *Dispatcher) applyMailAnswer(
 			}
 			if ln.Status == lane.StatusBlocked {
 				ln.Status = lane.StatusRunning
+				ln.HostHoldReason = ""
 				ln.LastEventAt = d.clock.Now().UTC()
 				if err := d.store.Lanes().Upsert(ctx, ln); err != nil {
 					return "", err

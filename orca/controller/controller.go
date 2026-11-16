@@ -223,6 +223,9 @@ type Config struct {
 	HoldAdvanceCheck func(string) bool
 	// ImportedHostState marks TerminalState as a host-ledger adoption snapshot.
 	ImportedHostState bool
+	// HostRun marks a handoff from a host orchestrator. A completed SWE-only
+	// report is a merge judgment for these runs, never an automatic completion.
+	HostRun bool
 }
 
 func (c Config) withDefaults() Config {
@@ -1182,6 +1185,7 @@ func (c *Controller) applyOwnerAskResolution(ctx context.Context, ask OwnerAsk, 
 			}
 			if ln.Status == lane.StatusBlocked {
 				ln.Status = lane.StatusRunning
+				ln.HostHoldReason = ""
 				if eventID != "" {
 					ln.LastEventID = eventID
 				}
@@ -2159,6 +2163,9 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		}
 		return store.EventClassUnclassified, err
 	}
+	if ln.HostHoldReason != "" {
+		return store.EventClassJudgment, nil
+	}
 	if ln.Status.Terminal() {
 		return store.EventClassAuto, nil
 	}
@@ -2510,6 +2517,12 @@ func (c *Controller) advanceByRecipe(
 
 	noMerge := r.MergePolicy.Mode == recipe.MergeModeNone || c.isNoMergeLane(ctx, ln)
 	target := mech.To
+	if target == recipe.TargetComplete && c.cfg.HostRun && strings.EqualFold(strings.TrimSpace(ln.Phase), recipe.PhaseSWE) && len(r.Phases) == 1 {
+		// The host may have left an open PR (or a no-PR branch) for the hand
+		// integrator. Keep the report as a judgment event until the dispatcher
+		// has reviewed the run's merge gate.
+		return store.EventClassJudgment, nil
+	}
 	if target == recipe.PhaseIntegrate && noMerge {
 		target = recipe.TargetComplete
 	}
@@ -2638,6 +2651,9 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 			return store.EventClassJudgment, nil
 		}
 		return store.EventClassUnclassified, err
+	}
+	if ln.HostHoldReason != "" {
+		return store.EventClassJudgment, nil
 	}
 	if ln.Status != lane.StatusRunning {
 		return store.EventClassAuto, nil
@@ -2805,6 +2821,9 @@ func (c *Controller) handleCI(ctx context.Context, ev *store.Event) (store.Event
 		}
 		return store.EventClassUnclassified, err
 	}
+	if ln.HostHoldReason != "" {
+		return store.EventClassJudgment, nil
+	}
 	var payload CIPayload
 	if len(ev.Payload) > 0 {
 		_ = json.Unmarshal(ev.Payload, &payload)
@@ -2877,6 +2896,9 @@ func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.Ev
 			return store.EventClassJudgment, nil
 		}
 		return store.EventClassUnclassified, err
+	}
+	if ln.HostHoldReason != "" {
+		return store.EventClassJudgment, nil
 	}
 	if settled, err := c.reconcileLanePRState(ctx, ln, ev.ID); settled || err != nil {
 		if err != nil {

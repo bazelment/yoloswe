@@ -341,6 +341,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		HoldAdvance:       holdAdvanceLanes(r),
 		HoldAdvanceCheck:  func(id string) bool { return fileExists(filepath.Join(r.Dir, id+".hold-advance")) },
 		ImportedHostState: true,
+		HostRun:           true,
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
 	cr := &controlledRun{
@@ -366,6 +367,28 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	if err := d.observeFirst(ctx, r, dispatch); err != nil {
 		cleanupFailedStart()
 		return err
+	}
+	// A host lane can already have handed back a completed SWE report before
+	// adoption. Surface the same merge judgment used by a live report instead
+	// of treating the imported done status as permission to merge or advance.
+	for i := range r.Lanes {
+		preview := previewLane(r, r.Lanes[i])
+		if preview.Move != "judge" {
+			continue
+		}
+		_, err := d.store.Events().Append(ctx, store.Event{
+			ID:      "adopt-merge-judgment-" + r.Lanes[i].ID,
+			RunID:   r.ID,
+			LaneID:  r.Lanes[i].ID,
+			Kind:    store.EventTimer,
+			Class:   store.EventClassJudgment,
+			Source:  "adopt",
+			Summary: "host merge judgment: " + preview.Reason,
+		})
+		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			cleanupFailedStart()
+			return err
+		}
 	}
 	if !r.HasNextWork() || ObjectiveIsDone(r.Objective) {
 		expireHoldDirectivesIfRunDone(ctx, runStore, r.ID)
@@ -1220,10 +1243,24 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			// A nebula-swarm lane parked for its owner; checkpoint writes it back.
 			status = lane.StatusBlocked
 		}
+		// Host-owned blocks and draft PRs are imported as blocked so every
+		// controller tick treats them as judgment-only. An owner/dispatcher
+		// answer can explicitly move the lane back to running.
+		hostHoldReason := strings.TrimSpace(imported.HostHold)
+		if hostHoldReason == "" && imported.PRDraft {
+			hostHoldReason = "PR is draft"
+		}
+		if hostHoldReason == "" && strings.EqualFold(imported.Status, "blocked") {
+			hostHoldReason = "blocked"
+		}
+		if hostHoldReason != "" {
+			status = lane.StatusBlocked
+		}
 		if !status.Valid() {
 			return workflow, nil, nil, fmt.Errorf("lane %s: unsupported host status %q", imported.ID, imported.Status)
 		}
-		ln := lane.Lane{ItemID: imported.ID, ID: imported.ID, RunID: r.ID, Title: imported.Title, Branch: imported.Branch, Status: status, RecipeName: workflow.Name, RecipeVersion: 1, BaseBranch: st.Config.Base, Attempt: 1, TerminalState: imported.TerminalState}
+		ln := lane.Lane{ItemID: imported.ID, ID: imported.ID, RunID: r.ID, Title: imported.Title, Branch: imported.Branch, Status: status, RecipeName: workflow.Name, RecipeVersion: 1, BaseBranch: st.Config.Base, Attempt: 1, TerminalState: imported.TerminalState, HostHoldReason: hostHoldReason,
+			PRHead: imported.Head, MergeSHA: imported.MergeSHA, Checks: imported.Checks}
 		ln.PR, _ = strconv.Atoi(imported.PR)
 		for j := range st.Tasks {
 			task := &st.Tasks[j]
@@ -1250,7 +1287,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 				}
 				noMerge := store.IsNoMergeText(mission) || store.IsNoMergeText(ln.Title) || store.IsNoMergeText(task.Brief)
 				items = append(items, store.BacklogItem{ID: ln.ID, RunID: r.ID, LaneID: ln.ID, Title: ln.Title, Description: mission, Priority: priority, Status: status, DependsOn: task.DependsOn, NoMerge: noMerge})
-				ln.PRHead, ln.ApprovalSHA, ln.MergeSHA, ln.Checks, ln.BaseCommit, ln.Worktree = task.PRHead, task.ApprovalSHA, task.MergeSHA, task.Checks, task.BaseCommit, task.Worktree
+				ln.PRHead, ln.ApprovalSHA, ln.MergeSHA, ln.Checks, ln.BaseCommit, ln.Worktree = firstNonEmpty(task.PRHead, ln.PRHead), task.ApprovalSHA, firstNonEmpty(task.MergeSHA, ln.MergeSHA), firstNonEmpty(task.Checks, ln.Checks), task.BaseCommit, task.Worktree
 				for phase, rounds := range task.Terminals {
 					normPhase, _ := normalizeHostPhaseName(phase, hasExplicitClean)
 					for round, id := range rounds {

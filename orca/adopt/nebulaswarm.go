@@ -100,6 +100,7 @@ func isNebulaSwarmDir(dir string) bool {
 	return false
 }
 
+//nolint:govet // fields mirror the nebula-swarm ledger shape.
 type nsLane struct {
 	Terminals     map[string]map[string]string `json:"terminals"`
 	ID            string                       `json:"id"`
@@ -111,6 +112,17 @@ type nsLane struct {
 	TerminalState string                       `json:"terminal_state"`
 	PR            int                          `json:"pr"`
 	Round         int                          `json:"round"`
+	BlockedOn     string                       `json:"blocked_on"`
+	Hold          string                       `json:"hold"`
+	HoldNote      string                       `json:"hold_note"`
+	Park          string                       `json:"park"`
+	Note          string                       `json:"note"`
+	PRDraft       bool                         `json:"pr_draft"`
+	Draft         bool                         `json:"draft"`
+	PRState       string                       `json:"pr_state"`
+	MergeSHA      string                       `json:"merge_sha"`
+	Head          string                       `json:"head"`
+	Checks        string                       `json:"checks"`
 }
 
 type nsLedger struct {
@@ -131,6 +143,7 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 		return fmt.Errorf("parse %s: %w", filepath.Join(dir, "state.json"), err)
 	}
 	r.Goal, r.DrivenBy = st.Config.Goal, st.Config.Orchestrator
+	r.Phases = hostPhaseNames(st.Config.Phases)
 	if isLocalRepoPath(st.Config.Repo) && localRepoPaths != nil {
 		*localRepoPaths = append(*localRepoPaths, st.Config.Repo)
 	} else {
@@ -140,10 +153,14 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 		t := &st.Tasks[i]
 		round := max(t.Round, 1)
 		x := Lane{ID: t.ID, Title: t.Title, Branch: t.Branch, Phase: t.Phase, Status: t.Status, Round: t.Round,
-			Session: t.SessionID, Terminal: t.Terminals[t.Phase][strconv.Itoa(round)], TerminalState: t.TerminalState}
+			Session: t.SessionID, Terminal: t.Terminals[t.Phase][strconv.Itoa(round)], TerminalState: t.TerminalState,
+			HostHold: firstNonEmpty(t.BlockedOn, t.HoldNote, t.Hold, t.Park, t.Note), PRDraft: t.PRDraft || t.Draft,
+			PRState: t.PRState, MergeSHA: t.MergeSHA, Head: t.Head, Checks: t.Checks}
+		x.PRDraft = x.PRDraft || strings.Contains(strings.ToLower(strings.TrimSpace(x.PRState)), "draft")
 		if t.PR > 0 {
 			x.PR = strconv.Itoa(t.PR)
 		}
+		x.Integrated = x.MergeSHA != ""
 		x.ReportPath = latestReport(dir, t.ID, t.Phase, round)
 		r.Lanes = append(r.Lanes, x)
 	}
@@ -163,9 +180,18 @@ func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
 	for i := range r.Lanes {
 		x := &r.Lanes[i]
 		x.LastEvent = events[x.ID]
-		if x.ReportPath != "" {
-			x.Report = reportHeadline(readText(x.ReportPath))
+		eventLower := strings.ToLower(x.LastEvent)
+		if strings.Contains(eventLower, "merged") {
+			x.Integrated, x.PRState = true, "merged"
+		} else if strings.Contains(eventLower, "closed") {
+			x.Integrated, x.PRState = true, "closed"
 		}
+		if x.ReportPath != "" {
+			report := readText(x.ReportPath)
+			x.Report = reportHeadline(report)
+			applyReportMetadata(x, report)
+		}
+		x.HostHold = hostHoldReason(dir, x.ID, x.HostHold)
 		x.Next = laneNext(x, phases, escalations, progress)
 	}
 }

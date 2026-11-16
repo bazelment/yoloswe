@@ -63,15 +63,19 @@ type Lane struct {
 	// TerminalState is an imported host terminal state. Keeping a known
 	// working/busy value prevents adoption from stopping or releasing it.
 	TerminalState string `json:"terminal_state,omitempty"`
-	PRHead        string `json:"pr_head,omitempty"`
-	ApprovalSHA   string `json:"approval_sha,omitempty"`
-	MergeSHA      string `json:"merge_sha,omitempty"`
-	Checks        string `json:"checks,omitempty"`
-	LastEventID   string `json:"last_event_id,omitempty"`
-	Round         int    `json:"round,omitempty"`
-	Attempt       int    `json:"attempt,omitempty"`
-	RecipeVersion int    `json:"recipe_version,omitempty"`
-	PR            int    `json:"pr,omitempty"`
+	// HostHoldReason marks a host-owned block or draft hold imported during
+	// adoption. It remains distinct from a controller escalation so an explicit
+	// dispatcher/owner action can still resolve the latter normally.
+	HostHoldReason string `json:"host_hold_reason,omitempty"`
+	PRHead         string `json:"pr_head,omitempty"`
+	ApprovalSHA    string `json:"approval_sha,omitempty"`
+	MergeSHA       string `json:"merge_sha,omitempty"`
+	Checks         string `json:"checks,omitempty"`
+	LastEventID    string `json:"last_event_id,omitempty"`
+	Round          int    `json:"round,omitempty"`
+	Attempt        int    `json:"attempt,omitempty"`
+	RecipeVersion  int    `json:"recipe_version,omitempty"`
+	PR             int    `json:"pr,omitempty"`
 }
 
 func (l Lane) Clone() Lane {
