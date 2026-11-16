@@ -162,6 +162,27 @@ func TestMergeGateEvidenceUsesLaneEvidenceOnly(t *testing.T) {
 	}
 }
 
+func TestExplicitHostHoldLine(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		line string
+		want bool
+	}{
+		{"lane hold: behind deploy", true},
+		{"lane parked behind deploy", true},
+		{"lane blocked on: CI", true},
+		{"lane hold: none", false},
+		{"lane unblocked after deploy", false},
+		{"lane hold-advance contract", false},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
+			if got := explicitHostHoldLine(tc.line); got != tc.want {
+				t.Fatalf("explicitHostHoldLine(%q) = %v, want %v", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestControllerStateIntegratedLaneWinsHostHold(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

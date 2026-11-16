@@ -565,12 +565,30 @@ func explicitHostHoldLine(line string) bool {
 	if strings.Contains(lower, "hold-advance") || strings.Contains(lower, "hold released") || strings.Contains(lower, "unblocked") {
 		return false
 	}
-	for _, marker := range []string{"hold", "hold_note", "park", "blocked", "blocked_on"} {
-		if strings.Contains(lower, marker+":") || strings.Contains(lower, marker+"=") {
-			return true
+	for _, negative := range []string{"hold: none", "hold=none", "blocked: no", "blocked=no", "blocked_on: n/a", "blocked_on=n/a", "park: none", "park=none"} {
+		if strings.Contains(lower, negative) {
+			return false
 		}
 	}
-	return false
+	return hostHoldLineRE.MatchString(lower)
+}
+
+var hostHoldLineRE = regexp.MustCompile(`(?:^|\s)(?:hold(?:_note)?|park(?:ed)?|blocked(?:_on)?)(?:\s+(?:on|by))?(?:\s*[:=]|\s+)`)
+
+func ledgerHostHold(values ...string) string {
+	for i, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if i == len(values)-1 && !explicitHostHoldLine(value) {
+			continue
+		}
+		if meaningfulHostValue(value) {
+			return value
+		}
+	}
+	return ""
 }
 
 var (
@@ -708,7 +726,7 @@ type spawnFile struct {
 
 func importLane(dir string, l *ledgerLane) Lane {
 	x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: l.Status, Round: l.Round,
-		HostHold: firstNonEmpty(l.BlockedOn, l.HoldNote, l.Hold, l.Park), PRDraft: l.PRDraft || l.Draft,
+		HostHold: ledgerHostHold(l.BlockedOn, l.HoldNote, l.Hold, l.Park, l.Note), PRDraft: l.PRDraft || l.Draft,
 		PRState: l.PRState, MergeSHA: l.MergeSHA, Head: l.Head, Checks: l.Checks}
 	x.PRDraft = x.PRDraft || isDraftPR(x.PRState)
 	phase, sp := newestSpawn(dir, l.ID, l.Phase)

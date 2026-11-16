@@ -1263,7 +1263,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		if terminal {
 			hostHoldReason = ""
 		}
-		if hostHoldReason != "" && !terminal {
+		if hostHoldReason != "" {
 			status = lane.StatusBlocked
 		}
 		if !status.Valid() {
