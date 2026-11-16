@@ -49,7 +49,7 @@ func TestAdoptDryRunDirUsesExplicitCopiedRun(t *testing.T) {
 		"lane copied-lane: phase=swe status=running",
 		"evidence:",
 		"move: judge; reason:",
-		"SAFE",
+		"JUDGES: copied-lane:judge",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)

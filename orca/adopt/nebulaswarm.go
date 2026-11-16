@@ -129,6 +129,7 @@ type nsLedger struct {
 	Config struct {
 		Goal         string      `json:"goal"`
 		Repo         string      `json:"repo"`
+		Target       string      `json:"target"`
 		Orchestrator string      `json:"orchestrator_session_id"`
 		Phases       []hostPhase `json:"phases"`
 	} `json:"config"`
@@ -143,6 +144,7 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 		return fmt.Errorf("parse %s: %w", filepath.Join(dir, "state.json"), err)
 	}
 	r.Goal, r.DrivenBy = st.Config.Goal, st.Config.Orchestrator
+	r.TargetBranch = strings.TrimSpace(st.Config.Target)
 	r.Phases = hostPhaseNames(st.Config.Phases)
 	if isLocalRepoPath(st.Config.Repo) && localRepoPaths != nil {
 		*localRepoPaths = append(*localRepoPaths, st.Config.Repo)
@@ -172,6 +174,7 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 // and what comes next from ESCALATIONS.md, PROGRESS.md or the phase order.
 func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
 	events := laneEvents(filepath.Join(dir, "EVENTS"))
+	integratedEvents := laneIntegrationEvents(filepath.Join(dir, "EVENTS"))
 	progress, escalations := readText(filepath.Join(dir, "PROGRESS.md")), readText(filepath.Join(dir, "ESCALATIONS.md"))
 	phases := make([]string, 0, len(phaseSpecs))
 	for _, p := range phaseSpecs {
@@ -181,7 +184,7 @@ func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
 		x := &r.Lanes[i]
 		x.LastEvent = events[x.ID]
 		eventLower := eventKind(x.LastEvent)
-		if eventLower == "merged" {
+		if integratedEvents[x.ID] != "" || eventLower == "merged" {
 			x.Integrated, x.PRState = true, "merged"
 		} else if eventLower == "closed" {
 			x.Integrated, x.PRState = true, "closed"
@@ -193,6 +196,36 @@ func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
 		}
 		x.Next = laneNext(x, phases, escalations, progress)
 	}
+}
+
+// laneIntegrationEvents records every merged/integrated EVENTS row. The
+// newest row is useful for display, but it is not authoritative for done-ness:
+// later progress rows routinely follow the host's merge record.
+func laneIntegrationEvents(path string) map[string]string {
+	out := map[string]string{}
+	f, err := os.Open(path)
+	if err != nil {
+		return out
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		parts := strings.SplitN(sc.Text(), "\t", 4)
+		if len(parts) < 3 || strings.TrimSpace(parts[1]) == "" {
+			continue
+		}
+		kind := strings.ToLower(strings.TrimSpace(parts[2]))
+		if kind != "merged" && kind != "integrated" {
+			continue
+		}
+		detail := ""
+		if len(parts) == 4 {
+			detail = strings.TrimSpace(parts[3])
+		}
+		out[parts[1]] = clip(strings.Join([]string{parts[0], kind, detail}, " "), 240)
+	}
+	return out
 }
 
 func latestReport(dir, laneID, phase string, round int) string {
