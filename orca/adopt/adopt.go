@@ -781,10 +781,18 @@ func ensureGitMirror(ctx context.Context, r *Run, cfg GitMirror, source string) 
 	key := strings.TrimSpace(r.Repo)
 	if lane.IsRepositorySlug(key) {
 		parts := strings.Split(lane.NormalizeRepositorySlug(key), "/")
-		key = filepath.Join(parts...)
+		if len(parts) == 2 && safeMirrorPathPart(parts[0]) && safeMirrorPathPart(parts[1]) {
+			key = filepath.Join(parts...)
+		} else {
+			sum := sha256.Sum256([]byte(source))
+			key = filepath.Join("_local", hex.EncodeToString(sum[:]))
+		}
 	} else {
 		sum := sha256.Sum256([]byte(source))
 		key = filepath.Join("_local", hex.EncodeToString(sum[:]))
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", fmt.Errorf("create mirror cache: %w", err)
 	}
 	path := filepath.Join(root, key+".git")
 	if _, err := os.Stat(filepath.Join(path, "HEAD")); os.IsNotExist(err) {
@@ -795,6 +803,10 @@ func ensureGitMirror(ctx context.Context, r *Run, cfg GitMirror, source string) 
 		return "", err
 	}
 	return path, nil
+}
+
+func safeMirrorPathPart(part string) bool {
+	return part != "" && part != "." && part != ".." && !strings.ContainsAny(part, "/\\\x00\n\r")
 }
 
 func validGitSHA(value string) bool {

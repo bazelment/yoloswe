@@ -216,6 +216,23 @@ func TestDryRunIntegrationEvidenceG52Table(t *testing.T) {
 	}
 }
 
+func TestEnsureGitMirrorCreatesCacheAndKeepsInvalidSlugContained(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "nested", "cache")
+	r := &Run{Repo: "../escape"}
+	path, err := ensureGitMirror(t.Context(), r, GitMirror{CacheDir: root}, "file:///tmp/remote.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanRoot := filepath.Clean(root) + string(os.PathSeparator)
+	if !strings.HasPrefix(filepath.Clean(path), cleanRoot) {
+		t.Fatalf("mirror path %q escaped cache root %q", path, root)
+	}
+	if _, err := os.Stat(filepath.Join(path, "HEAD")); err != nil {
+		t.Fatalf("mirror was not initialized: %v", err)
+	}
+}
+
 func g52RemoteFixture(t *testing.T) (root, bare, other, laneHead string) {
 	t.Helper()
 	root = t.TempDir()

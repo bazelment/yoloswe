@@ -235,7 +235,9 @@ func laneIntegrationEvents(path string) map[string]string {
 	return out
 }
 
-var eventPRRE = regexp.MustCompile(`#(\d+)\b`)
+var mergedPRRE = regexp.MustCompile(`(?i)#(\d+)\s+merged\b`)
+var prMergedRE = regexp.MustCompile(`(?i)\bPR\s+#(\d+)\b[^\n]{0,120}\bmerged\b`)
+var ownLaneMergedRE = regexp.MustCompile(`(?i)\b(?:own\s+)?lane\s+#(\d+)\b[^\n]{0,200}\bmerged\b`)
 
 // laneMergeNotePRs extracts host merge prose from a lane's own EVENTS rows.
 // These nominations are deliberately not integration evidence by themselves;
@@ -259,8 +261,11 @@ func laneMergeNotePRs(path string) map[string][]string {
 		if !strings.Contains(lower, "merged") || strings.Contains(lower, "not merged") || strings.Contains(lower, "unmerged") {
 			continue
 		}
+		matches := mergedPRRE.FindAllStringSubmatch(detail, -1)
+		matches = append(matches, prMergedRE.FindAllStringSubmatch(detail, -1)...)
+		matches = append(matches, ownLaneMergedRE.FindAllStringSubmatch(detail, -1)...)
 		seen := map[string]bool{}
-		for _, match := range eventPRRE.FindAllStringSubmatch(detail, -1) {
+		for _, match := range matches {
 			if len(match) == 2 && !seen[match[1]] {
 				out[parts[1]] = append(out[parts[1]], match[1])
 				seen[match[1]] = true
