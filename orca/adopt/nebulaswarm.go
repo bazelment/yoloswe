@@ -180,10 +180,10 @@ func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
 	for i := range r.Lanes {
 		x := &r.Lanes[i]
 		x.LastEvent = events[x.ID]
-		eventLower := strings.ToLower(x.LastEvent)
-		if strings.Contains(eventLower, "merged") {
+		eventLower := eventKind(x.LastEvent)
+		if eventLower == "merged" {
 			x.Integrated, x.PRState = true, "merged"
-		} else if strings.Contains(eventLower, "closed") {
+		} else if eventLower == "closed" {
 			x.Integrated, x.PRState = true, "closed"
 		}
 		if x.ReportPath != "" {

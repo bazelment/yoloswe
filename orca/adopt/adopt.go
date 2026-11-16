@@ -790,27 +790,39 @@ func applyReportMetadata(ln *Lane, report string) {
 		value = strings.TrimSpace(value)
 		switch strings.ToLower(strings.TrimSpace(key)) {
 		case "head", "sha", "commit":
-			ln.Head = firstNonEmpty(ln.Head, value)
+			if value != "" {
+				ln.Head = firstNonEmpty(ln.Head, strings.Fields(value)[0])
+			}
 		case "checks", "ci":
 			ln.Checks = firstNonEmpty(ln.Checks, value)
 		case "draft", "pr draft":
 			ln.PRDraft = ln.PRDraft || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes")
-		case "pr state", "state":
-			if strings.Contains(strings.ToLower(value), "draft") {
+		case "pr state":
+			normalized := strings.ToLower(value)
+			if normalized == "draft" {
 				ln.PRDraft = true
 			}
-			if strings.Contains(strings.ToLower(value), "merge") || strings.EqualFold(value, "closed") {
-				ln.PRState = value
+			if normalized == "merged" || normalized == "closed" || normalized == "open" {
+				ln.PRState = normalized
 			}
 		case "merged", "integrated":
 			if strings.EqualFold(value, "true") || strings.EqualFold(value, "yes") {
 				ln.Integrated = true
 			}
 		case "merge sha", "merged sha":
-			if value != "" {
+			if meaningfulHostValue(value) {
 				ln.MergeSHA, ln.Integrated = value, true
 			}
 		}
+	}
+}
+
+func meaningfulHostValue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "n/a", "na", "none", "null", "unknown", "-":
+		return false
+	default:
+		return true
 	}
 }
 
@@ -1094,8 +1106,16 @@ func integratedLane(ln Lane) bool {
 	if state == "merged" || state == "closed" {
 		return true
 	}
-	event := strings.ToLower(ln.LastEvent)
-	return strings.Contains(event, "merged") || strings.Contains(event, "closed")
+	event := eventKind(ln.LastEvent)
+	return event == "merged" || event == "closed"
+}
+
+func eventKind(event string) string {
+	fields := strings.Fields(event)
+	if len(fields) < 2 {
+		return ""
+	}
+	return strings.ToLower(fields[1])
 }
 
 func reportDone(report string) bool {
