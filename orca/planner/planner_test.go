@@ -1004,3 +1004,154 @@ func TestPlanner_CLISessionBackend(t *testing.T) {
 		t.Fatalf("Result.Decisions = %+v, want attributed usage 200/0.025", res.Decisions)
 	}
 }
+
+func TestPlanner_ChatAnswersGroundedAndRecordsProposalAndCost(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := seedPlannerStore(t)
+	ctx := t.Context()
+
+	planPath := filepath.Join("testdata", "plan_v2.md")
+	if err := st.Runs().UpdateObjective(ctx, "run-1", "Diskless sandbox with minimal guest RAM overhead", planPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Directives().Add(ctx, store.Directive{
+		ID:       "dir-contract-ram",
+		RunID:    "run-1",
+		Kind:     store.DirectiveContract,
+		Source:   store.DirectiveSourceOwner,
+		Scope:    "contract",
+		Text:     "Guest RAM budget must remain below 1 GiB per sandbox VM.",
+		Contract: true,
+		Status:   store.DirectiveActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	drv.SetReport("term-alpha-swe-1", lane.PhaseReport{
+		LaneID:       "lane-alpha",
+		TerminalID:   "term-alpha-swe-1",
+		Phase:        recipe.PhaseSWE,
+		Round:        1,
+		Outcome:      lane.OutcomeDone,
+		HeadSHA:      "abc1234567890",
+		PR:           101,
+		Summary:      "Measured 3.8 GiB guest page cache duplication under virtio-blk rootfs.",
+		RiskiestStep: "guest page cache eviction under memory pressure",
+		Observed:     "free -m inside guest showed 3.6 GiB buff/cache",
+	})
+
+	propArgs, _ := json.Marshal(planner.ProposeWorkParams{
+		ID:          "proposal-virtiofs-dax",
+		Question:    "Switch rootfs to EROFS over virtio-pmem/DAX and cap guest RAM at 512 MiB?",
+		Description: "Bypass guest page cache duplication using DAX direct mapping",
+		Options:     []string{"approve_proposal", "reject_proposal"},
+		Default:     "approve_proposal",
+	})
+	laneShowArgs, _ := json.Marshal(planner.ChatLaneShowParams{LaneID: "lane-alpha"})
+
+	client := model.NewFakeClient(
+		model.Response{
+			ID:         "msg_chat_1",
+			Model:      planner.DefaultModel,
+			StopReason: model.StopReasonToolUse,
+			Usage:      model.Usage{InputTokens: 1500, OutputTokens: 200},
+			Message: model.NewAssistantMessage(
+				model.NewToolUseBlock("call_lane", planner.ToolLaneShow, laneShowArgs),
+				model.NewToolUseBlock("call_prop", planner.ToolProposeWork, propArgs),
+			),
+		},
+		model.Response{
+			ID:         "msg_chat_2",
+			Model:      planner.DefaultModel,
+			StopReason: model.StopReasonEndTurn,
+			Usage:      model.Usage{InputTokens: 1800, OutputTokens: 350},
+			Message: model.NewAssistantMessage(
+				model.NewTextBlock("Based on `lane-alpha`'s report (3.8 GiB guest page cache duplication) and the 1 GiB contract, we should use EROFS with DAX/virtio-pmem so the guest kernel maps host page cache directly without double-buffering, keeping guest RAM under 512 MiB. I recorded `proposal-virtiofs-dax` in open questions."),
+			),
+		},
+	)
+
+	p := planner.New(planner.Config{}, st, drv, clk, client)
+	const ask = "I'm not completely against guest ram consumption, but up to 4GB seems to be high, can you research what's the best we can do if memory overhead is minimized, think about how kernel manages fs cache"
+	var streamed []string
+	res, err := p.Ask(ctx, "run-1", ask, func(chunk string) {
+		streamed = append(streamed, chunk)
+	})
+	if err != nil {
+		t.Fatalf("Planner.Ask: %v", err)
+	}
+	if res.Mode != planner.ModeChat {
+		t.Fatalf("Mode = %q, want %q", res.Mode, planner.ModeChat)
+	}
+	if res.Model != planner.DefaultModel {
+		t.Fatalf("Model = %q, want %q (strongest model)", res.Model, planner.DefaultModel)
+	}
+	if len(streamed) == 0 || !strings.Contains(strings.Join(streamed, ""), "EROFS with DAX") {
+		t.Fatalf("streamed = %v, want streamed planner answer", streamed)
+	}
+
+	// Verify grounding in contract, plan, and lane reports on the initial request.
+	if len(client.Requests) != 2 {
+		t.Fatalf("len(Requests) = %d, want 2", len(client.Requests))
+	}
+	firstPrompt := client.Requests[0].Messages[0].Text()
+	for _, want := range []string{
+		"## Run Contract",
+		"Guest RAM budget must remain below 1 GiB per sandbox VM.",
+		"## Run Plan",
+		"Diskless sandbox with minimal guest RAM overhead",
+		"## Lane Reports",
+		"Measured 3.8 GiB guest page cache duplication under virtio-blk rootfs.",
+		ask,
+	} {
+		if !strings.Contains(firstPrompt, want) {
+			t.Fatalf("planner prompt missing %q:\n%s", want, firstPrompt)
+		}
+	}
+
+	// Verify read-only tools + plan tools are registered.
+	var toolNames []string
+	for _, td := range client.Requests[0].Tools {
+		toolNames = append(toolNames, td.Name)
+	}
+	for _, wantTool := range []string{
+		planner.ToolStatus,
+		planner.ToolLaneShow,
+		planner.ToolBacklog,
+		planner.ToolDecisionsSince,
+		planner.ToolReadPlan,
+		planner.ToolSubmitReconciliation,
+		planner.ToolProposeWork,
+	} {
+		if !slices.Contains(toolNames, wantTool) {
+			t.Fatalf("planner chat tools = %v, missing %q", toolNames, wantTool)
+		}
+	}
+
+	// Verify proposal recorded in open-question store.
+	if len(res.Applied.OwnerAsks) != 1 || res.Applied.OwnerAsks[0].ID != "proposal-virtiofs-dax" {
+		t.Fatalf("Applied.OwnerAsks = %+v, want proposal-virtiofs-dax", res.Applied.OwnerAsks)
+	}
+	dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: "run-1", ActiveOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundAsk := false
+	for _, d := range dirs {
+		if d.Ref == "owner_ask:proposal-virtiofs-dax" {
+			foundAsk = true
+			break
+		}
+	}
+	if !foundAsk {
+		t.Fatalf("expected active owner_ask:proposal-virtiofs-dax directive, got %+v", dirs)
+	}
+
+	// Verify turn usage and decision cost recorded for footer display.
+	if res.Usage.InputTokens != 3300 || res.Usage.OutputTokens != 550 || res.Usage.CostUSD <= 0 {
+		t.Fatalf("Usage = %+v, want 3300/550 and CostUSD > 0", res.Usage)
+	}
+	turns, err := st.Threads().ListTurns(ctx, res.ThreadID)
+	if err != nil || len(turns) != 1 || turns[0].CostUSD <= 0 {
+		t.Fatalf("turns = %+v, err=%v; want CostUSD > 0", turns, err)
+	}
+}

@@ -24,6 +24,11 @@ import (
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
+// ErrPlannerFallbackToQueue signals that PlannerStream could not run a live or
+// replayed planner chat turn (e.g. when a test replay only recorded router
+// exchanges) so Dispatch should fall back to queuing a plan_import directive.
+var ErrPlannerFallbackToQueue = errors.New("orca/chat: planner fallback to queue")
+
 // StoreBackend attaches chat to the same durable inbox and directives as orca run.
 //
 // The backend owns its attached store: Attach swaps the store and run under
@@ -32,9 +37,13 @@ import (
 //
 //nolint:govet
 type StoreBackend struct {
-	Stream   func(context.Context, string, func(string)) error
-	Now      func() time.Time
-	ListRuns func(context.Context) ([]store.Run, error)
+	Stream func(context.Context, string, func(string)) error
+	// PlannerStream streams a conversational answer from the planner for runID
+	// in st. When nil (or when it returns ErrPlannerFallbackToQueue), Dispatch
+	// falls back to queuing a plan_import directive.
+	PlannerStream func(ctx context.Context, st store.Store, runID, text string, emit func(string)) error
+	Now           func() time.Time
+	ListRuns      func(context.Context) ([]store.Run, error)
 	// OpenRun opens the store of a run ListRuns returned; /runs <id> attaches
 	// to it.
 	OpenRun func(context.Context, string) (store.Store, error)
@@ -1511,6 +1520,12 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 	if d.Handler != router.Planner && d.Handler != router.Dispatcher {
 		return fmt.Errorf("unsupported handler %q", d.Handler)
 	}
+	if d.Handler == router.Planner && b.PlannerStream != nil && router.IsPlannerChatQuestion(text) {
+		handled, pErr := b.dispatchPlannerStream(ctx, text, emit)
+		if handled || pErr != nil {
+			return pErr
+		}
+	}
 	b.mu.RLock()
 	st := b.store
 	runID, ack, err := b.target(ctx, text)
@@ -1575,6 +1590,53 @@ func (b *StoreBackend) Dispatch(ctx context.Context, d router.Decision, text str
 		emit(ack)
 	}
 	return err
+}
+
+func (b *StoreBackend) dispatchPlannerStream(ctx context.Context, text string, emit func(string)) (bool, error) {
+	b.mu.RLock()
+	st := b.store
+	runID, refusal, err := b.target(ctx, text)
+	var (
+		stepStore      = st
+		closeStepStore bool
+	)
+	if err == nil && refusal == "" && runID == "" {
+		target, fdRefusal, fdErr := b.frontDeskTarget(ctx, text)
+		switch {
+		case fdErr != nil || fdRefusal != "":
+			refusal, err = fdRefusal, fdErr
+		case target != "":
+			runID = target
+			if _, gErr := st.Runs().Get(ctx, target); gErr != nil {
+				if b.OpenRun == nil {
+					err = fmt.Errorf("run %s is not reachable from this chat", target)
+				} else if stepStore, err = b.OpenRun(ctx, target); err == nil {
+					closeStepStore = true
+				}
+			}
+		}
+	}
+	b.mu.RUnlock()
+	if closeStepStore && stepStore != nil {
+		defer func() { _ = stepStore.Close() }()
+	}
+	if err != nil {
+		return true, err
+	}
+	if refusal != "" {
+		if emit != nil {
+			emit(refusal)
+		}
+		return true, nil
+	}
+	if runID == "" || stepStore == nil {
+		return false, nil
+	}
+	pErr := b.PlannerStream(ctx, stepStore, runID, text, emit)
+	if errors.Is(pErr, ErrPlannerFallbackToQueue) {
+		return false, nil
+	}
+	return true, pErr
 }
 
 // deliver writes an owner instruction for handler to runID in st and reports

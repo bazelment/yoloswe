@@ -53,6 +53,22 @@ func TestLLMThreeWayParse(t *testing.T) {
 		}
 	}
 }
+
+func TestIsPlannerChatQuestionSeparatesResearchFromPlanEdits(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{"can you research how kernel manages fs cache?", true},
+		{"what's the best way to minimize guest RAM overhead?", true},
+		{"change the plan to ship chat first", false},
+		{"drop the docs task", false},
+	} {
+		if got := IsPlannerChatQuestion(tc.text); got != tc.want {
+			t.Errorf("IsPlannerChatQuestion(%q) = %t, want %t", tc.text, got, tc.want)
+		}
+	}
+}
 func TestGeminiSingleChoiceAndOpenQuestion(t *testing.T) {
 	raw, err := os.ReadFile("testdata/gemini.json")
 	if err != nil {
@@ -141,5 +157,66 @@ func TestTransportErrorIsSanitized(t *testing.T) {
 	_, err := (GeminiRouter{APIKey: "test-secret", HTTPClient: &http.Client{Transport: errorTransport{}}}).Route(t.Context(), "message")
 	if err == nil || strings.Contains(err.Error(), "test-secret") || strings.Contains(err.Error(), "private") {
 		t.Fatalf("%v", err)
+	}
+}
+
+const disklessRAMDesignAsk = "I'm not completely against guest ram consumption, but up to 4GB seems to be high, can you research what's the best we can do if memory overhead is minimized, think about how kernel manages fs cache"
+
+// rubricCheckingFake simulates the model following the rubric in req.System:
+// only if the planner rubric covers design/research questions, trade-offs, and
+// design constraints does it route the 21:36:59Z design/research ask to planner.
+type rubricCheckingFake struct{}
+
+func (rubricCheckingFake) CreateMessage(_ context.Context, req model.Request) (*model.Response, error) {
+	sys := strings.ToLower(req.System)
+	_, plannerPart, _ := strings.Cut(sys, "planner:")
+	plannerPart, _, _ = strings.Cut(plannerPart, "dispatcher:")
+	hasDepthRubric := strings.Contains(plannerPart, "design") &&
+		strings.Contains(plannerPart, "research") &&
+		strings.Contains(plannerPart, "trade-off") &&
+		strings.Contains(plannerPart, "constraint")
+	handler := Concierge
+	if hasDepthRubric {
+		handler = Planner
+	}
+	return &model.Response{
+		Message: model.NewAssistantMessage(model.NewTextBlock(`{"handler":"` + string(handler) + `","confidence":0.92}`)),
+	}, nil
+}
+
+func TestDesignAndResearchAskRoutesToPlanner(t *testing.T) {
+	d, err := (LLMRouter{Client: rubricCheckingFake{}, Model: "test-model"}).Route(t.Context(), disklessRAMDesignAsk)
+	if err != nil {
+		t.Fatalf("LLMRouter.Route: %v", err)
+	}
+	if d.Handler != Planner {
+		t.Fatalf("LLMRouter handler = %q, want %q (rubric=%q)", d.Handler, Planner, routingRubric)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Questions map[string]struct {
+				Criteria     map[string]string
+				Instructions string
+			}
+			Input string
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		crit := strings.ToLower(body.Questions["handler"].Criteria["planner"])
+		if !strings.Contains(crit, "design") || !strings.Contains(crit, "research") || !strings.Contains(crit, "trade-off") || !strings.Contains(crit, "constraint") {
+			_, _ = w.Write([]byte(`{"answers":{"handler":{"type":"choice","choice":"concierge","confidence":0.85,"probabilities":{"concierge":0.85,"planner":0.10,"dispatcher":0.05}}}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"answers":{"handler":{"type":"choice","choice":"planner","confidence":0.92,"probabilities":{"planner":0.92,"concierge":0.05,"dispatcher":0.03}}}}`))
+	}))
+	defer server.Close()
+	gd, err := (GeminiRouter{BaseURL: server.URL, APIKey: "dummy"}).Route(t.Context(), disklessRAMDesignAsk)
+	if err != nil {
+		t.Fatalf("GeminiRouter.Route: %v", err)
+	}
+	if gd.Handler != Planner {
+		t.Fatalf("GeminiRouter handler = %q, want %q", gd.Handler, Planner)
 	}
 }

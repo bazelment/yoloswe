@@ -50,9 +50,26 @@ func FormatInput(text, questions string) string {
 	return text + "\nOpen questions:\n" + questions
 }
 
-const conciergeCriterion = "Questions about current run state or policy; standing rules, durable preferences or corrections; pause, resume or stop execution; starting a new goal or run from chat. Also unclear messages or mixed independent requests needing front-desk handling."
-const plannerCriterion = "Changes to an existing goal, plan, scope, task order, timing or acceptance criteria, including dropping work or changing duration. A one-time plan update is planner, not a standing rule."
+const conciergeCriterion = "Status and fact questions about current run state, existing behavior or policy; standing rules, durable preferences or corrections; pause, resume or stop execution; starting a new goal or run from chat. Also unclear messages or mixed independent requests needing front-desk handling."
+const plannerCriterion = "Changes to an existing goal, plan, scope, task order, timing or acceptance criteria, including dropping work or changing duration; design questions, 'research / think about / what's the best we can do' asks, trade-off questions, and new constraints on the run's design (while status and fact questions about current state or existing behavior stay with concierge). A one-time plan update or design constraint is planner, not a standing rule."
 const dispatcherCriterion = "Do work now: assign, fund, retry, merge, review, or steer a lane or PR. Also an owner reply answering a listed open question; the Open questions block is context, not an additional request."
+
+// IsPlannerChatQuestion distinguishes a design/research conversation from an
+// imperative plan edit. Both are routed to the Planner by the model rubric,
+// but only the former should be answered conversationally; direct edits still
+// need the existing plan_import directive path.
+func IsPlannerChatQuestion(text string) bool {
+	l := strings.ToLower(strings.TrimSpace(text))
+	if l == "" {
+		return false
+	}
+	for _, marker := range []string{"research", "think about", "what's the best", "what is the best", "how should", "how can", "trade-off", "tradeoff", "design question", "pros and cons", "should we"} {
+		if strings.Contains(l, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 // routingRubric is shared by both model backends.
 const routingRubric = "Choose which model handles the owner message. concierge: " + conciergeCriterion + " planner: " + plannerCriterion + " dispatcher: " + dispatcherCriterion

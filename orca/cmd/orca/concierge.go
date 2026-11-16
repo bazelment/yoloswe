@@ -44,6 +44,7 @@ const (
 	ToolRunSettings         = memorychat.ToolRunSettings
 	ToolRunStart            = "run.start"
 	ToolSwarms              = "swarms"
+	ToolPlannerAsk          = memorychat.ToolPlannerAsk
 	DefaultConciergeMaxTurn = 12
 	// conciergeHistoryMessages bounds resumed thread history.
 	conciergeHistoryMessages = 40
@@ -60,6 +61,7 @@ Each answer must address only the question asked; never open with or repeat stat
 Answer the owner's questions accurately and concisely using read-only Store tools (status, lane.show, decisions.since, pr.ci, read.file, read.cmd). For runs this chat holds (including adopted runs), answer from the Store and live probes via status, lane.show, pr.ci, or read.file—do not call swarms for a held run. For a run orca does NOT hold (such as a released run or non-held host swarm), its Store copy is a historical snapshot and may be stale: always read its current files on disk with read.file (read_file) on OBJECTIVE.md (and state.json if needed) before answering, or explicitly state the Store copy's age; never report historical Store directives or holds as active holds on a run orca does not hold. For questions about other swarms on this machine, call swarms once (pass run="<id>" for a specific swarm, or active_only=true when asked which runs are active) and answer from it.
 Never conflate activity (how many lanes finished or PRs merged) with progress toward the goal: build progress and "have we met the goal?" answers from the run's full Objective (goal, plan milestones, open items, and Next: work), naming what is met (with lane/PR evidence), what is open, and what is Next:. When OBJECTIVE.md or the run's Objective contains multiple Next: or status lines over time, the LAST Next:/status line (shown as Current Status / Current Next) wins over older Open/Next sections earlier in the file: if the latest Next: says none / Run DONE, report that the run is done with no open work rather than citing stale items from earlier sections. Never say the goal is met while the latest Next: step or current status remains open.
 In an adopted-run context, "hold" / "keep the hold" means orca's lease on the run (as opposed to /release), NOT a hold on spawning lanes; never record a standing rule blocking new work unless the owner states that rule plainly.
+When a question requires deep architectural, design, research, trade-off, or constraint analysis that should shape the plan, call planner.ask with the owner's question and any partial findings you have gathered so far to hand the turn to the Planner instead of giving a shallow answer.
 Never invent facts not present in the Store. Owner corrections become memory.submit proposals saved immediately with a source quote; memory.undo reverts the last change.`
 
 type ConciergeStatusParams struct {
@@ -153,6 +155,8 @@ type Concierge struct {
 	OwnerRun func(ctx context.Context, run, text string) (string, error)
 	// Wake asks the controller of a run to act on a new directive now.
 	Wake func(runID string)
+	// AskPlanner escalates a complex design/research question (plus partial findings) to the Planner.
+	AskPlanner func(ctx context.Context, runID, question, findings string, emit func(string)) (string, error)
 	// RecordProposal records a pending action proposal when a concierge reply offers an action.
 	RecordProposal func(ctx context.Context, runID, summary, spec string) (string, error)
 	// Restart validates the startup binary and prepares an in-place re-exec.
@@ -181,8 +185,27 @@ func withReceipts(answer string, receipts []directiveReceipt) (string, string) {
 
 // ownerTurn holds per-turn start permission and directive receipts.
 type ownerTurn struct {
+	emit             func(string)
+	escalatedAnswer  string
 	receipts         []directiveReceipt
 	allowed, refused bool
+	escalatedEmitted bool
+}
+
+type conciergeEscalationClient struct {
+	inner model.ModelClient
+	start *ownerTurn
+}
+
+func (e *conciergeEscalationClient) CreateMessage(ctx context.Context, req model.Request) (*model.Response, error) {
+	if e.start != nil && e.start.escalatedAnswer != "" {
+		return &model.Response{
+			Model:      req.Model,
+			StopReason: model.StopReasonEndTurn,
+			Message:    model.NewAssistantMessage(model.NewTextBlock(e.start.escalatedAnswer)),
+		}, nil
+	}
+	return e.inner.CreateMessage(ctx, req)
 }
 
 // runStartRefusal is the tool result when the owner did not ask to start.
@@ -431,7 +454,10 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 
 	c.mu.Lock()
 	prior := slices.Clone(c.history)
-	start := &ownerTurn{allowed: chat.IsStartRequest(question) || (c.startAsked && chat.IsConfirmation(question))}
+	start := &ownerTurn{
+		emit:    emit,
+		allowed: chat.IsStartRequest(question) || (c.startAsked && chat.IsConfirmation(question)),
+	}
 	c.startAsked = false
 	c.mu.Unlock()
 
@@ -531,7 +557,7 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 
 		loopRes, lErr := model.RunToolLoop(
 			ctx,
-			c.client,
+			&conciergeEscalationClient{inner: c.client, start: start},
 			req,
 			reg,
 			// The last turn of the budget is kept for a forced answer.
@@ -539,7 +565,7 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 			model.WithToolCallLog(c.Logger, ActorConcierge),
 			model.WithOnTurn(func(_ int, resp model.Response) {
 				if txt := strings.TrimSpace(resp.Text()); txt != "" {
-					if emit != nil {
+					if emit != nil && !start.escalatedEmitted {
 						emit(txt)
 					}
 					emittedInLoo = true
@@ -610,6 +636,16 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 		}
 	}
 
+	if start.escalatedAnswer != "" {
+		if emit != nil && !emittedInLoo && !start.escalatedEmitted {
+			emit(start.escalatedAnswer)
+			emittedInLoo = true
+		}
+		if start.escalatedEmitted {
+			emittedInLoo = true
+		}
+		answer = start.escalatedAnswer
+	}
 	if memoryEcho != "" {
 		if emit != nil && !emittedInLoo {
 			emit(memoryEcho)
@@ -1590,6 +1626,42 @@ func (c *Concierge) buildToolRegistryWithContext(regCtx context.Context, threadI
 		}
 		return m.Body, nil
 	})
+	if c.AskPlanner != nil {
+		model.AddTool[PlannerAskParams](reg, ToolPlannerAsk,
+			"Escalate a complex design, research, trade-off, or constraint question (plus any partial findings) to the Planner",
+			func(ctx context.Context, p PlannerAskParams) (string, error) {
+				targetRun := strings.TrimSpace(p.RunID)
+				if targetRun == "" {
+					var err error
+					targetRun, err = c.resolveTargetRun(ctx, quote+" "+p.Question)
+					if err != nil {
+						targetRun = c.runID
+					}
+				}
+				q := cmp.Or(strings.TrimSpace(p.Question), strings.TrimSpace(quote))
+				var emitFn func(string)
+				if start != nil {
+					emitFn = start.emit
+				}
+				ans, err := c.AskPlanner(ctx, targetRun, q, strings.TrimSpace(p.Findings), func(s string) {
+					if start != nil {
+						start.escalatedEmitted = true
+					}
+					if emitFn != nil {
+						emitFn(s)
+					}
+				})
+				if err != nil {
+					return "", err
+				}
+				ans = strings.TrimSpace(ans)
+				if start != nil && ans != "" {
+					start.escalatedAnswer = ans
+				}
+				return ans, nil
+			},
+		)
+	}
 
 	icfg := c.investigateConfig(regCtx)
 	if icfg.HasRoots() {
@@ -1607,6 +1679,7 @@ func (c *Concierge) buildToolRegistryWithContext(regCtx context.Context, threadI
 
 type MemorySubmitParams = memorychat.MemorySubmitParams
 type MemoryUndoParams = memorychat.MemoryUndoParams
+type PlannerAskParams = memorychat.PlannerAskParams
 type MemoryReadParams struct {
 	ID string `json:"id"`
 }

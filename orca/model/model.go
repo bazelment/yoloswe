@@ -22,6 +22,10 @@ import (
 
 var unknownPricingModels sync.Map
 
+// ErrFakeClientExhausted indicates that a deterministic test client has no
+// scripted response left. Callers may use errors.Is instead of matching text.
+var ErrFakeClientExhausted = errors.New("orca/model: fake client exhausted")
+
 // Default limits for Messages API requests and tool loops.
 const (
 	DefaultMaxTokens = 4096
@@ -1324,7 +1328,7 @@ func (f *FakeClient) CreateMessage(ctx context.Context, req Request) (*Response,
 	callNum := len(f.Requests) + 1
 	f.Requests = append(f.Requests, req.Clone())
 	if len(f.queue) == 0 {
-		return nil, fmt.Errorf("orca/model: FakeClient has no more scripted responses (call #%d)", callNum)
+		return nil, fmt.Errorf("%w (call #%d)", ErrFakeClientExhausted, callNum)
 	}
 	next := f.queue[0]
 	f.queue = f.queue[1:]

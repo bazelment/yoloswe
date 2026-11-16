@@ -492,6 +492,19 @@ func runChatSession(
 	concierge.Logger = logger
 	wireChatConcierge(concierge, backend)
 	defer func() { _ = concierge.Close(context.WithoutCancel(ctx)) }()
+
+	chatPlanner := NewPlanner(st, clk, roleClient(client, cfg, "planner"), cfg.Models.Planner, logger)
+	chatPlanner.critic = roleClient(client, cfg, "critic")
+	chatPlanner.criticModel = cfg.Models.Roles["critic"].Model
+	chatPlanner.providerName = cfg.Models.Roles["planner"].Provider
+	chatPlanner.criticProvider = cfg.Models.Roles["critic"].Provider
+	chatPlanner.effort = cfg.Models.Roles["planner"].Effort
+	chatPlanner.agentBackend = concierge.AgentBackend
+	chatPlanner.llmGatewayURL = cfg.LLMGatewayURL
+	chatPlanner.investigate = concierge.Investigate
+	chatPlanner.claudeBin = cfg.ClaudeBin
+	chatPlanner.codexBin = cfg.CodexBin
+	defer func() { _ = chatPlanner.Close() }()
 	// A restarted chat continues the conversation it left.
 	resumed, err := concierge.Resume(ctx)
 	if err != nil {
@@ -536,6 +549,30 @@ func runChatSession(
 			err = errors.Join(err, backend.Attach(runStore, runID))
 		}
 		return err
+	}
+	routerOnlyReplay := isRouterOnlyReplay(cfg.ReplayPath)
+	backend.PlannerStream = func(streamCtx context.Context, runStore store.Store, activeRun, text string, emit func(string)) error {
+		if routerOnlyReplay || (chatPlanner.client == nil && chatPlanner.agentBackend != model.AgentBackendCLI) {
+			return chatui.ErrPlannerFallbackToQueue
+		}
+		_, askErr := chatPlanner.askStream(streamCtx, runStore, activeRun, text, "", concierge.investigateConfig(streamCtx), backend.ReadHostRun, emit)
+		return askErr
+	}
+	concierge.AskPlanner = func(askCtx context.Context, targetRun, q, findings string, emit func(string)) (string, error) {
+		var ans string
+		err := backend.WithRun(func(runStore store.Store, activeRun string) error {
+			runID := activeRun
+			if requested := strings.TrimSpace(targetRun); requested != "" {
+				if requested != activeRun {
+					return fmt.Errorf("planner target run %q is not the attached active run %q", requested, activeRun)
+				}
+				runID = requested
+			}
+			var askErr error
+			ans, askErr = chatPlanner.askStream(askCtx, runStore, runID, q, findings, concierge.investigateConfig(askCtx), backend.ReadHostRun, emit)
+			return askErr
+		})
+		return ans, err
 	}
 	backend.ListRuns = runs.List
 	backend.OpenRun = func(_ context.Context, runID string) (store.Store, error) {
@@ -678,6 +715,7 @@ func runChatSession(
 		shutdownErr = errors.Join(
 			shutdownErr,
 			concierge.Close(shutdownCtx),
+			chatPlanner.Close(),
 			backend.Close(),
 			runs.Close(),
 		)
@@ -692,6 +730,23 @@ func runChatSession(
 // runs, and live probes.
 func wireChatConcierge(c *Concierge, b *chatui.StoreBackend) {
 	c.BindBackend(b)
+}
+
+func isRouterOnlyReplay(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	exchanges, err := model.LoadRecording(path)
+	if err != nil || len(exchanges) == 0 {
+		return false
+	}
+	for i := range exchanges {
+		txt := strings.TrimSpace(exchanges[i].Response.Text())
+		if !strings.HasPrefix(txt, "{") || !strings.Contains(txt, `"handler"`) || len(exchanges[i].Response.ToolCalls()) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // chatHolder returns the stable holder and any legacy holder ids it owns.

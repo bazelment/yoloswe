@@ -720,5 +720,101 @@
     "needs_clarification": false,
     "rationale": "Immediate yes to both plus a separate standing rule.",
     "excerpt": false
+  },
+  {
+    "id": "owner-61",
+    "source_mail_id": "s:21365900",
+    "text": "I'm not completely against guest ram consumption, but up to 4GB seems to be high, can you research what's the best we can do if memory overhead is minimized, think about how kernel manages fs cache",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Sets a guest-RAM design constraint (<4 GiB) and asks for kernel fs-cache research to shape the plan.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-62",
+    "source_mail_id": "s:d1000001",
+    "text": "Can you research the trade-offs between virtiofs DAX and a read-only erofs rootfs if we cap per-sandbox guest memory at 1 GiB?",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Asks for architectural trade-off analysis under a 1 GiB guest-memory constraint.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-63",
+    "source_mail_id": "s:d1000002",
+    "text": "Think about what's the best we can do to keep cold snapshot restore under 300ms without pre-faulting the entire guest memory file.",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Open-ended design and research ask with a latency constraint on cold snapshot restore.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-64",
+    "source_mail_id": "s:d1000003",
+    "text": "We can't afford a separate sidecar process per sandbox; what design options do we have if we fold the heartbeat proxy into the host VMM?",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Introduces a new design constraint (no per-sandbox sidecar) and asks for architectural options.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-65",
+    "source_mail_id": "s:d1000004",
+    "text": "Research how OverlayFS page-cache sharing behaves across multiple Firecracker microVMs on the same host and whether KSM or shared backing files are viable.",
+    "context": "",
+    "destinations": [
+      "planner"
+    ],
+    "needs_clarification": false,
+    "rationale": "Research ask investigating kernel/VMM memory-sharing approaches that shape the run's design.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-66",
+    "source_mail_id": "s:c1000001",
+    "text": "Which lanes are currently running on this swarm, and have any PRs merged yet?",
+    "context": "",
+    "destinations": [
+      "concierge"
+    ],
+    "needs_clarification": false,
+    "rationale": "Status question about active lanes and merged PRs.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-67",
+    "source_mail_id": "s:c1000002",
+    "text": "What's our current progress against the run objective, and what is the next open milestone?",
+    "context": "",
+    "destinations": [
+      "concierge"
+    ],
+    "needs_clarification": false,
+    "rationale": "Asks for current run progress and status.",
+    "excerpt": false
+  },
+  {
+    "id": "owner-68",
+    "source_mail_id": "s:c1000003",
+    "text": "How much has this run spent so far, and what did the latest phase report on lane m2-gaps2 say?",
+    "context": "",
+    "destinations": [
+      "concierge"
+    ],
+    "needs_clarification": false,
+    "rationale": "Status and fact question about run cost and a lane's latest phase report.",
+    "excerpt": false
   }
 ]
