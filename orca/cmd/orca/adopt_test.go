@@ -33,6 +33,30 @@ import (
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
+func TestAdoptDryRunDirUsesExplicitCopiedRun(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"copied goal","no_pr":true,"phases":[{"name":"swe"}]},"tasks":[{"id":"copied-lane","phase":"swe","status":"running","round":1}]}`)
+	writeFile(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: copied goal\n")
+	writeFile(t, filepath.Join(dir, "copied-lane.swe.md"), "Outcome: done\n")
+	var stdout, stderr bytes.Buffer
+	if err := Execute(t.Context(), []string{"adopt", "--dry-run", "--dir", dir, "ignored-discovery-id"}, strings.NewReader(""), &stdout, &stderr); err != nil {
+		t.Fatalf("Execute adopt dry-run: %v\nstderr:\n%s", err, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"adopt dry-run " + filepath.Base(dir),
+		"format=subagent-swarm-nebula",
+		"lane copied-lane: phase=swe status=running",
+		"evidence:",
+		"move: advance; reason:",
+		"MOVES: copied-lane:advance",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // The shipped chat adopts, persists, and releases a host swarm lease.
 func TestShippedChatAdoptsAndReleasesHostSwarm(t *testing.T) {
 	for _, tc := range []struct {

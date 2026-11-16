@@ -166,6 +166,8 @@ func (m RoleModels) withDefaults(provider string, httpConfigured bool) RoleModel
 }
 
 // Config holds the runtime configuration for orca `run` and `chat`.
+//
+//nolint:govet // flags and their persisted config keys are kept together.
 type Config struct {
 	AgentBackend     model.AgentBackend `json:"agent_backend,omitempty"`
 	ModelProvider    string             `json:"model_provider,omitempty"`
@@ -190,6 +192,8 @@ type Config struct {
 	LogFormat        string             `json:"log_format,omitempty"`
 	Prompt           string             `json:"prompt,omitempty"`
 	ReportDay        string             `json:"report_day,omitempty"`
+	DryRun           bool               `json:"dry_run,omitempty"`
+	AdoptDir         string             `json:"-"`
 	ClaudeBin        string             `json:"-"`
 	CodexBin         string             `json:"-"`
 	AllowedModels    []string           `json:"allowed_models,omitempty"`
@@ -555,6 +559,8 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.StringVar(&cfg.LogFormat, "log-format", "", "Structured log format: json or text (default json)")
 	fs.StringVar(&cfg.Prompt, "prompt", "", "Single prompt for `chat` subcommand")
 	fs.StringVar(&cfg.ReportDay, "day", "", "Report day (YYYY-MM-DD)")
+	fs.BoolVar(&cfg.DryRun, "dry-run", false, "Print adoption moves without changing the run")
+	fs.StringVar(&cfg.AdoptDir, "dir", "", "Read an adoption dry-run from this copied run directory")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, nil, err
@@ -592,6 +598,12 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 			return Config{}, nil, err
 		}
 		cfg = merged
+		// These adoption-only switches are intentionally command-line scoped;
+		// preserve them across the JSON merge so --dir remains authoritative.
+		cfg.AdoptDir = cliCfg.AdoptDir
+		if cliCfg.DryRun {
+			cfg.DryRun = true
+		}
 	}
 	if cliCfg.Goal != "" {
 		cfg.Objective = cliCfg.Goal

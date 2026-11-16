@@ -110,6 +110,68 @@ func TestDiscoversNebulaSwarmRun(t *testing.T) {
 	}
 }
 
+func TestAdoptObserveFirstLeavesImportedWorkingLanesUntouched(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), ".swarm")
+	runID := "20261115-observe-first"
+	dir := filepath.Join(root, runID)
+	if err := os.MkdirAll(filepath.Join(dir, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"observe first","base":"main","target":"main","repo":"repo-1","orchestrator_session_id":"sess-orch","merge":"none","no_pr":true,"phases":[{"name":"swe"},{"name":"review"}]},"tasks":[
+{"id":"held-done","title":"held done","branch":"b-held","status":"running","phase":"swe","round":1,"session_id":"sess-held","terminals":{"swe":{"1":"term-held"}},"terminal_state":"working","pr":41},
+{"id":"no-pr-working","title":"working no-pr","branch":"b-working","status":"running","phase":"swe","round":2,"session_id":"sess-working","terminals":{"swe":{"2":"term-working"}},"terminal_state":"working"},
+{"id":"stale-report","title":"stale report","branch":"b-stale","status":"running","phase":"swe","round":2,"session_id":"sess-stale","terminals":{"swe":{"2":"term-stale"}},"terminal_state":"working"}]}`)
+	write(t, filepath.Join(dir, "OBJECTIVE.md"), "# observe first\n\nMerge rule: clean soak before integrate.\n")
+	write(t, filepath.Join(dir, "CONTEXT.md"), "Owner contract context.\n")
+	write(t, filepath.Join(dir, "EVENTS"), "")
+	write(t, filepath.Join(dir, "held-done.hold-advance"), "wait for owner soak judgment\n")
+	write(t, filepath.Join(dir, "reports", "held-done.swe.r1.md"), "Outcome: done\nHEAD: abc\nPR: 41\n")
+	write(t, filepath.Join(dir, "reports", "stale-report.swe.r2.md"), "Outcome: done\nHEAD: def\n")
+
+	clk := clock.NewFakeClock(time.Date(2026, 11, 15, 4, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	drv := lane.NewFakeDriver()
+	controllers := NewControllers(t.Context(), st, drv, clk, func(string, func(context.Context, string, string, string) error) controller.Judge {
+		return controller.NewFakeJudge()
+	})
+	controllers.PRProbe = func(context.Context, string, string, int) (controller.PRStatus, error) {
+		return controller.PRStatus{State: "CLOSED"}, nil
+	}
+	s := nsService(root, &fakeWatcher{running: false}, &fakeLabeler{label: "claude"})
+	s.Driver = controllers
+	before := readText(filepath.Join(dir, "state.json"))
+	r, err := s.Adopt(t.Context(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+
+	if got := readText(filepath.Join(dir, "state.json")); got != before {
+		t.Fatalf("adopt wrote imported state before a lifecycle transition:\n got %s\nwant %s", got, before)
+	}
+	if len(drv.PhaseStarts) != 0 || len(drv.Stops) != 0 || len(drv.Releases) != 0 {
+		t.Fatalf("adopt made a lane move before judgment: starts=%v stops=%v releases=%v", drv.PhaseStarts, drv.Stops, drv.Releases)
+	}
+	decs, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed bool
+	for _, dec := range decs {
+		if dec.Tool == "adopt.observe" {
+			observed = true
+		}
+		if dec.Tool == controller.ToolPhaseAdvance || dec.Tool == controller.ToolLaneComplete {
+			t.Fatalf("adopt made lifecycle decision before observe-first gate: %+v", dec)
+		}
+	}
+	if !observed {
+		t.Fatalf("decisions = %+v, want adopt.observe gate record", decs)
+	}
+}
+
 // nsSnapshot is every regular file of a run directory (reports/ included),
 // leaving out the bridge log a release appends to.
 func nsSnapshot(t *testing.T, dir string) map[string]string {

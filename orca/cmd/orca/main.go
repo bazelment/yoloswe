@@ -233,7 +233,7 @@ func Execute(
 		explicitSubcmd = true
 	} else {
 		switch args[0] {
-		case "run", "chat", "report", "export":
+		case "run", "chat", "adopt", "report", "export":
 			subcmd = args[0]
 			explicitSubcmd = true
 			rest = args[1:]
@@ -270,6 +270,54 @@ func Execute(
 			return err
 		}
 		return executeChat(ctx, cfg, slices.Clone(args), posArgs, stdin, stdout, stderr, logger)
+	case "adopt":
+		if !cfg.DryRun {
+			return errors.New("orca adopt currently supports only --dry-run; use /adopt from chat for a live handover")
+		}
+		runID := strings.TrimSpace(cfg.RunID)
+		if runID == "" && len(posArgs) > 0 {
+			runID = strings.TrimSpace(posArgs[0])
+		}
+		if strings.TrimSpace(cfg.AdoptDir) == "" && runID == "" {
+			return errors.New("orca adopt --dry-run requires a run id")
+		}
+		service := &adopt.Service{Importer: adopt.Importer{}}
+		var result adopt.DryRunResult
+		var err error
+		if dir := strings.TrimSpace(cfg.AdoptDir); dir != "" {
+			// An explicit copy is authoritative, even when a positional ID was
+			// also supplied. This keeps the command safe for scrubbed fixtures.
+			result, err = service.DryRunDir(ctx, dir)
+		} else {
+			result, err = service.DryRun(ctx, runID)
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(stdout, "adopt dry-run %s format=%s dir=%s\n", result.Run.ID, result.Run.Format, result.Run.Dir); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(stdout, "run: state=%s goal=%s\n", result.Run.State, result.Run.Goal); err != nil {
+			return err
+		}
+		for _, lane := range result.Lanes {
+			if _, err := fmt.Fprintf(stdout, "lane %s: phase=%s status=%s\n", lane.ID, lane.Phase, lane.Status); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(stdout, "  evidence: %s\n", strings.Join(lane.Evidence, "; ")); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(stdout, "  move: %s; reason: %s\n", lane.Move, lane.Reason); err != nil {
+				return err
+			}
+		}
+		for _, move := range result.Moves {
+			if _, err := fmt.Fprintln(stdout, "- "+move); err != nil {
+				return err
+			}
+		}
+		_, err = fmt.Fprintln(stdout, result.Verdict)
+		return err
 	case "report":
 		if err := cfg.Validate(false); err != nil {
 			return err
@@ -1146,7 +1194,7 @@ func printUsage(w io.Writer) {
   orca                                     Start or reattach to owner chat
   orca [run] --goal "<text>" [--standing] [--repo <owner/name>] [flags]
   orca chat [--run <id>] [--store sqlite:<path>|nebula] [--prompt "<question>"] [flags]`)
-	_, _ = fmt.Fprintln(w, "  orca report --run <id> [--day YYYY-MM-DD] [flags]\n  orca export --run <id> [flags]")
+	_, _ = fmt.Fprintln(w, "  orca adopt --dry-run <run-id> [--dir <copied-run-dir>]\n  orca report --run <id> [--day YYYY-MM-DD] [flags]\n  orca export --run <id> [flags]")
 	_, _ = fmt.Fprintf(w, "\nOrchestrator model defaults (flags and config override):\n  Dispatcher: %s\n  Planner:    %s\n  Critic:     %s (OpenAI; different vendor from Planner)\n", DefaultDispatcherModel, DefaultPlannerModel, DefaultOpenAIDispatcherModel)
 	_, _ = fmt.Fprintln(w, "Without HTTP credentials, Claude roles use claude-cli and the critic uses codex-cli.")
 }

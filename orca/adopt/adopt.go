@@ -15,6 +15,7 @@
 package adopt
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
@@ -82,6 +84,8 @@ func HeldByOrca(runDir string) (string, bool) {
 }
 
 // Lane is one ledger lane with the ownership of its current round.
+//
+//nolint:govet // fields mirror the two host ledger formats.
 type Lane struct {
 	ID, Title, Branch, Phase, Status string
 	// Session, Terminal and ReportPath belong to the lane's current round
@@ -90,6 +94,9 @@ type Lane struct {
 	// reports/<lane>.<phase>.r<round>.md). ReportPath is empty until that
 	// round reports.
 	Session, Terminal, ReportPath, PR string
+	// HoldAdvance is a host contract marker. Orca must wait for judgment before
+	// advancing this lane, even when its report says done.
+	HoldAdvance bool
 	// TerminalState is the ledger's last recorded terminal state (nebula-swarm).
 	TerminalState string
 	// Report is the latest report's Outcome line; LastEvent the lane's newest
@@ -99,6 +106,8 @@ type Lane struct {
 }
 
 // Run is a host swarm run directory.
+//
+//nolint:govet // fields mirror host discovery and handover metadata.
 type Run struct {
 	ID, Dir, Goal, Orchestrator, LastActivity string
 	// Format is FormatSubagentSwarm or FormatNebulaSwarm.
@@ -122,6 +131,8 @@ type Run struct {
 	// PlanPath is the plan file path or ref named in OBJECTIVE.md / PROGRESS.md.
 	// Next is the stated Next: work from OBJECTIVE.md (or PROGRESS.md).
 	Objective, PlanPath, Next string
+	Context, IntegrateRule    string
+	NoPR                      bool
 	// Progress and Escalations are PROGRESS.md and ESCALATIONS.md, clipped.
 	Progress, Escalations string
 	// Unchecked lists what discovery could not check for this run.
@@ -414,9 +425,10 @@ type ledgerLane struct {
 
 type ledger struct {
 	Config struct {
-		Goal   string      `json:"goal"`
-		Repo   string      `json:"repo"`
-		Phases []hostPhase `json:"phases"`
+		Goal      string      `json:"goal"`
+		Repo      string      `json:"repo"`
+		MergeRule string      `json:"merge_rule"`
+		Phases    []hostPhase `json:"phases"`
 	} `json:"config"`
 	Tasks []ledgerLane `json:"tasks"`
 }
@@ -439,6 +451,7 @@ func Read(dir string) (Run, error) {
 		r.Repo = repoSlug(dir)
 	}
 	r.Objective = stripMarker(readText(filepath.Join(dir, "OBJECTIVE.md")))
+	r.Context = stripMarker(readText(filepath.Join(dir, "CONTEXT.md")))
 	r.Progress = clip(stripMarker(readText(filepath.Join(dir, "PROGRESS.md"))), 1500)
 	r.Escalations = clip(stripMarker(readText(filepath.Join(dir, "ESCALATIONS.md"))), 1500)
 	if r.Format == FormatNebulaSwarm {
@@ -471,6 +484,17 @@ func Read(dir string) (Run, error) {
 	}
 	r.PlanPath = extractPlanPath(dir, r.Objective, r.Progress)
 	r.Next = extractNextSection(r.Objective)
+	r.NoPR = runNoPR(dir, b)
+	var contract struct {
+		Config struct {
+			MergeRule string `json:"merge_rule"`
+		} `json:"config"`
+	}
+	_ = json.Unmarshal(b, &contract)
+	r.IntegrateRule = extractMergeRuleText(contract.Config.MergeRule, r.Objective+"\n"+r.Context)
+	for i := range r.Lanes {
+		r.Lanes[i].HoldAdvance = fileExists(filepath.Join(dir, r.Lanes[i].ID+".hold-advance"))
+	}
 	sort.Slice(r.Lanes, func(a, b int) bool { return r.Lanes[a].ID < r.Lanes[b].ID })
 	r.State = RunFinished
 	if runLive(&r) {
@@ -673,6 +697,37 @@ func newestSpawn(dir, laneID, currentPhase string) (string, spawnFile) {
 
 var prLine = regexp.MustCompile(`(?m)^\s*PR:\s*#?(\d+)\s*$`)
 
+func runNoPR(dir string, ledger []byte) bool {
+	var probe struct {
+		Config struct {
+			NoPR bool `json:"no_pr"`
+		} `json:"config"`
+	}
+	if json.Unmarshal(ledger, &probe) == nil && probe.Config.NoPR {
+		return true
+	}
+	if strings.TrimSpace(os.Getenv("SNL_RUN_ID")) == filepath.Base(dir) {
+		value := strings.TrimSpace(os.Getenv("SNL_NO_PR"))
+		if value != "" && value != "0" && !strings.EqualFold(value, "false") && !strings.EqualFold(value, "no") {
+			return true
+		}
+	}
+	// SNL_NO_PR is scoped by SNL_RUN_ID in the host env when present. Reading
+	// env.sh keeps dry-run/adopt deterministic without inheriting another run's
+	// process environment.
+	env := readText(filepath.Join(dir, "env.sh"))
+	for _, line := range strings.Split(env, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) != "SNL_NO_PR" {
+			continue
+		}
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		return value != "" && value != "0" && !strings.EqualFold(value, "false") && !strings.EqualFold(value, "no")
+	}
+	return false
+}
+
 func orchestrator(dir, holder string) string {
 	if holder != "" {
 		return orcaLabel
@@ -735,6 +790,132 @@ type Service struct {
 	// restarted after stopWatcher stops a running loop (or when explicitly set
 	// > 0). Zero uses defaultLoopVerifyInterval when WatcherPIDs were stopped.
 	LoopVerifyInterval time.Duration
+}
+
+// DryRunResult describes the first adoption ticks without taking a lease or
+// starting a controller.
+//
+//nolint:govet // result groups the imported run, lane evidence, and report lines.
+type DryRunResult struct {
+	Run     Run
+	Lanes   []DryRunLane
+	Moves   []string
+	Verdict string
+}
+
+// DryRunLane is the evidence and first-tick action a read-only adoption
+// preview derives for one imported lane.
+//
+//nolint:govet // lane preview fields are intentionally grouped for report output.
+type DryRunLane struct {
+	ID       string
+	Phase    string
+	Status   string
+	Evidence []string
+	Move     string
+	Reason   string
+}
+
+// DryRun replays adoption's observe-first boundary from the host files only.
+// It is deliberately side-effect free and is safe to run against a copied run
+// directory before a live /adopt.
+func (s *Service) DryRun(ctx context.Context, id string) (DryRunResult, error) {
+	dir, err := s.Importer.Find(id)
+	if err != nil {
+		return DryRunResult{}, err
+	}
+	return s.DryRunDir(ctx, dir)
+}
+
+// DryRunDir previews adoption from an explicit run directory. It never opens
+// a store, acquires a lease, calls a host adapter, or writes to the directory;
+// callers can safely point it at a scrubbed copy of a live run.
+func (s *Service) DryRunDir(_ context.Context, dir string) (DryRunResult, error) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return DryRunResult{}, fmt.Errorf("%w: empty run directory", ErrRunNotFound)
+	}
+	dir = filepath.Clean(dir)
+	r, err := Read(dir)
+	if err != nil {
+		return DryRunResult{}, err
+	}
+	result := DryRunResult{Run: r, Moves: []string{"observe-first: read OBJECTIVE.md, CONTEXT.md, hold-advance files, and no-PR configuration"}}
+	mutating := make([]string, 0)
+	for i := range r.Lanes {
+		preview := previewLane(r, r.Lanes[i])
+		result.Lanes = append(result.Lanes, preview)
+		if preview.Move != "none" && preview.Move != "wait" {
+			mutating = append(mutating, preview.ID+":"+preview.Move)
+		}
+	}
+	if len(mutating) == 0 {
+		result.Verdict = "SAFE"
+	} else {
+		result.Verdict = "MOVES: " + strings.Join(mutating, ", ")
+	}
+	result.Moves = append(result.Moves, "adoption: no integrate, complete, release, retry, stop, or host state.json write")
+	return result, nil
+}
+
+func previewLane(r Run, ln Lane) DryRunLane {
+	p := DryRunLane{ID: ln.ID, Phase: cmp.Or(ln.Phase, "unknown"), Status: cmp.Or(ln.Status, "unknown"), Move: "none"}
+	p.Evidence = append(p.Evidence, "format="+r.Format, "phase="+p.Phase, "status="+p.Status)
+	if ln.TerminalState != "" {
+		p.Evidence = append(p.Evidence, "terminal_state="+ln.TerminalState)
+	}
+	if ln.Report != "" {
+		p.Evidence = append(p.Evidence, "report="+ln.Report)
+	}
+	if ln.LastEvent != "" {
+		p.Evidence = append(p.Evidence, "event="+ln.LastEvent)
+	}
+	if ln.Next != "" {
+		p.Evidence = append(p.Evidence, "next="+ln.Next)
+	}
+	if ln.PR != "" {
+		p.Evidence = append(p.Evidence, "pr=#"+ln.PR)
+	}
+	if r.NoPR {
+		p.Evidence = append(p.Evidence, "no-PR run")
+	}
+	if ln.HoldAdvance {
+		p.Evidence = append(p.Evidence, "hold-advance file present")
+		p.Move, p.Reason = "wait", "hold-advance requires an owner judgment"
+		return p
+	}
+	if r.State == RunFinished || strings.EqualFold(ln.Status, "done") || strings.EqualFold(ln.Status, "failed") || strings.EqualFold(ln.Status, "needs-human") {
+		p.Reason = "run or lane is already terminal; no lifecycle move"
+		return p
+	}
+	if strings.EqualFold(ln.TerminalState, "working") || strings.EqualFold(ln.TerminalState, "busy") {
+		p.Move, p.Reason = "wait", "terminal is working; adoption must not complete, release, or stop it"
+		return p
+	}
+	report := previewOutcome(ln.Report)
+	switch {
+	case report == string(lane.OutcomeNeedsSWE):
+		p.Move, p.Reason = "rework", "lane report requests SWE rework"
+	case report == string(lane.OutcomeBlocked) || report == string(lane.OutcomeNeedsInput):
+		p.Move, p.Reason = "wait", "lane report requires owner judgment"
+	case report == "done" || report == "no-change":
+		if !r.NoPR && (strings.EqualFold(ln.Phase, "review") || strings.EqualFold(ln.Phase, "clean")) && r.IntegrateRule != "" {
+			p.Move, p.Reason = "integrate", "completed report plus the run integrate rule permits the merge path"
+		} else {
+			p.Move, p.Reason = "advance", "completed report permits the next recipe phase"
+		}
+	default:
+		p.Move, p.Reason = "wait", "no terminal handback or actionable report evidence"
+	}
+	return p
+}
+
+func previewOutcome(report string) string {
+	rep, err := lane.ParsePhaseReport(report)
+	if err != nil {
+		return ""
+	}
+	return string(rep.Outcome)
 }
 
 const defaultLoopVerifyInterval = 50 * time.Millisecond
