@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
@@ -574,6 +576,9 @@ func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
 			if ln.Status != lane.StatusRunning {
 				return true
 			}
+			if !ln.AwaitingInputSince.IsZero() {
+				return true
+			}
 			now := c.clock.Now().UTC()
 			if c.laneIsWorkingOrBusyUncached(ctx, *ln) || c.hasActiveExpectedWait(ctx, ln.ID, now) {
 				return true
@@ -624,7 +629,16 @@ func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
 		}
 	}
 	identity, _ := json.Marshal(idEv)
-	event := store.Event{ID: fmt.Sprintf("lane-watch-%x", sha256.Sum256(identity)), RunID: c.cfg.RunID, LaneID: ev.LaneID, Kind: kind, Source: "lane.watch", Payload: raw, Summary: ev.Text}
+	eventID := fmt.Sprintf("lane-watch-%x", sha256.Sum256(identity))
+	summary := ev.Text
+	urgent := false
+	if ev.Kind == lane.EventWaitingForInput {
+		tail := waitingInputTail(ev.Text)
+		eventID = waitingInputEventID(ev.LaneID, ev.TerminalID, tail)
+		summary = waitingInputSummary(ev.LaneID, tail)
+		urgent = true
+	}
+	event := store.Event{ID: eventID, RunID: c.cfg.RunID, LaneID: ev.LaneID, Kind: kind, Source: "lane.watch", Payload: raw, Summary: summary, Urgent: urgent}
 	for {
 		if _, err := c.store.Events().Append(ctx, event); err == nil || errors.Is(err, store.ErrAlreadyExists) {
 			break
@@ -673,6 +687,36 @@ func (c *Controller) hasExistingLaneReport(ctx context.Context, ev lane.Event) b
 		}
 	}
 	return false
+}
+
+var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
+
+const waitingInputTailBytes = 1536
+
+func waitingInputTail(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = ansiEscapePattern.ReplaceAllString(text, "")
+	text = strings.Trim(text, " \t\r\n")
+	if text == "" {
+		return "(no screen text)"
+	}
+	if len(text) <= waitingInputTailBytes {
+		return text
+	}
+	text = text[len(text)-waitingInputTailBytes:]
+	for text != "" && !utf8.ValidString(text) {
+		text = text[1:]
+	}
+	return text
+}
+
+func waitingInputSummary(laneID, tail string) string {
+	return fmt.Sprintf("lane %s waiting for input: %s", laneID, tail)
+}
+
+func waitingInputEventID(laneID, terminalID, tail string) string {
+	identity := laneID + "\x00" + terminalID + "\x00" + tail
+	return fmt.Sprintf("lane-waiting-%x", sha256.Sum256([]byte(identity)))
 }
 
 // WatchErrors exposes stream and persistence failures while the forwarder retries.
@@ -1422,6 +1466,25 @@ func (c *Controller) recoverPendingState(ctx context.Context) error {
 			c.enqueueJudgmentEvent(ev)
 			continue
 		}
+		if ev.Kind == store.EventPhaseExit && ev.LaneID != "" {
+			var payload PhaseExitPayload
+			if json.Unmarshal(ev.Payload, &payload) == nil && payload.Kind == lane.EventWaitingForInput {
+				if lane.WorkingInputWaiting(payload.Error) {
+					continue
+				}
+				termID := strings.TrimSpace(payload.TerminalID)
+				if termID == "" {
+					termID = strings.TrimSpace(runningByID[ev.LaneID].TerminalID)
+				}
+				tail := waitingInputTail(payload.Error)
+				ev.ID = waitingInputEventID(ev.LaneID, termID, tail)
+				ev.Summary = waitingInputSummary(ev.LaneID, tail)
+				ev.Urgent = true
+				ev.Class = store.EventClassJudgment
+				c.enqueueJudgmentEvent(ev)
+				continue
+			}
+		}
 		if isRecoverableJudgmentEvent(ev) {
 			ev.Class = store.EventClassJudgment
 			c.enqueueJudgmentEvent(ev)
@@ -1440,6 +1503,9 @@ func isRecoverableJudgmentEvent(ev store.Event) bool {
 	switch ev.Kind {
 	case store.EventOwnerMessage, store.EventMail, store.EventStall:
 		return true
+	case store.EventPhaseExit:
+		var payload PhaseExitPayload
+		return json.Unmarshal(ev.Payload, &payload) == nil && payload.Kind == lane.EventWaitingForInput
 	default:
 		return false
 	}
@@ -1599,8 +1665,17 @@ func (c *Controller) checkLaneSessions(ctx context.Context) error {
 	for i := range running {
 		ln := running[i]
 		c.stopStaleRecordedTerminals(ctx, &ln)
-		if c.laneIsWorkingOrBusy(ctx, ln) && ln.LastEventAt.Before(now) {
+		working := c.laneIsWorkingOrBusy(ctx, ln)
+		changed := false
+		if working && !ln.AwaitingInputSince.IsZero() {
+			ln.AwaitingInputSince = time.Time{}
+			changed = true
+		}
+		if working && ln.LastEventAt.Before(now) {
 			ln.LastEventAt = now
+			changed = true
+		}
+		if changed {
 			if err := c.store.Lanes().Upsert(ctx, ln); err != nil {
 				return err
 			}
@@ -2177,6 +2252,12 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 	if rep.TerminalID != "" && ln.TerminalID != "" && rep.TerminalID != ln.TerminalID {
 		return store.EventClassAuto, nil
 	}
+	if !ln.AwaitingInputSince.IsZero() {
+		ln.AwaitingInputSince = time.Time{}
+		if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+			return store.EventClassUnclassified, err
+		}
+	}
 	// A report is the terminal's explicit handback. The imported host
 	// terminal_state may still say working until the host ledger catches up.
 	ln.TerminalState = ""
@@ -2675,6 +2756,26 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		// retry. Its exit is not evidence that the worker failed an attempt.
 		return store.EventClassAuto, nil
 	}
+	if payload.Kind == lane.EventWaitingForInput {
+		if lane.WorkingInputWaiting(payload.Error) {
+			return store.EventClassAuto, nil
+		}
+		tail := waitingInputTail(payload.Error)
+		termID := cmp.Or(strings.TrimSpace(payload.TerminalID), strings.TrimSpace(ln.TerminalID))
+		ev.ID = waitingInputEventID(ln.ID, termID, tail)
+		ev.Summary = waitingInputSummary(ln.ID, tail)
+		ev.Urgent = true
+		if ln.AwaitingInputSince.IsZero() {
+			ln.AwaitingInputSince = c.clock.Now().UTC()
+		}
+		if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
+			return store.EventClassUnclassified, err
+		}
+		return store.EventClassJudgment, nil
+	}
+	if !ln.AwaitingInputSince.IsZero() && (payload.Kind == lane.EventNoActivity || payload.Kind == lane.EventTurnEndedNoReport) {
+		return store.EventClassAuto, nil
+	}
 	if payload.Kind == lane.EventTurnEndedNoReport || payload.Kind == lane.EventExited {
 		// The host ledger can lag the terminal handback. An explicit ended event
 		// supersedes its imported working marker; a live driver state below still
@@ -2899,6 +3000,9 @@ func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.Ev
 	}
 	if ln.HostHoldReason != "" {
 		return store.EventClassJudgment, nil
+	}
+	if !ln.AwaitingInputSince.IsZero() {
+		return store.EventClassAuto, nil
 	}
 	if settled, err := c.reconcileLanePRState(ctx, ln, ev.ID); settled || err != nil {
 		if err != nil {

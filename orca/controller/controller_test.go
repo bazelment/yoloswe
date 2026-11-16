@@ -596,6 +596,135 @@ func TestControllerJudgmentRuleAndPhaseExitFallback(t *testing.T) {
 	}
 }
 
+func TestControllerWaitingForInputIsAQuestion(t *testing.T) {
+	t.Parallel()
+	tests := []struct { //nolint:govet // table readability is more useful than field packing here
+		name        string
+		text        string
+		wantBatch   bool
+		wantSummary string
+	}{
+		{name: "prose question", text: "### Needed decision\n1. Fix sim restore\n2. Narrow the leader release", wantBatch: true, wantSummary: "lane lane-wait waiting for input: ### Needed decision\n1. Fix sim restore\n2. Narrow the leader release"},
+		{name: "empty screen", wantBatch: true, wantSummary: "lane lane-wait waiting for input: (no screen text)"},
+		{name: "agy timer remains working", text: "30m timer running ... 1 task(s)", wantBatch: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clk, st, drv, judge := setupTestEnv(t)
+			ctx := t.Context()
+			if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-wait", RunID: "run-1", Status: lane.StatusRunning, SessionID: "s-1", TerminalID: "t-1", Phase: recipe.PhaseSWE, Attempt: 1}); err != nil {
+				t.Fatal(err)
+			}
+			ctrl := controller.New(controller.Config{RunID: "run-1", JudgmentDebounce: -1}, st, drv, clk, judge)
+			raw, err := json.Marshal(controller.PhaseExitPayload{Kind: lane.EventWaitingForInput, TerminalID: "t-1", Phase: recipe.PhaseSWE, Error: tc.text})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Events().Append(ctx, store.Event{RunID: "run-1", LaneID: "lane-wait", Kind: store.EventPhaseExit, Source: "lane.watch", Payload: raw}); err != nil {
+				t.Fatal(err)
+			}
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatalf("Step: %v", err)
+			}
+			t.Logf("%s decisions: batches=%d starts=%d stops=%d", tc.name, judge.BatchCount(), len(drv.PhaseStarts), len(drv.Stops))
+			if got := judge.BatchCount(); (got == 1) != tc.wantBatch {
+				t.Fatalf("judgment batches=%d, want question=%t", got, tc.wantBatch)
+			}
+			if len(drv.PhaseStarts) != 0 || len(drv.Stops) != 0 {
+				t.Fatalf("waiting input changed terminal: starts=%+v stops=%+v", drv.PhaseStarts, drv.Stops)
+			}
+			if tc.wantSummary != "" {
+				if len(judge.Batches) != 1 || len(judge.Batches[0]) != 1 || judge.Batches[0][0].Summary != tc.wantSummary || !judge.Batches[0][0].Urgent {
+					t.Fatalf("judgment event=%+v, want urgent summary %q", judge.Batches, tc.wantSummary)
+				}
+			}
+		})
+	}
+
+	t.Run("same question dedupes and steer releases quiet ladder", func(t *testing.T) {
+		clk, st, drv, judge := setupTestEnv(t)
+		ctx := t.Context()
+		if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-wait", RunID: "run-1", Status: lane.StatusRunning, SessionID: "s-1", TerminalID: "t-1", Phase: recipe.PhaseSWE, Attempt: 1}); err != nil {
+			t.Fatal(err)
+		}
+		ctrl := controller.New(controller.Config{RunID: "run-1", JudgmentDebounce: -1}, st, drv, clk, judge)
+		appendWaiting := func(text string) {
+			raw, _ := json.Marshal(controller.PhaseExitPayload{Kind: lane.EventWaitingForInput, TerminalID: "t-1", Phase: recipe.PhaseSWE, Error: text})
+			if _, err := st.Events().Append(ctx, store.Event{RunID: "run-1", LaneID: "lane-wait", Kind: store.EventPhaseExit, Source: "lane.watch", Payload: raw}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		appendWaiting("choose restore or narrow")
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatal(err)
+		}
+		appendWaiting("choose restore or narrow")
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if judge.BatchCount() != 1 {
+			t.Fatalf("same question batches=%d, want 1", judge.BatchCount())
+		}
+		appendWaiting("choose a different recovery path")
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if judge.BatchCount() != 2 {
+			t.Fatalf("changed question batches=%d, want 2", judge.BatchCount())
+		}
+		ln, err := st.Lanes().Get(ctx, "run-1", "lane-wait")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ln.Status != lane.StatusRunning || ln.TerminalID != "t-1" || ln.AwaitingInputSince.IsZero() {
+			t.Fatalf("waiting lane=%+v, want running with durable marker", ln)
+		}
+		ln.AwaitingInputSince = time.Time{}
+		if err := st.Lanes().Upsert(ctx, *ln); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(controller.PhaseExitPayload{Kind: lane.EventNoActivity, TerminalID: "t-1", Phase: recipe.PhaseSWE, Error: "quiet"})
+		if _, err := st.Events().Append(ctx, store.Event{RunID: "run-1", LaneID: "lane-wait", Kind: store.EventPhaseExit, Source: "lane.watch", Payload: raw}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("dedupe and post-steer decisions: batches=%d steers=%d starts=%d stops=%d", judge.BatchCount(), len(drv.Steers), len(drv.PhaseStarts), len(drv.Stops))
+		if len(drv.Steers) != 1 || len(drv.PhaseStarts) != 0 || len(drv.Stops) != 0 {
+			t.Fatalf("post-steer quiet pulse actions: steers=%+v starts=%+v stops=%+v", drv.Steers, drv.PhaseStarts, drv.Stops)
+		}
+	})
+
+	t.Run("phase report clears marker and advances", func(t *testing.T) {
+		clk, st, drv, judge := setupTestEnv(t)
+		ctx := t.Context()
+		if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-wait", RunID: "run-1", Status: lane.StatusRunning, SessionID: "s-1", TerminalID: "t-1", Phase: recipe.PhaseSWE, Attempt: 1}); err != nil {
+			t.Fatal(err)
+		}
+		ctrl := controller.New(controller.Config{RunID: "run-1", JudgmentDebounce: -1}, st, drv, clk, judge)
+		rawWaiting, _ := json.Marshal(controller.PhaseExitPayload{Kind: lane.EventWaitingForInput, TerminalID: "t-1", Phase: recipe.PhaseSWE, Error: "choose restore or narrow"})
+		if _, err := st.Events().Append(ctx, store.Event{RunID: "run-1", LaneID: "lane-wait", Kind: store.EventPhaseExit, Source: "lane.watch", Payload: rawWaiting}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatal(err)
+		}
+		appendReportEvent(t, st, "lane-wait", lane.PhaseReport{Phase: recipe.PhaseSWE, Outcome: lane.OutcomeDone, HeadSHA: "sha-wait"})
+		if err := ctrl.Step(ctx); err != nil {
+			t.Fatal(err)
+		}
+		ln, err := st.Lanes().Get(ctx, "run-1", "lane-wait")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("phase report decisions: batches=%d starts=%d stops=%d lane=%+v", judge.BatchCount(), len(drv.PhaseStarts), len(drv.Stops), ln)
+		if !ln.AwaitingInputSince.IsZero() || len(drv.PhaseStarts) != 1 || drv.PhaseStarts[0].Phase != recipe.PhaseClean {
+			t.Fatalf("phase report did not clear/advance: lane=%+v starts=%+v", ln, drv.PhaseStarts)
+		}
+	})
+}
+
 func TestControllerWatchRestartLadder(t *testing.T) {
 	t.Parallel()
 	for _, restartAfter := range []int{0, 1, 2, 3} {

@@ -1623,6 +1623,7 @@ func (d *Dispatcher) applyLaneSteer(ctx context.Context, runID string, view *Sta
 			ln.Status = lane.StatusRunning
 		}
 	}
+	ln.AwaitingInputSince = time.Time{}
 	ln.LastEventAt = d.clock.Now().UTC()
 	if err := d.store.Lanes().Upsert(ctx, ln); err != nil {
 		return "", err
