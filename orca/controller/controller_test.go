@@ -1613,6 +1613,25 @@ func TestControllerRunRetriesTransientTerminalCreateAndKeepsLeaseHeartbeating(t 
 		}
 		runtime.Gosched()
 	}
+	beforeHeartbeat, err := st.Runs().Get(ctx, "run-1")
+	if err != nil || beforeHeartbeat.Lease == nil {
+		t.Fatalf("run before blocked retry = %+v, err=%v", beforeHeartbeat, err)
+	}
+	// Keep the terminal-create call blocked while the independent heartbeat
+	// ticker fires. This is the failure mode that previously let the lease
+	// expire during a slow controller step.
+	clk.Advance(10 * time.Second)
+	heartbeatDeadline := time.Now().Add(2 * time.Second)
+	for {
+		run, getErr := st.Runs().Get(ctx, "run-1")
+		if getErr == nil && run.Lease != nil && run.Lease.HeartbeatAt.After(beforeHeartbeat.Lease.HeartbeatAt) {
+			break
+		}
+		if time.Now().After(heartbeatDeadline) {
+			t.Fatalf("lease heartbeat did not advance while terminal create was blocked: run=%+v, err=%v", run, getErr)
+		}
+		runtime.Gosched()
+	}
 	close(drv.failWait)
 	for clk.Waiters() < 2 {
 		if time.Now().After(deadline) {
@@ -1636,10 +1655,8 @@ func TestControllerRunRetriesTransientTerminalCreateAndKeepsLeaseHeartbeating(t 
 		}
 		t.Fatalf("phase starts = %d, want one retry launch", len(drv.PhaseStarts))
 	}
-	clk.Advance(10 * time.Second)
-	runtime.Gosched()
 	run, err := st.Runs().Get(ctx, "run-1")
-	if err != nil || run.Lease == nil || !run.Lease.HeartbeatAt.After(run.Lease.AcquiredAt) {
+	if err != nil || run.Lease == nil || !run.Lease.HeartbeatAt.After(beforeHeartbeat.Lease.HeartbeatAt) {
 		t.Fatalf("run lease = %+v, err=%v, want a heartbeat after the transient failure", run.Lease, err)
 	}
 	cancel()

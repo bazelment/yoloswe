@@ -1086,10 +1086,11 @@ func (b *StoreBackend) splitAdopted(adopted []string) (live, dead []string) {
 		return adopted, nil
 	}
 	status, hasStatus := b.Adoption.Driver.(interface{ ControllerStatus(string) string })
+	stopped, hasStopped := b.Adoption.Driver.(interface{ ControllerStopped(string) bool })
 	for _, id := range adopted {
 		if active.Active(id) {
 			live = append(live, id)
-		} else if hasStatus && strings.TrimSpace(status.ControllerStatus(id)) != "" {
+		} else if hasStatus && (!hasStopped || !stopped.ControllerStopped(id)) && strings.TrimSpace(status.ControllerStatus(id)) != "" {
 			// The supervisor owns the durable queue while it backs off.
 			live = append(live, id)
 		} else {
@@ -1125,17 +1126,8 @@ func (b *StoreBackend) target(ctx context.Context, text string) (runID, refusal 
 	if err != nil {
 		return "", "", err
 	}
-	// A stopped adopted controller still owns a durable queue. Deliver the
-	// message so the supervisor's next restart can process it.
-	var down interface{ ControllerStatus(string) string }
-	if b.Adoption != nil && b.Adoption.Driver != nil {
-		down, _ = b.Adoption.Driver.(interface{ ControllerStatus(string) string })
-	}
 	for _, id := range dead {
 		if Mentions(text, id) {
-			if down != nil && strings.TrimSpace(down.ControllerStatus(id)) != "" {
-				return id, "", nil
-			}
 			return "", "", errNoLiveController(id)
 		}
 	}
@@ -1204,9 +1196,7 @@ func (b *StoreBackend) OwnerRun(ctx context.Context, run, text string) (string, 
 			return "", err
 		}
 		if slices.Contains(dead, run) {
-			if status, ok := b.Adoption.Driver.(interface{ ControllerStatus(string) string }); !ok || strings.TrimSpace(status.ControllerStatus(run)) == "" {
-				return "", errNoLiveController(run)
-			}
+			return "", errNoLiveController(run)
 		}
 		if !slices.Contains(dead, run) && !slices.Contains(runs, run) {
 			return "", fmt.Errorf("run %s is not held by this chat (held: %s); /adopt or /runs it first", run, cmp.Or(strings.Join(runs, ", "), "none"))

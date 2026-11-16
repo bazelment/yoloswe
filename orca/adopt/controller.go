@@ -140,6 +140,21 @@ func (d *Controllers) ControllerStatus(runID string) string {
 	return cr.downReason
 }
 
+// ControllerStopped reports whether supervision has permanently stopped for
+// an adopted run. A non-empty ControllerStatus may also describe a restart
+// backoff, which still owns and will drain the durable queue.
+func (d *Controllers) ControllerStopped(runID string) bool {
+	d.mu.Lock()
+	cr := d.runs[runID]
+	d.mu.Unlock()
+	if cr == nil {
+		return false
+	}
+	cr.statusMu.RLock()
+	defer cr.statusMu.RUnlock()
+	return cr.stopped
+}
+
 // ControllerNotice returns the latest stop or restart line for an adopted run.
 func (d *Controllers) ControllerNotice(runID string) string {
 	d.mu.Lock()

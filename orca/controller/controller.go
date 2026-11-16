@@ -758,7 +758,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		case <-c.wakeCh:
 		case watchErr := <-c.watchErrors:
 			if watchErr != nil {
-				return watchErr
+				slog.Warn("orca controller watch forwarder failed; continuing", "run", c.cfg.RunID, "error", watchErr)
 			}
 		}
 		if err := c.Step(runCtx); err != nil {
@@ -779,7 +779,10 @@ func (c *Controller) Run(ctx context.Context) error {
 				return hbErr
 			case watchErr := <-c.watchErrors:
 				timer.Stop()
-				return watchErr
+				if watchErr != nil {
+					slog.Warn("orca controller watch forwarder failed; continuing", "run", c.cfg.RunID, "error", watchErr)
+				}
+				continue
 			case <-timer.C():
 			}
 			retryDelay = min(retryDelay*2, 1*time.Minute)
