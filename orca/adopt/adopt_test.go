@@ -92,6 +92,7 @@ func TestDryRunIntegrationEvidenceTable(t *testing.T) {
 	//nolint:govet // compact table readability is more useful than field packing in a test.
 	type fixture struct {
 		name, event, target string
+		status              string
 		pr                  int
 		blocked             bool
 		wantMove            string
@@ -104,11 +105,13 @@ func TestDryRunIntegrationEvidenceTable(t *testing.T) {
 		{name: "feature target", event: "feature", target: "feat/run", wantMove: "none"},
 		{name: "missing target evidence", event: "missing", target: "main", wantMove: "judge", wantReason: "integration gate:"},
 		{name: "fetch failure", event: "missing", target: "does-not-exist", wantMove: "judge", wantReason: "integration unknown: fetch target does-not-exist failed"},
+		{name: "fetch failure judges mid-pipeline", event: "missing", target: "does-not-exist", status: "running", wantMove: "judge", wantReason: "integration unknown: fetch target does-not-exist failed"},
+		{name: "mid-pipeline lane advances", event: "missing", target: "main", status: "running", wantMove: "advance"},
 		{name: "blocked report", event: "blocked", target: "main", blocked: true, wantMove: "judge", wantReason: "orchestrator judgment: lane report blocked: credentials are unavailable"},
 	}
 	for _, tc := range fixtures {
 		t.Run(tc.name, func(t *testing.T) {
-			runDir, _, laneHead := integrationFixture(t, tc.event, tc.target, tc.pr, tc.blocked)
+			runDir, _, laneHead := integrationFixture(t, tc.event, tc.target, tc.pr, tc.blocked, tc.status)
 			result, err := (&Service{}).DryRunDir(t.Context(), runDir)
 			if err != nil {
 				t.Fatal(err)
@@ -141,7 +144,7 @@ func TestDryRunIntegrationEvidenceTable(t *testing.T) {
 	}
 }
 
-func integrationFixture(t *testing.T, kind, target string, pr int, blocked bool) (runDir, repo, laneHead string) {
+func integrationFixture(t *testing.T, kind, target string, pr int, blocked bool, status ...string) (runDir, repo, laneHead string) {
 	t.Helper()
 	root := t.TempDir()
 	bare := filepath.Join(root, "target.git")
@@ -192,7 +195,11 @@ func integrationFixture(t *testing.T, kind, target string, pr int, blocked bool)
 		prJSON = fmt.Sprintf(",\"pr\":%d", pr)
 		prLine = fmt.Sprintf("PR: %d\n", pr)
 	}
-	write(t, filepath.Join(runDir, "state.json"), fmt.Sprintf(`{"config":{"goal":"integration fixture","repo":%q,"target":%q,"orchestrator_session_id":"fixture","phases":[{"name":"review"}]},"tasks":[{"id":"lane-1","phase":"review","status":"done","round":1,"head":%q%s}]}`, work, target, laneHead, prJSON))
+	laneStatus := "done"
+	if len(status) > 0 && status[0] != "" {
+		laneStatus = status[0]
+	}
+	write(t, filepath.Join(runDir, "state.json"), fmt.Sprintf(`{"config":{"goal":"integration fixture","repo":%q,"target":%q,"orchestrator_session_id":"fixture","phases":[{"name":"review"}]},"tasks":[{"id":"lane-1","phase":"review","status":%q,"round":1,"head":%q%s}]}`, work, target, laneStatus, laneHead, prJSON))
 	report := fmt.Sprintf("Outcome: done\nHEAD: %s\n%s", laneHead, prLine)
 	if blocked {
 		report = "Outcome: blocked\nReason: credentials are unavailable\n"

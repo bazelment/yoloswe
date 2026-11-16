@@ -574,7 +574,7 @@ func firstLocalRepoPath(runDir string, paths []string) string {
 			p = filepath.Join(runDir, p)
 		}
 		p = filepath.Clean(p)
-		if info, err := os.Stat(p); err == nil && (info.IsDir() || strings.HasSuffix(p, ".git")) {
+		if info, err := os.Stat(p); err == nil && (info.IsDir() || strings.HasSuffix(p, ".git")) && isGitCheckout(p) {
 			return p
 		}
 	}
@@ -590,6 +590,10 @@ func firstLocalRepoPath(runDir string, paths []string) string {
 		cur = parent
 	}
 	return ""
+}
+
+func isGitCheckout(path string) bool {
+	return exec.Command("git", "-C", path, "rev-parse", "--git-dir").Run() == nil
 }
 
 // applyIntegrationEvidence checks the host's own merge record and local Git
@@ -612,6 +616,8 @@ func applyIntegrationEvidence(ctx context.Context, r *Run) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	gitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	if strings.TrimSpace(r.RepoPath) == "" {
 		r.IntegrationError = "no local checkout"
 		return
@@ -625,16 +631,22 @@ func applyIntegrationEvidence(ctx context.Context, r *Run) {
 		r.IntegrationError = "run target branch is missing"
 		return
 	}
+	if !validGitBranch(gitCtx, r.RepoPath, target) {
+		r.IntegrationError = "invalid run target branch " + target
+		return
+	}
 	// Fetch exactly once for the run. Lane checks below only inspect the fetched
 	// target ref and never call a per-lane remote or GitHub API.
-	fetch := exec.CommandContext(ctx, "git", "-C", r.RepoPath, "fetch", "--no-tags", "origin", target)
+	refspec := "+refs/heads/" + target + ":refs/remotes/origin/" + target
+	fetch := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "fetch", "--no-tags", "origin", refspec)
+	fetch.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if err := fetch.Run(); err != nil {
-		r.IntegrationError = "fetch target " + target + " failed"
+		r.IntegrationError = "fetch target " + target + " failed: " + err.Error()
 		return
 	}
 	targetRef := ""
 	for _, ref := range []string{"refs/remotes/origin/" + target, "refs/heads/" + target, target} {
-		if out, err := exec.CommandContext(ctx, "git", "-C", r.RepoPath, "rev-parse", "--verify", ref).Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+		if out, err := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "rev-parse", "--verify", "--end-of-options", ref).Output(); err == nil && strings.TrimSpace(string(out)) != "" {
 			targetRef = ref
 			break
 		}
@@ -644,8 +656,11 @@ func applyIntegrationEvidence(ctx context.Context, r *Run) {
 		return
 	}
 	var targetSubjects []string
-	if out, err := exec.CommandContext(ctx, "git", "-C", r.RepoPath, "log", "--format=%s", targetRef).Output(); err == nil {
+	if out, err := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "log", "--format=%s", "--end-of-options", targetRef).Output(); err == nil {
 		targetSubjects = strings.Split(string(out), "\n")
+	} else {
+		r.IntegrationError = "read target history failed: " + err.Error()
+		return
 	}
 	for i := range r.Lanes {
 		ln := &r.Lanes[i]
@@ -653,9 +668,17 @@ func applyIntegrationEvidence(ctx context.Context, r *Run) {
 			continue
 		}
 		head := strings.TrimSpace(ln.Head)
+		if head != "" && !validGitSHA(head) {
+			ln.IntegrationReason = "integration unknown: invalid lane head " + head
+			continue
+		}
 		if head == "" && strings.TrimSpace(ln.Branch) != "" {
+			if !validGitBranch(gitCtx, r.RepoPath, strings.TrimSpace(ln.Branch)) {
+				ln.IntegrationReason = "integration unknown: invalid lane branch " + strings.TrimSpace(ln.Branch)
+				continue
+			}
 			for _, ref := range []string{"refs/heads/" + ln.Branch, "refs/remotes/origin/" + ln.Branch, ln.Branch} {
-				if out, err := exec.CommandContext(ctx, "git", "-C", r.RepoPath, "rev-parse", "--verify", ref).Output(); err == nil {
+				if out, err := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "rev-parse", "--verify", "--end-of-options", ref).Output(); err == nil {
 					head = strings.TrimSpace(string(out))
 					break
 				}
@@ -665,7 +688,7 @@ func applyIntegrationEvidence(ctx context.Context, r *Run) {
 			ln.IntegrationReason = "integration gate: missing lane head for target " + target
 			continue
 		}
-		if err := exec.CommandContext(ctx, "git", "-C", r.RepoPath, "merge-base", "--is-ancestor", head, targetRef).Run(); err == nil {
+		if err := exec.CommandContext(gitCtx, "git", "-C", r.RepoPath, "merge-base", "--is-ancestor", "--end-of-options", head, targetRef).Run(); err == nil {
 			ln.Integrated = true
 			ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is an ancestor of target %s", shortSHA(head), target)
 			continue
@@ -684,6 +707,27 @@ func applyIntegrationEvidence(ctx context.Context, r *Run) {
 			ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is not in target %s and no squash subject ending (#%s)", shortSHA(head), target, prNumber(ln.PR))
 		}
 	}
+}
+
+func validGitSHA(value string) bool {
+	if len(value) < 7 || len(value) > 64 {
+		return false
+	}
+	for _, c := range value {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func validGitBranch(ctx context.Context, repo, branch string) bool {
+	if branch == "" || strings.HasPrefix(branch, "-") || strings.ContainsAny(branch, "\x00\n\r") {
+		return false
+	}
+	check := exec.CommandContext(ctx, "git", "-C", repo, "check-ref-format", "--branch", branch)
+	check.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	return check.Run() == nil
 }
 
 func shortSHA(sha string) string {
@@ -1144,8 +1188,10 @@ func (s *Service) DryRun(ctx context.Context, id string) (DryRunResult, error) {
 }
 
 // DryRunDir previews adoption from an explicit run directory. It never opens
-// a store, acquires a lease, calls a host adapter, or writes to the directory;
-// callers can safely point it at a scrubbed copy of a live run.
+// a store, acquires a lease, calls a host adapter, or writes to the run
+// directory. When the run records a local checkout, it may fetch the target
+// branch there to obtain integration evidence; callers should use a disposable
+// checkout when that mutation is undesirable.
 func (s *Service) DryRunDir(ctx context.Context, dir string) (DryRunResult, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -1176,7 +1222,7 @@ func (s *Service) DryRunDir(ctx context.Context, dir string) (DryRunResult, erro
 	} else {
 		result.Verdict = "SAFE"
 	}
-	result.Moves = append(result.Moves, "adoption: no integrate, complete, release, retry, stop, or host state.json write")
+	result.Moves = append(result.Moves, "adoption: no integrate, complete, release, retry, stop, or host state.json write; local target fetch may update the recorded checkout")
 	return result, nil
 }
 
@@ -1268,7 +1314,7 @@ func previewLane(r Run, ln Lane) DryRunLane {
 	case report == "done" || report == "no-change":
 		if r.IntegrationError != "" {
 			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
-		} else if ln.IntegrationReason != "" {
+		} else if integrationJudgmentApplies(ln) && ln.IntegrationReason != "" {
 			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
 		} else if ln.HoldAdvance || sweOnly(r, ln) {
 			p.Move, p.Gate, p.EvidencePresent = "judge", mergeGate(r), mergeGateEvidence(r, ln)
@@ -1284,6 +1330,14 @@ func previewLane(r Run, ln Lane) DryRunLane {
 		p.Move, p.Reason = "wait", "no terminal handback or actionable report evidence"
 	}
 	return p
+}
+
+// Integration evidence decides only whether a terminal lane is already
+// integrated. A completed report from a lane with another recipe phase ahead
+// of it must still advance through that phase when the checkout was inspected;
+// an unavailable checkout or failed fetch is a safe judgment for every lane.
+func integrationJudgmentApplies(ln Lane) bool {
+	return strings.EqualFold(strings.TrimSpace(ln.Status), "done") || strings.TrimSpace(ln.Next) == ""
 }
 
 func integrationJudgeReason(r Run, ln Lane) string {
