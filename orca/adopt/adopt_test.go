@@ -2,6 +2,8 @@ package adopt
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -13,10 +15,185 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/recipe"
+	"github.com/bazelment/yoloswe/orca/store"
 )
 
 const testRun = "20261113-000000-host"
+
+// TestDryRunDirFixtures is deliberately built from scrubbed ledger shapes. It
+// exercises both host formats without reading any real ~/.swarm or checkout
+// run, and proves the preview does not touch files, store rows, or adapters.
+func TestDryRunDirFixtures(t *testing.T) {
+	t.Parallel()
+	//nolint:govet // table keeps each scrubbed run fixture and expected verdict together.
+	fixtures := []struct {
+		name, format, verdict string
+		make                  func(*testing.T) string
+	}{
+		{"subagent no-pr hold", FormatSubagentSwarm, "SAFE", fixtureSubagentNoPRHold},
+		{"subagent pr", FormatSubagentSwarm, "MOVES: lane-pr:integrate", fixtureSubagentPR},
+		{"nebula active", FormatNebulaSwarm, "SAFE", fixtureNebulaActive},
+		{"nebula closed", FormatNebulaSwarm, "SAFE", fixtureNebulaClosed},
+	}
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tc.make(t)
+			beforeFiles := hashRunFiles(t, dir)
+			clk := clock.NewFakeClock(time.Date(2026, 11, 15, 5, 0, 0, 0, time.UTC))
+			st := store.NewMemoryStore(clk)
+			t.Cleanup(func() { _ = st.Close() })
+			if err := st.Runs().Create(t.Context(), store.Run{ID: "store-row", Objective: "must remain"}); err != nil {
+				t.Fatal(err)
+			}
+			beforeRows, err := st.Runs().List(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			label := &dryRunMutationLabeler{t: t}
+			watcher := &dryRunMutationWatcher{t: t}
+			svc := &Service{Labeler: label, Watcher: watcher, Driver: dryRunMutationDriver{t: t}, Importer: Importer{Roots: []string{t.TempDir()}}}
+			result, err := svc.DryRunDir(t.Context(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Run.Format != tc.format {
+				t.Fatalf("format = %q, want %q", result.Run.Format, tc.format)
+			}
+			if result.Verdict != tc.verdict {
+				t.Fatalf("verdict = %q, want %q; result=%+v", result.Verdict, tc.verdict, result)
+			}
+			if len(result.Lanes) != 1 {
+				t.Fatalf("lanes = %+v, want one lane", result.Lanes)
+			}
+			ln := result.Lanes[0]
+			if ln.Phase == "" || ln.Status == "" || len(ln.Evidence) == 0 || ln.Move == "" || ln.Reason == "" {
+				t.Fatalf("lane preview lacks phase/status/evidence/move/reason: %+v", ln)
+			}
+			afterFiles := hashRunFiles(t, dir)
+			if !reflect.DeepEqual(afterFiles, beforeFiles) {
+				t.Fatalf("run files changed:\n before=%v\n after=%v", beforeFiles, afterFiles)
+			}
+			afterRows, err := st.Runs().List(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(afterRows, beforeRows) {
+				t.Fatalf("store rows changed:\n before=%v\n after=%v", beforeRows, afterRows)
+			}
+		})
+	}
+}
+
+type dryRunMutationLabeler struct{ t *testing.T }
+
+func (f *dryRunMutationLabeler) RunOrchestrator(context.Context, string) (string, error) {
+	return "claude", nil
+}
+
+func (f *dryRunMutationLabeler) SetRunOrchestrator(context.Context, string, string) error {
+	f.t.Fatal("dry run called Nebula label mutation")
+	return nil
+}
+
+type dryRunMutationWatcher struct{ t *testing.T }
+
+func (f *dryRunMutationWatcher) Running(context.Context, string) ([]int, error) { return []int{1}, nil }
+func (f *dryRunMutationWatcher) Stop(context.Context, []int) error {
+	f.t.Fatal("dry run stopped a host watcher")
+	return nil
+}
+func (f *dryRunMutationWatcher) Start(context.Context, string) error {
+	f.t.Fatal("dry run started a host watcher")
+	return nil
+}
+
+type dryRunMutationDriver struct{ t *testing.T }
+
+func (f dryRunMutationDriver) Start(context.Context, Run) error {
+	f.t.Fatal("dry run started a lane driver")
+	return nil
+}
+func (f dryRunMutationDriver) Stop(context.Context, Run) error {
+	f.t.Fatal("dry run stopped a lane driver")
+	return nil
+}
+
+func hashRunFiles(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		out[rel] = hex.EncodeToString(sum[:])
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func fixtureSubagentNoPRHold(t *testing.T) string {
+	dir := filepath.Join(t.TempDir(), ".shared", "subagent-swarm", "copied-subagent-no-pr")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"hold no-pr","no_pr":true,"phases":[{"name":"swe"}]},"tasks":[{"id":"lane-hold","title":"hold","phase":"swe","status":"running","round":1}]}`)
+	write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: hold no-pr\nNext: owner judgment\n")
+	write(t, filepath.Join(dir, "lane-hold.swe.md"), "Outcome: done\nHEAD: scrubbed\n")
+	write(t, filepath.Join(dir, "lane-hold.hold-advance"), "owner must approve the advance\n")
+	return dir
+}
+
+func fixtureSubagentPR(t *testing.T) string {
+	dir := filepath.Join(t.TempDir(), ".shared", "subagent-swarm", "copied-subagent-pr")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"pr review","phases":[{"name":"swe"},{"name":"review"}]},"tasks":[{"id":"lane-pr","title":"pr","phase":"review","status":"running","round":1}]}`)
+	write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: pr review\nMerge rule: integrate after review\n")
+	write(t, filepath.Join(dir, "lane-pr.review.md"), "Outcome: done\nPR: 42\nHEAD: scrubbed\n")
+	return dir
+}
+
+func fixtureNebulaActive(t *testing.T) string {
+	dir := filepath.Join(t.TempDir(), ".swarm", "copied-nebula-active")
+	if err := os.MkdirAll(filepath.Join(dir, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"active nebula","orchestrator_session_id":"scrubbed-session","phases":[{"name":"swe"}]},"tasks":[{"id":"lane-active","title":"active","phase":"swe","status":"running","round":1,"session_id":"scrubbed-lane","terminals":{"swe":{"1":"scrubbed-terminal"}},"terminal_state":"working"}]}`)
+	write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: active nebula\n")
+	write(t, filepath.Join(dir, "EVENTS"), "2026-11-15T05:00:00Z\tlane-active\tstarted\tworking\n")
+	write(t, filepath.Join(dir, "reports", "lane-active.swe.r1.md"), "Outcome: done\nHEAD: scrubbed\n")
+	return dir
+}
+
+func fixtureNebulaClosed(t *testing.T) string {
+	dir := filepath.Join(t.TempDir(), ".swarm", "copied-nebula-closed")
+	if err := os.MkdirAll(filepath.Join(dir, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"closed nebula","orchestrator_session_id":"scrubbed-session","phases":[{"name":"review"}]},"tasks":[{"id":"lane-closed","title":"closed","phase":"review","status":"done","round":1,"terminals":{"review":{"1":"scrubbed-terminal"}}}]}`)
+	write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: closed nebula\nNext: done\n")
+	write(t, filepath.Join(dir, "EVENTS"), "2026-11-15T05:00:00Z\tlane-closed\tcompleted\tdone\n")
+	write(t, filepath.Join(dir, "reports", "lane-closed.review.r1.md"), "Outcome: done\nHEAD: scrubbed\n")
+	return dir
+}
 
 var errInjected = errors.New("injected")
 

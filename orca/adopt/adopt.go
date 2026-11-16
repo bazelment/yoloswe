@@ -15,6 +15,7 @@
 package adopt
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -785,9 +786,26 @@ type Service struct {
 
 // DryRunResult describes the first adoption ticks without taking a lease or
 // starting a controller.
+//
+//nolint:govet // result groups the imported run, lane evidence, and report lines.
 type DryRunResult struct {
-	Run   Run
-	Moves []string
+	Run     Run
+	Lanes   []DryRunLane
+	Moves   []string
+	Verdict string
+}
+
+// DryRunLane is the evidence and first-tick action a read-only adoption
+// preview derives for one imported lane.
+//
+//nolint:govet // lane preview fields are intentionally grouped for report output.
+type DryRunLane struct {
+	ID       string
+	Phase    string
+	Status   string
+	Evidence []string
+	Move     string
+	Reason   string
 }
 
 // DryRun replays adoption's observe-first boundary from the host files only.
@@ -798,13 +816,88 @@ func (s *Service) DryRun(ctx context.Context, id string) (DryRunResult, error) {
 	if err != nil {
 		return DryRunResult{}, err
 	}
+	return s.DryRunDir(ctx, dir)
+}
+
+// DryRunDir previews adoption from an explicit run directory. It never opens
+// a store, acquires a lease, calls a host adapter, or writes to the directory;
+// callers can safely point it at a scrubbed copy of a live run.
+func (s *Service) DryRunDir(_ context.Context, dir string) (DryRunResult, error) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return DryRunResult{}, fmt.Errorf("%w: empty run directory", ErrRunNotFound)
+	}
+	dir = filepath.Clean(dir)
 	r, err := Read(dir)
 	if err != nil {
 		return DryRunResult{}, err
 	}
-	moves := []string{"observe-first: read OBJECTIVE.md, CONTEXT.md, hold-advance files, and no-PR configuration"}
-	moves = append(moves, "observe-first: no integrate, complete, release, retry, stop, or host state.json write")
-	return DryRunResult{Run: r, Moves: moves}, nil
+	result := DryRunResult{Run: r, Moves: []string{"observe-first: read OBJECTIVE.md, CONTEXT.md, hold-advance files, and no-PR configuration"}}
+	mutating := make([]string, 0)
+	for i := range r.Lanes {
+		preview := previewLane(r, r.Lanes[i])
+		result.Lanes = append(result.Lanes, preview)
+		if preview.Move != "none" && preview.Move != "wait" {
+			mutating = append(mutating, preview.ID+":"+preview.Move)
+		}
+	}
+	if len(mutating) == 0 {
+		result.Verdict = "SAFE"
+	} else {
+		result.Verdict = "MOVES: " + strings.Join(mutating, ", ")
+	}
+	result.Moves = append(result.Moves, "observe-first: no integrate, complete, release, retry, stop, or host state.json write")
+	return result, nil
+}
+
+func previewLane(r Run, ln Lane) DryRunLane {
+	p := DryRunLane{ID: ln.ID, Phase: cmp.Or(ln.Phase, "unknown"), Status: cmp.Or(ln.Status, "unknown"), Move: "none"}
+	p.Evidence = append(p.Evidence, "format="+r.Format, "phase="+p.Phase, "status="+p.Status)
+	if ln.TerminalState != "" {
+		p.Evidence = append(p.Evidence, "terminal_state="+ln.TerminalState)
+	}
+	if ln.Report != "" {
+		p.Evidence = append(p.Evidence, "report="+ln.Report)
+	}
+	if ln.LastEvent != "" {
+		p.Evidence = append(p.Evidence, "event="+ln.LastEvent)
+	}
+	if ln.Next != "" {
+		p.Evidence = append(p.Evidence, "next="+ln.Next)
+	}
+	if ln.PR != "" {
+		p.Evidence = append(p.Evidence, "pr=#"+ln.PR)
+	}
+	if r.NoPR {
+		p.Evidence = append(p.Evidence, "no-PR run")
+	}
+	if ln.HoldAdvance {
+		p.Evidence = append(p.Evidence, "hold-advance file present")
+		p.Move, p.Reason = "wait", "hold-advance requires an owner judgment"
+		return p
+	}
+	if r.State == RunFinished || strings.EqualFold(ln.Status, "done") || strings.EqualFold(ln.Status, "failed") || strings.EqualFold(ln.Status, "needs-human") {
+		p.Reason = "run or lane is already terminal; no lifecycle move"
+		return p
+	}
+	if strings.EqualFold(ln.TerminalState, "working") || strings.EqualFold(ln.TerminalState, "busy") {
+		p.Move, p.Reason = "wait", "terminal is working; adoption must not complete, release, or stop it"
+		return p
+	}
+	report := strings.ToLower(ln.Report)
+	switch {
+	case strings.Contains(report, "failed"), strings.Contains(report, "failure"):
+		p.Move, p.Reason = "retry", "lane report records failure and the lane is still active"
+	case strings.Contains(report, "done"), strings.Contains(report, "pass"), strings.Contains(report, "complete"):
+		if !r.NoPR && (strings.EqualFold(ln.Phase, "review") || strings.EqualFold(ln.Phase, "clean")) && r.IntegrateRule != "" {
+			p.Move, p.Reason = "integrate", "completed report plus the run integrate rule permits the merge path"
+		} else {
+			p.Move, p.Reason = "advance", "completed report permits the next recipe phase"
+		}
+	default:
+		p.Move, p.Reason = "wait", "no terminal handback or actionable report evidence"
+	}
+	return p
 }
 
 const defaultLoopVerifyInterval = 50 * time.Millisecond
