@@ -1871,6 +1871,9 @@ func (c *Controller) handleEvent(ctx context.Context, ev *store.Event) (store.Ev
 			if err != nil {
 				return store.EventClassUnclassified, err
 			}
+			if ln.Status != lane.StatusRunning || ln.Phase != recipe.PhaseIntegrate {
+				return store.EventClassAuto, nil
+			}
 			r, err := c.resolveRecipe(ctx, ln)
 			if err != nil {
 				return store.EventClassUnclassified, err

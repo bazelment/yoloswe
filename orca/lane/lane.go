@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -574,11 +575,16 @@ func IsBusyProcess(cmd string) bool {
 // the intentional agy idle state while a timer or background task is active.
 func WorkingInputWaiting(text string) bool {
 	lower := strings.ToLower(text)
-	return strings.Contains(lower, "timer running") ||
-		strings.Contains(lower, "checking back in") ||
-		strings.Contains(lower, "task(s)") ||
-		strings.Contains(lower, "task-")
+	if strings.Contains(lower, "timer running") {
+		return true
+	}
+	return strings.Contains(lower, "checking back in") && activeTaskIDPattern.MatchString(lower) || activeTaskCountPattern.MatchString(lower)
 }
+
+var (
+	activeTaskIDPattern    = regexp.MustCompile(`\(task-\d+\)`)
+	activeTaskCountPattern = regexp.MustCompile(`[1-9]\d* task\(s\)`)
+)
 
 type Driver = LaneDriver
 

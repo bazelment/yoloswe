@@ -1471,9 +1471,6 @@ func (d *Dispatcher) applyLaneSteer(ctx context.Context, runID string, view *Sta
 			return "", err
 		}
 	}
-	if ln.Status == lane.StatusBlocked {
-		ln.Status = lane.StatusRunning
-	}
 	ln.LastEventAt = d.clock.Now().UTC()
 	if err := d.store.Lanes().Upsert(ctx, ln); err != nil {
 		return "", err
@@ -1519,17 +1516,24 @@ func (d *Dispatcher) applyLaneForward(ctx context.Context, runID string, view *S
 			return "", err
 		}
 	}
-	if target.Status == lane.StatusBlocked {
-		target.Status = lane.StatusRunning
-	}
 	target.LastEventAt = d.clock.Now().UTC()
 	if err := d.store.Lanes().Upsert(ctx, target); err != nil {
 		return "", err
 	}
-	if from != "" {
-		return fmt.Sprintf("forwarded finding from lane %s to lane %s", from, target.ID), nil
+	resolved, err := d.resolveOrcaEscalation(ctx, runID, &target, "forward")
+	if err != nil {
+		return "", err
 	}
-	return fmt.Sprintf("forwarded finding to lane %s", target.ID), nil
+	result := ""
+	if from != "" {
+		result = fmt.Sprintf("forwarded finding from lane %s to lane %s", from, target.ID)
+	} else {
+		result = fmt.Sprintf("forwarded finding to lane %s", target.ID)
+	}
+	if resolved != "" {
+		result = resolved + "; " + result
+	}
+	return result, nil
 }
 
 func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *StateView, p LaneRetryParams) (string, error) {

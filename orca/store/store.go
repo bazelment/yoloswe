@@ -631,6 +631,7 @@ func IsInternalDirective(d Directive) bool {
 	ref := strings.TrimSpace(d.Ref)
 	return strings.HasPrefix(ref, "owner_ask:") ||
 		strings.HasPrefix(ref, "named-wait:") ||
+		strings.HasPrefix(ref, "integrate-recovery:") ||
 		strings.HasPrefix(ref, "planner_request:") ||
 		ref == "chat:control"
 }

@@ -41,6 +41,11 @@ func TestWorkingInputWaitingRequiresActiveWork(t *testing.T) {
 	if lane.WorkingInputWaiting("waiting for input >") {
 		t.Fatal("ordinary input.waiting screen was treated as active work")
 	}
+	for _, screen := range []string{"0 task(s)", "task-runner.go", "task-656"} {
+		if lane.WorkingInputWaiting(screen) {
+			t.Fatalf("stale screen %q was treated as active work", screen)
+		}
+	}
 }
 
 func TestLaneAttemptKeysAndValidation(t *testing.T) {
