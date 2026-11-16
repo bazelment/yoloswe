@@ -698,7 +698,7 @@ func importLane(dir string, l *ledgerLane) Lane {
 	x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: l.Status, Round: l.Round,
 		HostHold: firstNonEmpty(l.BlockedOn, l.HoldNote, l.Hold, l.Park, l.Note), PRDraft: l.PRDraft || l.Draft,
 		PRState: l.PRState, MergeSHA: l.MergeSHA, Head: l.Head, Checks: l.Checks}
-	x.PRDraft = x.PRDraft || strings.Contains(strings.ToLower(strings.TrimSpace(x.PRState)), "draft")
+	x.PRDraft = x.PRDraft || isDraftPR(x.PRState)
 	phase, sp := newestSpawn(dir, l.ID, l.Phase)
 	// The ledger records a terminal restart after spawn.json was written, so
 	// its session and terminal are the newer ones when set.
@@ -725,6 +725,10 @@ func importLane(dir string, l *ledgerLane) Lane {
 	}
 	applyReportMetadata(&x, report)
 	return x
+}
+
+func isDraftPR(state string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(state)), "draft")
 }
 
 // newestSpawn returns the phase and contents of the lane's most recently
@@ -1035,7 +1039,7 @@ func previewLane(r Run, ln Lane) DryRunLane {
 		p.Move, p.Reason = "wait", "lane report requires owner judgment"
 	case report == "done" || report == "no-change":
 		if ln.HoldAdvance || sweOnly(r, ln) {
-			p.Move, p.Gate, p.EvidencePresent = "judge", mergeGate(r, ln), mergeGateEvidence(r, ln)
+			p.Move, p.Gate, p.EvidencePresent = "judge", mergeGate(r), mergeGateEvidence(r, ln)
 			p.Reason = fmt.Sprintf("%s evidence=%s", p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
 		} else if !r.NoPR && (strings.EqualFold(ln.Phase, "review") || strings.EqualFold(ln.Phase, "clean")) && r.IntegrateRule != "" {
 			p.Move, p.Reason = "integrate", "completed report plus the run integrate rule permits the merge path"
@@ -1087,7 +1091,7 @@ func sweOnly(r Run, ln Lane) bool {
 	return len(r.Phases) == 0 && strings.EqualFold(strings.TrimSpace(ln.Phase), "swe") && strings.TrimSpace(ln.Next) == ""
 }
 
-func mergeGate(r Run, ln Lane) string {
+func mergeGate(r Run) string {
 	if gate := strings.TrimSpace(r.IntegrateRule); gate != "" {
 		return clip(gate, 180)
 	}

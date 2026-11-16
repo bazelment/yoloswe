@@ -156,7 +156,7 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 			Session: t.SessionID, Terminal: t.Terminals[t.Phase][strconv.Itoa(round)], TerminalState: t.TerminalState,
 			HostHold: firstNonEmpty(t.BlockedOn, t.HoldNote, t.Hold, t.Park, t.Note), PRDraft: t.PRDraft || t.Draft,
 			PRState: t.PRState, MergeSHA: t.MergeSHA, Head: t.Head, Checks: t.Checks}
-		x.PRDraft = x.PRDraft || strings.Contains(strings.ToLower(strings.TrimSpace(x.PRState)), "draft")
+		x.PRDraft = x.PRDraft || isDraftPR(x.PRState)
 		if t.PR > 0 {
 			x.PR = strconv.Itoa(t.PR)
 		}
@@ -191,7 +191,6 @@ func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
 			x.Report = reportHeadline(report)
 			applyReportMetadata(x, report)
 		}
-		x.HostHold = hostHoldReason(dir, x.ID, x.HostHold)
 		x.Next = laneNext(x, phases, escalations, progress)
 	}
 }
