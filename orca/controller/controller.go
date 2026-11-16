@@ -689,7 +689,7 @@ func (c *Controller) hasExistingLaneReport(ctx context.Context, ev lane.Event) b
 	return false
 }
 
-var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
+var ansiEscapePattern = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[ -/]*[@-~])`) //nolint:gocritic // ECMA-48 defines space-to-slash as the intermediate-byte range.
 
 const waitingInputTailBytes = 1536
 
@@ -1469,12 +1469,13 @@ func (c *Controller) recoverPendingState(ctx context.Context) error {
 		if ev.Kind == store.EventPhaseExit && ev.LaneID != "" {
 			var payload PhaseExitPayload
 			if json.Unmarshal(ev.Payload, &payload) == nil && payload.Kind == lane.EventWaitingForInput {
-				if lane.WorkingInputWaiting(payload.Error) {
+				ln, running := runningByID[ev.LaneID]
+				if ev.Class == store.EventClassAuto || !running || ln.AwaitingInputSince.IsZero() || lane.WorkingInputWaiting(payload.Error) {
 					continue
 				}
-				termID := strings.TrimSpace(payload.TerminalID)
-				if termID == "" {
-					termID = strings.TrimSpace(runningByID[ev.LaneID].TerminalID)
+				termID := cmp.Or(strings.TrimSpace(payload.TerminalID), strings.TrimSpace(ln.TerminalID))
+				if termID != strings.TrimSpace(ln.TerminalID) || c.stoppedTerminals[termID] {
+					continue
 				}
 				tail := waitingInputTail(payload.Error)
 				ev.ID = waitingInputEventID(ev.LaneID, termID, tail)
@@ -2766,6 +2767,10 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		tail := waitingInputTail(payload.Error)
 		termID := cmp.Or(strings.TrimSpace(payload.TerminalID), strings.TrimSpace(ln.TerminalID))
 		ev.ID = waitingInputEventID(ln.ID, termID, tail)
+		// A replay of an answered question must not restore the waiting marker.
+		if c.isEventHandled(ev.ID) {
+			return store.EventClassAuto, nil
+		}
 		ev.Summary = waitingInputSummary(ln.ID, tail)
 		ev.Urgent = true
 		if ln.AwaitingInputSince.IsZero() {
