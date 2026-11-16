@@ -643,6 +643,10 @@ func applyIntegrationEvidence(ctx context.Context, r *Run) {
 		r.IntegrationError = "fetched target " + target + " is unavailable"
 		return
 	}
+	var targetSubjects []string
+	if out, err := exec.CommandContext(ctx, "git", "-C", r.RepoPath, "log", "--format=%s", targetRef).Output(); err == nil {
+		targetSubjects = strings.Split(string(out), "\n")
+	}
 	for i := range r.Lanes {
 		ln := &r.Lanes[i]
 		if integratedLane(*ln) {
@@ -667,14 +671,12 @@ func applyIntegrationEvidence(ctx context.Context, r *Run) {
 			continue
 		}
 		if pr := strings.TrimSpace(ln.PR); pr != "" {
-			if out, err := exec.CommandContext(ctx, "git", "-C", r.RepoPath, "log", "--format=%s", targetRef).Output(); err == nil {
-				suffix := "(#" + pr + ")"
-				for _, subject := range strings.Split(string(out), "\n") {
-					if strings.HasSuffix(strings.TrimSpace(subject), suffix) {
-						ln.Integrated = true
-						ln.IntegrationReason = fmt.Sprintf("integration gate: target %s has squash subject ending %s", target, suffix)
-						break
-					}
+			suffix := "(#" + pr + ")"
+			for _, subject := range targetSubjects {
+				if strings.HasSuffix(strings.TrimSpace(subject), suffix) {
+					ln.Integrated = true
+					ln.IntegrationReason = fmt.Sprintf("integration gate: target %s has squash subject ending %s", target, suffix)
+					break
 				}
 			}
 		}
@@ -1271,8 +1273,6 @@ func previewLane(r Run, ln Lane) DryRunLane {
 		} else if ln.HoldAdvance || sweOnly(r, ln) {
 			p.Move, p.Gate, p.EvidencePresent = "judge", mergeGate(r), mergeGateEvidence(r, ln)
 			p.Reason = fmt.Sprintf("%s evidence=%s", p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
-		} else if strings.EqualFold(ln.Status, "done") && (r.IntegrationError != "" || ln.IntegrationReason != "") {
-			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
 		} else if !r.NoPR && (strings.EqualFold(ln.Phase, "review") || strings.EqualFold(ln.Phase, "clean")) && r.IntegrateRule != "" {
 			p.Move, p.Reason = "integrate", "completed report plus the run integrate rule permits the merge path"
 		} else if strings.EqualFold(ln.Status, "done") {
