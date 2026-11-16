@@ -2048,10 +2048,12 @@ func (p *Planner) AskWithFindings(ctx context.Context, runID, question, findings
 			if err != nil {
 				return "", err
 			}
-			_, _ = recordProposal(callCtx, ProposeWorkParams{
+			if _, err := recordProposal(callCtx, ProposeWorkParams{
 				Question:    propSummary,
 				Description: string(rawRec),
-			})
+			}); err != nil {
+				return "", err
+			}
 		}
 		return FormatReconciliationSummary(runID, effectiveRef, cp, AppliedChanges{}), nil
 	}, recordProposal)

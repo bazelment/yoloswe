@@ -63,7 +63,7 @@ func IsPlannerChatQuestion(text string) bool {
 	if l == "" {
 		return false
 	}
-	for _, marker := range []string{"?", "research", "think about", "what's the best", "what is the best", "how should", "how can", "trade-off", "tradeoff", "design", "pros and cons", "should we"} {
+	for _, marker := range []string{"research", "think about", "what's the best", "what is the best", "how should", "how can", "trade-off", "tradeoff", "design question", "pros and cons", "should we"} {
 		if strings.Contains(l, marker) {
 			return true
 		}
