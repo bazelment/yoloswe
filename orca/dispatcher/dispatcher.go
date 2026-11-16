@@ -1472,14 +1472,19 @@ func (d *Dispatcher) applyLaneSteer(ctx context.Context, runID string, view *Sta
 			return "", err
 		}
 	}
-	if ln.Status == lane.StatusBlocked {
-		ln.Status = lane.StatusRunning
-	}
 	ln.LastEventAt = d.clock.Now().UTC()
 	if err := d.store.Lanes().Upsert(ctx, ln); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("steered lane %s", ln.ID), nil
+	resolved, err := d.resolveOrcaEscalation(ctx, runID, &ln, "steer")
+	if err != nil {
+		return "", err
+	}
+	result := fmt.Sprintf("steered lane %s", ln.ID)
+	if resolved != "" {
+		result = resolved + "; " + result
+	}
+	return result, nil
 }
 
 func (d *Dispatcher) applyLaneForward(ctx context.Context, runID string, view *StateView, p LaneForwardParams) (string, error) {
@@ -1512,17 +1517,24 @@ func (d *Dispatcher) applyLaneForward(ctx context.Context, runID string, view *S
 			return "", err
 		}
 	}
-	if target.Status == lane.StatusBlocked {
-		target.Status = lane.StatusRunning
-	}
 	target.LastEventAt = d.clock.Now().UTC()
 	if err := d.store.Lanes().Upsert(ctx, target); err != nil {
 		return "", err
 	}
-	if from != "" {
-		return fmt.Sprintf("forwarded finding from lane %s to lane %s", from, target.ID), nil
+	resolved, err := d.resolveOrcaEscalation(ctx, runID, &target, "forward")
+	if err != nil {
+		return "", err
 	}
-	return fmt.Sprintf("forwarded finding to lane %s", target.ID), nil
+	result := ""
+	if from != "" {
+		result = fmt.Sprintf("forwarded finding from lane %s to lane %s", from, target.ID)
+	} else {
+		result = fmt.Sprintf("forwarded finding to lane %s", target.ID)
+	}
+	if resolved != "" {
+		result = resolved + "; " + result
+	}
+	return result, nil
 }
 
 func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *StateView, p LaneRetryParams) (string, error) {
@@ -1610,10 +1622,22 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 	if err := d.store.Lanes().Upsert(ctx, ln); err != nil {
 		return "", err
 	}
-	if selectedModel != "" {
-		return fmt.Sprintf("retried lane %s in phase %s (round %d, model=%s)", ln.ID, targetPhase.Name, round, selectedModel), nil
+	resolved, err := d.resolveOrcaEscalation(ctx, runID, &ln, "retry")
+	if err != nil {
+		return "", err
 	}
-	return fmt.Sprintf("retried lane %s in phase %s (round %d)", ln.ID, targetPhase.Name, round), nil
+	if selectedModel != "" {
+		result := fmt.Sprintf("retried lane %s in phase %s (round %d, model=%s)", ln.ID, targetPhase.Name, round, selectedModel)
+		if resolved != "" {
+			result = resolved + "; " + result
+		}
+		return result, nil
+	}
+	result := fmt.Sprintf("retried lane %s in phase %s (round %d)", ln.ID, targetPhase.Name, round)
+	if resolved != "" {
+		result = resolved + "; " + result
+	}
+	return result, nil
 }
 
 func (d *Dispatcher) spawnLaneSession(
@@ -1768,7 +1792,61 @@ func (d *Dispatcher) applyLaneWait(ctx context.Context, runID string, view *Stat
 	if err := d.store.Directives().Add(ctx, dir); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("recorded expected wait on lane %s until %s (%s)", ln.ID, dl.Format(time.RFC3339), dir.Text), nil
+	resolved, err := d.resolveOrcaEscalation(ctx, runID, &ln, "expected wait")
+	if err != nil {
+		return "", err
+	}
+	result := fmt.Sprintf("recorded expected wait on lane %s until %s (%s)", ln.ID, dl.Format(time.RFC3339), dir.Text)
+	if resolved != "" {
+		result = resolved + "; " + result
+	}
+	return result, nil
+}
+
+// resolveOrcaEscalation closes an owner question created by the adopted-run
+// supervisor for an Orca lane.escalate decision. A later dispatcher decision
+// owns the lane again, so leaving the stale question open would incorrectly
+// keep the lane blocked and ask the owner to repeat an engineering choice.
+func (d *Dispatcher) resolveOrcaEscalation(ctx context.Context, runID string, ln *lane.Lane, action string) (string, error) {
+	if ln == nil {
+		return "", nil
+	}
+	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, Scope: ln.ID, ActiveOnly: true})
+	if err != nil {
+		return "", err
+	}
+	var asks []store.Directive
+	for i := range dirs {
+		dir := dirs[i]
+		if !strings.HasPrefix(dir.Ref, ownerAskRefPrefix) || !strings.HasPrefix(strings.TrimPrefix(dir.Ref, ownerAskRefPrefix), "escalation-") {
+			continue
+		}
+		asks = append(asks, dir)
+	}
+	if len(asks) == 0 {
+		return "", nil
+	}
+	if ln.Status == lane.StatusBlocked {
+		ln.Status = lane.StatusRunning
+		ln.LastEventAt = d.clock.Now().UTC()
+		if err := d.store.Lanes().Upsert(ctx, *ln); err != nil {
+			return "", err
+		}
+	}
+	resolvedIDs := make([]string, 0, len(asks))
+	for i := range asks {
+		dir := &asks[i]
+		askID := strings.TrimPrefix(dir.Ref, ownerAskRefPrefix)
+		if err := d.store.Directives().UpdateStatus(ctx, runID, dir.ID, store.DirectiveHandled); err != nil {
+			return "", err
+		}
+		resolvedIDs = append(resolvedIDs, askID)
+		resolved := fmt.Sprintf("resolved %s myself: %s", askID, action)
+		if _, err := d.store.Notes().Append(ctx, store.RunNote{ID: "resolve-" + askID, RunID: runID, TaskID: ln.ID, Text: resolved}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return "", err
+		}
+	}
+	return fmt.Sprintf("resolved %s myself: %s", strings.Join(resolvedIDs, ", "), action), nil
 }
 
 func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, state *turnExecState, view *StateView, p OwnerAskParams) (string, error) {

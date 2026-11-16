@@ -1790,8 +1790,8 @@ func TestIntegrateIntentSurvivesCrash(t *testing.T) {
 	ctrl = controller.New(controller.Config{RunID: "run-1", HolderID: "replacement"}, st, d, clk, judge)
 	mustStep(t, ctrl)
 	got, err := st.Lanes().Get(t.Context(), "run-1", "worker")
-	if err != nil || got.Status != lane.StatusBlocked || len(base.PhaseStarts) != 1 {
-		t.Fatalf("uncertain integrate must escalate without relaunch: lane=%+v starts=%d err=%v", got, len(base.PhaseStarts), err)
+	if err != nil || got.Status != lane.StatusRunning || len(base.PhaseStarts) != 2 {
+		t.Fatalf("interrupted integrate intent must retry: lane=%+v starts=%d err=%v", got, len(base.PhaseStarts), err)
 	}
 	decs, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: "run-1"})
 	if err != nil {

@@ -1407,6 +1407,31 @@ func TestWatchUniformEventKinds(t *testing.T) {
 	}
 }
 
+func TestWatchIgnoresInputWaitingWhileBackgroundTaskIsCheckingIn(t *testing.T) {
+	t.Parallel()
+	srv := newFakeNebulaServer(t)
+	drv, _, st := newTestDriver(t, srv, nebula.WithAPIURL(srv.srv.URL))
+	payload, err := json.Marshal(nebula.StreamEventPayload{TerminalEvent: &nebula.TerminalEvent{
+		Type:            "input.waiting",
+		AgentState:      "idle",
+		Text:            "checking back in 240s (task-656)\n1 task(s)\n> ",
+		BackgroundTasks: json.RawMessage(`{"tasks":[{"id":"task-656"}]}`),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Events().Append(t.Context(), store.Event{RunID: "run-waiting", LaneID: "soak", Kind: store.EventStall, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancel()
+	select {
+	case ev := <-drv.Watch(ctx, "run-waiting"):
+		t.Fatalf("working input.waiting became lane event %q", ev.Kind)
+	case <-ctx.Done():
+	}
+}
+
 func TestStartPhaseTerminalStopsPreviousAndPrehandoverTerminalsAndRefusesStaleSteer(t *testing.T) {
 	srv := newFakeNebulaServer(t)
 	t.Setenv(nebula.EnvSessionID, "sess-host")

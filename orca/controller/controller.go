@@ -52,7 +52,11 @@ const (
 const (
 	ownerAskRefPrefix = "owner_ask:"
 	// NamedWaitRefPrefix is the directive Ref prefix for lane/run expected waits.
-	NamedWaitRefPrefix = "named-wait:"
+	NamedWaitRefPrefix           = "named-wait:"
+	integrateRecoveryRefPrefix   = "integrate-recovery:"
+	integrateRecoveryReadyPrefix = "integrate recovery ready:"
+	integrateRecoveryMaxAttempts = 3
+	integrateRecoveryBackoff     = time.Second
 )
 
 // ErrControllerStopped is returned when Step or Run is called on a killed controller.
@@ -463,6 +467,11 @@ func (c *Controller) forwardLaneEvents(ctx context.Context, ch <-chan lane.Event
 }
 
 func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
+	if ev.Kind == lane.EventWaitingForInput && lane.WorkingInputWaiting(ev.Text) {
+		// agy can report input.waiting while its own timer/background task is
+		// active. That is a working heartbeat, never a phase exit or stop cue.
+		return true
+	}
 	// Drivers may report run-wide silence. Apply it only to lanes that were
 	// already quiet at Since, retaining each terminal's identity for stale checks.
 	if ev.Kind == lane.EventNoActivity && ev.LaneID == "" {
@@ -746,6 +755,9 @@ func (c *Controller) Step(ctx context.Context) error {
 	if err := c.checkNamedWaits(ctx); err != nil {
 		return err
 	}
+	if err := c.checkIntegrateRecovery(ctx); err != nil {
+		return err
+	}
 	if err := c.checkOwnerAsks(ctx); err != nil {
 		return err
 	}
@@ -791,6 +803,42 @@ func (c *Controller) checkNamedWaits(ctx context.Context) error {
 			continue
 		}
 		_, err := c.store.Events().Append(ctx, store.Event{ID: "expired-" + dir.ID, RunID: c.cfg.RunID, LaneID: dir.Scope, Kind: store.EventTimer, Class: store.EventClassJudgment, Urgent: true, Summary: "wait deadline: " + dir.Text})
+		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return err
+		}
+		if err := c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dir.ID, store.DirectiveHandled); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Controller) checkIntegrateRecovery(ctx context.Context) error {
+	dirs, err := c.store.Directives().List(ctx, store.DirectiveFilter{RunID: c.cfg.RunID, ActiveOnly: false})
+	if err != nil {
+		return err
+	}
+	now := c.clock.Now().UTC()
+	for i := range dirs {
+		dir := &dirs[i]
+		if dir.Status != store.DirectiveActive || !strings.HasPrefix(dir.Ref, integrateRecoveryRefPrefix) || dir.ExpiresAt == nil || now.Before(*dir.ExpiresAt) {
+			continue
+		}
+		var p struct {
+			LaneID    string `json:"lane_id"`
+			ActionKey string `json:"action_key"`
+		}
+		if json.Unmarshal([]byte(dir.Text), &p) != nil || strings.TrimSpace(p.LaneID) == "" {
+			if err := c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dir.ID, store.DirectiveHandled); err != nil {
+				return err
+			}
+			continue
+		}
+		payload, err := json.Marshal(p)
+		if err != nil {
+			return err
+		}
+		_, err = c.store.Events().Append(ctx, store.Event{ID: "expired-" + dir.ID, RunID: c.cfg.RunID, LaneID: p.LaneID, Kind: store.EventTimer, Class: store.EventClassAuto, Source: ActorController, Summary: integrateRecoveryReadyPrefix + p.ActionKey, Payload: payload})
 		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			return err
 		}
@@ -1818,6 +1866,27 @@ func (c *Controller) handleEvent(ctx context.Context, ev *store.Event) (store.Ev
 		}
 		return store.EventClassJudgment, nil
 	case store.EventTimer:
+		if strings.HasPrefix(ev.Summary, integrateRecoveryReadyPrefix) {
+			ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ev.LaneID)
+			if err != nil {
+				return store.EventClassUnclassified, err
+			}
+			if ln.Status != lane.StatusRunning || ln.Phase != recipe.PhaseIntegrate {
+				return store.EventClassAuto, nil
+			}
+			r, err := c.resolveRecipe(ctx, ln)
+			if err != nil {
+				return store.EventClassUnclassified, err
+			}
+			phase, ok := r.Phase(recipe.PhaseIntegrate)
+			if !ok {
+				return store.EventClassUnclassified, fmt.Errorf("orca/controller: missing integrate phase")
+			}
+			if err := c.startLanePhase(ctx, ln, r, phase, max(ln.Round, 1), max(ln.Attempt, 1), ToolPhaseRetry, ev.ID, "retry interrupted integrate launch after backoff", ""); err != nil {
+				return store.EventClassUnclassified, err
+			}
+			return store.EventClassAuto, nil
+		}
 		if ev.Class == store.EventClassJudgment {
 			return store.EventClassJudgment, nil
 		}
@@ -2409,6 +2478,11 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		// Stale exit for an earlier terminal that already advanced.
 		return store.EventClassAuto, nil
 	}
+	if terminalID := strings.TrimSpace(payload.TerminalID); terminalID != "" && c.stoppedTerminals[terminalID] {
+		// Orca stopped this live terminal as part of a deliberate handover or
+		// retry. Its exit is not evidence that the worker failed an attempt.
+		return store.EventClassAuto, nil
+	}
 	if settled, err := c.reconcileLanePRState(ctx, ln, ev.ID); settled || err != nil {
 		if err != nil {
 			return store.EventClassUnclassified, err
@@ -2753,12 +2827,46 @@ func (c *Controller) startLanePhase(
 	}
 	if phase.Name == recipe.PhaseIntegrate {
 		intentKey := "intent:" + actionKey
-		if c.hasActionDecision(intentKey) {
-			_, err := c.escalateLane(ctx, ln, "integrate launch outcome uncertain; reconcile the existing terminal before proceeding", "integrate intent recovered", DecisionArgs{ActionKey: "uncertain:" + actionKey})
-			return err
-		}
+		recovered := c.hasActionDecision(intentKey)
 		if _, _, err := c.recordDecision(ctx, "phase.launch.intent", ln.ID, reason, "integrate launch reserved", DecisionArgs{ActionKey: intentKey, Phase: phase.Name, Round: round, Attempt: attempt}); err != nil {
 			return err
+		}
+		if recovered {
+			// A durable intent means the previous controller may have died between
+			// reserving and applying the launch. Re-run the launch effect with a
+			// small persisted retry budget and backoff; never turn recovery into an
+			// owner escalation.
+			recoveries, lastRecovery, err := c.integrateRecoveryState(ctx, ln.ID, actionKey)
+			if err != nil {
+				return err
+			}
+			if recoveries >= integrateRecoveryMaxAttempts {
+				_, err := c.store.Events().Append(ctx, store.Event{ID: "integrate-recovery-exhausted:" + actionKey, RunID: c.cfg.RunID, LaneID: ln.ID, Kind: store.EventStall, Class: store.EventClassJudgment, Source: ActorController, Summary: "integrate launch recovery exhausted"})
+				if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+					return err
+				}
+				return nil
+			}
+			if !lastRecovery.IsZero() && c.clock.Now().Before(lastRecovery.Add(integrateRecoveryBackoff)) {
+				expires := lastRecovery.Add(integrateRecoveryBackoff)
+				waitID := fmt.Sprintf("%s%s:%d", integrateRecoveryRefPrefix, actionKey, recoveries)
+				body, err := json.Marshal(struct {
+					LaneID    string `json:"lane_id"`
+					ActionKey string `json:"action_key"`
+				}{ln.ID, actionKey})
+				if err != nil {
+					return err
+				}
+				if err := c.store.Directives().Add(ctx, store.Directive{ID: waitID, RunID: c.cfg.RunID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Scope: ln.ID, Ref: waitID, Text: string(body), ExpiresAt: &expires, Status: store.DirectiveActive}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+					return err
+				}
+				return nil
+			}
+			recoveryKey := fmt.Sprintf("recover:%s:%d", actionKey, recoveries+1)
+			if _, _, err := c.recordDecision(ctx, "phase.launch.recovery", ln.ID, "retry interrupted integrate launch", "recovery pending", DecisionArgs{ActionKey: recoveryKey, Phase: phase.Name, Round: round, Attempt: attempt}); err != nil {
+				return err
+			}
+			reason = "recover interrupted integrate launch: " + reason
 		}
 	}
 
@@ -2881,6 +2989,28 @@ func (c *Controller) startLanePhase(
 		}
 	}
 	return nil
+}
+
+func (c *Controller) integrateRecoveryState(ctx context.Context, laneID, actionKey string) (int, time.Time, error) {
+	decs, err := c.store.Decisions().List(ctx, store.DecisionFilter{RunID: c.cfg.RunID, LaneID: laneID})
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	count := 0
+	var last time.Time
+	for i := range decs {
+		if decs[i].Tool != "phase.launch.recovery" {
+			continue
+		}
+		var args DecisionArgs
+		if json.Unmarshal(decs[i].Args, &args) == nil && strings.HasPrefix(args.ActionKey, "recover:"+actionKey+":") {
+			count++
+			if decs[i].CreatedAt.After(last) {
+				last = decs[i].CreatedAt
+			}
+		}
+	}
+	return count, last, nil
 }
 
 func (c *Controller) stopCurrentTerminal(ctx context.Context, ln *lane.Lane, reason string) error {

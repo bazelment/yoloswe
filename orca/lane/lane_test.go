@@ -33,6 +33,21 @@ func TestFakeDriverWatchEmitsEveryEventKind(t *testing.T) {
 	}
 }
 
+func TestWorkingInputWaitingRequiresActiveWork(t *testing.T) {
+	t.Parallel()
+	if !lane.WorkingInputWaiting("checking back in 240s (task-656)\n1 task(s)") {
+		t.Fatal("active timer/task screen was not recognized")
+	}
+	if lane.WorkingInputWaiting("waiting for input >") {
+		t.Fatal("ordinary input.waiting screen was treated as active work")
+	}
+	for _, screen := range []string{"0 task(s)", "task-runner.go", "task-656"} {
+		if lane.WorkingInputWaiting(screen) {
+			t.Fatalf("stale screen %q was treated as active work", screen)
+		}
+	}
+}
+
 func TestLaneAttemptKeysAndValidation(t *testing.T) {
 	t.Parallel()
 
