@@ -19,10 +19,17 @@ const answeredDirectivePrefix = "lane_mail_answered:"
 //
 //nolint:govet
 type Question struct {
+	// RunID and LaneID identify the adopted run and lane that own the question.
+	// They are optional for legacy local mailboxes, but transports that relay
+	// owner asks should preserve them.
+	ID       string
+	RunID    string
+	LaneID   string
 	Ask      string
 	Options  []string
 	Default  string
 	Deadline time.Time
+	Reason   string
 }
 
 // Message is an inbound mailbox message. Replies retain InReplyTo.

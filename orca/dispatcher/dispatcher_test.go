@@ -1381,8 +1381,8 @@ func TestDispatcher_RestartOnPersistedStoreDoesNotCollideIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List directives: %v", err)
 	}
-	if len(dirs) != 6 {
-		t.Fatalf("len(directives) = %d, want 6", len(dirs))
+	if len(dirs) != 5 {
+		t.Fatalf("len(directives) = %d, want 5 (two notes, two planner requests, one deduplicated ask)", len(dirs))
 	}
 }
 
@@ -2276,6 +2276,327 @@ func TestDispatchAdoptedFinishedRunSkipsTurnAndCompactSnapshot(t *testing.T) {
 	if resActive.TurnCount != 1 || len(activeClient.Requests) != 1 {
 		t.Fatalf("expected active run to invoke model turn (not skip), got TurnCount=%d requests=%d",
 			resActive.TurnCount, len(activeClient.Requests))
+	}
+}
+
+//nolint:govet // transport capture groups the observations used below.
+type ownerAskMailbox struct {
+	*mailboxfake.Mailbox
+	questions     []mailbox.Question
+	notifications int
+	failNext      bool
+}
+
+func (m *ownerAskMailbox) AskOwner(_ context.Context, q mailbox.Question) (string, error) {
+	if m.failNext {
+		m.failNext = false
+		return "", errors.New("mail unavailable")
+	}
+	m.questions = append(m.questions, q)
+	return q.ID, nil
+}
+
+func (m *ownerAskMailbox) NotifyOwnerAsk(context.Context, mailbox.Question) error {
+	m.notifications++
+	return nil
+}
+
+func TestOwnerAskDeliveryDedupeRestartAndRetry(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	ctx := t.Context()
+	if err := st.Lanes().Upsert(ctx, lane.Lane{RunID: "run-1", ID: "lane", Status: lane.StatusRunning, SessionID: "session", TerminalID: "terminal"}); err != nil {
+		t.Fatal(err)
+	}
+	box := &ownerAskMailbox{Mailbox: mailboxfake.New(st.Events(), "run-1"), failNext: true}
+	makeDispatcher := func() *dispatcher.Dispatcher {
+		return dispatcher.New(dispatcher.Config{Mailboxes: []mailbox.Mailbox{box}}, st, drv, clk, nil)
+	}
+	ask := dispatcher.OwnerAskParams{ID: "one", LaneID: "lane", Question: "Approve the budget?", Options: []string{"yes", "defer"}, Default: "defer", Deadline: "1h"}
+	if _, err := makeDispatcher().RegisterOwnerAsk(ctx, "run-1", ask); err == nil {
+		t.Fatal("expected first delivery failure")
+	}
+	ask.ID, ask.Question = "retry", " APPROVE   the budget? "
+	if _, err := makeDispatcher().RegisterOwnerAsk(ctx, "run-1", ask); err != nil {
+		t.Fatal(err)
+	}
+	ask.ID, ask.Question = "other", "A different question for the same lane?"
+	if _, err := makeDispatcher().RegisterOwnerAsk(ctx, "run-1", ask); err != nil {
+		t.Fatal(err)
+	}
+	if len(box.questions) != 1 || box.notifications != 1 {
+		t.Fatalf("mail=%+v Slack=%d, want one each", box.questions, box.notifications)
+	}
+	q := box.questions[0]
+	if q.RunID != "run-1" || q.LaneID != "lane" || q.ID != "one" || q.Default != "defer" || len(q.Options) != 2 || !q.Deadline.Equal(clk.Now().Add(time.Hour)) {
+		t.Fatalf("mail lost ask context: %+v", q)
+	}
+	if len(drv.Steers) != 1 || !strings.Contains(drv.Steers[0].Message, "defer") {
+		t.Fatalf("default should continue once: %+v", drv.Steers)
+	}
+	asks, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: "run-1", ActiveOnly: true})
+	if err != nil || len(asks) != 1 {
+		t.Fatalf("open asks=%+v err=%v", asks, err)
+	}
+	if err := st.Directives().UpdateStatus(ctx, "run-1", "ask-one", store.DirectiveHandled); err != nil {
+		t.Fatal(err)
+	}
+	ask.ID, ask.Question = "after-answer", "approve the budget?"
+	if _, err := makeDispatcher().RegisterOwnerAsk(ctx, "run-1", ask); err != nil {
+		t.Fatal(err)
+	}
+	if len(box.questions) != 1 {
+		t.Fatalf("answered question was mailed again: %+v", box.questions)
+	}
+}
+
+func TestOwnerAskRetriesOnlyFailedTransport(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	first := &ownerAskMailbox{Mailbox: mailboxfake.New(st.Events(), "run-1")}
+	second := &ownerAskMailbox{Mailbox: mailboxfake.New(st.Events(), "run-1"), failNext: true}
+	d := dispatcher.New(dispatcher.Config{Mailboxes: []mailbox.Mailbox{first, second}}, st, drv, clk, nil)
+	ask := dispatcher.OwnerAskParams{ID: "one", Question: "Approve the budget?", Options: []string{"yes", "defer"}, Default: "defer", Deadline: "1h"}
+	if _, err := d.RegisterOwnerAsk(t.Context(), "run-1", ask); err == nil {
+		t.Fatal("expected second transport failure")
+	}
+	if _, err := d.RegisterOwnerAsk(t.Context(), "run-1", ask); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.questions) != 1 || len(second.questions) != 1 || first.notifications != 1 || second.notifications != 1 {
+		t.Fatalf("delivery repeated after partial failure: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestOwnerAskAcceptsRunMailSourceReference(t *testing.T) {
+	t.Parallel()
+	for _, messageID := range []string{"card-1", "ev-card-1", "mail:card-1"} {
+		for _, laneID := range []string{"", "lane"} {
+			t.Run(messageID+"/"+laneID, func(t *testing.T) {
+				clk, st, drv := setupTestEnv(t)
+				if err := st.Lanes().Upsert(t.Context(), lane.Lane{RunID: "run-1", ID: "lane", Status: lane.StatusRunning}); err != nil {
+					t.Fatal(err)
+				}
+				raw, err := json.Marshal(dispatcher.OwnerAskParams{MessageID: messageID, LaneID: laneID, Question: "Approve the launch budget?", Options: []string{"approve", "defer"}, Default: "defer", Deadline: "1h"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				client := model.NewFakeClient(model.Response{
+					StopReason: model.StopReasonToolUse,
+					Message:    model.NewAssistantMessage(model.NewToolUseBlock("ask", dispatcher.ToolOwnerAsk, raw)),
+				}, model.Response{StopReason: model.StopReasonEndTurn})
+				d := dispatcher.New(dispatcher.Config{}, st, drv, clk, client)
+				result, err := d.Dispatch(t.Context(), "run-1", []store.Event{{ID: "ev-card-1", RunID: "run-1", Kind: store.EventMail, Source: "mail:card-1", Summary: "Approve the launch budget? Options: approve, defer. Default: defer."}})
+				if err != nil || len(result.Accepted) != 1 || result.Accepted[0].Tool != dispatcher.ToolOwnerAsk {
+					t.Fatalf("run mail reference rejected: result=%+v err=%v", result, err)
+				}
+			})
+		}
+	}
+}
+
+func TestOwnerAskHourlyCapKeepsOverflowAndSendsOneDigest(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	box := &ownerAskMailbox{Mailbox: mailboxfake.New(st.Events(), "run-1")}
+	d := dispatcher.New(dispatcher.Config{Mailboxes: []mailbox.Mailbox{box}}, st, drv, clk, nil)
+	for i := range 10 {
+		id := fmt.Sprintf("lane-%02d", i)
+		if err := st.Lanes().Upsert(t.Context(), lane.Lane{RunID: "run-1", ID: id, Status: lane.StatusRunning}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.RegisterOwnerAsk(t.Context(), "run-1", dispatcher.OwnerAskParams{ID: id, LaneID: id, Question: "Approve " + id + "?", Options: []string{"yes", "defer"}, Default: "defer", Deadline: "1h"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(box.questions) != 9 || box.notifications != 9 {
+		t.Fatalf("mail=%d Slack=%d, want 8 individual plus 1 digest", len(box.questions), box.notifications)
+	}
+	if !strings.Contains(box.questions[8].Ask, "lane-08") || !strings.Contains(box.questions[8].Ask, "/asks queue") {
+		t.Fatalf("digest lost overflow: %+v", box.questions[8])
+	}
+	asks, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: "run-1", ActiveOnly: true})
+	if err != nil || len(asks) != 10 {
+		t.Fatalf("all overflow must stay durable: asks=%+v err=%v", asks, err)
+	}
+	clk.Advance(time.Hour + time.Second)
+	if _, err := d.RegisterOwnerAsk(t.Context(), "run-1", dispatcher.OwnerAskParams{ID: "next-hour", Question: "Next hourly budget?", Options: []string{"yes", "defer"}, Default: "defer", Deadline: "1h"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(box.questions) != 10 {
+		t.Fatalf("hourly cap did not reopen: mail=%d", len(box.questions))
+	}
+}
+
+func TestHostActionRecordsExactStepAndParksWithoutSteering(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	box := &ownerAskMailbox{Mailbox: mailboxfake.New(st.Events(), "run-1")}
+	d := dispatcher.New(dispatcher.Config{Mailboxes: []mailbox.Mailbox{box}}, st, drv, clk, nil)
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{RunID: "run-1", ID: "lane", Status: lane.StatusRunning, SessionID: "session", TerminalID: "terminal"}); err != nil {
+		t.Fatal(err)
+	}
+	const step = "testbed pool resize --pool chaos --size 4"
+	ask := dispatcher.OwnerAskParams{ID: "host-step", LaneID: "lane", Question: "Provide the live testbed", HostAction: true, HostStep: step, Options: []string{"done", "park"}, Default: "park", Deadline: "1h", SteerNote: step}
+	for range 2 {
+		if _, err := d.RegisterOwnerAsk(t.Context(), "run-1", ask); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ln, err := st.Lanes().Get(t.Context(), "run-1", "lane")
+	if err != nil || ln.Status != lane.StatusBlocked || len(drv.Steers) != 0 {
+		t.Fatalf("host step must park: lane=%+v err=%v steers=%+v", ln, err, drv.Steers)
+	}
+	decisions, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: "run-1"})
+	if err != nil || len(decisions) != 1 || decisions[0].Tool != "host.action" || decisions[0].Result != step {
+		t.Fatalf("host task=%+v err=%v", decisions, err)
+	}
+	wait, err := st.Directives().Get(t.Context(), "run-1", "ask-host-step")
+	if err != nil || !strings.Contains(wait.Text, step) || !wait.ExpiresAt.Equal(clk.Now().Add(time.Hour)) {
+		t.Fatalf("expected wait=%+v err=%v", wait, err)
+	}
+	if len(box.questions) != 1 || !strings.Contains(box.questions[0].Ask, step) || box.questions[0].Default != "hold: park" {
+		t.Fatalf("host ask=%+v", box.questions)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1", HolderID: "test"}, st, drv, clk, controller.NewFakeJudge())
+	clk.Advance(time.Hour + time.Second)
+	if err := ctrl.Step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	ln, err = st.Lanes().Get(t.Context(), "run-1", "lane")
+	if err != nil || ln.Status != lane.StatusBlocked || len(drv.Steers) != 0 {
+		t.Fatalf("deadline must keep host task parked: lane=%+v err=%v steers=%+v", ln, err, drv.Steers)
+	}
+}
+
+func TestHostActionSupersedesOrdinaryAskAndCompletesItsWait(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	box := &ownerAskMailbox{Mailbox: mailboxfake.New(st.Events(), "run-1")}
+	d := dispatcher.New(dispatcher.Config{Mailboxes: []mailbox.Mailbox{box}}, st, drv, clk, nil)
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{RunID: "run-1", ID: "lane", Status: lane.StatusRunning, SessionID: "session", TerminalID: "terminal"}); err != nil {
+		t.Fatal(err)
+	}
+	ask := dispatcher.OwnerAskParams{ID: "ordinary", LaneID: "lane", Question: "Approve the budget?", Options: []string{"yes", "defer"}, Default: "defer", Deadline: "1h"}
+	if _, err := d.RegisterOwnerAsk(t.Context(), "run-1", ask); err != nil {
+		t.Fatal(err)
+	}
+	const step = "testbed pool resize --pool chaos --size 4"
+	ask = dispatcher.OwnerAskParams{ID: "host", LaneID: "lane", Question: "Provide the testbed", HostAction: true, HostStep: step, Options: []string{"done", "park"}, Default: "park", Deadline: "1h"}
+	for range 2 {
+		if _, err := d.RegisterOwnerAsk(t.Context(), "run-1", ask); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ln, err := st.Lanes().Get(t.Context(), "run-1", "lane")
+	if err != nil || ln.Status != lane.StatusBlocked || len(box.questions) != 2 || !strings.Contains(box.questions[1].Ask, step) {
+		t.Fatalf("host prerequisite hidden: lane=%+v asks=%+v err=%v", ln, box.questions, err)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1", HolderID: "test"}, st, drv, clk, controller.NewFakeJudge())
+	if err := ctrl.AnswerOwnerAsk(t.Context(), "host", "done"); err != nil {
+		t.Fatal(err)
+	}
+	dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: "run-1", ActiveOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range dirs {
+		if strings.HasPrefix(dir.Ref, "owner_ask:") || strings.HasPrefix(dir.Ref, controller.NamedWaitRefPrefix) {
+			t.Fatalf("completed host task retained a wait: %+v", dir)
+		}
+	}
+	for _, steer := range drv.Steers {
+		if strings.Contains(steer.Message, step) {
+			t.Fatalf("host step steered to lane: %+v", steer)
+		}
+	}
+}
+
+type retryOwnerAskDriver struct {
+	lane.LaneDriver
+	failNext bool
+}
+
+func (d *retryOwnerAskDriver) Steer(ctx context.Context, req lane.SteerRequest) error {
+	if d.failNext {
+		d.failNext = false
+		return errors.New("transient steer failure")
+	}
+	return d.LaneDriver.Steer(ctx, req)
+}
+
+type retryOwnerAskLaneStore struct {
+	store.LaneStore
+	failNext bool
+}
+
+func (s *retryOwnerAskLaneStore) Upsert(ctx context.Context, ln lane.Lane) error {
+	if s.failNext {
+		s.failNext = false
+		return errors.New("transient park failure")
+	}
+	return s.LaneStore.Upsert(ctx, ln)
+}
+
+type retryOwnerAskStore struct {
+	store.Store
+	lanes store.LaneStore
+}
+
+func (s retryOwnerAskStore) Lanes() store.LaneStore { return s.lanes }
+
+func TestOwnerAskRetriesUnfinishedLanePreparation(t *testing.T) {
+	t.Parallel()
+	for _, hostAction := range []bool{false, true} {
+		t.Run(fmt.Sprintf("host=%t", hostAction), func(t *testing.T) {
+			clk, st, drv := setupTestEnv(t)
+			ctx := t.Context()
+			if err := st.Lanes().Upsert(ctx, lane.Lane{RunID: "run-1", ID: "lane", Status: lane.StatusRunning, SessionID: "session", TerminalID: "terminal"}); err != nil {
+				t.Fatal(err)
+			}
+			box := &ownerAskMailbox{Mailbox: mailboxfake.New(st.Events(), "run-1")}
+			wrappedStore := retryOwnerAskStore{Store: st, lanes: &retryOwnerAskLaneStore{LaneStore: st.Lanes(), failNext: hostAction}}
+			wrappedDriver := &retryOwnerAskDriver{LaneDriver: drv, failNext: !hostAction}
+			makeDispatcher := func() *dispatcher.Dispatcher {
+				return dispatcher.New(dispatcher.Config{Mailboxes: []mailbox.Mailbox{box}}, wrappedStore, wrappedDriver, clk, nil)
+			}
+			ask := dispatcher.OwnerAskParams{ID: "retry", LaneID: "lane", Question: "Approve the budget?", Options: []string{"yes", "park"}, Default: "park", Deadline: "1h"}
+			if hostAction {
+				ask.HostAction, ask.HostStep = true, "testbed pool resize --pool chaos --size 4"
+			}
+			if _, err := makeDispatcher().RegisterOwnerAsk(ctx, "run-1", ask); err == nil {
+				t.Fatal("expected lane preparation failure")
+			}
+			if len(box.questions) != 0 {
+				t.Fatal("owner notified before lane preparation completed")
+			}
+			// Retry after a restart using the durable original ask, even when
+			// the new request is an ordinary decision for the same lane.
+			ask.ID, ask.HostAction, ask.HostStep = "retry-again", false, ""
+			for range 2 {
+				if _, err := makeDispatcher().RegisterOwnerAsk(ctx, "run-1", ask); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ln, err := st.Lanes().Get(ctx, "run-1", "lane")
+			if err != nil {
+				t.Fatal(err)
+			}
+			decisions, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hostAction {
+				if ln.Status != lane.StatusBlocked || len(drv.Steers) != 0 || len(decisions) != 1 {
+					t.Fatalf("host preparation not resumed once: lane=%+v steers=%+v decisions=%+v", ln, drv.Steers, decisions)
+				}
+			} else if ln.Status != lane.StatusRunning || len(drv.Steers) != 1 {
+				t.Fatalf("default preparation not resumed once: lane=%+v steers=%+v", ln, drv.Steers)
+			}
+			if len(box.questions) != 1 || box.notifications != 1 {
+				t.Fatalf("notifications repeated: mail=%+v Slack=%d", box.questions, box.notifications)
+			}
+		})
 	}
 }
 

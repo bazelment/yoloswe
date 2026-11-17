@@ -272,6 +272,25 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			tracker.TrackLane(*ln)
 		}
 	}
+	for i := range r.Lanes {
+		imported := &r.Lanes[i]
+		if integratedLane(*imported) || finishedAnalysisLane(*imported) {
+			continue
+		}
+		waitingOn, until := imported.expectedHostWait(d.clock.Now().UTC())
+		if waitingOn == "" {
+			continue
+		}
+		var deadline *time.Time
+		if !until.IsZero() {
+			deadline = &until
+		}
+		wait := store.Directive{ID: "wait-adopt-" + imported.ID, RunID: r.ID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Scope: imported.ID, Ref: controller.NamedWaitRefPrefix + imported.ID, Text: "waiting on " + waitingOn, ExpiresAt: deadline, Status: store.DirectiveActive}
+		if err := d.store.Directives().Add(ctx, wait); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return err
+		}
+	}
+
 	if err := d.store.Runs().UpdateObjective(ctx, r.ID, fullObjectiveWithHandover(r), generation); err != nil {
 		return err
 	}
@@ -324,7 +343,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	runDriver := d.driver
 	if runDriver != nil {
-		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: runStore, syncer: syncer}
+		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: runStore, syncer: syncer, clock: d.clock}
 		if ds, ok := dispatch.(interface{ SetDriver(lane.LaneDriver) }); ok {
 			ds.SetDriver(runDriver)
 		} else if dispatch != nil {
@@ -372,18 +391,22 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	// adoption. Surface the same merge judgment used by a live report instead
 	// of treating the imported done status as permission to merge or advance.
 	for i := range r.Lanes {
-		preview := previewLane(r, r.Lanes[i])
+		preview := previewLaneAt(r, r.Lanes[i], d.clock.Now().UTC())
 		if preview.Move != "judge" {
 			continue
 		}
+		prefix, summary := "adopt-merge-judgment-", "host merge judgment: "
+		if strings.HasPrefix(preview.Reason, "lane question:") {
+			prefix, summary = "adopt-lane-question-", ""
+		}
 		_, err := d.store.Events().Append(ctx, store.Event{
-			ID:      "adopt-merge-judgment-" + r.Lanes[i].ID,
+			ID:      prefix + r.Lanes[i].ID,
 			RunID:   r.ID,
 			LaneID:  r.Lanes[i].ID,
 			Kind:    store.EventTimer,
 			Class:   store.EventClassJudgment,
 			Source:  "adopt",
-			Summary: "host merge judgment: " + preview.Reason,
+			Summary: summary + preview.Reason,
 		})
 		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			cleanupFailedStart()
@@ -951,18 +974,7 @@ func (d *Controllers) askOwnerOnEscalation(ctx context.Context, runID string, ev
 	if len(laneIDs) == 0 {
 		return nil
 	}
-	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
-	if err != nil {
-		return err
-	}
 	now := d.clock.Now().UTC()
-	asked := map[string]bool{}
-	for i := range dirs {
-		dir := &dirs[i]
-		if strings.HasPrefix(dir.Ref, ownerAskRef) && (dir.ExpiresAt == nil || now.Before(*dir.ExpiresAt)) {
-			asked[dir.Scope] = true
-		}
-	}
 	var errs []error
 	for _, id := range laneIDs {
 		ln, err := d.store.Lanes().Get(ctx, runID, id)
@@ -972,7 +984,7 @@ func (d *Controllers) askOwnerOnEscalation(ctx context.Context, runID string, ev
 			}
 			continue
 		}
-		if ln.Status != lane.StatusBlocked || asked[id] {
+		if ln.Status != lane.StatusBlocked {
 			continue
 		}
 		decs, err := d.store.Decisions().List(ctx, store.DecisionFilter{RunID: runID, LaneID: id})
@@ -1006,6 +1018,22 @@ func (d *Controllers) addEscalationAsk(ctx context.Context, runID string, ln *la
 		Options:  []string{fmt.Sprintf("rework: start swe round %d", ln.Round+1), "stop: drop " + ln.ID, hold},
 		Default:  hold,
 		Deadline: now.Add(escalationAskTTL),
+	}
+	if d.Mailboxes != nil {
+		notifier := dispatcher.New(dispatcher.Config{Mailboxes: d.Mailboxes(runID)}, d.store, d.driver, d.clock, nil)
+		_, err := notifier.RegisterOwnerAsk(ctx, runID, dispatcher.OwnerAskParams{ID: ask.ID, LaneID: ask.LaneID, Question: ask.Question, Options: ask.Options, Default: ask.Default, Deadline: ask.Deadline.Format(time.RFC3339)})
+		return err
+	}
+	// Without a mailbox there is no delivery retry path, but the fallback must
+	// still preserve the one-open-ask-per-lane invariant.
+	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
+	if err != nil {
+		return err
+	}
+	for i := range dirs {
+		if dirs[i].Scope == ln.ID && strings.HasPrefix(dirs[i].Ref, ownerAskRef) {
+			return nil
+		}
 	}
 	// Keep the ask scoped to the blocked lane so its default cannot change lane state.
 	if err := ask.Validate(); err != nil {
@@ -1643,6 +1671,7 @@ func nebulaSwarmPhaseBrief(dir, phase, specPrompt string) string {
 //nolint:govet // field alignment
 type adoptedRunDriver struct {
 	lane.LaneDriver
+	clock  clock.Clock
 	store  store.Store
 	syncer *runLedgerSync
 	run    Run
@@ -1895,12 +1924,65 @@ func inlineRunFileCitations(dir, laneID, brief string) string {
 	return out
 }
 
+// An adopted expected wait acknowledges the imported report only. Fresh
+// handbacks must still pass through, even while the host deadline is pending.
+func (d *adoptedRunDriver) hostAnsweredReport(ctx context.Context, runID, laneID string, rep *lane.PhaseReport) bool {
+	if rep == nil || (rep.Outcome != lane.OutcomeNeedsInput && rep.Outcome != lane.OutcomeBlocked) || d.store == nil {
+		return false
+	}
+	var original string
+	for i := range d.run.Lanes {
+		if d.run.Lanes[i].ID == laneID {
+			original = d.run.Lanes[i].reportText
+			break
+		}
+	}
+	if original == "" || strings.TrimSpace(rep.Raw) != original {
+		return false
+	}
+	wait, err := d.store.Directives().Get(ctx, runID, "wait-adopt-"+laneID)
+	return err == nil && wait.Scope == laneID && wait.IsActive(d.clock.Now().UTC())
+}
+
+func (d *adoptedRunDriver) Watch(ctx context.Context, runID string) <-chan lane.Event {
+	in := d.LaneDriver.Watch(ctx, runID)
+	out := make(chan lane.Event)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-in:
+				if !ok {
+					return
+				}
+				if event.Kind == lane.EventPhaseReported && d.hostAnsweredReport(ctx, runID, event.LaneID, event.Report) {
+					continue
+				}
+				select {
+				case out <- event:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out
+}
+
 func (d *adoptedRunDriver) ReadReport(ctx context.Context, runID, laneID, terminalID string) (*lane.PhaseReport, error) {
 	rep, err := d.LaneDriver.ReadReport(ctx, runID, laneID, terminalID)
 	if err == nil && rep != nil && rep.Outcome.Valid() {
+		if d.hostAnsweredReport(ctx, runID, laneID, rep) {
+			return nil, nil
+		}
 		return rep, nil
 	}
 	if fileRep := d.readRunReportFile(ctx, runID, laneID, terminalID); fileRep != nil {
+		if d.hostAnsweredReport(ctx, runID, laneID, fileRep) {
+			return nil, nil
+		}
 		return fileRep, nil
 	}
 	return rep, err

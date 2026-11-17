@@ -162,6 +162,7 @@ type Dispatcher struct {
 	lastResult         *BatchResult
 	cfg                Config
 	seq                int64
+	ownerAskMu         sync.Mutex
 	mu                 sync.Mutex
 }
 
@@ -733,7 +734,7 @@ var dispatcherToolDefs = []model.ToolDefinition{
 	{Name: ToolLaneRetry, Description: "Retry a stalled, blocked, or failed lane on a fresh round", InputSchema: model.SchemaFor[LaneRetryParams]()},
 	{Name: ToolLaneStop, Description: "Stop a non-terminal lane and mark it failed", InputSchema: model.SchemaFor[LaneStopParams]()},
 	{Name: ToolLaneWait, Description: "Record a named expected wait on a lane (e.g. cloud VM run, sweep, or merge gate) with a reason and deadline so the controller suppresses stall judgments until the deadline", InputSchema: model.SchemaFor[LaneWaitParams]()},
-	{Name: ToolOwnerAsk, Description: "Pose a decision to the owner that only the owner can make (product scope, spend, credentials, one-way/destructive policy) and that the batch presents as still open, with options, a mandatory default, and a deadline. Never use it for engineering, ordering, retry, or reversible workflow-dispatch/deploy timing choices covered by a runbook and rollback (e.g. HOST-ASK dispatch vs hold), or for work the owner already ordered", InputSchema: model.SchemaFor[OwnerAskParams]()},
+	{Name: ToolOwnerAsk, Description: "Pose a decision to the owner that only the owner can make (product scope, spend, credentials, one-way/destructive policy) and that the batch presents as still open, with options, a mandatory default, and a deadline. Never use it for engineering, ordering, retry, or reversible workflow-dispatch/deploy timing choices covered by a runbook and rollback (e.g. HOST-ASK dispatch vs hold), or for work the owner already ordered. Exception: route a concrete host-only execution step proposed by a specific lane using host_action=true, lane_id from the snapshot and host_step copied exactly; leave host_action unset for ordinary owner decision cards", InputSchema: model.SchemaFor[OwnerAskParams]()},
 	{Name: ToolOwnerAnswer, Description: "If the owner's message answers one of the listed open owner asks, resolve it with that ask's id; otherwise treat the message as work", InputSchema: model.SchemaFor[OwnerAnswerParams]()},
 	{Name: ToolDirectiveNote, Description: "Persist a standing rule, preference, inter-agent status/agreed context, or engineering/deploy-timing decision (including resolving a reversible HOST-ASK dispatch/hold choice) that later batches need and that no backlog item, lane or other call in this batch carries. At most one per batch, holding every point in its fact. Not a log of your own actions or questions", InputSchema: model.SchemaFor[DirectiveNoteParams]()},
 	{Name: ToolDirectiveRevoke, Description: "Revoke or supersede an active standing directive or instruction by ID when the owner lifts, clears, or replaces it", InputSchema: model.SchemaFor[DirectiveRevokeParams]()},
@@ -1287,7 +1288,7 @@ func (d *Dispatcher) applyVettedAction(
 	case ToolLaneWait:
 		return d.applyLaneWait(ctx, runID, view, *act.LaneWait)
 	case ToolOwnerAsk:
-		return d.applyOwnerAsk(ctx, runID, state, view, *act.OwnerAsk)
+		return d.applyOwnerAsk(ctx, runID, state, *act.OwnerAsk)
 	case ToolOwnerAnswer:
 		if d.cfg.OnOwnerAnswer == nil {
 			return "", errors.New("owner answer handler is not configured")
@@ -2018,7 +2019,20 @@ func (d *Dispatcher) resolveOrcaEscalation(ctx context.Context, runID string, ln
 	return fmt.Sprintf("resolved %s myself: %s", strings.Join(resolvedIDs, ", "), action), nil
 }
 
-func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, state *turnExecState, view *StateView, p OwnerAskParams) (string, error) {
+type registeredOwnerAsk struct {
+	HostStep string `json:"host_step,omitempty"`
+	controller.OwnerAsk
+}
+
+// RegisterOwnerAsk lets adopted-run escalation use the dispatcher's durable
+// deduplication, delivery cap and owner-mail path without a model turn.
+func (d *Dispatcher) RegisterOwnerAsk(ctx context.Context, runID string, p OwnerAskParams) (string, error) {
+	return d.applyOwnerAsk(ctx, runID, nil, p)
+}
+
+func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, state *turnExecState, p OwnerAskParams) (string, error) {
+	d.ownerAskMu.Lock()
+	defer d.ownerAskMu.Unlock()
 	now := d.clock.Now().UTC()
 	dl, err := parseFutureTime(now, p.Deadline)
 	if err != nil {
@@ -2057,7 +2071,8 @@ func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, state *tur
 		}
 	}
 
-	ask := controller.OwnerAsk{
+	hostAction := p.HostAction || strings.TrimSpace(p.HostStep) != ""
+	ask := registeredOwnerAsk{OwnerAsk: controller.OwnerAsk{
 		ID:              askID,
 		RunID:           runID,
 		LaneID:          laneID,
@@ -2068,9 +2083,42 @@ func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, state *tur
 		Deadline:        dl,
 		SourceEventID:   sourceEventID,
 		SourceMessageID: sourceMessageID,
+	}}
+
+	if hostAction {
+		if ask.LaneID == "" || strings.TrimSpace(p.HostStep) == "" {
+			return "", errors.New("host action requires lane_id and the exact host_step")
+		}
+		if ln, err := d.store.Lanes().Get(ctx, runID, ask.LaneID); err != nil || ln.Status.Terminal() {
+			return "", errors.New("host action requires a non-terminal lane")
+		}
+		ask.HostStep = p.HostStep
+		ask.Question += "\nHost step: " + p.HostStep
+		if !strings.HasPrefix(ask.Default, "hold:") {
+			park := "hold: " + ask.Default
+			for i := range ask.Options {
+				if ask.Options[i] == ask.Default {
+					ask.Options[i] = park
+				}
+			}
+			ask.Default = park
+		}
+		ask.SteerNote = ""
 	}
 	if err := ask.Validate(); err != nil {
 		return "", err
+	}
+	if existing, found, err := d.findOwnerAsk(ctx, runID, ask.LaneID, ask.Question, now); err != nil {
+		return "", err
+	} else if found {
+		if !hostAction || normalizeOwnerQuestion(existing.Question) == normalizeOwnerQuestion(ask.Question) || strings.HasSuffix(existing.Question, "\nHost step: "+p.HostStep) {
+			return fmt.Sprintf("owner ask already registered as %s", existing.ID), d.finishOwnerAsk(ctx, existing)
+		}
+		// A host prerequisite supersedes the lane's ordinary decision. Keeping
+		// that earlier ask active would hide the host task and leave work running.
+		if err := d.store.Directives().UpdateStatus(ctx, runID, "ask-"+existing.ID, store.DirectiveRevoked); err != nil {
+			return "", err
+		}
 	}
 
 	raw, err := json.Marshal(ask)
@@ -2091,17 +2139,195 @@ func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, state *tur
 	if err := d.store.Directives().Add(ctx, dir); err != nil {
 		return "", err
 	}
+	if err := d.finishOwnerAsk(ctx, ask); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("registered owner ask %s (default=%q deadline=%s)", ask.ID, ask.Default, dl.Format(time.RFC3339)), nil
+}
 
-	if ask.LaneID != "" {
-		if ln, ok := view.Lane(ask.LaneID); ok && ln.Status == lane.StatusRunning {
-			ln.Status = lane.StatusBlocked
-			ln.LastEventAt = now
-			if err := d.store.Lanes().Upsert(ctx, ln); err != nil {
-				return "", err
+func (d *Dispatcher) finishOwnerAsk(ctx context.Context, ask registeredOwnerAsk) error {
+	if err := d.prepareOwnerAskLane(ctx, ask); err != nil {
+		return err
+	}
+	return d.deliverOwnerAskCapped(ctx, ask.OwnerAsk)
+}
+
+func (d *Dispatcher) prepareOwnerAskLane(ctx context.Context, ask registeredOwnerAsk) error {
+	if ask.LaneID == "" {
+		return nil
+	}
+	receiptID := "owner-prepared-" + ask.ID
+	if recorded, err := d.ownerAskReceiptRecorded(ctx, ask.RunID, receiptID); recorded || err != nil {
+		return err
+	}
+	now := d.clock.Now().UTC()
+	dir, err := d.store.Directives().Get(ctx, ask.RunID, "ask-"+ask.ID)
+	if err != nil || !dir.IsActive(now) || !ask.Deadline.After(now) {
+		return err
+	}
+	if ask.HostStep != "" {
+		decisionID := "host-action-" + ask.ID
+		decisions, err := d.store.Decisions().List(ctx, store.DecisionFilter{RunID: ask.RunID, LaneID: ask.LaneID})
+		if err != nil {
+			return err
+		}
+		if !slices.ContainsFunc(decisions, func(dec store.Decision) bool { return dec.ID == decisionID }) {
+			args, _ := json.Marshal(map[string]string{"lane_id": ask.LaneID, "question": ask.Question, "step": ask.HostStep})
+			if _, err := d.store.Decisions().Append(ctx, store.Decision{ID: decisionID, RunID: ask.RunID, LaneID: ask.LaneID, Actor: ActorDispatcher, Category: store.DecisionJudgment, Tool: "host.action", Reason: "host-only action requested by lane", Result: ask.HostStep, Args: args, Vetted: true, CreatedAt: now}); err != nil {
+				return err
 			}
 		}
 	}
-	return fmt.Sprintf("registered owner ask %s (default=%q deadline=%s)", ask.ID, ask.Default, dl.Format(time.RFC3339)), nil
+	ln, err := d.store.Lanes().Get(ctx, ask.RunID, ask.LaneID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	if ln != nil && (ln.Status == lane.StatusRunning || (ask.HostStep != "" && !ln.Status.Terminal())) {
+		if len(d.mailboxes()) > 0 && ask.HostStep == "" {
+			if drv := d.laneDriver(); drv != nil {
+				msg := cmp.Or(strings.TrimSpace(ask.SteerNote), "Continue with the default: "+ask.Default+". The owner question is pending.")
+				if err := drv.Steer(ctx, lane.SteerRequest{RunID: ask.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: msg}); err != nil {
+					return err
+				}
+			}
+		} else {
+			ln.Status = lane.StatusBlocked
+			ln.LastEventAt = now
+			if err := d.store.Lanes().Upsert(ctx, *ln); err != nil {
+				return err
+			}
+		}
+	}
+	return d.store.Directives().Add(ctx, store.Directive{ID: receiptID, RunID: ask.RunID, Ref: "owner-prepared:" + ask.ID, Status: store.DirectiveHandled})
+}
+
+func normalizeOwnerQuestion(s string) string {
+	return strings.ToLower(singleLine(s))
+}
+
+func (d *Dispatcher) findOwnerAsk(ctx context.Context, runID, laneID, question string, now time.Time) (registeredOwnerAsk, bool, error) {
+	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: false})
+	if err != nil {
+		return registeredOwnerAsk{}, false, err
+	}
+	wantLane, wantQuestion := strings.TrimSpace(laneID), normalizeOwnerQuestion(question)
+	for i := range dirs {
+		if !strings.HasPrefix(strings.TrimSpace(dirs[i].Ref), ownerAskRefPrefix) {
+			continue
+		}
+		var candidate registeredOwnerAsk
+		if json.Unmarshal([]byte(dirs[i].Text), &candidate) != nil {
+			continue
+		}
+		if strings.TrimSpace(candidate.LaneID) != wantLane {
+			continue
+		}
+		if normalizeOwnerQuestion(candidate.Question) == wantQuestion || (wantLane != "" && dirs[i].IsActive(now) && candidate.Deadline.After(now)) {
+			return candidate, true, nil
+		}
+	}
+	return registeredOwnerAsk{}, false, nil
+}
+
+// Delivery receipts survive dispatcher restarts. The transport also receives a
+// stable ID so it can deduplicate an accepted request whose response was lost.
+func (d *Dispatcher) ownerAskReceiptRecorded(ctx context.Context, runID, receiptID string) (bool, error) {
+	_, err := d.store.Directives().Get(ctx, runID, receiptID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (d *Dispatcher) deliverOwnerAsk(ctx context.Context, ask controller.OwnerAsk) error {
+	receiptID := "owner-delivered-" + ask.ID
+	if recorded, err := d.ownerAskReceiptRecorded(ctx, ask.RunID, receiptID); recorded || err != nil {
+		return err
+	}
+	q := mailbox.Question{ID: ask.ID, RunID: ask.RunID, LaneID: ask.LaneID, Ask: ask.Question, Options: slices.Clone(ask.Options), Default: ask.Default, Deadline: ask.Deadline}
+	for index, box := range d.mailboxes() {
+		if box == nil {
+			continue
+		}
+		transportID := fmt.Sprintf("owner-transport-%s-%d", ask.ID, index)
+		if recorded, err := d.ownerAskReceiptRecorded(ctx, ask.RunID, transportID); err != nil {
+			return err
+		} else if recorded {
+			continue
+		}
+		if _, err := box.AskOwner(ctx, q); err != nil {
+			return err
+		}
+		if err := d.store.Directives().Add(ctx, store.Directive{ID: transportID, RunID: ask.RunID, Ref: "owner-transport:" + ask.ID, Text: ask.Question, Status: store.DirectiveHandled}); err != nil {
+			return err
+		}
+		if notifier, ok := box.(interface {
+			NotifyOwnerAsk(context.Context, mailbox.Question) error
+		}); ok {
+			if err := notifier.NotifyOwnerAsk(ctx, q); err != nil {
+				slog.WarnContext(ctx, "owner ask Slack notification failed", "run", ask.RunID, "ask", ask.ID, "error", err)
+			}
+		}
+	}
+	return d.store.Directives().Add(ctx, store.Directive{ID: receiptID, RunID: ask.RunID, Ref: "owner-delivered:" + ask.ID, Text: ask.Question, Status: store.DirectiveHandled, CreatedAt: d.clock.Now().UTC()})
+}
+
+// The cap bounds individual mail; all asks remain durable and visible in /asks.
+// One digest per hour points to that growing overflow queue, rather than losing
+// questions or repeatedly notifying the owner as the queue grows.
+const ownerAskHourlyCap = 8
+
+func (d *Dispatcher) deliverOwnerAskCapped(ctx context.Context, ask controller.OwnerAsk) error {
+	if len(d.mailboxes()) == 0 {
+		return nil
+	}
+	if recorded, err := d.ownerAskReceiptRecorded(ctx, ask.RunID, "owner-delivered-"+ask.ID); recorded || err != nil {
+		return err
+	}
+	now := d.clock.Now().UTC()
+	dir, err := d.store.Directives().Get(ctx, ask.RunID, "ask-"+ask.ID)
+	if err != nil {
+		return err
+	}
+	if !dir.IsActive(now) || !ask.Deadline.After(now) {
+		return nil
+	}
+	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: ask.RunID})
+	if err != nil {
+		return err
+	}
+	count := 0
+	delivered := make(map[string]bool)
+	for i := range dirs {
+		if strings.HasPrefix(dirs[i].Ref, "owner-delivered:") {
+			delivered[strings.TrimPrefix(dirs[i].Ref, "owner-delivered:")] = true
+		}
+		if dirs[i].Ref == "owner-delivered:"+ask.ID {
+			return nil
+		}
+		if strings.HasPrefix(dirs[i].Ref, "owner-delivered:") && !strings.HasPrefix(dirs[i].Ref, "owner-delivered:digest-") && dirs[i].CreatedAt.After(now.Add(-time.Hour)) {
+			count++
+		}
+	}
+	if count < ownerAskHourlyCap {
+		return d.deliverOwnerAsk(ctx, ask)
+	}
+	digestID := "digest-" + now.Format("2006010215")
+	if recorded, err := d.ownerAskReceiptRecorded(ctx, ask.RunID, "owner-delivered-"+digestID); recorded || err != nil {
+		return err
+	}
+	var queued []string
+	for i := range dirs {
+		if !strings.HasPrefix(dirs[i].Ref, ownerAskRefPrefix) || !dirs[i].IsActive(now) {
+			continue
+		}
+		var pending controller.OwnerAsk
+		if json.Unmarshal([]byte(dirs[i].Text), &pending) == nil && !delivered[pending.ID] {
+			queued = append(queued, fmt.Sprintf("lane %s: %s; options=%v; default=%s; deadline=%s", cmp.Or(pending.LaneID, "run"), pending.Question, pending.Options, pending.Default, pending.Deadline.Format(time.RFC3339)))
+		}
+	}
+	digest := controller.OwnerAsk{ID: digestID, RunID: ask.RunID, Question: "Owner ask hourly cap reached for run " + ask.RunID + ". Pending asks (later overflow joins the same /asks queue):\n" + strings.Join(queued, "\n"), Options: []string{"review /asks", "continue with defaults"}, Default: "continue with defaults", Deadline: now.Add(time.Hour)}
+	return d.deliverOwnerAsk(ctx, digest)
 }
 
 func (d *Dispatcher) applyDirectiveNote(ctx context.Context, runID string, state *turnExecState, p DirectiveNoteParams) (string, error) {
@@ -3789,7 +4015,7 @@ func (d *Dispatcher) resolveLaneMailTarget(
 			}
 		}
 	}
-	if !requireTarget && laneID == "" && isRunLevelBatchEventID(batchEvents, messageID) {
+	if !requireTarget && isRunLevelBatchEventID(batchEvents, messageID) {
 		return batchLaneMail{}, false, nil
 	}
 	return batchLaneMail{}, false, fmt.Errorf("%w: unknown lane mail message_id %q", store.ErrNotFound, messageID)
@@ -3805,6 +4031,9 @@ func isRunLevelBatchEventID(events []store.Event, id string) bool {
 			continue
 		}
 		if events[i].ID == id {
+			return true
+		}
+		if events[i].Kind == store.EventMail && (events[i].Source == "mail:"+id || events[i].Source == id) {
 			return true
 		}
 		var msg mailbox.Message

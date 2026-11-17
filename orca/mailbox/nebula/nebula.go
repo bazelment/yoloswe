@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -20,11 +21,13 @@ import (
 //nolint:govet
 type Config struct {
 	BaseURL, Token, RunID string
-	Events                store.EventStore
-	Client                *http.Client
-	PollInterval          time.Duration
-	Host                  bool
-	SessionID             string
+	// OwnerSlackWebhook enables one Slack line in addition to owner mail.
+	OwnerSlackWebhook string
+	Events            store.EventStore
+	Client            *http.Client
+	PollInterval      time.Duration
+	Host              bool
+	SessionID         string
 }
 
 //nolint:govet // logical field grouping
@@ -124,7 +127,22 @@ func (m *Mailbox) Reply(ctx context.Context, laneID, msgID, body string) error {
 	return err
 }
 func (m *Mailbox) AskOwner(ctx context.Context, q mailbox.Question) (string, error) {
-	v, err := m.req(ctx, http.MethodPost, "/api/mail", map[string]any{"to": "owner", "ask": q.Ask, "options": q.Options, "default": q.Default, "deadline": q.Deadline, "question": true, "runId": m.c.RunID})
+	runID := strings.TrimSpace(q.RunID)
+	if runID == "" {
+		runID = m.c.RunID
+	}
+	payload := map[string]any{"to": "owner", "ask": q.Ask, "options": q.Options, "default": q.Default, "deadline": q.Deadline, "question": true, "runId": runID}
+	if laneID := strings.TrimSpace(q.LaneID); laneID != "" {
+		payload["lane"] = laneID
+		payload["laneId"] = laneID
+	}
+	if reason := strings.TrimSpace(q.Reason); reason != "" {
+		payload["reason"] = reason
+	}
+	if q.ID != "" {
+		payload["idempotencyKey"] = runID + ":owner-ask:" + q.ID
+	}
+	v, err := m.req(ctx, http.MethodPost, "/api/mail", payload)
 	if err != nil {
 		return "", err
 	}
@@ -132,6 +150,34 @@ func (m *Mailbox) AskOwner(ctx context.Context, q mailbox.Question) (string, err
 		return id, nil
 	}
 	return "", nil
+}
+
+// NotifyOwnerAsk is called after the owner-mail receipt is durable.
+func (m *Mailbox) NotifyOwnerAsk(ctx context.Context, q mailbox.Question) error {
+	if m.c.OwnerSlackWebhook == "" {
+		return nil
+	}
+	line := fmt.Sprintf("Orca %s lane %s: %s | options: %s | default: %s | deadline: %s", q.RunID, q.LaneID, strings.Join(strings.Fields(q.Ask), " "), strings.Join(q.Options, " / "), q.Default, q.Deadline.Format(time.RFC3339))
+	body, err := json.Marshal(map[string]string{"text": line})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.c.OwnerSlackWebhook, bytes.NewReader(body))
+	if err != nil {
+		return errors.New("invalid owner Slack webhook")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := m.c.Client.Do(req)
+	if err != nil {
+		return errors.New("owner Slack webhook request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("owner Slack webhook status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (m *Mailbox) isOlderThanAdopt(ctx context.Context, msg mailbox.Message) bool {

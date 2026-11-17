@@ -104,11 +104,12 @@ func adoptedMailboxes(cfg Config, st store.Store) func(runID string) []mailbox.M
 	}
 	return func(runID string) []mailbox.Mailbox {
 		box, err := mailboxnebula.New(mailboxnebula.Config{
-			RunID:   runID,
-			Events:  st.Events(),
-			BaseURL: baseURL,
-			Token:   token,
-			Host:    true,
+			OwnerSlackWebhook: os.Getenv("ORCA_OWNER_ASK_SLACK_WEBHOOK"),
+			RunID:             runID,
+			Events:            st.Events(),
+			BaseURL:           baseURL,
+			Token:             token,
+			Host:              true,
 		})
 		if err != nil {
 			slog.Warn("unable to open adopted run mailbox", "run", runID, "error", err)

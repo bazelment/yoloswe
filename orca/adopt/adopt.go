@@ -28,12 +28,15 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/store"
 )
+
+const markerOnlyHostWaitTTL = 45 * time.Minute
 
 const (
 	leaseFile    = ".orca-lease.json"
@@ -118,6 +121,15 @@ type Lane struct {
 	// Report is the latest report's Outcome line; LastEvent the lane's newest
 	// EVENTS line; Next what the run files say comes next for the lane.
 	Report, LastEvent, Next string
+	reportText              string
+	// WaitingOn and WaitDeadline are host ledger facts. They become an
+	// expected wait during adoption instead of a fresh merge judgment.
+	WaitingOn    string
+	WaitDeadline time.Time
+	// AnsweredMarker is true when a newer .handled-* or .answered-* attn file
+	// follows the imported report.
+	AnsweredMarker bool
+	ReportQuestion string
 	// ReportBlocker is the text from an Outcome: blocked report. It is a
 	// host-owned hold so an adopted controller can carry it to orca judgment.
 	ReportBlocker string
@@ -447,29 +459,31 @@ func (i Importer) Find(id string) (string, error) {
 
 //nolint:govet // fields mirror both host ledger versions and preserve their JSON names.
 type ledgerLane struct {
-	ID             string `json:"id"`
-	Title          string `json:"title"`
-	Branch         string `json:"branch"`
-	Phase          string `json:"phase"`
-	Status         string `json:"status"`
-	NebulaSession  string `json:"nebula_session"`
-	NebulaTerminal string `json:"nebula_terminal"`
-	RepoURL        string `json:"repo_url"`
-	PR             int    `json:"pr"`
-	Round          int    `json:"round"`
-	BlockedOn      string `json:"blocked_on"`
-	Hold           string `json:"hold"`
-	HoldNote       string `json:"hold_note"`
-	Park           string `json:"park"`
-	Note           string `json:"note"`
-	PRDraft        bool   `json:"pr_draft"`
-	Draft          bool   `json:"draft"`
-	PRState        string `json:"pr_state"`
-	MergeSHA       string `json:"merge_sha"`
-	PRHead         string `json:"pr_head"`
-	Head           string `json:"head"`
-	Mode           string `json:"mode"`
-	Checks         string `json:"checks"`
+	ID             string       `json:"id"`
+	Title          string       `json:"title"`
+	Branch         string       `json:"branch"`
+	Phase          string       `json:"phase"`
+	Status         string       `json:"status"`
+	NebulaSession  string       `json:"nebula_session"`
+	NebulaTerminal string       `json:"nebula_terminal"`
+	RepoURL        string       `json:"repo_url"`
+	PR             int          `json:"pr"`
+	Round          int          `json:"round"`
+	BlockedOn      string       `json:"blocked_on"`
+	WaitingOn      string       `json:"waiting_on"`
+	Deadline       hostDeadline `json:"deadline"`
+	Hold           string       `json:"hold"`
+	HoldNote       string       `json:"hold_note"`
+	Park           string       `json:"park"`
+	Note           string       `json:"note"`
+	PRDraft        bool         `json:"pr_draft"`
+	Draft          bool         `json:"draft"`
+	PRState        string       `json:"pr_state"`
+	MergeSHA       string       `json:"merge_sha"`
+	PRHead         string       `json:"pr_head"`
+	Head           string       `json:"head"`
+	Mode           string       `json:"mode"`
+	Checks         string       `json:"checks"`
 }
 
 type ledger struct {
@@ -1062,6 +1076,8 @@ func importLane(dir string, l *ledgerLane) Lane {
 		x.Integrated = true
 	}
 	applyReportMetadata(&x, report)
+	x.WaitingOn, x.WaitDeadline = parseHostWait(l.WaitingOn, l.Deadline)
+	applyAttnAnswer(dir, &x)
 	return x
 }
 
@@ -1108,8 +1124,22 @@ func applyReportMetadata(ln *Lane, report string) {
 	if ln == nil {
 		return
 	}
-	if rep, err := lane.ParsePhaseReport(report); err == nil && rep.Outcome == lane.OutcomeBlocked {
-		ln.ReportBlocker = clip(strings.TrimSpace(cmp.Or(rep.Reason, rep.Summary, rep.Ask, "blocked report")), 240)
+	if rep, err := lane.ParsePhaseReport(report); err == nil {
+		if rep.Outcome == lane.OutcomeNeedsInput || rep.Outcome == lane.OutcomeBlocked {
+			ln.reportText = strings.TrimSpace(report)
+		}
+		if rep.Outcome == lane.OutcomeBlocked {
+			ln.ReportBlocker = clip(strings.TrimSpace(cmp.Or(rep.Reason, rep.Summary, rep.Ask, "blocked report")), 240)
+		}
+		ln.ReportQuestion = strings.TrimSpace(rep.Ask)
+	}
+	if ln.ReportQuestion == "" {
+		for _, line := range strings.Split(report, "\n") {
+			if strings.Contains(line, "?") {
+				ln.ReportQuestion = strings.TrimSpace(line)
+				break
+			}
+		}
 	}
 	for _, raw := range strings.Split(report, "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(raw), ":")
@@ -1141,6 +1171,63 @@ func applyReportMetadata(ln *Lane, report string) {
 		case "merge sha", "merged sha":
 			if meaningfulHostValue(value) {
 				ln.MergeSHA, ln.Integrated = value, true
+			}
+		}
+	}
+}
+
+type hostDeadline string
+
+func (d *hostDeadline) UnmarshalJSON(raw []byte) error {
+	var value string
+	if err := json.Unmarshal(raw, &value); err == nil {
+		*d = hostDeadline(value)
+		return nil
+	}
+	var epoch json.Number
+	if err := json.Unmarshal(raw, &epoch); err != nil {
+		return err
+	}
+	*d = hostDeadline(epoch.String())
+	return nil
+}
+
+func parseHostWait(waitingOn string, rawDeadline hostDeadline) (string, time.Time) {
+	waitingOn = strings.TrimSpace(waitingOn)
+	deadline := strings.TrimSpace(string(rawDeadline))
+	if waitingOn == "" || deadline == "" {
+		return waitingOn, time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339Nano, deadline); err == nil {
+		return waitingOn, t.UTC()
+	}
+	if epoch, err := strconv.ParseInt(deadline, 10, 64); err == nil {
+		if epoch > 1_000_000_000_000 {
+			return waitingOn, time.UnixMilli(epoch).UTC()
+		}
+		return waitingOn, time.Unix(epoch, 0).UTC()
+	}
+	return waitingOn, time.Time{}
+}
+
+func applyAttnAnswer(dir string, ln *Lane) {
+	if ln == nil || strings.TrimSpace(ln.ID) == "" || strings.TrimSpace(ln.Phase) == "" || ln.ReportPath == "" {
+		return
+	}
+	reportInfo, err := os.Stat(ln.ReportPath)
+	if err != nil {
+		return
+	}
+	patterns := []string{
+		filepath.Join(dir, ln.ID+"."+ln.Phase+".nebula-attn.handled-*"),
+		filepath.Join(dir, ln.ID+"."+ln.Phase+".nebula-attn.answered-*"),
+	}
+	for _, pattern := range patterns {
+		paths, _ := filepath.Glob(pattern)
+		for _, path := range paths {
+			if info, statErr := os.Stat(path); statErr == nil && info.ModTime().After(reportInfo.ModTime()) {
+				ln.AnsweredMarker = true
+				return
 			}
 		}
 	}
@@ -1337,6 +1424,10 @@ func (s *Service) DryRunDir(ctx context.Context, dir string) (DryRunResult, erro
 }
 
 func previewLane(r Run, ln Lane) DryRunLane {
+	return previewLaneAt(r, ln, time.Now().UTC())
+}
+
+func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 	p := DryRunLane{ID: ln.ID, Phase: cmp.Or(ln.Phase, "unknown"), Status: cmp.Or(ln.Status, "unknown"), Move: "none"}
 	p.Evidence = append(p.Evidence, "format="+r.Format, "phase="+p.Phase, "status="+p.Status)
 	if ln.TerminalState != "" {
@@ -1381,9 +1472,21 @@ func previewLane(r Run, ln Lane) DryRunLane {
 		return p
 	}
 	report := previewOutcome(ln.Report)
+	if waitingOn, deadline := ln.expectedHostWait(now); waitingOn != "" {
+		p.Move = "wait"
+		if deadline.IsZero() {
+			p.Reason = "host answered; waiting on " + waitingOn
+		} else {
+			p.Reason = fmt.Sprintf("answered=%t; waiting on %s until %s", ln.AnsweredMarker, waitingOn, deadline.Format(time.RFC3339))
+		}
+		return p
+	}
+	if report == string(lane.OutcomeNeedsInput) {
+		p.Move, p.Reason = "judge", "lane question: "+quoteLaneQuestion(cmp.Or(ln.ReportQuestion, ln.ReportBlocker, "lane report requires input"))
+		return p
+	}
 	if report == string(lane.OutcomeBlocked) {
-		p.Move = "judge"
-		p.Reason = "orchestrator judgment: lane report blocked: " + cmp.Or(ln.ReportBlocker, "blocked report")
+		p.Move, p.Reason = "judge", "lane question: "+quoteLaneQuestion(cmp.Or(ln.ReportQuestion, ln.ReportBlocker, "blocked report"))
 		return p
 	}
 	if ln.HoldAdvance {
@@ -1423,8 +1526,6 @@ func previewLane(r Run, ln Lane) DryRunLane {
 	switch {
 	case report == string(lane.OutcomeNeedsSWE):
 		p.Move, p.Reason = "rework", "lane report requests SWE rework"
-	case report == string(lane.OutcomeNeedsInput):
-		p.Move, p.Reason = "judge", "orchestrator judgment: lane report requires input: "+cmp.Or(ln.ReportBlocker, "lane report requires input")
 	case report == "done" || report == "no-change":
 		if r.IntegrationError != "" {
 			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
@@ -1444,6 +1545,25 @@ func previewLane(r Run, ln Lane) DryRunLane {
 		p.Move, p.Reason = "wait", "no terminal handback or actionable report evidence"
 	}
 	return p
+}
+
+func (ln Lane) expectedHostWait(now time.Time) (string, time.Time) {
+	waitingOn := strings.TrimSpace(ln.WaitingOn)
+	if waitingOn != "" && ln.WaitDeadline.After(now) {
+		return waitingOn, ln.WaitDeadline.UTC()
+	}
+	report := previewOutcome(ln.Report)
+	if ln.AnsweredMarker && ln.WaitDeadline.IsZero() && (report == string(lane.OutcomeBlocked) || report == string(lane.OutcomeNeedsInput)) {
+		// A marker answers the imported report, but it does not prove that the
+		// lane resumed. Bound this synthetic wait so a lane that never makes
+		// progress eventually gets a fresh judgment.
+		return cmp.Or(waitingOn, "lane progress"), now.Add(markerOnlyHostWaitTTL)
+	}
+	return "", time.Time{}
+}
+
+func quoteLaneQuestion(question string) string {
+	return strconv.Quote(cmp.Or(strings.Join(strings.Fields(question), " "), "lane report requires input"))
 }
 
 // Integration evidence decides only whether a terminal lane is already
