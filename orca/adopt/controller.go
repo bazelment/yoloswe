@@ -50,6 +50,14 @@ type Controllers struct {
 	mu                sync.Mutex
 }
 
+// SetMirror updates the commit mirror used for live integration verification.
+// The service owns this setting, so it is applied when a run is started.
+func (d *Controllers) SetMirror(mirror GitMirror) {
+	d.mu.Lock()
+	d.Mirror = mirror
+	d.mu.Unlock()
+}
+
 //nolint:govet // field alignment
 type controlledRun struct {
 	dispatch   controller.Judge

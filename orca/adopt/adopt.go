@@ -738,6 +738,19 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 		return
 	}
 	subjects := strings.Split(string(out), "\n")
+	targetSubjects := map[string]struct{}{}
+	targetRef := "refs/orca/" + strings.TrimSpace(r.TargetBranch)
+	if targetOnly {
+		for _, subject := range subjects {
+			targetSubjects[strings.TrimSpace(subject)] = struct{}{}
+		}
+	} else if strings.TrimSpace(r.TargetBranch) != "" {
+		if targetOut, err := gitOutput(gitCtx, mirror, "log", "--format=%s", "--end-of-options", targetRef); err == nil {
+			for _, subject := range strings.Split(string(targetOut), "\n") {
+				targetSubjects[strings.TrimSpace(subject)] = struct{}{}
+			}
+		}
+	}
 	for i := range r.Lanes {
 		ln := &r.Lanes[i]
 		if integratedLane(*ln) || strings.EqualFold(ln.Status, "blocked") || finishedAnalysisLane(*ln) {
@@ -798,7 +811,7 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 				for _, subject := range subjects {
 					if strings.HasSuffix(strings.TrimSpace(subject), suffix) {
 						ln.Integrated = true
-						ln.targetIntegrated = targetOnly || mirrorHasSquashSubject(gitCtx, mirror, r.TargetBranch, suffix)
+						_, ln.targetIntegrated = targetSubjects[strings.TrimSpace(subject)]
 						ln.IntegrationReason = fmt.Sprintf("integration gate: mirror has squash subject ending %s", suffix)
 						break
 					}
@@ -821,23 +834,6 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 			}
 		}
 	}
-}
-
-func mirrorHasSquashSubject(ctx context.Context, mirror, target, suffix string) bool {
-	target = strings.TrimSpace(target)
-	if target == "" {
-		return false
-	}
-	out, err := gitOutput(ctx, mirror, "log", "--format=%s", "--end-of-options", "refs/orca/"+target)
-	if err != nil {
-		return false
-	}
-	for _, subject := range strings.Split(string(out), "\n") {
-		if strings.HasSuffix(strings.TrimSpace(subject), suffix) {
-			return true
-		}
-	}
-	return false
 }
 
 func finishedAnalysisLane(ln Lane) bool {
@@ -1905,6 +1901,10 @@ type RunDriver interface {
 	Stop(context.Context, Run) error
 }
 
+type mirrorDriver interface {
+	SetMirror(GitMirror)
+}
+
 // StoppedLoop records the step-loop process /adopt stopped so /release can
 // restart it or tell the owner what to restart.
 type StoppedLoop struct {
@@ -1976,6 +1976,9 @@ func (s *Service) drive(ctx context.Context, dir string) (Run, error) {
 	}
 	applyIntegrationEvidence(ctx, &r, s.Mirror)
 	if s.Driver != nil {
+		if driver, ok := s.Driver.(mirrorDriver); ok {
+			driver.SetMirror(s.Mirror)
+		}
 		if err := s.Driver.Start(ctx, r); err != nil {
 			return Run{}, fmt.Errorf("start adopted run %s: %w (lease kept; retry /adopt or /release)", r.ID, err)
 		}
