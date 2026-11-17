@@ -3961,7 +3961,7 @@ func (c *Controller) respawnWrongRepoLane(
 		ln.LastEventID = eventID
 		ln.LastEventAt = c.clock.Now().UTC()
 		_ = c.store.Lanes().Upsert(ctx, *ln)
-		return store.EventClassUnclassified, err
+		return store.EventClassUnclassified, laneDriverError(err)
 	}
 	if strings.TrimSpace(res.Branch) != "" {
 		ln.Branch = strings.TrimSpace(res.Branch)
