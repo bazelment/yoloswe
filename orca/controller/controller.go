@@ -88,6 +88,17 @@ func isIsolatedFailure(err error) bool {
 	return errors.As(err, &local) || errors.As(err, &permanent)
 }
 
+// laneDriverError classifies a driver failure as scoped to the current lane.
+// Control and infrastructure errors remain unwrapped so Run can stop or retry
+// the controller instead of treating them as a lane outcome.
+func laneDriverError(err error) error {
+	if err == nil || errors.Is(err, store.ErrLeaseHeld) || errors.Is(err, store.ErrLeaseNotHeld) ||
+		errors.Is(err, ErrControllerStopped) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return &LaneLocalError{Err: err}
+}
+
 // IsUnrecoverable reports whether an error means this controller can no longer
 // make progress. Transport and provider failures are intentionally retryable;
 // only lease ownership loss, a released run, cancellation, or an explicit
@@ -1339,7 +1350,7 @@ func (c *Controller) applyOwnerAskResolution(ctx context.Context, ask OwnerAsk, 
 				}); err != nil {
 					var undelivered *lane.UndeliveredError
 					if !errors.As(err, &undelivered) {
-						return err
+						return laneDriverError(err)
 					}
 					if err := c.recordUndeliveredSteer(ctx, ln, directiveID, "owner.answer", "owner answer submitted but not confirmed", DecisionArgs{AskID: ask.ID}, err); err != nil {
 						return err
@@ -1953,7 +1964,7 @@ func (c *Controller) checkLaneUnpushedWork(ctx context.Context, ln *lane.Lane, n
 		}); err != nil {
 			var undelivered *lane.UndeliveredError
 			if !errors.As(err, &undelivered) {
-				return err
+				return laneDriverError(err)
 			}
 			return c.recordUndeliveredSteer(ctx, ln, steerKey, "lane.unpushed.steer", "unpushed work steer submitted but not confirmed", DecisionArgs{Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: max(ln.Attempt, 1), SessionID: ln.SessionID, TerminalID: ln.TerminalID}, err)
 		}
@@ -2034,7 +2045,7 @@ func (c *Controller) checkLaneDiskHealth(ctx context.Context, ln *lane.Lane) err
 	}); err != nil {
 		var undelivered *lane.UndeliveredError
 		if !errors.As(err, &undelivered) {
-			return err
+			return laneDriverError(err)
 		}
 		if saveErr := c.recordUndeliveredSteer(ctx, ln, diskKey, "lane.health.disk", "disk pressure steer submitted but not confirmed", DecisionArgs{Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: max(ln.Attempt, 1), SessionID: ln.SessionID, TerminalID: ln.TerminalID}, err); saveErr != nil {
 			return saveErr
@@ -2468,7 +2479,7 @@ func (c *Controller) routeWorkerQuestion(ctx context.Context, ev *store.Event) (
 		if err := c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Use the task text and notes:\n" + answer}); err != nil {
 			var undelivered *lane.UndeliveredError
 			if !errors.As(err, &undelivered) {
-				return false, err
+				return false, laneDriverError(err)
 			}
 			if err := c.recordUndeliveredSteer(ctx, ln, questionKey, "worker.question.answer", "worker answer submitted but not confirmed", DecisionArgs{EventID: ev.ID}, err); err != nil {
 				return false, err
@@ -2517,7 +2528,7 @@ func (c *Controller) routeWorkerQuestion(ctx context.Context, ev *store.Event) (
 	if err != nil {
 		var undelivered *lane.UndeliveredError
 		if !errors.As(err, &undelivered) {
-			return true, err
+			return true, laneDriverError(err)
 		}
 		if err := c.recordUndeliveredSteer(ctx, ln, defaultKey, "worker.question.default", "worker default steer submitted but not confirmed", DecisionArgs{EventID: ev.ID}, err); err != nil {
 			return true, err
@@ -3163,7 +3174,7 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 			if err := c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Continue and file the required phase report."}); err != nil {
 				var undelivered *lane.UndeliveredError
 				if !errors.As(err, &undelivered) {
-					return store.EventClassUnclassified, err
+					return store.EventClassUnclassified, laneDriverError(err)
 				}
 				ln.AwaitingInputSince = now
 				ln.AnswerAttemptedAt, ln.AnswerConfirmedAt = now, time.Time{}
@@ -3208,7 +3219,7 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 			}
 			res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{RunID: c.cfg.RunID, Repository: c.runRepository(ctx), LaneID: ln.ID, SessionID: ln.SessionID, Phase: curPhase.Name, Round: max(ln.Round, 1), Harness: agent.Harness, Model: agent.Model, Effort: agent.Effort, Brief: c.buildBrief(ctx, ln, r, curPhase, max(ln.Round, 1), "fresh terminal after nudge")})
 			if err != nil {
-				return store.EventClassUnclassified, err
+				return store.EventClassUnclassified, laneDriverError(err)
 			}
 			ln.SessionID, ln.TerminalID = res.SessionID, res.TerminalID
 			if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
@@ -3370,7 +3381,7 @@ func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.Ev
 	}
 	if ln.SessionID != "" || ln.TerminalID != "" {
 		if err := c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: "phase stall timeout exceeded"}); err != nil {
-			return store.EventClassUnclassified, err
+			return store.EventClassUnclassified, laneDriverError(err)
 		}
 		if strings.TrimSpace(ln.TerminalID) != "" {
 			c.stoppedTerminals[strings.TrimSpace(ln.TerminalID)] = true
@@ -3657,6 +3668,9 @@ func (c *Controller) stopCurrentTerminal(ctx context.Context, ln *lane.Lane, rea
 		return nil
 	}
 	err := c.driver.Stop(ctx, lane.StopRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Reason: reason})
+	if err != nil {
+		err = laneDriverError(err)
+	}
 	if err == nil && strings.TrimSpace(ln.TerminalID) != "" {
 		termID := strings.TrimSpace(ln.TerminalID)
 		c.stoppedTerminals[termID] = true
