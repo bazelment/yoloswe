@@ -193,6 +193,15 @@ type PRProbe func(ctx context.Context, runID, branch string, pr int) (PRStatus, 
 //
 //nolint:govet // config fields are grouped by lifecycle concern.
 type Config struct {
+	// BeforeStep runs immediately before each Run loop step. Returning false
+	// keeps the lease and watches alive while skipping lifecycle work.
+	BeforeStep func(context.Context) (bool, error)
+	// StepError receives lane-local failures that were recorded without
+	// aborting the rest of the controller pass.
+	StepError func(error)
+	// IsolateLaneErrors keeps provider failures local to a lane/event. Adopted
+	// controllers enable this so one host lane cannot freeze the run.
+	IsolateLaneErrors bool
 	// AnswerQuestion delegates interpretation of task text and notes to the
 	// dispatcher. An empty answer requests owner escalation.
 	AnswerQuestion func(context.Context, string, string) (string, error)
@@ -395,6 +404,10 @@ type Controller struct {
 	watchStarted       bool
 	stallTimeoutSet    bool
 	runtimeSettingsSet bool
+	runtimePaused      bool
+	stepError          error
+	laneFailures       map[string]time.Time
+	laneFailureCounts  map[string]int
 }
 
 // SetRuntimeSettings applies live settings for subsequent controller ticks.
@@ -412,6 +425,7 @@ func (c *Controller) SetRuntimeSettings(settings store.RunSettings) {
 	} else if settings.MaxCostPerHourUSD > 0 {
 		c.cfg.MaxCostPerHourUSD = settings.MaxCostPerHourUSD
 	}
+	c.runtimePaused = settings.Paused
 	if settings.StallTimeout <= 0 && settings.ConcurrencyCap == 0 && settings.MaxCostPerHourUSD <= 0 && !settings.CostGuardDisabled && !settings.Paused {
 		return
 	}
@@ -419,6 +433,20 @@ func (c *Controller) SetRuntimeSettings(settings store.RunSettings) {
 		c.cfg.ConcurrencyCap = settings.ConcurrencyCap
 	}
 	c.runtimeSettingsSet = true
+}
+
+// NotifyOwnerCostGuard sends the cost guard question with a stable idempotency
+// key. Callers should invoke it only when a new breach transitions the run to
+// paused.
+func (c *Controller) NotifyOwnerCostGuard(ctx context.Context, msg string) {
+	c.notifyOwnerCostGuard(ctx, msg)
+}
+
+// LastStepError returns the latest lane-local error recorded during a pass.
+func (c *Controller) LastStepError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stepError
 }
 
 // New constructs a new deterministic Controller for cfg.RunID.
@@ -444,6 +472,8 @@ func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge
 		unpushedSince:      make(map[string]time.Time),
 		releaseRetries:     make(map[string]int),
 		pendingStops:       make(map[string]int),
+		laneFailures:       make(map[string]time.Time),
+		laneFailureCounts:  make(map[string]int),
 		staleStopFailures:  make(map[string]int),
 		wakeCh:             make(chan struct{}, 1),
 		watchErrors:        make(chan error, 16),
@@ -924,6 +954,15 @@ func (c *Controller) resetStepCaches(init bool) {
 
 // Step executes one deterministic pass of lease maintenance, stall/expiry detection, event consumption, and judgment flushing.
 func (c *Controller) Step(ctx context.Context) error {
+	if c.cfg.BeforeStep != nil {
+		proceed, err := c.cfg.BeforeStep(ctx)
+		if err != nil {
+			return err
+		}
+		if !proceed {
+			return nil
+		}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.resetStepCaches(true)
@@ -932,9 +971,13 @@ func (c *Controller) Step(ctx context.Context) error {
 	if c.killed {
 		return ErrControllerStopped
 	}
+	c.stepError = nil
 
 	if err := c.ensureLease(ctx); err != nil {
 		return err
+	}
+	if c.runtimePaused {
+		return nil
 	}
 
 	if err := c.syncDecisions(ctx); err != nil {
@@ -1612,10 +1655,42 @@ func (c *Controller) reconcilePlannedLanes(ctx context.Context) error {
 			continue
 		}
 		round := max(ln.Round, ln.MaxRound(firstName)+1)
+		failureKey := fmt.Sprintf("planned:%s:%s:%d", ln.ID, firstPhase.Name, round)
+		if nextTry := c.laneFailures[failureKey]; !nextTry.IsZero() && c.clock.Now().Before(nextTry) {
+			continue
+		}
 		if err := c.startLanePhase(ctx, &ln, r, firstPhase, round, 1, ToolPhaseStart, "", "spawn planned lane", ""); err != nil {
+			if !c.cfg.IsolateLaneErrors || strings.Contains(strings.ToLower(err.Error()), "repository") {
+				return err
+			}
+			if recordErr := c.recordLaneFailure(ctx, &ln, failureKey, ToolPhaseStart, err); recordErr != nil {
+				return recordErr
+			}
+			continue
+		}
+		delete(c.laneFailures, failureKey)
+		activeCount++
+	}
+	return nil
+}
+
+func (c *Controller) recordLaneFailure(ctx context.Context, ln *lane.Lane, key, tool string, cause error) error {
+	count := c.laneFailureCounts[key] + 1
+	c.laneFailureCounts[key] = count
+	c.laneFailures[key] = c.clock.Now().Add(time.Second * time.Duration(1<<min(count-1, 5)))
+	c.stepError = fmt.Errorf("lane %s: %w", ln.ID, cause)
+	if c.cfg.StepError != nil {
+		c.cfg.StepError(c.stepError)
+	}
+	decisionKey := "lane-failure:" + key
+	if !c.hasActionDecision(decisionKey) {
+		if _, _, err := c.recordDecision(ctx, tool+".failure", ln.ID, "lane lifecycle action failed", cause.Error(), DecisionArgs{ActionKey: decisionKey, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: max(ln.Attempt, 1)}); err != nil {
 			return err
 		}
-		activeCount++
+		eventID := "lane-failure-event:" + key
+		if _, err := c.store.Events().Append(ctx, store.Event{ID: eventID, RunID: c.cfg.RunID, LaneID: ln.ID, Kind: store.EventStall, Class: store.EventClassJudgment, Urgent: true, Source: ActorController, Summary: c.stepError.Error()}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return err
+		}
 	}
 	return nil
 }
@@ -2033,7 +2108,29 @@ func (c *Controller) consumeEvents(ctx context.Context) error {
 
 		class, err := c.handleEvent(ctx, &ev)
 		if err != nil {
-			return err
+			if !c.cfg.IsolateLaneErrors {
+				return err
+			}
+			c.stepError = fmt.Errorf("event %s (lane %s): %w", ev.ID, ev.LaneID, err)
+			if c.cfg.StepError != nil {
+				c.cfg.StepError(c.stepError)
+			}
+			failureKey := "event-failure:" + ev.ID
+			if !c.hasActionDecision(failureKey) {
+				if _, _, dErr := c.recordDecision(ctx, "event.failure", ev.LaneID, "event handler failed", err.Error(), DecisionArgs{ActionKey: failureKey, EventID: ev.ID}); dErr != nil {
+					return dErr
+				}
+				failure := store.Event{ID: failureKey, RunID: c.cfg.RunID, LaneID: ev.LaneID, Kind: store.EventStall, Class: store.EventClassJudgment, Urgent: true, Source: ActorController, Summary: c.stepError.Error()}
+				if _, appendErr := c.store.Events().Append(ctx, failure); appendErr != nil && !errors.Is(appendErr, store.ErrAlreadyExists) {
+					return appendErr
+				}
+				c.enqueueJudgmentEvent(failure)
+				urgentFlush = true
+			}
+			if cursorErr := c.store.Events().SetCursor(ctx, c.cfg.RunID, c.cfg.Consumer, ev.Seq); cursorErr != nil {
+				return cursorErr
+			}
+			continue
 		}
 		ev.Class = class
 
@@ -4141,10 +4238,9 @@ func (c *Controller) flushJudgmentIfDue(ctx context.Context) error {
 
 func (c *Controller) flushJudgment(ctx context.Context, reason string) error {
 	now := c.clock.Now().UTC()
-	if paused, _, _, msg, err := store.EnforceCostGuard(ctx, c.store, c.cfg.RunID, now, c.cfg.MaxCostPerHourUSD); err != nil {
+	if paused, _, err := c.enforceCostGuard(ctx, now); err != nil {
 		return err
 	} else if paused {
-		c.notifyOwnerCostGuard(ctx, msg)
 		return nil
 	}
 
@@ -4186,10 +4282,23 @@ func (c *Controller) flushJudgment(ctx context.Context, reason string) error {
 			return err
 		}
 	}
-	if paused, _, _, msg, _ := store.EnforceCostGuard(ctx, c.store, c.cfg.RunID, c.clock.Now().UTC(), c.cfg.MaxCostPerHourUSD); paused {
+	_, _, _ = c.enforceCostGuard(ctx, c.clock.Now().UTC())
+	return nil
+}
+
+func (c *Controller) enforceCostGuard(ctx context.Context, now time.Time) (bool, string, error) {
+	settings, err := c.store.Runs().GetSettings(ctx, c.cfg.RunID)
+	if err != nil {
+		return false, "", err
+	}
+	paused, _, _, msg, err := store.EnforceCostGuard(ctx, c.store, c.cfg.RunID, now, c.cfg.MaxCostPerHourUSD)
+	if err != nil {
+		return false, "", err
+	}
+	if paused && !settings.Paused {
 		c.notifyOwnerCostGuard(ctx, msg)
 	}
-	return nil
+	return paused, msg, nil
 }
 
 func (c *Controller) notifyOwnerCostGuard(ctx context.Context, msg string) {
@@ -4197,7 +4306,7 @@ func (c *Controller) notifyOwnerCostGuard(ctx context.Context, msg string) {
 		return
 	}
 	if c.mailbox != nil {
-		_, _ = c.mailbox.AskOwner(ctx, mailbox.Question{Ask: msg})
+		_, _ = c.mailbox.AskOwner(ctx, mailbox.Question{ID: "cost-guard-" + c.cfg.RunID, RunID: c.cfg.RunID, Ask: msg})
 	}
 }
 
