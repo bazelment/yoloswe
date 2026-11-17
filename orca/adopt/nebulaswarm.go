@@ -185,7 +185,7 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 // annotateLanes adds each lane's latest report headline, newest EVENTS line
 // and what comes next from ESCALATIONS.md, PROGRESS.md or the phase order.
 func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
-	events := laneEvents(filepath.Join(dir, "EVENTS"))
+	events, turnStarts := laneEvents(filepath.Join(dir, "EVENTS"))
 	integratedEvents := laneIntegrationEvents(filepath.Join(dir, "EVENTS"))
 	mergeNotePRs := laneMergeNotePRs(filepath.Join(dir, "EVENTS"))
 	progress, escalations := readText(filepath.Join(dir, "PROGRESS.md")), readText(filepath.Join(dir, "ESCALATIONS.md"))
@@ -196,6 +196,7 @@ func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
 	for i := range r.Lanes {
 		x := &r.Lanes[i]
 		x.LastEvent = events[x.ID]
+		x.LastTurnStarted = turnStarts[x.ID]
 		eventLower := eventKind(x.LastEvent)
 		if integratedEvents[x.ID] != "" || eventLower == "merged" {
 			x.Integrated, x.PRState = true, "merged"
@@ -205,6 +206,9 @@ func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
 		x.MergeNotePRs = mergeNotePRs[x.ID]
 		if x.ReportPath != "" {
 			report := readText(x.ReportPath)
+			if info, err := os.Stat(x.ReportPath); err == nil {
+				x.ReportTime = info.ModTime().UTC()
+			}
 			x.Report = reportHeadline(report)
 			applyReportMetadata(x, report)
 		}
@@ -322,11 +326,12 @@ func reportHeadline(s string) string {
 
 // laneEvents returns each lane's newest EVENTS line as "<time> <event> <detail>".
 // EVENTS lines are <UTC> TAB <lane> TAB <event> TAB <detail>.
-func laneEvents(path string) map[string]string {
+func laneEvents(path string) (map[string]string, map[string]time.Time) {
 	out := map[string]string{}
+	turnStarts := map[string]time.Time{}
 	f, err := os.Open(path)
 	if err != nil {
-		return out
+		return out, turnStarts
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -341,8 +346,14 @@ func laneEvents(path string) map[string]string {
 			fields = append(fields, strings.TrimSpace(parts[3]))
 		}
 		out[parts[1]] = clip(strings.Join(fields, " "), 240)
+		if strings.Contains(strings.ToLower(strings.Join(parts[2:], " ")), "turn.started") {
+			at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(parts[0]))
+			if err == nil && at.After(turnStarts[parts[1]]) {
+				turnStarts[parts[1]] = at
+			}
+		}
 	}
-	return out
+	return out, turnStarts
 }
 
 // laneNext says what comes next for a lane: its escalation, else the

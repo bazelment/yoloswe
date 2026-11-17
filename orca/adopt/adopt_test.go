@@ -444,23 +444,32 @@ func TestNebulaSwarmAdoptPreviewFinishedLanesG56(t *testing.T) {
 	gitTest(t, seed, "push", "origin", "main")
 	gitTest(t, seed, "push", "origin", "main:refs/heads/swarm-lane/run/merged/lane")
 
+	// This commit stays local: the report can name a HEAD the remote never saw.
+	write(t, filepath.Join(seed, "unpushed.txt"), "local only\n")
+	gitTest(t, seed, "add", ".")
+	gitTest(t, seed, "commit", "-m", "unpushed work")
+	unpushedHead := strings.TrimSpace(gitTest(t, seed, "rev-parse", "HEAD"))
+
 	type fixture struct {
+		reportTime                                             time.Time
 		name, status, phase, branch, mode, hold, report, event string
 		wantMove, wantReason                                   string
 		taskExtra, historyReport                               string
+		wantText                                               []string
+		holdFile                                               bool
 	}
 	fixtures := []fixture{
-		{name: "done no PR missing branch", status: "done", phase: "swe", branch: "swarm-lane/run/missing/lane", report: "Outcome: done\n", event: "failed swe->clean lane: CHECK_UNAVAILABLE missing-ref: repo has no refs/heads/swarm-lane/run/missing/lane", wantMove: "none", wantReason: "finished, no PR to integrate"},
+		{name: "done no PR missing branch", status: "done", phase: "swe", branch: "swarm-lane/run/missing/lane", report: "Outcome: done\n", event: "failed swe->clean lane: CHECK_UNAVAILABLE missing-ref: repo has no refs/heads/swarm-lane/run/missing/lane", wantMove: "none", wantReason: "finished, no PR"},
 		{name: "done no PR unmerged branch", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", report: "Outcome: done\n", event: "failed swe->clean lane: CHECK_UNAVAILABLE missing-ref: stale", wantMove: "judge", wantReason: "unmerged head"},
 		{name: "G52 analysis remains finished", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", mode: "analysis", report: "Outcome: done\n", wantMove: "none", wantReason: "analysis lane finished; no PR to integrate"},
 		{name: "done no PR merged branch", status: "done", phase: "swe", branch: "swarm-lane/run/merged/lane", report: "Outcome: done\n", wantMove: "none", wantReason: "already integrated"},
 		{name: "stale report head with unmerged branch", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", report: "Outcome: done\nHEAD: " + baseHead + "\n", wantMove: "judge", wantReason: "unmerged head " + shortSHA(laneHead)},
-		{name: "missing branch with unmerged report head", status: "done", phase: "swe", branch: "swarm-lane/run/missing/head", report: "Outcome: done\nHEAD: " + laneHead + "\n", wantMove: "judge", wantReason: "integration gate: lane head"},
+		{name: "j absent branch with unpushed report HEAD", status: "done", phase: "swe", branch: "swarm-lane/run/missing/head", report: "Outcome: done\nHEAD: " + unpushedHead + "\n", wantMove: "none", wantReason: "finished, no PR", wantText: []string{"report-head=" + unpushedHead}},
 		{name: "invalid lane branch", status: "done", phase: "swe", branch: "-invalid", report: "Outcome: done\n", wantMove: "judge", wantReason: "missing or invalid lane branch"},
 		{name: "missing lane branch metadata", status: "done", phase: "swe", report: "Outcome: done\n", wantMove: "judge", wantReason: "missing or invalid lane branch"},
-		{name: "measurement hold no branch", status: "done", phase: "swe", branch: "swarm-lane/run/missing/measurement", hold: "measurement lane: never opens a PR; orchestrator advances by hand\n", report: "Outcome: done\n", event: "decision hold-advance: measurement complete", wantMove: "none", wantReason: "finished, no PR to integrate"},
-		{name: "empty hold unmerged branch", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", hold: "", report: "Outcome: done\n", event: "decision hold-advance: judgment", wantMove: "judge", wantReason: "unmerged head"},
-		{name: "hold missing report", status: "done", phase: "swe", branch: "swarm-lane/run/missing/report", hold: "", event: "decision hold-advance: judgment", wantMove: "wait", wantReason: "missing report"},
+		{name: "measurement hold no branch", status: "done", phase: "swe", branch: "swarm-lane/run/missing/measurement", hold: "measurement lane: never opens a PR; orchestrator advances by hand\n", report: "Outcome: done\n", event: "decision hold-advance: measurement complete", wantMove: "none", wantReason: "finished, no PR"},
+		{name: "empty hold unmerged branch", holdFile: true, status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", hold: "", report: "Outcome: done\n", event: "decision hold-advance: judgment", wantMove: "judge", wantReason: "unmerged head"},
+		{name: "hold missing report", holdFile: true, status: "done", phase: "swe", branch: "swarm-lane/run/missing/report", hold: "", event: "decision hold-advance: judgment", wantMove: "wait", wantReason: "missing report"},
 		{name: "planned not started", status: "planned", phase: "", wantMove: "none", wantReason: "planned, not started; dispatcher decides funding"},
 		{name: "running live terminal", status: "running", phase: "swe", branch: "swarm-lane/run/branch/lane", event: "started swe terminal-live", wantMove: "wait", wantReason: "waiting for terminal terminal-live handback"},
 		{name: "restarted ledger ignores stale spawn", status: "running", phase: "swe", taskExtra: `,"session_id":"restarted-session"`, wantMove: "none", wantReason: "no report or terminal to observe; dispatcher decides recovery"},
@@ -468,7 +477,16 @@ func TestNebulaSwarmAdoptPreviewFinishedLanesG56(t *testing.T) {
 		{name: "running with no terminal", status: "running", phase: "swe", wantMove: "none", wantReason: "no report or terminal to observe; dispatcher decides recovery"},
 		{name: "host hold still waits", status: "done", phase: "swe", branch: "swarm-lane/run/missing/held", report: "Outcome: done\n", taskExtra: `,"blocked_on":"host deployment"`, wantMove: "wait", wantReason: "host-held: host deployment"},
 		{name: "cached branch before deletion", status: "done", phase: "swe", branch: "swarm-lane/run/deleted/lane", report: "Outcome: done\n", wantMove: "judge", wantReason: "unmerged head"},
-		{name: "deleted branch after cached preview", status: "done", phase: "swe", branch: "swarm-lane/run/deleted/lane", report: "Outcome: done\n", wantMove: "none", wantReason: "finished, no PR to integrate"},
+		{name: "deleted branch after cached preview", status: "done", phase: "swe", branch: "swarm-lane/run/deleted/lane", report: "Outcome: done\n", wantMove: "none", wantReason: "finished, no PR"},
+		{name: "h ended review needs SWE", status: "running", phase: "review", taskExtra: `,"terminal_state":"ended","terminals":{"review":{"1":"review-ended"}}`, report: "Outcome: needs-swe\nBreaks: unsafe lifecycle transition\nOpen: fix five remaining shapes\n", wantMove: "judge", wantReason: "Breaks: unsafe lifecycle transition", wantText: []string{"Open: fix five remaining shapes"}},
+		{name: "h working review needs SWE", status: "running", phase: "review", taskExtra: `,"terminal_state":"working","terminals":{"review":{"1":"review-working"}}`, report: "Outcome: needs-swe\nBreaks: unsafe lifecycle transition\nOpen: fix five remaining shapes\n", wantMove: "wait", wantReason: "waiting for terminal review-working"},
+		{name: "h ended review multiline findings", status: "running", phase: "review", taskExtra: `,"terminal_state":"ended","terminals":{"review":{"1":"review-ended"}}`, report: "Outcome: needs-swe\nBreaks:\n- unsafe lifecycle transition\nOpen:\n- fix five remaining shapes\n", wantMove: "judge", wantReason: "unsafe lifecycle transition", wantText: []string{"Open:", "fix five remaining shapes"}},
+		{name: "i working old question newer turn", status: "running", phase: "swe", taskExtra: `,"terminal_state":"working","terminals":{"swe":{"1":"terminal-live"}}`, report: "Outcome: needs-input\nAsk: Has the host answered?\n", reportTime: time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC), event: "decision turn.started", wantMove: "wait", wantReason: "waiting for terminal terminal-live"},
+		{name: "i working new question", status: "running", phase: "swe", taskExtra: `,"terminal_state":"working","terminals":{"swe":{"1":"terminal-live"}}`, report: "Outcome: needs-input\nAsk: A new question?\n", reportTime: time.Date(2026, 11, 16, 3, 0, 0, 0, time.UTC), event: "decision turn.started", wantMove: "judge", wantReason: "A new question?"},
+		{name: "k absent branch no head", status: "done", phase: "swe", branch: "swarm-lane/run/missing/nohead", report: "Outcome: done\nHEAD: none\n", wantMove: "none", wantReason: "finished, no PR"},
+		{name: "k absent branch empty head", status: "done", phase: "swe", branch: "swarm-lane/run/missing/emptyhead", report: "Outcome: done\n", wantMove: "none", wantReason: "finished, no PR"},
+		{name: "l hold no gate text", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", holdFile: true, report: "Outcome: done\nHEAD: " + laneHead + "\n", wantMove: "judge", wantReason: "none recorded in run files", wantText: []string{"missing:"}},
+		{name: "l hold recorded gate", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", hold: "Gate: soak must pass", report: "Outcome: done\n", wantMove: "judge", wantReason: "soak must pass", wantText: []string{"missing:"}},
 	}
 	for _, tc := range fixtures {
 		t.Run(tc.name, func(t *testing.T) {
@@ -501,11 +519,17 @@ func TestNebulaSwarmAdoptPreviewFinishedLanesG56(t *testing.T) {
 				kind, detail, _ := strings.Cut(tc.event, " ")
 				return "2026-11-16T02:00:00Z\tlane\t" + kind + "\t" + detail + "\n"
 			}())
-			if tc.hold != "" || tc.name == "empty hold unmerged branch" || tc.name == "hold missing report" {
+			if tc.hold != "" || tc.holdFile {
 				write(t, filepath.Join(dir, "lane.hold-advance"), tc.hold)
 			}
 			if tc.report != "" {
 				if err := os.WriteFile(filepath.Join(dir, "lane."+tc.phase+".md"), []byte(tc.report), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !tc.reportTime.IsZero() {
+				path := filepath.Join(dir, "lane."+tc.phase+".md")
+				if err := os.Chtimes(path, tc.reportTime, tc.reportTime); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -537,6 +561,18 @@ func TestNebulaSwarmAdoptPreviewFinishedLanesG56(t *testing.T) {
 			}
 			got := result.Lanes[0]
 			t.Logf("dry-run %s: format=%s move=%s reason=%s evidence=%v", tc.name, result.Run.Format, got.Move, got.Reason, got.Evidence)
+			t.Logf("verdict=%s", result.Verdict)
+			if strings.HasPrefix(result.Verdict, "MOVES:") {
+				t.Errorf("unsafe verdict: %s", result.Verdict)
+			}
+			for _, want := range tc.wantText {
+				if !strings.Contains(got.Reason+" "+strings.Join(got.Evidence, " "), want) {
+					t.Errorf("preview=%+v missing %q", got, want)
+				}
+			}
+			if strings.Contains(got.Reason, "evidence=merge gate evidence") {
+				t.Errorf("placeholder reason: %s", got.Reason)
+			}
 			if result.Run.Format != FormatNebulaSwarm {
 				t.Fatalf("imported format = %q, want %q", result.Run.Format, FormatNebulaSwarm)
 			}
@@ -1337,7 +1373,7 @@ func TestImportsCurrentRoundOfTwoLaneRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []Lane{
-		{ID: "a", Title: "A", Branch: "ba", Phase: "swe", Status: "running", Round: 2, Session: "sess-a2", Terminal: "term-a2", ReportPath: filepath.Join(dir, "a.swe.md"), PR: "11", Report: "Outcome: done", Next: "next phase: review"},
+		{ID: "a", Title: "A", Branch: "ba", Phase: "swe", Status: "running", Round: 2, Session: "sess-a2", Terminal: "term-a2", ReportPath: filepath.Join(dir, "a.swe.md"), PR: "11", Report: "Outcome: done", ReportTime: base, Next: "next phase: review"},
 		{ID: "b", Title: "B", Branch: "bb", Phase: "review", Status: "running", Round: 2, Session: "sess-b2", Terminal: "term-b2", PR: "22", Next: "next: merge"},
 	}
 	if !reflect.DeepEqual(r.Lanes, want) {

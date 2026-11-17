@@ -123,8 +123,10 @@ type Lane struct {
 	TerminalState string
 	// Report is the latest report's Outcome line; LastEvent the lane's newest
 	// EVENTS line; Next what the run files say comes next for the lane.
-	Report, LastEvent, Next string
-	reportText              string
+	Report, LastEvent, Next     string
+	reportText                  string
+	holdAdvanceText             string
+	ReportTime, LastTurnStarted time.Time
 	// WaitingOn and WaitDeadline are host ledger facts. They become an
 	// expected wait during adoption instead of a fresh merge judgment.
 	WaitingOn    string
@@ -576,6 +578,7 @@ func Read(dir string) (Run, error) {
 	r.IntegrateRule = extractMergeRuleText(contract.Config.MergeRule, r.Objective+"\n"+r.Context)
 	for i := range r.Lanes {
 		r.Lanes[i].HoldAdvance = fileExists(filepath.Join(dir, r.Lanes[i].ID+".hold-advance"))
+		r.Lanes[i].holdAdvanceText = strings.TrimSpace(readText(filepath.Join(dir, r.Lanes[i].ID+".hold-advance")))
 		r.Lanes[i].HostHold = hostHoldReason(dir, r.Lanes[i].ID, r.Lanes[i].HostHold)
 	}
 	sort.Slice(r.Lanes, func(a, b int) bool { return r.Lanes[a].ID < r.Lanes[b].ID })
@@ -725,9 +728,8 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 			continue
 		}
 		head := strings.TrimSpace(ln.Head)
-		if head != "" && !validGitSHA(head) {
-			ln.IntegrationReason = "integration unknown: invalid lane head " + head
-			continue
+		if !meaningfulHostValue(head) {
+			head = ""
 		}
 		branchError := ""
 		if noPRHandback(*ln) {
@@ -745,9 +747,19 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 				}
 			}
 		}
+		if ln.branchChecked && ln.branchHead == "" {
+			// An absent remote branch ends a done no-PR handback even if the
+			// report records a local commit that was never pushed.
+			ln.IntegrationReason = fmt.Sprintf("integration gate: lane branch %s is absent from mirror", ln.Branch)
+			continue
+		}
 		if ln.branchHead != "" {
 			// The branch is newer evidence than a potentially stale report head.
 			head = ln.branchHead
+		}
+		if head != "" && !validGitSHA(head) {
+			ln.IntegrationReason = "integration unknown: invalid lane head " + head
+			continue
 		}
 		if head != "" {
 			for _, ref := range fetchedRefs {
@@ -784,8 +796,6 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 				ln.IntegrationReason = branchError
 			case ln.branchHead != "":
 				ln.IntegrationReason = fmt.Sprintf("integration gate: lane branch %s has unmerged head %s", ln.Branch, shortSHA(ln.branchHead))
-			case ln.branchChecked && head == "":
-				ln.IntegrationReason = fmt.Sprintf("integration gate: lane branch %s is absent from mirror", ln.Branch)
 			default:
 				ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is not in mirror refs and no squash subject ending (#%s)", cmp.Or(shortSHA(head), "missing"), prNumber(ln.PR))
 			}
@@ -807,9 +817,7 @@ func finishedNoPRLane(r Run, ln Lane) bool {
 	return noPRHandback(ln) &&
 		ln.branchChecked &&
 		ln.branchHead == "" &&
-		strings.TrimSpace(ln.Head) == "" &&
-		strings.TrimSpace(r.IntegrationError) == "" &&
-		strings.TrimSpace(ln.IntegrationReason) != ""
+		strings.TrimSpace(r.IntegrationError) == ""
 }
 
 func gitOutput(ctx context.Context, repo string, args ...string) ([]byte, error) {
@@ -1197,7 +1205,7 @@ func applyReportMetadata(ln *Lane, report string) {
 		return
 	}
 	if rep, err := lane.ParsePhaseReport(report); err == nil {
-		if rep.Outcome == lane.OutcomeNeedsInput || rep.Outcome == lane.OutcomeBlocked {
+		if rep.Outcome == lane.OutcomeNeedsInput || rep.Outcome == lane.OutcomeBlocked || rep.Outcome == lane.OutcomeNeedsSWE {
 			ln.reportText = strings.TrimSpace(report)
 		}
 		if rep.Outcome == lane.OutcomeBlocked {
@@ -1246,6 +1254,21 @@ func applyReportMetadata(ln *Lane, report string) {
 			}
 		}
 	}
+}
+
+func reportFindings(report string) string {
+	var parts []string
+	inFindings := false
+	for _, line := range strings.Split(report, "\n") {
+		line = strings.TrimSpace(line)
+		if key, _, ok := strings.Cut(line, ":"); ok {
+			inFindings = strings.EqualFold(key, "Breaks") || strings.EqualFold(key, "Open")
+		}
+		if inFindings && line != "" {
+			parts = append(parts, line)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 type hostDeadline string
@@ -1508,6 +1531,9 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 	if ln.Report != "" {
 		p.Evidence = append(p.Evidence, "report="+ln.Report)
 	}
+	if meaningfulHostValue(ln.Head) {
+		p.Evidence = append(p.Evidence, "report-head="+strings.TrimSpace(ln.Head))
+	}
 	if ln.LastEvent != "" {
 		p.Evidence = append(p.Evidence, "event="+ln.LastEvent)
 	}
@@ -1542,6 +1568,16 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 	if r.NoPR {
 		p.Evidence = append(p.Evidence, "no-PR run")
 	}
+	report := previewOutcome(ln.Report)
+	working := strings.EqualFold(ln.TerminalState, "working") || strings.EqualFold(ln.TerminalState, "busy")
+	questionIsNew := !ln.LastTurnStarted.IsZero() && ln.ReportTime.After(ln.LastTurnStarted)
+	if working && !(report == string(lane.OutcomeNeedsInput) && questionIsNew) {
+		p.Move, p.Reason = "wait", "terminal is working; adoption must not complete, release, or stop it"
+		if ln.Terminal != "" {
+			p.Reason += "; waiting for terminal " + ln.Terminal + " handback"
+		}
+		return p
+	}
 	if integratedLane(ln) {
 		p.Reason = "lane is already integrated, merged, or closed; no lifecycle move"
 		return p
@@ -1550,7 +1586,6 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 		p.Reason = "analysis lane finished; no PR to integrate"
 		return p
 	}
-	report := previewOutcome(ln.Report)
 	if waitingOn, deadline := ln.expectedHostWait(now); waitingOn != "" {
 		p.Move = "wait"
 		if deadline.IsZero() {
@@ -1566,6 +1601,13 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 	}
 	if report == string(lane.OutcomeBlocked) {
 		p.Move, p.Reason = "judge", "lane question: "+quoteLaneQuestion(cmp.Or(ln.ReportQuestion, ln.ReportBlocker, "blocked report"))
+		return p
+	}
+	if report == string(lane.OutcomeNeedsSWE) {
+		p.Move, p.Reason = "judge", "review report requests SWE rework"
+		if findings := reportFindings(ln.reportText); findings != "" {
+			p.Reason += "; " + findings
+		}
 		return p
 	}
 	if ln.HoldAdvance {
@@ -1611,31 +1653,22 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 			return p
 		}
 	}
-	if strings.EqualFold(ln.TerminalState, "working") || strings.EqualFold(ln.TerminalState, "busy") {
-		p.Move, p.Reason = "wait", "terminal is working; adoption must not complete, release, or stop it"
-		if ln.Terminal != "" {
-			p.Reason += "; waiting for terminal " + ln.Terminal + " handback"
-		}
-		return p
-	}
 	if finishedNoPRLane(r, ln) {
-		p.Reason = "finished, no PR to integrate"
+		p.Reason = "finished, no PR, branch never pushed"
 		return p
 	}
 	switch {
-	case report == string(lane.OutcomeNeedsSWE):
-		p.Move, p.Reason = "rework", "lane report requests SWE rework"
 	case report == "done" || report == "no-change":
 		if r.IntegrationError != "" {
 			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
 		} else if integrationJudgmentApplies(ln) && ln.IntegrationReason != "" {
 			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
 			if ln.HoldAdvance {
-				p.Gate, p.EvidencePresent = mergeGate(r), mergeGateEvidence(r, ln)
+				p.Gate, p.EvidencePresent = mergeGate(r, ln), mergeGateEvidence(r, ln)
 				p.Reason = fmt.Sprintf("%s; %s evidence=%s", p.Reason, p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
 			}
 		} else if ln.HoldAdvance || sweOnly(r, ln) {
-			p.Move, p.Gate, p.EvidencePresent = "judge", mergeGate(r), mergeGateEvidence(r, ln)
+			p.Move, p.Gate, p.EvidencePresent = "judge", mergeGate(r, ln), mergeGateEvidence(r, ln)
 			p.Reason = fmt.Sprintf("%s evidence=%s", p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
 		} else if !r.NoPR && (strings.EqualFold(ln.Phase, "review") || strings.EqualFold(ln.Phase, "clean")) && r.IntegrateRule != "" {
 			p.Move, p.Reason = "integrate", "completed report plus the run integrate rule permits the merge path"
@@ -1736,18 +1769,23 @@ func sweOnly(r Run, ln Lane) bool {
 	return len(r.Phases) == 0 && strings.EqualFold(strings.TrimSpace(ln.Phase), "swe") && strings.TrimSpace(ln.Next) == ""
 }
 
-func mergeGate(r Run) string {
-	if gate := strings.TrimSpace(r.IntegrateRule); gate != "" {
-		if strings.EqualFold(gate, "merge gate evidence") {
-			return "run merge gate"
-		}
-		return clip(gate, 180)
+func mergeGateText(r Run, ln Lane) string {
+	gate := strings.TrimSpace(r.IntegrateRule)
+	if gate == "" || strings.EqualFold(gate, "merge gate evidence") {
+		gate = extractMergeRuleText("", r.Objective+"\n"+r.Context)
 	}
-	return "run merge gate"
+	return strings.TrimSpace(gate + "\n" + ln.holdAdvanceText)
+}
+
+func mergeGate(r Run, ln Lane) string {
+	if gate := mergeGateText(r, ln); gate != "" {
+		return "merge gate: " + clip(gate, 180)
+	}
+	return "merge gate: none recorded in run files"
 }
 
 func mergeGateEvidence(r Run, ln Lane) bool {
-	gate := strings.ToLower(strings.Join([]string{r.Objective, r.Context, r.IntegrateRule}, "\n"))
+	gate := strings.ToLower(mergeGateText(r, ln))
 	evidence := strings.ToLower(strings.Join([]string{ln.Report, ln.LastEvent, ln.Checks}, "\n"))
 	if strings.Contains(gate, "exact head") && strings.TrimSpace(ln.Head) == "" {
 		return false
@@ -1786,10 +1824,10 @@ func evidenceLabel(present bool, r Run, ln Lane) string {
 	if present {
 		return "present"
 	}
-	missing := "merge gate evidence"
-	if strings.TrimSpace(r.IntegrateRule) != "" {
-		missing = "missing: " + clip(r.IntegrateRule, 120)
-	} else if strings.TrimSpace(ln.Head) == "" {
+	missing := "missing: merge gate result"
+	if gate := mergeGateText(r, ln); gate != "" {
+		missing = "missing: " + clip(gate, 120)
+	} else if !meaningfulHostValue(ln.Head) {
 		missing = "missing: exact head and gate result"
 	}
 	return missing
