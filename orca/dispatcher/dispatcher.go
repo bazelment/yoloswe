@@ -1671,15 +1671,11 @@ func (d *Dispatcher) deliverLaneAnswer(ctx context.Context, runID string, ln *la
 	if drv := d.laneDriver(); drv != nil {
 		err := drv.Steer(ctx, lane.SteerRequest{RunID: runID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: message, Select: selectOption})
 		if err != nil {
-			var undelivered *lane.UndeliveredError
-			if !errors.As(err, &undelivered) {
-				err = &lane.UndeliveredError{TerminalID: ln.TerminalID, Cause: err}
-			}
 			ln.AwaitingInputSince = ln.AnswerAttemptedAt
 			if saveErr := d.store.Lanes().Upsert(ctx, *ln); saveErr != nil {
 				return errors.Join(err, saveErr)
 			}
-			_, saveErr := d.store.Events().Append(ctx, store.Event{RunID: runID, LaneID: ln.ID, Kind: store.EventStall, Class: store.EventClassJudgment, Source: lane.AnswerDeliverySource, Urgent: true, Summary: err.Error()})
+			_, saveErr := d.store.Events().Append(ctx, store.Event{RunID: runID, LaneID: ln.ID, Kind: store.EventStall, Class: store.EventClassJudgment, Source: lane.AnswerDeliverySource, Urgent: true, Summary: "answer not delivered: " + err.Error()})
 			return errors.Join(err, saveErr)
 		}
 	}

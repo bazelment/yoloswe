@@ -1911,6 +1911,7 @@ func TestSteerConfirmsResumedEventAfterFastTurn(t *testing.T) {
 		case "GET /api/code-terminals/t-1/events/stream":
 			_, _ = fmt.Fprintf(w, "id: 1\nevent: turn.resumed\ndata: {\"seq\":1,\"type\":\"turn.resumed\",\"at\":%q}\n\n", clk.Now().Format(time.RFC3339Nano))
 		case "GET /api/code-terminals/t-1":
+			t.Error("confirmed turn should not require terminal metadata")
 			_, _ = io.WriteString(w, `{"id":"t-1","kind":"codex","agentState":"idle"}`)
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)

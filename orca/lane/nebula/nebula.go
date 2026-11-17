@@ -1245,7 +1245,13 @@ func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
 	sentAt := d.clock.Now()
 	d.mu.Lock()
 	resumedSeq := d.lastResumed[terminalID].Seq
+	d.lastResumed[terminalID] = TerminalEvent{Seq: resumedSeq}
 	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		delete(d.lastResumed, terminalID)
+		d.mu.Unlock()
+	}()
 	submit := func() error {
 		if req.Select > 0 {
 			return d.pressKeys(ctx, terminalID, append(strings.Split(strconv.Itoa(req.Select), ""), "Enter"))
@@ -1294,15 +1300,18 @@ func (d *Driver) confirmSteer(ctx context.Context, terminalID string, sentAt tim
 	flushAt := d.clock.Now().Add(lane.AnswerDeliveryWindow / 2)
 	flushed := false
 	cause := errors.New("agent did not resume within delivery window")
+	resumed := func() bool {
+		d.mu.Lock()
+		ev := d.lastResumed[terminalID]
+		d.mu.Unlock()
+		return ev.Seq > resumedSeq && !ev.At.IsZero() && !ev.At.Before(sentAt)
+	}
 	for {
-		term, err := d.GetTerminal(ctx, terminalID)
-		if err == nil && isWorkingAgentState(term.AgentState) {
+		if resumed() {
 			return nil
 		}
-		d.mu.Lock()
-		resumed := d.lastResumed[terminalID]
-		d.mu.Unlock()
-		if resumed.Seq > resumedSeq && !resumed.At.IsZero() && !resumed.At.Before(sentAt) {
+		term, err := d.GetTerminal(ctx, terminalID)
+		if (err == nil && isWorkingAgentState(term.AgentState)) || resumed() {
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -1861,7 +1870,7 @@ func (d *Driver) consumeSSEStream(
 
 		if termEv.Type == "turn.resumed" {
 			d.mu.Lock()
-			if termEv.Seq > d.lastResumed[termEv.TerminalID].Seq {
+			if previous, pending := d.lastResumed[termEv.TerminalID]; pending && termEv.Seq > previous.Seq {
 				d.lastResumed[termEv.TerminalID] = termEv
 			}
 			d.mu.Unlock()

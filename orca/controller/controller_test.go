@@ -3555,8 +3555,16 @@ func TestUndeliveredLaneAnswerReturnsToJudgmentOnce(t *testing.T) {
 				)
 				d := dispatcher.New(dispatcher.Config{}, st, drv, clk, client)
 				t.Cleanup(func() { _ = d.Close() })
-				if _, err := d.Dispatch(ctx, "run-1", []store.Event{{ID: "question-event", LaneID: ln.ID, Kind: store.EventLaneReport, Summary: ln.Question}}); err != nil {
+				result, err := d.Dispatch(ctx, "run-1", []store.Event{{ID: "question-event", LaneID: ln.ID, Kind: store.EventLaneReport, Summary: ln.Question}})
+				if err != nil {
 					t.Fatal(err)
+				}
+				wantAccepted := 1
+				if tc.preSubmitFailure {
+					wantAccepted = 0
+				}
+				if len(result.Accepted) != wantAccepted {
+					t.Fatalf("accepted mutations=%d, want %d", len(result.Accepted), wantAccepted)
 				}
 			}
 			if err := ctrl.Step(ctx); err != nil {
