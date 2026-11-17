@@ -1760,6 +1760,14 @@ func TestReadoptGeneration(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			pendingKey := "phase.start:lane:swe:attempt-1:adopt:2030-01-01T12:00:00Z"
+			pendingArgs, err := json.Marshal(controller.DecisionArgs{ActionKey: "intent:" + pendingKey, Phase: "swe", Round: 1, Attempt: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Decisions().Append(t.Context(), store.Decision{RunID: run.ID, LaneID: "lane", Tool: controller.ToolPhaseStart + ".intent", Args: pendingArgs}); err != nil {
+				t.Fatal(err)
+			}
 			clk.Advance(3 * time.Hour)
 			if scenario == "wait" {
 				wait = "Y"
@@ -1767,6 +1775,20 @@ func TestReadoptGeneration(t *testing.T) {
 			run = importRun(wait)
 			if err := ctrls.Start(t.Context(), run); err != nil {
 				t.Fatal(err)
+			}
+			decisions, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: run.ID, LaneID: "lane"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resolved := 0
+			for i := range decisions {
+				var args controller.DecisionArgs
+				if err := json.Unmarshal(decisions[i].Args, &args); err != nil {
+					t.Fatal(err)
+				}
+				if args.ActionKey == pendingKey && decisions[i].Tool == "adopt.launch.supersede" {
+					resolved++
+				}
 			}
 			ctrl := ctrls.runs[run.ID].controller
 			switch scenario {
@@ -1828,6 +1850,9 @@ func TestReadoptGeneration(t *testing.T) {
 				if got := len(judge.AllEvents()) - before; got != 1 {
 					t.Fatalf("new judgment events=%d; want 1 (all=%+v)", got, judge.AllEvents())
 				}
+			}
+			if resolved != 1 {
+				t.Fatalf("old in-flight reservations resolved=%d; want 1", resolved)
 			}
 		})
 	}

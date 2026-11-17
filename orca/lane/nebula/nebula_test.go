@@ -1976,6 +1976,12 @@ func TestFindPhaseTerminalAfterDriverRestart(t *testing.T) {
 	if err != nil || found == nil || found.TerminalID != started.TerminalID || found.SessionID != started.SessionID {
 		t.Fatalf("found=%+v err=%v; want %+v", found, err, started)
 	}
+	stale := req
+	stale.SessionID = "stale-session"
+	recovered, err := restarted.FindPhaseTerminal(t.Context(), stale)
+	if err != nil || recovered == nil || recovered.TerminalID != started.TerminalID {
+		t.Fatalf("stale session recovery=%+v err=%v", recovered, err)
+	}
 	for _, field := range []string{"attempt", "round", "phase", "run"} {
 		t.Run(field, func(t *testing.T) {
 			other := req

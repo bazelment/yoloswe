@@ -15,7 +15,10 @@ import (
 	br "github.com/bazelment/yoloswe/swarm-queen/bramble"
 )
 
-type fakeClient struct{ sessions []br.Session }
+type fakeClient struct {
+	panes    map[string]string
+	sessions []br.Session
+}
 
 func (f *fakeClient) NewSession(context.Context, br.SpawnRequest) (br.SpawnResult, error) {
 	return br.SpawnResult{SessionID: "s1"}, nil
@@ -23,6 +26,9 @@ func (f *fakeClient) NewSession(context.Context, br.SpawnRequest) (br.SpawnResul
 func (f *fakeClient) SendInput(context.Context, string, string) error    { return nil }
 func (f *fakeClient) SendKey(context.Context, string, string) error      { return nil }
 func (f *fakeClient) ListSessions(context.Context) ([]br.Session, error) { return f.sessions, nil }
+func (f *fakeClient) CapturePane(_ context.Context, id string, _ int) (string, error) {
+	return f.panes[id], nil
+}
 
 func TestPhaseBriefContract(t *testing.T) {
 	d, err := bramble.New(bramble.Config{Client: &fakeClient{}})
@@ -325,7 +331,7 @@ func TestFindPhaseTerminalAfterDriverRestart(t *testing.T) {
 		{"another phase", "running", "phase.retry:lane:review:attempt-2", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client := &fakeClient{sessions: []br.Session{{ID: "session", Status: tc.status, Prompt: "[orca launch:run/" + tc.marker + "]"}}}
+			client := &fakeClient{sessions: []br.Session{{ID: "session", Status: tc.status, TmuxTarget: "%1"}}, panes: map[string]string{"session": "[orca launch:run/" + tc.marker + "]"}}
 			drv, err := bramble.New(bramble.Config{Client: client})
 			if err != nil {
 				t.Fatal(err)
@@ -338,5 +344,60 @@ func TestFindPhaseTerminalAfterDriverRestart(t *testing.T) {
 				t.Fatalf("found=%+v; want live=%t", found, tc.want)
 			}
 		})
+	}
+}
+
+func TestFindPhaseTerminalFromReceiptWithoutPrompt(t *testing.T) {
+	client := &fakeClient{sessions: []br.Session{{ID: "s1", Status: "running", TmuxTarget: "%1"}}}
+	drv, err := bramble.New(bramble.Config{Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := lane.StartPhaseRequest{RunID: "run", LaneID: "lane", SessionID: "s1", Phase: "review", Round: 2, ActionKey: "phase.advance:lane:review2:attempt-1"}
+	started, err := drv.StartPhaseTerminal(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := bramble.New(bramble.Config{Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.KnownTerminalID = started.TerminalID
+	found, err := restarted.FindPhaseTerminal(t.Context(), req)
+	if err != nil || found == nil || found.TerminalID != started.TerminalID {
+		t.Fatalf("recovered=%+v err=%v", found, err)
+	}
+}
+
+type captureLaunchClient struct{ *fakeClient }
+
+func (c *captureLaunchClient) SendInput(_ context.Context, id, text string) error {
+	c.panes[id] = text
+	return nil
+}
+
+func TestFindPhaseTerminalFromPaneBeforeReceipt(t *testing.T) {
+	client := &captureLaunchClient{&fakeClient{sessions: []br.Session{{ID: "s1", Status: "running", TmuxTarget: "%1"}}, panes: map[string]string{}}}
+	drv, err := bramble.New(bramble.Config{Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := lane.StartPhaseRequest{RunID: "run", LaneID: "lane", SessionID: "s1", Phase: "swe", Round: 1, ActionKey: "phase.retry:lane:swe:attempt-2"}
+	started, err := drv.StartPhaseTerminal(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := bramble.New(bramble.Config{Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, err := restarted.FindPhaseTerminal(t.Context(), req)
+	if err != nil || found == nil || found.TerminalID != started.TerminalID {
+		t.Fatalf("pane recovery=%+v err=%v", found, err)
+	}
+	client.sessions[0].TmuxTarget = ""
+	found, err = restarted.FindPhaseTerminal(t.Context(), req)
+	if err != nil || found != nil {
+		t.Fatalf("closed pane recovery=%+v err=%v", found, err)
 	}
 }

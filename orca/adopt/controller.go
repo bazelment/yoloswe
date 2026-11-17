@@ -305,6 +305,45 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 				superseded = append(superseded, ev.ID)
 			}
 		}
+		// Resolve old launch reservations as superseded so consumers of the
+		// audit log do not keep counting them as in-flight spawns.
+		decs, err := d.store.Decisions().List(ctx, store.DecisionFilter{RunID: r.ID})
+		if err != nil {
+			return err
+		}
+		completed := make(map[string]bool)
+		type pendingLaunch struct {
+			laneID string
+			args   controller.DecisionArgs
+		}
+		var pending []pendingLaunch
+		for i := range decs {
+			var args controller.DecisionArgs
+			if json.Unmarshal(decs[i].Args, &args) != nil {
+				continue
+			}
+			if strings.HasPrefix(args.ActionKey, "intent:phase.") || strings.HasPrefix(args.ActionKey, "intent:integrate-launch:") {
+				args.ActionKey = strings.TrimPrefix(args.ActionKey, "intent:")
+				pending = append(pending, pendingLaunch{args: args, laneID: decs[i].LaneID})
+			} else {
+				completed[args.ActionKey] = true
+			}
+		}
+		for i := range pending {
+			args := pending[i].args
+			if completed[args.ActionKey] {
+				continue
+			}
+			args.TriggerEventID = ""
+			raw, err := json.Marshal(args)
+			if err != nil {
+				return err
+			}
+			if _, err := d.store.Decisions().Append(ctx, store.Decision{RunID: r.ID, Actor: controller.ActorController, LaneID: pending[i].laneID, Tool: "adopt.launch.supersede", Reason: "host state supersedes unfinished launch", Args: raw}); err != nil {
+				return err
+			}
+			completed[args.ActionKey] = true
+		}
 		args, err := json.Marshal(controller.DecisionArgs{ActionKey: "adopt-generation:" + actionGeneration, EventIDs: superseded})
 		if err != nil {
 			return err

@@ -424,20 +424,23 @@ type SpawnResult struct {
 
 // StartPhaseRequest starts a phase terminal on an existing or new worker session.
 type StartPhaseRequest struct {
-	RunDir       string            `json:"run_dir,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
-	RunID        string            `json:"run_id"`
-	ActionKey    string            `json:"action_key,omitempty"`
-	Repository   string            `json:"repository,omitempty"`
-	RepositoryID string            `json:"repository_id,omitempty"`
-	LaneID       string            `json:"lane_id"`
-	SessionID    string            `json:"session_id,omitempty"`
-	Phase        string            `json:"phase"`
-	Harness      string            `json:"harness"`
-	Model        string            `json:"model"`
-	Effort       string            `json:"effort,omitempty"`
-	Brief        string            `json:"brief"`
-	Round        int               `json:"round"`
+	RunDir    string            `json:"run_dir,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	RunID     string            `json:"run_id"`
+	ActionKey string            `json:"action_key,omitempty"`
+	// KnownTerminalID is supplied only for lookup, from a durable receipt of
+	// this exact launch. Drivers must still verify that the terminal is live.
+	KnownTerminalID string `json:"known_terminal_id,omitempty"`
+	Repository      string `json:"repository,omitempty"`
+	RepositoryID    string `json:"repository_id,omitempty"`
+	LaneID          string `json:"lane_id"`
+	SessionID       string `json:"session_id,omitempty"`
+	Phase           string `json:"phase"`
+	Harness         string `json:"harness"`
+	Model           string `json:"model"`
+	Effort          string `json:"effort,omitempty"`
+	Brief           string `json:"brief"`
+	Round           int    `json:"round"`
 }
 
 // StartPhaseResult describes the started phase terminal.

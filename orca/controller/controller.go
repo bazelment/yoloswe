@@ -1605,7 +1605,11 @@ func (c *Controller) recoverSavedLaunches(ctx context.Context) error {
 		if nextTry := c.laneFailures[failureKey]; !nextTry.IsZero() && c.clock.Now().Before(nextTry) {
 			continue
 		}
-		if err := c.startLanePhase(ctx, ln, r, phase, args.Round, args.Attempt, tool, args.TriggerEventID, dec.Reason, ""); err != nil {
+		triggerEventID := args.TriggerEventID
+		if triggerEventID == "" && tool != ToolPhaseStart {
+			triggerEventID = ln.LastEventID
+		}
+		if err := c.startLanePhase(ctx, ln, r, phase, args.Round, args.Attempt, tool, triggerEventID, dec.Reason, ""); err != nil {
 			if !c.cfg.IsolateLaneErrors || !isIsolatedFailure(err) {
 				return err
 			}
@@ -3604,9 +3608,15 @@ func (c *Controller) startLanePhase(
 	if phase.Name != recipe.PhaseIntegrate {
 		if c.hasActionDecision("intent:" + actionKey) {
 			var err error
-			recoveredTerminal, err = c.driver.FindPhaseTerminal(ctx, lane.StartPhaseRequest{
-				RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, Phase: phase.Name, Round: round, ActionKey: actionKey,
-			})
+			lookup := lane.StartPhaseRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, Phase: phase.Name, Round: round, ActionKey: actionKey}
+			if receipt, ok := c.decidedActions["started:"+actionKey]; ok {
+				var args DecisionArgs
+				if err := json.Unmarshal(receipt.Args, &args); err != nil {
+					return err
+				}
+				lookup.SessionID, lookup.KnownTerminalID = args.SessionID, args.TerminalID
+			}
+			recoveredTerminal, err = c.driver.FindPhaseTerminal(ctx, lookup)
 			if err != nil {
 				return laneDriverError(err)
 			}
@@ -3691,6 +3701,12 @@ func (c *Controller) startLanePhase(
 		}
 		sessionID = res.SessionID
 		terminalID = res.TerminalID
+	}
+
+	if phase.Name != recipe.PhaseIntegrate {
+		if _, _, err := c.recordDecision(ctx, tool+".started", ln.ID, reason, "terminal started", DecisionArgs{ActionKey: "started:" + actionKey, Phase: phase.Name, Round: round, Attempt: attempt, SessionID: sessionID, TerminalID: terminalID}); err != nil {
+			return err
+		}
 	}
 
 	now := c.clock.Now().UTC()

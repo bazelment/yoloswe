@@ -1142,30 +1142,12 @@ func (d *Driver) FindPhaseTerminal(ctx context.Context, req lane.StartPhaseReque
 	if req.ActionKey == "" {
 		return nil, nil
 	}
-	sessionIDs := []string{req.SessionID}
-	if req.SessionID == "" {
-		q := url.Values{"metadata.swarmRun": {req.RunID}, "metadata.swarmLane": {req.LaneID}}
-		var resp struct {
-			Sessions []SessionInfo `json:"sessions"`
-		}
-		if err := d.doJSON(ctx, http.MethodGet, "/api/code-sessions?"+q.Encode(), nil, &resp); err != nil {
-			return nil, err
-		}
-		sessionIDs = nil
-		for i := range resp.Sessions {
-			sess := &resp.Sessions[i]
-			if sess.Metadata["swarmRun"] == req.RunID && sess.Metadata["swarmLane"] == req.LaneID {
-				sessionIDs = append(sessionIDs, sess.ID)
-			}
-		}
-	}
-	for _, sessionID := range sessionIDs {
+	find := func(sessionID string) (*lane.StartPhaseResult, error) {
 		detail, err := d.GetSession(ctx, sessionID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
 		if err != nil {
-			var apiErr *APIError
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				continue
-			}
 			return nil, err
 		}
 		for i := range detail.Terminals {
@@ -1178,6 +1160,30 @@ func (d *Driver) FindPhaseTerminal(ctx context.Context, req lane.StartPhaseReque
 				d.TrackLane(lane.Lane{RunID: req.RunID, ID: req.LaneID, SessionID: sessionID, TerminalID: tm.ID})
 				return &lane.StartPhaseResult{SessionID: sessionID, TerminalID: tm.ID}, nil
 			}
+		}
+		return nil, nil
+	}
+	if req.SessionID != "" {
+		found, err := find(req.SessionID)
+		if found != nil || err != nil {
+			return found, err
+		}
+	}
+	q := url.Values{"metadata.swarmRun": {req.RunID}, "metadata.swarmLane": {req.LaneID}}
+	var resp struct {
+		Sessions []SessionInfo `json:"sessions"`
+	}
+	if err := d.doJSON(ctx, http.MethodGet, "/api/code-sessions?"+q.Encode(), nil, &resp); err != nil {
+		return nil, err
+	}
+	for i := range resp.Sessions {
+		sess := &resp.Sessions[i]
+		if sess.ID == req.SessionID || sess.Metadata["swarmRun"] != req.RunID || sess.Metadata["swarmLane"] != req.LaneID {
+			continue
+		}
+		found, err := find(sess.ID)
+		if found != nil || err != nil {
+			return found, err
 		}
 	}
 	return nil, nil

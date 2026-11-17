@@ -315,7 +315,7 @@ func TestControllerSweReviewIntegrateAndDefaultRecipe(t *testing.T) {
 		}
 		var tools []string
 		for _, d := range decs {
-			if !strings.HasSuffix(d.Tool, ".intent") {
+			if !strings.HasSuffix(d.Tool, ".intent") && !strings.HasSuffix(d.Tool, ".started") {
 				tools = append(tools, d.Tool)
 			}
 		}
@@ -3850,5 +3850,78 @@ func TestControllerRecoversSavedLaunch(t *testing.T) {
 	}
 	if completed != 1 {
 		t.Fatalf("completed launch decisions=%d; want 1", completed)
+	}
+}
+
+type launchLookupDriver struct {
+	*lane.FakeDriver
+	fail bool
+}
+
+func (d *launchLookupDriver) FindPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (*lane.StartPhaseResult, error) {
+	if d.fail {
+		d.fail = false
+		return nil, errors.New("temporary launch lookup failure")
+	}
+	return d.FakeDriver.FindPhaseTerminal(ctx, req)
+}
+
+func TestControllerLaunchRecoveryWithoutLiveTerminal(t *testing.T) {
+	for _, scenario := range []string{"absent", "lookup error", "isolated lookup error"} {
+		t.Run(scenario, func(t *testing.T) {
+			clk, st, base, judge := setupTestEnv(t)
+			drv := &launchLookupDriver{FakeDriver: base, fail: scenario != "absent"}
+			ctx := t.Context()
+			if err := st.Lanes().Upsert(ctx, lane.Lane{RunID: "run-1", ID: "lane", Status: lane.StatusRunning, Phase: "swe", Round: 1, Attempt: 1, SessionID: "session", TerminalID: "old-terminal"}); err != nil {
+				t.Fatal(err)
+			}
+			args, err := json.Marshal(controller.DecisionArgs{ActionKey: "intent:phase.advance:lane:clean:attempt-1", FromPhase: "swe", Phase: "clean", Round: 1, Attempt: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Decisions().Append(ctx, store.Decision{RunID: "run-1", LaneID: "lane", Tool: controller.ToolPhaseAdvance + ".intent", Args: args}); err != nil {
+				t.Fatal(err)
+			}
+			appendReportEvent(t, st, "lane", lane.PhaseReport{Phase: "swe", Outcome: lane.OutcomeDone, HeadSHA: "head", PR: 42})
+			ctrl := controller.New(controller.Config{RunID: "run-1", IsolateLaneErrors: scenario == "isolated lookup error"}, st, drv, clk, judge)
+			err = ctrl.Step(ctx)
+			wantError := scenario == "lookup error"
+			if (err != nil) != wantError {
+				t.Fatalf("first Step=%v; want error=%t", err, wantError)
+			}
+			wantStarts := 0
+			if scenario == "absent" {
+				wantStarts = 1
+			}
+			if len(base.PhaseStarts) != wantStarts {
+				t.Fatalf("starts after lookup=%d; want %d", len(base.PhaseStarts), wantStarts)
+			}
+			clk.Advance(2 * time.Second)
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if len(base.PhaseStarts) != 1 {
+				t.Fatalf("relaunches=%d; want 1", len(base.PhaseStarts))
+			}
+			decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			completed := 0
+			for i := range decs {
+				if decs[i].Tool == controller.ToolPhaseAdvance {
+					completed++
+					if !strings.Contains(decs[i].Reason, "driver found no live terminal") {
+						t.Fatalf("missing relaunch explanation: %+v", decs[i])
+					}
+				}
+			}
+			if completed != 1 {
+				t.Fatalf("completed decisions=%d; want 1", completed)
+			}
+		})
 	}
 }

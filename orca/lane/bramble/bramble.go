@@ -155,22 +155,38 @@ func (d *Driver) FindPhaseTerminal(ctx context.Context, req lane.StartPhaseReque
 	}
 	for i := range sessions {
 		sess := &sessions[i]
-		if req.ActionKey == "" || !strings.Contains(sess.Prompt, launchMarker(req.RunID, req.ActionKey)) {
-			continue
-		}
-		if req.SessionID != "" && req.SessionID != sess.ID {
+		if !sess.HasPane() || (req.SessionID != "" && req.SessionID != sess.ID) {
 			continue
 		}
 		switch strings.ToLower(strings.TrimSpace(sess.Status)) {
-		case "running", "working", "busy", "waiting", "wait", "waiting_for_input", "input.waiting":
-			d.mu.Lock()
-			d.activeByLane[req.RunID+"/"+req.LaneID] = sess.ID
-			d.phases[sess.ID], d.rounds[sess.ID] = req.Phase, req.Round
-			d.lanes[sess.ID], d.runs[sess.ID], d.runDirs[sess.ID] = req.LaneID, req.RunID, req.RunDir
-			delete(d.stopped, sess.ID)
-			d.mu.Unlock()
-			return &lane.StartPhaseResult{SessionID: sess.ID, TerminalID: sess.ID}, nil
+		case "running", "working", "busy", "idle", "waiting", "wait", "waiting_for_input", "input.waiting":
+		default:
+			continue
 		}
+		matched := req.KnownTerminalID != "" && req.KnownTerminalID == sess.ID && req.SessionID == sess.ID
+		if !matched {
+			capturer, ok := d.c.(interface {
+				CapturePane(context.Context, string, int) (string, error)
+			})
+			if !ok {
+				return nil, errors.New("bramble launch lookup needs a receipt or pane capture")
+			}
+			text, err := capturer.CapturePane(ctx, sess.ID, 0)
+			if err != nil {
+				return nil, err
+			}
+			matched = req.ActionKey != "" && strings.Contains(text, launchMarker(req.RunID, req.ActionKey))
+		}
+		if !matched {
+			continue
+		}
+		d.mu.Lock()
+		d.activeByLane[req.RunID+"/"+req.LaneID] = sess.ID
+		d.phases[sess.ID], d.rounds[sess.ID] = req.Phase, req.Round
+		d.lanes[sess.ID], d.runs[sess.ID], d.runDirs[sess.ID] = req.LaneID, req.RunID, req.RunDir
+		delete(d.stopped, sess.ID)
+		d.mu.Unlock()
+		return &lane.StartPhaseResult{SessionID: sess.ID, TerminalID: sess.ID}, nil
 	}
 	return nil, nil
 }
