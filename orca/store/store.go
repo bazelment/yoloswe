@@ -75,6 +75,8 @@ type LaneStore interface {
 // DirectiveStore manages standing owner rules, instructions, plan imports, and recipe edits.
 type DirectiveStore interface {
 	Add(ctx context.Context, d Directive) error
+	// Replace supersedes an existing directive while retaining its stable ID.
+	Replace(ctx context.Context, d Directive) error
 	Get(ctx context.Context, runID, directiveID string) (*Directive, error)
 	UpdateStatus(ctx context.Context, runID, directiveID string, status DirectiveStatus) error
 	List(ctx context.Context, filter DirectiveFilter) ([]Directive, error)

@@ -3735,3 +3735,120 @@ func TestLaneReportQuestionRecoveryIsUrgent(t *testing.T) {
 		t.Fatalf("recovered question batches=%+v, want one urgent question", judge.Batches)
 	}
 }
+
+type failLaunchLaneStore struct {
+	store.LaneStore
+	driver *lane.FakeDriver
+	failed bool
+}
+
+func (s *failLaunchLaneStore) Upsert(ctx context.Context, ln store.Lane) error {
+	if !s.failed && len(s.driver.PhaseStarts) == 1 {
+		s.failed = true
+		return errors.New("injected lane upsert failure after launch")
+	}
+	return s.LaneStore.Upsert(ctx, ln)
+}
+
+type launchFailureStore struct {
+	store.Store
+	lanes store.LaneStore
+}
+
+func (s *launchFailureStore) Lanes() store.LaneStore { return s.lanes }
+
+func TestControllerRecoversInterruptedPhaseLaunch(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+	if err := st.Lanes().Upsert(ctx, lane.Lane{RunID: "run-1", ID: "lane", Status: lane.StatusRunning, Phase: "swe", Round: 1, Attempt: 1, SessionID: "session", TerminalID: "old-terminal"}); err != nil {
+		t.Fatal(err)
+	}
+	wrapped := &launchFailureStore{Store: st, lanes: &failLaunchLaneStore{LaneStore: st.Lanes(), driver: drv}}
+	appendReportEvent(t, st, "lane", lane.PhaseReport{Phase: "swe", Outcome: lane.OutcomeDone, HeadSHA: "head", PR: 42})
+	cfg := controller.Config{RunID: "run-1"}
+	first := controller.New(cfg, wrapped, drv, clk, judge)
+	if err := first.Step(ctx); err == nil || !strings.Contains(err.Error(), "injected lane upsert failure") {
+		t.Fatalf("first Step=%v; want injected persistence failure", err)
+	}
+	if len(drv.PhaseStarts) != 1 {
+		t.Fatalf("starts=%d; want 1 before restart", len(drv.PhaseStarts))
+	}
+	recovered := controller.New(cfg, wrapped, drv, clk, judge)
+	if err := recovered.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(drv.PhaseStarts) != 1 {
+		t.Fatalf("starts=%d; recovery relaunched the phase", len(drv.PhaseStarts))
+	}
+	ln, err := st.Lanes().Get(ctx, "run-1", "lane")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ln.Phase != "clean" || ln.TerminalID == "old-terminal" {
+		t.Fatalf("recovered lane=%+v", ln)
+	}
+	if err := recovered.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(drv.PhaseStarts) != 1 {
+		t.Fatalf("completed recovery relaunched: %+v", drv.PhaseStarts)
+	}
+}
+
+type failLaunchDecisionStore struct {
+	store.DecisionStore
+	failed bool
+}
+
+func (s *failLaunchDecisionStore) Append(ctx context.Context, dec store.Decision) (store.Decision, error) {
+	if !s.failed && dec.Tool == controller.ToolPhaseAdvance {
+		s.failed = true
+		return store.Decision{}, errors.New("injected action save failure")
+	}
+	return s.DecisionStore.Append(ctx, dec)
+}
+
+type launchDecisionFailureStore struct {
+	store.Store
+	decisions store.DecisionStore
+}
+
+func (s *launchDecisionFailureStore) Decisions() store.DecisionStore { return s.decisions }
+
+func TestControllerRecoversSavedLaunch(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+	if err := st.Lanes().Upsert(ctx, lane.Lane{RunID: "run-1", ID: "lane", Status: lane.StatusRunning, Phase: "swe", Round: 1, Attempt: 1, SessionID: "session", TerminalID: "old-terminal"}); err != nil {
+		t.Fatal(err)
+	}
+	wrapped := &launchDecisionFailureStore{Store: st, decisions: &failLaunchDecisionStore{DecisionStore: st.Decisions()}}
+	appendReportEvent(t, st, "lane", lane.PhaseReport{Phase: "swe", Outcome: lane.OutcomeDone, HeadSHA: "head", PR: 42})
+	cfg := controller.Config{RunID: "run-1"}
+	if err := controller.New(cfg, wrapped, drv, clk, judge).Step(ctx); err == nil || !strings.Contains(err.Error(), "injected action save failure") {
+		t.Fatalf("Step=%v", err)
+	}
+	if err := controller.New(cfg, wrapped, drv, clk, judge).Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(drv.PhaseStarts) != 1 {
+		t.Fatalf("starts=%d; want one", len(drv.PhaseStarts))
+	}
+	decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := 0
+	for _, dec := range decs {
+		if dec.Tool == controller.ToolPhaseAdvance {
+			completed++
+			if !strings.Contains(dec.Reason, "recovered live terminal") {
+				t.Fatalf("recovery=%+v", dec)
+			}
+		}
+	}
+	if completed != 1 {
+		t.Fatalf("completed launch decisions=%d; want 1", completed)
+	}
+}

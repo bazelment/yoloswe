@@ -242,15 +242,17 @@ type Config struct {
 	AnswerQuestion func(context.Context, string, string) (string, error)
 	// PRProbe optionally queries a lane's PR state on GitHub before retry,
 	// advance, or spawn.
-	PRProbe           PRProbe
-	RunID             string
-	HolderID          string
-	Consumer          string
-	LeaseTTL          time.Duration
-	HeartbeatInterval time.Duration
-	PollInterval      time.Duration
-	JudgmentDebounce  time.Duration
-	StallTimeout      time.Duration
+	PRProbe PRProbe
+	RunID   string
+	// AdoptionGeneration scopes host handover effects; empty for native runs.
+	AdoptionGeneration string
+	HolderID           string
+	Consumer           string
+	LeaseTTL           time.Duration
+	HeartbeatInterval  time.Duration
+	PollInterval       time.Duration
+	JudgmentDebounce   time.Duration
+	StallTimeout       time.Duration
 	// StallTimeoutSet distinguishes an explicit timeout from the default.
 	StallTimeoutSet bool
 	// JudgeLaneMail routes inbound lane mail questions and notes to the
@@ -370,6 +372,7 @@ type LaneReportPayload struct {
 // controller actions and idempotency checks on restart.
 type DecisionArgs struct {
 	ActionKey        string   `json:"action_key"`
+	TriggerEventID   string   `json:"trigger_event_id,omitempty"`
 	EventID          string   `json:"event_id,omitempty"`
 	FromPhase        string   `json:"from_phase,omitempty"`
 	ToPhase          string   `json:"to_phase,omitempty"`
@@ -1030,6 +1033,9 @@ func (c *Controller) Step(ctx context.Context) error {
 		c.initialized = true
 	}
 
+	if err := c.recoverSavedLaunches(ctx); err != nil {
+		return err
+	}
 	if err := c.reconcilePlannedLanes(ctx); err != nil {
 		return err
 	}
@@ -1094,7 +1100,11 @@ func (c *Controller) checkNamedWaits(ctx context.Context) error {
 		if dir.Status != store.DirectiveActive || !strings.HasPrefix(dir.Ref, NamedWaitRefPrefix) || dir.ExpiresAt == nil || c.clock.Now().Before(*dir.ExpiresAt) {
 			continue
 		}
-		_, err := c.store.Events().Append(ctx, store.Event{ID: "expired-" + dir.ID, RunID: c.cfg.RunID, LaneID: dir.Scope, Kind: store.EventTimer, Class: store.EventClassJudgment, Urgent: true, Summary: "wait deadline: " + dir.Text})
+		eventID := "expired-" + dir.ID
+		if strings.HasPrefix(dir.ID, "wait-adopt-") {
+			eventID = c.generationKey(eventID)
+		}
+		_, err := c.store.Events().Append(ctx, store.Event{ID: eventID, RunID: c.cfg.RunID, LaneID: dir.Scope, Kind: store.EventTimer, Class: store.EventClassJudgment, Urgent: true, Summary: "wait deadline: " + dir.Text})
 		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			return err
 		}
@@ -1548,7 +1558,68 @@ func controllerOutcomeLabel(result string) string {
 	}
 }
 
-// recoverPendingState reconstructs pending judgment events and CI-gated verdicts on startup.
+// recoverSavedLaunches settles launches whose lane save preceded a crash.
+func (c *Controller) recoverSavedLaunches(ctx context.Context) error {
+	keys := make([]string, 0)
+	for key := range c.decidedActions {
+		if strings.HasPrefix(key, "intent:phase.") {
+			keys = append(keys, key)
+		}
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		dec := c.decidedActions[key]
+		var args DecisionArgs
+		if err := json.Unmarshal(dec.Args, &args); err != nil {
+			return err
+		}
+		tool := strings.TrimSuffix(dec.Tool, ".intent")
+		switch tool {
+		case ToolPhaseStart, ToolPhaseAdvance, ToolPhaseRework, ToolPhaseRetry:
+		default:
+			continue
+		}
+		if args.Phase == recipe.PhaseIntegrate {
+			continue
+		}
+		actionKey := c.generationKey(phaseActionKey(tool, dec.LaneID, args.Phase, args.Round, args.Attempt))
+		if key != "intent:"+actionKey || c.hasActionDecision(actionKey) {
+			continue
+		}
+		ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, dec.LaneID)
+		if err != nil {
+			return err
+		}
+		if ln.Status != lane.StatusRunning || ln.Phase != args.Phase || ln.Round != args.Round || ln.Attempt != args.Attempt {
+			continue
+		}
+		r, err := c.resolveRecipe(ctx, ln)
+		if err != nil {
+			return err
+		}
+		phase, ok := r.Phase(args.Phase)
+		if !ok {
+			continue
+		}
+		failureKey := "launch-recovery:" + actionKey
+		if nextTry := c.laneFailures[failureKey]; !nextTry.IsZero() && c.clock.Now().Before(nextTry) {
+			continue
+		}
+		if err := c.startLanePhase(ctx, ln, r, phase, args.Round, args.Attempt, tool, args.TriggerEventID, dec.Reason, ""); err != nil {
+			if !c.cfg.IsolateLaneErrors || !isIsolatedFailure(err) {
+				return err
+			}
+			if recordErr := c.recordLaneFailure(ctx, ln, failureKey, tool, err); recordErr != nil {
+				return recordErr
+			}
+			continue
+		}
+		delete(c.laneFailures, failureKey)
+	}
+	return nil
+}
+
+// recoverPendingState reconstructs pending judgments and CI-gated verdicts on startup.
 func (c *Controller) recoverPendingState(ctx context.Context) error {
 	cur, err := c.store.Events().GetCursor(ctx, c.cfg.RunID, c.cfg.Consumer)
 	if err != nil {
@@ -2298,7 +2369,7 @@ func (c *Controller) advanceExpiredNudges(ctx context.Context, urgentFlush *bool
 		if rung != 1 || waiting {
 			continue
 		}
-		key := quietLaneKey(&ln)
+		key := c.quietLaneKey(&ln)
 		if c.hasActionDecision("restart:fresh:" + key) {
 			continue
 		}
@@ -3164,7 +3235,7 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		ln.LastEventAt = now
 	}
 	if quiet {
-		key := quietLaneKey(ln)
+		key := c.quietLaneKey(ln)
 		switch {
 		case !c.hasActionDecision("restart:nudge:" + key):
 			if _, _, err := c.recordDecision(ctx, ToolPhaseRetry+".intent", ln.ID, "quiet lane: nudge before restart", "effect pending", DecisionArgs{ActionKey: "intent:restart:nudge:" + key, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt}); err != nil {
@@ -3473,6 +3544,7 @@ func (c *Controller) startLanePhase(
 	if phase.Name == recipe.PhaseIntegrate {
 		actionKey = "integrate-launch:" + ln.ID + ":" + ln.ApprovalSHA
 	}
+	actionKey = c.generationKey(actionKey)
 	if c.hasActionDecision(actionKey) {
 		return nil
 	}
@@ -3521,8 +3593,30 @@ func (c *Controller) startLanePhase(
 		}
 	}
 
+	var recoveredTerminal *lane.StartPhaseResult
+	recoveryResult := ""
+	if intent, ok := c.decidedActions["intent:"+actionKey]; ok && phase.Name != recipe.PhaseIntegrate {
+		var args DecisionArgs
+		if json.Unmarshal(intent.Args, &args) == nil && args.FromPhase != "" {
+			fromPhase = args.FromPhase
+		}
+	}
 	if phase.Name != recipe.PhaseIntegrate {
-		if _, _, err := c.recordDecision(ctx, tool+".intent", ln.ID, reason, "launch pending", DecisionArgs{ActionKey: "intent:" + actionKey, Phase: phase.Name, Round: round, Attempt: attempt}); err != nil {
+		if c.hasActionDecision("intent:" + actionKey) {
+			var err error
+			recoveredTerminal, err = c.driver.FindPhaseTerminal(ctx, lane.StartPhaseRequest{
+				RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, Phase: phase.Name, Round: round, ActionKey: actionKey,
+			})
+			if err != nil {
+				return laneDriverError(err)
+			}
+			if recoveredTerminal == nil {
+				recoveryResult = "relaunch: driver found no live terminal for launch intent"
+			} else {
+				recoveryResult = "recovered live terminal for launch intent"
+			}
+		}
+		if _, _, err := c.recordDecision(ctx, tool+".intent", ln.ID, reason, "launch pending", DecisionArgs{ActionKey: "intent:" + actionKey, TriggerEventID: eventID, FromPhase: fromPhase, Phase: phase.Name, Round: round, Attempt: attempt}); err != nil {
 			return err
 		}
 	}
@@ -3530,12 +3624,15 @@ func (c *Controller) startLanePhase(
 	var sessionID, terminalID string
 	var stoppedTerminals []string
 	repo := c.runRepository(ctx)
-	if ln.SessionID == "" {
+	if recoveredTerminal != nil {
+		sessionID, terminalID = recoveredTerminal.SessionID, recoveredTerminal.TerminalID
+	} else if ln.SessionID == "" {
 		if tool != ToolPhaseRetry {
 			stoppedTerminals = c.stopPreviousPhaseTerminals(ctx, ln, "new phase "+phase.Name+" started")
 		}
 		res, err := c.driver.SpawnSession(ctx, lane.SpawnRequest{
 			RunID:      c.cfg.RunID,
+			ActionKey:  actionKey,
 			Repository: repo,
 			LaneID:     ln.ID,
 			Phase:      phase.Name,
@@ -3578,6 +3675,7 @@ func (c *Controller) startLanePhase(
 		}
 		res, err := c.driver.StartPhaseTerminal(ctx, lane.StartPhaseRequest{
 			RunID:      c.cfg.RunID,
+			ActionKey:  actionKey,
 			Repository: repo,
 			LaneID:     ln.ID,
 			SessionID:  ln.SessionID,
@@ -3612,11 +3710,20 @@ func (c *Controller) startLanePhase(
 		return err
 	}
 
+	if recoveryResult != "" {
+		reason = recoveryResult + ": " + reason
+	}
+	decisionEventID := eventID
+	if existing, ok := c.decidedEvents[eventID]; ok && existing.Tool == "event.failure" {
+		decisionEventID = ""
+	}
 	_, _, err := c.recordDecision(ctx, tool, ln.ID, reason,
 		fmt.Sprintf("%s round %d attempt %d (%s:%s)", phase.Name, round, attempt, agent.Harness, agent.Model),
 		DecisionArgs{
 			ActionKey:        actionKey,
-			EventID:          eventID,
+			SessionID:        sessionID,
+			TerminalID:       terminalID,
+			EventID:          decisionEventID,
 			FromPhase:        fromPhase,
 			ToPhase:          phase.Name,
 			Phase:            phase.Name,
@@ -4153,10 +4260,17 @@ func (c *Controller) nudgeWaitDuration(r *recipe.Recipe) time.Duration {
 	return max(timeout/2, 5*time.Minute)
 }
 
-func quietLaneKey(ln *lane.Lane) string {
+func (c *Controller) quietLaneKey(ln *lane.Lane) string {
 	key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
 	if ln.AnswerEpoch > 0 {
 		key += fmt.Sprintf(":answer-%d", ln.AnswerEpoch)
+	}
+	return c.generationKey(key)
+}
+
+func (c *Controller) generationKey(key string) string {
+	if c.cfg.AdoptionGeneration != "" {
+		return key + ":adopt:" + c.cfg.AdoptionGeneration
 	}
 	return key
 }
@@ -4165,7 +4279,7 @@ func (c *Controller) quietLadderRungFromStore(ctx context.Context, ln *lane.Lane
 	if ln == nil || c.store == nil {
 		return 0, false
 	}
-	key := quietLaneKey(ln)
+	key := c.quietLaneKey(ln)
 	nudgeKey := "restart:nudge:" + key
 	freshKey := "restart:fresh:" + key
 

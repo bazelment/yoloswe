@@ -780,6 +780,7 @@ func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.
 		Brief:        req.Brief,
 		Round:        req.Round,
 		Env:          req.Env,
+		ActionKey:    req.ActionKey,
 	})
 	if err != nil {
 		return lane.SpawnResult{}, err
@@ -1103,6 +1104,12 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 		body.Env = maps.Clone(req.Env)
 	}
 
+	if req.ActionKey != "" {
+		if body.Env == nil {
+			body.Env = make(map[string]string)
+		}
+		body.Env["ORCA_LAUNCH_KEY"] = req.RunID + "/" + req.ActionKey
+	}
 	path := fmt.Sprintf("/api/code-sessions/%s/terminals", url.PathEscape(sessionID))
 	var resp TerminalInfo
 	err := d.doJSON(ctx, http.MethodPost, path, body, &resp)
@@ -1128,6 +1135,52 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 	}
 	d.TrackLane(lane.Lane{RunID: req.RunID, ID: req.LaneID, SessionID: result.SessionID, TerminalID: result.TerminalID})
 	return result, nil
+}
+
+// FindPhaseTerminal checks remote metadata, so recovery also works with a new driver.
+func (d *Driver) FindPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (*lane.StartPhaseResult, error) {
+	if req.ActionKey == "" {
+		return nil, nil
+	}
+	sessionIDs := []string{req.SessionID}
+	if req.SessionID == "" {
+		q := url.Values{"metadata.swarmRun": {req.RunID}, "metadata.swarmLane": {req.LaneID}}
+		var resp struct {
+			Sessions []SessionInfo `json:"sessions"`
+		}
+		if err := d.doJSON(ctx, http.MethodGet, "/api/code-sessions?"+q.Encode(), nil, &resp); err != nil {
+			return nil, err
+		}
+		sessionIDs = nil
+		for i := range resp.Sessions {
+			sess := &resp.Sessions[i]
+			if sess.Metadata["swarmRun"] == req.RunID && sess.Metadata["swarmLane"] == req.LaneID {
+				sessionIDs = append(sessionIDs, sess.ID)
+			}
+		}
+	}
+	for _, sessionID := range sessionIDs {
+		detail, err := d.GetSession(ctx, sessionID)
+		if err != nil {
+			var apiErr *APIError
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				continue
+			}
+			return nil, err
+		}
+		for i := range detail.Terminals {
+			tm := &detail.Terminals[i]
+			if tm.Env["ORCA_LAUNCH_KEY"] != req.RunID+"/"+req.ActionKey || tm.Title != fmt.Sprintf("%s %s r%d", req.LaneID, req.Phase, max(req.Round, 1)) {
+				continue
+			}
+			switch strings.ToLower(strings.TrimSpace(tm.Status)) {
+			case "running", "ready", "starting", "waiting":
+				d.TrackLane(lane.Lane{RunID: req.RunID, ID: req.LaneID, SessionID: sessionID, TerminalID: tm.ID})
+				return &lane.StartPhaseResult{SessionID: sessionID, TerminalID: tm.ID}, nil
+			}
+		}
+	}
+	return nil, nil
 }
 
 // stopOtherSessionTerminals stops any previous active terminal for (runID, laneID)

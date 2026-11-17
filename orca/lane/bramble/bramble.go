@@ -113,6 +113,9 @@ func (d *Driver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.
 func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (lane.StartPhaseResult, error) {
 	if req.SessionID != "" {
 		prompt := req.Brief + "\n[orca run:" + req.RunID + " lane:" + req.LaneID + "]"
+		if req.ActionKey != "" {
+			prompt += "\n" + launchMarker(req.RunID, req.ActionKey)
+		}
 		if err := d.c.SendInput(ctx, req.SessionID, prompt); err != nil {
 			return lane.StartPhaseResult{}, err
 		}
@@ -138,11 +141,45 @@ func (d *Driver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequ
 		}
 		return lane.StartPhaseResult{SessionID: req.SessionID, TerminalID: req.SessionID, StartedAt: time.Now().UTC()}, nil
 	}
-	r, err := d.start(ctx, lane.SpawnRequest{RunID: req.RunID, LaneID: req.LaneID, Phase: req.Phase, Harness: req.Harness, Model: req.Model, Effort: req.Effort, Brief: req.Brief, Round: req.Round, RunDir: req.RunDir})
+	r, err := d.start(ctx, lane.SpawnRequest{RunID: req.RunID, LaneID: req.LaneID, Phase: req.Phase, Harness: req.Harness, Model: req.Model, Effort: req.Effort, Brief: req.Brief, Round: req.Round, RunDir: req.RunDir, ActionKey: req.ActionKey})
 	return lane.StartPhaseResult{SessionID: r.SessionID, TerminalID: r.TerminalID, StartedAt: r.StartedAt}, err
 }
+func launchMarker(runID, actionKey string) string {
+	return "[orca launch:" + runID + "/" + actionKey + "]"
+}
+
+func (d *Driver) FindPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (*lane.StartPhaseResult, error) {
+	sessions, err := d.c.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		sess := &sessions[i]
+		if req.ActionKey == "" || !strings.Contains(sess.Prompt, launchMarker(req.RunID, req.ActionKey)) {
+			continue
+		}
+		if req.SessionID != "" && req.SessionID != sess.ID {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(sess.Status)) {
+		case "running", "working", "busy", "waiting", "wait", "waiting_for_input", "input.waiting":
+			d.mu.Lock()
+			d.activeByLane[req.RunID+"/"+req.LaneID] = sess.ID
+			d.phases[sess.ID], d.rounds[sess.ID] = req.Phase, req.Round
+			d.lanes[sess.ID], d.runs[sess.ID], d.runDirs[sess.ID] = req.LaneID, req.RunID, req.RunDir
+			delete(d.stopped, sess.ID)
+			d.mu.Unlock()
+			return &lane.StartPhaseResult{SessionID: sess.ID, TerminalID: sess.ID}, nil
+		}
+	}
+	return nil, nil
+}
+
 func (d *Driver) start(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
 	prompt := req.Brief + "\n[orca run:" + req.RunID + " lane:" + req.LaneID + "]"
+	if req.ActionKey != "" {
+		prompt += "\n" + launchMarker(req.RunID, req.ActionKey)
+	}
 	baseCommit := ""
 	worktree := strings.TrimSpace(req.Worktree)
 	if worktree == "" {

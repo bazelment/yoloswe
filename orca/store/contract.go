@@ -38,6 +38,7 @@ func RunContractTests(t *testing.T, factory Factory) {
 		t.Parallel()
 		testLanes(t, factory)
 	})
+	t.Run("ReplaceDirective", func(t *testing.T) { testReplaceDirective(t, factory) })
 	t.Run("Directives", func(t *testing.T) {
 		t.Parallel()
 		testDirectives(t, factory)
@@ -833,5 +834,34 @@ func testMemoriesAndNotes(t *testing.T, factory Factory) {
 	}
 	if _, err := st.Notes().Append(ctx, RunNote{ID: notes[0].ID, RunID: "other-run", Text: "duplicate"}); !errors.Is(err, ErrAlreadyExists) {
 		t.Fatalf("duplicate note error = %v", err)
+	}
+}
+
+func testReplaceDirective(t *testing.T, factory Factory) {
+	clk := clock.NewFakeClock(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	st := factory(t, clk)
+	defer st.Close()
+	ctx := t.Context()
+	old := Directive{ID: "wait-adopt-lane", RunID: "run", Kind: DirectiveInstruction, Source: DirectiveSourceDispatcher, Scope: "lane", Ref: "named-wait:lane", Text: "waiting on X", Status: DirectiveHandled}
+	if err := st.Directives().Add(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(3 * time.Hour)
+	deadline := clk.Now().Add(2 * time.Hour)
+	next := old
+	next.Text, next.Status, next.ExpiresAt = "waiting on Y", DirectiveActive, &deadline
+	if err := st.Directives().Replace(ctx, next); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Directives().Get(ctx, "run", old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Text != next.Text || !got.IsActive(clk.Now()) || !got.ExpiresAt.Equal(deadline) || !got.CreatedAt.Equal(clk.Now()) {
+		t.Fatalf("replacement=%+v", got)
+	}
+	next.RunID = "other"
+	if err := st.Directives().Replace(ctx, next); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-run replace=%v", err)
 	}
 }

@@ -312,3 +312,31 @@ func TestWatchReportsEachPhaseRoundAndTransition(t *testing.T) {
 		}
 	}
 }
+
+func TestFindPhaseTerminalAfterDriverRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, marker string
+		want                 bool
+	}{
+		{"live", "running", "phase.retry:lane:swe:attempt-2", true},
+		{"stopped", "stopped", "phase.retry:lane:swe:attempt-2", false},
+		{"another attempt", "running", "phase.retry:lane:swe:attempt-1", false},
+		{"another round", "running", "phase.retry:lane:swe2:attempt-2", false},
+		{"another phase", "running", "phase.retry:lane:review:attempt-2", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &fakeClient{sessions: []br.Session{{ID: "session", Status: tc.status, Prompt: "[orca launch:run/" + tc.marker + "]"}}}
+			drv, err := bramble.New(bramble.Config{Client: client})
+			if err != nil {
+				t.Fatal(err)
+			}
+			found, err := drv.FindPhaseTerminal(t.Context(), lane.StartPhaseRequest{RunID: "run", LaneID: "lane", Phase: "swe", Round: 1, ActionKey: "phase.retry:lane:swe:attempt-2"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (found != nil) != tc.want {
+				t.Fatalf("found=%+v; want live=%t", found, tc.want)
+			}
+		})
+	}
+}
