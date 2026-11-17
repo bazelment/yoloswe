@@ -792,6 +792,8 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 		}
 		if !ln.Integrated {
 			switch {
+			case len(ln.MergeNotePRs) > 0:
+				ln.IntegrationReason = "integration gate: host-nominated PR #" + strings.Join(ln.MergeNotePRs, ", #") + " has no matching squash subject in mirror"
 			case branchError != "":
 				ln.IntegrationReason = branchError
 			case ln.branchHead != "":
@@ -810,6 +812,7 @@ func finishedAnalysisLane(ln Lane) bool {
 func noPRHandback(ln Lane) bool {
 	return strings.EqualFold(strings.TrimSpace(ln.Status), "done") &&
 		strings.TrimSpace(ln.PR) == "" &&
+		len(ln.MergeNotePRs) == 0 &&
 		reportDone(ln.Report)
 }
 

@@ -401,6 +401,8 @@ func g52RunFixture(t *testing.T, root string, tc g52Fixture, laneHead string) st
 		kind, detail = "orch-note", "#7 MERGED to main abc1234"
 	case "note700":
 		kind, detail = "orch-note", "#700 merged to main abc1234"
+	case "note6110":
+		kind, detail = "orch-note", "PR #6110 is OPEN, not merged: host note nomination"
 	case "open8":
 		kind, detail = "decision", "own lane #8: PR is OPEN, not merged: hold"
 	case "orch-merge":
@@ -440,7 +442,7 @@ func TestNebulaSwarmAdoptPreviewFinishedLanesG56(t *testing.T) {
 	gitTest(t, seed, "checkout", "main")
 	write(t, filepath.Join(seed, "merged.txt"), "merged lane work\n")
 	gitTest(t, seed, "add", ".")
-	gitTest(t, seed, "commit", "-m", "merged lane work")
+	gitTest(t, seed, "commit", "-m", "merged lane work (#5557)")
 	gitTest(t, seed, "push", "origin", "main")
 	gitTest(t, seed, "push", "origin", "main:refs/heads/swarm-lane/run/merged/lane")
 
@@ -489,6 +491,9 @@ func TestNebulaSwarmAdoptPreviewFinishedLanesG56(t *testing.T) {
 		{name: "k absent branch empty head", status: "done", phase: "swe", branch: "swarm-lane/run/missing/emptyhead", report: "Outcome: done\n", wantMove: "none", wantReason: "finished, no PR"},
 		{name: "l hold no gate text", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", holdFile: true, report: "Outcome: done\nHEAD: " + laneHead + "\n", wantMove: "judge", wantReason: "none recorded in run files", wantText: []string{"missing:"}},
 		{name: "l hold recorded gate", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", hold: "Gate: soak must pass", report: "Outcome: done\n", wantMove: "judge", wantReason: "soak must pass", wantText: []string{"missing:"}},
+		{name: "m squash integrated stale working terminal", status: "done", phase: "swe", branch: "swarm-lane/run/missing/squashed", taskExtra: `,"pr":5557,"terminal_state":"working"`, report: "Outcome: done\nHEAD: " + laneHead + "\n", wantMove: "none", wantReason: "already integrated", wantText: []string{"mirror has squash subject ending (#5557)"}},
+		// The host's earlier merge claim nominates a PR; only the mirror can prove integration.
+		{name: "n absent branch host nominated open PR", status: "done", phase: "swe", branch: "swarm-lane/run/missing/worker-spread", taskExtra: `,"pr":0,"pr_state":"OPEN"`, report: "Outcome: done\nHEAD: " + laneHead + "\n", event: "orch-note PR #6110 is OPEN, not merged", wantMove: "judge", wantReason: "#6110"},
 	}
 	for _, tc := range fixtures {
 		t.Run(tc.name, func(t *testing.T) {

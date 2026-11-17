@@ -249,6 +249,7 @@ func laneIntegrationEvents(path string) map[string]string {
 var mergedPRRE = regexp.MustCompile(`(?i)#(\d+)\s+merged\b`)
 var prMergedRE = regexp.MustCompile(`(?i)\bPR\s+#(\d+)\b[^\n]{0,120}\bmerged\b`)
 var ownLaneMergedRE = regexp.MustCompile(`(?i)\b(?:own\s+)?lane\s+#(\d+)\b[^\n]{0,200}\bmerged\b`)
+var openPRRE = regexp.MustCompile(`(?i)\bPR\s+#(\d+)\b[^\n]{0,120}\b(?:open|not\s+merged)\b`)
 
 // laneMergeNotePRs extracts host merge prose from a lane's own EVENTS rows.
 // These nominations are deliberately not integration evidence by themselves;
@@ -269,12 +270,16 @@ func laneMergeNotePRs(path string) map[string][]string {
 		}
 		detail := parts[3]
 		lower := strings.ToLower(detail)
-		if !strings.Contains(lower, "merged") || strings.Contains(lower, "not merged") || strings.Contains(lower, "unmerged") {
+		isHostNote := strings.EqualFold(strings.TrimSpace(parts[2]), "orch-note")
+		if (!strings.Contains(lower, "merged") || strings.Contains(lower, "not merged") || strings.Contains(lower, "unmerged")) && !isHostNote {
 			continue
 		}
 		matches := mergedPRRE.FindAllStringSubmatch(detail, -1)
 		matches = append(matches, prMergedRE.FindAllStringSubmatch(detail, -1)...)
 		matches = append(matches, ownLaneMergedRE.FindAllStringSubmatch(detail, -1)...)
+		if isHostNote {
+			matches = append(matches, openPRRE.FindAllStringSubmatch(detail, -1)...)
+		}
 		seen := map[string]bool{}
 		for _, match := range matches {
 			if len(match) == 2 && !seen[match[1]] {
