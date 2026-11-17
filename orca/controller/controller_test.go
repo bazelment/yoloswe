@@ -3774,6 +3774,7 @@ func TestControllerRecoversInterruptedPhaseLaunch(t *testing.T) {
 	if len(drv.PhaseStarts) != 1 {
 		t.Fatalf("starts=%d; want 1 before restart", len(drv.PhaseStarts))
 	}
+	clk.Advance(50 * time.Minute)
 	recovered := controller.New(cfg, wrapped, drv, clk, judge)
 	if err := recovered.Step(ctx); err != nil {
 		t.Fatal(err)
@@ -3784,6 +3785,9 @@ func TestControllerRecoversInterruptedPhaseLaunch(t *testing.T) {
 	ln, err := st.Lanes().Get(ctx, "run-1", "lane")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if drv.IsTerminalStopped(ln.TerminalID) || ln.Status != lane.StatusRunning {
+		t.Fatalf("recovery stopped its live terminal: %+v; stops=%+v", ln, drv.Stops)
 	}
 	if ln.Phase != "clean" || ln.TerminalID == "old-terminal" {
 		t.Fatalf("recovered lane=%+v", ln)

@@ -1033,7 +1033,7 @@ func (c *Controller) Step(ctx context.Context) error {
 		c.initialized = true
 	}
 
-	if err := c.recoverSavedLaunches(ctx); err != nil {
+	if err := c.recoverRecordedLaunches(ctx); err != nil {
 		return err
 	}
 	if err := c.reconcilePlannedLanes(ctx); err != nil {
@@ -1558,8 +1558,8 @@ func controllerOutcomeLabel(result string) string {
 	}
 }
 
-// recoverSavedLaunches settles launches whose lane save preceded a crash.
-func (c *Controller) recoverSavedLaunches(ctx context.Context) error {
+// recoverRecordedLaunches settles successful effects before liveness checks or replay.
+func (c *Controller) recoverRecordedLaunches(ctx context.Context) error {
 	keys := make([]string, 0)
 	for key := range c.decidedActions {
 		if strings.HasPrefix(key, "intent:phase.") {
@@ -1590,7 +1590,12 @@ func (c *Controller) recoverSavedLaunches(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if ln.Status != lane.StatusRunning || ln.Phase != args.Phase || ln.Round != args.Round || ln.Attempt != args.Attempt {
+		if ln.Status != lane.StatusRunning && ln.Status != lane.StatusPlanned {
+			continue
+		}
+		_, hasReceipt := c.decidedActions["started:"+actionKey]
+		savedLane := ln.Status == lane.StatusRunning && ln.Phase == args.Phase && ln.Round == args.Round && ln.Attempt == args.Attempt
+		if !hasReceipt && !savedLane {
 			continue
 		}
 		r, err := c.resolveRecipe(ctx, ln)
@@ -3730,7 +3735,7 @@ func (c *Controller) startLanePhase(
 		reason = recoveryResult + ": " + reason
 	}
 	decisionEventID := eventID
-	if existing, ok := c.decidedEvents[eventID]; ok && existing.Tool == "event.failure" {
+	if _, ok := c.decidedEvents[eventID]; ok {
 		decisionEventID = ""
 	}
 	_, _, err := c.recordDecision(ctx, tool, ln.ID, reason,
