@@ -883,7 +883,7 @@ func closedLane(ln Lane) bool {
 
 func openPR(ln Lane) bool {
 	state := strings.ToLower(strings.TrimSpace(ln.PRState))
-	return state == "open" || strings.HasPrefix(state, "open ")
+	return state == "open" || strings.HasPrefix(state, "open ") || openPRRE.MatchString(ln.LastEvent)
 }
 
 func finishedAnalysisLane(ln Lane) bool {
@@ -1828,6 +1828,12 @@ func laneHostHold(ln Lane) string {
 func integratedLane(ln Lane) bool {
 	if openPR(ln) {
 		return false
+	}
+	// The host ledger's integrate/done record is terminal on adoption. This
+	// covers no-PR lanes whose integrate phase pushed directly to the base;
+	// an explicitly open PR remains eligible for judgment above.
+	if strings.EqualFold(strings.TrimSpace(ln.Phase), "integrate") && strings.EqualFold(strings.TrimSpace(ln.Status), "done") {
+		return true
 	}
 	if ln.Integrated || strings.TrimSpace(ln.MergeSHA) != "" {
 		return true
