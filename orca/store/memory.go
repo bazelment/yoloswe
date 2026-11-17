@@ -696,6 +696,24 @@ func (d *memDirectiveStore) Add(_ context.Context, dir Directive) error {
 	return nil
 }
 
+func (d *memDirectiveStore) Replace(_ context.Context, dir Directive) error {
+	if strings.TrimSpace(dir.Text) == "" && strings.TrimSpace(dir.Ref) == "" {
+		return fmt.Errorf("%w: directive requires text or ref", ErrInvalidArgument)
+	}
+	s := d.s()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.directives[dir.RunID][dir.ID] == nil {
+		return ErrNotFound
+	}
+	cp := dir.Clone()
+	if cp.CreatedAt.IsZero() {
+		cp.CreatedAt = s.now()
+	}
+	s.directives[dir.RunID][dir.ID] = &cp
+	return nil
+}
+
 func (d *memDirectiveStore) Get(_ context.Context, runID, directiveID string) (*Directive, error) {
 	s := d.s()
 	s.mu.RLock()

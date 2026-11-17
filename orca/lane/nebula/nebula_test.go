@@ -1962,3 +1962,51 @@ func TestSteerConfirmationBoundsHangingMetadataRequest(t *testing.T) {
 		t.Fatalf("confirmation err=%v, want typed undelivered cancellation", err)
 	}
 }
+
+func TestFindPhaseTerminalAfterDriverRestart(t *testing.T) {
+	srv := newFakeNebulaServer(t)
+	drv, _, _ := newTestDriver(t, srv)
+	req := lane.StartPhaseRequest{RunID: "run", LaneID: "lane", Phase: "swe", Round: 1, ActionKey: "phase.retry:lane:swe:attempt-2"}
+	started, err := drv.StartPhaseTerminal(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted, _, _ := newTestDriver(t, srv)
+	found, err := restarted.FindPhaseTerminal(t.Context(), req)
+	if err != nil || found == nil || found.TerminalID != started.TerminalID || found.SessionID != started.SessionID {
+		t.Fatalf("found=%+v err=%v; want %+v", found, err, started)
+	}
+	stale := req
+	stale.SessionID = "stale-session"
+	recovered, err := restarted.FindPhaseTerminal(t.Context(), stale)
+	if err != nil || recovered == nil || recovered.TerminalID != started.TerminalID {
+		t.Fatalf("stale session recovery=%+v err=%v", recovered, err)
+	}
+	for _, field := range []string{"attempt", "round", "phase", "run"} {
+		t.Run(field, func(t *testing.T) {
+			other := req
+			switch field {
+			case "attempt":
+				other.ActionKey = "phase.retry:lane:swe:attempt-3"
+			case "round":
+				other.Round = 2
+			case "phase":
+				other.Phase = "review"
+			case "run":
+				other.RunID = "another-run"
+				other.SessionID = started.SessionID
+			}
+			got, err := restarted.FindPhaseTerminal(t.Context(), other)
+			if err != nil || got != nil {
+				t.Fatalf("mismatched launch found=%+v err=%v", got, err)
+			}
+		})
+	}
+	if err := drv.Stop(t.Context(), lane.StopRequest{RunID: "run", LaneID: "lane", SessionID: started.SessionID, TerminalID: started.TerminalID}); err != nil {
+		t.Fatal(err)
+	}
+	found, err = restarted.FindPhaseTerminal(t.Context(), req)
+	if err != nil || found != nil {
+		t.Fatalf("stopped launch found=%+v err=%v", found, err)
+	}
+}

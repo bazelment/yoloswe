@@ -1450,6 +1450,31 @@ ON CONFLICT (run_id, id) DO NOTHING`,
 	)
 }
 
+func (d *sqliteDirectiveStore) Replace(ctx context.Context, dir Directive) error {
+	if strings.TrimSpace(dir.Text) == "" && strings.TrimSpace(dir.Ref) == "" {
+		return fmt.Errorf("%w: directive requires text or ref", ErrInvalidArgument)
+	}
+	s := d.s()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if dir.CreatedAt.IsZero() {
+		dir.CreatedAt = s.now()
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE directives SET kind=?, source=?, scope=?, text=?, ref=?, status=?, expires_at=?, created_at=? WHERE run_id=? AND id=?`,
+		string(dir.Kind), string(dir.Source), dir.Scope, dir.Text, dir.Ref, string(dir.Status), formatTimePtr(dir.ExpiresAt), formatTime(dir.CreatedAt), dir.RunID, dir.ID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (d *sqliteDirectiveStore) Get(ctx context.Context, runID, directiveID string) (*Directive, error) {
 	s := d.s()
 	s.mu.RLock()

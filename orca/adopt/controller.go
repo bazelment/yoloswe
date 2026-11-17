@@ -262,6 +262,97 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		return err
 	}
 	resume := sameAdoptionGeneration(storedRun.PlanRef, generation)
+	actionGeneration := markerGeneration(generation)
+	if resume {
+		// Older controllers used unscoped keys; preserve their restart dedup.
+		actionGeneration = ""
+		decs, err := d.store.Decisions().List(ctx, store.DecisionFilter{RunID: r.ID})
+		if err != nil {
+			return err
+		}
+		for i := range decs {
+			dec := &decs[i]
+			var args controller.DecisionArgs
+			if json.Unmarshal(dec.Args, &args) == nil && args.ActionKey == "adopt-generation:"+markerGeneration(generation) {
+				actionGeneration = markerGeneration(generation)
+				break
+			}
+		}
+	}
+	// Host state is authoritative at a new handover. Retain the audit log but
+	// retire waits and pending adopt judgments from the previous handover.
+	if !resume {
+		dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: r.ID, ActiveOnly: true})
+		if err != nil {
+			return err
+		}
+		for i := range dirs {
+			dir := &dirs[i]
+			if strings.HasPrefix(dir.ID, "wait-adopt-") {
+				if err := d.store.Directives().UpdateStatus(ctx, r.ID, dir.ID, store.DirectiveExpired); err != nil {
+					return err
+				}
+			}
+		}
+		events, err := d.store.Events().List(ctx, store.EventFilter{RunID: r.ID})
+		if err != nil {
+			return err
+		}
+		var superseded []string
+		for i := range events {
+			ev := &events[i]
+			if (ev.Source == "adopt" && (strings.HasPrefix(ev.ID, "adopt-merge-judgment-") || strings.HasPrefix(ev.ID, "adopt-lane-question-"))) || strings.HasPrefix(ev.ID, "expired-wait-adopt-") {
+				superseded = append(superseded, ev.ID)
+			}
+		}
+		// Resolve old launch reservations as superseded so consumers of the
+		// audit log do not keep counting them as in-flight spawns.
+		decs, err := d.store.Decisions().List(ctx, store.DecisionFilter{RunID: r.ID})
+		if err != nil {
+			return err
+		}
+		completed := make(map[string]bool)
+		type pendingLaunch struct {
+			laneID string
+			args   controller.DecisionArgs
+		}
+		var pending []pendingLaunch
+		for i := range decs {
+			var args controller.DecisionArgs
+			if json.Unmarshal(decs[i].Args, &args) != nil {
+				continue
+			}
+			if strings.HasPrefix(args.ActionKey, "intent:phase.") || strings.HasPrefix(args.ActionKey, "intent:integrate-launch:") {
+				args.ActionKey = strings.TrimPrefix(args.ActionKey, "intent:")
+				pending = append(pending, pendingLaunch{args: args, laneID: decs[i].LaneID})
+			} else {
+				completed[args.ActionKey] = true
+			}
+		}
+		for i := range pending {
+			args := pending[i].args
+			if completed[args.ActionKey] {
+				continue
+			}
+			args.TriggerEventID = ""
+			raw, err := json.Marshal(args)
+			if err != nil {
+				return err
+			}
+			if _, err := d.store.Decisions().Append(ctx, store.Decision{RunID: r.ID, Actor: controller.ActorController, LaneID: pending[i].laneID, Tool: controller.ToolAdoptLaunchSupersede, Reason: "host state supersedes unfinished launch", Args: raw}); err != nil {
+				return err
+			}
+			completed[args.ActionKey] = true
+		}
+		args, err := json.Marshal(controller.DecisionArgs{ActionKey: "adopt-generation:" + actionGeneration, EventIDs: superseded})
+		if err != nil {
+			return err
+		}
+		if _, err := d.store.Decisions().Append(ctx, store.Decision{RunID: r.ID, Actor: controller.ActorController, Tool: controller.ToolAdoptSupersede, Reason: "new host adoption generation", Args: args}); err != nil {
+			return err
+		}
+	}
+
 	workflow.Version = 0
 	saved, err := d.store.Recipes().Save(ctx, workflow)
 	if err != nil {
@@ -323,8 +414,15 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			deadline = &until
 		}
 		wait := store.Directive{ID: "wait-adopt-" + imported.ID, RunID: r.ID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Scope: imported.ID, Ref: controller.NamedWaitRefPrefix + imported.ID, Text: "waiting on " + waitingOn, ExpiresAt: deadline, Status: store.DirectiveActive}
-		if err := d.store.Directives().Add(ctx, wait); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-			return err
+		if err := d.store.Directives().Add(ctx, wait); err != nil {
+			if !errors.Is(err, store.ErrAlreadyExists) {
+				return err
+			}
+			if !resume {
+				if err := d.store.Directives().Replace(ctx, wait); err != nil {
+					return err
+				}
+			}
 		}
 	}
 
@@ -400,16 +498,17 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			cr.notice = fmt.Sprintf("⚠ controller lane failure: %s", err)
 			cr.statusMu.Unlock()
 		},
-		RunID:             r.ID,
-		HolderID:          holder,
-		PRProbe:           d.runPRProbe(syncer),
-		JudgeLaneMail:     true,
-		MaxCostPerHourUSD: d.MaxCostPerHourUSD,
-		NoPR:              r.NoPR,
-		HoldAdvance:       holdAdvanceLanes(r),
-		HoldAdvanceCheck:  func(id string) bool { return fileExists(filepath.Join(r.Dir, id+".hold-advance")) },
-		ImportedHostState: true,
-		HostRun:           true,
+		RunID:              r.ID,
+		AdoptionGeneration: actionGeneration,
+		HolderID:           holder,
+		PRProbe:            d.runPRProbe(syncer),
+		JudgeLaneMail:      true,
+		MaxCostPerHourUSD:  d.MaxCostPerHourUSD,
+		NoPR:               r.NoPR,
+		HoldAdvance:        holdAdvanceLanes(r),
+		HoldAdvanceCheck:   func(id string) bool { return fileExists(filepath.Join(r.Dir, id+".hold-advance")) },
+		ImportedHostState:  true,
+		HostRun:            true,
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
 	cr = &controlledRun{
@@ -448,8 +547,12 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		if strings.HasPrefix(preview.Reason, "lane question:") {
 			prefix, summary = "adopt-lane-question-", ""
 		}
+		eventID := prefix + r.Lanes[i].ID
+		if actionGeneration != "" {
+			eventID += ":adopt:" + actionGeneration
+		}
 		_, err := d.store.Events().Append(ctx, store.Event{
-			ID:      prefix + r.Lanes[i].ID,
+			ID:      eventID,
 			RunID:   r.ID,
 			LaneID:  r.Lanes[i].ID,
 			Kind:    store.EventTimer,

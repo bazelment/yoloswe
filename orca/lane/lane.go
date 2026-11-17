@@ -394,6 +394,7 @@ type SpawnRequest struct {
 	RunDir       string            `json:"run_dir,omitempty"`
 	Env          map[string]string `json:"env,omitempty"`
 	RunID        string            `json:"run_id"`
+	ActionKey    string            `json:"action_key,omitempty"`
 	Repository   string            `json:"repository,omitempty"`
 	RepositoryID string            `json:"repository_id,omitempty"`
 	LaneID       string            `json:"lane_id"`
@@ -423,19 +424,23 @@ type SpawnResult struct {
 
 // StartPhaseRequest starts a phase terminal on an existing or new worker session.
 type StartPhaseRequest struct {
-	RunDir       string            `json:"run_dir,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
-	RunID        string            `json:"run_id"`
-	Repository   string            `json:"repository,omitempty"`
-	RepositoryID string            `json:"repository_id,omitempty"`
-	LaneID       string            `json:"lane_id"`
-	SessionID    string            `json:"session_id,omitempty"`
-	Phase        string            `json:"phase"`
-	Harness      string            `json:"harness"`
-	Model        string            `json:"model"`
-	Effort       string            `json:"effort,omitempty"`
-	Brief        string            `json:"brief"`
-	Round        int               `json:"round"`
+	RunDir    string            `json:"run_dir,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	RunID     string            `json:"run_id"`
+	ActionKey string            `json:"action_key,omitempty"`
+	// KnownTerminalID is supplied only for lookup, from a durable receipt of
+	// this exact launch. Drivers must still verify that the terminal is live.
+	KnownTerminalID string `json:"known_terminal_id,omitempty"`
+	Repository      string `json:"repository,omitempty"`
+	RepositoryID    string `json:"repository_id,omitempty"`
+	LaneID          string `json:"lane_id"`
+	SessionID       string `json:"session_id,omitempty"`
+	Phase           string `json:"phase"`
+	Harness         string `json:"harness"`
+	Model           string `json:"model"`
+	Effort          string `json:"effort,omitempty"`
+	Brief           string `json:"brief"`
+	Round           int    `json:"round"`
 }
 
 // StartPhaseResult describes the started phase terminal.
@@ -525,6 +530,9 @@ type LaneDriver interface {
 	PhaseSkill(phase string) string
 	SpawnSession(ctx context.Context, req SpawnRequest) (SpawnResult, error)
 	StartPhaseTerminal(ctx context.Context, req StartPhaseRequest) (StartPhaseResult, error)
+	// FindPhaseTerminal returns the live terminal for this exact launch intent,
+	// nil when absent, or an error when the backend cannot determine its state.
+	FindPhaseTerminal(ctx context.Context, req StartPhaseRequest) (*StartPhaseResult, error)
 	Steer(ctx context.Context, req SteerRequest) error
 	Stop(ctx context.Context, req StopRequest) error
 	ReadReport(ctx context.Context, runID, laneID, terminalID string) (*PhaseReport, error)
@@ -657,6 +665,7 @@ type FakeDriver struct { //nolint:govet // test double state is intentionally gr
 	SessionHealths         map[string]SessionHealth
 	DiskUsage              map[string]int
 	BusyProcesses          map[string][]string
+	liveLaunches           map[string]StartPhaseResult
 	activeTerminal         map[string]string
 	stoppedTerminals       map[string]bool
 	nextSeq                int
@@ -668,6 +677,7 @@ type FakeDriver struct { //nolint:govet // test double state is intentionally gr
 func NewFakeDriver() *FakeDriver {
 	return &FakeDriver{
 		reports:          make(map[string]*PhaseReport),
+		liveLaunches:     make(map[string]StartPhaseResult),
 		AgentStates:      make(map[string]string),
 		GitStates:        make(map[string]GitState),
 		SessionHealths:   make(map[string]SessionHealth),
@@ -769,6 +779,10 @@ func (f *FakeDriver) SpawnSession(_ context.Context, req SpawnRequest) (SpawnRes
 		f.stoppedTerminals[prev] = true
 	}
 	f.activeTerminal[req.LaneID] = termID
+	if req.ActionKey != "" {
+		f.liveLaunches[req.RunID+"/"+req.ActionKey] = StartPhaseResult{SessionID: fmt.Sprintf("sess-%s-%d", req.LaneID, f.nextSeq), TerminalID: termID}
+	}
+
 	return SpawnResult{
 		SessionID:  fmt.Sprintf("sess-%s-%d", req.LaneID, f.nextSeq),
 		TerminalID: termID,
@@ -801,11 +815,25 @@ func (f *FakeDriver) StartPhaseTerminal(_ context.Context, req StartPhaseRequest
 		f.stoppedTerminals[prev] = true
 	}
 	f.activeTerminal[req.LaneID] = termID
+	if req.ActionKey != "" {
+		f.liveLaunches[req.RunID+"/"+req.ActionKey] = StartPhaseResult{SessionID: sessID, TerminalID: termID}
+	}
+
 	return StartPhaseResult{
 		SessionID:  sessID,
 		TerminalID: termID,
 		StartedAt:  time.Now().UTC(),
 	}, nil
+}
+
+func (f *FakeDriver) FindPhaseTerminal(_ context.Context, req StartPhaseRequest) (*StartPhaseResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	res, ok := f.liveLaunches[req.RunID+"/"+req.ActionKey]
+	if !ok || f.stoppedTerminals[res.TerminalID] {
+		return nil, nil
+	}
+	return &res, nil
 }
 
 func (f *FakeDriver) Steer(_ context.Context, req SteerRequest) error {
