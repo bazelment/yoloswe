@@ -2823,10 +2823,15 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		ln.PRHead = rep.HeadSHA
 	}
 	if !c.cfg.HostRun || rep.HeadSHA != "" {
-		if rep.Checks != "" {
-			ln.Checks = rep.Checks
-		} else if rep.CIGreen != nil {
-			ln.Checks = boolToChecks(*rep.CIGreen)
+		// Adopted merge checks must come from a head-pinned CI event. A worker
+		// report can carry check text for context, but cannot self-attest the
+		// merge gate.
+		if !c.cfg.HostRun {
+			if rep.Checks != "" {
+				ln.Checks = rep.Checks
+			} else if rep.CIGreen != nil {
+				ln.Checks = boolToChecks(*rep.CIGreen)
+			}
 		}
 	}
 
@@ -4768,7 +4773,10 @@ func isCIGreen(checks string) bool {
 	case "green", "pass", "passed", "success", "ok", "true":
 		return true
 	default:
-		return false
+		// Dispatcher vetting also consumes this predicate. Named adopted
+		// checks are green only when both required checks are green; the
+		// adopted controller applies the stricter host/head policy separately.
+		return isAdoptedCIGreen(checks)
 	}
 }
 
