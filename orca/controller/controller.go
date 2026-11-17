@@ -40,15 +40,17 @@ const (
 
 // Tool names recorded in store.DecisionStore by the deterministic controller.
 const (
-	ToolPhaseStart       = "phase.start"
-	ToolPhaseAdvance     = "phase.advance"
-	ToolPhaseRework      = "phase.rework"
-	ToolPhaseRetry       = "phase.retry"
-	ToolLaneComplete     = "lane.complete"
-	ToolLaneEscalate     = "lane.escalate"
-	ToolLaneStall        = "lane.stall"
-	ToolJudgmentDispatch = "judgment.dispatch"
-	ToolOwnerAskDefault  = "owner.ask.default"
+	ToolPhaseStart           = "phase.start"
+	ToolPhaseAdvance         = "phase.advance"
+	ToolPhaseRework          = "phase.rework"
+	ToolPhaseRetry           = "phase.retry"
+	ToolLaneComplete         = "lane.complete"
+	ToolLaneEscalate         = "lane.escalate"
+	ToolLaneStall            = "lane.stall"
+	ToolJudgmentDispatch     = "judgment.dispatch"
+	ToolOwnerAskDefault      = "owner.ask.default"
+	ToolAdoptSupersede       = "adopt.supersede"
+	ToolAdoptLaunchSupersede = "adopt.launch.supersede"
 )
 
 const (

@@ -339,7 +339,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			if err != nil {
 				return err
 			}
-			if _, err := d.store.Decisions().Append(ctx, store.Decision{RunID: r.ID, Actor: controller.ActorController, LaneID: pending[i].laneID, Tool: "adopt.launch.supersede", Reason: "host state supersedes unfinished launch", Args: raw}); err != nil {
+			if _, err := d.store.Decisions().Append(ctx, store.Decision{RunID: r.ID, Actor: controller.ActorController, LaneID: pending[i].laneID, Tool: controller.ToolAdoptLaunchSupersede, Reason: "host state supersedes unfinished launch", Args: raw}); err != nil {
 				return err
 			}
 			completed[args.ActionKey] = true
@@ -348,7 +348,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		if err != nil {
 			return err
 		}
-		if _, err := d.store.Decisions().Append(ctx, store.Decision{RunID: r.ID, Actor: controller.ActorController, Tool: "adopt.supersede", Reason: "new host adoption generation", Args: args}); err != nil {
+		if _, err := d.store.Decisions().Append(ctx, store.Decision{RunID: r.ID, Actor: controller.ActorController, Tool: controller.ToolAdoptSupersede, Reason: "new host adoption generation", Args: args}); err != nil {
 			return err
 		}
 	}
