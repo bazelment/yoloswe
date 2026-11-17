@@ -59,10 +59,34 @@ const (
 	integrateRecoveryReadyPrefix = "integrate recovery ready:"
 	integrateRecoveryMaxAttempts = 3
 	integrateRecoveryBackoff     = time.Second
+	eventFailureSource           = "controller.event.failure"
 )
 
 // ErrControllerStopped is returned when Step or Run is called on a killed controller.
 var ErrControllerStopped = errors.New("orca/controller: controller stopped")
+
+// LaneLocalError marks a driver failure scoped to one lane.
+type LaneLocalError struct{ Err error }
+
+func (e *LaneLocalError) Error() string { return e.Err.Error() }
+func (e *LaneLocalError) Unwrap() error { return e.Err }
+
+// PermanentError marks an event failure that can be durably skipped.
+type PermanentError struct{ Err error }
+
+func (e *PermanentError) Error() string { return e.Err.Error() }
+func (e *PermanentError) Unwrap() error { return e.Err }
+
+func isIsolatedFailure(err error) bool {
+	// Control and infrastructure errors take precedence even inside a wrapper.
+	if errors.Is(err, store.ErrLeaseHeld) || errors.Is(err, store.ErrLeaseNotHeld) ||
+		errors.Is(err, ErrControllerStopped) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var local *LaneLocalError
+	var permanent *PermanentError
+	return errors.As(err, &local) || errors.As(err, &permanent)
+}
 
 // IsUnrecoverable reports whether an error means this controller can no longer
 // make progress. Transport and provider failures are intentionally retryable;
@@ -408,6 +432,7 @@ type Controller struct {
 	stepError          error
 	laneFailures       map[string]time.Time
 	laneFailureCounts  map[string]int
+	eventRetries       map[string]store.Event
 }
 
 // SetRuntimeSettings applies live settings for subsequent controller ticks.
@@ -474,6 +499,7 @@ func New(cfg Config, st store.Store, drv lane.LaneDriver, clk clock.Clock, judge
 		pendingStops:       make(map[string]int),
 		laneFailures:       make(map[string]time.Time),
 		laneFailureCounts:  make(map[string]int),
+		eventRetries:       make(map[string]store.Event),
 		staleStopFailures:  make(map[string]int),
 		wakeCh:             make(chan struct{}, 1),
 		watchErrors:        make(chan error, 16),
@@ -1015,10 +1041,12 @@ func (c *Controller) Step(ctx context.Context) error {
 		return err
 	}
 
+	if err := c.retryFailedEvents(ctx); err != nil {
+		return err
+	}
 	if err := c.consumeEvents(ctx); err != nil {
 		return err
 	}
-
 	return c.flushJudgmentIfDue(ctx)
 }
 
@@ -1533,6 +1561,19 @@ func (c *Controller) recoverPendingState(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	for i := range events {
+		ev := events[i]
+		if ev.Source != eventFailureSource || len(ev.Payload) == 0 {
+			continue
+		}
+		var original store.Event
+		if err := json.Unmarshal(ev.Payload, &original); err != nil {
+			return err
+		}
+		if !c.hasActionDecision("event.retry.complete:" + original.ID) {
+			c.queueEventRetry(original)
+		}
+	}
 	runningByID := make(map[string]lane.Lane, len(lanes))
 	for i := range lanes {
 		runningByID[lanes[i].ID] = lanes[i]
@@ -1660,7 +1701,7 @@ func (c *Controller) reconcilePlannedLanes(ctx context.Context) error {
 			continue
 		}
 		if err := c.startLanePhase(ctx, &ln, r, firstPhase, round, 1, ToolPhaseStart, "", "spawn planned lane", ""); err != nil {
-			if !c.cfg.IsolateLaneErrors || strings.Contains(strings.ToLower(err.Error()), "repository") {
+			if !c.cfg.IsolateLaneErrors || !isIsolatedFailure(err) {
 				return err
 			}
 			if recordErr := c.recordLaneFailure(ctx, &ln, failureKey, ToolPhaseStart, err); recordErr != nil {
@@ -1678,17 +1719,17 @@ func (c *Controller) recordLaneFailure(ctx context.Context, ln *lane.Lane, key, 
 	count := c.laneFailureCounts[key] + 1
 	c.laneFailureCounts[key] = count
 	c.laneFailures[key] = c.clock.Now().Add(time.Second * time.Duration(1<<min(count-1, 5)))
-	c.stepError = fmt.Errorf("lane %s: %w", ln.ID, cause)
-	if c.cfg.StepError != nil {
-		c.cfg.StepError(c.stepError)
-	}
 	decisionKey := "lane-failure:" + key
 	if !c.hasActionDecision(decisionKey) {
+		c.stepError = fmt.Errorf("lane %s: %w", ln.ID, cause)
+		if c.cfg.StepError != nil {
+			c.cfg.StepError(c.stepError)
+		}
 		if _, _, err := c.recordDecision(ctx, tool+".failure", ln.ID, "lane lifecycle action failed", cause.Error(), DecisionArgs{ActionKey: decisionKey, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: max(ln.Attempt, 1)}); err != nil {
 			return err
 		}
 		eventID := "lane-failure-event:" + key
-		if _, err := c.store.Events().Append(ctx, store.Event{ID: eventID, RunID: c.cfg.RunID, LaneID: ln.ID, Kind: store.EventStall, Class: store.EventClassJudgment, Urgent: true, Source: ActorController, Summary: c.stepError.Error()}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		if _, err := c.store.Events().Append(ctx, store.Event{ID: eventID, RunID: c.cfg.RunID, LaneID: ln.ID, Kind: store.EventTimer, Class: store.EventClassJudgment, Urgent: true, Source: ActorController, Summary: c.stepError.Error()}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			return err
 		}
 	}
@@ -2108,7 +2149,7 @@ func (c *Controller) consumeEvents(ctx context.Context) error {
 
 		class, err := c.handleEvent(ctx, &ev)
 		if err != nil {
-			if !c.cfg.IsolateLaneErrors {
+			if !c.cfg.IsolateLaneErrors || !isIsolatedFailure(err) {
 				return err
 			}
 			c.stepError = fmt.Errorf("event %s (lane %s): %w", ev.ID, ev.LaneID, err)
@@ -2117,12 +2158,23 @@ func (c *Controller) consumeEvents(ctx context.Context) error {
 			}
 			failureKey := "event-failure:" + ev.ID
 			if !c.hasActionDecision(failureKey) {
+				failure := store.Event{ID: failureKey, RunID: c.cfg.RunID, LaneID: ev.LaneID, Kind: store.EventTimer, Class: store.EventClassJudgment, Urgent: true, Source: eventFailureSource, Summary: c.stepError.Error()}
+				var local *LaneLocalError
+				if errors.As(err, &local) {
+					payload, marshalErr := json.Marshal(ev)
+					if marshalErr != nil {
+						return marshalErr
+					}
+					failure.Payload = payload
+				}
+				if _, appendErr := c.store.Events().Append(ctx, failure); appendErr != nil && !errors.Is(appendErr, store.ErrAlreadyExists) {
+					return appendErr
+				}
 				if _, _, dErr := c.recordDecision(ctx, "event.failure", ev.LaneID, "event handler failed", err.Error(), DecisionArgs{ActionKey: failureKey, EventID: ev.ID}); dErr != nil {
 					return dErr
 				}
-				failure := store.Event{ID: failureKey, RunID: c.cfg.RunID, LaneID: ev.LaneID, Kind: store.EventStall, Class: store.EventClassJudgment, Urgent: true, Source: ActorController, Summary: c.stepError.Error()}
-				if _, appendErr := c.store.Events().Append(ctx, failure); appendErr != nil && !errors.Is(appendErr, store.ErrAlreadyExists) {
-					return appendErr
+				if len(failure.Payload) != 0 {
+					c.queueEventRetry(ev)
 				}
 				c.enqueueJudgmentEvent(failure)
 				urgentFlush = true
@@ -2151,6 +2203,57 @@ func (c *Controller) consumeEvents(ctx context.Context) error {
 	if urgentFlush {
 		if err := c.flushJudgment(ctx, "urgent bypass"); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// The original failed event is retained in the notification payload so an
+// advanced inbox cursor does not discard its lane's retry after a restart.
+func (c *Controller) queueEventRetry(ev store.Event) {
+	if _, queued := c.eventRetries[ev.ID]; queued {
+		return
+	}
+	c.eventRetries[ev.ID] = ev.Clone()
+	c.backoffEventRetry(ev.ID)
+}
+
+func (c *Controller) backoffEventRetry(id string) {
+	key := "event:" + id
+	count := c.laneFailureCounts[key] + 1
+	c.laneFailureCounts[key] = count
+	c.laneFailures[key] = c.clock.Now().Add(time.Second * time.Duration(1<<min(count-1, 5)))
+}
+
+func (c *Controller) retryFailedEvents(ctx context.Context) error {
+	retries := make([]string, 0, len(c.eventRetries))
+	for id := range c.eventRetries {
+		retries = append(retries, id)
+	}
+	slices.SortFunc(retries, func(a, b string) int { return cmp.Compare(c.eventRetries[a].Seq, c.eventRetries[b].Seq) })
+	for _, id := range retries {
+		ev := c.eventRetries[id]
+		key := "event:" + ev.ID
+		if c.clock.Now().Before(c.laneFailures[key]) {
+			continue
+		}
+		class, err := c.handleEvent(ctx, &ev)
+		if err != nil {
+			if !isIsolatedFailure(err) {
+				return err
+			}
+			c.backoffEventRetry(ev.ID)
+			continue
+		}
+		if _, _, err := c.recordDecision(ctx, "event.retry.complete", ev.LaneID, "failed event retry completed", "handled", DecisionArgs{ActionKey: "event.retry.complete:" + ev.ID}); err != nil {
+			return err
+		}
+		delete(c.eventRetries, ev.ID)
+		delete(c.laneFailures, key)
+		delete(c.laneFailureCounts, key)
+		if class == store.EventClassJudgment {
+			ev.Class = class
+			c.enqueueJudgmentEvent(ev)
 		}
 	}
 	return nil
@@ -3435,7 +3538,7 @@ func (c *Controller) startLanePhase(
 			Worktree:   ln.Worktree,
 		})
 		if err != nil {
-			return err
+			return &LaneLocalError{Err: err}
 		}
 		sessionID = res.SessionID
 		terminalID = res.TerminalID
@@ -3475,7 +3578,7 @@ func (c *Controller) startLanePhase(
 			Brief:      brief,
 		})
 		if err != nil {
-			return err
+			return &LaneLocalError{Err: err}
 		}
 		sessionID = res.SessionID
 		terminalID = res.TerminalID
@@ -4305,8 +4408,22 @@ func (c *Controller) notifyOwnerCostGuard(ctx context.Context, msg string) {
 	if strings.TrimSpace(msg) == "" {
 		return
 	}
-	if c.mailbox != nil {
-		_, _ = c.mailbox.AskOwner(ctx, mailbox.Question{ID: "cost-guard-" + c.cfg.RunID, RunID: c.cfg.RunID, Ask: msg})
+	if c.mailbox == nil {
+		return
+	}
+	// The persisted guard decision identifies the breach across restarts, even
+	// when two unpause/re-pause transitions share a clock timestamp.
+	decisions, err := c.store.Decisions().List(ctx, store.DecisionFilter{RunID: c.cfg.RunID})
+	if err != nil {
+		slog.WarnContext(ctx, "cost guard notification lookup failed", "run", c.cfg.RunID, "error", err)
+		return
+	}
+	for i := len(decisions) - 1; i >= 0; i-- {
+		if decisions[i].Tool == "cost.guard" {
+			id := fmt.Sprintf("cost-guard-%s-%d", c.cfg.RunID, decisions[i].Seq)
+			_, _ = c.mailbox.AskOwner(ctx, mailbox.Question{ID: id, RunID: c.cfg.RunID, Ask: msg})
+			return
+		}
 	}
 }
 

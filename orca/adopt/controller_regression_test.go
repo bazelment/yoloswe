@@ -20,9 +20,9 @@ import (
 
 // regressionMailbox models the question-id idempotency of the Nebula mailbox.
 type regressionMailbox struct {
+	seen      map[string]bool
 	calls     []mailbox.Question
 	delivered []mailbox.Question
-	seen      map[string]bool
 }
 
 func (*regressionMailbox) SendLane(context.Context, string, string) error    { return nil }
@@ -45,14 +45,18 @@ type regressionDriver struct {
 func (d *regressionDriver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (lane.StartPhaseResult, error) {
 	if req.LaneID == "X" {
 		d.attempts++
-		return lane.StartPhaseResult{}, d.failure
+		if d.failure != nil {
+			return lane.StartPhaseResult{}, d.failure
+		}
 	}
 	return d.FakeDriver.StartPhaseTerminal(ctx, req)
 }
 func (d *regressionDriver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
 	if req.LaneID == "X" {
 		d.attempts++
-		return lane.SpawnResult{}, d.failure
+		if d.failure != nil {
+			return lane.SpawnResult{}, d.failure
+		}
 	}
 	return d.FakeDriver.SpawnSession(ctx, req)
 }
@@ -410,6 +414,18 @@ func TestAdoptedRegression(t *testing.T) {
 		if e.decisions("event.failure") != 1 {
 			t.Errorf("failed-event decisions=%d, want 1", e.decisions("event.failure"))
 		}
+		e.mustStep()
+		if e.drv.attempts != 1 {
+			t.Errorf("event attempts before backoff=%d, want 1", e.drv.attempts)
+		}
+		e.clk.Advance(time.Second)
+		e.mustStep()
+		if e.drv.attempts != 2 {
+			t.Errorf("event attempts after backoff=%d, want 2", e.drv.attempts)
+		}
+		if e.decisions("event.failure") != 1 || e.judge.BatchCount() != 1 {
+			t.Error("event failure was reported more than once")
+		}
 	})
 	t.Run("k_transient_handler_keeps_cursor", func(t *testing.T) {
 		e := newRegressionEnv(t)
@@ -500,4 +516,82 @@ func TestAdoptedRegression(t *testing.T) {
 			t.Error("paused Run ignored stop")
 		}
 	})
+}
+
+func TestAdoptedEventRetryRecovery(t *testing.T) {
+	e := newRegressionEnv(t)
+	e.lane("X", "swe", lane.StatusRunning)
+	e.report("X")
+	e.mustStep()
+	restart := func() {
+		t.Helper()
+		if err := e.controllers.Start(e.ctx, e.cr.run); err != nil {
+			t.Fatal(err)
+		}
+		e.cr = e.controllers.runs["regression"]
+		awaitRegression(t, e.cr.done)
+	}
+	restart()
+	if e.drv.attempts != 1 {
+		t.Fatalf("restart bypassed event backoff: attempts=%d", e.drv.attempts)
+	}
+	e.settings(store.RunSettings{Paused: true})
+	e.clk.Advance(time.Second)
+	e.mustStep()
+	if e.drv.attempts != 1 {
+		t.Fatalf("paused retry launched: attempts=%d", e.drv.attempts)
+	}
+	e.settings(store.RunSettings{})
+	e.drv.failure = nil
+	e.mustStep()
+	e.wantPhase("X", "clean")
+	if e.drv.attempts != 2 {
+		t.Errorf("recovered attempts=%d, want 2", e.drv.attempts)
+	}
+	if e.decisions("event.failure") != 1 || e.decisions("event.retry.complete") != 1 || e.judge.BatchCount() != 1 {
+		t.Error("retry lost or duplicated its failure/completion/judgment")
+	}
+	restart()
+	e.clk.Advance(time.Second)
+	e.mustStep()
+	if e.drv.attempts != 2 {
+		t.Errorf("completed retry replayed: attempts=%d", e.drv.attempts)
+	}
+}
+
+func TestAdoptedDriverControlErrorsKeepCursor(t *testing.T) {
+	for _, cause := range []error{store.ErrLeaseNotHeld, controller.ErrControllerStopped, context.Canceled, context.DeadlineExceeded} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			e := newRegressionEnv(t)
+			e.lane("X", "swe", lane.StatusRunning)
+			first := e.report("X")
+			e.drv.failure = cause
+			if err := e.step(); !errors.Is(err, cause) {
+				t.Errorf("Step=%v, want %v", err, cause)
+			}
+			if e.cursor() >= first.Seq || e.decisions("event.failure") != 0 {
+				t.Error("driver control error was discarded as lane-local")
+			}
+		})
+	}
+}
+
+func TestAdoptedMissingLaneSessionIsLocal(t *testing.T) {
+	for _, status := range []lane.Status{lane.StatusPlanned, lane.StatusRunning} {
+		t.Run(string(status), func(t *testing.T) {
+			e := newRegressionEnv(t)
+			e.drv.failure = fmt.Errorf("%w: unknown lane session", store.ErrNotFound)
+			e.lane("X", "swe", status)
+			e.lane("Y", "swe", lane.StatusRunning)
+			if status == lane.StatusRunning {
+				e.report("X")
+			}
+			e.report("Y")
+			e.mustStep()
+			e.wantPhase("Y", "clean")
+			if e.judge.BatchCount() != 1 {
+				t.Errorf("judgments=%d, want 1", e.judge.BatchCount())
+			}
+		})
+	}
 }

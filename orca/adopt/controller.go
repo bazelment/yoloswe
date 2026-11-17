@@ -128,25 +128,23 @@ func (d *Controllers) prepareStep(ctx context.Context, cr *controlledRun) (bool,
 		settings = latest
 		cr.controller.SetRuntimeSettings(settings)
 	}
-	if settings.Paused {
-		return false, nil
-	}
 	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: cr.run.ID, ActiveOnly: true})
 	if err != nil {
 		return false, err
 	}
+	controlPaused := false
 	for i := range dirs {
 		if dirs[i].Ref != "chat:control" {
 			continue
 		}
 		switch dirs[i].Text {
 		case "pause":
-			return false, nil
+			controlPaused = true
 		case "stop":
 			return false, controller.ErrControllerStopped
 		}
 	}
-	return true, nil
+	return !settings.Paused && !controlPaused, nil
 }
 
 // Active reports whether this process currently runs a controller for runID.
