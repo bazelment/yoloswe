@@ -1256,12 +1256,14 @@ func applyReportMetadata(ln *Lane, report string) {
 	}
 }
 
+var reportSectionLabelRE = regexp.MustCompile(`^[A-Za-z][A-Za-z ]*:`)
+
 func reportFindings(report string) string {
 	var parts []string
 	inFindings := false
 	for _, line := range strings.Split(report, "\n") {
 		line = strings.TrimSpace(line)
-		if key, _, ok := strings.Cut(line, ":"); ok {
+		if key, _, ok := strings.Cut(line, ":"); ok && reportSectionLabelRE.MatchString(line) {
 			inFindings = strings.EqualFold(key, "Breaks") || strings.EqualFold(key, "Open")
 		}
 		if inFindings && line != "" {
@@ -1568,6 +1570,14 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 	if r.NoPR {
 		p.Evidence = append(p.Evidence, "no-PR run")
 	}
+	if integratedLane(ln) {
+		p.Reason = "lane is already integrated, merged, or closed; no lifecycle move"
+		return p
+	}
+	if finishedAnalysisLane(ln) {
+		p.Reason = "analysis lane finished; no PR to integrate"
+		return p
+	}
 	report := previewOutcome(ln.Report)
 	working := strings.EqualFold(ln.TerminalState, "working") || strings.EqualFold(ln.TerminalState, "busy")
 	questionIsNew := !ln.LastTurnStarted.IsZero() && ln.ReportTime.After(ln.LastTurnStarted)
@@ -1576,14 +1586,6 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 		if ln.Terminal != "" {
 			p.Reason += "; waiting for terminal " + ln.Terminal + " handback"
 		}
-		return p
-	}
-	if integratedLane(ln) {
-		p.Reason = "lane is already integrated, merged, or closed; no lifecycle move"
-		return p
-	}
-	if finishedAnalysisLane(ln) {
-		p.Reason = "analysis lane finished; no PR to integrate"
 		return p
 	}
 	if waitingOn, deadline := ln.expectedHostWait(now); waitingOn != "" {
