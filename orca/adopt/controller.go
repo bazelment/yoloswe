@@ -486,8 +486,26 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			slog.DebugContext(ctx, "orca/adopt: judge does not implement SetDriver; adoptedRunDriver not attached to judge", "run_id", r.ID)
 		}
 	}
+	var integrationMu sync.Mutex
+	integrationCache := map[string]integrationResult{}
+	verify := func(ctx context.Context, ln lane.Lane) (bool, string, error) {
+		integrationMu.Lock()
+		defer integrationMu.Unlock()
+		key := ln.ID + ":" + ln.PRHead
+		if result, ok := integrationCache[key]; ok {
+			return result.merged, result.proof, result.err
+		}
+		merged, proof, err := d.verifyIntegration(ctx, syncer, ln)
+		integrationCache[key] = integrationResult{merged: merged, proof: proof, err: err}
+		return merged, proof, err
+	}
 	ctrl = controller.New(controller.Config{
-		BeforeStep:        func(ctx context.Context) (bool, error) { return d.prepareStep(ctx, cr) },
+		BeforeStep: func(ctx context.Context) (bool, error) {
+			integrationMu.Lock()
+			clear(integrationCache)
+			integrationMu.Unlock()
+			return d.prepareStep(ctx, cr)
+		},
 		IsolateLaneErrors: true,
 		StepError: func(err error) {
 			if cr == nil || err == nil {
@@ -502,6 +520,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		AdoptionGeneration: actionGeneration,
 		HolderID:           holder,
 		PRProbe:            d.runPRProbe(syncer),
+		HostIntegration:    verify,
 		JudgeLaneMail:      true,
 		MaxCostPerHourUSD:  d.MaxCostPerHourUSD,
 		NoPR:               r.NoPR,
@@ -954,6 +973,38 @@ func (d *Controllers) runPRProbe(syncer *runLedgerSync) controller.PRProbe {
 		}
 		return d.PRProbe(ctx, runID, branch, pr)
 	}
+}
+
+type integrationResult struct {
+	err    error
+	proof  string
+	merged bool
+}
+
+// verifyIntegration deliberately ignores report outcomes and host PR-state prose.
+// Only a recorded merge SHA or commit evidence on the configured target counts.
+func (d *Controllers) verifyIntegration(ctx context.Context, syncer *runLedgerSync, ln lane.Lane) (bool, string, error) {
+	r := syncer.CurrentRun()
+	r.TargetBranch = cmp.Or(strings.TrimSpace(r.TargetBranch), recipe.Default().MergePolicy.TargetBranch)
+	b, err := os.ReadFile(filepath.Join(r.Dir, "state.json"))
+	if err != nil {
+		return false, "", err
+	}
+	var host ledger
+	if err := json.Unmarshal(b, &host); err != nil {
+		return false, "", err
+	}
+	for i := range host.Tasks {
+		if host.Tasks[i].ID == ln.ID && validGitSHA(strings.TrimSpace(host.Tasks[i].MergeSHA)) {
+			return true, strings.TrimSpace(host.Tasks[i].MergeSHA), nil
+		}
+	}
+	r.Lanes = []Lane{{ID: ln.ID, Branch: ln.Branch, Head: ln.PRHead, PR: strconv.Itoa(ln.PR), Status: "running"}}
+	applyTargetIntegrationEvidence(ctx, &r, d.Mirror)
+	if r.Lanes[0].Integrated {
+		return true, ln.PRHead, nil
+	}
+	return false, fmt.Sprintf("PR #%d remains open or unverified on target %s: %s", ln.PR, r.TargetBranch, cmp.Or(r.IntegrationError, r.Lanes[0].IntegrationReason)), nil
 }
 
 const maxGitCheckoutSearchDepth = 4

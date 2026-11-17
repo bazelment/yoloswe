@@ -114,6 +114,8 @@ type Lane struct {
 	// A report may omit its head while the remote branch still has work.
 	branchChecked bool
 	branchHead    string
+	// targetIntegrated records mirror proof independently of report claims.
+	targetIntegrated bool
 	// Mode is the host lane mode (for example "analysis").
 	Mode string
 	// MergeNotePRs are PR numbers nominated by host merge prose. They require
@@ -633,6 +635,14 @@ func isGitCheckout(path string) bool {
 // applyIntegrationEvidence obtains all integration evidence from one orca-owned
 // commit-only mirror per run. Recorded checkouts are read-only sources only.
 func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) {
+	applyIntegrationEvidenceRefs(ctx, r, mirrorCfg, false)
+}
+
+func applyTargetIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) {
+	applyIntegrationEvidenceRefs(ctx, r, mirrorCfg, true)
+}
+
+func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirror, targetOnly bool) {
 	if r == nil {
 		return
 	}
@@ -663,7 +673,11 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 		return
 	}
 	branches := []string{}
-	for _, branch := range []string{r.TargetBranch, r.BaseBranch} {
+	evidenceBranches := []string{r.TargetBranch, r.BaseBranch}
+	if targetOnly {
+		evidenceBranches = []string{r.TargetBranch}
+	}
+	for _, branch := range evidenceBranches {
 		branch = strings.TrimSpace(branch)
 		if branch != "" && !slices.Contains(branches, branch) {
 			branches = append(branches, branch)
@@ -695,8 +709,10 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 		fetchedRefs = append(fetchedRefs, "refs/orca/"+branch)
 	}
 	refspecs = append(refspecs, laneRefspecs...)
-	refspecs = append(refspecs, "+HEAD:refs/orca/HEAD")
-	fetchedRefs = append(fetchedRefs, "refs/orca/HEAD")
+	if !targetOnly {
+		refspecs = append(refspecs, "+HEAD:refs/orca/HEAD")
+		fetchedRefs = append(fetchedRefs, "refs/orca/HEAD")
+	}
 	fetchArgs := []string{"-C", mirror, "fetch"}
 	if len(laneRefspecs) > 0 {
 		fetchArgs = append(fetchArgs, "--prune")
@@ -765,6 +781,7 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 			for _, ref := range fetchedRefs {
 				if gitRun(gitCtx, mirror, "merge-base", "--is-ancestor", "--end-of-options", head, ref) == nil {
 					ln.Integrated = true
+					ln.targetIntegrated = ref == "refs/orca/"+strings.TrimSpace(r.TargetBranch)
 					ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is an ancestor of mirror ref %s", shortSHA(head), strings.TrimPrefix(ref, "refs/orca/"))
 					break
 				}
@@ -781,6 +798,7 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 				for _, subject := range subjects {
 					if strings.HasSuffix(strings.TrimSpace(subject), suffix) {
 						ln.Integrated = true
+						ln.targetIntegrated = targetOnly || mirrorHasSquashSubject(gitCtx, mirror, r.TargetBranch, suffix)
 						ln.IntegrationReason = fmt.Sprintf("integration gate: mirror has squash subject ending %s", suffix)
 						break
 					}
@@ -803,6 +821,23 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 			}
 		}
 	}
+}
+
+func mirrorHasSquashSubject(ctx context.Context, mirror, target, suffix string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	out, err := gitOutput(ctx, mirror, "log", "--format=%s", "--end-of-options", "refs/orca/"+target)
+	if err != nil {
+		return false
+	}
+	for _, subject := range strings.Split(string(out), "\n") {
+		if strings.HasSuffix(strings.TrimSpace(subject), suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func finishedAnalysisLane(ln Lane) bool {

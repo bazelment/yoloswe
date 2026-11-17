@@ -906,13 +906,13 @@ func TestNebulaSwarmReviewReportRecognised(t *testing.T) {
 
 	waitFor(t, func() bool {
 		got, err := st.Lanes().Get(t.Context(), nsRun, "m2-default")
-		return err == nil && got.Status == lane.StatusDone
+		return err == nil && got.Status == lane.StatusBlocked
 	})
 	gotLane, err := st.Lanes().Get(t.Context(), nsRun, "m2-default")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotLane.ApprovalSHA != "fb6c5bae" || gotLane.PR != 5705 {
+	if gotLane.ApprovalSHA != "fb6c5bae" || gotLane.PR != 5705 || gotLane.MergeSHA != "" {
 		t.Fatalf("m2-default after review pass = %+v, want ApprovalSHA=fb6c5bae PR=5705", gotLane)
 	}
 	if len(drv.PhaseStarts) != 1 {
@@ -1060,6 +1060,7 @@ state_file.write_text(json.dumps(doc, indent=2) + "\n")
 				t.Fatal(err)
 			}
 			// Finish review with pass, then let PRProbe reconcile the merged PR (#5705 -> 999aaaa).
+			recordFixtureMerge(t, dir, "m2-default", "999aaaa")
 			prMerged.Store(true)
 			write(t, filepath.Join(dir, "reports", "m2-default.review.r1.md"), "Outcome: done\nHEAD: fb6c5bae\nPR: 5705\nVerdict: pass\n")
 			drv.Emit(lane.Event{
@@ -1326,6 +1327,7 @@ func TestAdoptedRunObjectiveNextWorkTriggersPlannerAndRefreshes(t *testing.T) {
 		}
 
 		// Merge #5705 so m2-default finishes and the backlog drains.
+		recordFixtureMerge(t, dir, "m2-default", "999aaaa")
 		prMerged.Store(true)
 		drv.Emit(lane.Event{
 			RunID:      nsRun,
@@ -3091,7 +3093,8 @@ Remaining orchestrator steps after #5899 merges:
 			t.Fatalf("FINAL.md should not exist while m5-finish is still running")
 		}
 
-		// Now m5-finish writes its review pass report and PRProbe sees #5899 merged.
+		// The host records the merge; PR state alone is no longer proof.
+		recordFixtureMerge(t, dir, "m5-finish", "def5899")
 		write(t, filepath.Join(dir, "reports", "m5-finish.review.r1.md"), "Outcome: done\nHEAD: def\nPR: 5899\nVerdict: pass\n")
 		fakeDrv.Emit(lane.Event{
 			RunID:      nsRun,
