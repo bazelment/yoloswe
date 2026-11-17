@@ -2660,6 +2660,8 @@ func parseFutureTime(now time.Time, raw string) (time.Time, error) {
 }
 
 func isCIGreen(checks string) bool {
+	// Adopted host runs apply their named exact-head CI gate in orca/controller;
+	// keep dispatcher vetting's native generic status semantics unchanged.
 	switch strings.ToLower(strings.TrimSpace(checks)) {
 	case "green", "pass", "passed", "success", "ok", "true":
 		return true

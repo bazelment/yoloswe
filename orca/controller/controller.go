@@ -38,6 +38,17 @@ const (
 	ActorController              = "controller"
 )
 
+// TerminalStateLive reports whether a host terminal may still own work.
+// Unknown states remain live until an explicit exit is observed.
+func TerminalStateLive(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "exited", "stopped", "released", "ended", "done", "completed", "failed", "finished", "idle", "sleeping":
+		return false
+	default:
+		return true
+	}
+}
+
 // Tool names recorded in store.DecisionStore by the deterministic controller.
 const (
 	ToolPhaseStart           = "phase.start"
@@ -57,6 +68,7 @@ const (
 	ownerAskRefPrefix = "owner_ask:"
 	// NamedWaitRefPrefix is the directive Ref prefix for lane/run expected waits.
 	NamedWaitRefPrefix           = "named-wait:"
+	HostIntegrationWaitRefPrefix = NamedWaitRefPrefix + "host-integration:"
 	integrateRecoveryRefPrefix   = "integrate-recovery:"
 	integrateRecoveryReadyPrefix = "integrate recovery ready:"
 	integrateRecoveryMaxAttempts = 3
@@ -276,6 +288,8 @@ type Config struct {
 	// HostRun marks a handoff from a host orchestrator. A completed SWE-only
 	// report is a merge judgment for these runs, never an automatic completion.
 	HostRun bool
+	// HostIntegration verifies completion from the adopted run's commit mirror.
+	HostIntegration func(context.Context, lane.Lane) (bool, string, error)
 }
 
 func (c Config) withDefaults() Config {
@@ -345,9 +359,13 @@ func (a *OwnerAsk) Validate() error {
 
 // CIPayload is the JSON payload for store.EventCI events.
 type CIPayload struct {
-	Green       *bool  `json:"green,omitempty"`
-	HeadSHA     string `json:"head_sha,omitempty"`
-	Status      string `json:"status,omitempty"`
+	Green   *bool  `json:"green,omitempty"`
+	HeadSHA string `json:"head_sha,omitempty"`
+	Status  string `json:"status,omitempty"`
+	// CheckName identifies an individual required check when a host reports
+	// checks incrementally.  Aggregate statuses remain supported for native
+	// runs; adopted merge gates require the named checks below.
+	CheckName   string `json:"check_name,omitempty"`
 	FailedCheck string `json:"failed_check,omitempty"`
 	PR          int    `json:"pr,omitempty"`
 }
@@ -1053,6 +1071,9 @@ func (c *Controller) Step(ctx context.Context) error {
 	if err := c.checkNamedWaits(ctx); err != nil {
 		return err
 	}
+	if err := c.checkHostIntegrationWaits(ctx); err != nil {
+		return err
+	}
 	if err := c.checkIntegrateRecovery(ctx); err != nil {
 		return err
 	}
@@ -1115,6 +1136,105 @@ func (c *Controller) checkNamedWaits(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+const hostIntegrationWaitRefPrefix = HostIntegrationWaitRefPrefix
+
+func (c *Controller) waitForHostIntegration(ctx context.Context, ln *lane.Lane, reason string) (store.EventClass, error) {
+	ln.Question = reason
+	report := lane.PhaseReport{Phase: ln.Phase, Round: ln.Round, Outcome: lane.OutcomeDone, HeadSHA: ln.PRHead, PR: ln.PR}
+	payload, err := json.Marshal(report)
+	if err != nil {
+		return store.EventClassUnclassified, err
+	}
+	id := "host-integration:" + ln.ID + ":" + ln.AttemptKey() + ":" + ln.PRHead
+	if err := c.store.Directives().Add(ctx, store.Directive{ID: id, RunID: c.cfg.RunID, Scope: ln.ID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Ref: hostIntegrationWaitRefPrefix + ln.ID, Text: string(payload), Status: store.DirectiveActive}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		return store.EventClassUnclassified, err
+	}
+	if _, err := c.store.Events().Append(ctx, store.Event{ID: "judgment:" + id, RunID: c.cfg.RunID, LaneID: ln.ID, Kind: store.EventStall, Class: store.EventClassJudgment, Source: ActorController, Summary: reason}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		return store.EventClassUnclassified, err
+	}
+	return c.blockLaneForJudgment(ctx, ln)
+}
+
+// A completed handback waits durably for mirror evidence, without relaunching
+// the integrator or relying on the worker to submit another report.
+func (c *Controller) checkHostIntegrationWaits(ctx context.Context) error {
+	if !c.cfg.HostRun || c.cfg.HostIntegration == nil {
+		return nil
+	}
+	dirs, err := c.store.Directives().List(ctx, store.DirectiveFilter{RunID: c.cfg.RunID, ActiveOnly: true})
+	if err != nil {
+		return err
+	}
+	for i := range dirs {
+		dir := &dirs[i]
+		if !strings.HasPrefix(dir.Ref, hostIntegrationWaitRefPrefix) {
+			continue
+		}
+		ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, dir.Scope)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				if updateErr := c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dir.ID, store.DirectiveHandled); updateErr != nil {
+					return updateErr
+				}
+				continue
+			}
+			if noteErr := c.noteHostIntegrationWaitError(ctx, dir, err); noteErr != nil {
+				return noteErr
+			}
+			continue
+		}
+		var report lane.PhaseReport
+		if err := json.Unmarshal([]byte(dir.Text), &report); err != nil {
+			if updateErr := c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dir.ID, store.DirectiveHandled); updateErr != nil {
+				return updateErr
+			}
+			continue
+		}
+		if !ln.Status.Terminal() && report.HeadSHA == ln.PRHead && report.Phase == ln.Phase && report.Round == ln.Round {
+			if ln.HostHoldReason != "" || c.advanceHeld(ln) {
+				continue
+			}
+			merged, _, err := c.cfg.HostIntegration(ctx, *ln)
+			if err != nil {
+				if noteErr := c.noteHostIntegrationWaitError(ctx, dir, err); noteErr != nil {
+					return noteErr
+				}
+				continue
+			}
+			if !merged {
+				continue
+			}
+			if _, err := c.store.Events().Append(ctx, store.Event{ID: "verified:" + dir.ID, RunID: c.cfg.RunID, LaneID: ln.ID, Kind: store.EventLaneReport, Payload: json.RawMessage(dir.Text), Summary: fmt.Sprintf("mirror confirmed PR #%d merged on target", ln.PR)}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+				return err
+			}
+		}
+		if err := c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dir.ID, store.DirectiveHandled); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Controller) noteHostIntegrationWaitError(ctx context.Context, dir *store.Directive, err error) error {
+	if dir == nil || err == nil {
+		return nil
+	}
+	_, appendErr := c.store.Events().Append(ctx, store.Event{
+		ID:      "host-integration-error:" + dir.ID,
+		RunID:   c.cfg.RunID,
+		LaneID:  dir.Scope,
+		Kind:    store.EventStall,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Source:  ActorController,
+		Summary: fmt.Sprintf("host integration verification failed for %s: %v", dir.Scope, err),
+	})
+	if errors.Is(appendErr, store.ErrAlreadyExists) {
+		return nil
+	}
+	return appendErr
 }
 
 func (c *Controller) checkIntegrateRecovery(ctx context.Context) error {
@@ -1754,14 +1874,32 @@ func (c *Controller) reconcilePlannedLanes(ctx context.Context) error {
 		return err
 	}
 
-	running, err := c.store.Lanes().List(ctx, store.LaneFilter{
-		RunID:    c.cfg.RunID,
-		Statuses: []store.LaneStatus{lane.StatusRunning},
-	})
+	running, err := c.store.Lanes().List(ctx, store.LaneFilter{RunID: c.cfg.RunID})
 	if err != nil {
 		return err
 	}
-	activeCount := len(running)
+	activeCount := 0
+	for i := range running {
+		ln := &running[i]
+		if !c.cfg.HostRun {
+			if ln.Status == lane.StatusRunning {
+				activeCount++
+			}
+			continue
+		}
+		if ln.Status.Terminal() || strings.TrimSpace(ln.TerminalID) == "" || c.stoppedTerminals[ln.TerminalID] {
+			continue
+		}
+		state, _, err := c.terminalAgentState(ctx, ln.TerminalID, true)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if !TerminalStateLive(state) {
+			continue
+		}
+		// An unknown terminal is conservatively live until its exit is observed.
+		activeCount++
+	}
 
 	for i := range planned {
 		ln := planned[i]
@@ -2689,12 +2827,20 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		ln.PR = rep.PR
 	}
 	if rep.HeadSHA != "" {
+		if c.cfg.HostRun && rep.HeadSHA != ln.PRHead {
+			ln.Checks = ""
+		}
 		ln.PRHead = rep.HeadSHA
 	}
-	if rep.Checks != "" {
-		ln.Checks = rep.Checks
-	} else if rep.CIGreen != nil {
-		ln.Checks = boolToChecks(*rep.CIGreen)
+	// Adopted merge checks must come from a head-pinned CI event. A worker
+	// report can carry check text for context, but cannot self-attest the
+	// merge gate.
+	if !c.cfg.HostRun {
+		if rep.Checks != "" {
+			ln.Checks = rep.Checks
+		} else if rep.CIGreen != nil {
+			ln.Checks = boolToChecks(*rep.CIGreen)
+		}
 	}
 
 	r, err := c.resolveRecipe(ctx, ln)
@@ -2913,7 +3059,11 @@ func (c *Controller) reconcileLanePRState(ctx context.Context, ln *lane.Lane, ev
 	if c.cfg.NoPR || c.advanceHeld(ln) || c.laneMarkedWorking(ctx, *ln) {
 		return false, nil
 	}
-	settled, state, err := ReconcileLanePRState(ctx, c.cfg.PRProbe, c.store, nil, c.clock.Now(), c.cfg.RunID, ActorController, eventID, ln)
+	probe := c.cfg.PRProbe
+	if c.cfg.HostRun && c.cfg.HostIntegration != nil && ln.Phase == recipe.PhaseIntegrate {
+		probe = nil
+	}
+	settled, state, err := ReconcileLanePRState(ctx, probe, c.store, nil, c.clock.Now(), c.cfg.RunID, ActorController, eventID, ln)
 	if !settled {
 		return false, err
 	}
@@ -2969,7 +3119,11 @@ func (c *Controller) advanceByRecipe(
 		return store.EventClassAuto, nil
 	}
 	round := max(ln.Round, 1)
+	noMergeLane := c.isNoMergeLane(ctx, ln)
 	ciGreen := isCIGreen(ln.Checks)
+	if c.cfg.HostRun && r.MergePolicy.RequireCIGreen && r.MergePolicy.Mode != recipe.MergeModeNone && !noMergeLane {
+		ciGreen = isAdoptedCIGreen(ln.Checks)
+	}
 
 	mech, judg := r.MatchTransitions(ln.Phase, verdict, ciGreen, round)
 	if len(judg) > 0 {
@@ -2981,7 +3135,7 @@ func (c *Controller) advanceByRecipe(
 
 	if mech == nil {
 		// Hold the verdict if a transition only awaits green CI.
-		if !ciGreen && !isCIRed(ln.Checks) {
+		if !ciGreen && (!isCIRed(ln.Checks) || c.cfg.HostRun) {
 			mechWithCI, judgWithCI := r.MatchTransitions(ln.Phase, verdict, true, round)
 			if mechWithCI != nil || len(judgWithCI) > 0 {
 				c.pendingVerdicts[ln.ID] = pendingVerdict{
@@ -2992,6 +3146,9 @@ func (c *Controller) advanceByRecipe(
 				if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
 					return store.EventClassUnclassified, err
 				}
+				if isCIRed(ln.Checks) {
+					return store.EventClassJudgment, nil
+				}
 				return store.EventClassAuto, nil
 			}
 		}
@@ -3000,7 +3157,7 @@ func (c *Controller) advanceByRecipe(
 
 	delete(c.pendingVerdicts, ln.ID)
 
-	noMerge := r.MergePolicy.Mode == recipe.MergeModeNone || c.isNoMergeLane(ctx, ln)
+	noMerge := r.MergePolicy.Mode == recipe.MergeModeNone || noMergeLane
 	target := mech.To
 	if target == recipe.TargetComplete && c.cfg.HostRun && strings.EqualFold(strings.TrimSpace(ln.Phase), recipe.PhaseSWE) && len(r.Phases) == 1 {
 		// The host may have left an open PR (or a no-PR branch) for the hand
@@ -3014,6 +3171,19 @@ func (c *Controller) advanceByRecipe(
 
 	switch target {
 	case recipe.TargetComplete:
+		if c.cfg.HostRun && !noMerge && c.cfg.HostIntegration != nil {
+			merged, proof, err := c.cfg.HostIntegration(ctx, *ln)
+			if err != nil {
+				return store.EventClassUnclassified, &LaneLocalError{Err: err}
+			}
+			if !merged {
+				if ev != nil {
+					ev.Summary = proof
+				}
+				return c.waitForHostIntegration(ctx, ln, proof)
+			}
+			ln.MergeSHA = cmp.Or(proof, ln.PRHead)
+		}
 		if c.laneMarkedWorking(ctx, *ln) {
 			return store.EventClassJudgment, nil
 		}
@@ -3022,7 +3192,7 @@ func (c *Controller) advanceByRecipe(
 				return c.blockLaneForJudgment(ctx, ln)
 			}
 		}
-		if r.MergePolicy.RequireCIGreen && !noMerge && !ciGreen {
+		if r.MergePolicy.RequireCIGreen && !noMerge && !ciGreen && strings.TrimSpace(ln.MergeSHA) == "" {
 			return c.blockLaneForJudgment(ctx, ln)
 		}
 
@@ -3355,6 +3525,9 @@ func (c *Controller) handleCI(ctx context.Context, ev *store.Event) (store.Event
 	if len(ev.Payload) > 0 {
 		_ = json.Unmarshal(ev.Payload, &payload)
 	}
+	if c.cfg.HostRun && (payload.HeadSHA == "" || payload.HeadSHA != ln.PRHead || (payload.PR > 0 && ln.PR > 0 && payload.PR != ln.PR)) {
+		return store.EventClassAuto, nil
+	}
 
 	now := c.clock.Now().UTC()
 	ln.LastEventID = ev.ID
@@ -3366,6 +3539,8 @@ func (c *Controller) handleCI(ctx context.Context, ev *store.Event) (store.Event
 		ln.PRHead = payload.HeadSHA
 	}
 	switch {
+	case payload.CheckName != "":
+		ln.Checks = mergeNamedCheckStatus(ln.Checks, payload.CheckName, payload.Status, payload.Green)
 	case payload.Status != "":
 		ln.Checks = payload.Status
 	case payload.Green != nil:
@@ -3380,7 +3555,17 @@ func (c *Controller) handleCI(ctx context.Context, ev *store.Event) (store.Event
 		return store.EventClassUnclassified, err
 	}
 
-	if isCIGreen(ln.Checks) {
+	ciGreen := isCIGreen(ln.Checks)
+	if c.cfg.HostRun {
+		r, resolveErr := c.resolveRecipe(ctx, ln)
+		if resolveErr != nil {
+			return store.EventClassUnclassified, resolveErr
+		}
+		if r.MergePolicy.RequireCIGreen && r.MergePolicy.Mode != recipe.MergeModeNone && !c.isNoMergeLane(ctx, ln) {
+			ciGreen = isAdoptedCIGreen(ln.Checks)
+		}
+	}
+	if ciGreen {
 		if pv, ok := c.pendingVerdictForLane(ctx, ln); ok {
 			r, err := c.resolveRecipe(ctx, ln)
 			if err != nil {
@@ -3398,11 +3583,11 @@ func (c *Controller) handleCI(ctx context.Context, ev *store.Event) (store.Event
 }
 
 func (c *Controller) pendingVerdictForLane(ctx context.Context, ln *lane.Lane) (pendingVerdict, bool) {
-	if pv, ok := c.pendingVerdicts[ln.ID]; ok && pv.key == ln.AttemptKey() {
+	if pv, ok := c.pendingVerdicts[ln.ID]; ok && pv.key == ln.AttemptKey() && (!c.cfg.HostRun || pv.headSHA == ln.PRHead) {
 		return pv, true
 	}
 	if ln.TerminalID != "" {
-		if rep, err := c.driver.ReadReport(ctx, c.cfg.RunID, ln.ID, ln.TerminalID); err == nil && rep != nil && rep.Outcome.Valid() {
+		if rep, err := c.driver.ReadReport(ctx, c.cfg.RunID, ln.ID, ln.TerminalID); err == nil && rep != nil && rep.Outcome.Valid() && (!c.cfg.HostRun || rep.HeadSHA == ln.PRHead) {
 			return pendingVerdict{
 				key:     ln.AttemptKey(),
 				verdict: string(rep.Outcome),
@@ -4428,6 +4613,12 @@ func (c *Controller) extractReport(ctx context.Context, ln *lane.Lane, ev store.
 		}
 	}
 	payload.HeadSHA = cmp.Or(payload.HeadSHA, payload.Head)
+	if c.cfg.HostRun && payload.HeadSHA == "" {
+		// A fallback disk report can supply a verdict/head, but cannot bind CI
+		// claims from this separate event to that older report's head.
+		payload.Checks = ""
+		payload.CIGreen = nil
+	}
 
 	termID := cmp.Or(payload.TerminalID, ln.TerminalID)
 	if termID != "" && c.driver != nil {
@@ -4592,6 +4783,67 @@ func isCIGreen(checks string) bool {
 	default:
 		return false
 	}
+}
+
+var (
+	adoptedLintGreenRE      = regexp.MustCompile(`(?i)(^|[^a-z0-9])lint([^a-z0-9]+)(success|succeeded|pass|passed|green|ok|true)([^a-z0-9]|$)`)
+	adoptedBuildTestGreenRE = regexp.MustCompile(`(?i)(^|[^a-z0-9])build([^a-z0-9]+)(and|&)([^a-z0-9]+)test([^a-z0-9]+)(success|succeeded|pass|passed|green|ok|true)([^a-z0-9]|$)`)
+	adoptedNamedCheckBadRE  = regexp.MustCompile(`(?i)(lint|build([^a-z0-9]+)(and|&)([^a-z0-9]+)test)([^a-z0-9]+)(red|fail|failed|failure|error|pending|queued|in[_ -]?progress|false)`)
+)
+
+// Native runs continue to use isCIGreen; adopted runs use this named-check
+// predicate only inside HostRun merge-gate branches.
+// isAdoptedCIGreen requires the two checks named by the adopted-run merge
+// contract.  A generic "green" summary is deliberately insufficient because
+// it does not prove which checks ran on the current PR head.
+func isAdoptedCIGreen(checks string) bool {
+	text := strings.TrimSpace(checks)
+	if text == "" || adoptedNamedCheckBadRE.MatchString(text) {
+		return false
+	}
+	return adoptedLintGreenRE.MatchString(text) && adoptedBuildTestGreenRE.MatchString(text)
+}
+
+func mergeNamedCheckStatus(existing, name, status string, green *bool) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return existing
+	}
+	value := strings.TrimSpace(status)
+	if value == "" && green != nil {
+		value = boolToChecks(*green)
+	}
+	if value == "" {
+		return existing
+	}
+	newEntry := name + ": " + value
+	if existing == "" {
+		return newEntry
+	}
+	target := normalizeCheckName(name)
+	parts := strings.Split(existing, ";")
+	for i, part := range parts {
+		key, _, ok := strings.Cut(strings.TrimSpace(part), ":")
+		if !ok {
+			key, _, ok = strings.Cut(strings.TrimSpace(part), "=")
+		}
+		if ok && normalizeCheckName(key) == target {
+			parts[i] = newEntry
+			return strings.Join(parts, "; ")
+		}
+	}
+	return existing + "; " + newEntry
+}
+
+func normalizeCheckName(name string) string {
+	name = strings.ToLower(strings.ReplaceAll(name, "&", "and"))
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func isCIRed(checks string) bool {

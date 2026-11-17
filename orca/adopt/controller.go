@@ -46,8 +46,17 @@ type Controllers struct {
 	ledgerScript      *string
 	runs              map[string]*controlledRun
 	starting          map[string]*startup
+	Mirror            GitMirror
 	MaxCostPerHourUSD float64
 	mu                sync.Mutex
+}
+
+// SetMirror updates the commit mirror used for live integration verification.
+// The service owns this setting, so it is applied when a run is started.
+func (d *Controllers) SetMirror(mirror GitMirror) {
+	d.mu.Lock()
+	d.Mirror = mirror
+	d.mu.Unlock()
 }
 
 //nolint:govet // field alignment
@@ -402,6 +411,31 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	for i := range r.Lanes {
 		imported := &r.Lanes[i]
+		if r.NoPR || !strings.EqualFold(strings.TrimSpace(imported.Phase), recipe.PhaseIntegrate) || closedLane(*imported) || imported.targetIntegrated || (!openPR(*imported) && validGitSHA(strings.TrimSpace(imported.MergeSHA))) {
+			continue
+		}
+		// A host's merged/done claim is not merge proof. Keep the imported
+		// lane waiting so the controller rechecks its mirror on every step.
+		if !integratedLane(*imported) && !reportDone(imported.Report) {
+			continue
+		}
+		ln := lanes[i]
+		report := lane.PhaseReport{Phase: ln.Phase, Round: max(ln.Round, 1), Outcome: lane.OutcomeDone, HeadSHA: ln.PRHead, PR: ln.PR}
+		payload, err := json.Marshal(report)
+		if err != nil {
+			return err
+		}
+		waitID := "host-integration:" + ln.ID + ":adopt:" + strings.TrimSpace(ln.PRHead)
+		wait := store.Directive{ID: waitID, RunID: r.ID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Scope: ln.ID, Ref: controller.HostIntegrationWaitRefPrefix + ln.ID, Text: string(payload), Status: store.DirectiveActive}
+		if err := d.store.Directives().Add(ctx, wait); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return err
+		}
+		if _, err := d.store.Events().Append(ctx, store.Event{ID: "judgment:" + waitID, RunID: r.ID, LaneID: ln.ID, Kind: store.EventStall, Class: store.EventClassJudgment, Source: controller.ActorController, Summary: fmt.Sprintf("PR #%d remains open or unverified on target; waiting for mirror evidence", ln.PR)}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return err
+		}
+	}
+	for i := range r.Lanes {
+		imported := &r.Lanes[i]
 		if integratedLane(*imported) || finishedAnalysisLane(*imported) {
 			continue
 		}
@@ -486,8 +520,29 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			slog.DebugContext(ctx, "orca/adopt: judge does not implement SetDriver; adoptedRunDriver not attached to judge", "run_id", r.ID)
 		}
 	}
+	d.mu.Lock()
+	mirror := d.Mirror
+	d.mu.Unlock()
+	var integrationMu sync.Mutex
+	integrationCache := map[string]integrationResult{}
+	verify := func(ctx context.Context, ln lane.Lane) (bool, string, error) {
+		integrationMu.Lock()
+		defer integrationMu.Unlock()
+		key := ln.ID + ":" + ln.PRHead
+		if result, ok := integrationCache[key]; ok {
+			return result.merged, result.proof, result.err
+		}
+		merged, proof, err := d.verifyIntegration(ctx, syncer, ln, mirror)
+		integrationCache[key] = integrationResult{merged: merged, proof: proof, err: err}
+		return merged, proof, err
+	}
 	ctrl = controller.New(controller.Config{
-		BeforeStep:        func(ctx context.Context) (bool, error) { return d.prepareStep(ctx, cr) },
+		BeforeStep: func(ctx context.Context) (bool, error) {
+			integrationMu.Lock()
+			clear(integrationCache)
+			integrationMu.Unlock()
+			return d.prepareStep(ctx, cr)
+		},
 		IsolateLaneErrors: true,
 		StepError: func(err error) {
 			if cr == nil || err == nil {
@@ -502,6 +557,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		AdoptionGeneration: actionGeneration,
 		HolderID:           holder,
 		PRProbe:            d.runPRProbe(syncer),
+		HostIntegration:    verify,
 		JudgeLaneMail:      true,
 		MaxCostPerHourUSD:  d.MaxCostPerHourUSD,
 		NoPR:               r.NoPR,
@@ -956,6 +1012,47 @@ func (d *Controllers) runPRProbe(syncer *runLedgerSync) controller.PRProbe {
 	}
 }
 
+type integrationResult struct {
+	err    error
+	proof  string
+	merged bool
+}
+
+// verifyIntegration deliberately ignores report outcomes and host PR-state prose.
+// Only a recorded merge SHA or commit evidence on the configured target counts.
+func (d *Controllers) verifyIntegration(ctx context.Context, syncer *runLedgerSync, ln lane.Lane, mirror GitMirror) (bool, string, error) {
+	if strings.TrimSpace(ln.HostHoldReason) != "" {
+		return false, fmt.Sprintf("PR #%d remains host-held or draft; merge is forbidden", ln.PR), nil
+	}
+	r := syncer.CurrentRun()
+	r.TargetBranch = cmp.Or(strings.TrimSpace(r.TargetBranch), recipe.Default().MergePolicy.TargetBranch)
+	b, err := os.ReadFile(filepath.Join(r.Dir, "state.json"))
+	if err != nil {
+		return false, "", err
+	}
+	var host ledger
+	if err := json.Unmarshal(b, &host); err != nil {
+		return false, "", err
+	}
+	for i := range host.Tasks {
+		if host.Tasks[i].ID == ln.ID {
+			state := strings.ToLower(strings.TrimSpace(host.Tasks[i].PRState))
+			if state == "open" || strings.HasPrefix(state, "open ") {
+				return false, fmt.Sprintf("PR #%d remains open or unverified on target %s: open PR has no merge evidence", ln.PR, r.TargetBranch), nil
+			}
+			if validGitSHA(strings.TrimSpace(host.Tasks[i].MergeSHA)) {
+				return true, strings.TrimSpace(host.Tasks[i].MergeSHA), nil
+			}
+		}
+	}
+	r.Lanes = []Lane{{ID: ln.ID, Branch: ln.Branch, Head: ln.PRHead, PR: strconv.Itoa(ln.PR), Status: "running"}}
+	applyTargetIntegrationEvidence(ctx, &r, mirror)
+	if r.Lanes[0].Integrated {
+		return true, ln.PRHead, nil
+	}
+	return false, fmt.Sprintf("PR #%d remains open or unverified on target %s: %s", ln.PR, r.TargetBranch, cmp.Or(r.IntegrationError, r.Lanes[0].IntegrationReason)), nil
+}
+
 const maxGitCheckoutSearchDepth = 4
 
 func hasGitCheckout(dir string) bool {
@@ -1270,12 +1367,14 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		Config struct {
 			MergePolicy *recipe.MergePolicy `json:"merge_policy"`
 			MergeRule   string              `json:"merge_rule"`
+			MergeGate   string              `json:"merge_gate"`
 			// Merge is nebula-swarm's merge authority: none or a merge method.
-			Merge  string      `json:"merge"`
-			Base   string      `json:"base"`
-			Target string      `json:"target"`
-			Phases []hostPhase `json:"phases"`
-			NoPR   bool        `json:"no_pr"`
+			Merge       string      `json:"merge"`
+			Base        string      `json:"base"`
+			Target      string      `json:"target"`
+			Phases      []hostPhase `json:"phases"`
+			TargetLanes int         `json:"target_lanes"`
+			NoPR        bool        `json:"no_pr"`
 		} `json:"config"`
 	}
 	if err := json.Unmarshal(b, &st); err != nil {
@@ -1307,6 +1406,24 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 	if r.NoPR {
 		workflow = recipe.WithoutIntegrate(workflow)
 		workflow.MergePolicy.Mode = recipe.MergeModeNone
+	}
+	workflow.MergePolicy.RequireCIGreen = true
+	if st.Config.TargetLanes > 0 {
+		workflow.Limits.MaxConcurrentLanes = st.Config.TargetLanes
+	} else {
+		live, planned := 0, false
+		for i := range r.Lanes {
+			imported := &r.Lanes[i]
+			planned = planned || imported.Status == string(lane.StatusPlanned)
+			if imported.Status != string(lane.StatusDone) && imported.Status != string(lane.StatusFailed) && strings.TrimSpace(imported.Terminal) != "" && controller.TerminalStateLive(imported.TerminalState) {
+				live++
+			}
+		}
+		// Leave room for one queued lane beyond the host's live terminals.
+		if planned {
+			live++
+		}
+		workflow.Limits.MaxConcurrentLanes = max(workflow.Limits.MaxConcurrentLanes, live)
 	}
 	if !workflow.MergePolicy.Mode.Valid() {
 		return workflow, nil, nil, fmt.Errorf("invalid adopted merge mode %q", workflow.MergePolicy.Mode)
@@ -1407,7 +1524,8 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			}
 		}
 		if ph.Name == recipe.PhaseIntegrate {
-			ph.BriefTemplate += fmt.Sprintf("\nRun merge policy: mode=%s; target=%s; script=%s; require_review_pass=%t; require_ci_green=%t. %s", workflow.MergePolicy.Mode, workflow.MergePolicy.TargetBranch, workflow.MergePolicy.Script, workflow.MergePolicy.RequireReviewPass, workflow.MergePolicy.RequireCIGreen, st.Config.MergeRule)
+			ph.BriefTemplate += fmt.Sprintf("\nRun merge policy: mode=%s; target=%s; script=%s; require_review_pass=%t; require_ci_green=%t. %s", workflow.MergePolicy.Mode, workflow.MergePolicy.TargetBranch, workflow.MergePolicy.Script, workflow.MergePolicy.RequireReviewPass, workflow.MergePolicy.RequireCIGreen, adoptedMergeGateText(st.Config.MergeGate, ruleText, objectiveText, contextText))
+			ph.BriefTemplate += "\nRequired checks: Lint plus Build and Test green on the PR's exact head before merge; one rerun allowed. Recheck the head before merging once."
 			if r.NoPR {
 				ph.BriefTemplate += "\nThis run uses branches without PRs; integrate the reviewed branch into the run target."
 				ph.ExitContract.RequiresPR = false
@@ -1431,16 +1549,10 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			// A nebula-swarm lane parked for its owner; checkpoint writes it back.
 			status = lane.StatusBlocked
 		}
-		terminal := integratedLane(*imported)
-		if terminal {
-			// Imported merge/close facts are authoritative even when a host
-			// ledger's status or hold marker is stale. Terminal lanes are never
-			// reopened by adoption.
-			status = lane.StatusDone
+		mergeSHA := strings.TrimSpace(imported.MergeSHA)
+		if !validGitSHA(mergeSHA) {
+			mergeSHA = ""
 		}
-		// Host-owned blocks and draft PRs are imported as blocked so every
-		// controller tick treats them as judgment-only. An owner/dispatcher
-		// answer can explicitly move the lane back to running.
 		hostHoldReason := strings.TrimSpace(imported.HostHold)
 		if hostHoldReason == "" && !finishedAnalysisLane(*imported) && strings.EqualFold(previewOutcome(imported.Report), string(lane.OutcomeBlocked)) {
 			hostHoldReason = strings.TrimSpace(imported.ReportBlocker)
@@ -1451,7 +1563,48 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		if hostHoldReason == "" && strings.EqualFold(imported.Status, "blocked") {
 			hostHoldReason = "blocked"
 		}
+		mergeForbidden := hostHoldReason != "" || imported.PRDraft
+		terminal := integratedLane(*imported)
+		if strings.EqualFold(imported.Phase, recipe.PhaseIntegrate) {
+			closed := closedLane(*imported)
+			mergeSHA = ""
+			if !mergeForbidden {
+				for j := range st.Tasks {
+					if st.Tasks[j].ID == imported.ID {
+						if sha := strings.TrimSpace(st.Tasks[j].MergeSHA); validGitSHA(sha) {
+							mergeSHA = sha
+						}
+						break
+					}
+				}
+			}
+			if !mergeForbidden && !openPR(*imported) && imported.targetIntegrated && mergeSHA == "" {
+				mergeSHA = imported.Head
+			}
+			// A closed host PR is terminal even though it is not a merge. Merge
+			// prose and an integrate done report remain claims until the target
+			// mirror (or an independent host merge SHA) proves the merge.
+			terminal = closed || (!mergeForbidden && !openPR(*imported) && (imported.targetIntegrated || mergeSHA != ""))
+			if !terminal && status == lane.StatusDone {
+				status = lane.StatusRunning
+			}
+			if !terminal && (integratedLane(*imported) || reportDone(imported.Report)) {
+				status = lane.StatusBlocked
+			}
+		}
+		if mergeForbidden || openPR(*imported) {
+			mergeSHA = ""
+		}
 		if terminal {
+			// Imported merge/close facts are authoritative even when a host
+			// ledger's status or hold marker is stale. Terminal lanes are never
+			// reopened by adoption.
+			status = lane.StatusDone
+		}
+		// Host-owned blocks and draft PRs are imported as blocked so every
+		// controller tick treats them as judgment-only. An owner/dispatcher
+		// answer can explicitly move the lane back to running.
+		if terminal && !mergeForbidden {
 			hostHoldReason = ""
 		}
 		if hostHoldReason != "" {
@@ -1461,7 +1614,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			return workflow, nil, nil, fmt.Errorf("lane %s: unsupported host status %q", imported.ID, imported.Status)
 		}
 		ln := lane.Lane{ItemID: imported.ID, ID: imported.ID, RunID: r.ID, Title: imported.Title, Branch: imported.Branch, Status: status, RecipeName: workflow.Name, RecipeVersion: 1, BaseBranch: st.Config.Base, Attempt: 1, TerminalState: imported.TerminalState, HostHoldReason: hostHoldReason,
-			PRHead: imported.Head, MergeSHA: imported.MergeSHA, Checks: imported.Checks}
+			PRHead: imported.Head, MergeSHA: mergeSHA, Checks: imported.Checks}
 		ln.PR, _ = strconv.Atoi(imported.PR)
 		for j := range st.Tasks {
 			task := &st.Tasks[j]
@@ -1488,7 +1641,11 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 				}
 				noMerge := store.IsNoMergeText(mission) || store.IsNoMergeText(ln.Title) || store.IsNoMergeText(task.Brief)
 				items = append(items, store.BacklogItem{ID: ln.ID, RunID: r.ID, LaneID: ln.ID, Title: ln.Title, Description: mission, Priority: priority, Status: status, DependsOn: task.DependsOn, NoMerge: noMerge})
-				ln.PRHead, ln.ApprovalSHA, ln.MergeSHA, ln.Checks, ln.BaseCommit, ln.Worktree = firstNonEmpty(task.PRHead, ln.PRHead), task.ApprovalSHA, firstNonEmpty(task.MergeSHA, ln.MergeSHA), firstNonEmpty(task.Checks, ln.Checks), task.BaseCommit, task.Worktree
+				taskMergeSHA := strings.TrimSpace(task.MergeSHA)
+				if mergeForbidden || !validGitSHA(taskMergeSHA) {
+					taskMergeSHA = ""
+				}
+				ln.PRHead, ln.ApprovalSHA, ln.MergeSHA, ln.Checks, ln.BaseCommit, ln.Worktree = firstNonEmpty(task.PRHead, ln.PRHead), task.ApprovalSHA, firstNonEmpty(taskMergeSHA, ln.MergeSHA), firstNonEmpty(task.Checks, ln.Checks), task.BaseCommit, task.Worktree
 				for phase, rounds := range task.Terminals {
 					normPhase, _ := normalizeHostPhaseName(phase, hasExplicitClean)
 					for round, id := range rounds {
@@ -1709,6 +1866,18 @@ func extractMergeRuleText(configMergeRule, objectiveText string) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// Keep gate prose additive without letting it change the host's merge authority.
+func adoptedMergeGateText(configGate, rule, objective, contextText string) string {
+	parts := []string{configGate, rule}
+	for _, line := range strings.Split(objective+"\n"+contextText, "\n") {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "merge gate") || strings.Contains(lower, "merge_gate") || strings.Contains(lower, "lint") || strings.Contains(lower, "build and test") || strings.Contains(lower, "soak") || strings.Contains(lower, "before merg") {
+			parts = append(parts, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
 func splitMergeRuleClauses(s string) []string {
@@ -2008,6 +2177,20 @@ func (d *adoptedRunDriver) expandRunBrief(ctx context.Context, laneID, phase, br
 					out = fmt.Sprintf("Review lane %s (%s).\n\n%s", laneID, prTag, out)
 				}
 			}
+		}
+	}
+	if phase == recipe.PhaseIntegrate && validatePathComponent("lane id", laneID) == nil {
+		gate := strings.TrimSpace(readText(filepath.Join(d.run.Dir, laneID+".hold-advance")))
+		if gate == "" {
+			for i := range d.run.Lanes {
+				if d.run.Lanes[i].ID == laneID {
+					gate = d.run.Lanes[i].holdAdvanceText
+					break
+				}
+			}
+		}
+		if gate != "" {
+			out += "\nAdditional host gate: " + gate
 		}
 	}
 	out = inlineRunFileCitations(d.run.Dir, laneID, out)

@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -114,6 +115,8 @@ type Lane struct {
 	// A report may omit its head while the remote branch still has work.
 	branchChecked bool
 	branchHead    string
+	// targetIntegrated records mirror proof independently of report claims.
+	targetIntegrated bool
 	// Mode is the host lane mode (for example "analysis").
 	Mode string
 	// MergeNotePRs are PR numbers nominated by host merge prose. They require
@@ -630,16 +633,26 @@ func isGitCheckout(path string) bool {
 	return exec.Command("git", "-C", path, "rev-parse", "--git-dir").Run() == nil
 }
 
-// applyIntegrationEvidence obtains all integration evidence from one orca-owned
-// commit-only mirror per run. Recorded checkouts are read-only sources only.
+// applyIntegrationEvidence obtains G52's union of integration evidence from
+// one orca-owned commit-only mirror per run. It accepts target, base, main,
+// and remote-HEAD ancestry or squash subjects; the merge gate uses the
+// target-only wrapper below. Recorded checkouts are read-only sources only.
 func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) {
+	applyIntegrationEvidenceRefs(ctx, r, mirrorCfg, false)
+}
+
+func applyTargetIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) {
+	applyIntegrationEvidenceRefs(ctx, r, mirrorCfg, true)
+}
+
+func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirror, targetOnly bool) {
 	if r == nil {
 		return
 	}
 	needsGit := false
 	for i := range r.Lanes {
 		ln := r.Lanes[i]
-		if !integratedLane(ln) && !strings.EqualFold(ln.Status, "blocked") && !finishedAnalysisLane(ln) {
+		if integrationEvidenceNeeded(ln) {
 			needsGit = true
 			break
 		}
@@ -663,7 +676,11 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 		return
 	}
 	branches := []string{}
-	for _, branch := range []string{r.TargetBranch, r.BaseBranch} {
+	evidenceBranches := []string{r.TargetBranch, r.BaseBranch}
+	if targetOnly {
+		evidenceBranches = []string{r.TargetBranch}
+	}
+	for _, branch := range evidenceBranches {
 		branch = strings.TrimSpace(branch)
 		if branch != "" && !slices.Contains(branches, branch) {
 			branches = append(branches, branch)
@@ -674,7 +691,7 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 	laneRefspecs := []string{}
 	for i := range r.Lanes {
 		ln := r.Lanes[i]
-		if !noPRHandback(ln) || finishedAnalysisLane(ln) || integratedLane(ln) {
+		if !noPRHandback(ln) || finishedAnalysisLane(ln) || !integrationEvidenceNeeded(ln) {
 			continue
 		}
 		branch := strings.TrimPrefix(strings.TrimSpace(ln.Branch), "refs/heads/")
@@ -695,10 +712,17 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 		fetchedRefs = append(fetchedRefs, "refs/orca/"+branch)
 	}
 	refspecs = append(refspecs, laneRefspecs...)
-	refspecs = append(refspecs, "+HEAD:refs/orca/HEAD")
-	fetchedRefs = append(fetchedRefs, "refs/orca/HEAD")
+	optionalMain := !targetOnly && !slices.Contains(branches, "main")
+	if optionalMain {
+		// An optional wildcard refspec tolerates repositories without main.
+		refspecs = append(refspecs, "+refs/heads/main*:refs/orca/main*")
+	}
+	if !targetOnly {
+		refspecs = append(refspecs, "+HEAD:refs/orca/HEAD")
+		fetchedRefs = append(fetchedRefs, "refs/orca/HEAD")
+	}
 	fetchArgs := []string{"-C", mirror, "fetch"}
-	if len(laneRefspecs) > 0 {
+	if len(laneRefspecs) > 0 || optionalMain {
 		fetchArgs = append(fetchArgs, "--prune")
 	}
 	fetchArgs = append(fetchArgs, "--no-tags", "--filter=tree:0", source)
@@ -708,6 +732,11 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 	if out, err := fetch.CombinedOutput(); err != nil {
 		r.IntegrationError = "fetch target " + cmp.Or(strings.TrimSpace(r.TargetBranch), "remote") + " failed: " + strings.TrimSpace(string(out))
 		return
+	}
+	if optionalMain {
+		if _, err := gitOutput(gitCtx, mirror, "rev-parse", "--verify", "--quiet", "refs/orca/main"); err == nil {
+			fetchedRefs = append(fetchedRefs, "refs/orca/main")
+		}
 	}
 	for _, ref := range fetchedRefs {
 		if _, err := gitOutput(gitCtx, mirror, "rev-parse", "--verify", "--end-of-options", ref); err != nil {
@@ -722,9 +751,32 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 		return
 	}
 	subjects := strings.Split(string(out), "\n")
+	targetSubjects := map[string]struct{}{}
+	targetRef := "refs/orca/" + strings.TrimSpace(r.TargetBranch)
+	if targetOnly {
+		for _, subject := range subjects {
+			targetSubjects[strings.TrimSpace(subject)] = struct{}{}
+		}
+	} else if strings.TrimSpace(r.TargetBranch) != "" {
+		if targetOut, err := gitOutput(gitCtx, mirror, "log", "--format=%s", "--end-of-options", targetRef); err == nil {
+			for _, subject := range strings.Split(string(targetOut), "\n") {
+				targetSubjects[strings.TrimSpace(subject)] = struct{}{}
+			}
+		}
+	}
 	for i := range r.Lanes {
 		ln := &r.Lanes[i]
-		if integratedLane(*ln) || strings.EqualFold(ln.Status, "blocked") || finishedAnalysisLane(*ln) {
+		if !integrationEvidenceNeeded(*ln) {
+			continue
+		}
+		openClaim := openPR(*ln)
+		openNoteClaim := openPRRE.MatchString(ln.LastEvent)
+		if openClaim && !openNoteClaim {
+			pr := strings.TrimSpace(ln.PR)
+			if pr == "" && len(ln.MergeNotePRs) > 0 {
+				pr = strings.TrimSpace(ln.MergeNotePRs[0])
+			}
+			ln.IntegrationReason = fmt.Sprintf("integration gate: PR #%s remains open; merge evidence is unavailable", cmp.Or(pr, "unknown"))
 			continue
 		}
 		head := strings.TrimSpace(ln.Head)
@@ -765,6 +817,7 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 			for _, ref := range fetchedRefs {
 				if gitRun(gitCtx, mirror, "merge-base", "--is-ancestor", "--end-of-options", head, ref) == nil {
 					ln.Integrated = true
+					ln.targetIntegrated = ref == targetRef && strings.TrimSpace(r.TargetBranch) != ""
 					ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is an ancestor of mirror ref %s", shortSHA(head), strings.TrimPrefix(ref, "refs/orca/"))
 					break
 				}
@@ -779,8 +832,10 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 				}
 				suffix := "(#" + pr + ")"
 				for _, subject := range subjects {
-					if strings.HasSuffix(strings.TrimSpace(subject), suffix) {
+					subject = strings.TrimSpace(subject)
+					if strings.HasSuffix(subject, suffix) {
 						ln.Integrated = true
+						_, ln.targetIntegrated = targetSubjects[subject]
 						ln.IntegrationReason = fmt.Sprintf("integration gate: mirror has squash subject ending %s", suffix)
 						break
 					}
@@ -791,9 +846,17 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 			}
 		}
 		if !ln.Integrated {
+			if openClaim {
+				pr := strings.TrimSpace(ln.PR)
+				if pr == "" && len(ln.MergeNotePRs) > 0 {
+					pr = strings.TrimSpace(ln.MergeNotePRs[0])
+				}
+				ln.IntegrationReason = fmt.Sprintf("integration gate: PR #%s remains open; merge evidence is unavailable", cmp.Or(pr, "unknown"))
+				continue
+			}
 			switch {
 			case len(ln.MergeNotePRs) > 0:
-				ln.IntegrationReason = "integration gate: host-nominated PR #" + strings.Join(ln.MergeNotePRs, ", #") + " has no matching squash subject in mirror"
+				ln.IntegrationReason = "integration gate: host-nominated PR #" + strings.Join(ln.MergeNotePRs, ", #") + " has neither lane-head ancestry nor a matching squash subject in mirror"
 			case branchError != "":
 				ln.IntegrationReason = branchError
 			case ln.branchHead != "":
@@ -803,6 +866,40 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 			}
 		}
 	}
+}
+
+// integrationEvidenceNeeded keeps closed facts terminal, while treating an
+// integrate lane's merged/done prose as a claim that still needs independent
+// target mirror evidence.
+func integrationEvidenceNeeded(ln Lane) bool {
+	if strings.EqualFold(strings.TrimSpace(ln.Status), "blocked") || finishedAnalysisLane(ln) || closedLane(ln) {
+		return false
+	}
+	// An open PR cannot supply merge evidence, including a stale host merge
+	// claim. Keep it eligible for the mirror pass so preview reports the open
+	// PR as a judgment rather than treating integrate/done as terminal.
+	if openPR(ln) {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(ln.Phase), "integrate") {
+		return !validGitSHA(strings.TrimSpace(ln.MergeSHA)) && !ln.targetIntegrated
+	}
+	return !integratedLane(ln)
+}
+
+func closedLane(ln Lane) bool {
+	return strings.EqualFold(strings.TrimSpace(ln.PRState), "closed") || eventKind(ln.LastEvent) == "closed"
+}
+
+func openPR(ln Lane) bool {
+	// A mirror-confirmed squash can make an earlier host note saying the PR is
+	// open stale. Preserve explicit open state until that independent evidence
+	// has been recorded, then let the mirror result drive adoption.
+	if ln.Integrated && openPRRE.MatchString(ln.LastEvent) {
+		return false
+	}
+	state := strings.ToLower(strings.TrimSpace(ln.PRState))
+	return state == "open" || strings.HasPrefix(state, "open ") || openPRRE.MatchString(ln.LastEvent)
 }
 
 func finishedAnalysisLane(ln Lane) bool {
@@ -1126,9 +1223,13 @@ type spawnFile struct {
 }
 
 func importLane(dir string, l *ledgerLane) Lane {
+	mergeSHA := strings.TrimSpace(l.MergeSHA)
+	if !validGitSHA(mergeSHA) {
+		mergeSHA = ""
+	}
 	x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: l.Status, Round: l.Round,
 		HostHold: ledgerHostHold(l.BlockedOn, l.HoldNote, l.Hold, l.Park, l.Note), PRDraft: l.PRDraft || l.Draft,
-		PRState: l.PRState, MergeSHA: l.MergeSHA, Head: firstNonEmpty(l.PRHead, l.Head), Mode: l.Mode, Checks: l.Checks}
+		PRState: l.PRState, MergeSHA: mergeSHA, Head: firstNonEmpty(l.PRHead, l.Head), Mode: l.Mode, Checks: l.Checks}
 	x.PRDraft = x.PRDraft || isDraftPR(x.PRState)
 	x.Session, x.Terminal = l.NebulaSession, l.NebulaTerminal
 	applySpawnEvidence(dir, &x)
@@ -1142,7 +1243,7 @@ func importLane(dir string, l *ledgerLane) Lane {
 	} else if m := prLine.FindStringSubmatch(report); m != nil {
 		x.PR = m[1]
 	}
-	if x.MergeSHA != "" {
+	if x.MergeSHA != "" && strings.TrimSpace(x.HostHold) == "" && !x.PRDraft && !strings.EqualFold(strings.TrimSpace(x.Status), "blocked") {
 		x.Integrated = true
 	}
 	applyReportMetadata(&x, report)
@@ -1252,9 +1353,8 @@ func applyReportMetadata(ln *Lane, report string) {
 				ln.Integrated = true
 			}
 		case "merge sha", "merged sha":
-			if meaningfulHostValue(value) {
-				ln.MergeSHA, ln.Integrated = value, true
-			}
+			// A phase report is not independent merge proof. Host merge_sha is
+			// read from the ledger in controllerState and verifyIntegration.
 		}
 	}
 }
@@ -1683,7 +1783,9 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 			p.Move, p.Reason = "advance", "completed report permits the next recipe phase"
 		}
 	default:
-		if strings.TrimSpace(ln.Terminal) != "" {
+		if !controller.TerminalStateLive(ln.TerminalState) && strings.EqualFold(strings.TrimSpace(ln.Status), "done") {
+			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
+		} else if strings.TrimSpace(ln.Terminal) != "" && controller.TerminalStateLive(ln.TerminalState) {
 			p.Move, p.Reason = "wait", "waiting for terminal "+ln.Terminal+" handback"
 		} else {
 			p.Move, p.Reason = "none", "no report or terminal to observe; dispatcher decides recovery"
@@ -1740,6 +1842,12 @@ func laneHostHold(ln Lane) string {
 }
 
 func integratedLane(ln Lane) bool {
+	if openPR(ln) {
+		return false
+	}
+	// The host ledger's integrate/done record is terminal on adoption. This
+	// covers no-PR lanes whose integrate phase pushed directly to the base;
+	// an explicitly open PR remains eligible for judgment above.
 	if strings.EqualFold(strings.TrimSpace(ln.Phase), "integrate") && strings.EqualFold(strings.TrimSpace(ln.Status), "done") {
 		return true
 	}
@@ -1870,6 +1978,10 @@ type RunDriver interface {
 	Stop(context.Context, Run) error
 }
 
+type mirrorDriver interface {
+	SetMirror(GitMirror)
+}
+
 // StoppedLoop records the step-loop process /adopt stopped so /release can
 // restart it or tell the owner what to restart.
 type StoppedLoop struct {
@@ -1941,6 +2053,9 @@ func (s *Service) drive(ctx context.Context, dir string) (Run, error) {
 	}
 	applyIntegrationEvidence(ctx, &r, s.Mirror)
 	if s.Driver != nil {
+		if driver, ok := s.Driver.(mirrorDriver); ok {
+			driver.SetMirror(s.Mirror)
+		}
 		if err := s.Driver.Start(ctx, r); err != nil {
 			return Run{}, fmt.Errorf("start adopted run %s: %w (lease kept; retry /adopt or /release)", r.ID, err)
 		}

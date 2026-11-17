@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -593,5 +594,302 @@ func TestAdoptedMissingLaneSessionIsLocal(t *testing.T) {
 				t.Errorf("judgments=%d, want 1", e.judge.BatchCount())
 			}
 		})
+	}
+}
+
+// TestAdoptedHostContract uses only synthetic ledgers and a local bare remote.
+func TestAdoptedHostContract(t *testing.T) {
+	for _, name := range []string{"a capacity from live host", "a blocked live terminal", "a exited terminal is not live", "b configured target lanes", "c waits release slots", "d red then pending then green", "d headless green report", "d recorded host gate", "e open integrate report", "e squash merge", "e wrong target", "e host merge sha", "e imported done", "e report merge sha", "f draft", "f host hold"} {
+		t.Run(name, func(t *testing.T) {
+			dir, repo, head := integrationFixture(t, "missing", "main", 42, false, "running")
+			write(t, filepath.Join(dir, leaseFile), `{"holder":"fixture","marker":"ORCHESTRATOR: orca since 2026-11-16T12:00:00Z"}`)
+			config := map[string]any{"repo": repo, "target": "main", "base": "main", "merge": "squash", "merge_gate": "verdict+ci", "phases": []map[string]string{{"name": "swe"}, {"name": "review"}, {"name": "integrate"}}}
+			if name == "e wrong target" {
+				config["target"] = "feature"
+				base := strings.TrimSpace(gitTest(t, repo, "rev-parse", "main"))
+				gitTest(t, repo, "push", "origin", base+":refs/heads/feature")
+			}
+			tasks := []map[string]any{}
+			add := func(id, phase, status, terminal string) {
+				tasks = append(tasks, map[string]any{"id": id, "title": id, "phase": phase, "status": status, "round": 1, "session_id": "sess-" + id, "terminals": map[string]map[string]string{phase: {"1": terminal}}, "pr": 42, "pr_head": head, "approval_sha": head, "checks": "green"})
+			}
+			switch name[0] {
+			case 'a', 'b', 'c':
+				count := 6
+				if name[0] == 'c' {
+					count = 4
+					config["target_lanes"] = 5
+					add("wait-1", "swe", "running", "")
+					tasks[len(tasks)-1]["waiting_on"] = "host soak"
+					add("wait-2", "swe", "running", "")
+					tasks[len(tasks)-1]["waiting_on"] = "owner deadline"
+				}
+				for i := 0; i < count; i++ {
+					id := fmt.Sprintf("live-%d", i)
+					status := "running"
+					if name == "a blocked live terminal" && i == 0 {
+						status = "blocked"
+					}
+					add(id, "swe", status, "term-"+id)
+					if name == "a exited terminal is not live" && i == 0 {
+						tasks[len(tasks)-1]["terminal_state"] = "exited"
+					}
+				}
+				add("planned", "swe", "planned", "")
+				if name[0] == 'b' {
+					config["target_lanes"] = 9
+				}
+			default:
+				phase := "review"
+				if name[0] == 'e' {
+					phase = "integrate"
+				}
+				add("lane-1", phase, "running", "term-lane-1")
+				if name == "e imported done" {
+					tasks[0]["status"] = "done"
+				}
+				if name[0] == 'd' {
+					tasks[0]["checks"] = "red"
+				}
+				if name == "f draft" {
+					tasks[0]["pr_draft"] = true
+				}
+				if name == "f host hold" {
+					tasks[0]["hold"] = "owner approval"
+				}
+				if name[0] == 'f' {
+					// Even independent-looking host merge proof cannot override a
+					// draft or explicit host hold.
+					tasks[0]["merge_sha"] = head
+				}
+			}
+			data, err := json.Marshal(map[string]any{"config": config, "tasks": tasks})
+			if err != nil {
+				t.Fatal(err)
+			}
+			write(t, filepath.Join(dir, "state.json"), string(data))
+			write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: host contract fixture\nMerge gate: retain soak PASS\n")
+			write(t, filepath.Join(dir, "CONTEXT.md"), "Merge gate: staging soak PASS\n")
+			if name == "d recorded host gate" {
+				write(t, filepath.Join(dir, "lane-1.hold-advance"), "Retain this owner approval gate after advancing.")
+			}
+			if name == "e report merge sha" {
+				write(t, filepath.Join(dir, "reports/lane-1.integrate.r1.md"), "Outcome: done\nHead: "+head+"\nMerge SHA: "+head+"\nPR: #42\n")
+			}
+			r, err := Read(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clk := clock.NewFakeClock(time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC))
+			st := store.NewMemoryStore(clk)
+			t.Cleanup(func() { _ = st.Close() })
+			drv := lane.NewFakeDriver()
+			bg, cancel := context.WithCancel(t.Context())
+			cancel() // Run is quiescent; each assertion drives exactly one Step.
+			d := NewControllers(bg, st, drv, clk, nil)
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			emptyScript := ""
+			d.ledgerScript = &emptyScript
+			if err := st.Runs().Create(t.Context(), store.Run{ID: r.ID}); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.Runs().UpdateSettings(t.Context(), r.ID, store.RunSettings{Paused: true}); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.Start(t.Context(), r); err != nil {
+				t.Fatal(err)
+			}
+			awaitRegression(t, d.runs[r.ID].done)
+			if name == "d recorded host gate" {
+				if err := os.Remove(filepath.Join(dir, "lane-1.hold-advance")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := st.Runs().UpdateSettings(t.Context(), r.ID, store.RunSettings{}); err != nil {
+				t.Fatal(err)
+			}
+			step := func() {
+				t.Helper()
+				if err := d.Step(t.Context(), r.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			get := func(id string) *lane.Lane {
+				t.Helper()
+				ln, err := st.Lanes().Get(t.Context(), r.ID, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return ln
+			}
+			appendEvent := func(id string, kind store.EventKind, payload any) {
+				t.Helper()
+				b, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := st.Events().Append(t.Context(), store.Event{ID: id, RunID: r.ID, LaneID: "lane-1", Kind: kind, Payload: b}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			workflow, err := st.Recipes().Get(t.Context(), r.ID, "adopted", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch name[0] {
+			case 'a', 'b', 'c':
+				want := map[byte]int{'a': 7, 'b': 9, 'c': 5}[name[0]]
+				if name == "a exited terminal is not live" {
+					want = 6
+				}
+				if workflow.Limits.MaxConcurrentLanes != want {
+					t.Errorf("adopted cap=%d, want %d", workflow.Limits.MaxConcurrentLanes, want)
+				}
+				// Isolate the slot rule from recipe mapping in case (c).
+				if name[0] == 'c' {
+					if err := st.Runs().UpdateSettings(t.Context(), r.ID, store.RunSettings{ConcurrencyCap: 5}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if name[0] == 'b' {
+					if err := st.Runs().UpdateSettings(t.Context(), r.ID, store.RunSettings{ConcurrencyCap: 6}); err != nil {
+						t.Fatal(err)
+					}
+					step()
+					if get("planned").Status != lane.StatusPlanned {
+						t.Fatal("owner cap did not override host cap")
+					}
+					if err := st.Runs().UpdateSettings(t.Context(), r.ID, store.RunSettings{ConcurrencyCap: 7}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				step()
+				if get("planned").Status != lane.StatusRunning {
+					t.Error("planned lane did not start")
+				}
+			case 'd':
+				appendEvent("review-done", store.EventLaneReport, lane.PhaseReport{Phase: "review", Round: 1, Outcome: lane.OutcomeDone, HeadSHA: head, PR: 42})
+				step()
+				if len(drv.PhaseStarts) != 0 || get("lane-1").MergeSHA != "" {
+					t.Fatalf("red CI launched merge: %+v", drv.PhaseStarts)
+				}
+				if name == "d headless green report" {
+					green := true
+					appendEvent("headless-report", store.EventLaneReport, controller.LaneReportPayload{PhaseReport: lane.PhaseReport{Phase: "review", Round: 1, Outcome: lane.OutcomeDone, PR: 42}, Checks: "green", CIGreen: &green})
+					step()
+					if len(drv.PhaseStarts) != 0 || get("lane-1").Checks != "red" {
+						t.Fatal("headless report overwrote exact-head red CI")
+					}
+				}
+				appendEvent("pending", store.EventCI, controller.CIPayload{HeadSHA: head, Status: "pending", PR: 42})
+				step()
+				if len(drv.PhaseStarts) != 0 {
+					t.Fatal("pending CI launched merge")
+				}
+				for _, oldHead := range []string{"", "stale-head"} {
+					appendEvent("wrong-green-"+oldHead, store.EventCI, controller.CIPayload{HeadSHA: oldHead, Status: "green", PR: 42})
+					step()
+					if len(drv.PhaseStarts) != 0 || get("lane-1").PRHead != head {
+						t.Fatal("CI for a missing/different head launched merge or changed head")
+					}
+				}
+				appendEvent("generic-green", store.EventCI, controller.CIPayload{HeadSHA: head, Status: "green", PR: 42})
+				step()
+				if len(drv.PhaseStarts) != 0 {
+					t.Fatal("generic green CI launched integrate without named required checks")
+				}
+				appendEvent("lint-red", store.EventCI, controller.CIPayload{HeadSHA: head, CheckName: "Lint", Status: "red", PR: 42})
+				step()
+				appendEvent("build-green", store.EventCI, controller.CIPayload{HeadSHA: head, CheckName: "Build and Test", Status: "green", PR: 42})
+				step()
+				appendEvent("lint-rerun-green", store.EventCI, controller.CIPayload{HeadSHA: head, CheckName: "Lint", Status: "green", PR: 42})
+				step()
+				step()
+				if len(drv.PhaseStarts) != 1 || drv.PhaseStarts[0].Phase != "integrate" {
+					t.Fatalf("green CI launches=%+v, want one integrate", drv.PhaseStarts)
+				}
+				for _, text := range []string{"require_ci_green=true", "Lint", "Build and Test", "exact head", "one rerun", "verdict+ci", "retain soak PASS", "staging soak PASS"} {
+					if !strings.Contains(drv.PhaseStarts[0].Brief, text) {
+						t.Errorf("integrate brief missing %q", text)
+					}
+				}
+				if name == "d recorded host gate" && !strings.Contains(drv.PhaseStarts[0].Brief, "Retain this owner approval gate") {
+					t.Fatal("integrate lost the recorded hold-advance gate after its marker was lifted")
+				}
+			case 'e':
+				appendEvent("integrate-done", store.EventLaneReport, lane.PhaseReport{Phase: "integrate", Round: 1, Outcome: lane.OutcomeDone, HeadSHA: head, PR: 42})
+				step()
+				ln := get("lane-1")
+				if ln.Status == lane.StatusDone || ln.MergeSHA != "" {
+					t.Fatalf("open PR #42 marked merged: status=%s merge=%s", ln.Status, ln.MergeSHA)
+				}
+				events, err := st.Events().List(t.Context(), store.EventFilter{RunID: r.ID})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var openNamed bool
+				for _, ev := range events {
+					openNamed = openNamed || strings.Contains(ev.Summary, "PR #42")
+				}
+				if !openNamed {
+					t.Error("wait/judgment does not name open PR #42")
+				}
+				switch name {
+				case "e squash merge":
+					gitTest(t, repo, "checkout", "main")
+					gitTest(t, repo, "commit", "--allow-empty", "-m", "integrated lane (#42)")
+					gitTest(t, repo, "push", "origin", "main")
+				case "e host merge sha":
+					recordFixtureMerge(t, dir, "lane-1", head)
+				case "e wrong target":
+					gitTest(t, repo, "push", "origin", head+":refs/heads/main")
+					appendEvent("base-only", store.EventLaneReport, lane.PhaseReport{Phase: "integrate", Round: 1, Outcome: lane.OutcomeDone, HeadSHA: head, PR: 42})
+					step()
+					if get("lane-1").Status == lane.StatusDone {
+						t.Fatal("merge on base/HEAD was treated as a merge on feature target")
+					}
+					gitTest(t, repo, "push", "origin", head+":refs/heads/feature")
+				default:
+					gitTest(t, repo, "push", "origin", head+":refs/heads/main")
+				}
+				step()
+				if got := get("lane-1"); got.Status != lane.StatusDone || got.MergeSHA == "" {
+					t.Fatalf("mirror merge not completed: %+v", got)
+				}
+			case 'f':
+				appendEvent("held-done", store.EventLaneReport, controller.LaneReportPayload{PhaseReport: lane.PhaseReport{Phase: "review", Round: 1, Outcome: lane.OutcomeDone, HeadSHA: head, PR: 42}, Checks: "green"})
+				step()
+				if len(drv.PhaseStarts) != 0 || get("lane-1").MergeSHA != "" || get("lane-1").Status == lane.StatusDone {
+					t.Fatal("draft or host-held PR advanced or merged")
+				}
+			}
+		})
+	}
+}
+
+func recordFixtureMerge(t *testing.T, dir, id, sha string) {
+	t.Helper()
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(readText(filepath.Join(dir, "state.json"))), &doc); err != nil {
+		t.Fatal(err)
+	}
+	var tasks []map[string]json.RawMessage
+	if err := json.Unmarshal(doc["tasks"], &tasks); err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range tasks {
+		var taskID string
+		_ = json.Unmarshal(task["id"], &taskID)
+		if taskID == id {
+			task["merge_sha"], _ = json.Marshal(sha)
+		}
+	}
+	doc["tasks"], _ = json.Marshal(tasks)
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomic(filepath.Join(dir, "state.json"), b); err != nil {
+		t.Fatal(err)
 	}
 }

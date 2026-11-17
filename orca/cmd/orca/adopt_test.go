@@ -381,7 +381,7 @@ func testAdoptTransition(t *testing.T, outcome, policy, wantPhase string, wantRo
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish review","target":"release","merge_rule":"Use the repository merge queue."`+policy+`},"tasks":[{"id":"a","title":"A","branch":"lane-a","phase":"review","status":"running","round":2,"pr":42,"host_only":"keep","sessions":{"review":"nebula:old-review"}}]}`)
+	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish review","target":"release","merge_rule":"Use the repository merge queue."`+policy+`},"tasks":[{"id":"a","title":"A","branch":"lane-a","phase":"review","status":"running","round":2,"pr":42,"host_only":"keep","pr_head":"reviewed-head","checks":"Lint: green; Build and Test: green","sessions":{"review":"nebula:old-review"}}]}`)
 	if err := os.MkdirAll(filepath.Join(dir, "missions"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -458,6 +458,9 @@ func testAdoptTransition(t *testing.T, outcome, policy, wantPhase string, wantRo
 	case <-time.After(5 * time.Second):
 		t.Fatal("chat did not adopt run")
 	}
+	if complete && wantPhase == "review" {
+		recordAdoptHostMerge(t, dir)
+	}
 	close(reportReady)
 	if wantPhase != "review" {
 		select {
@@ -478,6 +481,25 @@ func testAdoptTransition(t *testing.T, outcome, policy, wantPhase string, wantRo
 		}
 	}
 	if complete {
+		if wantPhase == "integrate" {
+			waitForCondition(t, 3*time.Second, func() bool {
+				var doc struct {
+					Tasks []struct {
+						Phase    string
+						Terminal string `json:"nebula_terminal"`
+					}
+				}
+				b, err := os.ReadFile(filepath.Join(dir, "state.json"))
+				if err != nil {
+					return false
+				}
+				if err := json.Unmarshal(b, &doc); err != nil {
+					return false
+				}
+				return len(doc.Tasks) == 1 && doc.Tasks[0].Phase == "integrate" && doc.Tasks[0].Terminal == "integrate-terminal"
+			})
+		}
+		recordAdoptHostMerge(t, dir)
 		close(completeReport)
 		select {
 		case <-released:
@@ -874,7 +896,7 @@ func TestRestartTwiceInProcessPreservesHeldLeasesAndControllers(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "missions"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish review","target":"release","merge_rule":"Use merge queue."},"tasks":[{"id":"a","title":"A","branch":"lane-a","phase":"review","status":"running","round":1,"pr":42,"sessions":{"review":"nebula:imported-review"}}]}`)
+	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish review","target":"release","merge_rule":"Use merge queue."},"tasks":[{"id":"a","title":"A","branch":"lane-a","phase":"review","status":"running","round":1,"pr":42,"pr_head":"reviewed-head","checks":"Lint: green; Build and Test: green","sessions":{"review":"nebula:imported-review"}}]}`)
 	writeFile(t, filepath.Join(dir, "missions", "a.md"), "Keep held lease across restarts.")
 	writeFile(t, filepath.Join(dir, "a.review.spawn.json"), `{"session_id":"imported-session","terminal_id":"imported-review"}`)
 	script := filepath.Join(root, "watch_lanes.sh")
@@ -2343,5 +2365,30 @@ func TestConfigMaxCostPerHourDefaultAndExplicitZero(t *testing.T) {
 	cfgFileZero = cfgFileZero.withDefaults()
 	if cfgFileZero.MaxCostPerHourUSD != 0 {
 		t.Fatalf("config file max_cost_per_hour_usd:0 got %.2f, want 0", cfgFileZero.MaxCostPerHourUSD)
+	}
+}
+
+// recordAdoptHostMerge adds independent host proof before a completed handback.
+func recordAdoptHostMerge(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "state.json")
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(readFile(t, path)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	var tasks []map[string]json.RawMessage
+	if err := json.Unmarshal(doc["tasks"], &tasks); err != nil {
+		t.Fatal(err)
+	}
+	tasks[0]["merge_sha"] = json.RawMessage(`"abcdef1234567"`)
+	doc["tasks"], _ = json.Marshal(tasks)
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := path + ".host-merge"
+	writeFile(t, tmp, string(b))
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
 	}
 }
