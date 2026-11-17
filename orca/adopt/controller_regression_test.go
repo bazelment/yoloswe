@@ -778,7 +778,12 @@ func TestAdoptedHostContract(t *testing.T) {
 						t.Fatal("CI for a missing/different head launched merge or changed head")
 					}
 				}
-				appendEvent("green", store.EventCI, controller.CIPayload{HeadSHA: head, Status: "green", PR: 42})
+				appendEvent("generic-green", store.EventCI, controller.CIPayload{HeadSHA: head, Status: "green", PR: 42})
+				step()
+				if len(drv.PhaseStarts) != 0 {
+					t.Fatal("generic green CI launched integrate without named required checks")
+				}
+				appendEvent("green", store.EventCI, controller.CIPayload{HeadSHA: head, Status: "Lint: green; Build and Test: green", PR: 42})
 				step()
 				step()
 				if len(drv.PhaseStarts) != 1 || drv.PhaseStarts[0].Phase != "integrate" {

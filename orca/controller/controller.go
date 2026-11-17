@@ -347,9 +347,13 @@ func (a *OwnerAsk) Validate() error {
 
 // CIPayload is the JSON payload for store.EventCI events.
 type CIPayload struct {
-	Green       *bool  `json:"green,omitempty"`
-	HeadSHA     string `json:"head_sha,omitempty"`
-	Status      string `json:"status,omitempty"`
+	Green   *bool  `json:"green,omitempty"`
+	HeadSHA string `json:"head_sha,omitempty"`
+	Status  string `json:"status,omitempty"`
+	// CheckName identifies an individual required check when a host reports
+	// checks incrementally.  Aggregate statuses remain supported for native
+	// runs; adopted merge gates require the named checks below.
+	CheckName   string `json:"check_name,omitempty"`
 	FailedCheck string `json:"failed_check,omitempty"`
 	PR          int    `json:"pr,omitempty"`
 }
@@ -1158,11 +1162,23 @@ func (c *Controller) checkHostIntegrationWaits(ctx context.Context) error {
 		}
 		ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, dir.Scope)
 		if err != nil {
-			return err
+			if errors.Is(err, store.ErrNotFound) {
+				if updateErr := c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dir.ID, store.DirectiveHandled); updateErr != nil {
+					return updateErr
+				}
+				continue
+			}
+			if noteErr := c.noteHostIntegrationWaitError(ctx, dir, err); noteErr != nil {
+				return noteErr
+			}
+			continue
 		}
 		var report lane.PhaseReport
 		if err := json.Unmarshal([]byte(dir.Text), &report); err != nil {
-			return err
+			if updateErr := c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dir.ID, store.DirectiveHandled); updateErr != nil {
+				return updateErr
+			}
+			continue
 		}
 		if !ln.Status.Terminal() && report.HeadSHA == ln.PRHead && report.Phase == ln.Phase && report.Round == ln.Round {
 			if ln.HostHoldReason != "" || c.advanceHeld(ln) {
@@ -1170,7 +1186,10 @@ func (c *Controller) checkHostIntegrationWaits(ctx context.Context) error {
 			}
 			merged, _, err := c.cfg.HostIntegration(ctx, *ln)
 			if err != nil {
-				return err
+				if noteErr := c.noteHostIntegrationWaitError(ctx, dir, err); noteErr != nil {
+					return noteErr
+				}
+				continue
 			}
 			if !merged {
 				continue
@@ -1184,6 +1203,26 @@ func (c *Controller) checkHostIntegrationWaits(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (c *Controller) noteHostIntegrationWaitError(ctx context.Context, dir *store.Directive, err error) error {
+	if dir == nil || err == nil {
+		return nil
+	}
+	_, appendErr := c.store.Events().Append(ctx, store.Event{
+		ID:      "host-integration-error:" + dir.ID,
+		RunID:   c.cfg.RunID,
+		LaneID:  dir.Scope,
+		Kind:    store.EventStall,
+		Class:   store.EventClassJudgment,
+		Urgent:  true,
+		Source:  ActorController,
+		Summary: fmt.Sprintf("host integration verification failed for %s: %v", dir.Scope, err),
+	})
+	if errors.Is(appendErr, store.ErrAlreadyExists) {
+		return nil
+	}
+	return appendErr
 }
 
 func (c *Controller) checkIntegrateRecovery(ctx context.Context) error {
@@ -3066,7 +3105,11 @@ func (c *Controller) advanceByRecipe(
 		return store.EventClassAuto, nil
 	}
 	round := max(ln.Round, 1)
+	noMergeLane := c.isNoMergeLane(ctx, ln)
 	ciGreen := isCIGreen(ln.Checks)
+	if c.cfg.HostRun && r.MergePolicy.RequireCIGreen && r.MergePolicy.Mode != recipe.MergeModeNone && !noMergeLane {
+		ciGreen = isAdoptedCIGreen(ln.Checks)
+	}
 
 	mech, judg := r.MatchTransitions(ln.Phase, verdict, ciGreen, round)
 	if len(judg) > 0 {
@@ -3100,7 +3143,7 @@ func (c *Controller) advanceByRecipe(
 
 	delete(c.pendingVerdicts, ln.ID)
 
-	noMerge := r.MergePolicy.Mode == recipe.MergeModeNone || c.isNoMergeLane(ctx, ln)
+	noMerge := r.MergePolicy.Mode == recipe.MergeModeNone || noMergeLane
 	target := mech.To
 	if target == recipe.TargetComplete && c.cfg.HostRun && strings.EqualFold(strings.TrimSpace(ln.Phase), recipe.PhaseSWE) && len(r.Phases) == 1 {
 		// The host may have left an open PR (or a no-PR branch) for the hand
@@ -3117,7 +3160,7 @@ func (c *Controller) advanceByRecipe(
 		if c.cfg.HostRun && !noMerge && c.cfg.HostIntegration != nil {
 			merged, proof, err := c.cfg.HostIntegration(ctx, *ln)
 			if err != nil {
-				return store.EventClassUnclassified, err
+				return store.EventClassUnclassified, &LaneLocalError{Err: err}
 			}
 			if !merged {
 				if ev != nil {
@@ -3135,7 +3178,7 @@ func (c *Controller) advanceByRecipe(
 				return c.blockLaneForJudgment(ctx, ln)
 			}
 		}
-		if r.MergePolicy.RequireCIGreen && !noMerge && !ciGreen {
+		if r.MergePolicy.RequireCIGreen && !noMerge && !ciGreen && strings.TrimSpace(ln.MergeSHA) == "" {
 			return c.blockLaneForJudgment(ctx, ln)
 		}
 
@@ -3482,6 +3525,8 @@ func (c *Controller) handleCI(ctx context.Context, ev *store.Event) (store.Event
 		ln.PRHead = payload.HeadSHA
 	}
 	switch {
+	case payload.CheckName != "":
+		ln.Checks = mergeNamedCheckStatus(ln.Checks, payload.CheckName, payload.Status, payload.Green)
 	case payload.Status != "":
 		ln.Checks = payload.Status
 	case payload.Green != nil:
@@ -3496,7 +3541,17 @@ func (c *Controller) handleCI(ctx context.Context, ev *store.Event) (store.Event
 		return store.EventClassUnclassified, err
 	}
 
-	if isCIGreen(ln.Checks) {
+	ciGreen := isCIGreen(ln.Checks)
+	if c.cfg.HostRun {
+		r, resolveErr := c.resolveRecipe(ctx, ln)
+		if resolveErr != nil {
+			return store.EventClassUnclassified, resolveErr
+		}
+		if r.MergePolicy.RequireCIGreen && r.MergePolicy.Mode != recipe.MergeModeNone && !c.isNoMergeLane(ctx, ln) {
+			ciGreen = isAdoptedCIGreen(ln.Checks)
+		}
+	}
+	if ciGreen {
 		if pv, ok := c.pendingVerdictForLane(ctx, ln); ok {
 			r, err := c.resolveRecipe(ctx, ln)
 			if err != nil {
@@ -3507,7 +3562,7 @@ func (c *Controller) handleCI(ctx context.Context, ev *store.Event) (store.Event
 		return store.EventClassAuto, nil
 	}
 
-	if isCIRed(ln.Checks) {
+	if isCIRed(ln.Checks) || (c.cfg.HostRun && !ciGreen) {
 		return store.EventClassJudgment, nil
 	}
 	return store.EventClassAuto, nil
@@ -4714,6 +4769,41 @@ func isCIGreen(checks string) bool {
 	default:
 		return false
 	}
+}
+
+var (
+	adoptedLintGreenRE      = regexp.MustCompile(`(?i)(^|[^a-z0-9])lint([^a-z0-9]+)(success|succeeded|pass|passed|green|ok|true)([^a-z0-9]|$)`)
+	adoptedBuildTestGreenRE = regexp.MustCompile(`(?i)(^|[^a-z0-9])build([^a-z0-9]+)(and|&)([^a-z0-9]+)test([^a-z0-9]+)(success|succeeded|pass|passed|green|ok|true)([^a-z0-9]|$)`)
+	adoptedNamedCheckBadRE  = regexp.MustCompile(`(?i)(lint|build([^a-z0-9]+)(and|&)([^a-z0-9]+)test)([^a-z0-9]+)(red|fail|failed|failure|error|pending|queued|in[_ -]?progress|false)`)
+)
+
+// isAdoptedCIGreen requires the two checks named by the adopted-run merge
+// contract.  A generic "green" summary is deliberately insufficient because
+// it does not prove which checks ran on the current PR head.
+func isAdoptedCIGreen(checks string) bool {
+	text := strings.TrimSpace(checks)
+	if text == "" || adoptedNamedCheckBadRE.MatchString(text) {
+		return false
+	}
+	return adoptedLintGreenRE.MatchString(text) && adoptedBuildTestGreenRE.MatchString(text)
+}
+
+func mergeNamedCheckStatus(existing, name, status string, green *bool) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return existing
+	}
+	value := strings.TrimSpace(status)
+	if value == "" && green != nil {
+		value = boolToChecks(*green)
+	}
+	if value == "" {
+		return existing
+	}
+	if existing == "" {
+		return name + ": " + value
+	}
+	return existing + "; " + name + ": " + value
 }
 
 func isCIRed(checks string) bool {

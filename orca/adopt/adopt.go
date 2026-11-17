@@ -649,7 +649,7 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 	needsGit := false
 	for i := range r.Lanes {
 		ln := r.Lanes[i]
-		if !integratedLane(ln) && !strings.EqualFold(ln.Status, "blocked") && !finishedAnalysisLane(ln) {
+		if integrationEvidenceNeeded(ln) {
 			needsGit = true
 			break
 		}
@@ -688,7 +688,7 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 	laneRefspecs := []string{}
 	for i := range r.Lanes {
 		ln := r.Lanes[i]
-		if !noPRHandback(ln) || finishedAnalysisLane(ln) || integratedLane(ln) {
+		if !noPRHandback(ln) || finishedAnalysisLane(ln) || !integrationEvidenceNeeded(ln) {
 			continue
 		}
 		branch := strings.TrimPrefix(strings.TrimSpace(ln.Branch), "refs/heads/")
@@ -753,7 +753,7 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 	}
 	for i := range r.Lanes {
 		ln := &r.Lanes[i]
-		if integratedLane(*ln) || strings.EqualFold(ln.Status, "blocked") || finishedAnalysisLane(*ln) {
+		if !integrationEvidenceNeeded(*ln) {
 			continue
 		}
 		head := strings.TrimSpace(ln.Head)
@@ -834,6 +834,23 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 			}
 		}
 	}
+}
+
+// integrationEvidenceNeeded keeps closed facts terminal, while treating an
+// integrate lane's merged/done prose as a claim that still needs independent
+// target mirror evidence.
+func integrationEvidenceNeeded(ln Lane) bool {
+	if strings.EqualFold(strings.TrimSpace(ln.Status), "blocked") || finishedAnalysisLane(ln) || closedLane(ln) {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(ln.Phase), "integrate") {
+		return strings.TrimSpace(ln.MergeSHA) == "" && !ln.targetIntegrated
+	}
+	return !integratedLane(ln)
+}
+
+func closedLane(ln Lane) bool {
+	return strings.EqualFold(strings.TrimSpace(ln.PRState), "closed") || eventKind(ln.LastEvent) == "closed"
 }
 
 func finishedAnalysisLane(ln Lane) bool {

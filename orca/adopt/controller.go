@@ -410,6 +410,31 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	for i := range r.Lanes {
 		imported := &r.Lanes[i]
+		if r.NoPR || !strings.EqualFold(strings.TrimSpace(imported.Phase), recipe.PhaseIntegrate) || closedLane(*imported) || imported.targetIntegrated || strings.TrimSpace(imported.MergeSHA) != "" {
+			continue
+		}
+		// A host's merged/done claim is not merge proof. Keep the imported
+		// lane waiting so the controller rechecks its mirror on every step.
+		if !integratedLane(*imported) && !reportDone(imported.Report) {
+			continue
+		}
+		ln := lanes[i]
+		report := lane.PhaseReport{Phase: ln.Phase, Round: max(ln.Round, 1), Outcome: lane.OutcomeDone, HeadSHA: ln.PRHead, PR: ln.PR}
+		payload, err := json.Marshal(report)
+		if err != nil {
+			return err
+		}
+		waitID := "host-integration:" + ln.ID + ":adopt:" + strings.TrimSpace(ln.PRHead)
+		wait := store.Directive{ID: waitID, RunID: r.ID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Scope: ln.ID, Ref: controller.NamedWaitRefPrefix + "host-integration:" + ln.ID, Text: string(payload), Status: store.DirectiveActive}
+		if err := d.store.Directives().Add(ctx, wait); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return err
+		}
+		if _, err := d.store.Events().Append(ctx, store.Event{ID: "judgment:" + waitID, RunID: r.ID, LaneID: ln.ID, Kind: store.EventStall, Class: store.EventClassJudgment, Source: controller.ActorController, Summary: fmt.Sprintf("PR #%d remains open or unverified on target; waiting for mirror evidence", ln.PR)}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return err
+		}
+	}
+	for i := range r.Lanes {
+		imported := &r.Lanes[i]
 		if integratedLane(*imported) || finishedAnalysisLane(*imported) {
 			continue
 		}
@@ -1490,7 +1515,33 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			// A nebula-swarm lane parked for its owner; checkpoint writes it back.
 			status = lane.StatusBlocked
 		}
+		mergeSHA := imported.MergeSHA
 		terminal := integratedLane(*imported)
+		if strings.EqualFold(imported.Phase, recipe.PhaseIntegrate) {
+			closed := closedLane(*imported)
+			mergeSHA = ""
+			for j := range st.Tasks {
+				if st.Tasks[j].ID == imported.ID {
+					if sha := strings.TrimSpace(st.Tasks[j].MergeSHA); validGitSHA(sha) {
+						mergeSHA = sha
+					}
+					break
+				}
+			}
+			if imported.targetIntegrated && mergeSHA == "" {
+				mergeSHA = imported.Head
+			}
+			// A closed host PR is terminal even though it is not a merge. Merge
+			// prose and an integrate done report remain claims until the target
+			// mirror (or an independent host merge SHA) proves the merge.
+			terminal = closed || imported.targetIntegrated || mergeSHA != ""
+			if !terminal && status == lane.StatusDone {
+				status = lane.StatusRunning
+			}
+			if !terminal && (integratedLane(*imported) || reportDone(imported.Report)) {
+				status = lane.StatusBlocked
+			}
+		}
 		if terminal {
 			// Imported merge/close facts are authoritative even when a host
 			// ledger's status or hold marker is stale. Terminal lanes are never
@@ -1520,7 +1571,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			return workflow, nil, nil, fmt.Errorf("lane %s: unsupported host status %q", imported.ID, imported.Status)
 		}
 		ln := lane.Lane{ItemID: imported.ID, ID: imported.ID, RunID: r.ID, Title: imported.Title, Branch: imported.Branch, Status: status, RecipeName: workflow.Name, RecipeVersion: 1, BaseBranch: st.Config.Base, Attempt: 1, TerminalState: imported.TerminalState, HostHoldReason: hostHoldReason,
-			PRHead: imported.Head, MergeSHA: imported.MergeSHA, Checks: imported.Checks}
+			PRHead: imported.Head, MergeSHA: mergeSHA, Checks: imported.Checks}
 		ln.PR, _ = strconv.Atoi(imported.PR)
 		for j := range st.Tasks {
 			task := &st.Tasks[j]

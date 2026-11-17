@@ -381,7 +381,7 @@ func testAdoptTransition(t *testing.T, outcome, policy, wantPhase string, wantRo
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish review","target":"release","merge_rule":"Use the repository merge queue."`+policy+`},"tasks":[{"id":"a","title":"A","branch":"lane-a","phase":"review","status":"running","round":2,"pr":42,"host_only":"keep","pr_head":"reviewed-head","checks":"green","sessions":{"review":"nebula:old-review"}}]}`)
+	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish review","target":"release","merge_rule":"Use the repository merge queue."`+policy+`},"tasks":[{"id":"a","title":"A","branch":"lane-a","phase":"review","status":"running","round":2,"pr":42,"host_only":"keep","pr_head":"reviewed-head","checks":"Lint: green; Build and Test: green","sessions":{"review":"nebula:old-review"}}]}`)
 	if err := os.MkdirAll(filepath.Join(dir, "missions"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -896,7 +896,7 @@ func TestRestartTwiceInProcessPreservesHeldLeasesAndControllers(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "missions"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish review","target":"release","merge_rule":"Use merge queue."},"tasks":[{"id":"a","title":"A","branch":"lane-a","phase":"review","status":"running","round":1,"pr":42,"pr_head":"reviewed-head","checks":"green","sessions":{"review":"nebula:imported-review"}}]}`)
+	writeFile(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"finish review","target":"release","merge_rule":"Use merge queue."},"tasks":[{"id":"a","title":"A","branch":"lane-a","phase":"review","status":"running","round":1,"pr":42,"pr_head":"reviewed-head","checks":"Lint: green; Build and Test: green","sessions":{"review":"nebula:imported-review"}}]}`)
 	writeFile(t, filepath.Join(dir, "missions", "a.md"), "Keep held lease across restarts.")
 	writeFile(t, filepath.Join(dir, "a.review.spawn.json"), `{"session_id":"imported-session","terminal_id":"imported-review"}`)
 	script := filepath.Join(root, "watch_lanes.sh")
