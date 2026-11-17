@@ -20,6 +20,7 @@ go_library(
         "migrations/0007_thread_resume_id.sql",
         "migrations/0008_cost_guard.sql",
         "migrations/0009_backlog_no_merge.sql",
+        "migrations/0010_lane_answers.sql",
     ],
     importpath = "github.com/bazelment/yoloswe/orca/store",
     visibility = ["//visibility:public"],

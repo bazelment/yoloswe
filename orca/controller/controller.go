@@ -585,7 +585,7 @@ func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
 			}
 			r, _ := c.resolveRecipe(ctx, ln)
 			rung, waiting := c.quietLadderRungFromStore(ctx, ln, r, now)
-			quietKey := fmt.Sprintf("%s:%d:%d:%s:%d:%d:%t", ln.Phase, max(ln.Round, 1), max(ln.Attempt, 1), ln.TerminalID, ln.LastEventAt.UTC().UnixNano(), rung, waiting)
+			quietKey := fmt.Sprintf("%s:%d:%d:%s:%d:%d:%t:%d", ln.Phase, max(ln.Round, 1), max(ln.Attempt, 1), ln.TerminalID, ln.LastEventAt.UTC().UnixNano(), rung, waiting, ln.AnswerEpoch)
 			c.quietMu.Lock()
 			already := c.emittedQuiet[ln.ID] == quietKey
 			if !already {
@@ -631,7 +631,7 @@ func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
 	identity, _ := json.Marshal(idEv)
 	eventID := fmt.Sprintf("lane-watch-%x", sha256.Sum256(identity))
 	summary := ev.Text
-	urgent := false
+	urgent := ev.Kind == lane.EventPhaseReported && ev.Report != nil && (ev.Report.Outcome == lane.OutcomeNeedsInput || ev.Report.Outcome == lane.OutcomeBlocked)
 	if ev.Kind == lane.EventWaitingForInput {
 		tail := waitingInputTail(ev.Text)
 		eventID = waitingInputEventID(ev.LaneID, ev.TerminalID, tail)
@@ -656,6 +656,11 @@ func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
 func (c *Controller) hasExistingLaneReport(ctx context.Context, ev lane.Event) bool {
 	if ev.Report == nil || ev.LaneID == "" {
 		return false
+	}
+	if ev.Report.Outcome == lane.OutcomeNeedsInput || ev.Report.Outcome == lane.OutcomeBlocked {
+		if ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ev.LaneID); err == nil && ln.DuplicateQuestion(ev.Report.QuestionText(), c.clock.Now()) {
+			return true
+		}
 	}
 	evs, err := c.store.Events().List(ctx, store.EventFilter{
 		RunID:  c.cfg.RunID,
@@ -1462,6 +1467,10 @@ func (c *Controller) recoverPendingState(ctx context.Context) error {
 					continue
 				}
 			}
+			var rep lane.PhaseReport
+			if json.Unmarshal(ev.Payload, &rep) == nil && (rep.Outcome == lane.OutcomeNeedsInput || rep.Outcome == lane.OutcomeBlocked) {
+				ev.Urgent = true
+			}
 			ev.Class = store.EventClassJudgment
 			c.enqueueJudgmentEvent(ev)
 			continue
@@ -2005,6 +2014,9 @@ func (c *Controller) advanceExpiredNudges(ctx context.Context, urgentFlush *bool
 	now := c.clock.Now().UTC()
 	for i := range running {
 		ln := running[i]
+		if !ln.AwaitingInputSince.IsZero() {
+			continue
+		}
 		if c.terminalIsWorkingOrUnknown(ctx, ln.TerminalID) || c.sessionIsBusy(ctx, ln) || c.hasActiveExpectedWait(ctx, ln.ID, now) {
 			continue
 		}
@@ -2016,7 +2028,7 @@ func (c *Controller) advanceExpiredNudges(ctx context.Context, urgentFlush *bool
 		if rung != 1 || waiting {
 			continue
 		}
-		key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
+		key := quietLaneKey(&ln)
 		if c.hasActionDecision("restart:fresh:" + key) {
 			continue
 		}
@@ -2255,6 +2267,18 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 	}
 	if rep.TerminalID != "" && ln.TerminalID != "" && rep.TerminalID != ln.TerminalID {
 		return store.EventClassAuto, nil
+	}
+	if rep.Outcome == lane.OutcomeNeedsInput || rep.Outcome == lane.OutcomeBlocked {
+		ev.Urgent = true
+		question := rep.QuestionText()
+		if ln.DuplicateQuestion(question, c.clock.Now()) {
+			_, _, err := c.recordDecision(ctx, "lane.question.duplicate", ln.ID, "same question pending or settling", "suppressed duplicate question", DecisionArgs{EventID: ev.ID})
+			return store.EventClassAuto, err
+		}
+		ln.Question = question
+		ln.AnswerAttemptedAt, ln.AnswerConfirmedAt = time.Time{}, time.Time{}
+	} else {
+		ln.Question = ""
 	}
 	if !ln.AwaitingInputSince.IsZero() {
 		ln.AwaitingInputSince = time.Time{}
@@ -2801,7 +2825,10 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 	if payload.ExitCode == 0 && (payload.Error == "" || payload.Kind == lane.EventTurnEndedNoReport || payload.Kind == lane.EventExited) {
 		if termID != "" && c.driver != nil {
 			if rep, err := c.driver.ReadReport(ctx, c.cfg.RunID, ln.ID, termID); err == nil && rep != nil && rep.Outcome.Valid() {
-				return c.handleLaneReport(ctx, ev)
+				answeredQuestion := (rep.Outcome == lane.OutcomeNeedsInput || rep.Outcome == lane.OutcomeBlocked) && ln.Question == rep.QuestionText() && !ln.AnswerConfirmedAt.IsZero()
+				if !answeredQuestion {
+					return c.handleLaneReport(ctx, ev)
+				}
 			}
 		}
 	}
@@ -2843,7 +2870,7 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		ln.LastEventAt = now
 	}
 	if quiet {
-		key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
+		key := quietLaneKey(ln)
 		switch {
 		case !c.hasActionDecision("restart:nudge:" + key):
 			if _, _, err := c.recordDecision(ctx, ToolPhaseRetry+".intent", ln.ID, "quiet lane: nudge before restart", "effect pending", DecisionArgs{ActionKey: "intent:restart:nudge:" + key, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt}); err != nil {
@@ -2851,7 +2878,22 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 			}
 
 			if err := c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Continue and file the required phase report."}); err != nil {
-				return store.EventClassUnclassified, err
+				var undelivered *lane.UndeliveredError
+				if !errors.As(err, &undelivered) {
+					return store.EventClassUnclassified, err
+				}
+				ln.AwaitingInputSince = now
+				ln.AnswerAttemptedAt, ln.AnswerConfirmedAt = now, time.Time{}
+				if saveErr := c.store.Lanes().Upsert(ctx, *ln); saveErr != nil {
+					return store.EventClassUnclassified, saveErr
+				}
+				failure, saveErr := c.store.Events().Append(ctx, store.Event{ID: "undelivered-" + ev.ID, RunID: c.cfg.RunID, LaneID: ln.ID, Kind: store.EventStall, Class: store.EventClassJudgment, Source: lane.AnswerDeliverySource, Urgent: true, Summary: err.Error()})
+				if saveErr != nil {
+					return store.EventClassUnclassified, saveErr
+				}
+				c.enqueueJudgmentEvent(failure)
+				_, _, saveErr = c.recordDecision(ctx, ToolPhaseRetry, ln.ID, "quiet lane: nudge before restart", err.Error(), DecisionArgs{ActionKey: "restart:nudge:" + key, EventID: ev.ID, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt})
+				return store.EventClassAuto, saveErr
 			}
 			if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
 				return store.EventClassUnclassified, err
@@ -2996,7 +3038,7 @@ func (c *Controller) pendingVerdictForLane(ctx context.Context, ln *lane.Lane) (
 }
 
 func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.EventClass, error) {
-	if ev.LaneID == "" || ev.Source == "lane.unpushed" || ev.Source == "lane.health" {
+	if ev.LaneID == "" || ev.Source == "lane.unpushed" || ev.Source == "lane.health" || ev.Source == lane.AnswerDeliverySource {
 		return store.EventClassJudgment, nil
 	}
 	ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ev.LaneID)
@@ -3814,11 +3856,19 @@ func (c *Controller) nudgeWaitDuration(r *recipe.Recipe) time.Duration {
 	return max(timeout/2, 5*time.Minute)
 }
 
+func quietLaneKey(ln *lane.Lane) string {
+	key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
+	if ln.AnswerEpoch > 0 {
+		key += fmt.Sprintf(":answer-%d", ln.AnswerEpoch)
+	}
+	return key
+}
+
 func (c *Controller) quietLadderRungFromStore(ctx context.Context, ln *lane.Lane, r *recipe.Recipe, now time.Time) (int, bool) {
 	if ln == nil || c.store == nil {
 		return 0, false
 	}
-	key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
+	key := quietLaneKey(ln)
 	nudgeKey := "restart:nudge:" + key
 	freshKey := "restart:fresh:" + key
 

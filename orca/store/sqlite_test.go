@@ -377,8 +377,8 @@ func TestSQLiteStoreReopenIdenticalState(t *testing.T) {
 	if before.ControllerCursor.Seq != 2 {
 		t.Fatalf("ControllerCursor.Seq = %d, want 2 (monotonic)", before.ControllerCursor.Seq)
 	}
-	if !slices.Equal(before.AppliedMigrations, []string{"0001_init.sql", "0002_memory_notes.sql", "0003_decision_trace.sql", "0004_lane_base_commit.sql", "0005_run_settings.sql", "0006_run_repository.sql", "0007_thread_resume_id.sql", "0008_cost_guard.sql", "0009_backlog_no_merge.sql"}) {
-		t.Fatalf("AppliedMigrations = %v, want all migrations through 0009", before.AppliedMigrations)
+	if !slices.Equal(before.AppliedMigrations, []string{"0001_init.sql", "0002_memory_notes.sql", "0003_decision_trace.sql", "0004_lane_base_commit.sql", "0005_run_settings.sql", "0006_run_repository.sql", "0007_thread_resume_id.sql", "0008_cost_guard.sql", "0009_backlog_no_merge.sql", "0010_lane_answers.sql"}) {
+		t.Fatalf("AppliedMigrations = %v, want all migrations through 0010", before.AppliedMigrations)
 	}
 
 	if err := st1.Close(); err != nil {
@@ -781,5 +781,55 @@ func TestObjectiveDoneAndCostGuardHelpers(t *testing.T) {
 	}
 	if !gotMem.IsContract() || !gotMem.Contract || gotMem.Kind != store.DirectiveContract || gotMem.Scope != "run" {
 		t.Fatalf("gotMem = %+v, want Contract=true Kind=contract Scope=run", gotMem)
+	}
+}
+
+func TestSQLiteLaneAnswerStateSurvivesReopen(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	clk := clock.NewFakeClock(time.Time{})
+	path := filepath.Join(t.TempDir(), "answers.db")
+	st, err := store.OpenSQLite(path, clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Runs().Create(ctx, store.Run{ID: "run-1", Objective: "Answer lane questions"}); err != nil {
+		t.Fatal(err)
+	}
+	ln := lane.Lane{ID: "question", RunID: "run-1", Status: lane.StatusBlocked, TerminalID: "t-1", Question: "Restore main?", AnswerAttemptedAt: clk.Now(), AwaitingInputSince: clk.Now()}
+	if err := st.Lanes().Upsert(ctx, ln); err != nil {
+		t.Fatal(err)
+	}
+	for _, confirmed := range []bool{false, true} {
+		if err := st.Close(); err != nil {
+			t.Fatal(err)
+		}
+		st, err = store.OpenSQLite(path, clk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := st.Lanes().Get(ctx, "run-1", ln.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Question != ln.Question || !got.AnswerAttemptedAt.Equal(ln.AnswerAttemptedAt) || !got.AnswerConfirmedAt.Equal(ln.AnswerConfirmedAt) || !got.AwaitingInputSince.Equal(ln.AwaitingInputSince) || got.AnswerEpoch != ln.AnswerEpoch {
+			t.Fatalf("reopened lane=%+v, want answer state from %+v", got, ln)
+		}
+		if !got.DuplicateQuestion(ln.Question, clk.Now().Add(time.Second)) {
+			t.Fatalf("reopened answer lost duplicate suppression: %+v", got)
+		}
+		if !confirmed {
+			clk.Advance(time.Second)
+			ln.Status = lane.StatusRunning
+			ln.AnswerConfirmedAt = clk.Now()
+			ln.AnswerEpoch = 1
+			ln.AwaitingInputSince = time.Time{}
+			if err := st.Lanes().Upsert(ctx, ln); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
