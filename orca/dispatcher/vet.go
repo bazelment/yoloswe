@@ -210,6 +210,7 @@ type LaneSteerParams struct {
 	LaneID string `json:"lane_id" jsonschema:"required,description=Lane ID to steer"`
 	Note   string `json:"note" jsonschema:"required,description=Steering instruction to inject into the lane"`
 	Reason string `json:"reason,omitempty" jsonschema:"description=Reason for steering this lane"`
+	Select int    `json:"select,omitempty" jsonschema:"description=Optional positive option number for a numbered question"`
 }
 
 // LaneForwardParams holds parameters for the lane.forward tool.
@@ -1883,7 +1884,10 @@ func checkBriefSizeCap(st *StateView, act ProposedAction) error {
 		if act.LaneSteer == nil {
 			return errors.New("missing lane.steer parameters")
 		}
-		if strings.TrimSpace(act.LaneSteer.Note) == "" {
+		if act.LaneSteer.Select < 0 {
+			return errors.New("select must be a positive option number")
+		}
+		if strings.TrimSpace(act.LaneSteer.Note) == "" && act.LaneSteer.Select == 0 {
 			return errors.New("steer note is required")
 		}
 		maxBytes := st.maxBriefBytesForLane(act.LaneSteer.LaneID)

@@ -1177,15 +1177,17 @@ const selectLaneColumns = `
 SELECT run_id, id, item_id, title, branch, base_branch, base_commit, worktree, status, phase,
        round, attempt, recipe_name, recipe_version, session_id, terminal_id,
        sessions_json, terminals_json, pr, pr_head, approval_sha, merge_sha,
-       checks, last_event_id, last_event_at, created_at, updated_at
+       checks, last_event_id, last_event_at, created_at, updated_at,
+       question, answer_attempted_at, answer_confirmed_at, answer_epoch, awaiting_input_since
 FROM lanes`
 
 func scanLane(scanner rowScanner) (*Lane, error) {
 	var (
-		ln                                   Lane
-		statusStr                            string
-		sessionsJSON, terminalsJSON          string
-		lastEventStr, createdStr, updatedStr string
+		ln                                      Lane
+		statusStr                               string
+		sessionsJSON, terminalsJSON             string
+		lastEventStr, createdStr, updatedStr    string
+		attemptedStr, confirmedStr, awaitingStr string
 	)
 	err := scanner.Scan(
 		&ln.RunID, &ln.ID, &ln.ItemID, &ln.Title, &ln.Branch, &ln.BaseBranch, &ln.BaseCommit, &ln.Worktree,
@@ -1193,11 +1195,21 @@ func scanLane(scanner rowScanner) (*Lane, error) {
 		&ln.SessionID, &ln.TerminalID, &sessionsJSON, &terminalsJSON,
 		&ln.PR, &ln.PRHead, &ln.ApprovalSHA, &ln.MergeSHA, &ln.Checks,
 		&ln.LastEventID, &lastEventStr, &createdStr, &updatedStr,
+		&ln.Question, &attemptedStr, &confirmedStr, &ln.AnswerEpoch, &awaitingStr,
 	)
 	if err != nil {
 		return nil, err
 	}
 	ln.Status = LaneStatus(statusStr)
+	if ln.AnswerAttemptedAt, err = parseTime(attemptedStr); err != nil {
+		return nil, err
+	}
+	if ln.AnswerConfirmedAt, err = parseTime(confirmedStr); err != nil {
+		return nil, err
+	}
+	if ln.AwaitingInputSince, err = parseTime(awaitingStr); err != nil {
+		return nil, err
+	}
 	if ln.LastEventAt, err = parseTime(lastEventStr); err != nil {
 		return nil, err
 	}
@@ -1265,8 +1277,9 @@ INSERT INTO lanes (
     run_id, id, item_id, title, branch, base_branch, base_commit, worktree, status, phase,
     round, attempt, recipe_name, recipe_version, session_id, terminal_id,
     sessions_json, terminals_json, pr, pr_head, approval_sha, merge_sha,
-    checks, last_event_id, last_event_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    checks, last_event_id, last_event_at, created_at, updated_at,
+    question, answer_attempted_at, answer_confirmed_at, answer_epoch, awaiting_input_since
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (run_id, id) DO UPDATE SET
     item_id = excluded.item_id,
     title = excluded.title,
@@ -1292,12 +1305,18 @@ ON CONFLICT (run_id, id) DO UPDATE SET
     last_event_id = excluded.last_event_id,
     last_event_at = excluded.last_event_at,
     created_at = excluded.created_at,
-    updated_at = excluded.updated_at`,
+    updated_at = excluded.updated_at,
+    question = excluded.question,
+    answer_attempted_at = excluded.answer_attempted_at,
+    answer_confirmed_at = excluded.answer_confirmed_at,
+    answer_epoch = excluded.answer_epoch,
+    awaiting_input_since = excluded.awaiting_input_since`,
 		cp.RunID, cp.ID, cp.ItemID, cp.Title, cp.Branch, cp.BaseBranch, cp.BaseCommit, cp.Worktree,
 		string(cp.Status), cp.Phase, cp.Round, cp.Attempt, cp.RecipeName, cp.RecipeVersion,
 		cp.SessionID, cp.TerminalID, sessionsJSON, terminalsJSON,
 		cp.PR, cp.PRHead, cp.ApprovalSHA, cp.MergeSHA, cp.Checks,
 		cp.LastEventID, formatTime(cp.LastEventAt), formatTime(cp.CreatedAt), formatTime(cp.UpdatedAt),
+		cp.Question, formatTime(cp.AnswerAttemptedAt), formatTime(cp.AnswerConfirmedAt), cp.AnswerEpoch, formatTime(cp.AwaitingInputSince),
 	)
 	if err != nil {
 		return err

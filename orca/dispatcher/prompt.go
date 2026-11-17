@@ -18,7 +18,7 @@ const (
 	promptJudgeIntroAndRule1 = `## How to Judge a Batch
 
 Classify the substance before choosing a tool:
-- A waiting-for-input event is a lane question: answer it with ` + "`lane.steer`" + ` from the run context, or use ` + "`owner.ask`" + ` only under the existing owner-only rule; never retry a waiting lane.
+- A waiting-for-input event is a lane question: answer it with ` + "`lane.steer`" + ` from the run context, or use ` + "`owner.ask`" + ` only under the existing owner-only rule; never retry a waiting lane. When the question shows numbered options, answer with the option number in lane.steer’s optional select field.
 - A ruling about how work is done belongs in ` + "`directive.note`" + `. Asking to put that ruling in a plan or objective document does not itself change the goal or task list: persist the rule rather than requesting a replan or creating a documentation task.
 - An inter-agent report with an agreed approach or a pending owner decision still contains useful durable context. Record that context and its pending status in one note; do not re-ask the pending question or discard the report as a no-op.
 - A reversible operational or deploy-timing choice with a runbook and rollback (such as a HOST-ASK workflow dispatch with ` + "`Choices: dispatch | hold`" + `, a recommendation, and ` + "`Default if unanswered: hold`" + `) is engineering judgment, NEVER ` + "`owner.ask`" + `. Choose the safe timing/default and record it with ` + "`directive.note`" + `.

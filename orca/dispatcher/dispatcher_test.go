@@ -2278,3 +2278,56 @@ func TestDispatchAdoptedFinishedRunSkipsTurnAndCompactSnapshot(t *testing.T) {
 			resActive.TurnCount, len(activeClient.Requests))
 	}
 }
+
+func TestLaneAnswersPreserveOwnerAndHostBlockRules(t *testing.T) {
+	t.Parallel()
+	for _, tool := range []string{dispatcher.ToolLaneSteer, dispatcher.ToolLaneForward} {
+		for _, block := range []string{"own report", "awaiting input", "owner ask", "host hold"} {
+			t.Run(tool+"/"+block, func(t *testing.T) {
+				clk, st, drv := setupTestEnv(t)
+				ctx := t.Context()
+				ln := lane.Lane{ID: "question", RunID: "run-1", Status: lane.StatusBlocked, SessionID: "s-1", TerminalID: "t-1", Question: "Restore main?"}
+				wantStatus := lane.StatusRunning
+				switch block {
+				case "awaiting input":
+					ln.Question = ""
+					ln.Status = lane.StatusRunning
+					ln.AwaitingInputSince = clk.Now()
+				case "owner ask":
+					if err := st.Directives().Add(ctx, store.Directive{ID: "ask", RunID: "run-1", Scope: ln.ID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Ref: "owner_ask:pending", Text: "Owner-only decision", Status: store.DirectiveActive}); err != nil {
+						t.Fatal(err)
+					}
+					wantStatus = lane.StatusBlocked
+				case "host hold":
+					ln.HostHoldReason = "host review"
+					if tool == dispatcher.ToolLaneForward {
+						wantStatus = lane.StatusBlocked
+					}
+				}
+				if err := st.Lanes().Upsert(ctx, ln); err != nil {
+					t.Fatal(err)
+				}
+				input := json.RawMessage(`{"lane_id":"question","note":"Restore main"}`)
+				if tool == dispatcher.ToolLaneForward {
+					input = json.RawMessage(`{"to_lane_id":"question","excerpt":"Restore main"}`)
+				}
+				client := model.NewFakeClient(toolUseResponse(model.ToolCall{ID: "answer", Name: tool, Input: input}), endTurnResponse("Answered."))
+				d := dispatcher.New(dispatcher.Config{}, st, drv, clk, client)
+				t.Cleanup(func() { _ = d.Close() })
+				if _, err := d.Dispatch(ctx, "run-1", []store.Event{{ID: "question-event", LaneID: ln.ID, Kind: store.EventLaneReport, Summary: "Restore main?"}}); err != nil {
+					t.Fatal(err)
+				}
+				got, err := st.Lanes().Get(ctx, "run-1", ln.ID)
+				if err != nil || got.Status != wantStatus || !got.AwaitingInputSince.IsZero() || got.AnswerConfirmedAt.IsZero() || got.AnswerEpoch != 1 {
+					t.Fatalf("answered lane=%+v err=%v, want %s with confirmation", got, err, wantStatus)
+				}
+				if block == "owner ask" {
+					ask, err := st.Directives().Get(ctx, "run-1", "ask")
+					if err != nil || ask.Status != store.DirectiveActive {
+						t.Fatalf("owner ask=%+v err=%v", ask, err)
+					}
+				}
+			})
+		}
+	}
+}

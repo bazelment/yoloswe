@@ -163,6 +163,7 @@ type Driver struct {
 	lastCapacity     map[string]string
 	activeTerminals  map[string]string
 	stoppedTerminals map[string]bool
+	lastResumed      map[string]TerminalEvent
 	apiURL           string
 	token            string
 	githubToken      string
@@ -648,6 +649,7 @@ func New(cfg Config, opts ...Option) (*Driver, error) {
 		lastCapacity:     make(map[string]string),
 		activeTerminals:  make(map[string]string),
 		stoppedTerminals: make(map[string]bool),
+		lastResumed:      make(map[string]TerminalEvent),
 		apiURL:           apiURL,
 		token:            token,
 		githubToken:      strings.TrimSpace(cfg.GitHubToken),
@@ -1199,10 +1201,13 @@ func (d *Driver) isStaleTerminal(runID, laneID, terminalID string) bool {
 	return false
 }
 
-// Steer sends steering text into a running terminal via POST /api/code-terminals/{id}/input.
+// Steer submits text or an option key and confirms that the agent resumes.
 func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
-	if strings.TrimSpace(req.Message) == "" {
-		return fmt.Errorf("%w: steer message is required", store.ErrInvalidArgument)
+	if req.Select < 0 || len(strconv.Itoa(req.Select)) > 15 {
+		return fmt.Errorf("%w: select must be a positive option number of at most 15 digits", store.ErrInvalidArgument)
+	}
+	if strings.TrimSpace(req.Message) == "" && req.Select == 0 {
+		return fmt.Errorf("%w: steer message or select is required", store.ErrInvalidArgument)
 	}
 	terminalID := strings.TrimSpace(req.TerminalID)
 	sessionID := strings.TrimSpace(req.SessionID)
@@ -1237,13 +1242,26 @@ func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
 		return fmt.Errorf("%w: %s", lane.ErrStaleTerminal, terminalID)
 	}
 
-	path := fmt.Sprintf("/api/code-terminals/%s/input", url.PathEscape(terminalID))
-	body := struct {
-		Text string `json:"text"`
-	}{
-		Text: req.Message,
+	sentAt := d.clock.Now()
+	d.mu.Lock()
+	resumedSeq := d.lastResumed[terminalID].Seq
+	d.lastResumed[terminalID] = TerminalEvent{Seq: resumedSeq}
+	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		delete(d.lastResumed, terminalID)
+		d.mu.Unlock()
+	}()
+	submit := func() error {
+		if req.Select > 0 {
+			return d.pressKeys(ctx, terminalID, append(strings.Split(strconv.Itoa(req.Select), ""), "Enter"))
+		}
+		path := fmt.Sprintf("/api/code-terminals/%s/input", url.PathEscape(terminalID))
+		return d.doJSON(ctx, http.MethodPost, path, struct {
+			Text string `json:"text"`
+		}{Text: req.Message}, nil)
 	}
-	err := d.doJSON(ctx, http.MethodPost, path, body, nil)
+	err := submit()
 	if IsNotReady(err) {
 		if sessionID == "" {
 			if term, getErr := d.GetTerminal(ctx, terminalID); getErr == nil {
@@ -1254,10 +1272,89 @@ func (d *Driver) Steer(ctx context.Context, req lane.SteerRequest) error {
 			if _, settleErr := d.settleSession(ctx, SessionInfo{ID: sessionID, Status: "sleeping"}); settleErr != nil {
 				return settleErr
 			}
-			err = d.doJSON(ctx, http.MethodPost, path, body, nil)
+			sentAt = d.clock.Now()
+			err = submit()
 		}
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return d.confirmSteer(ctx, terminalID, sentAt, resumedSeq)
+}
+
+// pressKeys uses the same endpoint and body as nebula term key. These are
+// keystrokes, not pasted text, so numbered dialogs can consume the selection.
+func (d *Driver) pressKeys(ctx context.Context, terminalID string, keys []string) error {
+	path := fmt.Sprintf("/api/code-terminals/%s/keys", url.PathEscape(terminalID))
+	return d.doJSON(ctx, http.MethodPost, path, struct {
+		Keys []string `json:"keys"`
+	}{Keys: keys}, nil)
+}
+
+func (d *Driver) confirmSteer(ctx context.Context, terminalID string, sentAt time.Time, resumedSeq int64) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	deadline := d.clock.Now().Add(lane.AnswerDeliveryWindow)
+	timeout := d.clock.AfterFunc(lane.AnswerDeliveryWindow, cancel)
+	defer timeout.Stop()
+	flushAt := d.clock.Now().Add(lane.AnswerDeliveryWindow / 2)
+	flushed := false
+	cause := errors.New("agent did not resume within delivery window")
+	resumed := func() bool {
+		d.mu.Lock()
+		ev := d.lastResumed[terminalID]
+		d.mu.Unlock()
+		return ev.Seq > resumedSeq && !ev.At.IsZero() && !ev.At.Before(sentAt)
+	}
+	for {
+		if resumed() {
+			return nil
+		}
+		term, err := d.GetTerminal(ctx, terminalID)
+		if (err == nil && isWorkingAgentState(term.AgentState)) || resumed() {
+			return nil
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		now := d.clock.Now()
+		if !now.Before(deadline) {
+			break
+		}
+		if err != nil {
+			cause = err
+		} else if !flushed && !now.Before(flushAt) && strings.EqualFold(term.AgentState, "idle") {
+			flushed = true
+			var keys []string
+			switch strings.ToLower(term.Kind) {
+			case "codex":
+				keys = []string{"Esc", "Enter"}
+			case "claude":
+				keys = []string{"Enter"}
+			case "agy":
+				keys = []string{"M-m"}
+			}
+			if len(keys) > 0 {
+				if err := d.pressKeys(ctx, terminalID, keys); err != nil {
+					return &lane.UndeliveredError{TerminalID: terminalID, Cause: err}
+				}
+				continue
+			}
+		}
+		timer := d.clock.NewTimer(min(d.pollInterval, deadline.Sub(now)))
+		select {
+		case <-ctx.Done():
+		case <-timer.C():
+		}
+		timer.Stop()
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if ctx.Err() != nil {
+		cause = errors.Join(cause, ctx.Err())
+	}
+	return &lane.UndeliveredError{TerminalID: terminalID, Cause: cause}
 }
 
 // GetTerminal fetches metadata for a single terminal via GET /api/code-terminals/{id}.
@@ -1771,6 +1868,13 @@ func (d *Driver) consumeSSEStream(
 			highWaterSeq = termEv.Seq
 		}
 
+		if termEv.Type == "turn.resumed" {
+			d.mu.Lock()
+			if previous, pending := d.lastResumed[termEv.TerminalID]; pending && termEv.Seq > previous.Seq {
+				d.lastResumed[termEv.TerminalID] = termEv
+			}
+			d.mu.Unlock()
+		}
 		storeEv, ok, err := d.mapTerminalEvent(ctx, req, termEv)
 		if err != nil {
 			return false, err

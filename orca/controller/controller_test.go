@@ -1334,11 +1334,9 @@ func TestControllerJudgmentBatchingAndUrgentBypass(t *testing.T) {
 		t.Fatalf("Step (spawn): %v", err)
 	}
 
-	appendReportEvent(t, st, "lane-blocked", lane.PhaseReport{
-		Phase:   recipe.PhaseSWE,
-		Outcome: lane.OutcomeBlocked,
-		Reason:  "needs sharedHome=true",
-	})
+	if _, err := st.Events().Append(ctx, store.Event{RunID: "run-1", Kind: store.EventMail, Summary: "routine progress update"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := ctrl.Step(ctx); err != nil {
 		t.Fatalf("Step at t=0: %v", err)
 	}
@@ -1379,9 +1377,9 @@ func TestControllerJudgmentBatchingAndUrgentBypass(t *testing.T) {
 		t.Fatalf("BatchCount at t=3m = %d, want 1", judge.BatchCount())
 	}
 	if len(judge.Batches[0]) != 2 ||
-		judge.Batches[0][0].Kind != store.EventLaneReport ||
+		judge.Batches[0][0].Kind != store.EventMail ||
 		judge.Batches[0][1].Kind != store.EventMail {
-		t.Fatalf("Batches[0] = %+v, want [lane_report, mail]", judge.Batches[0])
+		t.Fatalf("Batches[0] = %+v, want [mail, mail]", judge.Batches[0])
 	}
 
 	clk.Advance(time.Minute)
@@ -3368,5 +3366,372 @@ func TestControllerNoMergeReportOnlyItemSkipsIntegrateAndNeverMerges(t *testing.
 	}
 	if ln.Status != lane.StatusDone {
 		t.Fatalf("lane status = %q (phase=%q), want done after review", ln.Status, ln.Phase)
+	}
+}
+
+func TestAnsweredReportLaneRunsAndNudges(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "question", RunID: "run-1", Status: lane.StatusRunning, SessionID: "s-1", TerminalID: "t-1", Phase: recipe.PhaseSWE, Attempt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1", JudgmentDebounce: -1}, st, drv, clk, judge)
+	raw, _ := json.Marshal(lane.PhaseReport{TerminalID: "t-1", Phase: recipe.PhaseSWE, Outcome: lane.OutcomeNeedsInput, Summary: "Restore main?"})
+	if _, err := st.Events().Append(ctx, store.Event{RunID: "run-1", LaneID: "question", Kind: store.EventLaneReport, Source: "lane.watch", Payload: raw}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := st.Lanes().Get(ctx, "run-1", "question")
+	if err != nil || ln.Status != lane.StatusBlocked {
+		t.Fatalf("reported lane=%+v err=%v, want blocked", ln, err)
+	}
+	client := model.NewFakeClient(
+		model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("answer", dispatcher.ToolLaneSteer, json.RawMessage(`{"lane_id":"question","note":"Restore main"}`)))},
+		model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock("Answered."))},
+	)
+	d := dispatcher.New(dispatcher.Config{}, st, drv, clk, client)
+	t.Cleanup(func() { _ = d.Close() })
+	if _, err := d.Dispatch(ctx, "run-1", judge.Batches[0]); err != nil {
+		t.Fatal(err)
+	}
+	appendLaneWatchEvent(t, st, "question", "t-1", lane.EventNoActivity)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ln, err = st.Lanes().Get(ctx, "run-1", "question")
+	if err != nil || ln.Status != lane.StatusRunning || len(drv.Steers) != 2 {
+		t.Fatalf("answered lane=%+v steers=%d err=%v, want running and answer plus one nudge", ln, len(drv.Steers), err)
+	}
+}
+
+func TestLaneQuestionBypassesDefaultDebounce(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "question", RunID: "run-1", Status: lane.StatusRunning, TerminalID: "t-1", Phase: recipe.PhaseSWE}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+	raw, _ := json.Marshal(lane.PhaseReport{TerminalID: "t-1", Phase: recipe.PhaseSWE, Outcome: lane.OutcomeNeedsInput, Summary: "Restore main?"})
+	if _, err := st.Events().Append(ctx, store.Event{RunID: "run-1", LaneID: "question", Kind: store.EventLaneReport, Source: "lane.watch", Payload: raw}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if judge.BatchCount() != 1 {
+		t.Fatalf("judgment batches=%d, want 1 without clock advance", judge.BatchCount())
+	}
+}
+
+func TestLaneAnswersReleaseOwnBlocksAndCollapseReasks(t *testing.T) {
+	t.Parallel()
+	for _, tool := range []string{dispatcher.ToolLaneSteer, dispatcher.ToolLaneForward} {
+		for _, outcome := range []lane.ReportOutcome{lane.OutcomeNeedsInput, lane.OutcomeBlocked} {
+			t.Run(tool+"/"+string(outcome), func(t *testing.T) {
+				clk, st, drv, judge := setupTestEnv(t)
+				ctx := t.Context()
+				if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "question", RunID: "run-1", Status: lane.StatusRunning, SessionID: "s-1", TerminalID: "t-1", Phase: recipe.PhaseSWE}); err != nil {
+					t.Fatal(err)
+				}
+				ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+				appendLaneWatchEvent(t, st, "question", "t-1", lane.EventNoActivity)
+				if err := ctrl.Step(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if len(drv.Steers) != 1 {
+					t.Fatalf("initial nudges=%d", len(drv.Steers))
+				}
+				report := lane.PhaseReport{TerminalID: "t-1", Phase: recipe.PhaseSWE, Outcome: outcome, Summary: "Restore main?"}
+				appendQuestion := func() {
+					t.Helper()
+					report.Raw += "\nMetadata: new revision"
+					appendReportEvent(t, st, "question", report)
+					if err := ctrl.Step(ctx); err != nil {
+						t.Fatal(err)
+					}
+				}
+				appendQuestion()
+				appendQuestion()
+				if judge.BatchCount() != 1 {
+					t.Fatalf("unanswered re-asks: batches=%d, want 1", judge.BatchCount())
+				}
+				input := json.RawMessage(`{"lane_id":"question","note":"Restore main","select":1}`)
+				if tool == dispatcher.ToolLaneForward {
+					input = json.RawMessage(`{"to_lane_id":"question","excerpt":"Restore main"}`)
+				}
+				client := model.NewFakeClient(
+					model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("answer", tool, input))},
+					model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock("Answered."))},
+				)
+				d := dispatcher.New(dispatcher.Config{}, st, drv, clk, client)
+				t.Cleanup(func() { _ = d.Close() })
+				if _, err := d.Dispatch(ctx, "run-1", judge.Batches[0]); err != nil {
+					t.Fatal(err)
+				}
+				got, err := st.Lanes().Get(ctx, "run-1", "question")
+				if err != nil || got.Status != lane.StatusRunning || got.AnswerConfirmedAt.IsZero() || got.AnswerEpoch != 1 {
+					t.Fatalf("answered lane=%+v err=%v", got, err)
+				}
+				if tool == dispatcher.ToolLaneSteer && drv.Steers[1].Select != 1 {
+					t.Fatalf("selection not forwarded: %+v", drv.Steers[1])
+				}
+				// Delivery dedupe must survive controller restart and metadata-only re-filing.
+				ctrl = controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+				clk.Advance(10 * time.Second)
+				appendQuestion()
+				if judge.BatchCount() != 1 {
+					t.Fatalf("settling re-ask: batches=%d, want 1", judge.BatchCount())
+				}
+				// The durable report endpoint still exposes the old question after delivery.
+				drv.SetReport("t-1", report)
+				clk.Advance(lane.AnswerDeliveryWindow)
+				appendLaneWatchEvent(t, st, "question", "t-1", lane.EventNoActivity)
+				if err := ctrl.Step(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if len(drv.Steers) != 3 || len(drv.PhaseStarts) != 0 {
+					t.Fatalf("quiet ladder did not reset: steers=%d starts=%d", len(drv.Steers), len(drv.PhaseStarts))
+				}
+				appendQuestion()
+				if judge.BatchCount() != 2 || len(judge.Batches[1]) != 1 {
+					t.Fatalf("later re-ask: batches=%d, want 2", judge.BatchCount())
+				}
+			})
+		}
+	}
+}
+
+type undeliveredDriver struct {
+	*lane.FakeDriver
+	calls            int
+	preSubmitFailure bool
+}
+
+func (d *undeliveredDriver) Steer(_ context.Context, req lane.SteerRequest) error {
+	d.calls++
+	if d.preSubmitFailure {
+		return errors.New("input API unavailable")
+	}
+	return &lane.UndeliveredError{TerminalID: req.TerminalID, Cause: errors.New("still idle after flush")}
+}
+
+func TestUndeliveredLaneAnswerReturnsToJudgmentOnce(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		action           string
+		preSubmitFailure bool
+	}{
+		{action: dispatcher.ToolLaneSteer}, {action: dispatcher.ToolLaneForward}, {action: "nudge"},
+		{action: dispatcher.ToolLaneSteer, preSubmitFailure: true}, {action: dispatcher.ToolLaneForward, preSubmitFailure: true},
+	} {
+		t.Run(fmt.Sprintf("%s/pre_submit_failure_%t", tc.action, tc.preSubmitFailure), func(t *testing.T) {
+			action := tc.action
+			clk, st, base, judge := setupTestEnv(t)
+			drv := &undeliveredDriver{FakeDriver: base, preSubmitFailure: tc.preSubmitFailure}
+			ctx := t.Context()
+			ln := lane.Lane{ID: "question", RunID: "run-1", Status: lane.StatusRunning, SessionID: "s-1", TerminalID: "t-1", Phase: recipe.PhaseSWE}
+			if action != "nudge" {
+				ln.Status = lane.StatusBlocked
+				ln.Question = "Restore main?"
+			}
+			if err := st.Lanes().Upsert(ctx, ln); err != nil {
+				t.Fatal(err)
+			}
+			ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+			if action == "nudge" {
+				appendLaneWatchEvent(t, st, ln.ID, ln.TerminalID, lane.EventNoActivity)
+			} else {
+				input := json.RawMessage(`{"lane_id":"question","note":"Restore main"}`)
+				if action == dispatcher.ToolLaneForward {
+					input = json.RawMessage(`{"to_lane_id":"question","excerpt":"Restore main"}`)
+				}
+				client := model.NewFakeClient(
+					model.Response{StopReason: model.StopReasonToolUse, Message: model.NewAssistantMessage(model.NewToolUseBlock("answer", action, input))},
+					model.Response{StopReason: model.StopReasonEndTurn, Message: model.NewAssistantMessage(model.NewTextBlock("Delivery failed."))},
+				)
+				d := dispatcher.New(dispatcher.Config{}, st, drv, clk, client)
+				t.Cleanup(func() { _ = d.Close() })
+				result, err := d.Dispatch(ctx, "run-1", []store.Event{{ID: "question-event", LaneID: ln.ID, Kind: store.EventLaneReport, Summary: ln.Question}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantAccepted := 1
+				if tc.preSubmitFailure {
+					wantAccepted = 0
+				}
+				if len(result.Accepted) != wantAccepted {
+					t.Fatalf("accepted mutations=%d, want %d", len(result.Accepted), wantAccepted)
+				}
+			}
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if judge.BatchCount() != 1 || !strings.Contains(judge.Batches[0][0].Summary, "answer not delivered") {
+				t.Fatalf("delivery judgment=%+v", judge.Batches)
+			}
+			got, err := st.Lanes().Get(ctx, "run-1", ln.ID)
+			if err != nil || got.AwaitingInputSince.IsZero() || !got.AnswerConfirmedAt.IsZero() {
+				t.Fatalf("undelivered lane=%+v err=%v", got, err)
+			}
+			clk.Advance(30 * time.Minute)
+			appendLaneWatchEvent(t, st, ln.ID, ln.TerminalID, lane.EventNoActivity)
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if drv.calls != 1 || judge.BatchCount() != 1 || len(base.Stops) != 0 {
+				t.Fatalf("delivery loop: calls=%d batches=%d stops=%d", drv.calls, judge.BatchCount(), len(base.Stops))
+			}
+		})
+	}
+}
+
+func TestUndeliveredControllerSteersAreIdempotent(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"unpushed", "disk", "worker", "default", "owner"} {
+		t.Run(kind, func(t *testing.T) {
+			clk, st, base, judge := setupTestEnv(t)
+			drv := &undeliveredDriver{FakeDriver: base}
+			ctx := t.Context()
+			ln := lane.Lane{ID: "lane-" + kind, RunID: "run-1", Status: lane.StatusRunning, SessionID: "s-1", TerminalID: "t-1", Phase: recipe.PhaseSWE}
+			if kind == "owner" {
+				ln.Status = lane.StatusBlocked
+			}
+			if err := st.Lanes().Upsert(ctx, ln); err != nil {
+				t.Fatal(err)
+			}
+			cfg := controller.Config{RunID: "run-1", JudgmentDebounce: -1, UnpushedWorkThreshold: time.Minute}
+			var box *questionBox
+			var ask controller.OwnerAsk
+			switch kind {
+			case "worker":
+				cfg.AnswerQuestion = func(context.Context, string, string) (string, error) { return "use the task notes", nil }
+			case "default":
+				box = &questionBox{}
+			case "owner":
+				ask = controller.OwnerAsk{ID: "owner-ask", RunID: "run-1", LaneID: ln.ID, Question: "choose", Options: []string{"continue"}, Default: "continue", Deadline: clk.Now().Add(time.Hour)}
+			}
+			ctrl := controller.New(cfg, st, drv, clk, judge, box)
+			if kind == "owner" {
+				if err := ctrl.AskOwner(ctx, ask); err != nil {
+					t.Fatal(err)
+				}
+				mailEvent(t, st, mailbox.Message{Owner: true, InReplyTo: ask.ID, Body: "continue"})
+				mailEvent(t, st, mailbox.Message{Body: "other event"})
+			}
+			switch kind {
+			case "unpushed":
+				drv.GitStates[ln.ID] = lane.GitState{UnpushedCommits: 1, OldestUnpushedAt: clk.Now().Add(-time.Hour)}
+			case "disk":
+				drv.DiskUsage[ln.ID] = 95
+			case "worker", "default":
+				msg := mailbox.Message{ID: "q-" + kind, LaneID: ln.ID, Question: true, Body: "choose"}
+				if kind == "default" {
+					msg.ID = ""
+				}
+				mailEvent(t, st, msg)
+				mailEvent(t, st, mailbox.Message{Body: "other event"})
+			}
+			if kind == "unpushed" || kind == "disk" {
+				mailEvent(t, st, mailbox.Message{Body: "other event"})
+			}
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if drv.calls != 1 {
+				t.Fatalf("steer submissions = %d, want 1", drv.calls)
+			}
+			undelivered := 0
+			otherSeen := false
+			for _, batch := range judge.Batches {
+				for _, ev := range batch {
+					if ev.Source == lane.AnswerDeliverySource && strings.Contains(ev.Summary, "answer not delivered") {
+						undelivered++
+					}
+					if ev.Summary == "other event" {
+						otherSeen = true
+					}
+				}
+			}
+			if undelivered != 1 {
+				t.Fatalf("undelivered judgments = %d in %+v, want 1", undelivered, judge.Batches)
+			}
+			if !otherSeen {
+				t.Fatalf("judgment batches = %+v; want the following event consumed in the same Step", judge.Batches)
+			}
+			decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1", LaneID: ln.ID})
+			if err != nil || len(decs) == 0 {
+				t.Fatalf("decisions = %+v, err=%v; want recorded action", decs, err)
+			}
+			recordedKey := false
+			for _, dec := range decs {
+				var args controller.DecisionArgs
+				if json.Unmarshal(dec.Args, &args) == nil && args.ActionKey != "" {
+					recordedKey = true
+				}
+			}
+			if !recordedKey {
+				t.Fatalf("decisions = %+v; want an action key", decs)
+			}
+		})
+	}
+}
+
+func TestLaneWatchQuestionsAreUrgent(t *testing.T) {
+	t.Parallel()
+	for _, outcome := range []lane.ReportOutcome{lane.OutcomeNeedsInput, lane.OutcomeBlocked} {
+		t.Run(string(outcome), func(t *testing.T) {
+			clk, st, drv, judge := setupTestEnv(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "question", RunID: "run-1", Status: lane.StatusRunning, TerminalID: "t-1", Phase: recipe.PhaseSWE}); err != nil {
+				t.Fatal(err)
+			}
+			ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+			if err := ctrl.StartWatches(ctx); err != nil {
+				t.Fatal(err)
+			}
+			drv.Emit(lane.Event{RunID: "run-1", LaneID: "question", TerminalID: "t-1", Kind: lane.EventPhaseReported, Report: &lane.PhaseReport{TerminalID: "t-1", Phase: recipe.PhaseSWE, Outcome: outcome, Summary: "Restore main?"}})
+			waitFor(t, func() bool {
+				events, _ := st.Events().List(ctx, store.EventFilter{RunID: "run-1", Kinds: []store.EventKind{store.EventLaneReport}})
+				return len(events) == 1
+			})
+			events, err := st.Events().List(ctx, store.EventFilter{RunID: "run-1", Kinds: []store.EventKind{store.EventLaneReport}})
+			if err != nil || !events[0].Urgent {
+				t.Fatalf("watch events=%+v err=%v", events, err)
+			}
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if judge.BatchCount() != 1 {
+				t.Fatalf("batches=%d, want immediate judgment", judge.BatchCount())
+			}
+		})
+	}
+}
+
+func TestLaneReportQuestionRecoveryIsUrgent(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "question", RunID: "run-1", Status: lane.StatusBlocked, TerminalID: "t-1", Phase: recipe.PhaseSWE, Question: "Restore main?"}); err != nil {
+		t.Fatal(err)
+	}
+	ev := appendReportEvent(t, st, "question", lane.PhaseReport{TerminalID: "t-1", Phase: recipe.PhaseSWE, Outcome: lane.OutcomeNeedsInput, Summary: "Restore main?"})
+	if err := st.Events().SetCursor(ctx, "run-1", controller.DefaultConsumer, ev.Seq); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1"}, st, drv, clk, judge)
+	if err := ctrl.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if judge.BatchCount() != 1 || len(judge.Batches[0]) != 1 || !judge.Batches[0][0].Urgent {
+		t.Fatalf("recovered question batches=%+v, want one urgent question", judge.Batches)
 	}
 }

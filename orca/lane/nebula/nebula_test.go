@@ -438,6 +438,9 @@ func (f *fakeNebulaServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]any{"code": "SESSION_SLEEPING", "message": "session sleeping"})
 				return
 			}
+			if tm := f.terminals[termID]; tm != nil {
+				tm.AgentState = "working"
+			}
 			f.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 			return
@@ -1792,5 +1795,170 @@ func TestWatchWorkingTerminalAndQuietDeduplication(t *testing.T) {
 			t.Fatalf("subsequent quiet poll %d emitted duplicate event: %+v", poll, ev)
 		default:
 		}
+	}
+}
+
+func TestSteerFlushesQueuedCodexOnceAndReportsUndelivered(t *testing.T) {
+	t.Parallel()
+	var keys [][]string
+	inputs := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /api/code-terminals/t-1/input":
+			inputs++
+			_, _ = io.WriteString(w, `{"ok":true}`)
+		case "GET /api/code-terminals/t-1":
+			_, _ = io.WriteString(w, `{"id":"t-1","kind":"codex","agentState":"idle","screen":"edit last queued message"}`)
+		case "POST /api/code-terminals/t-1/keys":
+			var body struct {
+				Keys []string `json:"keys"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			keys = append(keys, body.Keys)
+			_, _ = io.WriteString(w, `{"ok":true}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	clk := autoAdvanceClock{clock.NewFakeClock(time.Time{})}
+	drv, err := nebula.New(nebula.Config{APIURL: srv.URL, Token: "synthetic", Clock: clk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = drv.Steer(t.Context(), lane.SteerRequest{RunID: "run-1", LaneID: "question", SessionID: "s-1", TerminalID: "t-1", Message: "Restore main"})
+	if inputs != 1 || fmt.Sprint(keys) != "[[Esc Enter]]" || err == nil || fmt.Sprintf("%T", err) != "*lane.UndeliveredError" {
+		t.Fatalf("inputs=%d keys=%v err=(%T) %v, want one input, one Esc/Enter flush and typed undelivered result", inputs, keys, err, err)
+	}
+}
+
+func TestSteerConfirmsExecutionAndSelectsWithKeys(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, harness, initial, wantKeys string
+		selectOption                     int
+	}{
+		{name: "already working", harness: "codex", initial: "working"},
+		{name: "codex queued answer", harness: "codex", initial: "idle", wantKeys: "[Esc Enter]"},
+		{name: "claude picker", harness: "claude", initial: "idle", selectOption: 2, wantKeys: "[2 Enter]"},
+		{name: "multi digit picker", harness: "claude", initial: "idle", selectOption: 12, wantKeys: "[1 2 Enter]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inputs := 0
+			var keys []string
+			state := tc.initial
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method + " " + r.URL.Path {
+				case "POST /api/code-terminals/t-1/input":
+					inputs++
+					_, _ = io.WriteString(w, `{}`)
+				case "POST /api/code-terminals/t-1/keys":
+					var body struct {
+						Keys []string `json:"keys"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+					}
+					keys = append(keys, body.Keys...)
+					state = "working"
+					_, _ = io.WriteString(w, `{}`)
+				case "GET /api/code-terminals/t-1":
+					_ = json.NewEncoder(w).Encode(map[string]string{"id": "t-1", "kind": tc.harness, "agentState": state})
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			clk := autoAdvanceClock{clock.NewFakeClock(time.Time{})}
+			drv, err := nebula.New(nebula.Config{APIURL: srv.URL, Token: "synthetic", Clock: clk})
+			if err != nil {
+				t.Fatal(err)
+			}
+			message := "Restore main"
+			wantInputs := 1
+			if tc.selectOption > 0 {
+				message = ""
+				wantInputs = 0
+			}
+			if err := drv.Steer(t.Context(), lane.SteerRequest{RunID: "run-1", LaneID: "question", SessionID: "s-1", TerminalID: "t-1", Message: message, Select: tc.selectOption}); err != nil {
+				t.Fatal(err)
+			}
+			if inputs != wantInputs || strings.Join(keys, " ") != strings.Trim(tc.wantKeys, "[]") {
+				t.Fatalf("inputs=%d keys=%v, want %d %s", inputs, keys, wantInputs, tc.wantKeys)
+			}
+		})
+	}
+}
+
+func TestSteerConfirmsResumedEventAfterFastTurn(t *testing.T) {
+	t.Parallel()
+	clk := autoAdvanceClock{clock.NewFakeClock(time.Time{})}
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	var drv *nebula.Driver
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /api/code-terminals/t-1/input":
+			err := drv.StreamEvents(r.Context(), nebula.StreamRequest{RunID: "run-1", LaneID: "question", TerminalID: "t-1"})
+			if err != nil {
+				t.Error(err)
+			}
+			_, _ = io.WriteString(w, `{}`)
+		case "GET /api/code-terminals/t-1/events/stream":
+			_, _ = fmt.Fprintf(w, "id: 1\nevent: turn.resumed\ndata: {\"seq\":1,\"type\":\"turn.resumed\",\"at\":%q}\n\n", clk.Now().Format(time.RFC3339Nano))
+		case "GET /api/code-terminals/t-1":
+			t.Error("confirmed turn should not require terminal metadata")
+			_, _ = io.WriteString(w, `{"id":"t-1","kind":"codex","agentState":"idle"}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	var err error
+	drv, err = nebula.New(nebula.Config{APIURL: srv.URL, Token: "synthetic", Clock: clk, Events: st.Events()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := drv.Steer(t.Context(), lane.SteerRequest{RunID: "run-1", LaneID: "question", SessionID: "s-1", TerminalID: "t-1", Message: "Restore main"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSteerConfirmationBoundsHangingMetadataRequest(t *testing.T) {
+	t.Parallel()
+	entered := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /api/code-terminals/t-1/input":
+			_, _ = io.WriteString(w, `{}`)
+		case "GET /api/code-terminals/t-1":
+			close(entered)
+			<-r.Context().Done()
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	clk := clock.NewFakeClock(time.Time{})
+	drv, err := nebula.New(nebula.Config{APIURL: srv.URL, Token: "synthetic", Clock: clk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- drv.Steer(t.Context(), lane.SteerRequest{RunID: "run-1", LaneID: "question", SessionID: "s-1", TerminalID: "t-1", Message: "Restore main"})
+	}()
+	<-entered
+	clk.Advance(lane.AnswerDeliveryWindow)
+	err = <-done
+	var undelivered *lane.UndeliveredError
+	if !errors.As(err, &undelivered) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("confirmation err=%v, want typed undelivered cancellation", err)
 	}
 }

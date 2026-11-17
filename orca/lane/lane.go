@@ -3,6 +3,7 @@
 package lane
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -71,15 +72,20 @@ type Lane struct {
 	// dispatcher answer. It suppresses quiet-lane replacement and stall
 	// handling while preserving the running lane and terminal.
 	AwaitingInputSince time.Time `json:"awaiting_input_since,omitempty"`
-	PRHead             string    `json:"pr_head,omitempty"`
-	ApprovalSHA        string    `json:"approval_sha,omitempty"`
-	MergeSHA           string    `json:"merge_sha,omitempty"`
-	Checks             string    `json:"checks,omitempty"`
-	LastEventID        string    `json:"last_event_id,omitempty"`
-	Round              int       `json:"round,omitempty"`
-	Attempt            int       `json:"attempt,omitempty"`
-	RecipeVersion      int       `json:"recipe_version,omitempty"`
-	PR                 int       `json:"pr,omitempty"`
+	// Question retains the lane's own report question through answer delivery.
+	Question          string    `json:"question,omitempty"`
+	AnswerAttemptedAt time.Time `json:"answer_attempted_at,omitempty"`
+	AnswerConfirmedAt time.Time `json:"answer_confirmed_at,omitempty"`
+	PRHead            string    `json:"pr_head,omitempty"`
+	ApprovalSHA       string    `json:"approval_sha,omitempty"`
+	MergeSHA          string    `json:"merge_sha,omitempty"`
+	Checks            string    `json:"checks,omitempty"`
+	LastEventID       string    `json:"last_event_id,omitempty"`
+	AnswerEpoch       int       `json:"answer_epoch,omitempty"`
+	Round             int       `json:"round,omitempty"`
+	Attempt           int       `json:"attempt,omitempty"`
+	RecipeVersion     int       `json:"recipe_version,omitempty"`
+	PR                int       `json:"pr,omitempty"`
 }
 
 func (l Lane) Clone() Lane {
@@ -149,6 +155,10 @@ func (l *Lane) MaxRound(phase string) int {
 // RecordAttempt records sessionID and terminalID for (phase, round) and sets
 // the lane's active Phase, Round, SessionID, and TerminalID.
 func (l *Lane) RecordAttempt(phase string, round int, sessionID, terminalID string) {
+	if l.TerminalID != terminalID {
+		l.Question = ""
+		l.AnswerAttemptedAt, l.AnswerConfirmedAt, l.AwaitingInputSince = time.Time{}, time.Time{}, time.Time{}
+	}
 	if round < 1 {
 		round = 1
 	}
@@ -442,6 +452,37 @@ type SteerRequest struct {
 	SessionID  string `json:"session_id,omitempty"`
 	TerminalID string `json:"terminal_id,omitempty"`
 	Message    string `json:"message"`
+	Select     int    `json:"select,omitempty"`
+}
+
+// AnswerDeliveryWindow bounds confirmation and collapses immediate re-asks.
+const AnswerDeliveryWindow = 20 * time.Second
+
+// AnswerDeliverySource identifies a delivery failure that requires judgment,
+// without triggering the controller's stalled-terminal recovery.
+const AnswerDeliverySource = "lane.answer"
+
+// UndeliveredError means input was submitted but agent execution was not confirmed.
+type UndeliveredError struct {
+	Cause      error
+	TerminalID string
+}
+
+func (e *UndeliveredError) Error() string {
+	return fmt.Sprintf("answer not delivered to terminal %s: %v", e.TerminalID, e.Cause)
+}
+
+func (e *UndeliveredError) Unwrap() error { return e.Cause }
+
+// QuestionText returns the stable question independent of report metadata.
+func (p PhaseReport) QuestionText() string {
+	return strings.Join(strings.Fields(cmp.Or(p.Ask, p.Reason, p.Summary, "(no question text)")), " ")
+}
+
+// DuplicateQuestion suppresses a re-ask while delivery is pending or settling.
+func (l Lane) DuplicateQuestion(question string, now time.Time) bool {
+	return l.Question == question &&
+		(l.AnswerConfirmedAt.IsZero() || now.Before(l.AnswerConfirmedAt.Add(AnswerDeliveryWindow)))
 }
 
 // StopRequest terminates a running lane session/terminal.

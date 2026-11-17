@@ -1019,6 +1019,12 @@ func (d *Dispatcher) handleRawToolCall(
 		if state != nil && !isReadOnlyTool(act.Tool) {
 			state.view = nil
 		}
+		var undelivered *lane.UndeliveredError
+		if errors.As(execErr, &undelivered) && state != nil {
+			// The submission already happened. Another mutation in this batch would
+			// resend the answer before the controller can report delivery failure.
+			state.accepted = append(state.accepted, act)
+		}
 		var invErr *invariantViolationError
 		if errors.As(execErr, &invErr) {
 			if state != nil {
@@ -1604,28 +1610,7 @@ func (d *Dispatcher) applyLaneSteer(ctx context.Context, runID string, view *Sta
 	if settled, msg, err := d.reconcileLanePRState(ctx, runID, &ln); settled || err != nil {
 		return msg, err
 	}
-	if drv := d.laneDriver(); drv != nil {
-		if err := drv.Steer(ctx, lane.SteerRequest{
-			RunID:      runID,
-			LaneID:     ln.ID,
-			SessionID:  ln.SessionID,
-			TerminalID: ln.TerminalID,
-			Message:    p.Note,
-		}); err != nil {
-			return "", err
-		}
-	}
-	if ln.HostHoldReason != "" {
-		// A dispatcher steer is an explicit post-adoption instruction. It is the
-		// durable point at which a host hold may be lifted.
-		ln.HostHoldReason = ""
-		if ln.Status == lane.StatusBlocked {
-			ln.Status = lane.StatusRunning
-		}
-	}
-	ln.AwaitingInputSince = time.Time{}
-	ln.LastEventAt = d.clock.Now().UTC()
-	if err := d.store.Lanes().Upsert(ctx, ln); err != nil {
+	if err := d.deliverLaneAnswer(ctx, runID, &ln, p.Note, p.Select, true); err != nil {
 		return "", err
 	}
 	resolved, err := d.resolveOrcaEscalation(ctx, runID, &ln, "steer")
@@ -1658,19 +1643,7 @@ func (d *Dispatcher) applyLaneForward(ctx context.Context, runID string, view *S
 	if from != "" {
 		msg = fmt.Sprintf("Forwarded finding from lane %s: %s", from, finding)
 	}
-	if drv := d.laneDriver(); drv != nil {
-		if err := drv.Steer(ctx, lane.SteerRequest{
-			RunID:      runID,
-			LaneID:     target.ID,
-			SessionID:  target.SessionID,
-			TerminalID: target.TerminalID,
-			Message:    msg,
-		}); err != nil {
-			return "", err
-		}
-	}
-	target.LastEventAt = d.clock.Now().UTC()
-	if err := d.store.Lanes().Upsert(ctx, target); err != nil {
+	if err := d.deliverLaneAnswer(ctx, runID, &target, msg, 0, false); err != nil {
 		return "", err
 	}
 	resolved, err := d.resolveOrcaEscalation(ctx, runID, &target, "forward")
@@ -1687,6 +1660,49 @@ func (d *Dispatcher) applyLaneForward(ctx context.Context, runID string, view *S
 		result = resolved + "; " + result
 	}
 	return result, nil
+}
+
+func (d *Dispatcher) deliverLaneAnswer(ctx context.Context, runID string, ln *lane.Lane, message string, selectOption int, liftHostHold bool) error {
+	ln.AnswerAttemptedAt = d.clock.Now().UTC()
+	ln.AnswerConfirmedAt = time.Time{}
+	if err := d.store.Lanes().Upsert(ctx, *ln); err != nil {
+		return err
+	}
+	if drv := d.laneDriver(); drv != nil {
+		err := drv.Steer(ctx, lane.SteerRequest{RunID: runID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: message, Select: selectOption})
+		if err != nil {
+			ln.AwaitingInputSince = ln.AnswerAttemptedAt
+			if saveErr := d.store.Lanes().Upsert(ctx, *ln); saveErr != nil {
+				return errors.Join(err, saveErr)
+			}
+			_, saveErr := d.store.Events().Append(ctx, store.Event{RunID: runID, LaneID: ln.ID, Kind: store.EventStall, Class: store.EventClassJudgment, Source: lane.AnswerDeliverySource, Urgent: true, Summary: "answer not delivered: " + err.Error()})
+			return errors.Join(err, saveErr)
+		}
+	}
+	ownQuestion := ln.Question != "" || !ln.AwaitingInputSince.IsZero()
+	if ownQuestion && ln.HostHoldReason == "" && ln.Status == lane.StatusBlocked {
+		dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, Scope: ln.ID, ActiveOnly: true})
+		if err != nil {
+			return err
+		}
+		ownerBlocked := slices.ContainsFunc(dirs, func(dir store.Directive) bool {
+			return strings.HasPrefix(dir.Ref, ownerAskRefPrefix) && !strings.HasPrefix(dir.Ref, ownerAskRefPrefix+"escalation-")
+		})
+		if !ownerBlocked {
+			ln.Status = lane.StatusRunning
+		}
+	}
+	if liftHostHold && ln.HostHoldReason != "" {
+		ln.HostHoldReason = ""
+		if ln.Status == lane.StatusBlocked {
+			ln.Status = lane.StatusRunning
+		}
+	}
+	ln.AwaitingInputSince = time.Time{}
+	ln.AnswerConfirmedAt = d.clock.Now().UTC()
+	ln.AnswerEpoch++
+	ln.LastEventAt = ln.AnswerConfirmedAt
+	return d.store.Lanes().Upsert(ctx, *ln)
 }
 
 func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *StateView, p LaneRetryParams) (string, error) {
@@ -2261,7 +2277,7 @@ func (d *Dispatcher) syncRunContract(ctx context.Context, runID string) {
 			SessionID:  ln.SessionID,
 			TerminalID: ln.TerminalID,
 			Message:    msg,
-		}); sErr == nil {
+		}); sErr == nil || isSubmittedSteerError(sErr) {
 			d.mu.Lock()
 			if d.contractBroadcasts == nil {
 				d.contractBroadcasts = make(map[string]map[string]bool)
@@ -2279,6 +2295,11 @@ func (d *Dispatcher) syncRunContract(ctx context.Context, runID string) {
 			d.cfg.Logger.WarnContext(ctx, "dispatcher: steer run contract failed", "run_id", runID, "lane_id", ln.ID, "err", sErr)
 		}
 	}
+}
+
+func isSubmittedSteerError(err error) bool {
+	var undelivered *lane.UndeliveredError
+	return errors.As(err, &undelivered)
 }
 
 func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, state *turnExecState, view *StateView, p DirectiveRevokeParams) (string, error) {
@@ -3833,13 +3854,7 @@ func (d *Dispatcher) applyMailAnswer(
 		if ln, ok := view.Lane(laneID); ok {
 			if !delivered {
 				if drv := d.laneDriver(); drv != nil && (ln.SessionID != "" || ln.TerminalID != "") {
-					if err := drv.Steer(ctx, lane.SteerRequest{
-						RunID:      runID,
-						LaneID:     ln.ID,
-						SessionID:  ln.SessionID,
-						TerminalID: ln.TerminalID,
-						Message:    answer,
-					}); err != nil {
+					if err := d.deliverLaneAnswer(ctx, runID, &ln, answer, 0, false); err != nil {
 						return "", err
 					}
 				}

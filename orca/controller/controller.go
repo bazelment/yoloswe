@@ -585,7 +585,7 @@ func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
 			}
 			r, _ := c.resolveRecipe(ctx, ln)
 			rung, waiting := c.quietLadderRungFromStore(ctx, ln, r, now)
-			quietKey := fmt.Sprintf("%s:%d:%d:%s:%d:%d:%t", ln.Phase, max(ln.Round, 1), max(ln.Attempt, 1), ln.TerminalID, ln.LastEventAt.UTC().UnixNano(), rung, waiting)
+			quietKey := fmt.Sprintf("%s:%d:%d:%s:%d:%d:%t:%d", ln.Phase, max(ln.Round, 1), max(ln.Attempt, 1), ln.TerminalID, ln.LastEventAt.UTC().UnixNano(), rung, waiting, ln.AnswerEpoch)
 			c.quietMu.Lock()
 			already := c.emittedQuiet[ln.ID] == quietKey
 			if !already {
@@ -631,7 +631,7 @@ func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
 	identity, _ := json.Marshal(idEv)
 	eventID := fmt.Sprintf("lane-watch-%x", sha256.Sum256(identity))
 	summary := ev.Text
-	urgent := false
+	urgent := ev.Kind == lane.EventPhaseReported && ev.Report != nil && (ev.Report.Outcome == lane.OutcomeNeedsInput || ev.Report.Outcome == lane.OutcomeBlocked)
 	if ev.Kind == lane.EventWaitingForInput {
 		tail := waitingInputTail(ev.Text)
 		eventID = waitingInputEventID(ev.LaneID, ev.TerminalID, tail)
@@ -656,6 +656,11 @@ func (c *Controller) forwardLaneEvent(ctx context.Context, ev lane.Event) bool {
 func (c *Controller) hasExistingLaneReport(ctx context.Context, ev lane.Event) bool {
 	if ev.Report == nil || ev.LaneID == "" {
 		return false
+	}
+	if ev.Report.Outcome == lane.OutcomeNeedsInput || ev.Report.Outcome == lane.OutcomeBlocked {
+		if ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ev.LaneID); err == nil && ln.DuplicateQuestion(ev.Report.QuestionText(), c.clock.Now()) {
+			return true
+		}
 	}
 	evs, err := c.store.Events().List(ctx, store.EventFilter{
 		RunID:  c.cfg.RunID,
@@ -1192,6 +1197,40 @@ func (c *Controller) answerOwnerAsk(ctx context.Context, askID, chosenOption str
 	return c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dir.ID, store.DirectiveHandled)
 }
 
+// recordUndeliveredSteer preserves the fact that a steer was submitted even
+// when the lane driver could not confirm that the agent resumed. The action
+// key makes retries idempotent, while the urgent event lets the dispatcher
+// decide how to handle the unconfirmed lane.
+func (c *Controller) recordUndeliveredSteer(ctx context.Context, ln *lane.Lane, actionKey, tool, reason string, args DecisionArgs, err error) error {
+	now := c.clock.Now().UTC()
+	ln.AwaitingInputSince = now
+	ln.AnswerAttemptedAt = now
+	ln.AnswerConfirmedAt = time.Time{}
+	if saveErr := c.store.Lanes().Upsert(ctx, *ln); saveErr != nil {
+		return saveErr
+	}
+	eventID := "undelivered-" + actionKey
+	ev, saveErr := c.store.Events().Append(ctx, store.Event{
+		ID:      eventID,
+		RunID:   c.cfg.RunID,
+		LaneID:  ln.ID,
+		Kind:    store.EventStall,
+		Class:   store.EventClassJudgment,
+		Source:  lane.AnswerDeliverySource,
+		Urgent:  true,
+		Summary: "answer not delivered: " + err.Error(),
+	})
+	if saveErr != nil && !errors.Is(saveErr, store.ErrAlreadyExists) {
+		return saveErr
+	}
+	if saveErr == nil {
+		c.enqueueJudgmentEvent(ev)
+	}
+	args.ActionKey = actionKey
+	_, _, saveErr = c.recordDecision(ctx, tool, ln.ID, reason, err.Error(), args)
+	return saveErr
+}
+
 func (c *Controller) applyOwnerAskResolution(ctx context.Context, ask OwnerAsk, directiveID, chosenOption, steerMsg, eventID string) error {
 	resDir := store.Directive{
 		ID:     directiveID,
@@ -1214,20 +1253,33 @@ func (c *Controller) applyOwnerAskResolution(ctx context.Context, ask OwnerAsk, 
 	if strings.HasPrefix(strings.TrimSpace(chosenOption), "hold:") {
 		return nil
 	}
+	steerConfirmed := false
 	if ask.LaneID != "" {
 		if ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ask.LaneID); err == nil {
 			if !ln.Status.Terminal() && (ln.SessionID != "" || ln.TerminalID != "") {
-				if err := c.driver.Steer(ctx, lane.SteerRequest{
+				if c.hasActionDecision(directiveID) {
+					// The prior submission is durable; do not send it again.
+				} else if err := c.driver.Steer(ctx, lane.SteerRequest{
 					RunID:      c.cfg.RunID,
 					LaneID:     ln.ID,
 					SessionID:  ln.SessionID,
 					TerminalID: ln.TerminalID,
 					Message:    steerMsg,
 				}); err != nil {
-					return err
+					var undelivered *lane.UndeliveredError
+					if !errors.As(err, &undelivered) {
+						return err
+					}
+					if err := c.recordUndeliveredSteer(ctx, ln, directiveID, "owner.answer", "owner answer submitted but not confirmed", DecisionArgs{AskID: ask.ID}, err); err != nil {
+						return err
+					}
+				} else {
+					steerConfirmed = true
 				}
+			} else {
+				steerConfirmed = true
 			}
-			if ln.Status == lane.StatusBlocked {
+			if ln.Status == lane.StatusBlocked && steerConfirmed {
 				ln.Status = lane.StatusRunning
 				ln.HostHoldReason = ""
 				if eventID != "" {
@@ -1461,6 +1513,10 @@ func (c *Controller) recoverPendingState(ctx context.Context) error {
 					}
 					continue
 				}
+			}
+			var rep lane.PhaseReport
+			if json.Unmarshal(ev.Payload, &rep) == nil && (rep.Outcome == lane.OutcomeNeedsInput || rep.Outcome == lane.OutcomeBlocked) {
+				ev.Urgent = true
 			}
 			ev.Class = store.EventClassJudgment
 			c.enqueueJudgmentEvent(ev)
@@ -1779,7 +1835,11 @@ func (c *Controller) checkLaneUnpushedWork(ctx context.Context, ln *lane.Lane, n
 			TerminalID: ln.TerminalID,
 			Message:    msg,
 		}); err != nil {
-			return err
+			var undelivered *lane.UndeliveredError
+			if !errors.As(err, &undelivered) {
+				return err
+			}
+			return c.recordUndeliveredSteer(ctx, ln, steerKey, "lane.unpushed.steer", "unpushed work steer submitted but not confirmed", DecisionArgs{Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: max(ln.Attempt, 1), SessionID: ln.SessionID, TerminalID: ln.TerminalID}, err)
 		}
 		_, _, err := c.recordDecision(ctx, "lane.unpushed.steer", ln.ID,
 			"unpushed work older than threshold; steered lane to push WIP",
@@ -1856,7 +1916,15 @@ func (c *Controller) checkLaneDiskHealth(ctx context.Context, ln *lane.Lane) err
 		TerminalID: ln.TerminalID,
 		Message:    noteMsg,
 	}); err != nil {
-		return err
+		var undelivered *lane.UndeliveredError
+		if !errors.As(err, &undelivered) {
+			return err
+		}
+		if saveErr := c.recordUndeliveredSteer(ctx, ln, diskKey, "lane.health.disk", "disk pressure steer submitted but not confirmed", DecisionArgs{Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: max(ln.Attempt, 1), SessionID: ln.SessionID, TerminalID: ln.TerminalID}, err); saveErr != nil {
+			return saveErr
+		}
+		_, _ = c.store.Notes().Append(ctx, store.RunNote{ID: "disk-pressure-" + ln.ID, RunID: c.cfg.RunID, TaskID: cmp.Or(ln.ItemID, ln.ID), Phase: ln.Phase, Text: noteMsg})
+		return nil
 	}
 	_, _ = c.store.Notes().Append(ctx, store.RunNote{
 		ID:     "disk-pressure-" + ln.ID,
@@ -2005,6 +2073,9 @@ func (c *Controller) advanceExpiredNudges(ctx context.Context, urgentFlush *bool
 	now := c.clock.Now().UTC()
 	for i := range running {
 		ln := running[i]
+		if !ln.AwaitingInputSince.IsZero() {
+			continue
+		}
 		if c.terminalIsWorkingOrUnknown(ctx, ln.TerminalID) || c.sessionIsBusy(ctx, ln) || c.hasActiveExpectedWait(ctx, ln.ID, now) {
 			continue
 		}
@@ -2016,7 +2087,7 @@ func (c *Controller) advanceExpiredNudges(ctx context.Context, urgentFlush *bool
 		if rung != 1 || waiting {
 			continue
 		}
-		key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
+		key := quietLaneKey(&ln)
 		if c.hasActionDecision("restart:fresh:" + key) {
 			continue
 		}
@@ -2173,6 +2244,9 @@ func (c *Controller) routeWorkerQuestion(ctx context.Context, ev *store.Event) (
 		contextParts = append(contextParts, item.Description, item.Acceptance)
 	}
 	questionKey := "worker-answer:" + ev.ID
+	if c.hasActionDecision(questionKey) {
+		return true, nil
+	}
 	var answer string
 	if c.cfg.AnswerQuestion != nil && !c.hasActionDecision(questionKey) {
 		answer, err = c.cfg.AnswerQuestion(ctx, msg.Body, strings.Join(contextParts, "\n"))
@@ -2188,11 +2262,18 @@ func (c *Controller) routeWorkerQuestion(ctx context.Context, ev *store.Event) (
 			}
 		}
 		_ = mailbox.MarkAnswered(ctx, c.store, c.cfg.RunID, ln.ID, msg.ID, ev.ID, answer)
-		if err := c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Use the task text and notes:\n" + answer}); err != nil {
-			return false, err
-		}
 		if _, err := c.store.Notes().Append(ctx, store.RunNote{ID: "worker-answer-" + ev.ID, RunID: c.cfg.RunID, TaskID: cmp.Or(ln.ItemID, ln.ID), Text: "Question: " + msg.Body + "\nAnswer: " + answer}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			return false, err
+		}
+		if err := c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Use the task text and notes:\n" + answer}); err != nil {
+			var undelivered *lane.UndeliveredError
+			if !errors.As(err, &undelivered) {
+				return false, err
+			}
+			if err := c.recordUndeliveredSteer(ctx, ln, questionKey, "worker.question.answer", "worker answer submitted but not confirmed", DecisionArgs{EventID: ev.ID}, err); err != nil {
+				return false, err
+			}
+			return true, nil
 		}
 		_, _, err := c.recordDecision(ctx, "worker.question.answer", ln.ID, msg.Body, answer, DecisionArgs{ActionKey: questionKey, EventID: ev.ID})
 		return true, err
@@ -2228,7 +2309,21 @@ func (c *Controller) routeWorkerQuestion(ctx context.Context, ev *store.Event) (
 			return false, err
 		}
 	}
-	return true, c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Continue with the default: " + ask.Default + ". The owner question is pending."})
+	defaultKey := questionKey
+	if c.hasActionDecision(defaultKey) {
+		return true, nil
+	}
+	err = c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Continue with the default: " + ask.Default + ". The owner question is pending."})
+	if err != nil {
+		var undelivered *lane.UndeliveredError
+		if !errors.As(err, &undelivered) {
+			return true, err
+		}
+		if err := c.recordUndeliveredSteer(ctx, ln, defaultKey, "worker.question.default", "worker default steer submitted but not confirmed", DecisionArgs{EventID: ev.ID}, err); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
 }
 
 func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (store.EventClass, error) {
@@ -2255,6 +2350,18 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 	}
 	if rep.TerminalID != "" && ln.TerminalID != "" && rep.TerminalID != ln.TerminalID {
 		return store.EventClassAuto, nil
+	}
+	if rep.Outcome == lane.OutcomeNeedsInput || rep.Outcome == lane.OutcomeBlocked {
+		ev.Urgent = true
+		question := rep.QuestionText()
+		if ln.DuplicateQuestion(question, c.clock.Now()) {
+			_, _, err := c.recordDecision(ctx, "lane.question.duplicate", ln.ID, "same question pending or settling", "suppressed duplicate question", DecisionArgs{EventID: ev.ID})
+			return store.EventClassAuto, err
+		}
+		ln.Question = question
+		ln.AnswerAttemptedAt, ln.AnswerConfirmedAt = time.Time{}, time.Time{}
+	} else {
+		ln.Question = ""
 	}
 	if !ln.AwaitingInputSince.IsZero() {
 		ln.AwaitingInputSince = time.Time{}
@@ -2801,7 +2908,10 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 	if payload.ExitCode == 0 && (payload.Error == "" || payload.Kind == lane.EventTurnEndedNoReport || payload.Kind == lane.EventExited) {
 		if termID != "" && c.driver != nil {
 			if rep, err := c.driver.ReadReport(ctx, c.cfg.RunID, ln.ID, termID); err == nil && rep != nil && rep.Outcome.Valid() {
-				return c.handleLaneReport(ctx, ev)
+				answeredQuestion := (rep.Outcome == lane.OutcomeNeedsInput || rep.Outcome == lane.OutcomeBlocked) && ln.Question == rep.QuestionText() && !ln.AnswerConfirmedAt.IsZero()
+				if !answeredQuestion {
+					return c.handleLaneReport(ctx, ev)
+				}
 			}
 		}
 	}
@@ -2843,7 +2953,7 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		ln.LastEventAt = now
 	}
 	if quiet {
-		key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
+		key := quietLaneKey(ln)
 		switch {
 		case !c.hasActionDecision("restart:nudge:" + key):
 			if _, _, err := c.recordDecision(ctx, ToolPhaseRetry+".intent", ln.ID, "quiet lane: nudge before restart", "effect pending", DecisionArgs{ActionKey: "intent:restart:nudge:" + key, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt}); err != nil {
@@ -2851,7 +2961,22 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 			}
 
 			if err := c.driver.Steer(ctx, lane.SteerRequest{RunID: c.cfg.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: "Continue and file the required phase report."}); err != nil {
-				return store.EventClassUnclassified, err
+				var undelivered *lane.UndeliveredError
+				if !errors.As(err, &undelivered) {
+					return store.EventClassUnclassified, err
+				}
+				ln.AwaitingInputSince = now
+				ln.AnswerAttemptedAt, ln.AnswerConfirmedAt = now, time.Time{}
+				if saveErr := c.store.Lanes().Upsert(ctx, *ln); saveErr != nil {
+					return store.EventClassUnclassified, saveErr
+				}
+				failure, saveErr := c.store.Events().Append(ctx, store.Event{ID: "undelivered-" + ev.ID, RunID: c.cfg.RunID, LaneID: ln.ID, Kind: store.EventStall, Class: store.EventClassJudgment, Source: lane.AnswerDeliverySource, Urgent: true, Summary: err.Error()})
+				if saveErr != nil {
+					return store.EventClassUnclassified, saveErr
+				}
+				c.enqueueJudgmentEvent(failure)
+				_, _, saveErr = c.recordDecision(ctx, ToolPhaseRetry, ln.ID, "quiet lane: nudge before restart", err.Error(), DecisionArgs{ActionKey: "restart:nudge:" + key, EventID: ev.ID, Phase: ln.Phase, Round: max(ln.Round, 1), Attempt: curAttempt})
+				return store.EventClassAuto, saveErr
 			}
 			if err := c.store.Lanes().Upsert(ctx, *ln); err != nil {
 				return store.EventClassUnclassified, err
@@ -2996,7 +3121,7 @@ func (c *Controller) pendingVerdictForLane(ctx context.Context, ln *lane.Lane) (
 }
 
 func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.EventClass, error) {
-	if ev.LaneID == "" || ev.Source == "lane.unpushed" || ev.Source == "lane.health" {
+	if ev.LaneID == "" || ev.Source == "lane.unpushed" || ev.Source == "lane.health" || ev.Source == lane.AnswerDeliverySource {
 		return store.EventClassJudgment, nil
 	}
 	ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ev.LaneID)
@@ -3814,11 +3939,19 @@ func (c *Controller) nudgeWaitDuration(r *recipe.Recipe) time.Duration {
 	return max(timeout/2, 5*time.Minute)
 }
 
+func quietLaneKey(ln *lane.Lane) string {
+	key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
+	if ln.AnswerEpoch > 0 {
+		key += fmt.Sprintf(":answer-%d", ln.AnswerEpoch)
+	}
+	return key
+}
+
 func (c *Controller) quietLadderRungFromStore(ctx context.Context, ln *lane.Lane, r *recipe.Recipe, now time.Time) (int, bool) {
 	if ln == nil || c.store == nil {
 		return 0, false
 	}
-	key := fmt.Sprintf("%s:%s:%d", ln.ID, ln.Phase, max(ln.Round, 1))
+	key := quietLaneKey(ln)
 	nudgeKey := "restart:nudge:" + key
 	freshKey := "restart:fresh:" + key
 
