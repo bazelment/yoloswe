@@ -165,12 +165,13 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 			Session: t.SessionID, Terminal: t.Terminals[t.Phase][strconv.Itoa(round)], TerminalState: t.TerminalState,
 			HostHold: ledgerHostHold(t.BlockedOn, t.HoldNote, t.Hold, t.Park, t.Note), PRDraft: t.PRDraft || t.Draft,
 			PRState: t.PRState, MergeSHA: t.MergeSHA, Head: firstNonEmpty(t.PRHead, t.Head), Checks: t.Checks}
+		applySpawnEvidence(dir, &x)
 		x.PRDraft = x.PRDraft || isDraftPR(x.PRState)
 		if t.PR > 0 {
 			x.PR = strconv.Itoa(t.PR)
 		}
 		x.Integrated = x.MergeSHA != ""
-		x.ReportPath = latestReport(dir, t.ID, t.Phase, round)
+		x.ReportPath = latestReport(dir, t.ID, x.Phase, round)
 		x.WaitingOn, x.WaitDeadline = parseHostWait(t.WaitingOn, t.Deadline)
 		if x.ReportPath != "" {
 			applyAttnAnswer(dir, &x)
@@ -284,6 +285,9 @@ func laneMergeNotePRs(path string) map[string][]string {
 func latestReport(dir, laneID, phase string, round int) string {
 	if phase != "" {
 		if p := filepath.Join(dir, "reports", fmt.Sprintf("%s.%s.r%d.md", laneID, phase, round)); fileExists(p) {
+			return p
+		}
+		if p := filepath.Join(dir, fmt.Sprintf("%s.%s.md", laneID, phase)); fileExists(p) {
 			return p
 		}
 	}
