@@ -852,7 +852,7 @@ func integrationEvidenceNeeded(ln Lane) bool {
 		return false
 	}
 	if strings.EqualFold(strings.TrimSpace(ln.Phase), "integrate") {
-		return strings.TrimSpace(ln.MergeSHA) == "" && !ln.targetIntegrated
+		return !validGitSHA(strings.TrimSpace(ln.MergeSHA)) && !ln.targetIntegrated
 	}
 	return !integratedLane(ln)
 }
@@ -1182,9 +1182,13 @@ type spawnFile struct {
 }
 
 func importLane(dir string, l *ledgerLane) Lane {
+	mergeSHA := strings.TrimSpace(l.MergeSHA)
+	if !validGitSHA(mergeSHA) {
+		mergeSHA = ""
+	}
 	x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: l.Status, Round: l.Round,
 		HostHold: ledgerHostHold(l.BlockedOn, l.HoldNote, l.Hold, l.Park, l.Note), PRDraft: l.PRDraft || l.Draft,
-		PRState: l.PRState, MergeSHA: l.MergeSHA, Head: firstNonEmpty(l.PRHead, l.Head), Mode: l.Mode, Checks: l.Checks}
+		PRState: l.PRState, MergeSHA: mergeSHA, Head: firstNonEmpty(l.PRHead, l.Head), Mode: l.Mode, Checks: l.Checks}
 	x.PRDraft = x.PRDraft || isDraftPR(x.PRState)
 	x.Session, x.Terminal = l.NebulaSession, l.NebulaTerminal
 	applySpawnEvidence(dir, &x)
