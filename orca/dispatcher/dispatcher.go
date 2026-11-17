@@ -162,8 +162,19 @@ type Dispatcher struct {
 	lastResult         *BatchResult
 	cfg                Config
 	seq                int64
-	ownerAskMu         sync.Mutex
 	mu                 sync.Mutex
+}
+
+// ownerAskRunLocks serializes the read/check/register sequence for a run
+// across all Dispatcher instances. Adopted escalation creates a short-lived
+// Dispatcher for each callback, so a mutex on Dispatcher itself cannot enforce
+// the one-open-ask-per-lane invariant.
+var ownerAskRunLocks sync.Map // map[string]*sync.Mutex
+
+func ownerAskLock(runID string) *sync.Mutex {
+	lock := &sync.Mutex{}
+	actual, _ := ownerAskRunLocks.LoadOrStore(strings.TrimSpace(runID), lock)
+	return actual.(*sync.Mutex)
 }
 
 type spawnDriverError struct{ err error }
@@ -2031,8 +2042,9 @@ func (d *Dispatcher) RegisterOwnerAsk(ctx context.Context, runID string, p Owner
 }
 
 func (d *Dispatcher) applyOwnerAsk(ctx context.Context, runID string, state *turnExecState, p OwnerAskParams) (string, error) {
-	d.ownerAskMu.Lock()
-	defer d.ownerAskMu.Unlock()
+	lock := ownerAskLock(runID)
+	lock.Lock()
+	defer lock.Unlock()
 	now := d.clock.Now().UTC()
 	dl, err := parseFutureTime(now, p.Deadline)
 	if err != nil {
@@ -2183,7 +2195,7 @@ func (d *Dispatcher) prepareOwnerAskLane(ctx context.Context, ask registeredOwne
 		return err
 	}
 	if ln != nil && (ln.Status == lane.StatusRunning || (ask.HostStep != "" && !ln.Status.Terminal())) {
-		if len(d.mailboxes()) > 0 && ask.HostStep == "" {
+		if len(d.mailboxes()) > 0 && ask.HostStep == "" && !strings.HasPrefix(strings.TrimSpace(ask.Default), "hold:") {
 			if drv := d.laneDriver(); drv != nil {
 				msg := cmp.Or(strings.TrimSpace(ask.SteerNote), "Continue with the default: "+ask.Default+". The owner question is pending.")
 				if err := drv.Steer(ctx, lane.SteerRequest{RunID: ask.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: msg}); err != nil {

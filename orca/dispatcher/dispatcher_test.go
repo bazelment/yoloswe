@@ -2350,6 +2350,61 @@ func TestOwnerAskDeliveryDedupeRestartAndRetry(t *testing.T) {
 	}
 }
 
+func TestOwnerAskRegistrationDedupeAcrossDispatchers(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	box := &ownerAskMailbox{Mailbox: mailboxfake.New(st.Events(), "run-1")}
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{RunID: "run-1", ID: "lane", Status: lane.StatusRunning}); err != nil {
+		t.Fatal(err)
+	}
+	params := dispatcher.OwnerAskParams{LaneID: "lane", Question: "Approve the budget?", Options: []string{"yes", "defer"}, Default: "defer", Deadline: "1h"}
+	d1 := dispatcher.New(dispatcher.Config{Mailboxes: []mailbox.Mailbox{box}}, st, drv, clk, nil)
+	d2 := dispatcher.New(dispatcher.Config{Mailboxes: []mailbox.Mailbox{box}}, st, drv, clk, nil)
+	errs := make(chan error, 2)
+	go func() {
+		p := params
+		p.ID = "ask-one"
+		_, err := d1.RegisterOwnerAsk(t.Context(), "run-1", p)
+		errs <- err
+	}()
+	go func() {
+		p := params
+		p.ID = "ask-two"
+		_, err := d2.RegisterOwnerAsk(t.Context(), "run-1", p)
+		errs <- err
+	}()
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(box.questions) != 1 {
+		t.Fatalf("mail=%+v, want one question across dispatcher instances", box.questions)
+	}
+	asks, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: "run-1", ActiveOnly: true})
+	if err != nil || len(asks) != 1 || !strings.HasPrefix(asks[0].Ref, "owner_ask:") {
+		t.Fatalf("active asks=%+v err=%v, want one owner ask", asks, err)
+	}
+}
+
+func TestOwnerAskHoldDefaultParksLane(t *testing.T) {
+	t.Parallel()
+	clk, st, drv := setupTestEnv(t)
+	box := &ownerAskMailbox{Mailbox: mailboxfake.New(st.Events(), "run-1")}
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{RunID: "run-1", ID: "lane", Status: lane.StatusRunning}); err != nil {
+		t.Fatal(err)
+	}
+	d := dispatcher.New(dispatcher.Config{Mailboxes: []mailbox.Mailbox{box}}, st, drv, clk, nil)
+	_, err := d.RegisterOwnerAsk(t.Context(), "run-1", dispatcher.OwnerAskParams{ID: "hold", LaneID: "lane", Question: "Approve?", Options: []string{"hold: wait"}, Default: "hold: wait", Deadline: "1h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := st.Lanes().Get(t.Context(), "run-1", "lane")
+	if err != nil || ln.Status != lane.StatusBlocked || len(drv.Steers) != 0 {
+		t.Fatalf("hold default should park lane: lane=%+v err=%v steers=%+v", ln, err, drv.Steers)
+	}
+}
+
 func TestOwnerAskRetriesOnlyFailedTransport(t *testing.T) {
 	t.Parallel()
 	clk, st, drv := setupTestEnv(t)
