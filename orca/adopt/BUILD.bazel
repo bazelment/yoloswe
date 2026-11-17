@@ -26,6 +26,7 @@ go_test(
     name = "adopt_test",
     srcs = [
         "adopt_test.go",
+        "controller_regression_test.go",
         "nebulaswarm_test.go",
     ],
     embed = [":adopt"],

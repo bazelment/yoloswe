@@ -1775,9 +1775,13 @@ func TestAdoptedSpawnRefusedWhenRepoMissing(t *testing.T) {
 	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
 	s := nsService(root, loop, label)
 	s.Driver = controllers
-	_, err = s.Adopt(t.Context(), nsRun)
-	if err == nil || !strings.Contains(err.Error(), "repository is not configured") {
-		t.Fatalf("Adopt with missing repository = %v, want repository is not configured error", err)
+	r, err := s.Adopt(t.Context(), nsRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+	if status := controllers.ControllerStatus(nsRun); !strings.Contains(status, "m2-gaps3") || !strings.Contains(status, "repository is not configured") {
+		t.Fatalf("controller status = %q, want lane-local repository failure", status)
 	}
 	if got := creates.Load(); got != 0 {
 		t.Fatalf("POST /api/code-sessions called %d times, want 0", got)
@@ -1835,9 +1839,13 @@ func TestAdoptedSpawnReleasesSessionInWrongRepo(t *testing.T) {
 	label, loop := &fakeLabeler{label: "claude"}, &fakeWatcher{running: false}
 	s := nsService(root, loop, label)
 	s.Driver = controllers
-	_, err = s.Adopt(t.Context(), nsRun)
-	if err == nil {
-		t.Fatal("Adopt succeeded on wrong-repo session; want error")
+	r, err := s.Adopt(t.Context(), nsRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controllers.Stop(context.Background(), r) })
+	if status := controllers.ControllerStatus(nsRun); !strings.Contains(status, "m2-gaps3") || !strings.Contains(status, "does not match expected") {
+		t.Fatalf("controller status = %q, want lane-local repository mismatch", status)
 	}
 	if got, _ := released.Load().(string); got != "018a40a9" {
 		t.Fatalf("released session = %q, want 018a40a9", got)
@@ -3544,9 +3552,13 @@ func TestSubagentSwarmLocalBareRepoResolution(t *testing.T) {
 			Holder:   ChatHolder("front-desk"),
 			Now:      clk.Now,
 		}
-		_, err = svc.Adopt(t.Context(), runID)
-		if err == nil || !strings.Contains(err.Error(), runID) || !strings.Contains(err.Error(), "repository is not configured") {
-			t.Fatalf("Adopt with unresolvable local path = %v, want error naming %s with repository is not configured", err, runID)
+		adopted, err := svc.Adopt(t.Context(), runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = controllers.Stop(context.Background(), adopted) })
+		if status := controllers.ControllerStatus(runID); !strings.Contains(status, runID) || !strings.Contains(status, "mem-overhead") || !strings.Contains(status, "repository is not configured") {
+			t.Fatalf("controller status = %q, want lane-local repository failure naming %s", status, runID)
 		}
 		if got := creates.Load(); got != 0 {
 			t.Fatalf("POST /api/code-sessions called %d times, want 0", got)

@@ -110,6 +110,43 @@ func (d *Controllers) Step(ctx context.Context, runID string) error {
 	return cr.controller.Step(ctx)
 }
 
+func (d *Controllers) prepareStep(ctx context.Context, cr *controlledRun) (bool, error) {
+	settings, err := d.store.Runs().GetSettings(ctx, cr.run.ID)
+	if err != nil {
+		return false, err
+	}
+	cr.controller.SetRuntimeSettings(settings)
+	wasPaused := settings.Paused
+	paused, _, _, msg, err := store.EnforceCostGuard(ctx, d.store, cr.run.ID, d.clock.Now().UTC(), d.MaxCostPerHourUSD)
+	if err != nil {
+		return false, err
+	}
+	if paused && !wasPaused {
+		cr.controller.NotifyOwnerCostGuard(ctx, msg)
+	}
+	if latest, getErr := d.store.Runs().GetSettings(ctx, cr.run.ID); getErr == nil {
+		settings = latest
+		cr.controller.SetRuntimeSettings(settings)
+	}
+	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: cr.run.ID, ActiveOnly: true})
+	if err != nil {
+		return false, err
+	}
+	controlPaused := false
+	for i := range dirs {
+		if dirs[i].Ref != "chat:control" {
+			continue
+		}
+		switch dirs[i].Text {
+		case "pause":
+			controlPaused = true
+		case "stop":
+			return false, controller.ErrControllerStopped
+		}
+	}
+	return !settings.Paused && !controlPaused, nil
+}
+
 // Active reports whether this process currently runs a controller for runID.
 func (d *Controllers) Active(runID string) bool {
 	d.mu.Lock()
@@ -317,6 +354,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		},
 	}
 	var ctrl *controller.Controller
+	var cr *controlledRun
 	var dispatch controller.Judge
 	if d.judges != nil {
 		dispatch = d.judges(r.ID, func(ctx context.Context, runID, askID, text string) error {
@@ -351,6 +389,17 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		}
 	}
 	ctrl = controller.New(controller.Config{
+		BeforeStep:        func(ctx context.Context) (bool, error) { return d.prepareStep(ctx, cr) },
+		IsolateLaneErrors: true,
+		StepError: func(err error) {
+			if cr == nil || err == nil {
+				return
+			}
+			cr.statusMu.Lock()
+			cr.downReason = err.Error()
+			cr.notice = fmt.Sprintf("⚠ controller lane failure: %s", err)
+			cr.statusMu.Unlock()
+		},
 		RunID:             r.ID,
 		HolderID:          holder,
 		PRProbe:           d.runPRProbe(syncer),
@@ -363,7 +412,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		HostRun:           true,
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
-	cr := &controlledRun{
+	cr = &controlledRun{
 		controller: ctrl,
 		dispatch:   dispatch,
 		driver:     runDriver,
@@ -482,7 +531,15 @@ func (d *Controllers) supervise(ctx context.Context, cr *controlledRun) {
 	defer cr.cancel()
 	for {
 		err := cr.controller.Run(ctx)
-		if err == nil || errors.Is(err, controller.ErrControllerStopped) || ctx.Err() != nil {
+		if errors.Is(err, controller.ErrControllerStopped) {
+			cr.statusMu.Lock()
+			cr.downReason = controller.ErrControllerStopped.Error()
+			cr.notice = "⚠ controller stopped"
+			cr.stopped = true
+			cr.statusMu.Unlock()
+			return
+		}
+		if err == nil || ctx.Err() != nil {
 			return
 		}
 		if controller.IsUnrecoverable(err) {
