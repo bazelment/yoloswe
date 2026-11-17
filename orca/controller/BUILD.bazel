@@ -20,8 +20,10 @@ go_test(
     deps = [
         ":controller",
         "//orca/clock",
+        "//orca/dispatcher",
         "//orca/lane",
         "//orca/mailbox",
+        "//orca/model",
         "//orca/recipe",
         "//orca/store",
     ],

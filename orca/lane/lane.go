@@ -67,15 +67,19 @@ type Lane struct {
 	// adoption. It remains distinct from a controller escalation so an explicit
 	// dispatcher/owner action can still resolve the latter normally.
 	HostHoldReason string `json:"host_hold_reason,omitempty"`
-	PRHead         string `json:"pr_head,omitempty"`
-	ApprovalSHA    string `json:"approval_sha,omitempty"`
-	MergeSHA       string `json:"merge_sha,omitempty"`
-	Checks         string `json:"checks,omitempty"`
-	LastEventID    string `json:"last_event_id,omitempty"`
-	Round          int    `json:"round,omitempty"`
-	Attempt        int    `json:"attempt,omitempty"`
-	RecipeVersion  int    `json:"recipe_version,omitempty"`
-	PR             int    `json:"pr,omitempty"`
+	// AwaitingInputSince records that the active terminal is waiting for a
+	// dispatcher answer. It suppresses quiet-lane replacement and stall
+	// handling while preserving the running lane and terminal.
+	AwaitingInputSince time.Time `json:"awaiting_input_since,omitempty"`
+	PRHead             string    `json:"pr_head,omitempty"`
+	ApprovalSHA        string    `json:"approval_sha,omitempty"`
+	MergeSHA           string    `json:"merge_sha,omitempty"`
+	Checks             string    `json:"checks,omitempty"`
+	LastEventID        string    `json:"last_event_id,omitempty"`
+	Round              int       `json:"round,omitempty"`
+	Attempt            int       `json:"attempt,omitempty"`
+	RecipeVersion      int       `json:"recipe_version,omitempty"`
+	PR                 int       `json:"pr,omitempty"`
 }
 
 func (l Lane) Clone() Lane {
