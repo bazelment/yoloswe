@@ -46,6 +46,7 @@ type Controllers struct {
 	ledgerScript      *string
 	runs              map[string]*controlledRun
 	starting          map[string]*startup
+	Mirror            GitMirror
 	MaxCostPerHourUSD float64
 	mu                sync.Mutex
 }
@@ -1354,12 +1355,14 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		Config struct {
 			MergePolicy *recipe.MergePolicy `json:"merge_policy"`
 			MergeRule   string              `json:"merge_rule"`
+			MergeGate   string              `json:"merge_gate"`
 			// Merge is nebula-swarm's merge authority: none or a merge method.
-			Merge  string      `json:"merge"`
-			Base   string      `json:"base"`
-			Target string      `json:"target"`
-			Phases []hostPhase `json:"phases"`
-			NoPR   bool        `json:"no_pr"`
+			Merge       string      `json:"merge"`
+			Base        string      `json:"base"`
+			Target      string      `json:"target"`
+			Phases      []hostPhase `json:"phases"`
+			TargetLanes int         `json:"target_lanes"`
+			NoPR        bool        `json:"no_pr"`
 		} `json:"config"`
 	}
 	if err := json.Unmarshal(b, &st); err != nil {
@@ -1389,7 +1392,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		workflow.MergePolicy.TargetBranch = st.Config.Target
 	}
 	if r.NoPR {
-	workflow = recipe.WithoutIntegrate(workflow)
+		workflow = recipe.WithoutIntegrate(workflow)
 		workflow.MergePolicy.Mode = recipe.MergeModeNone
 	}
 	workflow.MergePolicy.RequireCIGreen = true
@@ -1509,7 +1512,8 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			}
 		}
 		if ph.Name == recipe.PhaseIntegrate {
-			ph.BriefTemplate += fmt.Sprintf("\nRun merge policy: mode=%s; target=%s; script=%s; require_review_pass=%t; require_ci_green=%t. %s", workflow.MergePolicy.Mode, workflow.MergePolicy.TargetBranch, workflow.MergePolicy.Script, workflow.MergePolicy.RequireReviewPass, workflow.MergePolicy.RequireCIGreen, st.Config.MergeRule)
+			ph.BriefTemplate += fmt.Sprintf("\nRun merge policy: mode=%s; target=%s; script=%s; require_review_pass=%t; require_ci_green=%t. %s", workflow.MergePolicy.Mode, workflow.MergePolicy.TargetBranch, workflow.MergePolicy.Script, workflow.MergePolicy.RequireReviewPass, workflow.MergePolicy.RequireCIGreen, adoptedMergeGateText(st.Config.MergeGate, ruleText, objectiveText, contextText))
+			ph.BriefTemplate += "\nRequired checks: Lint plus Build and Test green on the PR's exact head before merge; one rerun allowed. Recheck the head before merging once."
 			if r.NoPR {
 				ph.BriefTemplate += "\nThis run uses branches without PRs; integrate the reviewed branch into the run target."
 				ph.ExitContract.RequiresPR = false
@@ -1839,6 +1843,18 @@ func extractMergeRuleText(configMergeRule, objectiveText string) string {
 	return strings.Join(parts, "\n")
 }
 
+// Keep gate prose additive without letting it change the host's merge authority.
+func adoptedMergeGateText(configGate, rule, objective, contextText string) string {
+	parts := []string{configGate, rule}
+	for _, line := range strings.Split(objective+"\n"+contextText, "\n") {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "merge gate") || strings.Contains(lower, "merge_gate") || strings.Contains(lower, "lint") || strings.Contains(lower, "build and test") || strings.Contains(lower, "soak") || strings.Contains(lower, "before merg") {
+			parts = append(parts, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
 func splitMergeRuleClauses(s string) []string {
 	r := strings.NewReplacer(
 		"\n", "|",
@@ -2136,6 +2152,20 @@ func (d *adoptedRunDriver) expandRunBrief(ctx context.Context, laneID, phase, br
 					out = fmt.Sprintf("Review lane %s (%s).\n\n%s", laneID, prTag, out)
 				}
 			}
+		}
+	}
+	if phase == recipe.PhaseIntegrate && validatePathComponent("lane id", laneID) == nil {
+		gate := strings.TrimSpace(readText(filepath.Join(d.run.Dir, laneID+".hold-advance")))
+		if gate == "" {
+			for i := range d.run.Lanes {
+				if d.run.Lanes[i].ID == laneID {
+					gate = d.run.Lanes[i].holdAdvanceText
+					break
+				}
+			}
+		}
+		if gate != "" {
+			out += "\nAdditional host gate: " + gate
 		}
 	}
 	out = inlineRunFileCitations(d.run.Dir, laneID, out)
