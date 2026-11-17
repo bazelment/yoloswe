@@ -165,12 +165,13 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 			Session: t.SessionID, Terminal: t.Terminals[t.Phase][strconv.Itoa(round)], TerminalState: t.TerminalState,
 			HostHold: ledgerHostHold(t.BlockedOn, t.HoldNote, t.Hold, t.Park, t.Note), PRDraft: t.PRDraft || t.Draft,
 			PRState: t.PRState, MergeSHA: t.MergeSHA, Head: firstNonEmpty(t.PRHead, t.Head), Checks: t.Checks}
+		applySpawnEvidence(dir, &x)
 		x.PRDraft = x.PRDraft || isDraftPR(x.PRState)
 		if t.PR > 0 {
 			x.PR = strconv.Itoa(t.PR)
 		}
 		x.Integrated = x.MergeSHA != ""
-		x.ReportPath = latestReport(dir, t.ID, t.Phase, round)
+		x.ReportPath = latestReport(dir, t.ID, x.Phase, round)
 		x.WaitingOn, x.WaitDeadline = parseHostWait(t.WaitingOn, t.Deadline)
 		if x.ReportPath != "" {
 			applyAttnAnswer(dir, &x)
@@ -184,7 +185,7 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 // annotateLanes adds each lane's latest report headline, newest EVENTS line
 // and what comes next from ESCALATIONS.md, PROGRESS.md or the phase order.
 func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
-	events := laneEvents(filepath.Join(dir, "EVENTS"))
+	events, turnStarts := laneEvents(filepath.Join(dir, "EVENTS"))
 	integratedEvents := laneIntegrationEvents(filepath.Join(dir, "EVENTS"))
 	mergeNotePRs := laneMergeNotePRs(filepath.Join(dir, "EVENTS"))
 	progress, escalations := readText(filepath.Join(dir, "PROGRESS.md")), readText(filepath.Join(dir, "ESCALATIONS.md"))
@@ -195,6 +196,7 @@ func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
 	for i := range r.Lanes {
 		x := &r.Lanes[i]
 		x.LastEvent = events[x.ID]
+		x.LastTurnStarted = turnStarts[x.ID]
 		eventLower := eventKind(x.LastEvent)
 		if integratedEvents[x.ID] != "" || eventLower == "merged" {
 			x.Integrated, x.PRState = true, "merged"
@@ -204,6 +206,9 @@ func annotateLanes(dir string, r *Run, phaseSpecs []hostPhase) {
 		x.MergeNotePRs = mergeNotePRs[x.ID]
 		if x.ReportPath != "" {
 			report := readText(x.ReportPath)
+			if info, err := os.Stat(x.ReportPath); err == nil {
+				x.ReportTime = info.ModTime().UTC()
+			}
 			x.Report = reportHeadline(report)
 			applyReportMetadata(x, report)
 		}
@@ -244,6 +249,7 @@ func laneIntegrationEvents(path string) map[string]string {
 var mergedPRRE = regexp.MustCompile(`(?i)#(\d+)\s+merged\b`)
 var prMergedRE = regexp.MustCompile(`(?i)\bPR\s+#(\d+)\b[^\n]{0,120}\bmerged\b`)
 var ownLaneMergedRE = regexp.MustCompile(`(?i)\b(?:own\s+)?lane\s+#(\d+)\b[^\n]{0,200}\bmerged\b`)
+var openPRRE = regexp.MustCompile(`(?i)\bPR\s+#(\d+)\b[^\n]{0,120}\b(?:open|not\s+merged)\b`)
 
 // laneMergeNotePRs extracts host merge prose from a lane's own EVENTS rows.
 // These nominations are deliberately not integration evidence by themselves;
@@ -264,12 +270,16 @@ func laneMergeNotePRs(path string) map[string][]string {
 		}
 		detail := parts[3]
 		lower := strings.ToLower(detail)
-		if !strings.Contains(lower, "merged") || strings.Contains(lower, "not merged") || strings.Contains(lower, "unmerged") {
+		isHostNote := strings.EqualFold(strings.TrimSpace(parts[2]), "orch-note")
+		if (!strings.Contains(lower, "merged") || strings.Contains(lower, "not merged") || strings.Contains(lower, "unmerged")) && !isHostNote {
 			continue
 		}
 		matches := mergedPRRE.FindAllStringSubmatch(detail, -1)
 		matches = append(matches, prMergedRE.FindAllStringSubmatch(detail, -1)...)
 		matches = append(matches, ownLaneMergedRE.FindAllStringSubmatch(detail, -1)...)
+		if isHostNote {
+			matches = append(matches, openPRRE.FindAllStringSubmatch(detail, -1)...)
+		}
 		seen := map[string]bool{}
 		for _, match := range matches {
 			if len(match) == 2 && !seen[match[1]] {
@@ -284,6 +294,9 @@ func laneMergeNotePRs(path string) map[string][]string {
 func latestReport(dir, laneID, phase string, round int) string {
 	if phase != "" {
 		if p := filepath.Join(dir, "reports", fmt.Sprintf("%s.%s.r%d.md", laneID, phase, round)); fileExists(p) {
+			return p
+		}
+		if p := filepath.Join(dir, fmt.Sprintf("%s.%s.md", laneID, phase)); fileExists(p) {
 			return p
 		}
 	}
@@ -318,11 +331,12 @@ func reportHeadline(s string) string {
 
 // laneEvents returns each lane's newest EVENTS line as "<time> <event> <detail>".
 // EVENTS lines are <UTC> TAB <lane> TAB <event> TAB <detail>.
-func laneEvents(path string) map[string]string {
+func laneEvents(path string) (map[string]string, map[string]time.Time) {
 	out := map[string]string{}
+	turnStarts := map[string]time.Time{}
 	f, err := os.Open(path)
 	if err != nil {
-		return out
+		return out, turnStarts
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -337,8 +351,14 @@ func laneEvents(path string) map[string]string {
 			fields = append(fields, strings.TrimSpace(parts[3]))
 		}
 		out[parts[1]] = clip(strings.Join(fields, " "), 240)
+		if strings.Contains(strings.ToLower(strings.Join(parts[2:], " ")), "turn.started") {
+			at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(parts[0]))
+			if err == nil && at.After(turnStarts[parts[1]]) {
+				turnStarts[parts[1]] = at
+			}
+		}
 	}
-	return out
+	return out, turnStarts
 }
 
 // laneNext says what comes next for a lane: its escalation, else the

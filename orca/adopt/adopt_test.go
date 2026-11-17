@@ -401,6 +401,8 @@ func g52RunFixture(t *testing.T, root string, tc g52Fixture, laneHead string) st
 		kind, detail = "orch-note", "#7 MERGED to main abc1234"
 	case "note700":
 		kind, detail = "orch-note", "#700 merged to main abc1234"
+	case "note6110":
+		kind, detail = "orch-note", "PR #6110 is OPEN, not merged: host note nomination"
 	case "open8":
 		kind, detail = "decision", "own lane #8: PR is OPEN, not merged: hold"
 	case "orch-merge":
@@ -410,6 +412,257 @@ func g52RunFixture(t *testing.T, root string, tc g52Fixture, laneHead string) st
 	}
 	write(t, filepath.Join(dir, "EVENTS"), "2026-11-16T02:00:00Z\tlane-1\t"+kind+"\t"+detail+"\n")
 	return dir
+}
+
+func TestNebulaSwarmAdoptPreviewFinishedLanesG56(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	seed := filepath.Join(root, "seed")
+	gitTest(t, root, "init", "--bare", remote)
+	gitTest(t, root, "init", seed)
+	gitTest(t, seed, "config", "user.email", "orca-g56@example.invalid")
+	gitTest(t, seed, "config", "user.name", "orca g56")
+	gitTest(t, seed, "remote", "add", "origin", remote)
+	write(t, filepath.Join(seed, "base.txt"), "base\n")
+	gitTest(t, seed, "add", ".")
+	gitTest(t, seed, "commit", "-m", "base")
+	gitTest(t, seed, "branch", "-M", "main")
+	gitTest(t, seed, "push", "-u", "origin", "main")
+	gitTest(t, root, "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	baseHead := strings.TrimSpace(gitTest(t, seed, "rev-parse", "HEAD"))
+	gitTest(t, seed, "checkout", "-b", "swarm-lane/run/branch/lane")
+	write(t, filepath.Join(seed, "lane.txt"), "unmerged\n")
+	gitTest(t, seed, "add", ".")
+	gitTest(t, seed, "commit", "-m", "lane work")
+	laneHead := strings.TrimSpace(gitTest(t, seed, "rev-parse", "HEAD"))
+	gitTest(t, seed, "push", "-u", "origin", "swarm-lane/run/branch/lane")
+	gitTest(t, seed, "push", "origin", "HEAD:refs/heads/swarm-lane/run/deleted/lane")
+	gitTest(t, seed, "push", "origin", "HEAD:refs/heads/unrelated-work")
+	gitTest(t, seed, "checkout", "main")
+	write(t, filepath.Join(seed, "merged.txt"), "merged lane work\n")
+	gitTest(t, seed, "add", ".")
+	gitTest(t, seed, "commit", "-m", "merged lane work (#5557)")
+	gitTest(t, seed, "push", "origin", "main")
+	gitTest(t, seed, "push", "origin", "main:refs/heads/swarm-lane/run/merged/lane")
+
+	// This commit stays local: the report can name a HEAD the remote never saw.
+	write(t, filepath.Join(seed, "unpushed.txt"), "local only\n")
+	gitTest(t, seed, "add", ".")
+	gitTest(t, seed, "commit", "-m", "unpushed work")
+	unpushedHead := strings.TrimSpace(gitTest(t, seed, "rev-parse", "HEAD"))
+
+	type fixture struct {
+		reportTime                                             time.Time
+		name, status, phase, branch, mode, hold, report, event string
+		wantMove, wantReason                                   string
+		taskExtra, historyReport                               string
+		wantText                                               []string
+		holdFile                                               bool
+	}
+	fixtures := []fixture{
+		{name: "done no PR missing branch", status: "done", phase: "swe", branch: "swarm-lane/run/missing/lane", report: "Outcome: done\n", event: "failed swe->clean lane: CHECK_UNAVAILABLE missing-ref: repo has no refs/heads/swarm-lane/run/missing/lane", wantMove: "none", wantReason: "finished, no PR"},
+		{name: "done no PR unmerged branch", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", report: "Outcome: done\n", event: "failed swe->clean lane: CHECK_UNAVAILABLE missing-ref: stale", wantMove: "judge", wantReason: "unmerged head"},
+		{name: "G52 analysis remains finished", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", mode: "analysis", report: "Outcome: done\n", wantMove: "none", wantReason: "analysis lane finished; no PR to integrate"},
+		{name: "done no PR merged branch", status: "done", phase: "swe", branch: "swarm-lane/run/merged/lane", report: "Outcome: done\n", wantMove: "none", wantReason: "already integrated"},
+		{name: "G52 analysis ignores stale working state", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", mode: "analysis", taskExtra: `,"terminal_state":"working"`, report: "Outcome: done\n", wantMove: "none", wantReason: "analysis lane finished; no PR to integrate"},
+		{name: "merged lane ignores stale working state", status: "done", phase: "swe", branch: "swarm-lane/run/merged/lane", taskExtra: `,"terminal_state":"working"`, report: "Outcome: done\n", wantMove: "none", wantReason: "already integrated"},
+		{name: "stale report head with unmerged branch", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", report: "Outcome: done\nHEAD: " + baseHead + "\n", wantMove: "judge", wantReason: "unmerged head " + shortSHA(laneHead)},
+		{name: "j absent branch with unpushed report HEAD", status: "done", phase: "swe", branch: "swarm-lane/run/missing/head", report: "Outcome: done\nHEAD: " + unpushedHead + "\n", wantMove: "none", wantReason: "finished, no PR", wantText: []string{"report-head=" + unpushedHead}},
+		{name: "invalid lane branch", status: "done", phase: "swe", branch: "-invalid", report: "Outcome: done\n", wantMove: "judge", wantReason: "missing or invalid lane branch"},
+		{name: "missing lane branch metadata", status: "done", phase: "swe", report: "Outcome: done\n", wantMove: "judge", wantReason: "missing or invalid lane branch"},
+		{name: "measurement hold no branch", status: "done", phase: "swe", branch: "swarm-lane/run/missing/measurement", hold: "measurement lane: never opens a PR; orchestrator advances by hand\n", report: "Outcome: done\n", event: "decision hold-advance: measurement complete", wantMove: "none", wantReason: "finished, no PR"},
+		{name: "empty hold unmerged branch", holdFile: true, status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", hold: "", report: "Outcome: done\n", event: "decision hold-advance: judgment", wantMove: "judge", wantReason: "unmerged head"},
+		{name: "hold missing report", holdFile: true, status: "done", phase: "swe", branch: "swarm-lane/run/missing/report", hold: "", event: "decision hold-advance: judgment", wantMove: "wait", wantReason: "missing report"},
+		{name: "planned not started", status: "planned", phase: "", wantMove: "none", wantReason: "planned, not started; dispatcher decides funding"},
+		{name: "running live terminal", status: "running", phase: "swe", branch: "swarm-lane/run/branch/lane", event: "started swe terminal-live", wantMove: "wait", wantReason: "waiting for terminal terminal-live handback"},
+		{name: "restarted ledger ignores stale spawn", status: "running", phase: "swe", taskExtra: `,"session_id":"restarted-session"`, wantMove: "none", wantReason: "no report or terminal to observe; dispatcher decides recovery"},
+		{name: "current flat report beats historical round", status: "running", phase: "clean", report: "Outcome: needs-input\nAsk: Is the next step funded?\n", historyReport: "Outcome: done\nHEAD: " + baseHead + "\n", wantMove: "judge", wantReason: "lane question:"},
+		{name: "running with no terminal", status: "running", phase: "swe", wantMove: "none", wantReason: "no report or terminal to observe; dispatcher decides recovery"},
+		{name: "host hold still waits", status: "done", phase: "swe", branch: "swarm-lane/run/missing/held", report: "Outcome: done\n", taskExtra: `,"blocked_on":"host deployment"`, wantMove: "wait", wantReason: "host-held: host deployment"},
+		{name: "cached branch before deletion", status: "done", phase: "swe", branch: "swarm-lane/run/deleted/lane", report: "Outcome: done\n", wantMove: "judge", wantReason: "unmerged head"},
+		{name: "deleted branch after cached preview", status: "done", phase: "swe", branch: "swarm-lane/run/deleted/lane", report: "Outcome: done\n", wantMove: "none", wantReason: "finished, no PR"},
+		{name: "h ended review needs SWE", status: "running", phase: "review", taskExtra: `,"terminal_state":"ended","terminals":{"review":{"1":"review-ended"}}`, report: "Outcome: needs-swe\nBreaks: unsafe lifecycle transition\nOpen: fix five remaining shapes\n", wantMove: "judge", wantReason: "Breaks: unsafe lifecycle transition", wantText: []string{"Open: fix five remaining shapes"}},
+		{name: "h working review needs SWE", status: "running", phase: "review", taskExtra: `,"terminal_state":"working","terminals":{"review":{"1":"review-working"}}`, report: "Outcome: needs-swe\nBreaks: unsafe lifecycle transition\nOpen: fix five remaining shapes\n", wantMove: "wait", wantReason: "waiting for terminal review-working"},
+		{name: "h ended review multiline findings", status: "running", phase: "review", taskExtra: `,"terminal_state":"ended","terminals":{"review":{"1":"review-ended"}}`, report: "Outcome: needs-swe\nBreaks:\n- orca/adopt/adopt.go:12 unsafe lifecycle transition\nOpen:\n* orca/adopt/adopt.go:34 fix five remaining shapes\nObserved: unrelated details\n", wantMove: "judge", wantReason: "orca/adopt/adopt.go:12 unsafe lifecycle transition", wantText: []string{"Open:", "orca/adopt/adopt.go:34 fix five remaining shapes"}},
+		{name: "i working old question newer turn", status: "running", phase: "swe", taskExtra: `,"terminal_state":"working","terminals":{"swe":{"1":"terminal-live"}}`, report: "Outcome: needs-input\nAsk: Has the host answered?\n", reportTime: time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC), event: "decision turn.started", wantMove: "wait", wantReason: "waiting for terminal terminal-live"},
+		{name: "i working new question", status: "running", phase: "swe", taskExtra: `,"terminal_state":"working","terminals":{"swe":{"1":"terminal-live"}}`, report: "Outcome: needs-input\nAsk: A new question?\n", reportTime: time.Date(2026, 11, 16, 3, 0, 0, 0, time.UTC), event: "decision turn.started", wantMove: "judge", wantReason: "A new question?"},
+		{name: "k absent branch no head", status: "done", phase: "swe", branch: "swarm-lane/run/missing/nohead", report: "Outcome: done\nHEAD: none\n", wantMove: "none", wantReason: "finished, no PR"},
+		{name: "k absent branch empty head", status: "done", phase: "swe", branch: "swarm-lane/run/missing/emptyhead", report: "Outcome: done\n", wantMove: "none", wantReason: "finished, no PR"},
+		{name: "l hold no gate text", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", holdFile: true, report: "Outcome: done\nHEAD: " + laneHead + "\n", wantMove: "judge", wantReason: "none recorded in run files", wantText: []string{"missing:"}},
+		{name: "l hold recorded gate", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", hold: "Gate: soak must pass", report: "Outcome: done\n", wantMove: "judge", wantReason: "soak must pass", wantText: []string{"missing:"}},
+		{name: "m squash integrated stale working terminal", status: "done", phase: "swe", branch: "swarm-lane/run/missing/squashed", taskExtra: `,"pr":5557,"terminal_state":"working"`, report: "Outcome: done\nHEAD: " + laneHead + "\n", wantMove: "none", wantReason: "already integrated", wantText: []string{"mirror has squash subject ending (#5557)"}},
+		// The host's earlier merge claim nominates a PR; only the mirror can prove integration.
+		{name: "n absent branch host nominated open PR", status: "done", phase: "swe", branch: "swarm-lane/run/missing/worker-spread", taskExtra: `,"pr":0,"pr_state":"OPEN"`, report: "Outcome: done\nHEAD: " + laneHead + "\n", event: "orch-note PR #6110 is OPEN, not merged", wantMove: "judge", wantReason: "#6110"},
+	}
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(root, "runs", strings.ReplaceAll(tc.name, " ", "-"))
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(dir, "briefs"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			phase := ""
+			if tc.phase != "" {
+				phase = fmt.Sprintf(",\"phase\":%q", tc.phase)
+			}
+			branch := ""
+			if tc.branch != "" {
+				branch = fmt.Sprintf(",\"branch\":%q", tc.branch)
+			}
+			mode := ""
+			if tc.mode != "" {
+				mode = fmt.Sprintf(","+`"mode":%q`, tc.mode)
+			}
+			write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{"config":{"goal":"g56","repo":%q,"target":"main","base":"main","phases":[{"name":"swe"}]},"tasks":[{"id":"lane","status":%q%s%s%s%s},{"id":"pending","status":"planned"}]}`, remote, tc.status, phase, branch, mode, tc.taskExtra))
+			write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: g56\n")
+			write(t, filepath.Join(dir, "briefs", "lane.swe.md"), "Synthetic lane assignment\n")
+			write(t, filepath.Join(dir, "EVENTS"), func() string {
+				if tc.event == "" {
+					return ""
+				}
+				kind, detail, _ := strings.Cut(tc.event, " ")
+				return "2026-11-16T02:00:00Z\tlane\t" + kind + "\t" + detail + "\n"
+			}())
+			if tc.hold != "" || tc.holdFile {
+				write(t, filepath.Join(dir, "lane.hold-advance"), tc.hold)
+			}
+			if tc.report != "" {
+				if err := os.WriteFile(filepath.Join(dir, "lane."+tc.phase+".md"), []byte(tc.report), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !tc.reportTime.IsZero() {
+				path := filepath.Join(dir, "lane."+tc.phase+".md")
+				if err := os.Chtimes(path, tc.reportTime, tc.reportTime); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.name == "running live terminal" {
+				write(t, filepath.Join(dir, "lane.swe.spawn.json"), `{"session_id":"session-live","terminal_id":"terminal-live"}`)
+			}
+			if tc.name == "restarted ledger ignores stale spawn" {
+				write(t, filepath.Join(dir, "lane.swe.spawn.json"), `{"session_id":"stale-session","terminal_id":"stale-terminal"}`)
+			}
+			if tc.historyReport != "" {
+				if err := os.MkdirAll(filepath.Join(dir, "reports"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				write(t, filepath.Join(dir, "reports", "lane.swe.r1.md"), tc.historyReport)
+			}
+			if tc.name == "deleted branch after cached preview" {
+				gitTest(t, root, "--git-dir", remote, "update-ref", "-d", "refs/heads/"+tc.branch)
+			}
+			if got := DetectFormat(dir); got != FormatNebulaSwarm {
+				t.Fatalf("detected format = %q, want %q", got, FormatNebulaSwarm)
+			}
+			svc := &Service{Mirror: GitMirror{CacheDir: filepath.Join(root, "mirror")}}
+			result, err := svc.DryRunDir(t.Context(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Lanes) != 2 {
+				t.Fatalf("lanes = %+v", result.Lanes)
+			}
+			got := result.Lanes[0]
+			t.Logf("dry-run %s: format=%s move=%s reason=%s evidence=%v", tc.name, result.Run.Format, got.Move, got.Reason, got.Evidence)
+			t.Logf("verdict=%s", result.Verdict)
+			if strings.HasPrefix(result.Verdict, "MOVES:") {
+				t.Errorf("unsafe verdict: %s", result.Verdict)
+			}
+			for _, want := range tc.wantText {
+				if !strings.Contains(got.Reason+" "+strings.Join(got.Evidence, " "), want) {
+					t.Errorf("preview=%+v missing %q", got, want)
+				}
+			}
+			if strings.Contains(got.Reason, "evidence=merge gate evidence") {
+				t.Errorf("placeholder reason: %s", got.Reason)
+			}
+			if result.Run.Format != FormatNebulaSwarm {
+				t.Fatalf("imported format = %q, want %q", result.Run.Format, FormatNebulaSwarm)
+			}
+			if got.Move != tc.wantMove || !strings.Contains(got.Reason, tc.wantReason) {
+				t.Fatalf("preview = %+v, want move=%q reason containing %q", got, tc.wantMove, tc.wantReason)
+			}
+			if tc.wantReason == "unmerged head" && !strings.Contains(got.Reason, shortSHA(laneHead)) {
+				t.Fatalf("reason %q does not name unmerged head %s", got.Reason, laneHead)
+			}
+			if tc.name == "hold missing report" && !strings.Contains(got.Reason, "no terminal") {
+				t.Fatalf("reason %q does not disclose the missing terminal", got.Reason)
+			}
+			if tc.name == "empty hold unmerged branch" && got.Gate == "" {
+				t.Fatalf("hold advance judgment lacks run gate: %+v", got)
+			}
+			svc.Importer = Importer{Roots: []string{filepath.Dir(dir)}}
+			svc.Holder = "g56-fixture"
+			svc.Labeler, svc.Watcher = &fakeLabeler{label: "claude"}, &fakeWatcher{}
+			var live DryRunLane
+			svc.Driver = runDriverFuncs{start: func(_ context.Context, r Run) error {
+				live = previewLaneAt(r, r.Lanes[0], time.Now().UTC())
+				return nil
+			}}
+			if _, err := svc.Adopt(t.Context(), filepath.Base(dir)); err != nil {
+				t.Fatal(err)
+			}
+			if live.Move != got.Move || live.Reason != got.Reason {
+				t.Fatalf("live preview = %+v, dry-run = %+v", live, got)
+			}
+		})
+	}
+	mirrors, err := filepath.Glob(filepath.Join(root, "mirror", "_local", "*.git"))
+	if err != nil || len(mirrors) != 1 {
+		t.Fatalf("mirrors = %v, error = %v; want one local mirror", mirrors, err)
+	}
+	refs := gitTest(t, root, "--git-dir", mirrors[0], "for-each-ref", "--format=%(refname)", "refs/orca/heads/")
+	if strings.Contains(refs, "refs/orca/heads/unrelated-work") {
+		t.Fatalf("mirror fetched unrelated branch: %s", refs)
+	}
+}
+
+func TestNebulaSwarmAdoptPreviewG52Counts(t *testing.T) {
+	t.Parallel()
+	root, remote, _, laneHead := g52RemoteFixture(t)
+	dir := filepath.Join(root, ".swarm", "synthetic-casfs")
+	if err := os.MkdirAll(filepath.Join(dir, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tasks := make([]string, 0, 91)
+	for i := range 88 {
+		tasks = append(tasks, fmt.Sprintf(`{"id":"analysis-%d","mode":"analysis","status":"done","phase":"swe"}`, i))
+	}
+	tasks = append(tasks,
+		fmt.Sprintf(`{"id":"merge-judgment","status":"done","phase":"swe","pr":700,"pr_head":%q}`, laneHead),
+		`{"id":"live-working","status":"running","phase":"swe","session_id":"live-session","terminal_state":"working","terminals":{"swe":{"1":"working-terminal"}}}`,
+		`{"id":"live-idle","status":"running","phase":"swe","session_id":"idle-session","terminals":{"swe":{"1":"idle-terminal"}}}`)
+	write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{"config":{"repo":%q,"target":"main","base":"main","orchestrator_session_id":"host"},"tasks":[%s]}`, remote, strings.Join(tasks, ",")))
+	write(t, filepath.Join(dir, "EVENTS"), "")
+	write(t, filepath.Join(dir, "reports", "merge-judgment.swe.r1.md"), "Outcome: done\n")
+	// Round-numbered reports and ledger terminals retain authority over flat files.
+	write(t, filepath.Join(dir, "merge-judgment.swe.md"), "Outcome: needs-swe\n")
+	write(t, filepath.Join(dir, "live-idle.swe.spawn.json"), `{"session_id":"stale-session","terminal_id":"stale-terminal"}`)
+	if got := DetectFormat(dir); got != FormatNebulaSwarm {
+		t.Fatalf("detected format = %q, want %q", got, FormatNebulaSwarm)
+	}
+	result, err := (&Service{Mirror: GitMirror{CacheDir: filepath.Join(root, "mirror")}}).DryRunDir(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, ln := range result.Lanes {
+		counts[ln.Move]++
+		if strings.HasPrefix(ln.ID, "live-") {
+			terminal := strings.TrimPrefix(ln.ID, "live-") + "-terminal"
+			if ln.Move != "wait" || !strings.Contains(ln.Reason, terminal) {
+				t.Fatalf("live lane %+v must wait on terminal %s", ln, terminal)
+			}
+		}
+	}
+	if counts["none"] != 88 || counts["judge"] != 1 || counts["wait"] != 2 || len(result.Lanes) != 91 {
+		t.Fatalf("synthetic G52 counts = %v; want 88 none, 1 judge, 2 live-terminal waits", counts)
+	}
+	t.Logf("synthetic casfs format=%s: 88 none, 1 judge, 2 wait on their live terminal", result.Run.Format)
 }
 
 func integrationFixture(t *testing.T, kind, target string, pr int, blocked bool, status ...string) (runDir, repo, laneHead string) {
@@ -1127,7 +1380,7 @@ func TestImportsCurrentRoundOfTwoLaneRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []Lane{
-		{ID: "a", Title: "A", Branch: "ba", Phase: "swe", Status: "running", Round: 2, Session: "sess-a2", Terminal: "term-a2", ReportPath: filepath.Join(dir, "a.swe.md"), PR: "11", Report: "Outcome: done", Next: "next phase: review"},
+		{ID: "a", Title: "A", Branch: "ba", Phase: "swe", Status: "running", Round: 2, Session: "sess-a2", Terminal: "term-a2", ReportPath: filepath.Join(dir, "a.swe.md"), PR: "11", Report: "Outcome: done", ReportTime: base, Next: "next phase: review"},
 		{ID: "b", Title: "B", Branch: "bb", Phase: "review", Status: "running", Round: 2, Session: "sess-b2", Terminal: "term-b2", PR: "22", Next: "next: merge"},
 	}
 	if !reflect.DeepEqual(r.Lanes, want) {
