@@ -39,6 +39,26 @@ func setupTestEnv(t *testing.T) (*clock.FakeClock, *store.MemoryStore, *lane.Fak
 	return clk, st, drv, judge
 }
 
+func TestTerminalStateLive(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		state string
+		want  bool
+	}{
+		{state: "working", want: true},
+		{state: "", want: true},
+		{state: "exited", want: false},
+		{state: "failed", want: false},
+		{state: "released", want: false},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			if got := controller.TerminalStateLive(tc.state); got != tc.want {
+				t.Fatalf("TerminalStateLive(%q) = %t, want %t", tc.state, got, tc.want)
+			}
+		})
+	}
+}
+
 type lifecycleFailDriver struct {
 	*lane.FakeDriver
 	releaseFailures  int

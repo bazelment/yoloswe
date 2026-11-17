@@ -42,7 +42,7 @@ const (
 // Unknown states remain live until an explicit exit is observed.
 func TerminalStateLive(state string) bool {
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "exited", "stopped", "released", "ended", "done", "completed", "finished", "idle", "sleeping":
+	case "exited", "stopped", "released", "ended", "done", "completed", "failed", "finished", "idle", "sleeping":
 		return false
 	default:
 		return true
