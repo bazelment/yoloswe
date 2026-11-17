@@ -599,7 +599,7 @@ func TestAdoptedMissingLaneSessionIsLocal(t *testing.T) {
 
 // TestAdoptedHostContract uses only synthetic ledgers and a local bare remote.
 func TestAdoptedHostContract(t *testing.T) {
-	for _, name := range []string{"a capacity from live host", "b configured target lanes", "c waits release slots", "d red then pending then green", "d headless green report", "d recorded host gate", "e open integrate report", "e squash merge", "e wrong target", "e host merge sha", "e imported done", "e report merge sha", "f draft", "f host hold"} {
+	for _, name := range []string{"a capacity from live host", "a blocked live terminal", "b configured target lanes", "c waits release slots", "d red then pending then green", "d headless green report", "d recorded host gate", "e open integrate report", "e squash merge", "e wrong target", "e host merge sha", "e imported done", "e report merge sha", "f draft", "f host hold"} {
 		t.Run(name, func(t *testing.T) {
 			dir, repo, head := integrationFixture(t, "missing", "main", 42, false, "running")
 			write(t, filepath.Join(dir, leaseFile), `{"holder":"fixture","marker":"ORCHESTRATOR: orca since 2026-11-16T12:00:00Z"}`)
@@ -626,7 +626,11 @@ func TestAdoptedHostContract(t *testing.T) {
 				}
 				for i := 0; i < count; i++ {
 					id := fmt.Sprintf("live-%d", i)
-					add(id, "swe", "running", "term-"+id)
+					status := "running"
+					if name == "a blocked live terminal" && i == 0 {
+						status = "blocked"
+					}
+					add(id, "swe", status, "term-"+id)
 				}
 				add("planned", "swe", "planned", "")
 				if name[0] == 'b' {
@@ -783,7 +787,11 @@ func TestAdoptedHostContract(t *testing.T) {
 				if len(drv.PhaseStarts) != 0 {
 					t.Fatal("generic green CI launched integrate without named required checks")
 				}
-				appendEvent("green", store.EventCI, controller.CIPayload{HeadSHA: head, Status: "Lint: green; Build and Test: green", PR: 42})
+				appendEvent("lint-red", store.EventCI, controller.CIPayload{HeadSHA: head, CheckName: "Lint", Status: "red", PR: 42})
+				step()
+				appendEvent("build-green", store.EventCI, controller.CIPayload{HeadSHA: head, CheckName: "Build and Test", Status: "green", PR: 42})
+				step()
+				appendEvent("lint-rerun-green", store.EventCI, controller.CIPayload{HeadSHA: head, CheckName: "Lint", Status: "green", PR: 42})
 				step()
 				step()
 				if len(drv.PhaseStarts) != 1 || drv.PhaseStarts[0].Phase != "integrate" {

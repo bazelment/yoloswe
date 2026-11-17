@@ -425,7 +425,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			return err
 		}
 		waitID := "host-integration:" + ln.ID + ":adopt:" + strings.TrimSpace(ln.PRHead)
-		wait := store.Directive{ID: waitID, RunID: r.ID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Scope: ln.ID, Ref: controller.NamedWaitRefPrefix + "host-integration:" + ln.ID, Text: string(payload), Status: store.DirectiveActive}
+		wait := store.Directive{ID: waitID, RunID: r.ID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Scope: ln.ID, Ref: controller.HostIntegrationWaitRefPrefix + ln.ID, Text: string(payload), Status: store.DirectiveActive}
 		if err := d.store.Directives().Add(ctx, wait); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 			return err
 		}
@@ -1389,8 +1389,26 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		workflow.MergePolicy.TargetBranch = st.Config.Target
 	}
 	if r.NoPR {
-		workflow = recipe.WithoutIntegrate(workflow)
+	workflow = recipe.WithoutIntegrate(workflow)
 		workflow.MergePolicy.Mode = recipe.MergeModeNone
+	}
+	workflow.MergePolicy.RequireCIGreen = true
+	if st.Config.TargetLanes > 0 {
+		workflow.Limits.MaxConcurrentLanes = st.Config.TargetLanes
+	} else {
+		live, planned := 0, false
+		for i := range r.Lanes {
+			imported := &r.Lanes[i]
+			planned = planned || imported.Status == string(lane.StatusPlanned)
+			if imported.Status != string(lane.StatusDone) && imported.Status != string(lane.StatusFailed) && strings.TrimSpace(imported.Terminal) != "" {
+				live++
+			}
+		}
+		// Leave room for one queued lane beyond the host's live terminals.
+		if planned {
+			live++
+		}
+		workflow.Limits.MaxConcurrentLanes = max(workflow.Limits.MaxConcurrentLanes, live)
 	}
 	if !workflow.MergePolicy.Mode.Valid() {
 		return workflow, nil, nil, fmt.Errorf("invalid adopted merge mode %q", workflow.MergePolicy.Mode)

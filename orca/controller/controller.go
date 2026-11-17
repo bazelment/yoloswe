@@ -57,6 +57,7 @@ const (
 	ownerAskRefPrefix = "owner_ask:"
 	// NamedWaitRefPrefix is the directive Ref prefix for lane/run expected waits.
 	NamedWaitRefPrefix           = "named-wait:"
+	HostIntegrationWaitRefPrefix = NamedWaitRefPrefix + "host-integration:"
 	integrateRecoveryRefPrefix   = "integrate-recovery:"
 	integrateRecoveryReadyPrefix = "integrate recovery ready:"
 	integrateRecoveryMaxAttempts = 3
@@ -1126,7 +1127,7 @@ func (c *Controller) checkNamedWaits(ctx context.Context) error {
 	return nil
 }
 
-const hostIntegrationWaitRefPrefix = NamedWaitRefPrefix + "host-integration:"
+const hostIntegrationWaitRefPrefix = HostIntegrationWaitRefPrefix
 
 func (c *Controller) waitForHostIntegration(ctx context.Context, ln *lane.Lane, reason string) (store.EventClass, error) {
 	ln.Question = reason
@@ -3562,7 +3563,7 @@ func (c *Controller) handleCI(ctx context.Context, ev *store.Event) (store.Event
 		return store.EventClassAuto, nil
 	}
 
-	if isCIRed(ln.Checks) || (c.cfg.HostRun && !ciGreen) {
+	if isCIRed(ln.Checks) {
 		return store.EventClassJudgment, nil
 	}
 	return store.EventClassAuto, nil
@@ -4800,10 +4801,34 @@ func mergeNamedCheckStatus(existing, name, status string, green *bool) string {
 	if value == "" {
 		return existing
 	}
+	newEntry := name + ": " + value
 	if existing == "" {
-		return name + ": " + value
+		return newEntry
 	}
-	return existing + "; " + name + ": " + value
+	target := normalizeCheckName(name)
+	parts := strings.Split(existing, ";")
+	for i, part := range parts {
+		key, _, ok := strings.Cut(strings.TrimSpace(part), ":")
+		if !ok {
+			key, _, ok = strings.Cut(strings.TrimSpace(part), "=")
+		}
+		if ok && normalizeCheckName(key) == target {
+			parts[i] = newEntry
+			return strings.Join(parts, "; ")
+		}
+	}
+	return existing + "; " + newEntry
+}
+
+func normalizeCheckName(name string) string {
+	name = strings.ToLower(strings.ReplaceAll(name, "&", "and"))
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func isCIRed(checks string) bool {
