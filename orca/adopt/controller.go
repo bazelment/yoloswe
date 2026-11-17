@@ -411,7 +411,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	for i := range r.Lanes {
 		imported := &r.Lanes[i]
-		if r.NoPR || !strings.EqualFold(strings.TrimSpace(imported.Phase), recipe.PhaseIntegrate) || closedLane(*imported) || imported.targetIntegrated || strings.TrimSpace(imported.MergeSHA) != "" {
+		if r.NoPR || !strings.EqualFold(strings.TrimSpace(imported.Phase), recipe.PhaseIntegrate) || closedLane(*imported) || imported.targetIntegrated || validGitSHA(strings.TrimSpace(imported.MergeSHA)) {
 			continue
 		}
 		// A host's merged/done claim is not merge proof. Keep the imported
@@ -520,6 +520,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			slog.DebugContext(ctx, "orca/adopt: judge does not implement SetDriver; adoptedRunDriver not attached to judge", "run_id", r.ID)
 		}
 	}
+	d.mu.Lock()
+	mirror := d.Mirror
+	d.mu.Unlock()
 	var integrationMu sync.Mutex
 	integrationCache := map[string]integrationResult{}
 	verify := func(ctx context.Context, ln lane.Lane) (bool, string, error) {
@@ -529,7 +532,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		if result, ok := integrationCache[key]; ok {
 			return result.merged, result.proof, result.err
 		}
-		merged, proof, err := d.verifyIntegration(ctx, syncer, ln)
+		merged, proof, err := d.verifyIntegration(ctx, syncer, ln, mirror)
 		integrationCache[key] = integrationResult{merged: merged, proof: proof, err: err}
 		return merged, proof, err
 	}
@@ -1017,7 +1020,7 @@ type integrationResult struct {
 
 // verifyIntegration deliberately ignores report outcomes and host PR-state prose.
 // Only a recorded merge SHA or commit evidence on the configured target counts.
-func (d *Controllers) verifyIntegration(ctx context.Context, syncer *runLedgerSync, ln lane.Lane) (bool, string, error) {
+func (d *Controllers) verifyIntegration(ctx context.Context, syncer *runLedgerSync, ln lane.Lane, mirror GitMirror) (bool, string, error) {
 	r := syncer.CurrentRun()
 	r.TargetBranch = cmp.Or(strings.TrimSpace(r.TargetBranch), recipe.Default().MergePolicy.TargetBranch)
 	b, err := os.ReadFile(filepath.Join(r.Dir, "state.json"))
@@ -1034,7 +1037,7 @@ func (d *Controllers) verifyIntegration(ctx context.Context, syncer *runLedgerSy
 		}
 	}
 	r.Lanes = []Lane{{ID: ln.ID, Branch: ln.Branch, Head: ln.PRHead, PR: strconv.Itoa(ln.PR), Status: "running"}}
-	applyTargetIntegrationEvidence(ctx, &r, d.Mirror)
+	applyTargetIntegrationEvidence(ctx, &r, mirror)
 	if r.Lanes[0].Integrated {
 		return true, ln.PRHead, nil
 	}
@@ -1620,7 +1623,11 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 				}
 				noMerge := store.IsNoMergeText(mission) || store.IsNoMergeText(ln.Title) || store.IsNoMergeText(task.Brief)
 				items = append(items, store.BacklogItem{ID: ln.ID, RunID: r.ID, LaneID: ln.ID, Title: ln.Title, Description: mission, Priority: priority, Status: status, DependsOn: task.DependsOn, NoMerge: noMerge})
-				ln.PRHead, ln.ApprovalSHA, ln.MergeSHA, ln.Checks, ln.BaseCommit, ln.Worktree = firstNonEmpty(task.PRHead, ln.PRHead), task.ApprovalSHA, firstNonEmpty(task.MergeSHA, ln.MergeSHA), firstNonEmpty(task.Checks, ln.Checks), task.BaseCommit, task.Worktree
+				taskMergeSHA := strings.TrimSpace(task.MergeSHA)
+				if !validGitSHA(taskMergeSHA) {
+					taskMergeSHA = ""
+				}
+				ln.PRHead, ln.ApprovalSHA, ln.MergeSHA, ln.Checks, ln.BaseCommit, ln.Worktree = firstNonEmpty(task.PRHead, ln.PRHead), task.ApprovalSHA, firstNonEmpty(taskMergeSHA, ln.MergeSHA), firstNonEmpty(task.Checks, ln.Checks), task.BaseCommit, task.Worktree
 				for phase, rounds := range task.Terminals {
 					normPhase, _ := normalizeHostPhaseName(phase, hasExplicitClean)
 					for round, id := range rounds {

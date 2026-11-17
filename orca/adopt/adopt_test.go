@@ -243,11 +243,11 @@ func TestDryRunIntegrationEvidenceG52Table(t *testing.T) {
 	mirror := filepath.Join(root, "mirror")
 	urlTemplate := "file://" + bare
 	fixtures := []g52Fixture{
-		{name: "a squash merged to main with feature target", pr: 41, report: "Outcome: done\n", wantMove: "none"},
+		{name: "a squash merged to main with feature target", pr: 41, report: "Outcome: done\n", wantMove: "judge", wantReason: "integration gate:"},
 		{name: "b squash merged to feature without checkout", pr: 99, report: "Outcome: done\n", wantMove: "none"},
-		{name: "c recorded checkout remains byte identical", repoPath: other, pr: 41, report: "Outcome: done\n", wantMove: "none"},
+		{name: "c recorded checkout remains byte identical", repoPath: other, pr: 41, report: "Outcome: done\n", wantMove: "judge", wantReason: "integration gate:"},
 		{name: "d analysis blocked report is finished", mode: "analysis", status: "done", report: "Outcome: blocked\nReason: report is blocked\n", wantMove: "none", wantReason: "analysis lane finished; no PR to integrate"},
-		{name: "e host note with matching squash", event: "note7", report: "Outcome: done\n", wantMove: "none"},
+		{name: "e host note with matching squash", event: "note7", report: "Outcome: done\n", wantMove: "judge", wantReason: "integration gate:"},
 		{name: "f host note without matching squash", event: "note700", report: "Outcome: done\n", wantMove: "judge", wantReason: "integration gate:"},
 		{name: "g open decision does not nominate", event: "open8", report: "Outcome: done\n", wantMove: "judge", wantReason: "integration gate:"},
 		{name: "h orch merge event", event: "orch-merge", report: "Outcome: done\n", wantMove: "none"},

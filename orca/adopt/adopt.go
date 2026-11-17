@@ -793,10 +793,14 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 		if head != "" {
 			for _, ref := range fetchedRefs {
 				if gitRun(gitCtx, mirror, "merge-base", "--is-ancestor", "--end-of-options", head, ref) == nil {
-					ln.Integrated = true
-					ln.targetIntegrated = ref == "refs/orca/"+strings.TrimSpace(r.TargetBranch)
-					ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is an ancestor of mirror ref %s", shortSHA(head), strings.TrimPrefix(ref, "refs/orca/"))
-					break
+					targetRef := "refs/orca/" + strings.TrimSpace(r.TargetBranch)
+					if ref == targetRef && strings.TrimSpace(r.TargetBranch) != "" {
+						ln.Integrated = true
+						ln.targetIntegrated = true
+						ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is an ancestor of mirror ref %s", shortSHA(head), strings.TrimPrefix(ref, "refs/orca/"))
+						break
+					}
+					ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is present on non-target mirror ref %s", shortSHA(head), strings.TrimPrefix(ref, "refs/orca/"))
 				}
 			}
 		}
@@ -809,11 +813,15 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 				}
 				suffix := "(#" + pr + ")"
 				for _, subject := range subjects {
-					if strings.HasSuffix(strings.TrimSpace(subject), suffix) {
-						ln.Integrated = true
-						_, ln.targetIntegrated = targetSubjects[strings.TrimSpace(subject)]
-						ln.IntegrationReason = fmt.Sprintf("integration gate: mirror has squash subject ending %s", suffix)
-						break
+					subject = strings.TrimSpace(subject)
+					if strings.HasSuffix(subject, suffix) {
+						if _, ok := targetSubjects[subject]; ok {
+							ln.Integrated = true
+							ln.targetIntegrated = true
+							ln.IntegrationReason = fmt.Sprintf("integration gate: mirror has squash subject ending %s", suffix)
+							break
+						}
+						ln.IntegrationReason = fmt.Sprintf("integration gate: squash subject ending %s is present only on a non-target mirror ref", suffix)
 					}
 				}
 				if ln.Integrated {
@@ -1300,9 +1308,8 @@ func applyReportMetadata(ln *Lane, report string) {
 				ln.Integrated = true
 			}
 		case "merge sha", "merged sha":
-			if meaningfulHostValue(value) {
-				ln.MergeSHA, ln.Integrated = value, true
-			}
+			// A phase report is not independent merge proof. Host merge_sha is
+			// read from the ledger in controllerState and verifyIntegration.
 		}
 	}
 }
