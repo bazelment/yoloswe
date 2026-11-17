@@ -599,7 +599,7 @@ func TestAdoptedMissingLaneSessionIsLocal(t *testing.T) {
 
 // TestAdoptedHostContract uses only synthetic ledgers and a local bare remote.
 func TestAdoptedHostContract(t *testing.T) {
-	for _, name := range []string{"a capacity from live host", "a blocked live terminal", "b configured target lanes", "c waits release slots", "d red then pending then green", "d headless green report", "d recorded host gate", "e open integrate report", "e squash merge", "e wrong target", "e host merge sha", "e imported done", "e report merge sha", "f draft", "f host hold"} {
+	for _, name := range []string{"a capacity from live host", "a blocked live terminal", "a exited terminal is not live", "b configured target lanes", "c waits release slots", "d red then pending then green", "d headless green report", "d recorded host gate", "e open integrate report", "e squash merge", "e wrong target", "e host merge sha", "e imported done", "e report merge sha", "f draft", "f host hold"} {
 		t.Run(name, func(t *testing.T) {
 			dir, repo, head := integrationFixture(t, "missing", "main", 42, false, "running")
 			write(t, filepath.Join(dir, leaseFile), `{"holder":"fixture","marker":"ORCHESTRATOR: orca since 2026-11-16T12:00:00Z"}`)
@@ -631,6 +631,9 @@ func TestAdoptedHostContract(t *testing.T) {
 						status = "blocked"
 					}
 					add(id, "swe", status, "term-"+id)
+					if name == "a exited terminal is not live" && i == 0 {
+						tasks[len(tasks)-1]["terminal_state"] = "exited"
+					}
 				}
 				add("planned", "swe", "planned", "")
 				if name[0] == 'b' {
@@ -736,6 +739,9 @@ func TestAdoptedHostContract(t *testing.T) {
 			switch name[0] {
 			case 'a', 'b', 'c':
 				want := map[byte]int{'a': 7, 'b': 9, 'c': 5}[name[0]]
+				if name == "a exited terminal is not live" {
+					want = 6
+				}
 				if workflow.Limits.MaxConcurrentLanes != want {
 					t.Errorf("adopted cap=%d, want %d", workflow.Limits.MaxConcurrentLanes, want)
 				}

@@ -232,11 +232,11 @@ func TestDryRunIntegrationEvidenceTable(t *testing.T) {
 
 //nolint:govet // compact table keeps each synthetic ledger shape readable.
 type g52Fixture struct {
-	name, event, mode, status, report, repoPath, url string
-	pr                                               int
-	prState, terminalState, head                     string
-	terminal                                         string
-	wantMove, wantReason                             string
+	name, event, mode, phase, status, report, repoPath, url, mergeSHA string
+	pr                                                                int
+	prState, terminalState, head                                      string
+	terminal                                                          string
+	wantMove, wantReason                                              string
 }
 
 func TestDryRunIntegrationEvidenceG52Table(t *testing.T) {
@@ -258,6 +258,8 @@ func TestDryRunIntegrationEvidenceG52Table(t *testing.T) {
 		{name: "h host-noted PR landed as merge commit", event: "note5904", report: "Outcome: done\n", head: "merge", wantMove: "none"},
 		{name: "i exited terminal with merged PR", pr: 41, terminal: "terminal-exited", terminalState: "exited", report: "Outcome: done\n", wantMove: "none"},
 		{name: "i exited terminal with open PR", pr: 41, prState: "OPEN", terminal: "terminal-exited", terminalState: "exited", report: "Outcome: done\n", wantMove: "judge", wantReason: "PR #41 remains open"},
+		{name: "i integrate exited terminal with merged PR", phase: "integrate", pr: 41, prState: "MERGED", terminal: "terminal-exited", terminalState: "exited", report: "Outcome: done\n", wantMove: "none"},
+		{name: "i integrate exited terminal with open PR", phase: "integrate", pr: 41, prState: "OPEN", mergeSHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", terminal: "terminal-exited", terminalState: "exited", report: "Outcome: done\n", wantMove: "judge", wantReason: "PR #41 remains open"},
 		{name: "j unreachable remote is judged", report: "Outcome: done\n", url: "file://" + filepath.Join(root, "missing.git"), wantMove: "judge", wantReason: "integration unknown: fetch target feat/x failed"},
 	}
 	for _, tc := range fixtures {
@@ -387,9 +389,17 @@ func g52RunFixture(t *testing.T, root string, tc g52Fixture, laneHead, mergeLane
 	if status == "" {
 		status = "done"
 	}
+	phase := tc.phase
+	if phase == "" {
+		phase = "review"
+	}
 	pr := ""
 	if tc.pr > 0 {
 		pr = fmt.Sprintf(",\"pr\":%d", tc.pr)
+	}
+	mergeSHA := ""
+	if tc.mergeSHA != "" {
+		mergeSHA = fmt.Sprintf(",\"merge_sha\":%q", tc.mergeSHA)
 	}
 	mode := ""
 	if tc.mode != "" {
@@ -414,18 +424,18 @@ func g52RunFixture(t *testing.T, root string, tc g52Fixture, laneHead, mergeLane
 	}
 	terminals := ""
 	if tc.terminal != "" {
-		terminals = fmt.Sprintf(",\"terminals\":{\"review\":{\"1\":%q}}", tc.terminal)
+		terminals = fmt.Sprintf(",\"terminals\":{%q:{\"1\":%q}}", phase, tc.terminal)
 	}
 	if tc.mode == "analysis" || tc.event == "note7" || tc.event == "note700" || tc.event == "open8" || tc.event == "orch-merge" {
 		head = ""
 	}
 	write(t, filepath.Join(dir, ".repo-slug"), "acme/widgets\n")
-	write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{"config":{"goal":"G52 fixture","repo":%s,"target":"feat/x","base":"feat/x","orchestrator_session_id":"fixture","phases":[{"name":"review"}]},"tasks":[{"id":"lane-1","phase":"review","status":%q%s%s%s%s%s%s}]}`, repo, status, mode, head, pr, prState, terminalState, terminals))
+	write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{"config":{"goal":"G52 fixture","repo":%s,"target":"feat/x","base":"feat/x","orchestrator_session_id":"fixture","phases":[{"name":%q}]},"tasks":[{"id":"lane-1","phase":%q,"status":%q%s%s%s%s%s%s%s}]}`, repo, phase, phase, status, mode, head, pr, prState, mergeSHA, terminalState, terminals))
 	report := tc.report
 	if report == "" {
 		report = "Outcome: done\n"
 	}
-	write(t, filepath.Join(dir, "reports", "lane-1.review.r1.md"), report)
+	write(t, filepath.Join(dir, "reports", "lane-1."+phase+".r1.md"), report)
 	detail := "started review"
 	kind := "started"
 	switch tc.event {
@@ -807,7 +817,7 @@ func TestAdoptDecisionHostHolds(t *testing.T) {
 		},
 		{
 			name:   "integrated lane is terminal",
-			status: "done", phase: "integrate", taskExtra: `,"pr":6113,"merge_sha":"def"`, hold: "orchestrator integrates by hand\n",
+			status: "done", phase: "integrate", taskExtra: `,"pr":6113,"merge_sha":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"`, hold: "orchestrator integrates by hand\n",
 			report: "Outcome: done\n", wantMove: "none",
 		},
 	}

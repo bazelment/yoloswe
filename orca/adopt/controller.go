@@ -411,7 +411,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	for i := range r.Lanes {
 		imported := &r.Lanes[i]
-		if r.NoPR || !strings.EqualFold(strings.TrimSpace(imported.Phase), recipe.PhaseIntegrate) || closedLane(*imported) || imported.targetIntegrated || validGitSHA(strings.TrimSpace(imported.MergeSHA)) {
+		if r.NoPR || !strings.EqualFold(strings.TrimSpace(imported.Phase), recipe.PhaseIntegrate) || closedLane(*imported) || imported.targetIntegrated || (!openPR(*imported) && validGitSHA(strings.TrimSpace(imported.MergeSHA))) {
 			continue
 		}
 		// A host's merged/done claim is not merge proof. Keep the imported
@@ -1035,8 +1035,14 @@ func (d *Controllers) verifyIntegration(ctx context.Context, syncer *runLedgerSy
 		return false, "", err
 	}
 	for i := range host.Tasks {
-		if host.Tasks[i].ID == ln.ID && validGitSHA(strings.TrimSpace(host.Tasks[i].MergeSHA)) {
-			return true, strings.TrimSpace(host.Tasks[i].MergeSHA), nil
+		if host.Tasks[i].ID == ln.ID {
+			state := strings.ToLower(strings.TrimSpace(host.Tasks[i].PRState))
+			if state == "open" || strings.HasPrefix(state, "open ") {
+				return false, fmt.Sprintf("PR #%d remains open or unverified on target %s: open PR has no merge evidence", ln.PR, r.TargetBranch), nil
+			}
+			if validGitSHA(strings.TrimSpace(host.Tasks[i].MergeSHA)) {
+				return true, strings.TrimSpace(host.Tasks[i].MergeSHA), nil
+			}
 		}
 	}
 	r.Lanes = []Lane{{ID: ln.ID, Branch: ln.Branch, Head: ln.PRHead, PR: strconv.Itoa(ln.PR), Status: "running"}}
@@ -1409,7 +1415,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		for i := range r.Lanes {
 			imported := &r.Lanes[i]
 			planned = planned || imported.Status == string(lane.StatusPlanned)
-			if imported.Status != string(lane.StatusDone) && imported.Status != string(lane.StatusFailed) && strings.TrimSpace(imported.Terminal) != "" {
+			if imported.Status != string(lane.StatusDone) && imported.Status != string(lane.StatusFailed) && strings.TrimSpace(imported.Terminal) != "" && controller.TerminalStateLive(imported.TerminalState) {
 				live++
 			}
 		}
@@ -1572,13 +1578,13 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 					}
 				}
 			}
-			if !mergeForbidden && imported.targetIntegrated && mergeSHA == "" {
+			if !mergeForbidden && !openPR(*imported) && imported.targetIntegrated && mergeSHA == "" {
 				mergeSHA = imported.Head
 			}
 			// A closed host PR is terminal even though it is not a merge. Merge
 			// prose and an integrate done report remain claims until the target
 			// mirror (or an independent host merge SHA) proves the merge.
-			terminal = closed || (!mergeForbidden && (imported.targetIntegrated || mergeSHA != ""))
+			terminal = closed || (!mergeForbidden && !openPR(*imported) && (imported.targetIntegrated || mergeSHA != ""))
 			if !terminal && status == lane.StatusDone {
 				status = lane.StatusRunning
 			}
@@ -1586,7 +1592,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 				status = lane.StatusBlocked
 			}
 		}
-		if mergeForbidden {
+		if mergeForbidden || openPR(*imported) {
 			mergeSHA = ""
 		}
 		if terminal {

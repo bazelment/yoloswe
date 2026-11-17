@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -863,6 +864,12 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 func integrationEvidenceNeeded(ln Lane) bool {
 	if strings.EqualFold(strings.TrimSpace(ln.Status), "blocked") || finishedAnalysisLane(ln) || closedLane(ln) {
 		return false
+	}
+	// An open PR cannot supply merge evidence, including a stale host merge
+	// claim. Keep it eligible for the mirror pass so preview reports the open
+	// PR as a judgment rather than treating integrate/done as terminal.
+	if openPR(ln) {
+		return true
 	}
 	if strings.EqualFold(strings.TrimSpace(ln.Phase), "integrate") {
 		return !validGitSHA(strings.TrimSpace(ln.MergeSHA)) && !ln.targetIntegrated
@@ -1760,24 +1767,15 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 			p.Move, p.Reason = "advance", "completed report permits the next recipe phase"
 		}
 	default:
-		if !terminalStateLive(ln.TerminalState) && strings.EqualFold(strings.TrimSpace(ln.Status), "done") {
+		if !controller.TerminalStateLive(ln.TerminalState) && strings.EqualFold(strings.TrimSpace(ln.Status), "done") {
 			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
-		} else if strings.TrimSpace(ln.Terminal) != "" && terminalStateLive(ln.TerminalState) {
+		} else if strings.TrimSpace(ln.Terminal) != "" && controller.TerminalStateLive(ln.TerminalState) {
 			p.Move, p.Reason = "wait", "waiting for terminal "+ln.Terminal+" handback"
 		} else {
 			p.Move, p.Reason = "none", "no report or terminal to observe; dispatcher decides recovery"
 		}
 	}
 	return p
-}
-
-func terminalStateLive(state string) bool {
-	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "exited", "stopped", "released", "ended", "done", "completed", "finished", "idle", "sleeping":
-		return false
-	default:
-		return true
-	}
 }
 
 func (ln Lane) expectedHostWait(now time.Time) (string, time.Time) {
@@ -1828,8 +1826,8 @@ func laneHostHold(ln Lane) string {
 }
 
 func integratedLane(ln Lane) bool {
-	if strings.EqualFold(strings.TrimSpace(ln.Phase), "integrate") && strings.EqualFold(strings.TrimSpace(ln.Status), "done") {
-		return true
+	if openPR(ln) {
+		return false
 	}
 	if ln.Integrated || strings.TrimSpace(ln.MergeSHA) != "" {
 		return true

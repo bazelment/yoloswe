@@ -38,6 +38,17 @@ const (
 	ActorController              = "controller"
 )
 
+// TerminalStateLive reports whether a host terminal may still own work.
+// Unknown states remain live until an explicit exit is observed.
+func TerminalStateLive(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "exited", "stopped", "released", "ended", "done", "completed", "finished", "idle", "sleeping":
+		return false
+	default:
+		return true
+	}
+}
+
 // Tool names recorded in store.DecisionStore by the deterministic controller.
 const (
 	ToolPhaseStart           = "phase.start"
@@ -1883,8 +1894,7 @@ func (c *Controller) reconcilePlannedLanes(ctx context.Context) error {
 		if errors.Is(err, store.ErrNotFound) {
 			continue
 		}
-		switch strings.ToLower(strings.TrimSpace(state)) {
-		case "idle", "done", "completed", "failed", "stopped", "exited":
+		if !TerminalStateLive(state) {
 			continue
 		}
 		// An unknown terminal is conservatively live until its exit is observed.
