@@ -248,15 +248,17 @@ type LaneWaitParams struct {
 
 // OwnerAskParams holds parameters for the owner.ask tool.
 type OwnerAskParams struct {
-	ID        string   `json:"id,omitempty" jsonschema:"description=Optional unique ask ID"`
-	LaneID    string   `json:"lane_id,omitempty" jsonschema:"description=Optional lane ID blocked on this question"`
-	MessageID string   `json:"message_id,omitempty" jsonschema:"description=Optional inbound mail message ID this ask escalates"`
-	Question  string   `json:"question" jsonschema:"required,description=One-sentence decision question for the owner"`
-	Default   string   `json:"default" jsonschema:"required" jsonschema_description:"Option auto-applied at deadline. If it is not already one of options it is added as an option, so a card's own stated default can be passed as is"`
-	Deadline  string   `json:"deadline" jsonschema:"required" jsonschema_description:"Deadline as RFC3339 timestamp, positive duration (30m, 2h, 7d) or UTC clock time (05:30Z = next occurrence)"`
-	SteerNote string   `json:"steer_note,omitempty" jsonschema:"description=Optional steering note to send when the default is applied"`
-	Reason    string   `json:"reason,omitempty" jsonschema:"description=Why owner input is required"`
-	Options   []string `json:"options" jsonschema:"required" jsonschema_description:"Concrete options the owner can choose from: short labels, a few words each (put the detail in the question)"`
+	ID         string   `json:"id,omitempty" jsonschema:"description=Optional unique ask ID"`
+	LaneID     string   `json:"lane_id,omitempty" jsonschema:"description=Optional lane ID blocked on this question"`
+	MessageID  string   `json:"message_id,omitempty" jsonschema:"description=Optional inbound mail message ID this ask escalates"`
+	Question   string   `json:"question" jsonschema:"required,description=One-sentence decision question for the owner"`
+	Default    string   `json:"default" jsonschema:"required" jsonschema_description:"Option auto-applied at deadline. If it is not already one of options it is added as an option, so a card's own stated default can be passed as is"`
+	Deadline   string   `json:"deadline" jsonschema:"required" jsonschema_description:"Deadline as RFC3339 timestamp, positive duration (30m, 2h, 7d) or UTC clock time (05:30Z = next occurrence)"`
+	SteerNote  string   `json:"steer_note,omitempty" jsonschema:"description=Optional steering note to send when the default is applied"`
+	Reason     string   `json:"reason,omitempty" jsonschema:"description=Why owner input is required"`
+	HostStep   string   `json:"host_step,omitempty" jsonschema_description:"Exact command or host step the lane proposed"`
+	Options    []string `json:"options" jsonschema:"required" jsonschema_description:"Concrete options the owner can choose from: short labels, a few words each (put the detail in the question)"`
+	HostAction bool     `json:"host_action,omitempty" jsonschema_description:"Set when this asks the host to perform an operational step; record and park the lane instead of steering it to do host-only work"`
 }
 
 type OwnerAnswerParams struct {

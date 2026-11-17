@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/clock"
+	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/recipe"
 	"github.com/bazelment/yoloswe/orca/store"
@@ -87,6 +88,90 @@ func TestDryRunDirFixtures(t *testing.T) {
 	}
 }
 
+func TestDryRunNeedsInputUsesHostAnswerAndLaneQuestion(t *testing.T) {
+	t.Parallel()
+	deadline := "2030-01-01T13:00:00Z"
+	tests := []struct {
+		name, waiting, deadline, marker string
+		wantMove, wantReason            string
+	}{
+		{name: "answered wait", waiting: "chaos-24h-final", deadline: deadline, marker: "handled-0251", wantMove: "wait", wantReason: "waiting on chaos-24h-final"},
+		{name: "marker-only wait is bounded", marker: "answered-0251", wantMove: "wait", wantReason: "waiting on lane progress"},
+		{name: "unanswered lane question", wantMove: "judge", wantReason: "lane question", marker: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, "reports"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{"config":{"goal":"fixture","phases":[{"name":"swe"}]},"tasks":[{"id":"lane","phase":"swe","status":"running","round":1,"waiting_on":%q,"deadline":%q}]}`, tc.waiting, tc.deadline))
+			write(t, filepath.Join(dir, "OBJECTIVE.md"), "# Objective\nfixture\n")
+			report := filepath.Join(dir, "lane.swe.md")
+			write(t, report, "Outcome: needs-input\nAsk: Should the host provide the final chaos result?\n")
+			if tc.marker != "" {
+				marker := filepath.Join(dir, "lane.swe.nebula-attn."+tc.marker)
+				write(t, marker, "answered")
+				old := time.Now().Add(-time.Minute)
+				if err := os.Chtimes(report, old, old); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, err := (&Service{}).DryRunDir(t.Context(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Lanes) != 1 || result.Lanes[0].Move != tc.wantMove || !strings.Contains(result.Lanes[0].Reason, tc.wantReason) {
+				t.Fatalf("preview = %+v, want move=%q reason containing %q", result.Lanes, tc.wantMove, tc.wantReason)
+			}
+			if tc.marker == "" && !strings.Contains(result.Lanes[0].Reason, "Should the host provide the final chaos result?") {
+				t.Fatalf("unanswered reason = %q, want quoted question", result.Lanes[0].Reason)
+			}
+		})
+	}
+}
+
+func TestMarkerOnlyHostWaitHasDeadline(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	ln := Lane{Report: "Outcome: needs-input\nAsk: wait for host", AnsweredMarker: true}
+	waitingOn, deadline := ln.expectedHostWait(now)
+	if waitingOn != "lane progress" || !deadline.Equal(now.Add(markerOnlyHostWaitTTL)) {
+		t.Fatalf("marker-only wait = %q until %s, want lane progress until %s", waitingOn, deadline, now.Add(markerOnlyHostWaitTTL))
+	}
+}
+
+func TestEscalationFallbackKeepsOneOpenAskPerLane(t *testing.T) {
+	t.Parallel()
+	clk := clock.NewFakeClock(time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Lanes().Upsert(t.Context(), lane.Lane{RunID: "run", ID: "lane", Status: lane.StatusBlocked, Round: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Decisions().Append(t.Context(), store.Decision{RunID: "run", LaneID: "lane", Tool: controller.ToolLaneEscalate, Reason: "needs owner", Seq: 1}); err != nil {
+		t.Fatal(err)
+	}
+	ctrls := NewControllers(t.Context(), st, lane.NewFakeDriver(), clk, nil)
+	events := []store.Event{{RunID: "run", LaneID: "lane"}}
+	if err := ctrls.askOwnerOnEscalation(t.Context(), "run", events); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Decisions().Append(t.Context(), store.Decision{RunID: "run", LaneID: "lane", Tool: controller.ToolLaneEscalate, Reason: "needs owner again", Seq: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctrls.askOwnerOnEscalation(t.Context(), "run", events); err != nil {
+		t.Fatal(err)
+	}
+	dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: "run", ActiveOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 1 || dirs[0].Scope != "lane" || !strings.HasPrefix(dirs[0].Ref, ownerAskRef) {
+		t.Fatalf("open fallback asks = %+v, want one owner ask for lane", dirs)
+	}
+}
+
 func TestDryRunIntegrationEvidenceTable(t *testing.T) {
 	t.Parallel()
 	//nolint:govet // compact table readability is more useful than field packing in a test.
@@ -107,7 +192,7 @@ func TestDryRunIntegrationEvidenceTable(t *testing.T) {
 		{name: "fetch failure", event: "missing", target: "does-not-exist", wantMove: "judge", wantReason: "integration unknown: fetch target does-not-exist failed"},
 		{name: "fetch failure judges mid-pipeline", event: "missing", target: "does-not-exist", status: "running", wantMove: "judge", wantReason: "integration unknown: fetch target does-not-exist failed"},
 		{name: "mid-pipeline lane advances", event: "missing", target: "main", status: "running", wantMove: "advance"},
-		{name: "blocked report", event: "blocked", target: "main", blocked: true, wantMove: "judge", wantReason: "orchestrator judgment: lane report blocked: credentials are unavailable"},
+		{name: "blocked report", event: "blocked", target: "main", blocked: true, wantMove: "judge", wantReason: `lane question: "credentials are unavailable"`},
 	}
 	for _, tc := range fixtures {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1241,5 +1326,115 @@ func TestFailedReleaseResumesController(t *testing.T) {
 	}
 	if stops != 2 || !w.watcher.running {
 		t.Fatalf("successful handback: stops=%d watcher=%v", stops, w.watcher.running)
+	}
+}
+
+func TestLiveAdoptImportsHostWaitAndNamesLaneQuestions(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, outcome     string
+		answered, waiting bool
+	}{
+		{name: "answered with ledger wait", outcome: "needs-input", answered: true, waiting: true},
+		{name: "unanswered", outcome: "needs-input"},
+		{name: "completed with handled marker", outcome: "done", answered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			now := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+			waitFields := ""
+			if tc.waiting {
+				waitFields = `,"waiting_on":"chaos-24h-final","deadline":"2030-01-01T13:00:00Z"`
+			}
+			write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"fixture","phases":[{"name":"swe"}]},"tasks":[{"id":"lane","title":"Chaos result","phase":"swe","status":"running","round":1`+waitFields+`}]}`)
+			write(t, filepath.Join(dir, "OBJECTIVE.md"), "# Objective\nfixture\n")
+			write(t, filepath.Join(dir, "lane.swe.md"), "Outcome: "+tc.outcome+"\nAsk: Should the host provide the final chaos result?\n")
+			if tc.answered {
+				write(t, filepath.Join(dir, "lane.swe.nebula-attn.answered-123"), "answered")
+				old := now.Add(-time.Hour)
+				if err := os.Chtimes(filepath.Join(dir, "lane.swe.md"), old, old); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(filepath.Join(dir, "lane.swe.nebula-attn.answered-123"), now, now); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(t, filepath.Join(dir, leaseFile), `{"holder":"orca-chat:fixture","state":"adopted","marker":"ORCHESTRATOR: orca since 2030-01-01T12:00:00Z"}`)
+			run, err := Read(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clk := clock.NewFakeClock(now)
+			st := store.NewMemoryStore(clk)
+			t.Cleanup(func() { _ = st.Close() })
+			ctrls := NewControllers(t.Context(), st, lane.NewFakeDriver(), clk, nil)
+			t.Cleanup(func() { _ = ctrls.Close(context.Background()) })
+			if err := ctrls.Start(t.Context(), run); err != nil {
+				t.Fatal(err)
+			}
+			events, err := st.Events().List(t.Context(), store.EventFilter{RunID: run.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var questions []store.Event
+			for _, event := range events {
+				if strings.HasPrefix(event.ID, "adopt-") && event.Class == store.EventClassJudgment {
+					questions = append(questions, event)
+				}
+			}
+			if tc.outcome == "done" {
+				if _, err := st.Directives().Get(t.Context(), run.ID, "wait-adopt-lane"); !errors.Is(err, store.ErrNotFound) {
+					t.Fatalf("completed report retained an indefinite host wait: %v", err)
+				}
+			} else if tc.answered {
+				if len(questions) != 0 {
+					t.Fatalf("answered report re-judged: %+v", questions)
+				}
+				wait, err := st.Directives().Get(t.Context(), run.ID, "wait-adopt-lane")
+				if err != nil || wait.Text != "waiting on chaos-24h-final" || !wait.ExpiresAt.Equal(now.Add(time.Hour)) {
+					t.Fatalf("host wait=%+v err=%v", wait, err)
+				}
+			} else if len(questions) != 1 || !strings.HasPrefix(questions[0].Summary, "lane question:") || !strings.Contains(questions[0].Summary, `"Should the host provide the final chaos result?"`) {
+				t.Fatalf("unanswered report must be a quoted lane question: %+v", questions)
+			}
+		})
+	}
+}
+
+func TestAdoptedWaitSuppressesOnlyTheAnsweredReport(t *testing.T) {
+	t.Parallel()
+	clk := clock.NewFakeClock(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	deadline := clk.Now().Add(time.Hour)
+	if err := st.Directives().Add(t.Context(), store.Directive{ID: "wait-adopt-lane", RunID: "run", Scope: "lane", Ref: "named-wait:lane", Text: "waiting on chaos-24h-final", ExpiresAt: &deadline, Status: store.DirectiveActive}); err != nil {
+		t.Fatal(err)
+	}
+	const raw = "Outcome: needs-input\nAsk: Is the final chaos result available?"
+	old, err := lane.ParsePhaseReport(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := lane.NewFakeDriver()
+	base.SetReport("terminal", *old)
+	drv := &adoptedRunDriver{LaneDriver: base, store: st, clock: clk, run: Run{ID: "run", Lanes: []Lane{{ID: "lane", reportText: raw}}}}
+	if rep, err := drv.ReadReport(t.Context(), "run", "lane", "terminal"); err != nil || rep != nil {
+		t.Fatalf("answered report replayed: %+v err=%v", rep, err)
+	}
+	watch := drv.Watch(t.Context(), "run")
+	base.Emit(lane.Event{Kind: lane.EventPhaseReported, RunID: "run", LaneID: "lane", Report: old})
+	fresh := &lane.PhaseReport{Outcome: lane.OutcomeNeedsInput, Raw: "Outcome: needs-input\nAsk: A new host question?"}
+	base.Emit(lane.Event{Kind: lane.EventPhaseReported, RunID: "run", LaneID: "lane", Report: fresh})
+	select {
+	case event := <-watch:
+		if event.Report != fresh {
+			t.Fatalf("expected fresh report, got %+v", event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fresh report was not forwarded")
+	}
+	clk.Advance(2 * time.Hour)
+	if rep, err := drv.ReadReport(t.Context(), "run", "lane", "terminal"); err != nil || rep == nil {
+		t.Fatalf("expired wait swallowed report: %+v err=%v", rep, err)
 	}
 }

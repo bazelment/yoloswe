@@ -1328,9 +1328,13 @@ func TestAdoptedRunOpenLaneQuestionsAndEscalation(t *testing.T) {
 	drv := lane.NewFakeDriver()
 
 	var (
-		ansMu     sync.Mutex
-		ansPaths  []string
-		ansBodies []string
+		ansMu        sync.Mutex
+		ansPaths     []string
+		ansBodies    []string
+		ansCh        = make(chan struct{}, 1)
+		ownerPosts   int
+		slackPosts   int
+		ownerPayload map[string]any
 	)
 	nebulaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1346,7 +1350,26 @@ func TestAdoptedRunOpenLaneQuestionsAndEscalation(t *testing.T) {
 			ansPaths = append(ansPaths, r.URL.Path)
 			ansBodies = append(ansBodies, body.Answer)
 			ansMu.Unlock()
+			select {
+			case ansCh <- struct{}{}:
+			default:
+			}
 			_, _ = io.WriteString(w, `{"id":"q-open-1"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/mail":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["to"] == "owner" {
+				ansMu.Lock()
+				ownerPosts++
+				ownerPayload = body
+				ansMu.Unlock()
+			}
+			_, _ = io.WriteString(w, `{"id":"owner-ask-1"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/slack":
+			ansMu.Lock()
+			slackPosts++
+			ansMu.Unlock()
+			_, _ = io.WriteString(w, "ok")
 		default:
 			http.NotFound(w, r)
 		}
@@ -1354,12 +1377,13 @@ func TestAdoptedRunOpenLaneQuestionsAndEscalation(t *testing.T) {
 	defer nebulaSrv.Close()
 
 	nebBox, err := mailboxnebula.New(mailboxnebula.Config{
-		BaseURL:      nebulaSrv.URL,
-		Token:        "test-token",
-		RunID:        runID,
-		Events:       st.Events(),
-		Host:         true,
-		PollInterval: time.Hour,
+		BaseURL:           nebulaSrv.URL,
+		OwnerSlackWebhook: nebulaSrv.URL + "/slack",
+		Token:             "test-token",
+		RunID:             runID,
+		Events:            st.Events(),
+		Host:              true,
+		PollInterval:      time.Hour,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1371,6 +1395,7 @@ func TestAdoptedRunOpenLaneQuestionsAndEscalation(t *testing.T) {
 		StopReason: model.StopReasonToolUse,
 		Message: model.NewAssistantMessage(
 			model.NewToolUseBlock("call-ask", dispatcher.ToolOwnerAsk, json.RawMessage(`{"id":"ask-scope","lane_id":"m2-gaps3","question":"Should we expand product scope and approve additional spend for the enterprise tier?","options":["approve","defer"],"default":"defer","deadline":"1h","steer_note":"Defer enterprise tier.","reason":"only the owner can decide product scope and spend"}`)),
+			model.NewToolUseBlock("call-ask-repeat", dispatcher.ToolOwnerAsk, json.RawMessage(`{"id":"ask-scope-repeat","lane_id":"m2-gaps3","question":" should we expand product scope and approve additional spend for the enterprise tier? ","options":["approve","defer"],"default":"defer","deadline":"1h"}`)),
 		),
 	}, model.Response{
 		StopReason: model.StopReasonEndTurn,
@@ -1386,7 +1411,7 @@ func TestAdoptedRunOpenLaneQuestionsAndEscalation(t *testing.T) {
 	})
 
 	ctrls := adopt.NewControllers(t.Context(), st, drv, clk, func(id string, answer func(context.Context, string, string, string) error) controller.Judge {
-		d := dispatcher.New(dispatcher.Config{Model: "gpt-6.1-sol", HardBatchModel: "gpt-6.1-sol"}, st, drv, clk, client)
+		d := dispatcher.New(dispatcher.Config{Model: "gpt-6.1-sol", HardBatchModel: "gpt-6.1-sol", AllowMultiAction: true}, st, drv, clk, client)
 		d.SetOwnerAnswer(answer)
 		return d
 	})
@@ -1463,13 +1488,26 @@ func TestAdoptedRunOpenLaneQuestionsAndEscalation(t *testing.T) {
 		t.Fatalf("concierge progress report missing open lane question with lane and age:\n%s", progressOut)
 	}
 
-	// Advance clock past debounce and wake the controller so the dispatcher escalates the question to an owner ask.
-	clk.Advance(2 * time.Minute)
-	waitForCondition(t, 2*time.Second, func() bool {
-		ctrls.Wake(runID)
-		dirs, _ := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: runID, ActiveOnly: true})
-		return len(dirs) > 0
-	})
+	// Advance past debounce without jumping over the live controller's lease.
+	// Each synchronous step renews the lease before the next clock advance.
+	for range 12 {
+		clk.Advance(10 * time.Second)
+		if err := ctrls.Step(t.Context(), runID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ansMu.Lock()
+	gotOwnerPosts, gotSlackPosts, payload := ownerPosts, slackPosts, ownerPayload
+	ansMu.Unlock()
+	if gotOwnerPosts != 1 {
+		t.Fatalf("owner mail POSTs = %d, want exactly 1 for repeated owner.ask", gotOwnerPosts)
+	}
+	if gotSlackPosts != 1 {
+		t.Fatalf("Slack POSTs = %d, want exactly 1 for repeated owner.ask", gotSlackPosts)
+	}
+	if payload["runId"] != runID || payload["laneId"] != "m2-gaps3" || payload["default"] != "defer" || payload["deadline"] == nil || payload["options"] == nil || payload["ask"] == nil {
+		t.Fatalf("owner mail lost ask context: %+v", payload)
+	}
 	dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: runID, ActiveOnly: true})
 	if err != nil || len(dirs) != 1 || !strings.HasPrefix(dirs[0].Ref, "owner_ask:") {
 		t.Fatalf("expected owner_ask directive for owner-only question, got %+v (err=%v)", dirs, err)
@@ -1522,17 +1560,19 @@ func TestAdoptedRunOpenLaneQuestionsAndEscalation(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	waitForCondition(t, 2*time.Second, func() bool {
-		ctrls.Wake(runID)
-		ansMu.Lock()
-		gotAns := len(ansPaths) > 0
-		ansMu.Unlock()
-		if !gotAns {
-			return false
-		}
-		open, err := mailbox.OpenLaneQuestions(t.Context(), st, runID, clk.Now())
-		return err == nil && len(open) == 0
-	})
+	if err := ctrls.Step(t.Context(), runID); err != nil {
+		t.Fatalf("synchronous owner-answer step: %v", err)
+	}
+	select {
+	case <-ansCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner answer was not delivered within 2s")
+	}
+	resolved, err := mailbox.OpenLaneQuestions(t.Context(), st, runID, clk.Now())
+	if err != nil || len(resolved) != 0 {
+		t.Fatalf("owner-answer step left open questions: %+v (err=%v)", resolved, err)
+	}
+
 	ansMu.Lock()
 	gotPath := ansPaths[0]
 	gotBody := ansBodies[0]

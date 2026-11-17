@@ -114,6 +114,8 @@ type nsLane struct {
 	PR            int                          `json:"pr"`
 	Round         int                          `json:"round"`
 	BlockedOn     string                       `json:"blocked_on"`
+	WaitingOn     string                       `json:"waiting_on"`
+	Deadline      hostDeadline                 `json:"deadline"`
 	Hold          string                       `json:"hold"`
 	HoldNote      string                       `json:"hold_note"`
 	Park          string                       `json:"park"`
@@ -169,6 +171,10 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 		}
 		x.Integrated = x.MergeSHA != ""
 		x.ReportPath = latestReport(dir, t.ID, t.Phase, round)
+		x.WaitingOn, x.WaitDeadline = parseHostWait(t.WaitingOn, t.Deadline)
+		if x.ReportPath != "" {
+			applyAttnAnswer(dir, &x)
+		}
 		r.Lanes = append(r.Lanes, x)
 	}
 	annotateLanes(dir, r, st.Config.Phases)
