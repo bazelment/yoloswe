@@ -769,7 +769,9 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 		if !integrationEvidenceNeeded(*ln) {
 			continue
 		}
-		if openPR(*ln) {
+		openClaim := openPR(*ln)
+		openNoteClaim := openPRRE.MatchString(ln.LastEvent)
+		if openClaim && !openNoteClaim {
 			pr := strings.TrimSpace(ln.PR)
 			if pr == "" && len(ln.MergeNotePRs) > 0 {
 				pr = strings.TrimSpace(ln.MergeNotePRs[0])
@@ -844,6 +846,14 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 			}
 		}
 		if !ln.Integrated {
+			if openClaim {
+				pr := strings.TrimSpace(ln.PR)
+				if pr == "" && len(ln.MergeNotePRs) > 0 {
+					pr = strings.TrimSpace(ln.MergeNotePRs[0])
+				}
+				ln.IntegrationReason = fmt.Sprintf("integration gate: PR #%s remains open; merge evidence is unavailable", cmp.Or(pr, "unknown"))
+				continue
+			}
 			switch {
 			case len(ln.MergeNotePRs) > 0:
 				ln.IntegrationReason = "integration gate: host-nominated PR #" + strings.Join(ln.MergeNotePRs, ", #") + " has neither lane-head ancestry nor a matching squash subject in mirror"
@@ -882,6 +892,12 @@ func closedLane(ln Lane) bool {
 }
 
 func openPR(ln Lane) bool {
+	// A mirror-confirmed squash can make an earlier host note saying the PR is
+	// open stale. Preserve explicit open state until that independent evidence
+	// has been recorded, then let the mirror result drive adoption.
+	if ln.Integrated && openPRRE.MatchString(ln.LastEvent) {
+		return false
+	}
 	state := strings.ToLower(strings.TrimSpace(ln.PRState))
 	return state == "open" || strings.HasPrefix(state, "open ") || openPRRE.MatchString(ln.LastEvent)
 }

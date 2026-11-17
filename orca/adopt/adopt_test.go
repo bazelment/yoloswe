@@ -232,12 +232,12 @@ func TestDryRunIntegrationEvidenceTable(t *testing.T) {
 
 //nolint:govet // compact table keeps each synthetic ledger shape readable.
 type g52Fixture struct {
-	name, event, mode, phase, status, report, repoPath, url, mergeSHA string
-	pr                                                                int
-	prState, terminalState, head                                      string
-	terminal                                                          string
-	holdFile, noReport                                                bool
-	wantMove, wantReason                                              string
+	name, event, mode, phase, status, report, repoPath, url, mergeSHA, target string
+	pr                                                                        int
+	prState, terminalState, head                                              string
+	terminal                                                                  string
+	holdFile, noReport                                                        bool
+	wantMove, wantReason                                                      string
 }
 
 func TestDryRunIntegrationEvidenceG52Table(t *testing.T) {
@@ -263,6 +263,7 @@ func TestDryRunIntegrationEvidenceG52Table(t *testing.T) {
 		{name: "i integrate exited terminal with open PR", phase: "integrate", pr: 41, prState: "OPEN", mergeSHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", terminal: "terminal-exited", terminalState: "exited", report: "Outcome: done\n", wantMove: "judge", wantReason: "PR #41 remains open"},
 		{name: "j host integrate done no PR hold no report", phase: "integrate", status: "done", holdFile: true, noReport: true, wantMove: "none"},
 		{name: "k host integrate done noted open PR", phase: "integrate", event: "note6110", wantMove: "judge", wantReason: "PR #6110 remains open"},
+		{name: "l stale open note loses to target squash", target: "main", phase: "swe", pr: 41, event: "note-open41", terminal: "terminal-working", terminalState: "working", report: "Outcome: done\n", wantMove: "none", wantReason: "already integrated"},
 		{name: "j unreachable remote is judged", report: "Outcome: done\n", url: "file://" + filepath.Join(root, "missing.git"), wantMove: "judge", wantReason: "integration unknown: fetch target feat/x failed"},
 	}
 	for _, tc := range fixtures {
@@ -396,6 +397,10 @@ func g52RunFixture(t *testing.T, root string, tc g52Fixture, laneHead, mergeLane
 	if phase == "" {
 		phase = "review"
 	}
+	target := tc.target
+	if target == "" {
+		target = "feat/x"
+	}
 	pr := ""
 	if tc.pr > 0 {
 		pr = fmt.Sprintf(",\"pr\":%d", tc.pr)
@@ -433,7 +438,7 @@ func g52RunFixture(t *testing.T, root string, tc g52Fixture, laneHead, mergeLane
 		head = ""
 	}
 	write(t, filepath.Join(dir, ".repo-slug"), "acme/widgets\n")
-	write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{"config":{"goal":"G52 fixture","repo":%s,"target":"feat/x","base":"feat/x","orchestrator_session_id":"fixture","phases":[{"name":%q}]},"tasks":[{"id":"lane-1","phase":%q,"status":%q%s%s%s%s%s%s%s}]}`, repo, phase, phase, status, mode, head, pr, prState, mergeSHA, terminalState, terminals))
+	write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{"config":{"goal":"G52 fixture","repo":%s,"target":%q,"base":"feat/x","orchestrator_session_id":"fixture","phases":[{"name":%q}]},"tasks":[{"id":"lane-1","phase":%q,"status":%q%s%s%s%s%s%s%s}]}`, repo, target, phase, phase, status, mode, head, pr, prState, mergeSHA, terminalState, terminals))
 	report := tc.report
 	if report == "" && !tc.noReport {
 		report = "Outcome: done\n"
@@ -454,6 +459,8 @@ func g52RunFixture(t *testing.T, root string, tc g52Fixture, laneHead, mergeLane
 		kind, detail = "orch-note", "PR #5904 merged to main abc1234"
 	case "note6110":
 		kind, detail = "orch-note", "PR #6110 is OPEN, not merged: host note nomination"
+	case "note-open41":
+		kind, detail = "orch-note", "PR #41 is still OPEN, not merged: stale host note"
 	case "open8":
 		kind, detail = "decision", "own lane #8: PR is OPEN, not merged: hold"
 	case "orch-merge":
