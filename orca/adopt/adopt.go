@@ -111,6 +111,9 @@ type Lane struct {
 	// never be revisited by adopt.
 	PRDraft, Integrated             bool
 	PRState, MergeSHA, Head, Checks string
+	// A report may omit its head while the remote branch still has work.
+	branchChecked bool
+	branchHead    string
 	// Mode is the host lane mode (for example "analysis").
 	Mode string
 	// MergeNotePRs are PR numbers nominated by host merge prose. They require
@@ -633,7 +636,7 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 	needsGit := false
 	for i := range r.Lanes {
 		ln := r.Lanes[i]
-		if !integratedLane(ln) && !strings.EqualFold(ln.Status, "blocked") && !finishedAnalysisLane(ln) {
+		if !integratedLane(ln) && !strings.EqualFold(ln.Status, "blocked") && !finishedNebulaAnalysisLane(*r, ln) {
 			needsGit = true
 			break
 		}
@@ -665,6 +668,10 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 	}
 	refspecs := make([]string, 0, len(branches)+1)
 	fetchedRefs := make([]string, 0, len(branches)+1)
+	trackLaneBranches := false
+	for i := range r.Lanes {
+		trackLaneBranches = trackLaneBranches || subagentNoPRHandback(*r, r.Lanes[i])
+	}
 	for _, branch := range branches {
 		if !validGitBranch(gitCtx, mirror, branch) {
 			r.IntegrationError = "fetch target " + branch + " failed: invalid branch"
@@ -673,9 +680,19 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 		refspecs = append(refspecs, "+refs/heads/"+branch+":refs/orca/"+branch)
 		fetchedRefs = append(fetchedRefs, "refs/orca/"+branch)
 	}
+	if trackLaneBranches {
+		// Optional lane refs must be fetched together: a missing explicit ref
+		// would fail the fetch. Prune branches deleted since the last preview.
+		refspecs = append(refspecs, "+refs/heads/*:refs/orca/heads/*")
+	}
 	refspecs = append(refspecs, "+HEAD:refs/orca/HEAD")
 	fetchedRefs = append(fetchedRefs, "refs/orca/HEAD")
-	fetchArgs := append([]string{"-C", mirror, "fetch", "--no-tags", "--filter=tree:0", source}, refspecs...)
+	fetchArgs := []string{"-C", mirror, "fetch"}
+	if trackLaneBranches {
+		fetchArgs = append(fetchArgs, "--prune")
+	}
+	fetchArgs = append(fetchArgs, "--no-tags", "--filter=tree:0", source)
+	fetchArgs = append(fetchArgs, refspecs...)
 	fetch := exec.CommandContext(gitCtx, "git", fetchArgs...)
 	fetch.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if out, err := fetch.CombinedOutput(); err != nil {
@@ -697,13 +714,32 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 	subjects := strings.Split(string(out), "\n")
 	for i := range r.Lanes {
 		ln := &r.Lanes[i]
-		if integratedLane(*ln) || strings.EqualFold(ln.Status, "blocked") || finishedAnalysisLane(*ln) {
+		if integratedLane(*ln) || strings.EqualFold(ln.Status, "blocked") || finishedNebulaAnalysisLane(*r, *ln) {
 			continue
 		}
 		head := strings.TrimSpace(ln.Head)
 		if head != "" && !validGitSHA(head) {
 			ln.IntegrationReason = "integration unknown: invalid lane head " + head
 			continue
+		}
+		if subagentNoPRHandback(*r, *ln) {
+			branch := strings.TrimPrefix(strings.TrimSpace(ln.Branch), "refs/heads/")
+			if !validGitBranch(gitCtx, mirror, branch) {
+				ln.IntegrationReason = "integration unknown: missing or invalid lane branch " + branch
+				continue
+			}
+			branchRef := "refs/orca/heads/" + branch
+			branchHead, err := gitOutput(gitCtx, mirror, "rev-parse", "--verify", "--quiet", "--end-of-options", branchRef)
+			var exitErr *exec.ExitError
+			if err != nil && (!errors.As(err, &exitErr) || exitErr.ExitCode() != 1) {
+				ln.IntegrationReason = "integration unknown: read lane branch " + branch + " failed: " + err.Error()
+				continue
+			}
+			ln.branchChecked, ln.branchHead = true, strings.TrimSpace(string(branchHead))
+		}
+		if ln.branchHead != "" {
+			// The branch is newer evidence than a potentially stale report head.
+			head = ln.branchHead
 		}
 		if head != "" {
 			for _, ref := range fetchedRefs {
@@ -735,13 +771,40 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 			}
 		}
 		if !ln.Integrated {
-			ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is not in mirror refs and no squash subject ending (#%s)", cmp.Or(shortSHA(head), "missing"), prNumber(ln.PR))
+			switch {
+			case ln.branchHead != "":
+				ln.IntegrationReason = fmt.Sprintf("integration gate: lane branch %s has unmerged head %s", ln.Branch, shortSHA(ln.branchHead))
+			case ln.branchChecked && head == "":
+				ln.IntegrationReason = fmt.Sprintf("integration gate: lane branch %s is absent from mirror", ln.Branch)
+			default:
+				ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is not in mirror refs and no squash subject ending (#%s)", cmp.Or(shortSHA(head), "missing"), prNumber(ln.PR))
+			}
 		}
 	}
 }
 
 func finishedAnalysisLane(ln Lane) bool {
 	return strings.EqualFold(strings.TrimSpace(ln.Mode), "analysis") && strings.EqualFold(strings.TrimSpace(ln.Status), "done")
+}
+
+func finishedNebulaAnalysisLane(r Run, ln Lane) bool {
+	return r.Format == FormatNebulaSwarm && finishedAnalysisLane(ln)
+}
+
+func subagentNoPRHandback(r Run, ln Lane) bool {
+	return r.Format == FormatSubagentSwarm &&
+		strings.EqualFold(strings.TrimSpace(ln.Status), "done") &&
+		strings.TrimSpace(ln.PR) == "" &&
+		reportDone(ln.Report)
+}
+
+func finishedNoPRLane(r Run, ln Lane) bool {
+	return subagentNoPRHandback(r, ln) &&
+		ln.branchChecked &&
+		ln.branchHead == "" &&
+		strings.TrimSpace(ln.Head) == "" &&
+		strings.TrimSpace(r.IntegrationError) == "" &&
+		strings.TrimSpace(ln.IntegrationReason) != ""
 }
 
 func gitOutput(ctx context.Context, repo string, args ...string) ([]byte, error) {
@@ -1445,6 +1508,13 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 	if ln.PR != "" {
 		p.Evidence = append(p.Evidence, "pr=#"+ln.PR)
 	}
+	if ln.branchChecked {
+		if ln.branchHead != "" {
+			p.Evidence = append(p.Evidence, "lane-branch="+ln.Branch+" head="+shortSHA(ln.branchHead))
+		} else {
+			p.Evidence = append(p.Evidence, "lane-branch="+ln.Branch+" absent")
+		}
+	}
 	if ln.HostHold != "" {
 		p.Evidence = append(p.Evidence, "host-hold="+clip(ln.HostHold, 160))
 	}
@@ -1467,7 +1537,7 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 		p.Reason = "lane is already integrated, merged, or closed; no lifecycle move"
 		return p
 	}
-	if finishedAnalysisLane(ln) {
+	if finishedNebulaAnalysisLane(r, ln) {
 		p.Reason = "analysis lane finished; no PR to integrate"
 		return p
 	}
@@ -1504,6 +1574,21 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 		p.Move, p.Reason = "wait", "host-held: PR is draft"
 		return p
 	}
+	if r.Format == FormatSubagentSwarm {
+		if strings.EqualFold(ln.Status, "planned") && strings.TrimSpace(ln.Phase) == "" && ln.Session == "" && ln.Terminal == "" && strings.TrimSpace(ln.Report) == "" {
+			p.Reason = "planned, not started; dispatcher decides funding"
+			return p
+		}
+		if ln.HoldAdvance && report == "" {
+			p.Move, p.Reason = "wait", "host-held: hold-advance awaits missing report "+ln.ID+"."+ln.Phase+".md"
+			if ln.Terminal == "" {
+				p.Reason += "; no terminal recorded"
+			} else {
+				p.Reason += "; waiting for terminal " + ln.Terminal + " handback"
+			}
+			return p
+		}
+	}
 	if strings.EqualFold(ln.Status, "failed") || strings.EqualFold(ln.Status, "needs-human") {
 		p.Reason = "run or lane is already terminal; no lifecycle move"
 		return p
@@ -1516,11 +1601,18 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 		report := previewOutcome(ln.Report)
 		if report != "done" && report != "no-change" {
 			p.Move, p.Reason = "wait", "hold-advance requires orchestrator judgment"
+			if r.Format == FormatSubagentSwarm {
+				p.Move, p.Reason = "judge", "hold-advance requires orchestrator judgment before acting on report "+report
+			}
 			return p
 		}
 	}
 	if strings.EqualFold(ln.TerminalState, "working") || strings.EqualFold(ln.TerminalState, "busy") {
 		p.Move, p.Reason = "wait", "terminal is working; adoption must not complete, release, or stop it"
+		return p
+	}
+	if finishedNoPRLane(r, ln) {
+		p.Reason = "finished, no PR to integrate"
 		return p
 	}
 	switch {
@@ -1531,6 +1623,10 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
 		} else if integrationJudgmentApplies(ln) && ln.IntegrationReason != "" {
 			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
+			if r.Format == FormatSubagentSwarm && ln.HoldAdvance {
+				p.Gate, p.EvidencePresent = mergeGate(r), mergeGateEvidence(r, ln)
+				p.Reason = fmt.Sprintf("%s; %s evidence=%s", p.Reason, p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
+			}
 		} else if ln.HoldAdvance || sweOnly(r, ln) {
 			p.Move, p.Gate, p.EvidencePresent = "judge", mergeGate(r), mergeGateEvidence(r, ln)
 			p.Reason = fmt.Sprintf("%s evidence=%s", p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
@@ -1543,6 +1639,13 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 		}
 	default:
 		p.Move, p.Reason = "wait", "no terminal handback or actionable report evidence"
+		if r.Format == FormatSubagentSwarm {
+			if strings.TrimSpace(ln.Terminal) != "" {
+				p.Reason = "waiting for terminal " + ln.Terminal + " handback"
+			} else {
+				p.Move, p.Reason = "none", "no report or terminal to observe; dispatcher decides recovery"
+			}
+		}
 	}
 	return p
 }

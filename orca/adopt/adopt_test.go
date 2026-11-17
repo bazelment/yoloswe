@@ -412,6 +412,142 @@ func g52RunFixture(t *testing.T, root string, tc g52Fixture, laneHead string) st
 	return dir
 }
 
+func TestSubagentSwarmAdoptPreviewFinishedLanesG56(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	seed := filepath.Join(root, "seed")
+	gitTest(t, root, "init", "--bare", remote)
+	gitTest(t, root, "init", seed)
+	gitTest(t, seed, "config", "user.email", "orca-g56@example.invalid")
+	gitTest(t, seed, "config", "user.name", "orca g56")
+	gitTest(t, seed, "remote", "add", "origin", remote)
+	write(t, filepath.Join(seed, "base.txt"), "base\n")
+	gitTest(t, seed, "add", ".")
+	gitTest(t, seed, "commit", "-m", "base")
+	gitTest(t, seed, "branch", "-M", "main")
+	gitTest(t, seed, "push", "-u", "origin", "main")
+	gitTest(t, root, "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	baseHead := strings.TrimSpace(gitTest(t, seed, "rev-parse", "HEAD"))
+	gitTest(t, seed, "checkout", "-b", "swarm-lane/run/branch/lane")
+	write(t, filepath.Join(seed, "lane.txt"), "unmerged\n")
+	gitTest(t, seed, "add", ".")
+	gitTest(t, seed, "commit", "-m", "lane work")
+	laneHead := strings.TrimSpace(gitTest(t, seed, "rev-parse", "HEAD"))
+	gitTest(t, seed, "push", "-u", "origin", "swarm-lane/run/branch/lane")
+	gitTest(t, seed, "push", "origin", "HEAD:refs/heads/swarm-lane/run/deleted/lane")
+	gitTest(t, seed, "checkout", "main")
+	write(t, filepath.Join(seed, "merged.txt"), "merged lane work\n")
+	gitTest(t, seed, "add", ".")
+	gitTest(t, seed, "commit", "-m", "merged lane work")
+	gitTest(t, seed, "push", "origin", "main")
+	gitTest(t, seed, "push", "origin", "main:refs/heads/swarm-lane/run/merged/lane")
+
+	type fixture struct {
+		name, status, phase, branch, mode, hold, report, event string
+		wantMove, wantReason                                   string
+		taskExtra                                              string
+	}
+	fixtures := []fixture{
+		{name: "done no PR missing branch", status: "done", phase: "swe", branch: "swarm-lane/run/missing/lane", report: "Outcome: done\n", event: "failed swe->clean lane: CHECK_UNAVAILABLE missing-ref: repo has no refs/heads/swarm-lane/run/missing/lane", wantMove: "none", wantReason: "finished, no PR to integrate"},
+		{name: "done no PR unmerged branch", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", report: "Outcome: done\n", event: "failed swe->clean lane: CHECK_UNAVAILABLE missing-ref: stale", wantMove: "judge", wantReason: "unmerged head"},
+		{name: "subagent analysis unmerged branch", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", mode: "analysis", report: "Outcome: done\n", wantMove: "judge", wantReason: "unmerged head"},
+		{name: "done no PR merged branch", status: "done", phase: "swe", branch: "swarm-lane/run/merged/lane", report: "Outcome: done\n", wantMove: "none", wantReason: "already integrated"},
+		{name: "stale report head with unmerged branch", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", report: "Outcome: done\nHEAD: " + baseHead + "\n", wantMove: "judge", wantReason: "unmerged head " + shortSHA(laneHead)},
+		{name: "missing branch with unmerged report head", status: "done", phase: "swe", branch: "swarm-lane/run/missing/head", report: "Outcome: done\nHEAD: " + laneHead + "\n", wantMove: "judge", wantReason: "integration gate: lane head"},
+		{name: "invalid lane branch", status: "done", phase: "swe", branch: "-invalid", report: "Outcome: done\n", wantMove: "judge", wantReason: "missing or invalid lane branch"},
+		{name: "missing lane branch metadata", status: "done", phase: "swe", report: "Outcome: done\n", wantMove: "judge", wantReason: "missing or invalid lane branch"},
+		{name: "measurement hold no branch", status: "done", phase: "swe", branch: "swarm-lane/run/missing/measurement", hold: "measurement lane: never opens a PR; orchestrator advances by hand\n", report: "Outcome: done\n", event: "decision hold-advance: measurement complete", wantMove: "none", wantReason: "finished, no PR to integrate"},
+		{name: "empty hold unmerged branch", status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", hold: "", report: "Outcome: done\n", event: "decision hold-advance: judgment", wantMove: "judge", wantReason: "unmerged head"},
+		{name: "hold missing report", status: "done", phase: "swe", branch: "swarm-lane/run/missing/report", hold: "", event: "decision hold-advance: judgment", wantMove: "wait", wantReason: "missing report"},
+		{name: "planned not started", status: "planned", phase: "", wantMove: "none", wantReason: "planned, not started; dispatcher decides funding"},
+		{name: "running live terminal", status: "running", phase: "swe", branch: "swarm-lane/run/branch/lane", event: "started swe terminal-live", wantMove: "wait", wantReason: "waiting for terminal terminal-live handback"},
+		{name: "running with no terminal", status: "running", phase: "swe", wantMove: "none", wantReason: "no report or terminal to observe; dispatcher decides recovery"},
+		{name: "host hold still waits", status: "done", phase: "swe", branch: "swarm-lane/run/missing/held", report: "Outcome: done\n", taskExtra: `,"blocked_on":"host deployment"`, wantMove: "wait", wantReason: "host-held: host deployment"},
+		{name: "cached branch before deletion", status: "done", phase: "swe", branch: "swarm-lane/run/deleted/lane", report: "Outcome: done\n", wantMove: "judge", wantReason: "unmerged head"},
+		{name: "deleted branch after cached preview", status: "done", phase: "swe", branch: "swarm-lane/run/deleted/lane", report: "Outcome: done\n", wantMove: "none", wantReason: "finished, no PR to integrate"},
+	}
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(root, "subagent-swarm", strings.ReplaceAll(tc.name, " ", "-"))
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			phase := ""
+			if tc.phase != "" {
+				phase = fmt.Sprintf(",\"phase\":%q", tc.phase)
+			}
+			branch := ""
+			if tc.branch != "" {
+				branch = fmt.Sprintf(",\"branch\":%q", tc.branch)
+			}
+			mode := ""
+			if tc.mode != "" {
+				mode = fmt.Sprintf(","+`"mode":%q`, tc.mode)
+			}
+			write(t, filepath.Join(dir, "state.json"), fmt.Sprintf(`{"config":{"goal":"g56","repo":%q,"target":"main","base":"main","phases":[{"name":"swe"}]},"tasks":[{"id":"lane","status":%q%s%s%s%s}]}`, remote, tc.status, phase, branch, mode, tc.taskExtra))
+			write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: g56\n")
+			write(t, filepath.Join(dir, "EVENTS"), func() string {
+				if tc.event == "" {
+					return ""
+				}
+				kind, detail, _ := strings.Cut(tc.event, " ")
+				return "2026-11-16T02:00:00Z\tlane\t" + kind + "\t" + detail + "\n"
+			}())
+			if tc.hold != "" || tc.name == "empty hold unmerged branch" || tc.name == "hold missing report" {
+				write(t, filepath.Join(dir, "lane.hold-advance"), tc.hold)
+			}
+			if tc.report != "" {
+				if err := os.WriteFile(filepath.Join(dir, "lane."+tc.phase+".md"), []byte(tc.report), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.name == "running live terminal" {
+				write(t, filepath.Join(dir, "lane.swe.spawn.json"), `{"session_id":"session-live","terminal_id":"terminal-live"}`)
+			}
+			if tc.name == "deleted branch after cached preview" {
+				gitTest(t, root, "--git-dir", remote, "update-ref", "-d", "refs/heads/"+tc.branch)
+			}
+			svc := &Service{Mirror: GitMirror{CacheDir: filepath.Join(root, "mirror")}}
+			result, err := svc.DryRunDir(t.Context(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Lanes) != 1 {
+				t.Fatalf("lanes = %+v", result.Lanes)
+			}
+			got := result.Lanes[0]
+			t.Logf("dry-run %s: move=%s reason=%s evidence=%v", tc.name, got.Move, got.Reason, got.Evidence)
+			if got.Move != tc.wantMove || !strings.Contains(got.Reason, tc.wantReason) {
+				t.Fatalf("preview = %+v, want move=%q reason containing %q", got, tc.wantMove, tc.wantReason)
+			}
+			if tc.wantReason == "unmerged head" && !strings.Contains(got.Reason, shortSHA(laneHead)) {
+				t.Fatalf("reason %q does not name unmerged head %s", got.Reason, laneHead)
+			}
+			if tc.name == "hold missing report" && !strings.Contains(got.Reason, "no terminal") {
+				t.Fatalf("reason %q does not disclose the missing terminal", got.Reason)
+			}
+			if tc.name == "empty hold unmerged branch" && got.Gate == "" {
+				t.Fatalf("hold advance judgment lacks run gate: %+v", got)
+			}
+			svc.Importer = Importer{Roots: []string{filepath.Dir(dir)}}
+			svc.Holder = "g56-fixture"
+			svc.Labeler, svc.Watcher = &fakeLabeler{label: "claude"}, &fakeWatcher{}
+			var live DryRunLane
+			svc.Driver = runDriverFuncs{start: func(_ context.Context, r Run) error {
+				live = previewLaneAt(r, r.Lanes[0], time.Now().UTC())
+				return nil
+			}}
+			if _, err := svc.Adopt(t.Context(), filepath.Base(dir)); err != nil {
+				t.Fatal(err)
+			}
+			if live.Move != got.Move || live.Reason != got.Reason {
+				t.Fatalf("live preview = %+v, dry-run = %+v", live, got)
+			}
+		})
+	}
+}
+
 func integrationFixture(t *testing.T, kind, target string, pr int, blocked bool, status ...string) (runDir, repo, laneHead string) {
 	t.Helper()
 	root := t.TempDir()
