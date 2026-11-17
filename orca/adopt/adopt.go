@@ -632,8 +632,10 @@ func isGitCheckout(path string) bool {
 	return exec.Command("git", "-C", path, "rev-parse", "--git-dir").Run() == nil
 }
 
-// applyIntegrationEvidence obtains all integration evidence from one orca-owned
-// commit-only mirror per run. Recorded checkouts are read-only sources only.
+// applyIntegrationEvidence obtains G52's union of integration evidence from
+// one orca-owned commit-only mirror per run. It accepts target, base, main,
+// and remote-HEAD ancestry or squash subjects; the merge gate uses the
+// target-only wrapper below. Recorded checkouts are read-only sources only.
 func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) {
 	applyIntegrationEvidenceRefs(ctx, r, mirrorCfg, false)
 }
@@ -709,12 +711,17 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 		fetchedRefs = append(fetchedRefs, "refs/orca/"+branch)
 	}
 	refspecs = append(refspecs, laneRefspecs...)
+	optionalMain := !targetOnly && !slices.Contains(branches, "main")
+	if optionalMain {
+		// An optional wildcard refspec tolerates repositories without main.
+		refspecs = append(refspecs, "+refs/heads/main*:refs/orca/main*")
+	}
 	if !targetOnly {
 		refspecs = append(refspecs, "+HEAD:refs/orca/HEAD")
 		fetchedRefs = append(fetchedRefs, "refs/orca/HEAD")
 	}
 	fetchArgs := []string{"-C", mirror, "fetch"}
-	if len(laneRefspecs) > 0 {
+	if len(laneRefspecs) > 0 || optionalMain {
 		fetchArgs = append(fetchArgs, "--prune")
 	}
 	fetchArgs = append(fetchArgs, "--no-tags", "--filter=tree:0", source)
@@ -724,6 +731,11 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 	if out, err := fetch.CombinedOutput(); err != nil {
 		r.IntegrationError = "fetch target " + cmp.Or(strings.TrimSpace(r.TargetBranch), "remote") + " failed: " + strings.TrimSpace(string(out))
 		return
+	}
+	if optionalMain {
+		if _, err := gitOutput(gitCtx, mirror, "rev-parse", "--verify", "--quiet", "refs/orca/main"); err == nil {
+			fetchedRefs = append(fetchedRefs, "refs/orca/main")
+		}
 	}
 	for _, ref := range fetchedRefs {
 		if _, err := gitOutput(gitCtx, mirror, "rev-parse", "--verify", "--end-of-options", ref); err != nil {
@@ -754,6 +766,14 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 	for i := range r.Lanes {
 		ln := &r.Lanes[i]
 		if !integrationEvidenceNeeded(*ln) {
+			continue
+		}
+		if openPR(*ln) {
+			pr := strings.TrimSpace(ln.PR)
+			if pr == "" && len(ln.MergeNotePRs) > 0 {
+				pr = strings.TrimSpace(ln.MergeNotePRs[0])
+			}
+			ln.IntegrationReason = fmt.Sprintf("integration gate: PR #%s remains open; merge evidence is unavailable", cmp.Or(pr, "unknown"))
 			continue
 		}
 		head := strings.TrimSpace(ln.Head)
@@ -790,17 +810,13 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 			ln.IntegrationReason = "integration unknown: invalid lane head " + head
 			continue
 		}
-		nonTargetReason := ""
 		if head != "" {
 			for _, ref := range fetchedRefs {
 				if gitRun(gitCtx, mirror, "merge-base", "--is-ancestor", "--end-of-options", head, ref) == nil {
-					if ref == targetRef && strings.TrimSpace(r.TargetBranch) != "" {
-						ln.Integrated = true
-						ln.targetIntegrated = true
-						ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is an ancestor of mirror ref %s", shortSHA(head), strings.TrimPrefix(ref, "refs/orca/"))
-						break
-					}
-					nonTargetReason = fmt.Sprintf("integration gate: lane head %s is present on non-target mirror ref %s", shortSHA(head), strings.TrimPrefix(ref, "refs/orca/"))
+					ln.Integrated = true
+					ln.targetIntegrated = ref == targetRef && strings.TrimSpace(r.TargetBranch) != ""
+					ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is an ancestor of mirror ref %s", shortSHA(head), strings.TrimPrefix(ref, "refs/orca/"))
+					break
 				}
 			}
 		}
@@ -815,13 +831,10 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 				for _, subject := range subjects {
 					subject = strings.TrimSpace(subject)
 					if strings.HasSuffix(subject, suffix) {
-						if _, ok := targetSubjects[subject]; ok {
-							ln.Integrated = true
-							ln.targetIntegrated = true
-							ln.IntegrationReason = fmt.Sprintf("integration gate: mirror has squash subject ending %s", suffix)
-							break
-						}
-						nonTargetReason = fmt.Sprintf("integration gate: squash subject ending %s is present only on a non-target mirror ref", suffix)
+						ln.Integrated = true
+						_, ln.targetIntegrated = targetSubjects[subject]
+						ln.IntegrationReason = fmt.Sprintf("integration gate: mirror has squash subject ending %s", suffix)
+						break
 					}
 				}
 				if ln.Integrated {
@@ -832,13 +845,11 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 		if !ln.Integrated {
 			switch {
 			case len(ln.MergeNotePRs) > 0:
-				ln.IntegrationReason = "integration gate: host-nominated PR #" + strings.Join(ln.MergeNotePRs, ", #") + " has no matching squash subject in mirror"
+				ln.IntegrationReason = "integration gate: host-nominated PR #" + strings.Join(ln.MergeNotePRs, ", #") + " has neither lane-head ancestry nor a matching squash subject in mirror"
 			case branchError != "":
 				ln.IntegrationReason = branchError
 			case ln.branchHead != "":
 				ln.IntegrationReason = fmt.Sprintf("integration gate: lane branch %s has unmerged head %s", ln.Branch, shortSHA(ln.branchHead))
-			case nonTargetReason != "":
-				ln.IntegrationReason = nonTargetReason
 			default:
 				ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is not in mirror refs and no squash subject ending (#%s)", cmp.Or(shortSHA(head), "missing"), prNumber(ln.PR))
 			}
@@ -861,6 +872,11 @@ func integrationEvidenceNeeded(ln Lane) bool {
 
 func closedLane(ln Lane) bool {
 	return strings.EqualFold(strings.TrimSpace(ln.PRState), "closed") || eventKind(ln.LastEvent) == "closed"
+}
+
+func openPR(ln Lane) bool {
+	state := strings.ToLower(strings.TrimSpace(ln.PRState))
+	return state == "open" || strings.HasPrefix(state, "open ")
 }
 
 func finishedAnalysisLane(ln Lane) bool {
@@ -1744,13 +1760,24 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 			p.Move, p.Reason = "advance", "completed report permits the next recipe phase"
 		}
 	default:
-		if strings.TrimSpace(ln.Terminal) != "" {
+		if !terminalStateLive(ln.TerminalState) && strings.EqualFold(strings.TrimSpace(ln.Status), "done") {
+			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
+		} else if strings.TrimSpace(ln.Terminal) != "" && terminalStateLive(ln.TerminalState) {
 			p.Move, p.Reason = "wait", "waiting for terminal "+ln.Terminal+" handback"
 		} else {
 			p.Move, p.Reason = "none", "no report or terminal to observe; dispatcher decides recovery"
 		}
 	}
 	return p
+}
+
+func terminalStateLive(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "exited", "stopped", "released", "ended", "done", "completed", "finished", "idle", "sleeping":
+		return false
+	default:
+		return true
+	}
 }
 
 func (ln Lane) expectedHostWait(now time.Time) (string, time.Time) {
