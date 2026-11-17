@@ -654,6 +654,11 @@ func TestAdoptedHostContract(t *testing.T) {
 				if name == "f host hold" {
 					tasks[0]["hold"] = "owner approval"
 				}
+				if name[0] == 'f' {
+					// Even independent-looking host merge proof cannot override a
+					// draft or explicit host hold.
+					tasks[0]["merge_sha"] = head
+				}
 			}
 			data, err := json.Marshal(map[string]any{"config": config, "tasks": tasks})
 			if err != nil {

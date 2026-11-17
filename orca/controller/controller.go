@@ -4781,6 +4781,8 @@ var (
 	adoptedNamedCheckBadRE  = regexp.MustCompile(`(?i)(lint|build([^a-z0-9]+)(and|&)([^a-z0-9]+)test)([^a-z0-9]+)(red|fail|failed|failure|error|pending|queued|in[_ -]?progress|false)`)
 )
 
+// Native runs continue to use isCIGreen; adopted runs use this named-check
+// predicate only inside HostRun merge-gate branches.
 // isAdoptedCIGreen requires the two checks named by the adopted-run merge
 // contract.  A generic "green" summary is deliberately insufficient because
 // it does not prove which checks ran on the current PR head.

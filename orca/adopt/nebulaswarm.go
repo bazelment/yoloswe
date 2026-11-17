@@ -161,16 +161,20 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 	for i := range st.Tasks {
 		t := &st.Tasks[i]
 		round := max(t.Round, 1)
+		mergeSHA := strings.TrimSpace(t.MergeSHA)
+		if !validGitSHA(mergeSHA) {
+			mergeSHA = ""
+		}
 		x := Lane{ID: t.ID, Title: t.Title, Branch: t.Branch, Phase: t.Phase, Status: t.Status, Round: t.Round, Mode: t.Mode,
 			Session: t.SessionID, Terminal: t.Terminals[t.Phase][strconv.Itoa(round)], TerminalState: t.TerminalState,
 			HostHold: ledgerHostHold(t.BlockedOn, t.HoldNote, t.Hold, t.Park, t.Note), PRDraft: t.PRDraft || t.Draft,
-			PRState: t.PRState, MergeSHA: t.MergeSHA, Head: firstNonEmpty(t.PRHead, t.Head), Checks: t.Checks}
+			PRState: t.PRState, MergeSHA: mergeSHA, Head: firstNonEmpty(t.PRHead, t.Head), Checks: t.Checks}
 		applySpawnEvidence(dir, &x)
 		x.PRDraft = x.PRDraft || isDraftPR(x.PRState)
 		if t.PR > 0 {
 			x.PR = strconv.Itoa(t.PR)
 		}
-		x.Integrated = x.MergeSHA != ""
+		x.Integrated = x.MergeSHA != "" && strings.TrimSpace(x.HostHold) == "" && !x.PRDraft && !strings.EqualFold(strings.TrimSpace(x.Status), "blocked")
 		x.ReportPath = latestReport(dir, t.ID, x.Phase, round)
 		x.WaitingOn, x.WaitDeadline = parseHostWait(t.WaitingOn, t.Deadline)
 		if x.ReportPath != "" {

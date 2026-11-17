@@ -1021,6 +1021,9 @@ type integrationResult struct {
 // verifyIntegration deliberately ignores report outcomes and host PR-state prose.
 // Only a recorded merge SHA or commit evidence on the configured target counts.
 func (d *Controllers) verifyIntegration(ctx context.Context, syncer *runLedgerSync, ln lane.Lane, mirror GitMirror) (bool, string, error) {
+	if strings.TrimSpace(ln.HostHoldReason) != "" {
+		return false, fmt.Sprintf("PR #%d remains host-held or draft; merge is forbidden", ln.PR), nil
+	}
 	r := syncer.CurrentRun()
 	r.TargetBranch = cmp.Or(strings.TrimSpace(r.TargetBranch), recipe.Default().MergePolicy.TargetBranch)
 	b, err := os.ReadFile(filepath.Join(r.Dir, "state.json"))
@@ -1540,42 +1543,10 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			// A nebula-swarm lane parked for its owner; checkpoint writes it back.
 			status = lane.StatusBlocked
 		}
-		mergeSHA := imported.MergeSHA
-		terminal := integratedLane(*imported)
-		if strings.EqualFold(imported.Phase, recipe.PhaseIntegrate) {
-			closed := closedLane(*imported)
+		mergeSHA := strings.TrimSpace(imported.MergeSHA)
+		if !validGitSHA(mergeSHA) {
 			mergeSHA = ""
-			for j := range st.Tasks {
-				if st.Tasks[j].ID == imported.ID {
-					if sha := strings.TrimSpace(st.Tasks[j].MergeSHA); validGitSHA(sha) {
-						mergeSHA = sha
-					}
-					break
-				}
-			}
-			if imported.targetIntegrated && mergeSHA == "" {
-				mergeSHA = imported.Head
-			}
-			// A closed host PR is terminal even though it is not a merge. Merge
-			// prose and an integrate done report remain claims until the target
-			// mirror (or an independent host merge SHA) proves the merge.
-			terminal = closed || imported.targetIntegrated || mergeSHA != ""
-			if !terminal && status == lane.StatusDone {
-				status = lane.StatusRunning
-			}
-			if !terminal && (integratedLane(*imported) || reportDone(imported.Report)) {
-				status = lane.StatusBlocked
-			}
 		}
-		if terminal {
-			// Imported merge/close facts are authoritative even when a host
-			// ledger's status or hold marker is stale. Terminal lanes are never
-			// reopened by adoption.
-			status = lane.StatusDone
-		}
-		// Host-owned blocks and draft PRs are imported as blocked so every
-		// controller tick treats them as judgment-only. An owner/dispatcher
-		// answer can explicitly move the lane back to running.
 		hostHoldReason := strings.TrimSpace(imported.HostHold)
 		if hostHoldReason == "" && !finishedAnalysisLane(*imported) && strings.EqualFold(previewOutcome(imported.Report), string(lane.OutcomeBlocked)) {
 			hostHoldReason = strings.TrimSpace(imported.ReportBlocker)
@@ -1586,7 +1557,48 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		if hostHoldReason == "" && strings.EqualFold(imported.Status, "blocked") {
 			hostHoldReason = "blocked"
 		}
+		mergeForbidden := hostHoldReason != "" || imported.PRDraft
+		terminal := integratedLane(*imported)
+		if strings.EqualFold(imported.Phase, recipe.PhaseIntegrate) {
+			closed := closedLane(*imported)
+			mergeSHA = ""
+			if !mergeForbidden {
+				for j := range st.Tasks {
+					if st.Tasks[j].ID == imported.ID {
+						if sha := strings.TrimSpace(st.Tasks[j].MergeSHA); validGitSHA(sha) {
+							mergeSHA = sha
+						}
+						break
+					}
+				}
+			}
+			if !mergeForbidden && imported.targetIntegrated && mergeSHA == "" {
+				mergeSHA = imported.Head
+			}
+			// A closed host PR is terminal even though it is not a merge. Merge
+			// prose and an integrate done report remain claims until the target
+			// mirror (or an independent host merge SHA) proves the merge.
+			terminal = closed || (!mergeForbidden && (imported.targetIntegrated || mergeSHA != ""))
+			if !terminal && status == lane.StatusDone {
+				status = lane.StatusRunning
+			}
+			if !terminal && (integratedLane(*imported) || reportDone(imported.Report)) {
+				status = lane.StatusBlocked
+			}
+		}
+		if mergeForbidden {
+			mergeSHA = ""
+		}
 		if terminal {
+			// Imported merge/close facts are authoritative even when a host
+			// ledger's status or hold marker is stale. Terminal lanes are never
+			// reopened by adoption.
+			status = lane.StatusDone
+		}
+		// Host-owned blocks and draft PRs are imported as blocked so every
+		// controller tick treats them as judgment-only. An owner/dispatcher
+		// answer can explicitly move the lane back to running.
+		if terminal && !mergeForbidden {
 			hostHoldReason = ""
 		}
 		if hostHoldReason != "" {
@@ -1624,7 +1636,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 				noMerge := store.IsNoMergeText(mission) || store.IsNoMergeText(ln.Title) || store.IsNoMergeText(task.Brief)
 				items = append(items, store.BacklogItem{ID: ln.ID, RunID: r.ID, LaneID: ln.ID, Title: ln.Title, Description: mission, Priority: priority, Status: status, DependsOn: task.DependsOn, NoMerge: noMerge})
 				taskMergeSHA := strings.TrimSpace(task.MergeSHA)
-				if !validGitSHA(taskMergeSHA) {
+				if mergeForbidden || !validGitSHA(taskMergeSHA) {
 					taskMergeSHA = ""
 				}
 				ln.PRHead, ln.ApprovalSHA, ln.MergeSHA, ln.Checks, ln.BaseCommit, ln.Worktree = firstNonEmpty(task.PRHead, ln.PRHead), task.ApprovalSHA, firstNonEmpty(taskMergeSHA, ln.MergeSHA), firstNonEmpty(task.Checks, ln.Checks), task.BaseCommit, task.Worktree

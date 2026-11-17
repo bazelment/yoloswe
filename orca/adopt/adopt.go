@@ -790,17 +790,17 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 			ln.IntegrationReason = "integration unknown: invalid lane head " + head
 			continue
 		}
+		nonTargetReason := ""
 		if head != "" {
 			for _, ref := range fetchedRefs {
 				if gitRun(gitCtx, mirror, "merge-base", "--is-ancestor", "--end-of-options", head, ref) == nil {
-					targetRef := "refs/orca/" + strings.TrimSpace(r.TargetBranch)
 					if ref == targetRef && strings.TrimSpace(r.TargetBranch) != "" {
 						ln.Integrated = true
 						ln.targetIntegrated = true
 						ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is an ancestor of mirror ref %s", shortSHA(head), strings.TrimPrefix(ref, "refs/orca/"))
 						break
 					}
-					ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is present on non-target mirror ref %s", shortSHA(head), strings.TrimPrefix(ref, "refs/orca/"))
+					nonTargetReason = fmt.Sprintf("integration gate: lane head %s is present on non-target mirror ref %s", shortSHA(head), strings.TrimPrefix(ref, "refs/orca/"))
 				}
 			}
 		}
@@ -821,7 +821,7 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 							ln.IntegrationReason = fmt.Sprintf("integration gate: mirror has squash subject ending %s", suffix)
 							break
 						}
-						ln.IntegrationReason = fmt.Sprintf("integration gate: squash subject ending %s is present only on a non-target mirror ref", suffix)
+						nonTargetReason = fmt.Sprintf("integration gate: squash subject ending %s is present only on a non-target mirror ref", suffix)
 					}
 				}
 				if ln.Integrated {
@@ -837,6 +837,8 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 				ln.IntegrationReason = branchError
 			case ln.branchHead != "":
 				ln.IntegrationReason = fmt.Sprintf("integration gate: lane branch %s has unmerged head %s", ln.Branch, shortSHA(ln.branchHead))
+			case nonTargetReason != "":
+				ln.IntegrationReason = nonTargetReason
 			default:
 				ln.IntegrationReason = fmt.Sprintf("integration gate: lane head %s is not in mirror refs and no squash subject ending (#%s)", cmp.Or(shortSHA(head), "missing"), prNumber(ln.PR))
 			}
@@ -1202,7 +1204,7 @@ func importLane(dir string, l *ledgerLane) Lane {
 	} else if m := prLine.FindStringSubmatch(report); m != nil {
 		x.PR = m[1]
 	}
-	if x.MergeSHA != "" {
+	if x.MergeSHA != "" && strings.TrimSpace(x.HostHold) == "" && !x.PRDraft && !strings.EqualFold(strings.TrimSpace(x.Status), "blocked") {
 		x.Integrated = true
 	}
 	applyReportMetadata(&x, report)

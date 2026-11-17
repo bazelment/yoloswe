@@ -853,8 +853,8 @@ func TestControllerStateIntegratedLaneWinsHostHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lanes) != 1 || lanes[0].Status != lane.StatusDone || lanes[0].HostHoldReason != "" {
-		t.Fatalf("integrated held lane = %+v, want terminal without host hold", lanes)
+	if len(lanes) != 1 || lanes[0].Status != lane.StatusBlocked || lanes[0].HostHoldReason != "held behind deploy" || lanes[0].MergeSHA != "" {
+		t.Fatalf("integrated held lane = %+v, want held and unmerged", lanes)
 	}
 }
 
