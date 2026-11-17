@@ -2277,7 +2277,7 @@ func (d *Dispatcher) syncRunContract(ctx context.Context, runID string) {
 			SessionID:  ln.SessionID,
 			TerminalID: ln.TerminalID,
 			Message:    msg,
-		}); sErr == nil {
+		}); sErr == nil || isSubmittedSteerError(sErr) {
 			d.mu.Lock()
 			if d.contractBroadcasts == nil {
 				d.contractBroadcasts = make(map[string]map[string]bool)
@@ -2295,6 +2295,11 @@ func (d *Dispatcher) syncRunContract(ctx context.Context, runID string) {
 			d.cfg.Logger.WarnContext(ctx, "dispatcher: steer run contract failed", "run_id", runID, "lane_id", ln.ID, "err", sErr)
 		}
 	}
+}
+
+func isSubmittedSteerError(err error) bool {
+	var undelivered *lane.UndeliveredError
+	return errors.As(err, &undelivered)
 }
 
 func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, state *turnExecState, view *StateView, p DirectiveRevokeParams) (string, error) {
@@ -3849,13 +3854,7 @@ func (d *Dispatcher) applyMailAnswer(
 		if ln, ok := view.Lane(laneID); ok {
 			if !delivered {
 				if drv := d.laneDriver(); drv != nil && (ln.SessionID != "" || ln.TerminalID != "") {
-					if err := drv.Steer(ctx, lane.SteerRequest{
-						RunID:      runID,
-						LaneID:     ln.ID,
-						SessionID:  ln.SessionID,
-						TerminalID: ln.TerminalID,
-						Message:    answer,
-					}); err != nil {
+					if err := d.deliverLaneAnswer(ctx, runID, &ln, answer, 0, false); err != nil {
 						return "", err
 					}
 				}

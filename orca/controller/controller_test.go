@@ -3589,6 +3589,100 @@ func TestUndeliveredLaneAnswerReturnsToJudgmentOnce(t *testing.T) {
 	}
 }
 
+func TestUndeliveredControllerSteersAreIdempotent(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"unpushed", "disk", "worker", "default", "owner"} {
+		t.Run(kind, func(t *testing.T) {
+			clk, st, base, judge := setupTestEnv(t)
+			drv := &undeliveredDriver{FakeDriver: base}
+			ctx := t.Context()
+			ln := lane.Lane{ID: "lane-" + kind, RunID: "run-1", Status: lane.StatusRunning, SessionID: "s-1", TerminalID: "t-1", Phase: recipe.PhaseSWE}
+			if kind == "owner" {
+				ln.Status = lane.StatusBlocked
+			}
+			if err := st.Lanes().Upsert(ctx, ln); err != nil {
+				t.Fatal(err)
+			}
+			cfg := controller.Config{RunID: "run-1", JudgmentDebounce: -1, UnpushedWorkThreshold: time.Minute}
+			var box *questionBox
+			var ask controller.OwnerAsk
+			switch kind {
+			case "worker":
+				cfg.AnswerQuestion = func(context.Context, string, string) (string, error) { return "use the task notes", nil }
+			case "default":
+				box = &questionBox{}
+			case "owner":
+				ask = controller.OwnerAsk{ID: "owner-ask", RunID: "run-1", LaneID: ln.ID, Question: "choose", Options: []string{"continue"}, Default: "continue", Deadline: clk.Now().Add(time.Hour)}
+			}
+			ctrl := controller.New(cfg, st, drv, clk, judge, box)
+			if kind == "owner" {
+				if err := ctrl.AskOwner(ctx, ask); err != nil {
+					t.Fatal(err)
+				}
+				mailEvent(t, st, mailbox.Message{Owner: true, InReplyTo: ask.ID, Body: "continue"})
+				mailEvent(t, st, mailbox.Message{Body: "other event"})
+			}
+			switch kind {
+			case "unpushed":
+				drv.GitStates[ln.ID] = lane.GitState{UnpushedCommits: 1, OldestUnpushedAt: clk.Now().Add(-time.Hour)}
+			case "disk":
+				drv.DiskUsage[ln.ID] = 95
+			case "worker", "default":
+				msg := mailbox.Message{ID: "q-" + kind, LaneID: ln.ID, Question: true, Body: "choose"}
+				if kind == "default" {
+					msg.ID = ""
+				}
+				mailEvent(t, st, msg)
+				mailEvent(t, st, mailbox.Message{Body: "other event"})
+			}
+			if kind == "unpushed" || kind == "disk" {
+				mailEvent(t, st, mailbox.Message{Body: "other event"})
+			}
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := ctrl.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if drv.calls != 1 {
+				t.Fatalf("steer submissions = %d, want 1", drv.calls)
+			}
+			undelivered := 0
+			otherSeen := false
+			for _, batch := range judge.Batches {
+				for _, ev := range batch {
+					if ev.Source == lane.AnswerDeliverySource && strings.Contains(ev.Summary, "answer not delivered") {
+						undelivered++
+					}
+					if ev.Summary == "other event" {
+						otherSeen = true
+					}
+				}
+			}
+			if undelivered != 1 {
+				t.Fatalf("undelivered judgments = %d in %+v, want 1", undelivered, judge.Batches)
+			}
+			if !otherSeen {
+				t.Fatalf("judgment batches = %+v; want the following event consumed in the same Step", judge.Batches)
+			}
+			decs, err := st.Decisions().List(ctx, store.DecisionFilter{RunID: "run-1", LaneID: ln.ID})
+			if err != nil || len(decs) == 0 {
+				t.Fatalf("decisions = %+v, err=%v; want recorded action", decs, err)
+			}
+			recordedKey := false
+			for _, dec := range decs {
+				var args controller.DecisionArgs
+				if json.Unmarshal(dec.Args, &args) == nil && args.ActionKey != "" {
+					recordedKey = true
+				}
+			}
+			if !recordedKey {
+				t.Fatalf("decisions = %+v; want an action key", decs)
+			}
+		})
+	}
+}
+
 func TestLaneWatchQuestionsAreUrgent(t *testing.T) {
 	t.Parallel()
 	for _, outcome := range []lane.ReportOutcome{lane.OutcomeNeedsInput, lane.OutcomeBlocked} {
