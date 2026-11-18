@@ -22,7 +22,7 @@ var (
 	sanitizeSecretRE = regexp.MustCompile(`(?i)(?:ghp_[A-Za-z0-9_\-]+|sk-[A-Za-z0-9_\-]+|AIza[A-Za-z0-9_\-]+|xox[baprs]-[A-Za-z0-9_\-]+|BEGIN [^-\n]*PRIVATE KEY)`)
 	sanitizeSHARE    = regexp.MustCompile(`(?i)\b[0-9a-f]{7,64}\b`)
 	sanitizePRRE     = regexp.MustCompile(`#\d+`)
-	sanitizeTokenRE  = regexp.MustCompile(`(?i)\b(?:still\s+open|measurement\s+lane:\s*never\s+opens\s+a\s+pr|never\s+opens\s+a\s+pr|merge[_ -]?gate|exact\s+head|build\s+and\s+test|lint|soak|a/b|ci|checks?|review|integrat(?:e|ed|ion)|merged|closed|open|no[- ]pr|phase|status|done|blocked|working|running|planned|failed|needs[- ](?:input|swe|human)|hold[- ]advance|unmerged|target|base|swe|clean|analysis|plan|test|build|deploy|verdict|pass|passed|green|required|must|result|safety)\b`)
+	sanitizeTokenRE  = regexp.MustCompile(`(?i)\b(?:still\s+open|measurement\s+lane:\s*never\s+opens\s+a\s+pr|never\s+opens\s+a\s+pr|merge[_ -]?gate|exact\s+head|build\s+and\s+test|lint|soak|a/b|ci|checks?|review|integrat(?:e|ed|ion)|merged|closed|open|no[- ]pr|phase|status|done|blocked|working|running|planned|failed|needs[- ](?:input|swe|human)|hold[- ]advance|unmerged|target|base|swe|clean|analysis|plan|test|build|deploy|verdict|pass|passed|green|required|must|result|safety|next|merge|complete|remaining|work|none|n/a)\b`)
 )
 
 // SanitizeDir writes a credential-free, shape-preserving run copy. The output
