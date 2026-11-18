@@ -19,10 +19,12 @@
 # each worktree with `ledger.py set --worktree` at spawn or it is invisible here.
 # Run with run_in_background:true and end the turn.
 #
-# Reap the PREVIOUS watcher in its own separate foreground call before arming
-# this one. Never inside it: the reap pattern then matches this script's own argv
-# and it kills itself on startup (exit 144, zero turns of watching).
-#     pkill -f '[w]atch_lanes[.]sh'; pgrep -f '[w]atch_lanes[.]sh' | wc -l
+# Arming reaps this run's previous watcher, and only it: on start the script stops
+# the pid recorded in "$RUN/.watch_lanes.pid" if that process is still
+# watch_lanes.sh for this same run dir, then records its own pid. Do not reap by
+# pattern (`pkill -f '[w]atch_lanes[.]sh'`): on a shared host it matches every
+# run's watcher and silently deafens other orchestrators, and run inside the
+# arming call it matches this script's own argv too (exit 144, zero turns of watching).
 set -u
 
 RUN="${1:?usage: watch_lanes.sh <run-dir> [max-minutes]}"
@@ -30,6 +32,19 @@ MAXMIN="${2:-60}"
 INTERVAL="${INTERVAL:-20}"
 STALL_MIN="${STALL_MIN:-15}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+PIDFILE="$RUN/.watch_lanes.pid"
+old=$(cat "$PIDFILE" 2>/dev/null)
+case "$old" in
+  ''|*[!0-9]*|"$$") ;;
+  *)
+    # The pid may have exited and been reused, even by another run's watcher:
+    # stop it only if its argv still names this script and this run dir.
+    case " $(ps -ww -o args= -p "$old" 2>/dev/null) " in
+      *"watch_lanes.sh $RUN "*) kill "$old" 2>/dev/null ;;
+    esac ;;
+esac
+echo $$ >"$PIDFILE"
 
 lanes() { /usr/bin/env python3 "$HERE/ledger.py" lanes "$RUN" --need-worktree 2>/dev/null; }
 

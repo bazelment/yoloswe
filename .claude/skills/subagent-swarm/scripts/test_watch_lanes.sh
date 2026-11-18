@@ -1,5 +1,5 @@
 #!/bin/bash
-# Regression test for watch_lanes.sh signal detection.
+# Regression test for watch_lanes.sh signal detection and per-run watcher reaping.
 #
 # The bug this pins down: for most of this skill's life the watcher globbed only
 # "$RUN"/*.done. A review phase that rejects a lane writes <lane>.<phase>.needs-swe
@@ -11,12 +11,29 @@
 # never touches tmux, and never reads a real run dir.
 set -u
 SW="$(cd "$(dirname "$0")" && pwd)"
-TMP=$(mktemp -d /tmp/swarm-watch-test-XXXXXX)
-PASS=0; FAIL=0
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/swarm-watch-test-XXXXXX")
+PASS=0; FAIL=0; WPIDS=""
 ok(){ PASS=$((PASS+1)); echo "  ok   $1"; }
 no(){ FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 
-cleanup(){ rm -rf "$TMP"; }
+within(){                         # within <seconds> <cmd...>: poll until true or timeout
+  local end=$((SECONDS + $1)); shift
+  until "$@"; do [ "$SECONDS" -ge "$end" ] && return 1; sleep 0.1; done
+}
+
+# Stop only watchers this test armed, and only while their argv still names a run
+# dir under $TMP, so a recycled pid is never signalled. A killed watcher's
+# in-flight git command can still write under $TMP for a moment, so retry the rm.
+cleanup(){
+  local p killed=()
+  for p in $WPIDS; do
+    case "$(ps -ww -o args= -p "$p" 2>/dev/null)" in
+      *"watch_lanes.sh $TMP/"*) kill "$p" 2>/dev/null && killed+=("$p") ;;
+    esac
+  done
+  [ "${#killed[@]}" -gt 0 ] && wait "${killed[@]}" 2>/dev/null
+  within 5 rm -rf "$TMP" 2>/dev/null || echo "warning: could not remove $TMP" >&2
+}
 trap cleanup EXIT
 
 # A lane needs a real git worktree: the watcher resolves commits and dirty count
@@ -80,6 +97,43 @@ RUN=$(make_run preexisting)
 OUT=$(watch_then "$RUN" "")
 if echo "$OUT" | grep -q 'SIGNAL-FILE'; then no "re-reported a baseline signal"
 else ok "baseline signal ignored (got: $(echo "$OUT" | head -1))"; fi
+
+# Long-lived watchers for the reap tests. arm runs in this shell (not in $(...)) so
+# each watcher is this test's own child; ARMED is its pid.
+arm(){
+  INTERVAL=1 STALL_MIN=99 bash "$SW/watch_lanes.sh" "$1" 1 >/dev/null 2>&1 &
+  ARMED=$!; WPIDS="$WPIDS $ARMED"
+}
+alive(){ local s; s=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' '); [ -n "$s" ] && [ "${s#Z}" = "$s" ]; }
+gone(){ ! alive "$1"; }
+recorded(){ [ "$(cat "$1/.watch_lanes.pid" 2>/dev/null)" = "$2" ]; }
+
+echo "== re-arming one run reaps only that run's old watcher =="
+# On a shared host every run has its own watcher. The old reap advice,
+# pkill -f '[w]atch_lanes[.]sh', matched all of them, so re-arming one run killed
+# the others with no wake event. Run B arms AFTER run A, so a host-wide pid file
+# or a name-pattern reap would hit B.
+RUNA=$(make_run shared); RUNB=$(make_run shared2)
+arm "$RUNA"; A1=$ARMED; within 5 recorded "$RUNA" "$A1"
+arm "$RUNB"; B1=$ARMED; within 5 recorded "$RUNB" "$B1"
+if alive "$A1" && alive "$B1"; then ok "both runs' watchers armed"
+else no "a watcher died on startup"; fi
+arm "$RUNA"; A2=$ARMED; within 5 recorded "$RUNA" "$A2"
+if within 5 gone "$A1"; then ok "run A's old watcher reaped on re-arm"
+else no "run A's old watcher ($A1) still running after re-arm"; fi
+if alive "$B1"; then ok "run B's watcher survived run A's re-arm"
+else no "run A's re-arm killed run B's watcher"; fi
+if alive "$A2"; then ok "run A's new watcher running"
+else no "run A's new watcher died"; fi
+
+echo "== a recorded pid now owned by another run's watcher is left alone =="
+# A recorded pid can outlive its watcher and be reused, even by another run's
+# watcher. Only a watch_lanes.sh for the same run dir is stopped; B's dir extends
+# A's, so a prefix match on the run dir would kill B here.
+echo "$B1" >"$RUNA/.watch_lanes.pid"
+arm "$RUNA"; A3=$ARMED; within 5 recorded "$RUNA" "$A3"
+if alive "$B1"; then ok "run B's watcher survived a stale pid in run A"
+else no "a stale pid in run A killed run B's watcher"; fi
 
 echo
 echo "passed $PASS, failed $FAIL"
