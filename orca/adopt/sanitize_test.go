@@ -14,16 +14,16 @@ func TestSanitizeDirDropsSecretsAndPreservesPreview(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(input, "reports", "secrets"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeSanitizeTest(t, filepath.Join(input, "state.json"), `{"config":{"goal":"owner secret ghp_FAKE_TOKEN","target":"main","merge_gate":"verdict+ci","phases":[{"name":"swe"}]},"tasks":[{"id":"measurement","branch":"swarm-lane/synthetic/measurement","phase":"swe","status":"done","round":1}]}`)
-	writeSanitizeTest(t, filepath.Join(input, "OBJECTIVE.md"), "Owner context with ghp_FAKE_TOKEN and #77\n")
+	writeSanitizeTest(t, filepath.Join(input, "state.json"), `{"config":{"goal":"owner secret ghp_FAKE_TOKEN_12345678901234567890","target":"main","merge_gate":"verdict+ci","phases":[{"name":"swe"}]},"tasks":[{"id":"measurement","branch":"swarm-lane/synthetic/measurement","phase":"swe","status":"done","round":1}]}`)
+	writeSanitizeTest(t, filepath.Join(input, "OBJECTIVE.md"), "Owner context with ghp_FAKE_TOKEN_12345678901234567890 and #77\n")
 	writeSanitizeTest(t, filepath.Join(input, "measurement.swe.md"), "Outcome: done\nHEAD: abcdef1234567\nPR: #77\nBreaks: private details\n")
 	writeSanitizeTest(t, filepath.Join(input, "EVENTS"), "2026-11-17T00:00:00Z\tmeasurement\tcompleted\tPR #77 is still OPEN\n")
 	writeSanitizeTest(t, filepath.Join(input, "measurement.hold-advance"), "measurement lane: never opens a PR\n")
-	writeSanitizeTest(t, filepath.Join(input, "measurement.swe.spawn.json"), `{"session_id":"session-77","terminal_id":"terminal-77","note":"ghp_FAKE_TOKEN"}`)
-	writeSanitizeTest(t, filepath.Join(input, ".creds"), "ghp_FAKE_TOKEN\n")
+	writeSanitizeTest(t, filepath.Join(input, "measurement.swe.spawn.json"), `{"session_id":"session-77","terminal_id":"terminal-77","note":"ghp_FAKE_TOKEN_12345678901234567890"}`)
+	writeSanitizeTest(t, filepath.Join(input, ".creds"), "ghp_FAKE_TOKEN_12345678901234567890\n")
 	writeSanitizeTest(t, filepath.Join(input, "fake.pem"), "-----BEGIN FAKE PRIVATE KEY-----\n")
-	writeSanitizeTest(t, filepath.Join(input, "lanes.env"), "TOKEN=ghp_FAKE_TOKEN\n")
-	writeSanitizeTest(t, filepath.Join(input, "reports", "secrets", "token.txt"), "sk-FAKE\n")
+	writeSanitizeTest(t, filepath.Join(input, "lanes.env"), "TOKEN=ghp_FAKE_TOKEN_12345678901234567890\n")
+	writeSanitizeTest(t, filepath.Join(input, "reports", "secrets", "token.txt"), "sk-FAKE_12345678901234567890\n")
 	writeSanitizeTest(t, filepath.Join(input, "random.tmp"), "drop me\n")
 	writeSanitizeTest(t, filepath.Join(input, "measurement.swe.prev-1.md"), "drop history\n")
 
@@ -71,8 +71,8 @@ func TestSanitizeDirDropsSecretsAndPreservesPreview(t *testing.T) {
 func TestSanitizeRefusalPublishesNoOutput(t *testing.T) {
 	input := t.TempDir()
 	output := filepath.Join(t.TempDir(), "corpus")
-	writeSanitizeTest(t, filepath.Join(input, "state.json"), `{"config":{"phases":[{"name":"review"}]},"tasks":[{"id":"lane-ghp_BADTOKEN","phase":"review","status":"done"}]}`)
-	writeSanitizeTest(t, filepath.Join(input, "EVENTS"), "2026-11-17T00:00:00Z\tlane-ghp_BADTOKEN\tdecision\tcompleted\n")
+	writeSanitizeTest(t, filepath.Join(input, "state.json"), `{"config":{"phases":[{"name":"review"}]},"tasks":[{"id":"lane-ghp_BADTOKEN_12345678901234567890","phase":"review","status":"done"}]}`)
+	writeSanitizeTest(t, filepath.Join(input, "EVENTS"), "2026-11-17T00:00:00Z\tlane-ghp_BADTOKEN_12345678901234567890\tdecision\tcompleted\n")
 	if err := SanitizeDir(input, output); err == nil || !strings.Contains(err.Error(), "EVENTS") || !strings.Contains(err.Error(), "github-token") || strings.Contains(err.Error(), "BADTOKEN") {
 		t.Fatalf("refusal = %v, want relative file and pattern class without secret content", err)
 	}
@@ -140,19 +140,89 @@ func TestSanitizeVerifyReportsPerLaneDifference(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "lane lane:") || !strings.Contains(err.Error(), "move") {
 		t.Fatalf("verify error = %v, want per-lane move diff", err)
 	}
+	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("verify refusal left output: %v", statErr)
+	}
 }
 
 func TestSanitizeRefusesSecretInEventsDetail(t *testing.T) {
 	input := t.TempDir()
 	output := filepath.Join(t.TempDir(), "sanitized")
 	writeSanitizeTest(t, filepath.Join(input, "state.json"), `{"config":{"phases":[{"name":"swe"}]},"tasks":[{"id":"lane","phase":"swe","status":"done"}]}`)
-	writeSanitizeTest(t, filepath.Join(input, "EVENTS"), "2026-11-17T00:00:00Z\tlane\tdecision\tordinary prose ghp_FAKE_TOKEN\n")
+	writeSanitizeTest(t, filepath.Join(input, "EVENTS"), "2026-11-17T00:00:00Z\tlane\tdecision\tordinary prose ghp_FAKE_TOKEN_12345678901234567890\n")
 	err := SanitizeDir(input, output)
 	if err == nil || !strings.Contains(err.Error(), "EVENTS column detail") || !strings.Contains(err.Error(), "github-token") || strings.Contains(err.Error(), "FAKE_TOKEN") {
 		t.Fatalf("sanitize error = %v, want redacted detail-column refusal", err)
 	}
 	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
 		t.Fatalf("refused sanitize left output: %v", statErr)
+	}
+}
+
+func TestSanitizeSecretPatternsRejectRealisticTokensOnly(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		value string
+		class string
+	}{
+		{name: "sk", value: "sk-12345678901234567890", class: "api-token"},
+		{name: "sk proj", value: "sk-proj-12345678901234567890", class: "api-token"},
+		{name: "sk ant", value: "sk-ant-12345678901234567890", class: "api-token"},
+		{name: "google", value: "AIza12345678901234567890123456789012345", class: "google-token"},
+		{name: "slack", value: "xoxb-1234567890", class: "slack-token"},
+		{name: "github ghp", value: "ghp_12345678901234567890", class: "github-token"},
+		{name: "github gho", value: "gho_12345678901234567890", class: "github-token"},
+		{name: "github pat", value: "github_pat_12345678901234567890", class: "github-token"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if !sanitizeSecretRE.MatchString(tc.value) {
+				t.Fatalf("sanitizeSecretRE did not match realistic %s token %q", tc.class, tc.value)
+			}
+			if got := secretPatternClass([]byte(tc.value)); got != tc.class {
+				t.Fatalf("secretPatternClass(%q) = %q, want %q", tc.value, got, tc.class)
+			}
+		})
+	}
+	for _, benign := range []string{"task-1", "disk-full", "warden-risk-xyz", "2026-11-18T01:02:03Z"} {
+		if sanitizeSecretRE.MatchString(benign) {
+			t.Errorf("benign value %q matched secret pattern", benign)
+		}
+	}
+}
+
+func TestSanitizePreservesIntegrationEvidenceVocabulary(t *testing.T) {
+	input := t.TempDir()
+	output := filepath.Join(t.TempDir(), "sanitized")
+	writeSanitizeTest(t, filepath.Join(input, "state.json"), `{"config":{"phases":[{"name":"review"}]},"tasks":[{"id":"lane","phase":"review","status":"done","round":1}]}`)
+	writeSanitizeTest(t, filepath.Join(input, "EVENTS"), "2026-11-17T00:00:00Z\tlane\torch-note\tmerged #42 as abc1234def56789\n")
+	allow, err := sanitizeAllowlist(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vocab, err := sanitizeVocabularyFor(input, allow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := vocab.tokens["as"]; !ok {
+		t.Fatal("integration vocabulary dropped the merge SHA connector")
+	}
+	if err := SanitizeDir(input, output); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(output, "EVENTS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); !strings.Contains(got, "merged #42 as abc1234def56789") {
+		t.Fatalf("integration evidence changed: %q", got)
+	}
+	if got := laneMergeNotePRs(filepath.Join(output, "EVENTS"))["lane"]; len(got) != 1 || got[0] != "42" {
+		t.Fatalf("sanitized integration evidence PRs = %#v, want [42]", got)
+	}
+	if err := VerifySanitized(t.Context(), input, output); err != nil {
+		t.Fatal(err)
 	}
 }
 

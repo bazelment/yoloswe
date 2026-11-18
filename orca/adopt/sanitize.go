@@ -19,9 +19,17 @@ import (
 )
 
 var (
-	sanitizeSecretRE = regexp.MustCompile(`(?i)(?:ghp_[A-Za-z0-9_\-]+|sk-[A-Za-z0-9_\-]+|AIza[A-Za-z0-9_\-]+|xox[baprs]-[A-Za-z0-9_\-]+|BEGIN [^-\n]*PRIVATE KEY)`)
-	sanitizeSHARE    = regexp.MustCompile(`(?i)\b[0-9a-f]{7,64}\b`)
-	sanitizePRRE     = regexp.MustCompile(`#\d+`)
+	// Token patterns deliberately require a non-word boundary and realistic
+	// lengths. Short identifiers such as task-1, disk-full and xoxp-test are
+	// ordinary run vocabulary, not credentials.
+	sanitizeSecretRE      = regexp.MustCompile(`(?:^|[^[:word:]])(?:(?:ghp_|gho_|github_pat_)[A-Za-z0-9_-]{20,}|sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{35,}|xox[baprs]-[A-Za-z0-9-]{10,}|BEGIN [^-\n]*PRIVATE KEY)`)
+	sanitizeGithubTokenRE = regexp.MustCompile(`(?:^|\W)(?:ghp_|gho_|github_pat_)[A-Za-z0-9_-]{20,}`)
+	sanitizeAPITokenRE    = regexp.MustCompile(`(?:^|\W)sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}`)
+	sanitizeGoogleTokenRE = regexp.MustCompile(`(?:^|\W)AIza[A-Za-z0-9_-]{35,}`)
+	sanitizeSlackTokenRE  = regexp.MustCompile(`(?:^|\W)xox[baprs]-[A-Za-z0-9-]{10,}`)
+	sanitizePrivateKeyRE  = regexp.MustCompile(`(?:^|\W)BEGIN [^-\n]*PRIVATE KEY`)
+	sanitizeSHARE         = regexp.MustCompile(`(?i)\b[0-9a-f]{7,64}\b`)
+	sanitizePRRE          = regexp.MustCompile(`#\d+`)
 )
 
 // sanitizeVocabulary is derived from the values the importer actually
@@ -131,10 +139,19 @@ func Sanitize(input, output string) error { return SanitizeDir(input, output) }
 // VerifySanitized previews both directories and checks the invariant promised
 // by the corpus format: sanitization may change prose, but never a lane's
 // move or reason class.
-func VerifySanitized(ctx context.Context, input, output string) error {
+func VerifySanitized(ctx context.Context, input, output string) (err error) {
 	if strings.TrimSpace(input) == "" || strings.TrimSpace(output) == "" {
 		return errors.New("sanitize verify: input and output directories are required")
 	}
+	input = filepath.Clean(strings.TrimSpace(input))
+	output = filepath.Clean(strings.TrimSpace(output))
+	defer func() {
+		if err != nil && input != output {
+			// A drifting corpus is never a usable artifact. Remove it just as a
+			// refusal before publishing leaves no output behind.
+			_ = os.RemoveAll(output)
+		}
+	}()
 	service := &Service{}
 	want, err := service.DryRunDir(ctx, input)
 	if err != nil {
@@ -361,7 +378,7 @@ func sanitizeVocabularyFor(input string, allow map[string]bool) (*sanitizeVocabu
 				}
 				detail := parts[3]
 				// Preserve words matched by the importer's own event parsers.
-				for _, parser := range []*regexp.Regexp{openPRRE, prMergedRE, ownLaneMergedRE, decisionHostHoldRE} {
+				for _, parser := range integrationVocabularyREs {
 					for _, match := range parser.FindAllString(detail, -1) {
 						v.add(match)
 					}
@@ -712,15 +729,15 @@ func sanitizeSecretColumn(rel string, data []byte) string {
 func secretPatternClass(data []byte) string {
 	text := string(data)
 	switch {
-	case regexp.MustCompile(`(?i)ghp_[A-Za-z0-9_-]+`).MatchString(text):
+	case sanitizeGithubTokenRE.MatchString(text):
 		return "github-token"
-	case regexp.MustCompile(`(?i)sk-[A-Za-z0-9_-]+`).MatchString(text):
+	case sanitizeAPITokenRE.MatchString(text):
 		return "api-token"
-	case regexp.MustCompile(`(?i)AIza[A-Za-z0-9_-]+`).MatchString(text):
+	case sanitizeGoogleTokenRE.MatchString(text):
 		return "google-token"
-	case regexp.MustCompile(`(?i)xox[baprs]-[A-Za-z0-9_-]+`).MatchString(text):
+	case sanitizeSlackTokenRE.MatchString(text):
 		return "slack-token"
-	case regexp.MustCompile(`(?i)BEGIN [^-\n]*PRIVATE KEY`).MatchString(text):
+	case sanitizePrivateKeyRE.MatchString(text):
 		return "private-key"
 	default:
 		return "secret"

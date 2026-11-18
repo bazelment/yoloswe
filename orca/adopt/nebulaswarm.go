@@ -259,9 +259,21 @@ func laneIntegrationEvents(path string) map[string]string {
 }
 
 var mergedPRRE = regexp.MustCompile(`(?i)#(\d+)\s+merged\b`)
+var mergedBeforePRRE = regexp.MustCompile(`(?i)\bmerged\s+#(\d+)\b`)
 var prMergedRE = regexp.MustCompile(`(?i)\bPR\s+#(\d+)\b[^\n]{0,120}\bmerged\b`)
 var ownLaneMergedRE = regexp.MustCompile(`(?i)\b(?:own\s+)?lane\s+#(\d+)\b[^\n]{0,200}\bmerged\b`)
 var openPRRE = regexp.MustCompile(`(?i)\bPR\s+#(\d+)\b[^\n]{0,120}\b(?:open|not\s+merged)\b`)
+var mergedAsSHAEvidenceRE = regexp.MustCompile(`(?i)\bmerged(?:\s+#\d+)?\s+as\s+[0-9a-f]{7,64}\b`)
+var integratedEvidenceRE = regexp.MustCompile(`(?i)\bintegrated\b`)
+var landedEvidenceRE = regexp.MustCompile(`(?i)\blanded\b`)
+
+// integrationVocabularyREs is shared by the importer and sanitizer. Any
+// phrase that can nominate a host merge, or a token used by an integration
+// event, must survive prose sanitization in the same shape the importer sees.
+var integrationVocabularyREs = []*regexp.Regexp{
+	openPRRE, prMergedRE, ownLaneMergedRE, mergedPRRE, mergedBeforePRRE,
+	mergedAsSHAEvidenceRE, integratedEvidenceRE, landedEvidenceRE, decisionHostHoldRE,
+}
 
 // laneMergeNotePRs extracts host merge prose from a lane's own EVENTS rows.
 // These nominations are deliberately not integration evidence by themselves;
@@ -287,6 +299,7 @@ func laneMergeNotePRs(path string) map[string][]string {
 			continue
 		}
 		matches := mergedPRRE.FindAllStringSubmatch(detail, -1)
+		matches = append(matches, mergedBeforePRRE.FindAllStringSubmatch(detail, -1)...)
 		matches = append(matches, prMergedRE.FindAllStringSubmatch(detail, -1)...)
 		matches = append(matches, ownLaneMergedRE.FindAllStringSubmatch(detail, -1)...)
 		if isHostNote {
