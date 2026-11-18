@@ -69,23 +69,12 @@ type AgentSessionConfig struct {
 	Effort           string
 	SystemPrompt     string
 	WorkDir          string
-	NativeReadDir    string
 	ResumeID         string
 	LLMGatewayURL    string
 	ClaudeBin        string
 	CodexBin         string
-	Investigate      InvestigateConfig
 	MaxSessionTokens int
 	MaxSessionTurns  int
-}
-
-// SessionReadWorkDir picks a native CLI working directory that can see the
-// adopted run. MCP reads still enforce both run and repository roots.
-func SessionReadWorkDir(cfg InvestigateConfig, fallback string) string {
-	if roots := cfg.allowedRoots(); len(roots) > 0 {
-		return roots[0]
-	}
-	return fallback
 }
 
 // DeterministicSessionWorkDir returns a stable, isolated working directory path
@@ -166,7 +155,6 @@ type AgentTurnRequest struct {
 	Prompt       string
 	Model        string
 	SystemPrompt string
-	Investigate  InvestigateConfig
 	MaxToolCalls int
 }
 
@@ -264,10 +252,6 @@ func (s *AgentSession) Turn(ctx context.Context, req AgentTurnRequest) (*AgentTu
 		}
 		s.cfg.SystemPrompt = sys
 	}
-	if req.Investigate.HasRoots() {
-		s.cfg.Investigate = req.Investigate
-	}
-
 	s.bridge.SetRegistry(req.Registry)
 	s.bridge.SetMaxCalls(req.MaxToolCalls)
 	s.bridge.SetObserver(req.Observer)
@@ -388,15 +372,18 @@ func (s *AgentSession) runClaudeTurnLocked(
 			claude.WithCLIPath(bin),
 			claude.WithPermissionMode(claude.PermissionModeDefault),
 			claude.WithPermissionPromptToolStdio(),
-			claude.WithPermissionHandler(readOnlyClaudePermissionHandler(s.cfg.Investigate)),
 			claude.WithDisablePlugins(),
-			claude.WithTools("Read,Grep,Glob,Bash"),
 			claude.WithDisallowedTools("Write", "Edit", "MultiEdit", "NotebookEdit"),
 			claude.WithSDKTools("orca", s.bridge),
 		}
-		if len(allowed) > 0 {
-			opts = append(opts, claude.WithAllowedTools(allowed...))
-		}
+		// Shadow mode uses Claude's own best-effort permission grammar. The
+		// external read-only proxy and command wrappers are the safety boundary.
+		allowed = append(allowed,
+			"Bash(git log:*)", "Bash(git show:*)", "Bash(git status:*)", "Bash(git diff:*)",
+			"Bash(cat:*)", "Bash(ls:*)", "Bash(rg:*)", "Bash(gh pr view:*)", "Bash(gh pr list:*)",
+			"Bash(nebula term screen:*)",
+		)
+		opts = append(opts, claude.WithAllowedTools(allowed...))
 		if cliModel != "" {
 			opts = append(opts, claude.WithModel(cliModel))
 		}
@@ -411,7 +398,7 @@ func (s *AgentSession) runClaudeTurnLocked(
 			opts = append(opts, claude.WithEffort(claude.EffortLevel(effort)))
 		}
 		if sys := strings.TrimSpace(s.cfg.SystemPrompt); sys != "" {
-			opts = append(opts, claude.WithSystemPrompt(sys+nativeReadInstruction(s.cfg.Investigate)))
+			opts = append(opts, claude.WithSystemPrompt(sys))
 		}
 		if wd != "" {
 			opts = append(opts, claude.WithWorkDir(wd))
@@ -546,22 +533,6 @@ func ensurePrivateSessionDir(clean string) error {
 	return nil
 }
 
-const codexToolConfinementInstruction = "\n\nTool Confinement: Use the read-only sandbox for inspection of the adopted run and repository. Never write files, edit, delete, push, merge, or invoke a mutating command. All mutations must use Orca's typed MCP tools (`mcp__orca__*`)."
-
-var codexDisabledBuiltinFeatures = []string{
-	"apps",
-	"browser_use",
-	"browser_use_external",
-	"computer_use",
-	"image_generation",
-	"plugins",
-	"code_mode_host",
-	// Codex's read-only sandbox cannot express two disjoint readable roots.
-	// Disable its shell/filesystem built-ins and expose only the confined MCP
-	// investigation tools below.
-	"shell",
-}
-
 func (s *AgentSession) runCodexTurnLocked(
 	ctx context.Context,
 	prompt string,
@@ -584,9 +555,6 @@ func (s *AgentSession) runCodexTurnLocked(
 		appArgs := []string{
 			"-c", fmt.Sprintf("mcp_servers.orca.url=%q", mcpURL),
 			"-c", fmt.Sprintf("mcp_servers.orca.enabled_tools=%s", string(enabledToolsJSON)),
-		}
-		for _, feat := range codexDisabledBuiltinFeatures {
-			appArgs = append(appArgs, "--disable", feat)
 		}
 		if effort := strings.TrimSpace(s.cfg.Effort); effort != "" {
 			appArgs = append(appArgs, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
@@ -612,11 +580,7 @@ func (s *AgentSession) runCodexTurnLocked(
 			return nil, fmt.Errorf("orca/model: start codex app-server: %w", err)
 		}
 
-		disabledFeatureMap := make(map[string]interface{}, len(codexDisabledBuiltinFeatures))
-		for _, feat := range codexDisabledBuiltinFeatures {
-			disabledFeatureMap[feat] = false
-		}
-		devInstructions := strings.TrimSpace(s.cfg.SystemPrompt) + codexToolConfinementInstruction + "\n\nCodex native filesystem confinement: built-in shell/filesystem reads are disabled because the Codex sandbox cannot constrain reads to Orca's run and repository roots. Use mcp__orca__read_file/read_cmd only; they enforce the same roots and sensitive-path deny list." + nativeReadInstruction(s.cfg.Investigate)
+		devInstructions := strings.TrimSpace(s.cfg.SystemPrompt)
 		threadCfg := map[string]interface{}{
 			"mcp_servers": map[string]interface{}{
 				"orca": map[string]interface{}{
@@ -624,7 +588,6 @@ func (s *AgentSession) runCodexTurnLocked(
 					"enabled_tools": slices.Clone(newTools),
 				},
 			},
-			"features":               disabledFeatureMap,
 			"developer_instructions": strings.TrimSpace(devInstructions),
 		}
 		if effort := strings.TrimSpace(s.cfg.Effort); effort != "" {
@@ -694,14 +657,6 @@ func (s *AgentSession) runCodexTurnLocked(
 		Usage:     usage,
 		TurnCount: max(1, s.bridge.CallCount()),
 	}, nil
-}
-
-func nativeReadInstruction(cfg InvestigateConfig) string {
-	roots := cfg.ReadRoots()
-	if len(roots) == 0 {
-		return ""
-	}
-	return "\n\nNative read scope: " + strings.Join(roots, ", ") + ". Inspect the adopted run's OBJECTIVE.md, PROGRESS.md, EVENTS, reports and repository files directly when needed."
 }
 
 func (s *AgentSession) stopLocked() error {

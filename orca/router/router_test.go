@@ -73,17 +73,18 @@ func TestIsPlannerChatQuestionSeparatesResearchFromPlanEdits(t *testing.T) {
 func TestConciergeOverrideRequiresExplicitRequest(t *testing.T) {
 	for _, text := range []string{
 		"answer here: what happened?",
-		"status?",
-		"give me a status report",
-		"please provide a report",
-		"perform a retro",
-		"run the retrospective",
+		"answer in chat: what happened?",
 	} {
 		if !IsConciergeOverride(text) {
 			t.Errorf("%q should route to concierge", text)
 		}
 	}
 	for _, text := range []string{
+		"status?",
+		"give me a status report",
+		"please provide a report",
+		"perform a retro",
+		"run the retrospective",
 		"the soak report says X, fund the next round",
 		"the retro lane is blocked; retry it",
 		"status is green, merge the PR",

@@ -518,7 +518,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			// Sole-operator mode still observes the host ledger, but its local
 			// lifecycle writes must never reach the adopted run.
 			shadow:   d.Shadow,
-			operator: false,
+			operator: d.DecideAsOperator,
 		},
 		backlog: &adoptedBacklogStore{
 			BacklogStore: d.store.Backlog(),
@@ -590,6 +590,12 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}); ok && !d.DecideAsOperator {
 		setter.SetHostBrief(hostBrief)
 	}
+	var configuredHostBrief func(context.Context, lane.Lane, recipe.Phase) string
+	var configuredHoldAdvanceCheck func(string) bool
+	if !d.DecideAsOperator {
+		configuredHostBrief = hostBrief
+		configuredHoldAdvanceCheck = func(id string) bool { return fileExists(filepath.Join(r.Dir, id+".hold-advance")) }
+	}
 	ctrl = controller.New(controller.Config{
 		BeforeStep: func(ctx context.Context) (bool, error) {
 			integrationMu.Lock()
@@ -600,7 +606,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		HostRefresh: func(ctx context.Context) error {
 			return d.refreshHostState(ctx, r.ID)
 		},
-		HostBrief:         hostBrief,
+		HostBrief:         configuredHostBrief,
 		IsolateLaneErrors: true,
 		StepError: func(err error) {
 			if cr == nil || err == nil {
@@ -626,11 +632,16 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		MaxCostPerHourUSD:  d.MaxCostPerHourUSD,
 		SubscriptionActors: d.SubscriptionActors,
 		NoPR:               r.NoPR,
-		HoldAdvance:        holdAdvanceLanes(r),
-		HoldAdvanceCheck:   func(id string) bool { return fileExists(filepath.Join(r.Dir, id+".hold-advance")) },
-		ImportedHostState:  true,
-		HostRun:            true,
-		SkipLease:          d.Shadow,
+		HoldAdvance: func() map[string]bool {
+			if d.DecideAsOperator {
+				return nil
+			}
+			return holdAdvanceLanes(r)
+		}(),
+		HoldAdvanceCheck:  configuredHoldAdvanceCheck,
+		ImportedHostState: true,
+		HostRun:           true,
+		SkipLease:         d.Shadow,
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
 	cr = &controlledRun{
@@ -729,7 +740,11 @@ func (d *Controllers) watchRunFiles(ctx context.Context, cr *controlledRun) {
 	if cr == nil {
 		return
 	}
-	var lastDir, last string
+	lastDir := strings.TrimSpace(cr.run.Dir)
+	if cr.syncer != nil {
+		lastDir = strings.TrimSpace(cr.syncer.CurrentRun().Dir)
+	}
+	last := runFileSignature(lastDir)
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
@@ -743,6 +758,9 @@ func (d *Controllers) watchRunFiles(ctx context.Context, cr *controlledRun) {
 			}
 			now := runFileSignature(dir)
 			if dir != lastDir {
+				if lastDir != "" && now != last {
+					cr.controller.Wake()
+				}
 				lastDir, last = dir, now
 				continue
 			}
@@ -768,7 +786,7 @@ func runFileSignature(dir string) string {
 		if relErr != nil {
 			return nil
 		}
-		if name != "EVENTS" && name != "OBJECTIVE.md" && name != "PROGRESS.md" &&
+		if name != "EVENTS" && name != "state.json" && !strings.HasSuffix(name, ".md") &&
 			!strings.HasSuffix(name, ".done") && !strings.HasSuffix(name, ".needs-swe") &&
 			!strings.HasPrefix(filepath.ToSlash(rel), "reports/") {
 			return nil
@@ -2906,6 +2924,9 @@ func (s *adoptedLaneStore) hostOverlay(ln *lane.Lane) {
 		if host.ID != ln.ID {
 			continue
 		}
+		if !s.syncer.HostStatusIsNewer(host.ID, lane.Status(host.Status)) {
+			return
+		}
 		ln.HostHold = host.HoldAdvance
 		ln.HostHoldReason = cmp.Or(host.HostHold, decisionHostHold(host.LastEvent))
 		if ln.HostHoldReason == "" && host.WaitingOn != "" {
@@ -3142,6 +3163,23 @@ func (s *runLedgerSync) HostLaneChanged(ln lane.Lane) bool {
 	changed := !ok || hostLaneDiff(prev, ln)
 	s.hostKnown[ln.ID] = ln.Clone()
 	return changed
+}
+
+// HostLaneIsNewer reports whether the current ledger row differs from the
+// last host snapshot. It is intentionally read-only; callers record the row
+// after deciding whether to overlay it.
+func (s *runLedgerSync) HostLaneIsNewer(ln lane.Lane) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev, ok := s.hostKnown[ln.ID]
+	return !ok || hostLaneDiff(prev, ln)
+}
+
+func (s *runLedgerSync) HostStatusIsNewer(id string, status lane.Status) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev, ok := s.hostKnown[id]
+	return !ok || prev.Status != status
 }
 
 func (s *runLedgerSync) RememberHostLane(ln lane.Lane) {

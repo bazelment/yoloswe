@@ -139,90 +139,6 @@ func TestCLIFailureAndCancellation(t *testing.T) {
 	}
 }
 
-func TestInvestigateTools_ReadFileConfinementAndSymlinkEscape(t *testing.T) {
-	t.Parallel()
-	runDir := t.TempDir()
-	repoDir := t.TempDir()
-	outsideDir := t.TempDir()
-
-	if err := os.WriteFile(filepath.Join(runDir, "OBJECTIVE.md"), []byte("line1\nline2\nline3\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	secretFile := filepath.Join(outsideDir, "secret.txt")
-	if err := os.WriteFile(secretFile, []byte("outside-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	symlinkPath := filepath.Join(runDir, "escape.md")
-	if err := os.Symlink(secretFile, symlinkPath); err != nil {
-		t.Fatal(err)
-	}
-
-	reg := model.NewToolRegistry()
-	model.RegisterInvestigationTools(reg, model.InvestigateConfig{
-		RunDir:  runDir,
-		RepoDir: repoDir,
-	})
-
-	// 1. Valid bounded read inside runDir.
-	res := reg.Execute(t.Context(), model.ToolCall{
-		ID:    "c1",
-		Name:  model.ToolReadFile,
-		Input: json.RawMessage(`{"path":"OBJECTIVE.md","max_bytes":5}`),
-	})
-	if res.IsError || !strings.Contains(res.Content, "line1") || !strings.Contains(res.Content, "...[truncated]") {
-		t.Fatalf("valid read_file = %+v", res)
-	}
-
-	// 2. Relative path traversal rejected.
-	if res := reg.Execute(t.Context(), model.ToolCall{
-		ID:    "c2",
-		Name:  model.ToolReadFile,
-		Input: json.RawMessage(`{"path":"../secret.txt"}`),
-	}); !res.IsError {
-		t.Fatalf("expected path traversal rejection, got %+v", res)
-	}
-
-	// 3. Relative symlink escaping runDir rejected.
-	if res := reg.Execute(t.Context(), model.ToolCall{
-		ID:    "c3",
-		Name:  model.ToolReadFile,
-		Input: json.RawMessage(`{"path":"escape.md"}`),
-	}); !res.IsError {
-		t.Fatalf("expected relative symlink escape rejection, got %+v", res)
-	}
-
-	// 4. Absolute path to symlink inside runDir pointing outside runDir rejected.
-	absReq, _ := json.Marshal(model.ReadFileParams{
-		Path: symlinkPath,
-	})
-	if res := reg.Execute(t.Context(), model.ToolCall{
-		ID:    "c4",
-		Name:  model.ToolReadFile,
-		Input: absReq,
-	}); !res.IsError {
-		t.Fatalf("expected absolute symlink escape rejection, got %+v", res)
-	}
-
-	// 5. Sensitive paths inside allowed roots (.git, .env, .db) are rejected.
-	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, rel := range []string{".git/config", ".env", ".env.local", "orca.db", "state.sqlite3"} {
-		full := filepath.Join(repoDir, rel)
-		if err := os.WriteFile(full, []byte("sensitive"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		req, _ := json.Marshal(model.ReadFileParams{Path: rel})
-		if res := reg.Execute(t.Context(), model.ToolCall{
-			ID:    "sens-" + rel,
-			Name:  model.ToolReadFile,
-			Input: req,
-		}); !res.IsError {
-			t.Fatalf("expected sensitive path %q to be rejected, got %+v", rel, res)
-		}
-	}
-}
-
 func TestValidateReadOnlyCommand(t *testing.T) {
 	t.Parallel()
 	allowed := [][]string{
@@ -269,34 +185,6 @@ func TestValidateReadOnlyCommand(t *testing.T) {
 	for _, cmd := range denied {
 		if err := model.ValidateReadOnlyCommand(cmd[0], cmd[1:]); err == nil {
 			t.Errorf("ValidateReadOnlyCommand(%v) expected error, got nil", cmd)
-		}
-	}
-}
-
-func TestNativeReadCommandConfinementQuotedTraversalAndSensitive(t *testing.T) {
-	runDir := t.TempDir()
-	repoDir := t.TempDir()
-	outside := t.TempDir()
-	if err := os.WriteFile(filepath.Join(runDir, "ok.txt"), []byte("ok"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(runDir, "link")); err != nil {
-		t.Fatal(err)
-	}
-	cfg := model.InvestigateConfig{RunDir: runDir, RepoDir: repoDir}
-	denied := []string{
-		"cat '/etc/passwd'", "cat /etc/passwd", "cat ../outside", "cat '" + filepath.Join(runDir, "link", "secret") + "'",
-		"cat /proc/123/environ", "cat ~/.keys.sh", "cat ~/.config/gh/hosts.yml", "cat ~/.claude/credentials", "cat secrets/x", "cat lanes.env", "cat foo.token", "cat private.key",
-		"ls '$HOME'", "rg needle /etc/passwd", "printenv", "env", "set",
-	}
-	for _, command := range denied {
-		if err := model.ValidateNativeReadOnlyCommand(cfg, command); err == nil {
-			t.Errorf("native command %q was allowed", command)
-		}
-	}
-	for _, command := range []string{"cat " + filepath.Join(runDir, "ok.txt"), "ls '" + runDir + "'", "rg needle '" + repoDir + "'"} {
-		if err := model.ValidateNativeReadOnlyCommand(cfg, command); err != nil {
-			t.Errorf("native command %q refused: %v", command, err)
 		}
 	}
 }

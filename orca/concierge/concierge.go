@@ -565,16 +565,12 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 			LLMGatewayURL: c.cfg.LLMGatewayURL,
 			ClaudeBin:     c.cfg.ClaudeBin,
 			CodexBin:      c.cfg.CodexBin,
-			WorkDir:       model.DeterministicSessionWorkDir(c.cfg.Investigate.RunDir, threadID, ActorConcierge),
-			NativeReadDir: model.SessionReadWorkDir(c.cfg.Investigate, ""),
-			Investigate:   c.cfg.Investigate,
 		}, model.AgentTurnRequest{
 			Prompt:       userContent,
 			Model:        c.cfg.Model,
 			SystemPrompt: systemPrompt,
 			Registry:     reg,
 			MaxToolCalls: 0,
-			Investigate:  c.cfg.Investigate,
 		}, nil)
 		loopErr = cliErr
 		if turnRes != nil {

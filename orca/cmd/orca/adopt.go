@@ -303,7 +303,7 @@ func adoptedPRProbe(h hostSwarms, st store.Store) controller.PRProbe {
 	}
 }
 
-func newAdoptedPlanner(cfg Config, h hostSwarms, st store.Store, clk clock.Clock, client model.ModelClient, logger *slog.Logger, backend model.AgentBackend, runID string) (*Planner, model.InvestigateConfig) {
+func newAdoptedPlanner(cfg Config, h hostSwarms, st store.Store, clk clock.Clock, client model.ModelClient, logger *slog.Logger, backend model.AgentBackend, runID string) *Planner {
 	var runDir string
 	if runID != "" {
 		runDir, _ = h.importer.Find(runID)
@@ -323,7 +323,7 @@ func newAdoptedPlanner(cfg Config, h hostSwarms, st store.Store, clk clock.Clock
 	planner.investigate = investigate
 	planner.claudeBin = cfg.ClaudeBin
 	planner.codexBin = cfg.CodexBin
-	return planner, investigate
+	return planner
 }
 
 // adoptedDispatchers gives each adopted run the dispatcher and planner `orca run`
@@ -362,7 +362,7 @@ func adoptedDispatchers(
 		})
 	}
 	judges := func(runID string, answer func(context.Context, string, string, string) error) controller.Judge {
-		planner, investigate := newAdoptedPlanner(cfg, h, st, clk, client, logger, backend, runID)
+		planner := newAdoptedPlanner(cfg, h, st, clk, client, logger, backend, runID)
 		mu.Lock()
 		prev := planners[runID]
 		planners[runID] = planner
@@ -373,7 +373,6 @@ func adoptedDispatchers(
 
 		disp := dispatcher.New(dispatcher.Config{
 			AgentBackend:     backend,
-			Investigate:      investigate,
 			Model:            cfg.Models.Dispatcher,
 			Provider:         cfg.Models.Roles["dispatcher"].Provider,
 			Effort:           cfg.Models.Roles["dispatcher"].Effort,
@@ -407,7 +406,7 @@ func adoptedDispatchers(
 		if planner != nil {
 			return planner.HandlePlannerRequest(pCtx, runID, reason, planRef)
 		}
-		tmpPlanner, _ := newAdoptedPlanner(cfg, h, st, clk, client, logger, backend, runID)
+		tmpPlanner := newAdoptedPlanner(cfg, h, st, clk, client, logger, backend, runID)
 		defer func() { _ = tmpPlanner.Close() }()
 		return tmpPlanner.HandlePlannerRequest(pCtx, runID, reason, planRef)
 	}

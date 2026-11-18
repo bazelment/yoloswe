@@ -946,9 +946,6 @@ func (d *Dispatcher) dispatchCLITurn(
 			Model:            modelName,
 			Effort:           d.cfg.Effort,
 			SystemPrompt:     d.cfg.SystemPrompt,
-			WorkDir:          model.DeterministicSessionWorkDir(d.cfg.Investigate.RunDir, runID, ActorDispatcher),
-			NativeReadDir:    model.SessionReadWorkDir(d.cfg.Investigate, ""),
-			Investigate:      d.cfg.Investigate,
 			LLMGatewayURL:    d.cfg.LLMGatewayURL,
 			ClaudeBin:        d.cfg.ClaudeBin,
 			CodexBin:         d.cfg.CodexBin,
@@ -961,7 +958,6 @@ func (d *Dispatcher) dispatchCLITurn(
 			SystemPrompt: d.cfg.SystemPrompt,
 			Registry:     cliReg,
 			MaxToolCalls: 0,
-			Investigate:  d.cfg.Investigate,
 		},
 		d.cfg.Logger,
 	)

@@ -95,7 +95,7 @@ func WriteShadowReportsWithOptions(ctx context.Context, outDir, runDir, runID st
 			fmt.Fprintf(b, "- %s: %s\n", k, degraded[k])
 		}
 		b.WriteString("Recorder-launched sessions remain shadow-launched, with no report; their reads never reach Nebula. Session settling/wake is unavailable. Terminal lifecycle GETs and existing GET/local reports remain available.\n")
-		b.WriteString("Codex roles use a read-only sandbox with built-in filesystem tools disabled because the sandbox cannot express Orca's disjoint run/repository roots; confined MCP reads remain available.\n")
+		b.WriteString("Codex roles use the CLI's read-only sandbox.\n")
 		b.WriteString("\n## Counts by lane\n")
 		for _, pair := range sortedCounts(lanes) {
 			k := fmt.Sprint(pair[0])
@@ -220,7 +220,9 @@ func writeHostDiffWithWindow(outDir, runDir, actionPath string, started, ended t
 	if soleOperator {
 		scoreEnd = ended.Add(window)
 	}
-	events, available, err := readHostEvents(filepath.Join(runDir, "EVENTS"), started.Add(-window), ended.Add(window))
+	// The adoption start line is the scoring boundary. Host rows before it are
+	// historical context and must not contribute to either side of the score.
+	events, available, err := readHostEvents(filepath.Join(runDir, "EVENTS"), started, scoreEnd)
 	if err != nil {
 		return err
 	}

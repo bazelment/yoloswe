@@ -330,7 +330,6 @@ func NewRunner(
 
 	disp := dispatcher.New(dispatcher.Config{
 		AgentBackend:     backend,
-		Investigate:      investigate,
 		Model:            cfg.Models.Dispatcher,
 		Provider:         cfg.Models.Roles["dispatcher"].Provider,
 		Effort:           cfg.Models.Roles["dispatcher"].Effort,

@@ -567,7 +567,7 @@ func TestShadowHostDiffClassification(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("mechanical classifications: %v", result.Counts)
-	for kind, want := range map[string]int{"agree": 3, "differs": 2, "host-did-not": 0, "orca-missed": 2} {
+	for kind, want := range map[string]int{"agree": 1, "differs": 2, "host-did-not": 2, "orca-missed": 2} {
 		if result.Counts[kind] != want {
 			t.Errorf("%s=%d, want %d; %s", kind, result.Counts[kind], want, raw)
 		}
