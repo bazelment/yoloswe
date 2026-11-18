@@ -135,16 +135,16 @@ composer indefinitely.
 
 ## Watch and reap
 
-Use one watcher. Reap and arm it in separate calls so the kill pattern cannot match the
-new watcher's own argv:
+Use one watcher per run. Arming it reaps this run's previous watcher, and only that one:
 
 ~~~bash
-pkill -f '[w]atch_lanes[.]sh'
-pgrep -f '[w]atch_lanes[.]sh' | wc -l
 "$SW/watch_lanes.sh" "$RUN" &
 ~~~
 
-The count must be zero before arming. The watcher wakes on a new `.done` or static lane,
+On start it stops the pid recorded in `$RUN/.watch_lanes.pid` if that process is still
+`watch_lanes.sh` for the same run dir, then records its own. Never reap by pattern
+(`pkill -f '[w]atch_lanes[.]sh'`): on a shared host it matches every run's watcher and
+silently deafens other orchestrators. The watcher wakes on a new `.done` or static lane,
 not on every commit.
 
 There is no `bramble kill-session`. Reaping is three independent layers — process,

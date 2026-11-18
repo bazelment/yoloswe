@@ -143,7 +143,7 @@ Each tick:
    done when it exits zero, not when you have gone through the steps. Arm one watcher
    and schedule the next tick.
 
-Reap the old watcher and arm the new one in separate calls; see
+Arming the watcher reaps this run's old one; never reap watchers by name pattern, see
 [references/bramble-mechanics.md](references/bramble-mechanics.md). After compaction,
 first confirm the loop still exists and recreate
 it if needed. Stop only when the terminal proof holds, every material uncovered
