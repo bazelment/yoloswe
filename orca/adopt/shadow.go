@@ -195,19 +195,26 @@ func (t *shadowTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			raw, err := io.ReadAll(io.LimitReader(req.Body, 16*1024+1))
 			_ = req.Body.Close()
 			var body struct {
-				Command []string `json:"command"`
+				Command   string `json:"command"`
+				TimeoutMs int    `json:"timeoutMs"`
 			}
 			dec := json.NewDecoder(bytes.NewReader(raw))
 			dec.DisallowUnknownFields()
 			if err == nil && len(raw) <= 16*1024 && dec.Decode(&body) == nil && dec.Decode(new(any)) == io.EOF {
-				command, allowed := shadowReadOnlyCommand(body.Command)
+				decoded, parseErr := parseShellWords(body.Command)
+				command, allowed := shadowReadOnlyCommand(decoded)
+				if parseErr != nil || body.TimeoutMs < 1 || body.TimeoutMs > 30000 {
+					allowed = false
+				}
 				if allowed && t.reserveExec(parts[3]) {
-					if err := t.recorder.Record("", "exec_read", map[string]any{"session_id": parts[3], "command": command}, "allowlisted read-only exec"); err != nil {
+					finalCommand := nebula.QuoteExecCommand(command)
+					if err := t.recorder.Record("", "exec_read", map[string]any{"session_id": parts[3], "command": finalCommand}, "allowlisted read-only exec"); err != nil {
 						return nil, err
 					}
 					encoded, err := json.Marshal(struct {
-						Command []string `json:"command"`
-					}{command})
+						Command   string `json:"command"`
+						TimeoutMs int    `json:"timeoutMs"`
+					}{finalCommand, body.TimeoutMs})
 					if err != nil {
 						return nil, err
 					}
@@ -504,6 +511,69 @@ func (t *shadowTransport) reserveExec(session string) bool {
 
 var shadowRef = regexp.MustCompile(`^[A-Za-z0-9_./@^~:+-]+$`)
 var shadowReportName = regexp.MustCompile(`^phase-report\.[A-Za-z0-9_-]+\.md$`)
+
+// parseShellWords parses the POSIX quoting emitted by nebula.ExecSession.
+func parseShellWords(input string) ([]string, error) {
+	var words []string
+	var word strings.Builder
+	inWord := false
+	state := byte(0) // 0=unquoted, '\''=single, '"'=double
+	for i := 0; i < len(input); i++ {
+		ch := input[i]
+		switch state {
+		case '\'':
+			if ch == '\'' {
+				state = 0
+			} else {
+				word.WriteByte(ch)
+			}
+			inWord = true
+		case '"':
+			switch ch {
+			case '"':
+				state = 0
+			case '\\':
+				if i+1 >= len(input) {
+					return nil, errors.New("unterminated shell escape")
+				}
+				i++
+				word.WriteByte(input[i])
+			default:
+				word.WriteByte(ch)
+			}
+			inWord = true
+		default:
+			switch ch {
+			case ' ', '\t', '\n', '\r':
+				if inWord {
+					words = append(words, word.String())
+					word.Reset()
+					inWord = false
+				}
+			case '\'', '"':
+				state = ch
+				inWord = true
+			case '\\':
+				if i+1 >= len(input) {
+					return nil, errors.New("unterminated shell escape")
+				}
+				i++
+				word.WriteByte(input[i])
+				inWord = true
+			default:
+				word.WriteByte(ch)
+				inWord = true
+			}
+		}
+	}
+	if state != 0 {
+		return nil, errors.New("unterminated shell quote")
+	}
+	if inWord {
+		words = append(words, word.String())
+	}
+	return words, nil
+}
 
 func shadowReadOnlyCommand(command []string) ([]string, bool) {
 	if nebula.IsReadOnlyLaneProbe(command) {

@@ -18,11 +18,12 @@ go_library(
 go_test(
     name = "nebula_test",
     srcs = [
+        "exec_contract_test.go",
         "nebula_test.go",
         "runs_test.go",
     ],
+    embed = [":nebula"],
     deps = [
-        ":nebula",
         "//orca/clock",
         "//orca/lane",
         "//orca/store",

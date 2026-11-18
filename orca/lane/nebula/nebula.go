@@ -1497,13 +1497,27 @@ func (d *Driver) ExecSession(ctx context.Context, sessionID string, command []st
 	d.countSessionCall(sessionID, true)
 	path := fmt.Sprintf("/api/code-sessions/%s/exec", url.PathEscape(sessionID))
 	body := struct {
-		Command []string `json:"command"`
-	}{Command: command}
+		Command   string `json:"command"`
+		TimeoutMs int    `json:"timeoutMs"`
+	}{Command: QuoteExecCommand(command), TimeoutMs: execTimeoutMs}
 	var out ExecResult
 	if err := d.doJSON(ctx, http.MethodPost, path, body, &out); err != nil {
 		return ExecResult{}, err
 	}
 	return out, nil
+}
+
+const execTimeoutMs = 30_000
+
+// QuoteExecCommand renders argv as a shell command without allowing any argument
+// to become shell source. Keeping arguments positional is important for probes:
+// branch names and other untrusted values never enter the script itself.
+func QuoteExecCommand(argv []string) string {
+	quoted := make([]string, len(argv))
+	for i, arg := range argv {
+		quoted[i] = "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
+	}
+	return strings.Join(quoted, " ")
 }
 
 // LaneGitState inspects the lane session's git working tree and unpushed commits.
@@ -1582,8 +1596,8 @@ func (d *Driver) LaneSessionHealth(ctx context.Context, ln lane.Lane) (lane.Sess
 }
 
 const healthProbeScript = `df -P . 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print "DISK:" $5}'
-ps -eo args= 2>/dev/null | while IFS= read -r cmd; do
-  printf "PROC:%s\n" "$cmd"
+ps -eo comm= 2>/dev/null | grep -iF -e review_cli -e review-cli -e pr-polish -e bazel -e prepush -e pre-push | while IFS= read -r name; do
+  printf "PROC:%s\n" "$name"
 done
 `
 

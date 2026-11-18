@@ -214,9 +214,18 @@ func TestShadowAdoptExecReads(t *testing.T) {
 	}
 	defer rec.Close()
 	var nonGET, fakeIDs, fakeExec atomic.Int64
+	var forwardedCommand atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			nonGET.Add(1)
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/exec") {
+			var body struct {
+				Command string `json:"command"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+				forwardedCommand.Store(body.Command)
+			}
 		}
 		if strings.Contains(r.URL.Path, "shadow-session-") || strings.Contains(r.URL.Path, "shadow-terminal-") {
 			fakeIDs.Add(1)
@@ -278,12 +287,33 @@ func TestShadowAdoptExecReads(t *testing.T) {
 	if nonGET.Load() != 1 || fakeIDs.Load() != 0 {
 		t.Fatalf("shadow escaped: non-GET=%d invented-ID requests=%d; want 1 read-only exec and 0 invented-ID requests", nonGET.Load(), fakeIDs.Load())
 	}
+	command, ok := forwardedCommand.Load().(string)
+	if !ok {
+		t.Fatal("shadow did not forward a lane probe")
+	}
+	argv, err := parseShellWords(command)
+	if err != nil {
+		t.Fatalf("forwarded command is not POSIX shell words: %v", err)
+	}
+	if len(argv) != 6 || argv[0] != "sh" || argv[1] != "-c" || argv[3] != "--" || argv[4] != "main" || argv[5] != "" {
+		t.Fatalf("unquoted lane probe argv=%q, want sh -c script -- main empty-branch", argv)
+	}
 	actions, err := readShadowActions(filepath.Join(out, "actions.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	counts := map[string]int{}
+	var recordedCommand string
 	for _, a := range actions {
+		if a.Kind == "exec_read" {
+			var args struct {
+				Command string `json:"command"`
+			}
+			if err := json.Unmarshal(a.Arguments, &args); err != nil {
+				t.Fatal(err)
+			}
+			recordedCommand = args.Command
+		}
 		if a.Kind == "read_degraded" {
 			var args map[string]string
 			if err := json.Unmarshal(a.Arguments, &args); err != nil {
@@ -291,6 +321,9 @@ func TestShadowAdoptExecReads(t *testing.T) {
 			}
 			counts[a.Lane+"/"+args["kind"]]++
 		}
+	}
+	if recordedCommand != command {
+		t.Fatalf("recorded command=%q, forwarded command=%q", recordedCommand, command)
 	}
 	for kind, want := range map[string]int{"git_state": 0, "session_health": 0, "report_fallback": 1} {
 		if counts["adopted/"+kind] != want {
