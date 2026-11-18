@@ -280,6 +280,13 @@ func Execute(
 		}
 		return executeChat(ctx, cfg, slices.Clone(args), posArgs, stdin, stdout, stderr, logger)
 	case "adopt":
+		if cfg.Shadow {
+			runDir := strings.TrimSpace(cfg.AdoptDir)
+			if runDir == "" {
+				return errors.New("orca adopt --shadow requires --dir <run>")
+			}
+			return executeShadowAdopt(ctx, cfg, runDir, cfg.AdoptOut, logger)
+		}
 		if cfg.AdoptSanitize || (len(posArgs) > 0 && strings.EqualFold(posArgs[0], "sanitize")) {
 			if strings.TrimSpace(cfg.AdoptDir) == "" || strings.TrimSpace(cfg.AdoptOut) == "" {
 				return errors.New("orca adopt sanitize requires --dir <run> and --out <dir>")
@@ -1247,7 +1254,7 @@ func printUsage(w io.Writer) {
   orca                                     Start or reattach to owner chat
   orca [run] --goal "<text>" [--standing] [--repo <owner/name>] [flags]
   orca chat [--run <id>] [--store sqlite:<path>|nebula] [--prompt "<question>"] [flags]`)
-	_, _ = fmt.Fprintln(w, "  orca adopt --dry-run <run-id> [--dir <copied-run-dir>]\n  orca report --run <id> [--day YYYY-MM-DD] [flags]\n  orca export --run <id> [flags]")
+	_, _ = fmt.Fprintln(w, "  orca adopt --dry-run <run-id> [--dir <copied-run-dir>]\n  orca adopt --shadow --dir <run-dir> --out <dir> [--for 2h]\n  orca report --run <id> [--day YYYY-MM-DD] [flags]\n  orca export --run <id> [flags]")
 	_, _ = fmt.Fprintf(w, "\nOrchestrator model defaults (flags and config override):\n  Dispatcher: %s\n  Planner:    %s\n  Critic:     %s (OpenAI; different vendor from Planner)\n", DefaultDispatcherModel, DefaultPlannerModel, DefaultOpenAIDispatcherModel)
 	_, _ = fmt.Fprintln(w, "Without HTTP credentials, Claude roles use claude-cli and the critic uses codex-cli.")
 }

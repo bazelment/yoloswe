@@ -8,6 +8,8 @@ go_library(
         "diff.go",
         "nebulaswarm.go",
         "sanitize.go",
+        "shadow.go",
+        "shadow_report.go",
         "steploop.go",
         "watcher.go",
     ],
@@ -31,6 +33,7 @@ go_test(
         "controller_regression_test.go",
         "nebulaswarm_test.go",
         "sanitize_test.go",
+        "shadow_test.go",
     ],
     embed = [":adopt"],
     deps = [

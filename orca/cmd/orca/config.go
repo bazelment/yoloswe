@@ -205,6 +205,8 @@ type Config struct {
 	CodexBin            string             `json:"-"`
 	AllowedModels       []string           `json:"allowed_models,omitempty"`
 	RecipeFiles         []string           `json:"recipe_files,omitempty"`
+	Shadow              bool               `json:"-"`
+	ShadowFor           time.Duration      `json:"-"`
 	// launchArgs are the command-line flags a controller launched from this
 	// invocation inherits; see controllerFlags.
 	launchArgs            []string
@@ -568,13 +570,15 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.StringVar(&cfg.ReportDay, "day", "", "Report day (YYYY-MM-DD)")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "Print adoption moves without changing the run")
 	fs.StringVar(&cfg.AdoptDir, "dir", "", "Read an adoption dry-run from this copied run directory")
+	fs.BoolVar(&cfg.Shadow, "shadow", false, "Run adopted controller and dispatcher in recording mode")
+	fs.DurationVar(&cfg.ShadowFor, "for", 0, "Shadow duration (for example 2h; 0 waits for SIGINT)")
 	fs.BoolVar(&cfg.AdoptJSON, "json", false, "Emit one JSON adoption verdict per lane")
 	fs.BoolVar(&cfg.AdoptDiff, "diff", false, "Compare two orca binaries on one adoption snapshot")
 	fs.StringVar(&cfg.AdoptBinA, "bin-a", "", "First binary for adopt --diff")
 	fs.StringVar(&cfg.AdoptBinB, "bin-b", "", "Second binary for adopt --diff")
 	fs.BoolVar(&cfg.AdoptSanitize, "sanitize", false, "Write a credential-free adoption corpus copy")
 	fs.BoolVar(&cfg.AdoptSanitizeVerify, "verify", false, "Verify sanitized adoption decisions match the input")
-	fs.StringVar(&cfg.AdoptOut, "out", "", "Output directory for adopt --sanitize")
+	fs.StringVar(&cfg.AdoptOut, "out", "", "Output directory for adopt --sanitize or --shadow")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, nil, err
@@ -615,6 +619,8 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 		// These adoption-only switches are intentionally command-line scoped;
 		// preserve them across the JSON merge so --dir remains authoritative.
 		cfg.AdoptDir = cliCfg.AdoptDir
+		cfg.Shadow = cliCfg.Shadow
+		cfg.ShadowFor = cliCfg.ShadowFor
 		cfg.AdoptJSON = cliCfg.AdoptJSON
 		cfg.AdoptDiff = cliCfg.AdoptDiff
 		cfg.AdoptBinA = cliCfg.AdoptBinA

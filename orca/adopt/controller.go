@@ -34,6 +34,8 @@ type JudgeFactory func(runID string, answer func(ctx context.Context, runID, ask
 const escalationAskTTL = 24 * time.Hour
 
 // Controllers attaches host runs to orca's deterministic lane lifecycle.
+//
+//nolint:govet // field grouping follows lifecycle ownership and synchronization.
 type Controllers struct {
 	ctx               context.Context
 	store             store.Store
@@ -48,7 +50,12 @@ type Controllers struct {
 	starting          map[string]*startup
 	Mirror            GitMirror
 	MaxCostPerHourUSD float64
-	mu                sync.Mutex
+	// Shadow runs execute the normal controller against an isolated store while
+	// recording transport effects. They never acquire leases or checkpoint the
+	// host run directory.
+	Shadow   bool
+	Recorder *ActionRecorder
+	mu       sync.Mutex
 }
 
 // SetMirror updates the commit mirror used for live integration verification.
@@ -200,6 +207,9 @@ func (d *Controllers) ControllerNotice(runID string) string {
 }
 
 func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
+	if d.Shadow && d.Recorder == nil {
+		return errors.New("shadow controller requires an action recorder")
+	}
 	d.mu.Lock()
 	if cr := d.runs[r.ID]; cr != nil {
 		select {
@@ -225,11 +235,15 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		close(s.done)
 		d.mu.Unlock()
 	}()
-	journal, err := readJournal(filepath.Join(r.Dir, leaseFile))
+	j, err := readJournal(filepath.Join(r.Dir, leaseFile))
+	if d.Shadow && errors.Is(err, os.ErrNotExist) {
+		j = &journal{}
+		err = nil
+	}
 	if err != nil {
 		return err
 	}
-	generation := journal.Marker
+	generation := j.Marker
 	populateRunRepo(&r)
 	_, _, originRepo, hasTier1Repo := readTier1AndOriginRepo(r.Dir)
 	if !hasTier1Repo {
@@ -248,21 +262,23 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		return err
 	}
 	holder := cmp.Or(strings.TrimSpace(r.Holder), fmt.Sprintf("orca-adopt:%p", d))
-	if _, err := d.store.Runs().AcquireLease(ctx, r.ID, holder, controller.DefaultLeaseTTL); err != nil {
-		if errors.Is(err, store.ErrLeaseHeld) {
-			if existing, gErr := d.store.Runs().Get(ctx, r.ID); gErr == nil && existing.Lease != nil &&
-				(existing.Lease.HolderID == ChatHolder("") || strings.HasPrefix(existing.Lease.HolderID, ChatHolder("")+":")) {
-				_ = d.store.Runs().ReleaseLease(ctx, r.ID, existing.Lease.HolderID)
-				_, err = d.store.Runs().AcquireLease(ctx, r.ID, holder, controller.DefaultLeaseTTL)
+	if !d.Shadow {
+		if _, err := d.store.Runs().AcquireLease(ctx, r.ID, holder, controller.DefaultLeaseTTL); err != nil {
+			if errors.Is(err, store.ErrLeaseHeld) {
+				if existing, gErr := d.store.Runs().Get(ctx, r.ID); gErr == nil && existing.Lease != nil &&
+					(existing.Lease.HolderID == ChatHolder("") || strings.HasPrefix(existing.Lease.HolderID, ChatHolder("")+":")) {
+					_ = d.store.Runs().ReleaseLease(ctx, r.ID, existing.Lease.HolderID)
+					_, err = d.store.Runs().AcquireLease(ctx, r.ID, holder, controller.DefaultLeaseTTL)
+				}
 			}
-		}
-		if err != nil {
-			return err
+			if err != nil {
+				return err
+			}
 		}
 	}
 	started := false
 	defer func() {
-		if !started {
+		if !started && !d.Shadow {
 			_ = d.store.Runs().ReleaseLease(context.WithoutCancel(ctx), r.ID, holder)
 		}
 	}()
@@ -405,8 +421,10 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		if err := d.store.Lanes().Upsert(ctx, *ln); err != nil {
 			return err
 		}
-		if tracker, ok := d.driver.(interface{ TrackLane(lane.Lane) }); ok && !ln.Status.Terminal() {
-			tracker.TrackLane(*ln)
+		if !d.Shadow {
+			if tracker, ok := d.driver.(interface{ TrackLane(lane.Lane) }); ok && !ln.Status.Terminal() {
+				tracker.TrackLane(*ln)
+			}
 		}
 	}
 	for i := range r.Lanes {
@@ -467,7 +485,13 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	if d.Mailboxes != nil {
 		boxes = d.Mailboxes(r.ID)
 	}
+	if d.Shadow && d.Recorder != nil {
+		for i := range boxes {
+			boxes[i] = NewRecordingMailbox(boxes[i], d.Recorder)
+		}
+	}
 	syncer := newRunLedgerSync(r, d.clock, lanes)
+	syncer.readOnly = d.Shadow
 	syncer.ledgerScript = d.ledgerScript
 	runStore := &adoptedStore{
 		Store: d.store,
@@ -514,6 +538,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	runDriver := d.driver
 	if runDriver != nil {
 		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: runStore, syncer: syncer, clock: d.clock}
+		if d.Shadow && d.Recorder != nil {
+			runDriver = NewRecordingDriver(runDriver, d.Recorder)
+		}
 		if ds, ok := dispatch.(interface{ SetDriver(lane.LaneDriver) }); ok {
 			ds.SetDriver(runDriver)
 		} else if dispatch != nil {
@@ -565,6 +592,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		HoldAdvanceCheck:   func(id string) bool { return fileExists(filepath.Join(r.Dir, id+".hold-advance")) },
 		ImportedHostState:  true,
 		HostRun:            true,
+		SkipLease:          d.Shadow,
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
 	cr = &controlledRun{
@@ -844,17 +872,21 @@ func (d *Controllers) stop(ctx context.Context, r Run, releaseLease bool) error 
 	if err != nil {
 		return err
 	}
-	if cr.syncer != nil {
+	if cr.syncer != nil && !d.Shadow {
 		if err := cr.syncer.SyncAll(ctx, current); err != nil {
 			slog.Warn("sync adopted run lanes on stop failed", "run", r.ID, "error", err)
 		}
 	}
-	if err := checkpoint(r.Dir, current); err != nil {
-		return err
+	if !d.Shadow {
+		if err := checkpoint(r.Dir, current); err != nil {
+			return err
+		}
 	}
 	if releaseLease {
-		if err := cr.controller.ReleaseLease(ctx); err != nil {
-			return err
+		if !d.Shadow {
+			if err := cr.controller.ReleaseLease(ctx); err != nil {
+				return err
+			}
 		}
 	}
 	d.mu.Lock()
@@ -877,7 +909,10 @@ func (d *Controllers) judge(holder string, dispatch controller.Judge) controller
 					turnsBefore = len(turns)
 				}
 			}
-			stop := d.keepLease(ctx, runID, holder)
+			stop := func() {}
+			if !d.Shadow {
+				stop = d.keepLease(ctx, runID, holder)
+			}
 			err = dispatch.Judge(ctx, runID, events)
 			stop()
 			if err != nil {
@@ -1266,6 +1301,9 @@ func (d *Controllers) askOwnerOnEscalation(ctx context.Context, runID string, ev
 const ownerAskRef = "owner_ask:"
 
 func (d *Controllers) addEscalationAsk(ctx context.Context, runID string, ln *lane.Lane, esc *store.Decision, now time.Time) error {
+	if d.Shadow && d.Recorder == nil {
+		return errors.New("shadow controller requires an action recorder")
+	}
 	hold := "hold: keep " + ln.ID + " blocked"
 	ask := controller.OwnerAsk{
 		ID:       fmt.Sprintf("escalation-%s-%d", ln.ID, esc.Seq),
@@ -1277,7 +1315,17 @@ func (d *Controllers) addEscalationAsk(ctx context.Context, runID string, ln *la
 		Deadline: now.Add(escalationAskTTL),
 	}
 	if d.Mailboxes != nil {
-		notifier := dispatcher.New(dispatcher.Config{Mailboxes: d.Mailboxes(runID)}, d.store, d.driver, d.clock, nil)
+		boxes := d.Mailboxes(runID)
+		driver := d.driver
+		if d.Shadow {
+			for i := range boxes {
+				boxes[i] = NewRecordingMailbox(boxes[i], d.Recorder)
+			}
+			if cr := d.lookupRun(runID); cr != nil && cr.driver != nil {
+				driver = cr.driver
+			}
+		}
+		notifier := dispatcher.New(dispatcher.Config{Mailboxes: boxes}, d.store, driver, d.clock, nil)
 		_, err := notifier.RegisterOwnerAsk(ctx, runID, dispatcher.OwnerAskParams{ID: ask.ID, LaneID: ask.LaneID, Question: ask.Question, Options: ask.Options, Default: ask.Default, Deadline: ask.Deadline.Format(time.RFC3339)})
 		return err
 	}
@@ -2569,11 +2617,14 @@ func (s *adoptedBacklogStore) Close(ctx context.Context, runID, itemID string, s
 // (run, known, lastObjective, lastPlannedKey, stat signatures). Callers may
 // acquire ioMu or mu while holding closeoutMu, and mu while holding ioMu,
 // never the reverse, and mu is never held across file or subprocess I/O.
+//
+//nolint:govet // fields mirror the host ledger and synchronization state.
 type runLedgerSync struct {
 	clock            clock.Clock
 	known            map[string]lane.Lane
 	releasedSessions map[string]bool
 	ledgerScript     *string
+	readOnly         bool
 	runID            string
 	resolvedScript   string
 	lastObjective    string
@@ -2708,6 +2759,9 @@ func (s *runLedgerSync) ClearPlanned(key string) {
 }
 
 func (s *runLedgerSync) RefreshObjectiveIfChanged(ctx context.Context, runs store.RunStore) (bool, error) {
+	if s.readOnly {
+		return false, nil
+	}
 	s.mu.Lock()
 	dir := s.run.Dir
 	ready := s.statReady
@@ -2768,6 +2822,9 @@ func (s *runLedgerSync) RefreshObjective(ctx context.Context, runs store.RunStor
 	s.run = updated
 	s.lastObjective = fullObj
 	s.mu.Unlock()
+	if s.readOnly {
+		return true, nil
+	}
 
 	cur, err := runs.Get(ctx, runID)
 	if err != nil {
@@ -2818,6 +2875,12 @@ func (s *runLedgerSync) resolveLedgerScript() *string {
 }
 
 func (s *runLedgerSync) SyncLane(ctx context.Context, ln lane.Lane) error {
+	if s.readOnly {
+		s.mu.Lock()
+		s.known[ln.ID] = ln.Clone()
+		s.mu.Unlock()
+		return nil
+	}
 	s.ioMu.Lock()
 	defer s.ioMu.Unlock()
 
@@ -3079,6 +3142,15 @@ func checkpointNebulaSwarm(task map[string]json.RawMessage, ln *lane.Lane, cfgPh
 // named in OBJECTIVE.md, writes FINAL.md, updates PROGRESS.md and OBJECTIVE.md's
 // Next: line, and records one-line summaries for the owner with a /release offer.
 func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params dispatcher.RunCloseoutParams) (string, error) {
+	if d.Shadow {
+		if d.Recorder == nil {
+			return "", errors.New("shadow controller requires an action recorder")
+		}
+		if err := d.Recorder.Record("run", "closeout", params, "shadow closeout"); err != nil {
+			return "", err
+		}
+		return "recorded shadow closeout", nil
+	}
 	cr := d.lookupRun(runID)
 	if cr == nil || cr.syncer == nil {
 		return "", fmt.Errorf("adopted run %q is not active", runID)

@@ -57,6 +57,22 @@ func TestAdoptDryRunDirUsesExplicitCopiedRun(t *testing.T) {
 	}
 }
 
+func TestValidateShadowPathsRejectsOverlappingDirectories(t *testing.T) {
+	root := t.TempDir()
+	runDir := filepath.Join(root, "run")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, out := range []string{runDir, filepath.Join(runDir, "out"), root} {
+		if err := validateShadowPaths(runDir, out); err == nil {
+			t.Fatalf("validateShadowPaths(%q, %q) succeeded, want overlap error", runDir, out)
+		}
+	}
+	if err := validateShadowPaths(runDir, filepath.Join(root, "shadow-out")); err != nil {
+		t.Fatalf("validateShadowPaths disjoint output: %v", err)
+	}
+}
+
 // The shipped chat adopts, persists, and releases a host swarm lease.
 func TestShippedChatAdoptsAndReleasesHostSwarm(t *testing.T) {
 	for _, tc := range []struct {
@@ -2390,5 +2406,52 @@ func recordAdoptHostMerge(t *testing.T, dir string) {
 	writeFile(t, tmp, string(b))
 	if err := os.Rename(tmp, path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestShadowNebulaClientsGuardInnerWrites(t *testing.T) {
+	var writes atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writes.Add(1)
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	cfg := Config{NebulaAPIURL: srv.URL, NebulaToken: "synthetic"}
+	clk := clock.RealClock{}
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	rec, err := adopt.NewActionRecorder(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	h := newHostSwarmsWithRecorder(cfg, st, clk, rec)
+	if h.client == nil {
+		t.Fatal(h.off)
+	}
+	if err := h.client.WakeSession(t.Context(), "sleeping"); err == nil {
+		t.Fatal("inner wake allowed")
+	}
+	boxes := adoptedMailboxesWithRecorder(cfg, st, rec)("r")
+	if len(boxes) != 1 {
+		t.Fatalf("mailboxes=%d", len(boxes))
+	}
+	if err := boxes[0].SendLane(t.Context(), "lane", "hello"); err == nil {
+		t.Fatal("inner mail write allowed")
+	}
+	if writes.Load() != 0 {
+		t.Fatalf("shadow clients sent %d writes", writes.Load())
+	}
+}
+
+func TestShadowAdoptOutputFlags(t *testing.T) {
+	cfg, _, err := parseFlags("adopt", []string{"--shadow", "--dir", "run", "--out", "shadow-out", "--for", "1m"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Shadow || cfg.AdoptOut != "shadow-out" || cfg.ShadowFor != time.Minute {
+		t.Fatalf("unexpected shadow/output flags: shadow=%t out=%q for=%s", cfg.Shadow, cfg.AdoptOut, cfg.ShadowFor)
 	}
 }
