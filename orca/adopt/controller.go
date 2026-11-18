@@ -37,19 +37,20 @@ const escalationAskTTL = 24 * time.Hour
 //
 //nolint:govet // field grouping follows lifecycle ownership and synchronization.
 type Controllers struct {
-	ctx               context.Context
-	store             store.Store
-	driver            lane.LaneDriver
-	clock             clock.Clock
-	judges            JudgeFactory
-	Mailboxes         func(runID string) []mailbox.Mailbox
-	PRProbe           controller.PRProbe
-	Planner           func(ctx context.Context, runID, reason, planRef string) error
-	ledgerScript      *string
-	runs              map[string]*controlledRun
-	starting          map[string]*startup
-	Mirror            GitMirror
-	MaxCostPerHourUSD float64
+	ctx                context.Context
+	store              store.Store
+	driver             lane.LaneDriver
+	clock              clock.Clock
+	judges             JudgeFactory
+	Mailboxes          func(runID string) []mailbox.Mailbox
+	PRProbe            controller.PRProbe
+	Planner            func(ctx context.Context, runID, reason, planRef string) error
+	ledgerScript       *string
+	runs               map[string]*controlledRun
+	starting           map[string]*startup
+	Mirror             GitMirror
+	SubscriptionActors []string
+	MaxCostPerHourUSD  float64
 	// Shadow runs execute the normal controller against an isolated store while
 	// recording transport effects. They never acquire leases or checkpoint the
 	// host run directory.
@@ -133,7 +134,7 @@ func (d *Controllers) prepareStep(ctx context.Context, cr *controlledRun) (bool,
 	}
 	cr.controller.SetRuntimeSettings(settings)
 	wasPaused := settings.Paused
-	paused, _, _, msg, err := store.EnforceCostGuard(ctx, d.store, cr.run.ID, d.clock.Now().UTC(), d.MaxCostPerHourUSD)
+	paused, _, _, msg, err := store.EnforceCostGuard(ctx, d.store, cr.run.ID, d.clock.Now().UTC(), d.MaxCostPerHourUSD, d.SubscriptionActors...)
 	if err != nil {
 		return false, err
 	}
@@ -587,6 +588,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		HostIntegration:    verify,
 		JudgeLaneMail:      true,
 		MaxCostPerHourUSD:  d.MaxCostPerHourUSD,
+		SubscriptionActors: d.SubscriptionActors,
 		NoPR:               r.NoPR,
 		HoldAdvance:        holdAdvanceLanes(r),
 		HoldAdvanceCheck:   func(id string) bool { return fileExists(filepath.Join(r.Dir, id+".hold-advance")) },
@@ -1136,7 +1138,7 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 		return false, nil
 	}
 	now := d.clock.Now().UTC()
-	if paused, _, _, _, _ := store.EnforceCostGuard(ctx, d.store, runID, now, d.MaxCostPerHourUSD); paused {
+	if paused, _, _, _, _ := store.EnforceCostGuard(ctx, d.store, runID, now, d.MaxCostPerHourUSD, d.SubscriptionActors...); paused {
 		return false, nil
 	}
 	if settings, sErr := d.store.Runs().GetSettings(ctx, runID); sErr == nil && settings.Paused {
@@ -1195,7 +1197,7 @@ func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger 
 	}
 	err = plannerFn(ctx, runID, reason.String(), planRef)
 	stop()
-	_, _, _, _, _ = store.EnforceCostGuard(ctx, d.store, runID, d.clock.Now().UTC(), d.MaxCostPerHourUSD)
+	_, _, _, _, _ = store.EnforceCostGuard(ctx, d.store, runID, d.clock.Now().UTC(), d.MaxCostPerHourUSD, d.SubscriptionActors...)
 	if err != nil {
 		if ctx.Err() != nil {
 			cr.syncer.ClearPlanned(planKey)

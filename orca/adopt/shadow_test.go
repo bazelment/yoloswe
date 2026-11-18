@@ -20,6 +20,7 @@ import (
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/lane/nebula"
 	"github.com/bazelment/yoloswe/orca/mailbox"
+	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
@@ -227,11 +228,11 @@ func TestShadowAdoptExecReads(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		_, _ = w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{"stdout":"COMMITS:2\nDISK:94\nPROC:bazel test //...\n"}`))
 	}))
 	defer srv.Close()
 	clk := clock.NewFakeClock(time.Time{})
-	inner, err := nebula.New(nebula.Config{APIURL: srv.URL, Token: "synthetic", Clock: clk, HTTPClient: ShadowHTTPClient(nil, rec)})
+	inner, err := nebula.New(nebula.Config{APIURL: srv.URL, Token: "synthetic", Clock: clk, HTTPClient: ShadowHTTPClient(nil, rec, clk)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,15 +265,18 @@ func TestShadowAdoptExecReads(t *testing.T) {
 		}
 		for _, ln := range lanes {
 			_, _ = drv.ReadReport(t.Context(), ln.RunID, ln.ID, ln.TerminalID)
-			_, _ = drv.LaneGitState(t.Context(), ln)
-			_, _ = drv.LaneSessionHealth(t.Context(), ln)
+			git, gitErr := drv.LaneGitState(t.Context(), ln)
+			health, healthErr := drv.LaneSessionHealth(t.Context(), ln)
+			if ln.ID == "adopted" && (gitErr != nil || healthErr != nil || git.UnpushedCommits != 2 || health.DiskUsedPercent != 94 || !health.HasBusyProcess()) {
+				t.Fatalf("probe git=%+v (%v), health=%+v (%v)", git, gitErr, health, healthErr)
+			}
 			_, _ = drv.TerminalAgentState(t.Context(), ln.TerminalID)
 		}
 		clk.Advance(time.Duration(tick+1) * time.Second)
 	}
 	t.Logf("6 ticks: non-GET=%d, requests with invented IDs=%d (fake exec=%d)", nonGET.Load(), fakeIDs.Load(), fakeExec.Load())
-	if nonGET.Load() != 0 || fakeIDs.Load() != 0 {
-		t.Fatalf("shadow escaped: non-GET=%d invented-ID requests=%d; want both 0", nonGET.Load(), fakeIDs.Load())
+	if nonGET.Load() != 1 || fakeIDs.Load() != 0 {
+		t.Fatalf("shadow escaped: non-GET=%d invented-ID requests=%d; want 1 read-only exec and 0 invented-ID requests", nonGET.Load(), fakeIDs.Load())
 	}
 	actions, err := readShadowActions(filepath.Join(out, "actions.jsonl"))
 	if err != nil {
@@ -288,9 +292,9 @@ func TestShadowAdoptExecReads(t *testing.T) {
 			counts[a.Lane+"/"+args["kind"]]++
 		}
 	}
-	for _, kind := range []string{"git_state", "session_health", "report_fallback"} {
-		if counts["adopted/"+kind] != 1 {
-			t.Fatalf("degraded read %s count=%d, want 1", kind, counts["adopted/"+kind])
+	for kind, want := range map[string]int{"git_state": 0, "session_health": 0, "report_fallback": 1} {
+		if counts["adopted/"+kind] != want {
+			t.Fatalf("degraded read %s count=%d, want %d", kind, counts["adopted/"+kind], want)
 		}
 	}
 	if got, err := drv.TerminalAgentState(t.Context(), launched.TerminalID); err != nil || got != "shadow-launched" {
@@ -303,7 +307,7 @@ func TestShadowAdoptExecReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"git_state:", "session_health:", "report_fallback:", "Refused HTTP writes", "None (0)."} {
+	for _, want := range []string{"report_fallback:", "Refused HTTP writes", "None (0)."} {
 		if !strings.Contains(string(summary), want) {
 			t.Fatalf("summary missing %q", want)
 		}
@@ -311,7 +315,7 @@ func TestShadowAdoptExecReads(t *testing.T) {
 
 }
 
-func TestAdopt60LaneExecRate(t *testing.T) {
+func TestShadow60LaneExecRate(t *testing.T) {
 	var execs, wakes atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/exec") {
@@ -324,7 +328,12 @@ func TestAdopt60LaneExecRate(t *testing.T) {
 	}))
 	defer srv.Close()
 	clk := clock.NewFakeClock(time.Time{})
-	drv, err := nebula.New(nebula.Config{APIURL: srv.URL, Token: "synthetic", Clock: clk})
+	rec, err := NewActionRecorder(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	drv, err := nebula.New(nebula.Config{APIURL: srv.URL, Token: "synthetic", Clock: clk, HTTPClient: ShadowHTTPClient(srv.Client(), rec, clk)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,8 +351,8 @@ func TestAdopt60LaneExecRate(t *testing.T) {
 		clk.Advance(10 * time.Second)
 	}
 	t.Logf("60 lanes / 4 minutes: exec=%d wake=%d total=%.2f/s per-lane=%.2f/min", execs.Load(), wakes.Load(), float64(execs.Load()+wakes.Load())/240, float64(execs.Load()+wakes.Load())/240)
-	if got := execs.Load() + wakes.Load(); got > 240 {
-		t.Fatalf("exec+wake=%d, want <=240 (1/lane/min)", got)
+	if execs.Load() != 240 || wakes.Load() != 0 {
+		t.Fatalf("exec=%d wake=%d, want 240 reads and 0 wakes (1/lane/min)", execs.Load(), wakes.Load())
 	}
 }
 
@@ -443,5 +452,269 @@ func TestShadowSummaryRejectsMalformedAction(t *testing.T) {
 	defer st.Close()
 	if err := WriteShadowReports(t.Context(), out, t.TempDir(), "r", st, time.Now(), time.Now()); err == nil {
 		t.Fatal("summary silently dropped an action")
+	}
+}
+
+func TestShadowReadOnlyExecAllowlist(t *testing.T) {
+	rec, err := NewActionRecorder(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	var forwarded atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded.Add(1)
+		_, _ = w.Write([]byte(`{"stdout":" M file.go\n"}`))
+	}))
+	defer srv.Close()
+	inner, err := nebula.New(nebula.Config{APIURL: srv.URL, Token: "synthetic", HTTPClient: ShadowHTTPClient(srv.Client(), rec)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inner.ExecSession(t.Context(), "read", []string{"git", "status", "--porcelain"}); err != nil {
+		t.Errorf("allowlisted git status refused: %v", err)
+	}
+	for i, command := range [][]string{{"rm", "-rf", "/"}, {"git", "push"}, {"sh", "-c", "git status; rm -rf /"}, {"git", "log", "--output=/tmp/write"}, {"pgrep", "--pidfile=/tmp/file"}, {"cat", "/etc/passwd"}} {
+		if _, err := inner.ExecSession(t.Context(), fmt.Sprintf("write-%d", i), command); err == nil {
+			t.Errorf("unsafe exec forwarded: %q", command)
+		}
+	}
+	if err := inner.WakeSession(t.Context(), "sleeping"); err == nil {
+		t.Error("wake forwarded")
+	}
+	t.Logf("forwarded read-only execs=%d; unsafe execs and wake refused", forwarded.Load())
+	if forwarded.Load() != 1 {
+		t.Fatalf("forwarded=%d, want 1 read-only exec", forwarded.Load())
+	}
+}
+
+func TestShadowHostDiffClassification(t *testing.T) {
+	out, run := t.TempDir(), t.TempDir()
+	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	actions := []Action{
+		{At: at, Lane: "a", Kind: "start_phase", Arguments: json.RawMessage(`{"Phase":"review"}`)},
+		{At: at, Lane: "b", Kind: "stop", Arguments: json.RawMessage(`{"TerminalID":"term-b"}`)},
+		{At: at, Lane: "c", Kind: "steer", Arguments: json.RawMessage(`{"TerminalID":"term-c"}`)},
+		{At: at, Lane: "d", Kind: "start_phase", Arguments: json.RawMessage(`{"Phase":"review"}`)},
+		{At: at, Lane: "e", Kind: "stop", Arguments: json.RawMessage(`{"TerminalID":"term-e"}`)},
+	}
+	f, err := os.Create(filepath.Join(out, "actions.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range actions {
+		if err := json.NewEncoder(f).Encode(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rows := "2026-11-17T11:30:00Z\ta\tstarted\treview terminal=host-a\n" +
+		"2026-11-17T12:30:00Z\tb\tstop\tterminal=term-b\n" +
+		"2026-11-17T12:00:00Z\tc\tsteer\tterminal=term-c\n" +
+		"2026-11-17T12:00:00Z\td\tstarted\tswe terminal=host-d\n" +
+		"2026-11-17T12:00:00Z\te\tstop\tterminal=other\n" +
+		"2026-11-17T12:00:00Z\tf\tdecision\tgraded soak\n" +
+		"2026-11-17T12:00:00Z\tg\tfund\tbudget approved\n"
+	if err := os.WriteFile(filepath.Join(run, "EVENTS"), []byte(rows), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHostDiff(out, run, filepath.Join(out, "actions.jsonl"), at, at); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(out, "host-diff.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Counts map[string]int `json:"counts"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("mechanical classifications: %v", result.Counts)
+	for kind, want := range map[string]int{"agree": 3, "differs": 2, "host-did-not": 0, "orca-missed": 2} {
+		if result.Counts[kind] != want {
+			t.Errorf("%s=%d, want %d; %s", kind, result.Counts[kind], want, raw)
+		}
+	}
+}
+
+func TestShadowTransportRateLimitAndSleepingRead(t *testing.T) {
+	clk := clock.NewFakeClock(time.Time{})
+	rec, err := NewActionRecorder(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	var execs, wakes atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/wake") {
+			wakes.Add(1)
+		}
+		if strings.HasSuffix(r.URL.Path, "/exec") {
+			execs.Add(1)
+		}
+		if strings.Contains(r.URL.Path, "sleeping") {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		_, _ = w.Write([]byte(`{"stdout":"COMMITS:1\nDISK:95\n"}`))
+	}))
+	defer srv.Close()
+	inner, err := nebula.New(nebula.Config{APIURL: srv.URL, Token: "synthetic", Clock: clk, HTTPClient: ShadowHTTPClient(srv.Client(), rec, clk)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := []string{"git", "status", "--porcelain"}
+	if _, err := inner.ExecSession(t.Context(), "real", command); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inner.ExecSession(t.Context(), "real", command); err == nil {
+		t.Fatal("second exec inside minute allowed")
+	}
+	clk.Advance(time.Minute)
+	if _, err := inner.ExecSession(t.Context(), "real", command); err != nil {
+		t.Fatal(err)
+	}
+	drv := NewRecordingDriver(inner, rec)
+	ln := lane.Lane{RunID: "r", ID: "sleeping", SessionID: "sleeping"}
+	for range 3 {
+		if _, err := drv.LaneGitState(t.Context(), ln); err == nil {
+			t.Fatal("sleeping git read succeeded")
+		}
+		if _, err := drv.LaneSessionHealth(t.Context(), ln); err == nil {
+			t.Fatal("sleeping health read succeeded")
+		}
+	}
+	if execs.Load() != 3 || wakes.Load() != 0 {
+		t.Fatalf("exec=%d wake=%d, want 3 and 0", execs.Load(), wakes.Load())
+	}
+	actions, err := readShadowActions(rec.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	degraded := 0
+	for _, a := range actions {
+		if a.Kind == "read_degraded" {
+			degraded++
+		}
+	}
+	if degraded != 2 {
+		t.Fatalf("degraded=%d, want git and health once each", degraded)
+	}
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inner.ExecSession(t.Context(), "closed-recorder", command); err == nil {
+		t.Fatal("read allowed without audit recorder")
+	}
+	if execs.Load() != 3 {
+		t.Fatal("closed recorder forwarded an exec")
+	}
+}
+
+func TestShadowReadOnlyCommandArguments(t *testing.T) {
+	for _, command := range [][]string{
+		{"git", "status", "--porcelain"}, {"git", "rev-parse", "HEAD"}, {"git", "log", "--oneline", "-n", "5"}, {"git", "rev-list", "--count", "origin/main..HEAD"}, {"git", "diff", "--stat", "origin/main"},
+		{"df"}, {"df", "-P", "."}, {"pgrep", "-af", "bazel|review"}, {"cat", "/workspace/project/.git/phase-report.terminal-id.md"},
+	} {
+		if _, ok := shadowReadOnlyCommand(command); !ok {
+			t.Errorf("read-only command refused: %q", command)
+		}
+	}
+	for _, command := range [][]string{
+		{"git", "-c", "alias.status=!rm -rf /", "status"}, {"git", "status", "--porcelain; rm -rf /"}, {"git", "diff", "--stat", "--ext-diff"}, {"git", "log", "--output=/tmp/log"}, {"git", "rev-list", "--count", "--output=/tmp/log"},
+		{"df", "--output=/tmp/file"}, {"pgrep", "-F", "/tmp/file"}, {"cat", "../.git/phase-report.terminal.md"}, {"cat", "/workspace/.git/config"}, {"bash", "-c", "git status"},
+	} {
+		if _, ok := shadowReadOnlyCommand(command); ok {
+			t.Errorf("unsafe command allowed: %q", command)
+		}
+	}
+}
+
+func TestHostDiffDoesNotReuseRowsOrGuessMissingTargets(t *testing.T) {
+	out, run := t.TempDir(), t.TempDir()
+	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	actions := []Action{
+		{At: at, Lane: "a", Kind: "stop", Arguments: json.RawMessage(`{"terminal_id":"other"}`)},
+		{At: at, Lane: "a", Kind: "stop", Arguments: json.RawMessage(`{"terminal_id":"same"}`)},
+		{At: at, Lane: "b", Kind: "steer", Arguments: json.RawMessage(`{"terminal_id":"missing"}`)},
+		{At: at, Lane: "c", Kind: "start_phase", Arguments: json.RawMessage(`{"phase":"swe"}`)},
+	}
+	f, err := os.Create(filepath.Join(out, "actions.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range actions {
+		if err := json.NewEncoder(f).Encode(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rows := "2026-11-17T12:00:00Z\ta\tstop\tterminal=same\n" +
+		"2026-11-17T12:00:00Z\tb\tsteer\tno target recorded\n" +
+		"2026-11-17T12:30:00.000000001Z\tc\tstarted\tswe\n" +
+		"2026-11-17T12:00:00Z\tother-lane\tstarted\tswe\n"
+	if err := os.WriteFile(filepath.Join(run, "EVENTS"), []byte(rows), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHostDiff(out, run, filepath.Join(out, "actions.jsonl"), at, at); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(out, "host-diff.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result HostDiff
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []string{"host-did-not", "agree", "differs", "host-did-not"} {
+		if result.Actions[i].Classification != want {
+			t.Errorf("action %d=%s, want %s", i, result.Actions[i].Classification, want)
+		}
+	}
+	if result.Counts["orca-missed"] != 1 {
+		t.Fatalf("counts=%v, want one host decision for other-lane", result.Counts)
+	}
+}
+
+func TestShadowSummaryIncludesCLITurnUsageWithoutActions(t *testing.T) {
+	out := t.TempDir()
+	rec, err := NewActionRecorder(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	if err := st.Runs().Create(t.Context(), store.Run{ID: "usage"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Threads().StartThread(t.Context(), store.Thread{ID: "dispatcher", RunID: "usage", Role: store.ThreadRoleDispatcher}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Threads().StartTurn(t.Context(), store.Turn{ID: "turn", ThreadID: "dispatcher", RunID: "usage"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Threads().CompleteTurn(t.Context(), "dispatcher", "turn", store.TurnStatusCompleted, model.Usage{InputTokens: 100, OutputTokens: 40, CostUSD: 9}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteShadowReports(t.Context(), out, t.TempDir(), "usage", st, clk.Now(), clk.Now()); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(out, "summary.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Estimated tokens: 100 input, 40 output", "Estimated cost: $9.0000"} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("summary missing %q: %s", want, raw)
+		}
 	}
 }

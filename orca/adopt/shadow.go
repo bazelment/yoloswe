@@ -5,20 +5,26 @@ package adopt
 // as the real transports, but never call their mutating methods.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/lane"
+	"github.com/bazelment/yoloswe/orca/lane/nebula"
 	"github.com/bazelment/yoloswe/orca/mailbox"
+	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
@@ -149,11 +155,11 @@ func (r *ActionRecorder) Record(laneID, kind string, args any, reason string) er
 }
 
 // ErrShadowUnknown means the observation requires a remote command and is unavailable.
-var ErrShadowUnknown = errors.New("shadow read is unknown: remote exec disabled")
+var ErrShadowUnknown = errors.New("shadow read is unknown: read-only probe unavailable")
 
 // ShadowHTTPClient guards the shared Nebula transport, including stream clients
 // copied from it. Refusals never reach the underlying RoundTripper.
-func ShadowHTTPClient(base *http.Client, recorder *ActionRecorder) *http.Client {
+func ShadowHTTPClient(base *http.Client, recorder *ActionRecorder, clocks ...clock.Clock) *http.Client {
 	client := http.Client{Timeout: 30 * time.Second}
 	if base != nil {
 		client = *base
@@ -162,18 +168,56 @@ func ShadowHTTPClient(base *http.Client, recorder *ActionRecorder) *http.Client 
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
-	client.Transport = shadowTransport{base: transport, recorder: recorder}
+	var clk clock.Clock = clock.RealClock{}
+	if len(clocks) > 0 && clocks[0] != nil {
+		clk = clocks[0]
+	}
+	client.Transport = &shadowTransport{base: transport, recorder: recorder, clock: clk, lastExec: map[string]time.Time{}}
 	return &client
 }
 
 type shadowTransport struct {
+	clock    clock.Clock
+	lastExec map[string]time.Time
 	base     http.RoundTripper
 	recorder *ActionRecorder
+	mu       sync.Mutex
 }
 
-func (t shadowTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (t *shadowTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Method == http.MethodGet {
 		return t.base.RoundTrip(req)
+	}
+	if req.Method == http.MethodPost && req.Body != nil {
+		parts := strings.Split(req.URL.EscapedPath(), "/")
+		if len(parts) == 5 && parts[1] == "api" && parts[2] == "code-sessions" && parts[3] != "" && parts[4] == "exec" && req.URL.RawQuery == "" {
+			raw, err := io.ReadAll(io.LimitReader(req.Body, 16*1024+1))
+			_ = req.Body.Close()
+			var body struct {
+				Command []string `json:"command"`
+			}
+			dec := json.NewDecoder(bytes.NewReader(raw))
+			dec.DisallowUnknownFields()
+			if err == nil && len(raw) <= 16*1024 && dec.Decode(&body) == nil && dec.Decode(new(any)) == io.EOF {
+				command, allowed := shadowReadOnlyCommand(body.Command)
+				if allowed && t.reserveExec(parts[3]) {
+					if err := t.recorder.Record("", "exec_read", map[string]any{"session_id": parts[3], "command": command}, "allowlisted read-only exec"); err != nil {
+						return nil, err
+					}
+					encoded, err := json.Marshal(struct {
+						Command []string `json:"command"`
+					}{command})
+					if err != nil {
+						return nil, err
+					}
+					forward := req.Clone(req.Context())
+					forward.Body = io.NopCloser(bytes.NewReader(encoded))
+					forward.ContentLength = int64(len(encoded))
+					forward.GetBody = nil
+					return t.base.RoundTrip(forward)
+				}
+			}
+		}
 	}
 	if req.Body != nil {
 		_ = req.Body.Close()
@@ -181,7 +225,7 @@ func (t shadowTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	path := req.URL.EscapedPath()
 	if err := t.recorder.Record("", "http_refused", map[string]string{
 		"method": req.Method, "path": path, "path_class": shadowPathClass(path),
-	}, "shadow transport refuses non-GET requests"); err != nil {
+	}, "shadow transport refuses writes, unknown exec commands and rate-limited reads"); err != nil {
 		return nil, err
 	}
 	return nil, fmt.Errorf("shadow transport refused %s %s", req.Method, path)
@@ -316,23 +360,37 @@ func (d *RecordingDriver) ReadReport(ctx context.Context, runID, laneID, termina
 	}
 	return rep, err
 }
-func (d *RecordingDriver) LaneGitState(_ context.Context, ln lane.Lane) (lane.GitState, error) {
+func (d *RecordingDriver) LaneGitState(ctx context.Context, ln lane.Lane) (lane.GitState, error) {
 	if d.syntheticLane(ln.RunID, ln.ID) || shadowID(ln.SessionID) || shadowID(ln.TerminalID) {
 		return lane.GitState{}, ErrShadowUnknown
 	}
-	if err := d.recordRead(ln.RunID, ln.ID, "git_state", "Remote git exec disabled; dirty/unpushed-work and push-reminder decisions are unknown."); err != nil {
-		return lane.GitState{}, err
+	var result lane.GitState
+	err := ErrShadowUnknown
+	if reader, ok := d.inner.(lane.GitStateReader); ok {
+		result, err = reader.LaneGitState(ctx, ln)
 	}
-	return lane.GitState{}, ErrShadowUnknown
+	if err != nil {
+		if recordErr := d.recordRead(ln.RunID, ln.ID, "git_state", "Read-only git probe unavailable: "+err.Error()); recordErr != nil {
+			return lane.GitState{}, recordErr
+		}
+	}
+	return result, err
 }
-func (d *RecordingDriver) LaneSessionHealth(_ context.Context, ln lane.Lane) (lane.SessionHealth, error) {
+func (d *RecordingDriver) LaneSessionHealth(ctx context.Context, ln lane.Lane) (lane.SessionHealth, error) {
 	if d.syntheticLane(ln.RunID, ln.ID) || shadowID(ln.SessionID) || shadowID(ln.TerminalID) {
 		return lane.SessionHealth{}, ErrShadowUnknown
 	}
-	if err := d.recordRead(ln.RunID, ln.ID, "session_health", "Remote health exec disabled; disk pressure and busy gate/review-process decisions are unknown."); err != nil {
-		return lane.SessionHealth{}, err
+	var result lane.SessionHealth
+	err := ErrShadowUnknown
+	if reader, ok := d.inner.(lane.SessionHealthReader); ok {
+		result, err = reader.LaneSessionHealth(ctx, ln)
 	}
-	return lane.SessionHealth{}, ErrShadowUnknown
+	if err != nil {
+		if recordErr := d.recordRead(ln.RunID, ln.ID, "session_health", "Read-only health probe unavailable: "+err.Error()); recordErr != nil {
+			return lane.SessionHealth{}, recordErr
+		}
+	}
+	return result, err
 }
 func (d *RecordingDriver) TerminalAgentState(ctx context.Context, terminalID string) (string, error) {
 	if shadowID(terminalID) {
@@ -431,3 +489,78 @@ var _ mailbox.Mailbox = (*RecordingMailbox)(nil)
 var _ mailbox.Responder = (*RecordingMailbox)(nil)
 var _ mailbox.Dismisser = (*RecordingMailbox)(nil)
 var _ mailbox.AdoptCutoffSetter = (*RecordingMailbox)(nil)
+
+func (t *shadowTransport) reserveExec(session string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.clock.Now()
+	if last, ok := t.lastExec[session]; ok && now.Sub(last) < time.Minute {
+		return false
+	}
+	t.lastExec[session] = now
+	return true
+}
+
+var shadowRef = regexp.MustCompile(`^[A-Za-z0-9_./@^~:+-]+$`)
+var shadowReportName = regexp.MustCompile(`^phase-report\.[A-Za-z0-9_-]+\.md$`)
+
+func shadowReadOnlyCommand(command []string) ([]string, bool) {
+	if nebula.IsReadOnlyLaneProbe(command) {
+		return command, true
+	}
+	if len(command) == 0 {
+		return nil, false
+	}
+	args := command[1:]
+	switch command[0] {
+	case "git":
+		if len(args) == 0 {
+			return nil, false
+		}
+		switch args[0] {
+		case "status", "rev-parse", "log":
+			if model.ValidateReadOnlyCommand("git", args) != nil {
+				return nil, false
+			}
+		case "diff":
+			if len(args) < 2 || args[1] != "--stat" || model.ValidateReadOnlyCommand("git", args) != nil {
+				return nil, false
+			}
+		case "rev-list":
+			if len(args) != 3 || args[1] != "--count" || !shadowRef.MatchString(args[2]) || strings.HasPrefix(args[2], "-") {
+				return nil, false
+			}
+		default:
+			return nil, false
+		}
+		safe := []string{"git", "--no-optional-locks"}
+		if args[0] == "log" || args[0] == "diff" {
+			safe = append(safe, args[0], "--no-ext-diff", "--no-textconv")
+			safe = append(safe, args[1:]...)
+		} else {
+			safe = append(safe, args...)
+		}
+		return safe, true
+	case "df":
+		if len(args) == 0 || (len(args) == 2 && (args[0] == "-P" || args[0] == "-h") && (args[1] == "." || args[1] == "/")) {
+			return command, true
+		}
+	case "pgrep":
+		if len(args) == 2 && (args[0] == "-af" || args[0] == "-f") && args[1] != "" && !strings.HasPrefix(args[1], "-") {
+			return command, true
+		}
+	case "cat":
+		if len(args) == 1 && !strings.ContainsAny(args[0], "\\\x00\n\r") && filepath.Clean(args[0]) == args[0] && !strings.HasPrefix(args[0], "-") {
+			parts := strings.Split(filepath.ToSlash(args[0]), "/")
+			for _, part := range parts {
+				if part == ".." {
+					return nil, false
+				}
+			}
+			if len(parts) >= 2 && parts[len(parts)-2] == ".git" && shadowReportName.MatchString(parts[len(parts)-1]) {
+				return command, true
+			}
+		}
+	}
+	return nil, false
+}

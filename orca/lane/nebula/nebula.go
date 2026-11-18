@@ -1512,7 +1512,8 @@ func (d *Driver) LaneGitState(ctx context.Context, ln lane.Lane) (lane.GitState,
 	return git, err
 }
 
-const gitProbeScript = `set -e
+const gitProbeScript = `export GIT_OPTIONAL_LOCKS=0
+set -e
 base="$1"
 branch="$2"
 ref="origin/$base"
@@ -1590,6 +1591,14 @@ done
 // so unavailable sessions cannot turn the controller tick into an exec storm.
 const laneProbeInterval = time.Minute
 
+const laneProbeScript = "(\n" + gitProbeScript + "\n)\ngit_status=$?\n" + healthProbeScript + "\nexit \"$git_status\"\n"
+
+// IsReadOnlyLaneProbe recognizes only the fixed combined git/health probe.
+// Branches are positional arguments, never interpolated into shell source.
+func IsReadOnlyLaneProbe(command []string) bool {
+	return len(command) == 6 && command[0] == "sh" && command[1] == "-c" && command[2] == laneProbeScript && command[3] == "--"
+}
+
 var errLaneProbePending = errors.New("lane probe unknown until next minute after session, terminal or branch change")
 
 type laneProbe struct {
@@ -1626,7 +1635,7 @@ func (d *Driver) readLaneProbe(ctx context.Context, ln lane.Lane) (lane.GitState
 		return probe.git, probe.health, probe.err
 	}
 	probe.at, probe.signature = d.clock.Now(), signature
-	script := "(\n" + gitProbeScript + "\n)\ngit_status=$?\n" + healthProbeScript + "\nexit \"$git_status\"\n"
+	script := laneProbeScript
 	result, err := d.ExecSession(ctx, ln.SessionID, []string{"sh", "-c", script, "--", base, branch})
 	if err == nil && result.ExitCode != 0 {
 		err = fmt.Errorf("lane probe exited %d", result.ExitCode)

@@ -833,3 +833,53 @@ func TestSQLiteLaneAnswerStateSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCostGuardEnforcesHTTPSpendAlongsideCLIEstimates(t *testing.T) {
+	t.Parallel()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC))
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "cost.db"), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Runs().Create(t.Context(), store.Run{ID: "mixed"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []string{"dispatcher", "planner"} {
+		if _, err := st.Threads().StartThread(t.Context(), store.Thread{ID: role, RunID: "mixed", Role: store.ThreadRole(role)}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.Threads().StartTurn(t.Context(), store.Turn{ID: role + "-turn", ThreadID: role, RunID: "mixed"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Threads().CompleteTurn(t.Context(), role, role+"-turn", store.TurnStatusCompleted, model.Usage{CostUSD: 9}, ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.Decisions().Append(t.Context(), store.Decision{RunID: "mixed", Tool: "test.turn", Actor: role, ThreadID: role, TurnID: role + "-turn", CostUSD: 9}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Unlinked subscription decisions must also be excluded from enforcement.
+	if _, err := st.Decisions().Append(t.Context(), store.Decision{RunID: "mixed", Tool: "test.turn", Actor: "dispatcher", CostUSD: 9}); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		if _, err := st.Decisions().Append(t.Context(), store.Decision{RunID: "mixed", Tool: "test.turn", Actor: "critic", CostUSD: 3}); err != nil {
+			t.Fatal(err)
+		}
+		paused, spent, _, _, err := store.EnforceCostGuard(t.Context(), st, "mixed", clk.Now(), 5, "dispatcher", "planner")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if spent != float64((i+1)*3) || paused != (i == 1) {
+			t.Fatalf("HTTP spend=%f paused=%t after %d calls", spent, paused, i+1)
+		}
+	}
+	total, err := store.HourlyRunCostUSD(t.Context(), st, "mixed", clk.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 33 {
+		t.Fatalf("reported spend=%f, want $33 including subscription estimates", total)
+	}
+}

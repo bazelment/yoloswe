@@ -277,6 +277,7 @@ type Config struct {
 	// judgment dispatcher rather than the legacy auto-ask fallback.
 	JudgeLaneMail         bool
 	ConcurrencyCap        int
+	SubscriptionActors    []string
 	MaxCostPerHourUSD     float64
 	UnpushedWorkThreshold time.Duration
 	DiskPressurePercent   int
@@ -4751,7 +4752,7 @@ func (c *Controller) enforceCostGuard(ctx context.Context, now time.Time) (bool,
 	if err != nil {
 		return false, "", err
 	}
-	paused, _, _, msg, err := store.EnforceCostGuard(ctx, c.store, c.cfg.RunID, now, c.cfg.MaxCostPerHourUSD)
+	paused, _, _, msg, err := store.EnforceCostGuard(ctx, c.store, c.cfg.RunID, now, c.cfg.MaxCostPerHourUSD, c.cfg.SubscriptionActors...)
 	if err != nil {
 		return false, "", err
 	}

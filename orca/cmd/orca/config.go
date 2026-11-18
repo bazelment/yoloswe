@@ -301,7 +301,7 @@ func (c Config) withDefaults() Config {
 			}
 		}
 	}
-	if !c.maxCostPerHourSet && c.MaxCostPerHourUSD <= 0 {
+	if !c.maxCostPerHourSet && c.MaxCostPerHourUSD <= 0 && !c.Shadow {
 		c.MaxCostPerHourUSD = DefaultMaxCostPerHourUSD
 	}
 	c.LogLevel = cmp.Or(strings.ToLower(strings.TrimSpace(c.LogLevel)), "info")
@@ -815,6 +815,14 @@ func (c *providerRoutingClient) CreateMessage(ctx context.Context, req model.Req
 func isDefaultRoutingClient(client model.ModelClient) bool {
 	_, ok := client.(*providerRoutingClient)
 	return ok
+}
+
+// subscriptionActors identifies roles executed through the CLI subscription.
+func subscriptionActors(backend model.AgentBackend) []string {
+	if backend == model.AgentBackendCLI {
+		return []string{"dispatcher", "planner", "concierge"}
+	}
+	return nil
 }
 
 func effectiveAgentBackend(cfg Config, client model.ModelClient) model.AgentBackend {

@@ -2674,3 +2674,65 @@ func TestMainPlanner_ProposePlanCLI(t *testing.T) {
 		t.Fatalf("Decisions = %+v, err=%v; want 150 tokens / 0.015 USD", decs, err)
 	}
 }
+
+func TestCLIControllerKeepsTakingTurnsAboveCostCap(t *testing.T) {
+	clk := clock.NewFakeClock(time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC))
+	st := store.NewMemoryStore(clk)
+	defer st.Close()
+	if err := st.Runs().Create(t.Context(), store.Run{ID: "cli-cap"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := filepath.Join(dir, "stream.jsonl")
+	fixture := `{"type":"system","subtype":"init","session_id":"cli-cap-session","model":"claude-opus-5-5"}` + "\n" +
+		`{"type":"result","subtype":"success","is_error":false,"session_id":"cli-cap-session","result":"Observed.","num_turns":1,"total_cost_usd":9,"usage":{"input_tokens":100,"output_tokens":40}}` + "\n"
+	if err := os.WriteFile(stream, []byte(fixture), 0600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "fake-claude")
+	script := fmt.Sprintf("#!/bin/sh\nexport GO_WANT_FAKE_MAIN_PLANNER_CLAUDE_CLI=1\nexport FAKE_MAIN_PLANNER_CLAUDE_STREAM_FILE=%q\nexec %q\n", stream, exe)
+	if err := os.WriteFile(bin, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{RunID: "cli-cap", AgentBackend: model.AgentBackendCLI, ClaudeBin: bin, MaxCostPerHourUSD: 1, Models: RoleModels{Roles: map[string]RoleSelection{"dispatcher": {Provider: "claude-cli", Model: "claude-opus-5-5"}}}}
+	runner := NewRunner(cfg, st, lane.NewFakeDriver(), clk, nil, nil)
+	defer runner.dispatcher.Close()
+	for i := range 3 {
+		if _, err := st.Events().Append(t.Context(), store.Event{RunID: cfg.RunID, Kind: store.EventMail, Urgent: true, Summary: fmt.Sprintf("owner instruction %d", i)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := runner.controller.Step(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		settings, err := st.Runs().GetSettings(t.Context(), cfg.RunID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if settings.Paused {
+			t.Fatalf("CLI controller paused after turn %d on estimated subscription spend", i+1)
+		}
+		clk.Advance(time.Minute)
+	}
+	threads, err := st.Threads().ListThreads(t.Context(), store.ThreadFilter{RunID: cfg.RunID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(threads) != 1 {
+		t.Fatalf("threads=%d, want 1", len(threads))
+	}
+	turns, err := st.Threads().ListTurns(t.Context(), threads[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 3 {
+		t.Fatalf("turns=%d, want 3", len(turns))
+	}
+	t.Logf("CLI controller: turns=%d estimated cost=$%.2f cap=$%.2f paused=false", len(turns), threads[0].CostUSD, cfg.MaxCostPerHourUSD)
+	if threads[0].CostUSD <= cfg.MaxCostPerHourUSD {
+		t.Fatalf("estimated spend=%f, want above cap", threads[0].CostUSD)
+	}
+}
