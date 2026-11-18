@@ -10,6 +10,11 @@
     "reason_class": "wait"
   },
   {
+    "id": "closed-expired-wait",
+    "move": "none",
+    "reason_class": "integrated"
+  },
+  {
     "id": "done-expired-wait",
     "move": "none",
     "reason_class": "none"
@@ -30,6 +35,16 @@
     "reason_class": "wait"
   },
   {
+    "id": "merge-evidence-expired-wait",
+    "move": "none",
+    "reason_class": "integrated"
+  },
+  {
+    "id": "merged-expired-wait",
+    "move": "none",
+    "reason_class": "integrated"
+  },
+  {
     "id": "moving",
     "move": "wait",
     "reason_class": "wait"
@@ -38,6 +53,11 @@
     "id": "parked-draft",
     "move": "wait",
     "reason_class": "wait"
+  },
+  {
+    "id": "parked-owner-wait",
+    "move": "none",
+    "reason_class": "none"
   },
   {
     "id": "parked-pr-hold",

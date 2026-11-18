@@ -2041,7 +2041,7 @@ func integrationJudgeReason(r Run, ln Lane) string {
 }
 
 func hostLaneTerminal(ln Lane) bool {
-	return terminalStatus(strings.ToLower(strings.TrimSpace(ln.Status))) || strings.EqualFold(strings.TrimSpace(ln.PRState), "merged") || closedLane(ln)
+	return lane.Status(strings.ToLower(strings.TrimSpace(ln.Status))).Terminal() || strings.EqualFold(strings.TrimSpace(ln.PRState), "merged") || closedLane(ln) || integratedLane(ln)
 }
 
 func laneHostHold(ln Lane) string {

@@ -3959,6 +3959,7 @@ func TestTerminalLaneEventsIgnoreHostHolds(t *testing.T) {
 		}{
 			{kind: store.EventLaneReport}, {kind: store.EventPhaseExit}, {kind: store.EventCI},
 			{kind: store.EventStall}, {kind: store.EventStall, source: "lane.health"},
+			{kind: store.EventStall, source: "lane.unpushed"}, {kind: store.EventStall, source: lane.AnswerDeliverySource},
 		} {
 			t.Run(string(status)+"/"+string(tc.kind)+"/"+tc.source, func(t *testing.T) {
 				t.Parallel()

@@ -223,7 +223,7 @@ func TestG62AdoptedFixtureReplay(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("recorded actions mismatch\n got: %v\nwant: %v", got, want)
 	}
-	for _, laneID := range []string{"done-expired-wait", "done-override", "finish-first-other-pr", "clean-done"} {
+	for _, laneID := range []string{"done-expired-wait", "done-override", "finish-first-other-pr", "clean-done", "merged-expired-wait", "closed-expired-wait", "merge-evidence-expired-wait"} {
 		dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: r.ID, ActiveOnly: true})
 		if err != nil {
 			t.Fatal(err)
@@ -242,6 +242,19 @@ func TestG62AdoptedFixtureReplay(t *testing.T) {
 				t.Errorf("terminal lane %s raised attention: %+v", laneID, ev)
 			}
 		}
+	}
+	ownerEvents, err := st.Events().List(ctx, store.EventFilter{RunID: r.ID, LaneID: "parked-owner-wait"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerAttention := false
+	for _, ev := range ownerEvents {
+		if ev.Class == store.EventClassJudgment {
+			ownerAttention = true
+		}
+	}
+	if !ownerAttention {
+		t.Error("owner-parked lane lost deadline attention")
 	}
 	t.Logf("Observed: 8 synthetic adopted ticks -> recorded actions %v", got)
 }

@@ -465,7 +465,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	for i := range r.Lanes {
 		imported := &r.Lanes[i]
-		if hostLaneTerminal(*imported) || integratedLane(*imported) || finishedAnalysisLane(*imported) {
+		if hostLaneTerminal(*imported) || finishedAnalysisLane(*imported) {
 			continue
 		}
 		waitingOn, until := imported.WaitingOn, imported.WaitDeadline

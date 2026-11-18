@@ -172,6 +172,45 @@
       "terminal_state": "exited",
       "pr": 7005,
       "pr_state": "open"
+    },
+    {
+      "id": "merged-expired-wait",
+      "title": "merged-expired-wait",
+      "phase": "review",
+      "status": "running",
+      "round": 1,
+      "waiting_on": "stale host metadata",
+      "deadline": "2026-11-15T00:00:00Z",
+      "pr_state": "merged"
+    },
+    {
+      "id": "closed-expired-wait",
+      "title": "closed-expired-wait",
+      "phase": "review",
+      "status": "running",
+      "round": 1,
+      "waiting_on": "stale host metadata",
+      "deadline": "2026-11-15T00:00:00Z",
+      "pr_state": "closed"
+    },
+    {
+      "id": "merge-evidence-expired-wait",
+      "title": "merge-evidence-expired-wait",
+      "phase": "review",
+      "status": "running",
+      "round": 1,
+      "waiting_on": "stale host metadata",
+      "deadline": "2026-11-15T00:00:00Z",
+      "merge_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "parked-owner-wait",
+      "title": "parked-owner-wait",
+      "phase": "review",
+      "status": "needs-human",
+      "round": 1,
+      "waiting_on": "stale host metadata",
+      "deadline": "2026-11-15T00:00:00Z"
     }
   ]
 }
