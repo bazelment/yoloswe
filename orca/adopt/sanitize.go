@@ -73,11 +73,15 @@ func SanitizeDir(input, output string) error {
 	if input == "" || output == "" || input == "." || output == "." {
 		return errors.New("sanitize: input and output directories are required")
 	}
-	if input == output {
-		return errors.New("sanitize: output must differ from input")
+	var pathErr error
+	input, output, pathErr = sanitizeDirectories(input, output)
+	if pathErr != nil {
+		return pathErr
 	}
-	if rel, err := filepath.Rel(input, output); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "." {
-		return errors.New("sanitize: output must not be inside input")
+	for _, rel := range []string{"state.json", "EVENTS"} {
+		if _, err := sanitizeSourcePath(input, rel); err != nil {
+			return err
+		}
 	}
 	if _, err := os.Stat(filepath.Join(input, "state.json")); err != nil {
 		return fmt.Errorf("sanitize: input is not a run directory: %w", err)
@@ -143,10 +147,12 @@ func VerifySanitized(ctx context.Context, input, output string) (err error) {
 	if strings.TrimSpace(input) == "" || strings.TrimSpace(output) == "" {
 		return errors.New("sanitize verify: input and output directories are required")
 	}
-	input = filepath.Clean(strings.TrimSpace(input))
-	output = filepath.Clean(strings.TrimSpace(output))
+	input, output, err = sanitizeDirectories(input, output)
+	if err != nil {
+		return err
+	}
 	defer func() {
-		if err != nil && input != output {
+		if err != nil {
 			// A drifting corpus is never a usable artifact. Remove it just as a
 			// refusal before publishing leaves no output behind.
 			_ = os.RemoveAll(output)
@@ -192,6 +198,73 @@ func VerifySanitized(ctx context.Context, input, output string) (err error) {
 	return nil
 }
 
+// sanitizeDirectories resolves aliases before any output removal. A corpus
+// copy must be disjoint from its source, including through symlinked parents.
+func sanitizeDirectories(input, output string) (string, string, error) {
+	resolve := func(path string) (string, error) {
+		abs, err := filepath.Abs(strings.TrimSpace(path))
+		if err != nil {
+			return "", err
+		}
+		resolved, err := filepath.EvalSymlinks(abs)
+		if errors.Is(err, os.ErrNotExist) {
+			parent, parentErr := filepath.EvalSymlinks(filepath.Dir(abs))
+			if parentErr != nil {
+				return "", parentErr
+			}
+			return filepath.Join(parent, filepath.Base(abs)), nil
+		}
+		return resolved, err
+	}
+	in, err := resolve(input)
+	if err != nil {
+		return "", "", fmt.Errorf("sanitize: resolve input: %w", err)
+	}
+	out, err := resolve(output)
+	if err != nil {
+		return "", "", fmt.Errorf("sanitize: resolve output: %w", err)
+	}
+	for _, pair := range [][2]string{{in, out}, {out, in}} {
+		rel, err := filepath.Rel(pair[0], pair[1])
+		if err != nil {
+			return "", "", err
+		}
+		if rel == "." || filepath.IsLocal(rel) {
+			return "", "", errors.New("sanitize: input and output must be disjoint directories")
+		}
+	}
+	// Keep the output spelling for removal: RemoveAll on a final symlink
+	// removes the link, not the directory to which it points.
+	outPath, err := filepath.Abs(strings.TrimSpace(output))
+	if err != nil {
+		return "", "", err
+	}
+	return in, outPath, nil
+}
+
+// sanitizeSourcePath excludes ledger traversal and symlinked files/directories
+// before the importer or copy step can read outside the approved run.
+func sanitizeSourcePath(root, rel string) (string, error) {
+	if !filepath.IsLocal(rel) {
+		return "", errors.New("sanitize: file path escapes run directory")
+	}
+	path := root
+	for _, part := range strings.Split(filepath.Clean(rel), string(filepath.Separator)) {
+		path = filepath.Join(path, part)
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("sanitize: stat %s: %w", rel, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("sanitize: symlink in kept path %s", rel)
+		}
+	}
+	return path, nil
+}
+
 type sanitizeTask struct {
 	Terminals map[string]map[string]string `json:"terminals"`
 	ID        string                       `json:"id"`
@@ -225,6 +298,9 @@ func sanitizeAllowlist(input string) (map[string]bool, error) {
 	nebula := state.Config.Orchestrator != ""
 	for _, p := range state.Config.Phases {
 		if p.Name != "" {
+			if err := validatePathComponent("phase", p.Name); err != nil {
+				return nil, err
+			}
 			phases[p.Name] = true
 		}
 	}
@@ -232,9 +308,15 @@ func sanitizeAllowlist(input string) (map[string]bool, error) {
 		if task.ID == "" {
 			continue
 		}
+		if err := validatePathComponent("lane id", task.ID); err != nil {
+			return nil, err
+		}
 		lanes[task.ID] = true
 		nebula = nebula || task.SessionID != "" || len(task.Terminals) > 0
 		if task.Phase != "" {
+			if err := validatePathComponent("phase", task.Phase); err != nil {
+				return nil, err
+			}
 			phases[task.Phase] = true
 		}
 	}
@@ -307,6 +389,11 @@ func sanitizeAllowlist(input string) (map[string]bool, error) {
 					}
 				}
 			}
+		}
+	}
+	for rel := range allow {
+		if _, err := sanitizeSourcePath(input, rel); err != nil {
+			return nil, err
 		}
 	}
 	return allow, nil
@@ -412,7 +499,10 @@ func sanitizeVocabularyFor(input string, allow map[string]bool) (*sanitizeVocabu
 
 func copySanitizedFiles(input, output string, allow map[string]bool, vocab *sanitizeVocabulary) error {
 	for rel := range allow {
-		src := filepath.Join(input, rel)
+		src, err := sanitizeSourcePath(input, rel)
+		if err != nil {
+			return err
+		}
 		info, err := os.Stat(src)
 		if errors.Is(err, os.ErrNotExist) || (err == nil && !info.Mode().IsRegular()) {
 			continue

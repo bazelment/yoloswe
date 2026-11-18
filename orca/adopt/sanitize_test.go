@@ -1,6 +1,7 @@
 package adopt
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -185,7 +186,7 @@ func TestSanitizeSecretPatternsRejectRealisticTokensOnly(t *testing.T) {
 			}
 		})
 	}
-	for _, benign := range []string{"task-1", "disk-full", "warden-risk-xyz", "2026-11-18T01:02:03Z"} {
+	for _, benign := range []string{"task-x", "task-1", "disk-full", "warden-risk-xyz", "2026-11-18T01:02:03Z"} {
 		if sanitizeSecretRE.MatchString(benign) {
 			t.Errorf("benign value %q matched secret pattern", benign)
 		}
@@ -223,6 +224,113 @@ func TestSanitizePreservesIntegrationEvidenceVocabulary(t *testing.T) {
 	}
 	if err := VerifySanitized(t.Context(), input, output); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSanitizeRejectsEscapingPaths(t *testing.T) {
+	for _, tc := range []struct{ name, id, phase string }{
+		{"lane", "../outside", "review"},
+		{"phase", "lane", "../../../outside"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			input := filepath.Join(root, "input")
+			output := filepath.Join(root, "output")
+			writeSanitizeTest(t, filepath.Join(root, "outside.hold-advance"), "external owner prose")
+			writeSanitizeTest(t, filepath.Join(input, "state.json"), fmt.Sprintf(`{"config":{"phases":[{"name":%q}]},"tasks":[{"id":%q,"phase":%q,"status":"done"}]}`, tc.phase, tc.id, tc.phase))
+			if err := SanitizeDir(input, output); err == nil {
+				t.Fatal("sanitize accepted an escaping ledger path")
+			}
+			if _, err := os.Stat(output); !os.IsNotExist(err) {
+				t.Fatalf("refusal left output: %v", err)
+			}
+		})
+	}
+}
+
+func TestSanitizeRejectsSymlinkedKeptFiles(t *testing.T) {
+	for _, rel := range []string{"OBJECTIVE.md", "lane.hold-advance", "reports/lane.review.r1.md"} {
+		t.Run(rel, func(t *testing.T) {
+			input := t.TempDir()
+			output := filepath.Join(t.TempDir(), "output")
+			outside := filepath.Join(t.TempDir(), "external.md")
+			writeSanitizeTest(t, outside, "owner data")
+			writeSanitizeTest(t, filepath.Join(input, "state.json"), `{"config":{"orchestrator_session_id":"fixture","phases":[{"name":"review"}]},"tasks":[{"id":"lane","phase":"review","status":"done"}]}`)
+			path := filepath.Join(input, rel)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, path); err != nil {
+				t.Fatal(err)
+			}
+			if err := SanitizeDir(input, output); err == nil {
+				t.Fatal("sanitize followed a kept symlink")
+			}
+			if _, err := os.Stat(output); !os.IsNotExist(err) {
+				t.Fatalf("refusal left output: %v", err)
+			}
+		})
+	}
+}
+
+func TestVerifySanitizedNeverRemovesInput(t *testing.T) {
+	for _, mode := range []string{"relative alias", "ancestor", "symlink ancestor"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			input := filepath.Join(root, "input")
+			marker := filepath.Join(input, "keep.txt")
+			writeSanitizeTest(t, marker, "owner input must survive")
+			// Missing state.json makes verification fail before any lane comparison.
+			output := root
+			if mode == "relative alias" {
+				cwd, err := os.Getwd()
+				if err != nil {
+					t.Fatal(err)
+				}
+				output, err = filepath.Rel(cwd, input)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "symlink ancestor" {
+				alias := filepath.Join(t.TempDir(), "alias")
+				if err := os.Symlink(root, alias); err != nil {
+					t.Fatal(err)
+				}
+				output = alias
+				input = filepath.Join(alias, "input")
+			}
+			if err := VerifySanitized(t.Context(), input, output); err == nil {
+				t.Fatal("verify unexpectedly succeeded")
+			}
+			if data, err := os.ReadFile(marker); err != nil || string(data) != "owner input must survive" {
+				t.Fatalf("verify removed its input: %v", err)
+			}
+		})
+	}
+}
+
+func TestSanitizeVerifyRefusesLostMergeEvidence(t *testing.T) {
+	input, _, _ := integrationFixture(t, "squash", "main", 0, false)
+	writeSanitizeTest(t, filepath.Join(input, "EVENTS"), "2026-11-17T00:00:00Z\tlane-1\torch-note\tmerged #42 as abc1234def56789\n")
+	before, err := (&Service{}).DryRunDir(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := before.Lanes[0]; got.Move != "none" || got.ReasonClass != "integrated" {
+		t.Fatalf("original note-only evidence = %+v", got)
+	}
+	output := filepath.Join(t.TempDir(), "sanitized")
+	if err := SanitizeDir(input, output); err != nil {
+		t.Fatal(err)
+	}
+	err = VerifySanitized(t.Context(), input, output)
+	if err == nil || !strings.Contains(err.Error(), "lane lane-1: move none -> judge; reason_class integrated -> judge") {
+		t.Fatalf("expected lost mirror evidence to refuse, got %v", err)
+	}
+	t.Logf("Observed note-only integration drift: %v", err)
+	if _, err := os.Stat(output); !os.IsNotExist(err) {
+		t.Fatalf("verify left drifting output: %v", err)
 	}
 }
 
