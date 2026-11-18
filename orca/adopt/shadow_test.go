@@ -755,6 +755,96 @@ func TestHostDiffDoesNotReuseRowsOrGuessMissingTargets(t *testing.T) {
 	}
 }
 
+func TestSoleOperatorHostDiffCountsPostRunRows(t *testing.T) {
+	out, run := t.TempDir(), t.TempDir()
+	start := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	actions := []Action{
+		{At: start.Add(time.Minute), Lane: "a", Kind: "start_phase", Arguments: json.RawMessage(`{"phase":"review"}`)},
+		{At: start.Add(2 * time.Minute), Lane: "b", Kind: "stop", Arguments: json.RawMessage(`{"terminal_id":"term-b"}`)},
+	}
+	f, err := os.Create(filepath.Join(out, "actions.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range actions {
+		if err := json.NewEncoder(f).Encode(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rows := strings.Join([]string{
+		start.Add(time.Minute).Format(time.RFC3339Nano) + "\ta\tstarted\treview",
+		start.Add(2*time.Minute).Format(time.RFC3339Nano) + "\tb\tstop\tterminal=term-b",
+		start.Add(5*time.Minute).Format(time.RFC3339Nano) + "\tc\tstarted\tswe",
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(run, "EVENTS"), []byte(rows), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHostDiffWithWindow(out, run, filepath.Join(out, "actions.jsonl"), start, start, true); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(out, "host-diff.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got HostDiff
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Matched != 2 || got.MatchedPercent < 66.6 || got.MatchedPercent > 66.7 || got.Counts["orca-missed"] != 1 {
+		t.Fatalf("sole operator score = %+v", got)
+	}
+}
+
+func TestRecordingDriverDeduplicatesIdenticalShadowIntents(t *testing.T) {
+	out := t.TempDir()
+	rec, err := NewActionRecorder(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drv := NewRecordingDriver(nil, rec)
+	req := lane.StopRequest{RunID: "run", LaneID: "lane", TerminalID: "term"}
+	if err := drv.Stop(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	if err := drv.Stop(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+	actions, err := readShadowActions(filepath.Join(out, "actions.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("identical intents recorded %d times, want 1", len(actions))
+	}
+}
+
+func TestRunFileSignatureWatchesLedgerAndReports(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "EVENTS"), []byte("one\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	first := runFileSignature(dir)
+	if err := os.WriteFile(filepath.Join(dir, "reports", "lane.review.md"), []byte("report"), 0600); err == nil {
+		t.Fatal("writing a report in a missing directory unexpectedly succeeded")
+	}
+	if err := os.Mkdir(filepath.Join(dir, "reports"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "reports", "lane.review.md"), []byte("report"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	second := runFileSignature(dir)
+	if first == second {
+		t.Fatal("ledger/report change did not change watcher signature")
+	}
+}
+
 func TestShadowSummaryIncludesCLITurnUsageWithoutActions(t *testing.T) {
 	out := t.TempDir()
 	rec, err := NewActionRecorder(out)

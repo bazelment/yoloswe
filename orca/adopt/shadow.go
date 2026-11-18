@@ -263,10 +263,33 @@ type RecordingDriver struct {
 	launches       map[string]lane.StartPhaseResult
 	syntheticLanes map[string]bool
 	seen           map[string]bool
+	intents        map[string]bool
 }
 
 func NewRecordingDriver(inner lane.LaneDriver, recorder *ActionRecorder) *RecordingDriver {
-	return &RecordingDriver{inner: inner, recorder: recorder, launches: make(map[string]lane.StartPhaseResult), seen: make(map[string]bool), syntheticLanes: make(map[string]bool)}
+	return &RecordingDriver{inner: inner, recorder: recorder, launches: make(map[string]lane.StartPhaseResult), seen: make(map[string]bool), intents: make(map[string]bool), syntheticLanes: make(map[string]bool)}
+}
+
+func (d *RecordingDriver) recordIntent(laneID, kind string, args any, reason string) error {
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return err
+	}
+	key := laneID + "\x00" + kind + "\x00" + string(raw)
+	d.mu.Lock()
+	if d.intents[key] {
+		d.mu.Unlock()
+		return nil
+	}
+	d.intents[key] = true
+	d.mu.Unlock()
+	if err := d.recorder.Record(laneID, kind, args, reason); err != nil {
+		d.mu.Lock()
+		delete(d.intents, key)
+		d.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func (d *RecordingDriver) ReportInstructions(runID, laneID, phase string, round int) string {
@@ -287,7 +310,7 @@ func (d *RecordingDriver) SpawnSession(_ context.Context, req lane.SpawnRequest)
 	n := d.seq
 	d.mu.Unlock()
 	res := lane.SpawnResult{StartedAt: time.Now().UTC(), SessionID: fmt.Sprintf("shadow-session-%s-%d", req.LaneID, n), TerminalID: fmt.Sprintf("shadow-terminal-%s-%d", req.LaneID, n), Branch: req.Branch, BaseBranch: req.BaseBranch}
-	if err := d.recorder.Record(req.LaneID, "spawn", req, "controller/dispatcher launch intent"); err != nil {
+	if err := d.recordIntent(req.LaneID, "spawn", req, "controller/dispatcher launch intent"); err != nil {
 		return lane.SpawnResult{}, err
 	}
 	d.mu.Lock()
@@ -305,7 +328,7 @@ func (d *RecordingDriver) StartPhaseTerminal(_ context.Context, req lane.StartPh
 	if res.SessionID == "" {
 		res.SessionID = fmt.Sprintf("shadow-session-%s-%d", req.LaneID, n)
 	}
-	if err := d.recorder.Record(req.LaneID, "start_phase", req, "controller/dispatcher phase launch intent"); err != nil {
+	if err := d.recordIntent(req.LaneID, "start_phase", req, "controller/dispatcher phase launch intent"); err != nil {
 		return lane.StartPhaseResult{}, err
 	}
 	d.mu.Lock()
@@ -327,10 +350,10 @@ func (d *RecordingDriver) FindPhaseTerminal(ctx context.Context, req lane.StartP
 	return d.inner.FindPhaseTerminal(ctx, req)
 }
 func (d *RecordingDriver) Steer(_ context.Context, req lane.SteerRequest) error {
-	return d.recorder.Record(req.LaneID, "steer", req, "controller/dispatcher steering intent")
+	return d.recordIntent(req.LaneID, "steer", req, "controller/dispatcher steering intent")
 }
 func (d *RecordingDriver) Stop(_ context.Context, req lane.StopRequest) error {
-	return d.recorder.Record(req.LaneID, "stop", req, "controller/dispatcher stop intent")
+	return d.recordIntent(req.LaneID, "stop", req, "controller/dispatcher stop intent")
 }
 func (d *RecordingDriver) syntheticLane(runID, laneID string) bool {
 	d.mu.Lock()

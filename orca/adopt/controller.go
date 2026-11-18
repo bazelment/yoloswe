@@ -515,8 +515,10 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			LaneStore:   d.store.Lanes(),
 			syncer:      syncer,
 			controllers: d,
-			shadow:      d.Shadow && !d.DecideAsOperator,
-			operator:    d.DecideAsOperator,
+			// Sole-operator mode still observes the host ledger, but its local
+			// lifecycle writes must never reach the adopted run.
+			shadow:   d.Shadow,
+			operator: false,
 		},
 		backlog: &adoptedBacklogStore{
 			BacklogStore: d.store.Backlog(),
@@ -596,9 +598,6 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			return d.prepareStep(ctx, cr)
 		},
 		HostRefresh: func(ctx context.Context) error {
-			if d.DecideAsOperator {
-				return nil
-			}
 			return d.refreshHostState(ctx, r.ID)
 		},
 		HostBrief:         hostBrief,
@@ -629,8 +628,8 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		NoPR:               r.NoPR,
 		HoldAdvance:        holdAdvanceLanes(r),
 		HoldAdvanceCheck:   func(id string) bool { return fileExists(filepath.Join(r.Dir, id+".hold-advance")) },
-		ImportedHostState:  !d.DecideAsOperator,
-		HostRun:            !d.DecideAsOperator,
+		ImportedHostState:  true,
+		HostRun:            true,
 		SkipLease:          d.Shadow,
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
@@ -662,6 +661,11 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	// adoption. Surface the same merge judgment used by a live report instead
 	// of treating the imported done status as permission to merge or advance.
 	for i := range r.Lanes {
+		if d.DecideAsOperator {
+			// The host's completed report is observed input, not an Orca verdict.
+			// A sole operator must reach its own judgment from the refreshed state.
+			continue
+		}
 		preview := previewLaneAt(r, r.Lanes[i], d.clock.Now().UTC())
 		if preview.Move != "judge" {
 			continue
@@ -722,10 +726,10 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 // wakes. The controller still polls as a backstop, but an EVENTS append or a
 // report/.done/.needs-swe update is visible without waiting for that tick.
 func (d *Controllers) watchRunFiles(ctx context.Context, cr *controlledRun) {
-	if cr == nil || strings.TrimSpace(cr.run.Dir) == "" {
+	if cr == nil {
 		return
 	}
-	last := runFileSignature(cr.run.Dir)
+	var lastDir, last string
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
@@ -733,7 +737,15 @@ func (d *Controllers) watchRunFiles(ctx context.Context, cr *controlledRun) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			now := runFileSignature(cr.run.Dir)
+			dir := strings.TrimSpace(cr.run.Dir)
+			if cr.syncer != nil {
+				dir = strings.TrimSpace(cr.syncer.CurrentRun().Dir)
+			}
+			now := runFileSignature(dir)
+			if dir != lastDir {
+				lastDir, last = dir, now
+				continue
+			}
 			if now != last {
 				last = now
 				cr.controller.Wake()

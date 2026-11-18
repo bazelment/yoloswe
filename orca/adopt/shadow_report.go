@@ -95,6 +95,7 @@ func WriteShadowReportsWithOptions(ctx context.Context, outDir, runDir, runID st
 			fmt.Fprintf(b, "- %s: %s\n", k, degraded[k])
 		}
 		b.WriteString("Recorder-launched sessions remain shadow-launched, with no report; their reads never reach Nebula. Session settling/wake is unavailable. Terminal lifecycle GETs and existing GET/local reports remain available.\n")
+		b.WriteString("Codex roles use a read-only sandbox with built-in filesystem tools disabled because the sandbox cannot express Orca's disjoint run/repository roots; confined MCP reads remain available.\n")
 		b.WriteString("\n## Counts by lane\n")
 		for _, pair := range sortedCounts(lanes) {
 			k := fmt.Sprint(pair[0])
@@ -212,6 +213,13 @@ func writeHostDiffWithWindow(outDir, runDir, actionPath string, started, ended t
 	if soleOperator {
 		window = 10 * time.Minute
 	}
+	// Read a symmetric ±window around the run, then score every host decision
+	// from the start line through the post-run window. A shadow process may stop
+	// before the host ledger flushes its final decisions.
+	scoreEnd := ended
+	if soleOperator {
+		scoreEnd = ended.Add(window)
+	}
 	events, available, err := readHostEvents(filepath.Join(runDir, "EVENTS"), started.Add(-window), ended.Add(window))
 	if err != nil {
 		return err
@@ -298,7 +306,7 @@ func writeHostDiffWithWindow(outDir, runDir, actionPath string, started, ended t
 	}
 	hostDecisionCount := 0
 	for i := range events {
-		if !events[i].At.Before(started) && !events[i].At.After(ended) {
+		if !events[i].At.Before(started) && !events[i].At.After(scoreEnd) {
 			hostDecisionCount++
 		}
 	}
@@ -306,7 +314,7 @@ func writeHostDiffWithWindow(outDir, runDir, actionPath string, started, ended t
 		report.MatchedPercent = float64(report.Matched) / float64(hostDecisionCount) * 100
 	}
 	for i, e := range events {
-		if !used[i] && !e.At.Before(started) && !e.At.After(ended) {
+		if !used[i] && !e.At.Before(started) && !e.At.After(scoreEnd) {
 			report.OrcaMissed = append(report.OrcaMissed, e)
 			report.Counts["orca-missed"]++
 		}

@@ -50,7 +50,7 @@ func FormatInput(text, questions string) string {
 	return text + "\nOpen questions:\n" + questions
 }
 
-const conciergeCriterion = "Status and fact questions about current run state, existing behavior or policy; standing rules, durable preferences or corrections; pause, resume or stop execution; starting a new goal or run from chat. Also unclear messages or mixed independent requests needing front-desk handling."
+const conciergeCriterion = "Status and fact questions about current run state, existing behavior or policy; standing rules, durable preferences or corrections; pause, resume or stop execution; starting a new goal or run from chat. Also unclear messages or mixed independent requests needing front-desk handling. An explicit 'answer here' instruction, a request such as 'give me a report', or 'perform a retro' is concierge; incidental mentions of report, retro, or status are context."
 const plannerCriterion = "Changes to an existing goal, plan, scope, task order, timing or acceptance criteria, including dropping work or changing duration; design questions, 'research / think about / what's the best we can do' asks, trade-off questions, and new constraints on the run's design (while status and fact questions about current state or existing behavior stay with concierge). A one-time plan update or design constraint is planner, not a standing rule."
 const dispatcherCriterion = "Do work now: assign, fund, retry, merge, review, or steer a lane or PR. Also an owner reply answering a listed open question; the Open questions block is context, not an additional request."
 
@@ -76,8 +76,24 @@ func IsPlannerChatQuestion(text string) bool {
 // parked planner, and retrospectives are front-desk conversations.
 func IsConciergeOverride(text string) bool {
 	l := strings.ToLower(strings.TrimSpace(text))
-	for _, marker := range []string{"answer here", "retro", "report", "status"} {
-		if strings.Contains(l, marker) {
+	if strings.Contains(l, "answer here") {
+		return true
+	}
+	if l == "status" || l == "status?" {
+		return true
+	}
+	// A report/retro word in an incidental sentence is context, not a routing
+	// request. Require an imperative request form so the UI and model rubric
+	// agree on this override.
+	for _, verb := range []string{"give", "send", "write", "provide", "prepare", "show", "get", "generate"} {
+		if strings.Contains(l, verb+" me ") || strings.Contains(l, verb+" a ") || strings.Contains(l, verb+" the ") {
+			if strings.Contains(l, "report") || strings.Contains(l, "status") {
+				return true
+			}
+		}
+	}
+	for _, verb := range []string{"perform", "run", "do", "conduct", "hold", "schedule"} {
+		if strings.Contains(l, verb+" a retro") || strings.Contains(l, verb+" the retro") || strings.Contains(l, verb+" a retrospective") || strings.Contains(l, verb+" the retrospective") {
 			return true
 		}
 	}

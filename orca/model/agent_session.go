@@ -413,9 +413,7 @@ func (s *AgentSession) runClaudeTurnLocked(
 		if sys := strings.TrimSpace(s.cfg.SystemPrompt); sys != "" {
 			opts = append(opts, claude.WithSystemPrompt(sys+nativeReadInstruction(s.cfg.Investigate)))
 		}
-		if nativeWD := strings.TrimSpace(s.cfg.NativeReadDir); nativeWD != "" {
-			opts = append(opts, claude.WithWorkDir(nativeWD))
-		} else if wd != "" {
+		if wd != "" {
 			opts = append(opts, claude.WithWorkDir(wd))
 		}
 		if s.sessionID != "" {
@@ -558,6 +556,10 @@ var codexDisabledBuiltinFeatures = []string{
 	"image_generation",
 	"plugins",
 	"code_mode_host",
+	// Codex's read-only sandbox cannot express two disjoint readable roots.
+	// Disable its shell/filesystem built-ins and expose only the confined MCP
+	// investigation tools below.
+	"shell",
 }
 
 func (s *AgentSession) runCodexTurnLocked(
@@ -614,7 +616,7 @@ func (s *AgentSession) runCodexTurnLocked(
 		for _, feat := range codexDisabledBuiltinFeatures {
 			disabledFeatureMap[feat] = false
 		}
-		devInstructions := strings.TrimSpace(s.cfg.SystemPrompt) + codexToolConfinementInstruction + nativeReadInstruction(s.cfg.Investigate)
+		devInstructions := strings.TrimSpace(s.cfg.SystemPrompt) + codexToolConfinementInstruction + "\n\nCodex native filesystem confinement: built-in shell/filesystem reads are disabled because the Codex sandbox cannot constrain reads to Orca's run and repository roots. Use mcp__orca__read_file/read_cmd only; they enforce the same roots and sensitive-path deny list." + nativeReadInstruction(s.cfg.Investigate)
 		threadCfg := map[string]interface{}{
 			"mcp_servers": map[string]interface{}{
 				"orca": map[string]interface{}{
@@ -637,9 +639,7 @@ func (s *AgentSession) runCodexTurnLocked(
 		if cliModel != "" {
 			threadOpts = append(threadOpts, codex.WithModel(cliModel))
 		}
-		if nativeWD := strings.TrimSpace(s.cfg.NativeReadDir); nativeWD != "" {
-			threadOpts = append(threadOpts, codex.WithWorkDir(nativeWD))
-		} else if wd != "" {
+		if wd != "" {
 			threadOpts = append(threadOpts, codex.WithWorkDir(wd))
 		}
 

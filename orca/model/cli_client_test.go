@@ -273,6 +273,34 @@ func TestValidateReadOnlyCommand(t *testing.T) {
 	}
 }
 
+func TestNativeReadCommandConfinementQuotedTraversalAndSensitive(t *testing.T) {
+	runDir := t.TempDir()
+	repoDir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(runDir, "ok.txt"), []byte("ok"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(runDir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := model.InvestigateConfig{RunDir: runDir, RepoDir: repoDir}
+	denied := []string{
+		"cat '/etc/passwd'", "cat /etc/passwd", "cat ../outside", "cat '" + filepath.Join(runDir, "link", "secret") + "'",
+		"cat /proc/123/environ", "cat ~/.keys.sh", "cat ~/.config/gh/hosts.yml", "cat ~/.claude/credentials", "cat secrets/x", "cat lanes.env", "cat foo.token", "cat private.key",
+		"ls '$HOME'", "rg needle /etc/passwd", "printenv", "env", "set",
+	}
+	for _, command := range denied {
+		if err := model.ValidateNativeReadOnlyCommand(cfg, command); err == nil {
+			t.Errorf("native command %q was allowed", command)
+		}
+	}
+	for _, command := range []string{"cat " + filepath.Join(runDir, "ok.txt"), "ls '" + runDir + "'", "rg needle '" + repoDir + "'"} {
+		if err := model.ValidateNativeReadOnlyCommand(cfg, command); err != nil {
+			t.Errorf("native command %q refused: %v", command, err)
+		}
+	}
+}
+
 func TestMCPToolBridge_SerializationMaxCallsAndHTTPGuards(t *testing.T) {
 	t.Parallel()
 	reg := model.NewToolRegistry()

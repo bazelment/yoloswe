@@ -52,6 +52,11 @@ func (c InvestigateConfig) allowedRoots() []string {
 			p = abs
 		}
 		p = filepath.Clean(p)
+		// Roots are part of the security boundary. Resolve the root itself so a
+		// symlinked checkout cannot silently widen the native read scope.
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			p = filepath.Clean(real)
+		}
 		if !slices.Contains(roots, p) {
 			roots = append(roots, p)
 		}
@@ -239,6 +244,9 @@ func isDatedRunDirBase(base string) bool {
 }
 
 func isSensitiveInvestigationPath(target string) bool {
+	if sensitiveInvestigationToken(target) {
+		return true
+	}
 	if realTarget, err := filepath.EvalSymlinks(target); err == nil {
 		if hasSensitivePathComponent(realTarget) {
 			return true
@@ -251,15 +259,29 @@ func hasSensitivePathComponent(p string) bool {
 	clean := filepath.Clean(p)
 	for _, seg := range strings.Split(clean, string(filepath.Separator)) {
 		lower := strings.ToLower(strings.TrimSpace(seg))
-		if lower == ".git" || lower == ".env" || strings.HasPrefix(lower, ".env.") {
+		if lower == ".git" || lower == ".creds" || lower == "secrets" || lower == ".env" || strings.HasSuffix(lower, ".env") || strings.HasPrefix(lower, ".env.") || lower == "lanes.env" || strings.Contains(lower, "token") || strings.Contains(lower, "key") || strings.HasPrefix(lower, ".claude") {
 			return true
 		}
 	}
 	base := strings.ToLower(filepath.Base(clean))
+	if strings.HasSuffix(clean, string(filepath.Separator)+".keys.sh") || strings.HasSuffix(clean, string(filepath.Separator)+".config"+string(filepath.Separator)+"gh") || strings.Contains(clean, string(filepath.Separator)+".config"+string(filepath.Separator)+"gh"+string(filepath.Separator)) {
+		return true
+	}
+	if strings.HasPrefix(clean, string(filepath.Separator)+"proc"+string(filepath.Separator)) && strings.HasSuffix(clean, string(filepath.Separator)+"environ") {
+		return true
+	}
 	for _, suffix := range []string{".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm", ".sqlite-wal", ".sqlite-shm"} {
 		if strings.HasSuffix(base, suffix) {
 			return true
 		}
+	}
+	return false
+}
+
+func sensitiveInvestigationToken(target string) bool {
+	lower := strings.ToLower(strings.TrimSpace(target))
+	if lower == "env" || lower == "printenv" || lower == "set" {
+		return true
 	}
 	return false
 }
