@@ -758,7 +758,7 @@ func (d *Controllers) watchRunFiles(ctx context.Context, cr *controlledRun) {
 			}
 			now := runFileSignature(dir)
 			if dir != lastDir {
-				if lastDir != "" && now != last {
+				if lastDir != "" {
 					cr.controller.Wake()
 				}
 				lastDir, last = dir, now
@@ -2924,9 +2924,6 @@ func (s *adoptedLaneStore) hostOverlay(ln *lane.Lane) {
 		if host.ID != ln.ID {
 			continue
 		}
-		if !s.syncer.HostStatusIsNewer(host.ID, lane.Status(host.Status)) {
-			return
-		}
 		ln.HostHold = host.HoldAdvance
 		ln.HostHoldReason = cmp.Or(host.HostHold, decisionHostHold(host.LastEvent))
 		if ln.HostHoldReason == "" && host.WaitingOn != "" {
@@ -3173,13 +3170,6 @@ func (s *runLedgerSync) HostLaneIsNewer(ln lane.Lane) bool {
 	defer s.mu.Unlock()
 	prev, ok := s.hostKnown[ln.ID]
 	return !ok || hostLaneDiff(prev, ln)
-}
-
-func (s *runLedgerSync) HostStatusIsNewer(id string, status lane.Status) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev, ok := s.hostKnown[id]
-	return !ok || prev.Status != status
 }
 
 func (s *runLedgerSync) RememberHostLane(ln lane.Lane) {

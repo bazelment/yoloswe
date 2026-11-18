@@ -89,6 +89,26 @@ func TestDryRunDirFixtures(t *testing.T) {
 	}
 }
 
+func TestAdoptedLaneStoreOverlaysSameStatusHostFacts(t *testing.T) {
+	t.Parallel()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC))
+	hostLane := lane.Lane{RunID: "run", ID: "lane", Status: lane.StatusRunning}
+	syncer := newRunLedgerSync(Run{ID: "run", Lanes: []Lane{{ID: "lane", Status: "running", HostHold: "new host hold"}}}, clk, []lane.Lane{hostLane})
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Lanes().Upsert(t.Context(), hostLane); err != nil {
+		t.Fatal(err)
+	}
+	wrapped := &adoptedLaneStore{LaneStore: st.Lanes(), syncer: syncer}
+	got, err := wrapped.Get(t.Context(), "run", "lane")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HostHoldReason != "new host hold" {
+		t.Fatalf("HostHoldReason = %q, want same-status host update", got.HostHoldReason)
+	}
+}
+
 func TestDryRunNeedsInputUsesHostAnswerAndLaneQuestion(t *testing.T) {
 	t.Parallel()
 	deadline := "2030-01-01T13:00:00Z"

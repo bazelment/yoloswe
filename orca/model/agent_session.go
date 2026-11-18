@@ -373,7 +373,6 @@ func (s *AgentSession) runClaudeTurnLocked(
 			claude.WithPermissionMode(claude.PermissionModeDefault),
 			claude.WithPermissionPromptToolStdio(),
 			claude.WithDisablePlugins(),
-			claude.WithDisallowedTools("Write", "Edit", "MultiEdit", "NotebookEdit"),
 			claude.WithSDKTools("orca", s.bridge),
 		}
 		// Shadow mode uses Claude's own best-effort permission grammar. The
