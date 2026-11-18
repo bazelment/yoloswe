@@ -726,7 +726,7 @@ func (d *Controllers) watchRunFiles(ctx context.Context, cr *controlledRun) {
 		return
 	}
 	last := runFileSignature(cr.run.Dir)
-	t := time.NewTicker(250 * time.Millisecond)
+	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
 		select {
