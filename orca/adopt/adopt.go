@@ -176,6 +176,10 @@ type Run struct {
 	// BaseBranch is the configured base branch. Integration evidence is
 	// collected from the target, base, and remote HEAD refs together.
 	BaseBranch string
+	// HistoricalBranches are targets/bases recorded earlier in this run. A
+	// target can be repointed after a squash merge, so those refs remain valid
+	// integration evidence.
+	HistoricalBranches []string
 	// IntegrationError is set when the mirror source or fetch could not be
 	// inspected. Such lanes must be judged, never treated as integrated.
 	IntegrationError string
@@ -186,8 +190,12 @@ type Run struct {
 	// Next is the stated Next: work from OBJECTIVE.md (or PROGRESS.md).
 	Objective, PlanPath, Next string
 	Context, IntegrateRule    string
-	NoPR                      bool
-	Phases                    []string
+	// MergeGate is the explicit state.json config.merge_gate contract. It is
+	// kept separately from the older merge_rule field because adoption verdicts
+	// must report the gate the host actually recorded.
+	MergeGate string
+	NoPR      bool
+	Phases    []string
 	// Progress and Escalations are PROGRESS.md and ESCALATIONS.md, clipped.
 	Progress, Escalations string
 	// Unchecked lists what discovery could not check for this run.
@@ -470,6 +478,8 @@ type ledgerLane struct {
 	ID             string       `json:"id"`
 	Title          string       `json:"title"`
 	Branch         string       `json:"branch"`
+	Base           string       `json:"base"`
+	Target         string       `json:"target"`
 	Phase          string       `json:"phase"`
 	Status         string       `json:"status"`
 	NebulaSession  string       `json:"nebula_session"`
@@ -501,6 +511,7 @@ type ledger struct {
 		Target    string      `json:"target"`
 		Base      string      `json:"base"`
 		MergeRule string      `json:"merge_rule"`
+		MergeGate string      `json:"merge_gate"`
 		Phases    []hostPhase `json:"phases"`
 	} `json:"config"`
 	Tasks []ledgerLane `json:"tasks"`
@@ -563,6 +574,10 @@ func Read(dir string) (Run, error) {
 			}
 			r.Lanes = append(r.Lanes, importLane(dir, &st.Tasks[i]))
 		}
+		r.HistoricalBranches = historicalBranchesFromEvents(dir, r.TargetBranch, r.BaseBranch)
+		for i := range st.Tasks {
+			r.HistoricalBranches = appendBranch(r.HistoricalBranches, st.Tasks[i].Base, st.Tasks[i].Target)
+		}
 		annotateLanes(dir, &r, st.Config.Phases)
 	}
 	if r.Repo == "" && r.RepoID == "" {
@@ -575,10 +590,12 @@ func Read(dir string) (Run, error) {
 	var contract struct {
 		Config struct {
 			MergeRule string `json:"merge_rule"`
+			MergeGate string `json:"merge_gate"`
 		} `json:"config"`
 	}
 	_ = json.Unmarshal(b, &contract)
 	r.IntegrateRule = extractMergeRuleText(contract.Config.MergeRule, r.Objective+"\n"+r.Context)
+	r.MergeGate = strings.TrimSpace(contract.Config.MergeGate)
 	for i := range r.Lanes {
 		r.Lanes[i].HoldAdvance = fileExists(filepath.Join(dir, r.Lanes[i].ID+".hold-advance"))
 		r.Lanes[i].holdAdvanceText = strings.TrimSpace(readText(filepath.Join(dir, r.Lanes[i].ID+".hold-advance")))
@@ -641,6 +658,42 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 	applyIntegrationEvidenceRefs(ctx, r, mirrorCfg, false)
 }
 
+func appendBranch(branches []string, values ...string) []string {
+	for _, raw := range values {
+		branch := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(raw, "refs/heads/"), "refs/orca/"))
+		if branch == "" || !validBranchName(branch) || slices.Contains(branches, branch) {
+			continue
+		}
+		branches = append(branches, branch)
+	}
+	return branches
+}
+
+func validBranchName(branch string) bool {
+	return branch != "" && !strings.ContainsAny(branch, " \t\r\n") && branch != "target" && branch != "base" && branch != "from" && branch != "to"
+}
+
+func historicalBranchesFromEvents(dir string, current ...string) []string {
+	branches := []string{}
+	branches = appendBranch(branches, current...)
+	data := readText(filepath.Join(dir, "EVENTS"))
+	for _, line := range strings.Split(data, "\n") {
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "target") && !strings.Contains(lower, "base") {
+			continue
+		}
+		for _, token := range strings.FieldsFunc(line, func(r rune) bool {
+			return !(r == '/' || r == '_' || r == '-' || r == '.' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
+		}) {
+			token = strings.TrimPrefix(strings.TrimPrefix(token, "refs/heads/"), "refs/orca/")
+			if token == "main" || strings.Contains(token, "/") || strings.HasPrefix(token, "feat-") || strings.HasPrefix(token, "feature-") {
+				branches = appendBranch(branches, token)
+			}
+		}
+	}
+	return branches
+}
+
 func applyTargetIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) {
 	applyIntegrationEvidenceRefs(ctx, r, mirrorCfg, true)
 }
@@ -680,6 +733,12 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 	if targetOnly {
 		evidenceBranches = []string{r.TargetBranch}
 	}
+	for _, branch := range r.HistoricalBranches {
+		if targetOnly && strings.EqualFold(strings.TrimSpace(branch), strings.TrimSpace(r.BaseBranch)) {
+			continue
+		}
+		evidenceBranches = append(evidenceBranches, branch)
+	}
 	for _, branch := range evidenceBranches {
 		branch = strings.TrimSpace(branch)
 		if branch != "" && !slices.Contains(branches, branch) {
@@ -688,6 +747,19 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 	}
 	refspecs := make([]string, 0, len(branches)+1)
 	fetchedRefs := make([]string, 0, len(branches)+1)
+	// Preserve direct historical refs already present in this run's mirror.
+	// Lane branch refs live under refs/orca/heads and are checked separately;
+	// including them here would let one lane's unmerged head satisfy another.
+	if out, err := gitOutput(gitCtx, mirror, "for-each-ref", "--format=%(refname)", "refs/orca/"); err == nil {
+		for _, ref := range strings.Fields(string(out)) {
+			if ref == "refs/orca/HEAD" || strings.HasPrefix(ref, "refs/orca/heads/") || !strings.HasPrefix(ref, "refs/orca/") {
+				continue
+			}
+			if validBranchName(strings.TrimPrefix(ref, "refs/orca/")) && !slices.Contains(fetchedRefs, ref) {
+				fetchedRefs = append(fetchedRefs, ref)
+			}
+		}
+	}
 	laneRefspecs := []string{}
 	for i := range r.Lanes {
 		ln := r.Lanes[i]
@@ -705,8 +777,15 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 	}
 	for _, branch := range branches {
 		if !validGitBranch(gitCtx, mirror, branch) {
-			r.IntegrationError = "fetch target " + branch + " failed: invalid branch"
-			return
+			continue
+		}
+		// A historical target may have been deleted after the run moved on.
+		// Probe the remote and fetch only refs that still exist. Current target
+		// and base retain the strict fetch error used by the adoption gate.
+		if branch != strings.TrimSpace(r.TargetBranch) && branch != strings.TrimSpace(r.BaseBranch) {
+			if out, err := exec.CommandContext(gitCtx, "git", "ls-remote", source, "refs/heads/"+branch).Output(); err != nil || strings.TrimSpace(string(out)) == "" {
+				continue
+			}
 		}
 		refspecs = append(refspecs, "+refs/heads/"+branch+":refs/orca/"+branch)
 		fetchedRefs = append(fetchedRefs, "refs/orca/"+branch)
@@ -906,6 +985,11 @@ func finishedAnalysisLane(ln Lane) bool {
 	return strings.EqualFold(strings.TrimSpace(ln.Mode), "analysis") && strings.EqualFold(strings.TrimSpace(ln.Status), "done")
 }
 
+func measurementLane(ln Lane) bool {
+	text := strings.ToLower(strings.Join([]string{ln.holdAdvanceText, ln.HostHold, ln.Report, ln.LastEvent}, "\n"))
+	return strings.Contains(text, "measurement lane") && strings.Contains(text, "never opens a pr")
+}
+
 func noPRHandback(ln Lane) bool {
 	return strings.EqualFold(strings.TrimSpace(ln.Status), "done") &&
 		strings.TrimSpace(ln.PR) == "" &&
@@ -1078,6 +1162,9 @@ func ledgerHostHold(values ...string) string {
 		value = strings.TrimSpace(value)
 		if value == "" {
 			continue
+		}
+		if hold := decisionHostHold(value); hold != "" {
+			return hold
 		}
 		if i == len(values)-1 && !explicitHostHoldLine(value) {
 			continue
@@ -1565,14 +1652,15 @@ type DryRunResult struct {
 //
 //nolint:govet // lane preview fields are intentionally grouped for report output.
 type DryRunLane struct {
-	ID              string
-	Phase           string
-	Status          string
-	Evidence        []string
-	Move            string
-	Reason          string
-	Gate            string
-	EvidencePresent bool
+	ID              string   `json:"id"`
+	Phase           string   `json:"phase"`
+	Status          string   `json:"status"`
+	Evidence        []string `json:"evidence"`
+	Move            string   `json:"move"`
+	Reason          string   `json:"reason"`
+	Gate            string   `json:"gate,omitempty"`
+	EvidencePresent bool     `json:"evidence_present"`
+	ReasonClass     string   `json:"reason_class"`
 }
 
 // DryRun replays adoption's observe-first boundary from the host files only.
@@ -1627,8 +1715,9 @@ func previewLane(r Run, ln Lane) DryRunLane {
 	return previewLaneAt(r, ln, time.Now().UTC())
 }
 
-func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
-	p := DryRunLane{ID: ln.ID, Phase: cmp.Or(ln.Phase, "unknown"), Status: cmp.Or(ln.Status, "unknown"), Move: "none"}
+func previewLaneAt(r Run, ln Lane, now time.Time) (p DryRunLane) {
+	defer func() { p.ReasonClass = reasonClass(p.Move, p.Reason) }()
+	p = DryRunLane{ID: ln.ID, Phase: cmp.Or(ln.Phase, "unknown"), Status: cmp.Or(ln.Status, "unknown"), Move: "none"}
 	p.Evidence = append(p.Evidence, "format="+r.Format, "phase="+p.Phase, "status="+p.Status)
 	if ln.TerminalState != "" {
 		p.Evidence = append(p.Evidence, "terminal_state="+ln.TerminalState)
@@ -1718,6 +1807,13 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 	if ln.HoldAdvance {
 		p.Evidence = append(p.Evidence, "hold-advance file present")
 	}
+	// Measurement lanes are deliberately held for the host and never open a
+	// PR. Their branch can contain unmerged commits without creating an
+	// integration judgment; the host advances the lane by hand.
+	if measurementLane(ln) && reportDone(ln.Report) {
+		p.Reason = "finished, no PR; measurement lane; host never merges"
+		return p
+	}
 	if hostHold := laneHostHold(ln); hostHold != "" {
 		p.Move, p.Reason = "wait", "host-held: "+hostHold
 		return p
@@ -1764,17 +1860,17 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 	}
 	switch {
 	case report == "done" || report == "no-change":
-		if r.IntegrationError != "" {
+		if r.IntegrationError != "" && !ln.HoldAdvance && !sweOnly(r, ln) {
 			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
 		} else if integrationJudgmentApplies(ln) && ln.IntegrationReason != "" {
 			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
 			if ln.HoldAdvance {
 				p.Gate, p.EvidencePresent = mergeGate(r, ln), mergeGateEvidence(r, ln)
-				p.Reason = fmt.Sprintf("%s; %s evidence=%s", p.Reason, p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
+				p.Reason = fmt.Sprintf("%s; %s; %s", p.Reason, p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
 			}
 		} else if ln.HoldAdvance || sweOnly(r, ln) {
 			p.Move, p.Gate, p.EvidencePresent = "judge", mergeGate(r, ln), mergeGateEvidence(r, ln)
-			p.Reason = fmt.Sprintf("%s evidence=%s", p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
+			p.Reason = fmt.Sprintf("%s; %s", p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
 		} else if !r.NoPR && (strings.EqualFold(ln.Phase, "review") || strings.EqualFold(ln.Phase, "clean")) && r.IntegrateRule != "" {
 			p.Move, p.Reason = "integrate", "completed report plus the run integrate rule permits the merge path"
 		} else if strings.EqualFold(ln.Status, "done") {
@@ -1835,10 +1931,42 @@ func laneHostHold(ln Lane) string {
 	if strings.TrimSpace(ln.HostHold) != "" {
 		return clip(strings.TrimSpace(ln.HostHold), 240)
 	}
+	if hold := decisionHostHold(ln.LastEvent); hold != "" {
+		return hold
+	}
 	if strings.EqualFold(strings.TrimSpace(ln.Status), "blocked") {
 		return "blocked"
 	}
 	return ""
+}
+
+var decisionHostHoldRE = regexp.MustCompile(`(?i)\b(?:waits?\s+for|waiting\s+on|until\s+(?:the\s+)?[a-z0-9._-]+\s+(?:repl(?:y|ies)|approv(?:e|es|al))|held|\b(?:IC|owner)\s+(?:reply|approval))\b`)
+
+// decisionHostHold recognizes the small set of host-owned wait phrasings
+// emitted in decision rows. It intentionally returns a stable, short reason
+// rather than treating arbitrary prose as a hold.
+func decisionHostHold(event string) string {
+	text := strings.TrimSpace(event)
+	if text == "" || !decisionHostHoldRE.MatchString(text) {
+		return ""
+	}
+	lower := strings.ToLower(text)
+	for _, phrase := range []string{
+		"merge waits for the IC reply",
+		"merge waiting on the IC reply",
+		"waiting on the IC reply",
+		"until the IC replies",
+		"until IC replies",
+		"until the owner replies",
+		"until the owner approves",
+		"owner approval",
+		"IC approval",
+	} {
+		if strings.Contains(lower, strings.ToLower(phrase)) {
+			return phrase
+		}
+	}
+	return clip(text, 240)
 }
 
 func integratedLane(ln Lane) bool {
@@ -1883,6 +2011,9 @@ func sweOnly(r Run, ln Lane) bool {
 }
 
 func mergeGateText(r Run, ln Lane) string {
+	if gate := strings.TrimSpace(r.MergeGate); gate != "" {
+		return strings.TrimSpace(gate + "\n" + ln.holdAdvanceText)
+	}
 	gate := strings.TrimSpace(r.IntegrateRule)
 	if gate == "" || strings.EqualFold(gate, "merge gate evidence") {
 		gate = extractMergeRuleText("", r.Objective+"\n"+r.Context)
@@ -1935,16 +2066,53 @@ func isGreenEvidence(checks string) bool {
 
 func evidenceLabel(present bool, r Run, ln Lane) string {
 	if present {
-		return "present"
+		return "evidence: present"
 	}
-	missing := "missing: merge gate result"
+	missing := "evidence: missing: merge gate result"
 	if gate := mergeGateText(r, ln); gate != "" {
-		missing = "missing: " + clip(gate, 120)
+		missing = "evidence: missing: " + clip(gate, 120)
 	} else if !meaningfulHostValue(ln.Head) {
-		missing = "missing: exact head and gate result"
+		missing = "evidence: missing: exact head and gate result"
 	}
 	return missing
 }
+
+// reasonClass is intentionally coarse: goldens and binary diffs compare a
+// verdict category while the textual reason remains useful to an operator.
+func reasonClass(move, reason string) string {
+	if move == "" {
+		return "unknown"
+	}
+	lower := strings.ToLower(reason)
+	if move == "none" {
+		if strings.Contains(lower, "measurement lane") {
+			return "measurement"
+		}
+		if strings.Contains(lower, "integrated") || strings.Contains(lower, "merged") || strings.Contains(lower, "closed") {
+			return "integrated"
+		}
+		return "none"
+	}
+	switch {
+	case strings.Contains(lower, "measurement lane"):
+		return "measurement"
+	case strings.Contains(lower, "merge gate") || strings.Contains(lower, "integration gate"):
+		return "merge-gate"
+	case strings.Contains(lower, "integrated") || strings.Contains(lower, "merged") || strings.Contains(lower, "closed"):
+		return "integrated"
+	case strings.Contains(lower, "terminal") || strings.Contains(lower, "waiting") || strings.Contains(lower, "host-held"):
+		return "wait"
+	case strings.Contains(lower, "question") || strings.Contains(lower, "judgment") || strings.Contains(lower, "judge"):
+		return "judge"
+	case strings.Contains(lower, "advance") || strings.Contains(lower, "next phase"):
+		return "advance"
+	default:
+		return move
+	}
+}
+
+// ReasonClass returns the stable category used by corpus goldens and diffs.
+func ReasonClass(move, reason string) string { return reasonClass(move, reason) }
 
 func previewOutcome(report string) string {
 	rep, err := lane.ParsePhaseReport(report)

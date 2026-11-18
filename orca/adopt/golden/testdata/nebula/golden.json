@@ -1,0 +1,12 @@
+[
+	{"id":"active","move":"none","reason_class":"none"},
+	{"id":"analysis","move":"none","reason_class":"none"},
+	{"id":"blocked","move":"wait","reason_class":"wait"},
+	{"id":"closed","move":"none","reason_class":"integrated"},
+  {"id":"gate","move":"judge","reason_class":"merge-gate"},
+	{"id":"holdmissing","move":"wait","reason_class":"wait"},
+	{"id":"integrated","move":"none","reason_class":"integrated"},
+	{"id":"measurement","move":"none","reason_class":"measurement"},
+	{"id":"needs","move":"judge","reason_class":"judge"},
+	{"id":"planned","move":"none","reason_class":"none"}
+]

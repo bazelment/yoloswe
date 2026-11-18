@@ -5,7 +5,9 @@ go_library(
     srcs = [
         "adopt.go",
         "controller.go",
+        "diff.go",
         "nebulaswarm.go",
+        "sanitize.go",
         "steploop.go",
         "watcher.go",
     ],
@@ -28,6 +30,7 @@ go_test(
         "adopt_test.go",
         "controller_regression_test.go",
         "nebulaswarm_test.go",
+        "sanitize_test.go",
     ],
     embed = [":adopt"],
     deps = [

@@ -1,0 +1,21 @@
+{
+  "config": {
+    "goal": "synthetic adoption corpus",
+    "target": "main",
+    "base": "main",
+    "merge_gate": "verdict+ci",
+    "phases": [{"name": "swe"}, {"name": "review"}]
+  },
+  "tasks": [
+    {"id":"measurement","title":"measurement","branch":"swarm-lane/synthetic/measurement","phase":"swe","status":"done","round":1},
+    {"id":"gate","title":"gate","branch":"swarm-lane/synthetic/gate","phase":"review","status":"running","round":1},
+    {"id":"planned","title":"planned","status":"planned","round":1},
+    {"id":"active","title":"active","phase":"swe","status":"running","round":1},
+    {"id":"blocked","title":"blocked","phase":"swe","status":"blocked","round":1},
+    {"id":"needs","title":"needs","phase":"swe","status":"running","round":1},
+    {"id":"integrated","title":"integrated","phase":"integrate","status":"done","merge_sha":"abcdef1234567","round":1},
+    {"id":"analysis","title":"analysis","mode":"analysis","phase":"swe","status":"done","round":1},
+    {"id":"holdmissing","title":"holdmissing","phase":"review","status":"running","round":1},
+    {"id":"closed","title":"closed","phase":"review","status":"done","pr_state":"closed","round":1}
+  ]
+}

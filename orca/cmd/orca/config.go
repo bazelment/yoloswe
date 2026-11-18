@@ -169,35 +169,42 @@ func (m RoleModels) withDefaults(provider string, httpConfigured bool) RoleModel
 //
 //nolint:govet // flags and their persisted config keys are kept together.
 type Config struct {
-	AgentBackend     model.AgentBackend `json:"agent_backend,omitempty"`
-	ModelProvider    string             `json:"model_provider,omitempty"`
-	Models           RoleModels         `json:"models"`
-	RunID            string             `json:"run_id,omitempty"`
-	Goal             string             `json:"goal,omitempty"`
-	Objective        string             `json:"objective,omitempty"`
-	PlanRef          string             `json:"plan_ref,omitempty"`
-	Plan             string             `json:"plan,omitempty"`
-	Repository       string             `json:"repository,omitempty"`
-	StoreSpec        string             `json:"store,omitempty"`
-	StoreBaseDir     string             `json:"store_base_dir,omitempty"`
-	DriverKind       string             `json:"driver,omitempty"`
-	LLMGatewayURL    string             `json:"llm_gateway_url,omitempty"`
-	NebulaAPIURL     string             `json:"nebula_api_url,omitempty"`
-	NebulaToken      string             `json:"nebula_token,omitempty"`
-	HolderID         string             `json:"holder_id,omitempty"`
-	ReplayPath       string             `json:"replay_path,omitempty"`
-	RecordPath       string             `json:"record_path,omitempty"`
-	FakeScenarioPath string             `json:"fake_scenario_path,omitempty"`
-	LogLevel         string             `json:"log_level,omitempty"`
-	LogFormat        string             `json:"log_format,omitempty"`
-	Prompt           string             `json:"prompt,omitempty"`
-	ReportDay        string             `json:"report_day,omitempty"`
-	DryRun           bool               `json:"dry_run,omitempty"`
-	AdoptDir         string             `json:"-"`
-	ClaudeBin        string             `json:"-"`
-	CodexBin         string             `json:"-"`
-	AllowedModels    []string           `json:"allowed_models,omitempty"`
-	RecipeFiles      []string           `json:"recipe_files,omitempty"`
+	AgentBackend        model.AgentBackend `json:"agent_backend,omitempty"`
+	ModelProvider       string             `json:"model_provider,omitempty"`
+	Models              RoleModels         `json:"models"`
+	RunID               string             `json:"run_id,omitempty"`
+	Goal                string             `json:"goal,omitempty"`
+	Objective           string             `json:"objective,omitempty"`
+	PlanRef             string             `json:"plan_ref,omitempty"`
+	Plan                string             `json:"plan,omitempty"`
+	Repository          string             `json:"repository,omitempty"`
+	StoreSpec           string             `json:"store,omitempty"`
+	StoreBaseDir        string             `json:"store_base_dir,omitempty"`
+	DriverKind          string             `json:"driver,omitempty"`
+	LLMGatewayURL       string             `json:"llm_gateway_url,omitempty"`
+	NebulaAPIURL        string             `json:"nebula_api_url,omitempty"`
+	NebulaToken         string             `json:"nebula_token,omitempty"`
+	HolderID            string             `json:"holder_id,omitempty"`
+	ReplayPath          string             `json:"replay_path,omitempty"`
+	RecordPath          string             `json:"record_path,omitempty"`
+	FakeScenarioPath    string             `json:"fake_scenario_path,omitempty"`
+	LogLevel            string             `json:"log_level,omitempty"`
+	LogFormat           string             `json:"log_format,omitempty"`
+	Prompt              string             `json:"prompt,omitempty"`
+	ReportDay           string             `json:"report_day,omitempty"`
+	DryRun              bool               `json:"dry_run,omitempty"`
+	AdoptDir            string             `json:"-"`
+	AdoptJSON           bool               `json:"-"`
+	AdoptDiff           bool               `json:"-"`
+	AdoptBinA           string             `json:"-"`
+	AdoptBinB           string             `json:"-"`
+	AdoptSanitize       bool               `json:"-"`
+	AdoptSanitizeVerify bool               `json:"-"`
+	AdoptOut            string             `json:"-"`
+	ClaudeBin           string             `json:"-"`
+	CodexBin            string             `json:"-"`
+	AllowedModels       []string           `json:"allowed_models,omitempty"`
+	RecipeFiles         []string           `json:"recipe_files,omitempty"`
 	// launchArgs are the command-line flags a controller launched from this
 	// invocation inherits; see controllerFlags.
 	launchArgs            []string
@@ -561,6 +568,13 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.StringVar(&cfg.ReportDay, "day", "", "Report day (YYYY-MM-DD)")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "Print adoption moves without changing the run")
 	fs.StringVar(&cfg.AdoptDir, "dir", "", "Read an adoption dry-run from this copied run directory")
+	fs.BoolVar(&cfg.AdoptJSON, "json", false, "Emit one JSON adoption verdict per lane")
+	fs.BoolVar(&cfg.AdoptDiff, "diff", false, "Compare two orca binaries on one adoption snapshot")
+	fs.StringVar(&cfg.AdoptBinA, "bin-a", "", "First binary for adopt --diff")
+	fs.StringVar(&cfg.AdoptBinB, "bin-b", "", "Second binary for adopt --diff")
+	fs.BoolVar(&cfg.AdoptSanitize, "sanitize", false, "Write a credential-free adoption corpus copy")
+	fs.BoolVar(&cfg.AdoptSanitizeVerify, "verify", false, "Verify sanitized adoption decisions match the input")
+	fs.StringVar(&cfg.AdoptOut, "out", "", "Output directory for adopt --sanitize")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, nil, err
@@ -601,6 +615,13 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 		// These adoption-only switches are intentionally command-line scoped;
 		// preserve them across the JSON merge so --dir remains authoritative.
 		cfg.AdoptDir = cliCfg.AdoptDir
+		cfg.AdoptJSON = cliCfg.AdoptJSON
+		cfg.AdoptDiff = cliCfg.AdoptDiff
+		cfg.AdoptBinA = cliCfg.AdoptBinA
+		cfg.AdoptBinB = cliCfg.AdoptBinB
+		cfg.AdoptSanitize = cliCfg.AdoptSanitize
+		cfg.AdoptSanitizeVerify = cliCfg.AdoptSanitizeVerify
+		cfg.AdoptOut = cliCfg.AdoptOut
 		if cliCfg.DryRun {
 			cfg.DryRun = true
 		}

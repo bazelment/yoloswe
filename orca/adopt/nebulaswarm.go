@@ -107,6 +107,8 @@ type nsLane struct {
 	ID            string                       `json:"id"`
 	Title         string                       `json:"title"`
 	Branch        string                       `json:"branch"`
+	Base          string                       `json:"base"`
+	Target        string                       `json:"target"`
 	Phase         string                       `json:"phase"`
 	Status        string                       `json:"status"`
 	SessionID     string                       `json:"session_id"`
@@ -136,6 +138,7 @@ type nsLedger struct {
 		Repo         string      `json:"repo"`
 		Target       string      `json:"target"`
 		Base         string      `json:"base"`
+		MergeGate    string      `json:"merge_gate"`
 		Orchestrator string      `json:"orchestrator_session_id"`
 		Phases       []hostPhase `json:"phases"`
 	} `json:"config"`
@@ -152,6 +155,7 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 	r.Goal, r.DrivenBy = st.Config.Goal, st.Config.Orchestrator
 	r.TargetBranch = strings.TrimSpace(st.Config.Target)
 	r.BaseBranch = strings.TrimSpace(st.Config.Base)
+	r.MergeGate = strings.TrimSpace(st.Config.MergeGate)
 	r.Phases = hostPhaseNames(st.Config.Phases)
 	if isLocalRepoPath(st.Config.Repo) && localRepoPaths != nil {
 		*localRepoPaths = append(*localRepoPaths, st.Config.Repo)
@@ -181,6 +185,10 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 			applyAttnAnswer(dir, &x)
 		}
 		r.Lanes = append(r.Lanes, x)
+	}
+	r.HistoricalBranches = historicalBranchesFromEvents(dir, r.TargetBranch, r.BaseBranch)
+	for i := range st.Tasks {
+		r.HistoricalBranches = appendBranch(r.HistoricalBranches, st.Tasks[i].Base, st.Tasks[i].Target)
 	}
 	annotateLanes(dir, r, st.Config.Phases)
 	return nil
@@ -251,9 +259,21 @@ func laneIntegrationEvents(path string) map[string]string {
 }
 
 var mergedPRRE = regexp.MustCompile(`(?i)#(\d+)\s+merged\b`)
+var mergedBeforePRRE = regexp.MustCompile(`(?i)\bmerged\s+#(\d+)\b`)
 var prMergedRE = regexp.MustCompile(`(?i)\bPR\s+#(\d+)\b[^\n]{0,120}\bmerged\b`)
 var ownLaneMergedRE = regexp.MustCompile(`(?i)\b(?:own\s+)?lane\s+#(\d+)\b[^\n]{0,200}\bmerged\b`)
 var openPRRE = regexp.MustCompile(`(?i)\bPR\s+#(\d+)\b[^\n]{0,120}\b(?:open|not\s+merged)\b`)
+var mergedAsSHAEvidenceRE = regexp.MustCompile(`(?i)\bmerged(?:\s+#\d+)?\s+as\s+[0-9a-f]{7,64}\b`)
+var integratedEvidenceRE = regexp.MustCompile(`(?i)\bintegrated\b`)
+var landedEvidenceRE = regexp.MustCompile(`(?i)\blanded\b`)
+
+// integrationVocabularyREs is shared by the importer and sanitizer. Any
+// phrase that can nominate a host merge, or a token used by an integration
+// event, must survive prose sanitization in the same shape the importer sees.
+var integrationVocabularyREs = []*regexp.Regexp{
+	openPRRE, prMergedRE, ownLaneMergedRE, mergedPRRE, mergedBeforePRRE,
+	mergedAsSHAEvidenceRE, integratedEvidenceRE, landedEvidenceRE, decisionHostHoldRE,
+}
 
 // laneMergeNotePRs extracts host merge prose from a lane's own EVENTS rows.
 // These nominations are deliberately not integration evidence by themselves;
@@ -279,6 +299,7 @@ func laneMergeNotePRs(path string) map[string][]string {
 			continue
 		}
 		matches := mergedPRRE.FindAllStringSubmatch(detail, -1)
+		matches = append(matches, mergedBeforePRRE.FindAllStringSubmatch(detail, -1)...)
 		matches = append(matches, prMergedRE.FindAllStringSubmatch(detail, -1)...)
 		matches = append(matches, ownLaneMergedRE.FindAllStringSubmatch(detail, -1)...)
 		if isHostNote {
@@ -296,26 +317,46 @@ func laneMergeNotePRs(path string) map[string][]string {
 }
 
 func latestReport(dir, laneID, phase string, round int) string {
+	for _, p := range reportCandidates(dir, laneID, phase, round) {
+		if fileExists(p) {
+			return p
+		}
+	}
+	return ""
+}
+
+// reportCandidates is the single report-location contract shared by the
+// importer and the corpus sanitizer. Keep the order authoritative: the
+// current round report wins, then the legacy flat report, then the newest
+// report in reports/ for the lane.
+func reportCandidates(dir, laneID, phase string, round int) []string {
+	var candidates []string
 	if phase != "" {
-		if p := filepath.Join(dir, "reports", fmt.Sprintf("%s.%s.r%d.md", laneID, phase, round)); fileExists(p) {
-			return p
-		}
-		if p := filepath.Join(dir, fmt.Sprintf("%s.%s.md", laneID, phase)); fileExists(p) {
-			return p
-		}
+		candidates = append(candidates,
+			filepath.Join(dir, "reports", fmt.Sprintf("%s.%s.r%d.md", laneID, phase, round)),
+			filepath.Join(dir, fmt.Sprintf("%s.%s.md", laneID, phase)),
+			filepath.Join(dir, "reports", fmt.Sprintf("%s.%s.md", laneID, phase)),
+		)
 	}
 	paths, _ := filepath.Glob(filepath.Join(dir, "reports", laneID+".*.md"))
-	best, bestMod := "", int64(0)
+	sort.Slice(paths, func(i, j int) bool {
+		ai, aerr := os.Stat(paths[i])
+		bj, berr := os.Stat(paths[j])
+		if aerr != nil || berr != nil {
+			return paths[i] < paths[j]
+		}
+		if ai.ModTime().Equal(bj.ModTime()) {
+			return paths[i] < paths[j]
+		}
+		return ai.ModTime().After(bj.ModTime())
+	})
 	for _, p := range paths {
 		rest := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), laneID+"."), ".md")
-		if strings.Count(rest, ".") != 1 {
-			continue
-		}
-		if info, err := os.Stat(p); err == nil && (best == "" || info.ModTime().UnixNano() > bestMod) {
-			best, bestMod = p, info.ModTime().UnixNano()
+		if strings.Count(rest, ".") == 1 {
+			candidates = append(candidates, p)
 		}
 	}
-	return best
+	return candidates
 }
 
 // reportHeadline is a report's Outcome line, else its first non-empty line.
