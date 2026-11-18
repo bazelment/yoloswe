@@ -24,6 +24,8 @@ import (
 
 const maxShadowArgumentBytes = 2048
 
+var errShadowRecorderUnavailable = errors.New("shadow recorder is unavailable")
+
 // Action is one intercepted side effect.
 //
 //nolint:govet // JSONL shape is intentionally grouped by report semantics.
@@ -99,7 +101,7 @@ func (r *ActionRecorder) remember(err error) error {
 // Record writes one action, clipping serialized arguments at 2 KiB.
 func (r *ActionRecorder) Record(laneID, kind string, args any, reason string) error {
 	if r == nil || r.file == nil {
-		return nil
+		return errShadowRecorderUnavailable
 	}
 	raw, err := json.Marshal(args)
 	if err != nil {
@@ -373,6 +375,8 @@ var _ lane.PostPublisher = (*RecordingDriver)(nil)
 type RecordingMailbox struct {
 	inner    mailbox.Mailbox
 	recorder *ActionRecorder
+	mu       sync.Mutex
+	seq      int64
 }
 
 func NewRecordingMailbox(inner mailbox.Mailbox, recorder *ActionRecorder) *RecordingMailbox {
@@ -385,7 +389,11 @@ func (m *RecordingMailbox) AskOwner(_ context.Context, q mailbox.Question) (stri
 	if err := m.recorder.Record(q.LaneID, "ask_owner", q, "owner question intent"); err != nil {
 		return "", err
 	}
-	return q.Default, nil
+	m.mu.Lock()
+	m.seq++
+	id := fmt.Sprintf("shadow-ask-%d", m.seq)
+	m.mu.Unlock()
+	return id, nil
 }
 func (m *RecordingMailbox) Watch(ctx context.Context) (<-chan store.Event, error) {
 	if m.inner == nil {

@@ -146,6 +146,27 @@ func TestShadowRecorderTruncatesUnicodeArgumentsAsJSON(t *testing.T) {
 	}
 }
 
+func TestRecordingMailboxAskOwnerReturnsUniqueSyntheticIDs(t *testing.T) {
+	rec, err := NewActionRecorder(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	m := NewRecordingMailbox(nil, rec)
+	q := mailbox.Question{LaneID: "lane", Ask: "continue?", Default: "continue with task notes"}
+	first, err := m.AskOwner(t.Context(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := m.AskOwner(t.Context(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || first == q.Default || second == q.Default || first == "" || second == "" {
+		t.Fatalf("AskOwner IDs = %q, %q; want distinct non-default synthetic IDs", first, second)
+	}
+}
+
 func TestShadowControllerDoesNotAcquireLeaseOrCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"config":{"phases":[{"name":"swe"}]},"tasks":[{"id":"lane-1","title":"work","phase":"swe","status":"planned","brief":"work"}]}`), 0600); err != nil {
