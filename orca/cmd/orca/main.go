@@ -280,6 +280,9 @@ func Execute(
 		}
 		return executeChat(ctx, cfg, slices.Clone(args), posArgs, stdin, stdout, stderr, logger)
 	case "adopt":
+		if cfg.DecideAsOperator && !cfg.Shadow {
+			return errors.New("orca adopt --decide-as-operator requires --shadow")
+		}
 		if cfg.Shadow {
 			runDir := strings.TrimSpace(cfg.AdoptDir)
 			if runDir == "" {

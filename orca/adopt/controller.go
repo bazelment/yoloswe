@@ -57,9 +57,10 @@ type Controllers struct {
 	// Shadow runs execute the normal controller against an isolated store while
 	// recording transport effects. They never acquire leases or checkpoint the
 	// host run directory.
-	Shadow   bool
-	Recorder *ActionRecorder
-	mu       sync.Mutex
+	Shadow           bool
+	DecideAsOperator bool
+	Recorder         *ActionRecorder
+	mu               sync.Mutex
 }
 
 // SetMirror updates the commit mirror used for live integration verification.
@@ -514,6 +515,8 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			LaneStore:   d.store.Lanes(),
 			syncer:      syncer,
 			controllers: d,
+			shadow:      d.Shadow && !d.DecideAsOperator,
+			operator:    d.DecideAsOperator,
 		},
 		backlog: &adoptedBacklogStore{
 			BacklogStore: d.store.Backlog(),
@@ -582,7 +585,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	if setter, ok := dispatch.(interface {
 		SetHostBrief(func(context.Context, lane.Lane, recipe.Phase) string)
-	}); ok {
+	}); ok && !d.DecideAsOperator {
 		setter.SetHostBrief(hostBrief)
 	}
 	ctrl = controller.New(controller.Config{
@@ -592,7 +595,12 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			integrationMu.Unlock()
 			return d.prepareStep(ctx, cr)
 		},
-		HostRefresh:       func(ctx context.Context) error { return d.refreshHostState(ctx, r.ID) },
+		HostRefresh: func(ctx context.Context) error {
+			if d.DecideAsOperator {
+				return nil
+			}
+			return d.refreshHostState(ctx, r.ID)
+		},
 		HostBrief:         hostBrief,
 		IsolateLaneErrors: true,
 		StepError: func(err error) {
@@ -608,7 +616,12 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		AdoptionGeneration: actionGeneration,
 		HolderID:           holder,
 		PRProbe:            d.runPRProbe(syncer),
-		HostIntegration:    verify,
+		HostIntegration: func(ctx context.Context, ln lane.Lane) (bool, string, error) {
+			if d.DecideAsOperator {
+				return false, "", nil
+			}
+			return verify(ctx, ln)
+		},
 		PhaseStallTimeouts: observedPhaseStalls(r),
 		JudgeLaneMail:      true,
 		MaxCostPerHourUSD:  d.MaxCostPerHourUSD,
@@ -616,8 +629,8 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		NoPR:               r.NoPR,
 		HoldAdvance:        holdAdvanceLanes(r),
 		HoldAdvanceCheck:   func(id string) bool { return fileExists(filepath.Join(r.Dir, id+".hold-advance")) },
-		ImportedHostState:  true,
-		HostRun:            true,
+		ImportedHostState:  !d.DecideAsOperator,
+		HostRun:            !d.DecideAsOperator,
 		SkipLease:          d.Shadow,
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
@@ -700,8 +713,60 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	d.runs[r.ID] = cr
 	d.mu.Unlock()
 	started = true
+	go d.watchRunFiles(runCtx, cr)
 	go d.supervise(runCtx, cr)
 	return nil
+}
+
+// watchRunFiles turns host ledger/report changes into immediate controller
+// wakes. The controller still polls as a backstop, but an EVENTS append or a
+// report/.done/.needs-swe update is visible without waiting for that tick.
+func (d *Controllers) watchRunFiles(ctx context.Context, cr *controlledRun) {
+	if cr == nil || strings.TrimSpace(cr.run.Dir) == "" {
+		return
+	}
+	last := runFileSignature(cr.run.Dir)
+	t := time.NewTicker(250 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			now := runFileSignature(cr.run.Dir)
+			if now != last {
+				last = now
+				cr.controller.Wake()
+			}
+		}
+	}
+}
+
+func runFileSignature(dir string) string {
+	var b strings.Builder
+	_ = filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry == nil {
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		name := entry.Name()
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return nil
+		}
+		if name != "EVENTS" && name != "OBJECTIVE.md" && name != "PROGRESS.md" &&
+			!strings.HasSuffix(name, ".done") && !strings.HasSuffix(name, ".needs-swe") &&
+			!strings.HasPrefix(filepath.ToSlash(rel), "reports/") {
+			return nil
+		}
+		if info, statErr := entry.Info(); statErr == nil {
+			fmt.Fprintf(&b, "%s:%d:%d;", path, info.Size(), info.ModTime().UnixNano())
+		}
+		return nil
+	})
+	return b.String()
 }
 
 func holdAdvanceLanes(r Run) map[string]bool {
@@ -1133,9 +1198,9 @@ func (d *Controllers) refreshHostState(ctx context.Context, runID string) error 
 		wasTerminal := cur.Status.Terminal()
 		terminalChanged = terminalChanged || (!wasTerminal && host.Status.Terminal())
 		cur.Phase = host.Phase
-		if host.Status.Terminal() || cur.Status != lane.StatusBlocked {
-			cur.Status = host.Status
-		}
+		// The host ledger owns lifecycle status. A previous shadow intent must
+		// never pin a lane in blocked after the host has moved it on.
+		cur.Status = host.Status
 		cur.SessionID, cur.TerminalID = host.SessionID, host.TerminalID
 		cur.TerminalState, cur.HostHold, cur.HostHoldReason = host.TerminalState, host.HostHold, host.HostHoldReason
 		cur.PR, cur.PRHead, cur.MergeSHA, cur.Checks = host.PR, host.PRHead, host.MergeSHA, host.Checks
@@ -2812,13 +2877,15 @@ type adoptedLaneStore struct {
 	store.LaneStore
 	syncer      *runLedgerSync
 	controllers *Controllers
+	shadow      bool
+	operator    bool
 }
 
 // hostOverlay restores ephemeral host facts after a SQLite read. Those facts
 // belong to the host ledger, so they deliberately do not require a store schema
 // migration and are re-read before every controller tick.
 func (s *adoptedLaneStore) hostOverlay(ln *lane.Lane) {
-	if ln == nil || s.syncer == nil {
+	if ln == nil || s.syncer == nil || s.operator {
 		return
 	}
 	r := s.syncer.CurrentRun()
@@ -2835,7 +2902,7 @@ func (s *adoptedLaneStore) hostOverlay(ln *lane.Lane) {
 		if ln.HostHoldReason == "" && host.PRDraft {
 			ln.HostHoldReason = "PR is draft"
 		}
-		if !ln.Status.Terminal() && lane.Status(host.Status).Terminal() {
+		if !ln.Status.Terminal() {
 			ln.Status = lane.Status(host.Status)
 		}
 		if !ln.Status.Terminal() && (strings.EqualFold(host.PRState, "merged") || (ln.HostHoldReason == "" && !host.PRDraft && integratedLane(*host))) {
@@ -2869,6 +2936,11 @@ func (s *adoptedLaneStore) List(ctx context.Context, filter store.LaneFilter) ([
 // a terminal status with no active backlog item, triggers planNextWorkIfDrained
 // (controller.stepIntegrate marks merged lanes done directly without calling judge).
 func (s *adoptedLaneStore) Upsert(ctx context.Context, ln lane.Lane) error {
+	if s.shadow {
+		// Shadow lifecycle intents are recorded by the RecordingDriver. Keeping
+		// them out of the overlay means the next tick starts from host state.
+		return nil
+	}
 	if s.syncer != nil && ln.RunID == s.syncer.runID {
 		if err := s.syncer.SyncLane(ctx, ln); err != nil {
 			slog.Warn("live checkpoint adopted lane failed", "run", ln.RunID, "lane", ln.ID, "error", err)

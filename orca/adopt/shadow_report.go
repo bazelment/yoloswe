@@ -17,6 +17,13 @@ import (
 
 // WriteShadowReports writes the human readable shadow summary and host diff.
 func WriteShadowReports(ctx context.Context, outDir, runDir, runID string, st store.Store, started, ended time.Time) error {
+	return WriteShadowReportsWithOptions(ctx, outDir, runDir, runID, st, started, ended, false)
+}
+
+// WriteShadowReportsWithOptions writes reports and optionally scores the
+// shadow run as a sole operator. A host decision matches when lane, kind and
+// target agree within ten minutes.
+func WriteShadowReportsWithOptions(ctx context.Context, outDir, runDir, runID string, st store.Store, started, ended time.Time, decideAsOperator bool) error {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
@@ -96,17 +103,7 @@ func WriteShadowReports(ctx context.Context, outDir, runDir, runID string, st st
 			}
 			fmt.Fprintf(b, "- %s: %d\n", k, pair[1])
 		}
-		b.WriteString("\n## Would do\n")
-		if err := walkShadowActions(actionPath, func(a Action) error {
-			fmt.Fprintf(b, "- %s `%s` lane=%s args=%s", a.At.UTC().Format(time.RFC3339), a.Kind, a.Lane, string(a.Arguments))
-			if a.Reason != "" {
-				fmt.Fprintf(b, " — %s", a.Reason)
-			}
-			b.WriteByte('\n')
-			return nil
-		}); err != nil {
-			return err
-		}
+		b.WriteString("\nShadow intents are recorded in actions.jsonl and are shown only when explicitly requested.\n")
 		b.WriteString("\n## Dispatcher judgments\n")
 		for i := range judgments {
 			d := &judgments[i]
@@ -124,7 +121,7 @@ func WriteShadowReports(ctx context.Context, outDir, runDir, runID string, st st
 	}); err != nil {
 		return err
 	}
-	return writeHostDiff(outDir, runDir, actionPath, started, ended)
+	return writeHostDiffWithWindow(outDir, runDir, actionPath, started, ended, decideAsOperator)
 }
 
 func sortedCounts(m map[string]int) [][2]any {
@@ -199,15 +196,27 @@ type HostDiff struct {
 	Counts          map[string]int    `json:"counts"`
 	Actions         []HostActionMatch `json:"actions"`
 	OrcaMissed      []HostEvent       `json:"orca_missed"`
+	MatchedPercent  float64           `json:"matched_percent"`
+	Matched         int               `json:"matched"`
+	MatchWindowMin  int               `json:"match_window_minutes"`
 	EventsAvailable bool              `json:"events_available"`
+	SoleOperator    bool              `json:"sole_operator"`
 }
 
 func writeHostDiff(outDir, runDir, actionPath string, started, ended time.Time) error {
-	events, available, err := readHostEvents(filepath.Join(runDir, "EVENTS"), started.Add(-30*time.Minute), ended.Add(30*time.Minute))
+	return writeHostDiffWithWindow(outDir, runDir, actionPath, started, ended, false)
+}
+
+func writeHostDiffWithWindow(outDir, runDir, actionPath string, started, ended time.Time, soleOperator bool) error {
+	window := 30 * time.Minute
+	if soleOperator {
+		window = 10 * time.Minute
+	}
+	events, available, err := readHostEvents(filepath.Join(runDir, "EVENTS"), started.Add(-window), ended.Add(window))
 	if err != nil {
 		return err
 	}
-	report := HostDiff{Counts: map[string]int{"agree": 0, "differs": 0, "host-did-not": 0, "orca-missed": 0}, Actions: []HostActionMatch{}, OrcaMissed: []HostEvent{}, EventsAvailable: available}
+	report := HostDiff{Counts: map[string]int{"agree": 0, "matched": 0, "differs": 0, "host-did-not": 0, "orca-missed": 0}, Actions: []HostActionMatch{}, OrcaMissed: []HostEvent{}, EventsAvailable: available, MatchWindowMin: int(window / time.Minute), SoleOperator: soleOperator}
 	if err := walkShadowActions(actionPath, func(a Action) error {
 		switch a.Kind {
 		case "exec_read", "http_refused", "read_degraded":
@@ -239,9 +248,9 @@ func writeHostDiff(outDir, runDir, actionPath string, started, ended time.Time) 
 			}
 			kind, target := shadowActionIdentity(match.Action)
 			best := -1
-			distance := 31 * time.Minute
+			distance := window + time.Minute
 			indices := byKind[eventKey{match.Action.Lane, kind}]
-			earliest, latest := match.Action.At.Add(-30*time.Minute), match.Action.At.Add(30*time.Minute)
+			earliest, latest := match.Action.At.Add(-window), match.Action.At.Add(window)
 			first := sort.Search(len(indices), func(i int) bool { return !events[indices[i]].At.Before(earliest) })
 			for _, j := range indices[first:] {
 				e := &events[j]
@@ -272,7 +281,29 @@ func writeHostDiff(outDir, runDir, actionPath string, started, ended time.Time) 
 	}
 	for i := range report.Actions {
 		m := &report.Actions[i]
-		report.Counts[m.Classification]++
+		matched := m.Classification == "agree"
+		if soleOperator && matched {
+			m.Classification = "matched"
+		}
+		if !(soleOperator && matched) {
+			report.Counts[m.Classification]++
+		}
+		if matched {
+			report.Counts["matched"]++
+			report.Matched++
+		}
+	}
+	if soleOperator {
+		report.Counts["wrong"] = report.Counts["differs"]
+	}
+	hostDecisionCount := 0
+	for i := range events {
+		if !events[i].At.Before(started) && !events[i].At.After(ended) {
+			hostDecisionCount++
+		}
+	}
+	if hostDecisionCount > 0 {
+		report.MatchedPercent = float64(report.Matched) / float64(hostDecisionCount) * 100
 	}
 	for i, e := range events {
 		if !used[i] && !e.At.Before(started) && !e.At.After(ended) {
@@ -288,7 +319,10 @@ func writeHostDiff(outDir, runDir, actionPath string, started, ended time.Time) 
 		return err
 	}
 	return writeShadowReport(filepath.Join(outDir, "host-diff.md"), func(b *bufio.Writer) error {
-		b.WriteString("# Host diff\n\nMechanical matching by lane, kind and target within ±30 minutes. Each host row is used at most once. These classifications do not judge correctness.\n\n")
+		fmt.Fprintf(b, "# Host diff\n\nMechanical matching by lane, kind and target within ±%d minutes. Each host row is used at most once. These classifications do not judge correctness.\n\n", int(window/time.Minute))
+		if soleOperator {
+			fmt.Fprintf(b, "Matched: %d/%d (%.1f%%)\n\n", report.Matched, hostDecisionCount, report.MatchedPercent)
+		}
 		if !available {
 			b.WriteString("EVENTS unavailable; host-did-not means no host evidence is available.\n\n")
 		}

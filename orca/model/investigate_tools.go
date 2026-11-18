@@ -64,6 +64,10 @@ func (c InvestigateConfig) allowedRoots() []string {
 	return roots
 }
 
+// ReadRoots returns the canonical, cleaned roots visible to a CLI agent's
+// native read tools.
+func (c InvestigateConfig) ReadRoots() []string { return c.allowedRoots() }
+
 // ReadFileParams holds parameters for the read.file investigation tool.
 type ReadFileParams struct {
 	Path     string `json:"path" jsonschema:"required,description=Relative or absolute path within the run directory or repository checkout (e.g. OBJECTIVE.md, PROGRESS.md, state.json)"`

@@ -128,6 +128,7 @@ func executeShadowAdopt(ctx context.Context, cfg Config, runDir, out string, log
 	judges, plannerFn := adoptedDispatchers(ctx, cfg, h, st, h.client, clk, client, logger, prProbe)
 	ctrls := adopt.NewControllers(ctx, st, h.client, clk, judges)
 	ctrls.Shadow = true
+	ctrls.DecideAsOperator = cfg.DecideAsOperator
 	ctrls.Recorder = recorder
 	ctrls.PRProbe = prProbe
 	ctrls.Mailboxes = adoptedMailboxesWithRecorder(cfg, st, recorder)
@@ -151,7 +152,7 @@ func executeShadowAdopt(ctx context.Context, cfg Config, runDir, out string, log
 	if err := recorder.Err(); err != nil {
 		return err
 	}
-	return adopt.WriteShadowReports(context.WithoutCancel(ctx), out, runDir, run.ID, st, started, ended)
+	return adopt.WriteShadowReportsWithOptions(context.WithoutCancel(ctx), out, runDir, run.ID, st, started, ended, cfg.DecideAsOperator)
 }
 
 func validateShadowPaths(runDir, out string) error {

@@ -487,6 +487,10 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 
 	if c.AgentBackend == model.AgentBackendCLI {
 		var cliToolOutputs []string
+		readCfg := c.investigateConfig(ctx)
+		if roots := readCfg.ReadRoots(); len(roots) > 0 {
+			systemPrompt += "\n\nNative read roots (inspect files directly; writes remain unavailable): " + strings.Join(roots, ", ")
+		}
 		sessCfg := model.AgentSessionConfig{
 			Provider:     c.Provider,
 			Model:        c.modelName,
@@ -497,6 +501,8 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 			// using its promoted RunDir here would change the resume path whenever
 			// runs are adopted or released.
 			WorkDir:       model.DeterministicSessionWorkDir(c.Investigate.RunDir, cmp.Or(c.runID, threadID), ActorConcierge),
+			NativeReadDir: model.SessionReadWorkDir(readCfg, ""),
+			Investigate:   readCfg,
 			LLMGatewayURL: c.LLMGatewayURL,
 			ClaudeBin:     c.ClaudeBin,
 			CodexBin:      c.CodexBin,
@@ -506,7 +512,8 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 			Model:        c.modelName,
 			SystemPrompt: systemPrompt,
 			Registry:     reg,
-			MaxToolCalls: DefaultConciergeMaxTurn,
+			MaxToolCalls: 0,
+			Investigate:  readCfg,
 			Observer: func(name string, args json.RawMessage, output string, isError bool) {
 				if name != ToolRunStart {
 					chat.EmitToolCall(ctx, name, args, c.runID)

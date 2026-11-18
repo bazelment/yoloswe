@@ -206,6 +206,7 @@ type Config struct {
 	AllowedModels       []string           `json:"allowed_models,omitempty"`
 	RecipeFiles         []string           `json:"recipe_files,omitempty"`
 	Shadow              bool               `json:"-"`
+	DecideAsOperator    bool               `json:"-"`
 	ShadowFor           time.Duration      `json:"-"`
 	// launchArgs are the command-line flags a controller launched from this
 	// invocation inherits; see controllerFlags.
@@ -571,6 +572,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "Print adoption moves without changing the run")
 	fs.StringVar(&cfg.AdoptDir, "dir", "", "Read an adoption dry-run from this copied run directory")
 	fs.BoolVar(&cfg.Shadow, "shadow", false, "Run adopted controller and dispatcher in recording mode")
+	fs.BoolVar(&cfg.DecideAsOperator, "decide-as-operator", false, "In shadow mode, decide from the adopted snapshot without host-side decisions")
 	fs.DurationVar(&cfg.ShadowFor, "for", 0, "Shadow duration (for example 2h; 0 waits for SIGINT)")
 	fs.BoolVar(&cfg.AdoptJSON, "json", false, "Emit one JSON adoption verdict per lane")
 	fs.BoolVar(&cfg.AdoptDiff, "diff", false, "Compare two orca binaries on one adoption snapshot")
@@ -620,6 +622,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 		// preserve them across the JSON merge so --dir remains authoritative.
 		cfg.AdoptDir = cliCfg.AdoptDir
 		cfg.Shadow = cliCfg.Shadow
+		cfg.DecideAsOperator = cliCfg.DecideAsOperator
 		cfg.ShadowFor = cliCfg.ShadowFor
 		cfg.AdoptJSON = cliCfg.AdoptJSON
 		cfg.AdoptDiff = cliCfg.AdoptDiff

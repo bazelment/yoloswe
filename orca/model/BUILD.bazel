@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "agent_session.go",
         "cli_client.go",
+        "cli_readonly.go",
         "http_client.go",
         "investigate_tools.go",
         "mcp_bridge.go",

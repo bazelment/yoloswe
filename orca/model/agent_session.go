@@ -60,23 +60,32 @@ func ParseAgentBackend(raw string) (AgentBackend, error) {
 }
 
 // AgentSessionConfig configures a long-lived CLI agent session for a run role.
-// For Claude sessions, built-in tools are disabled via WithTools("") and
-// WithDisallowedTools so the model can only invoke Orca's MCP tools. For Codex
-// sessions, the thread runs in a read-only sandbox inside WorkDir with
-// ApprovalPolicyNever and developer instructions restricting tool calls to the
-// Orca MCP server.
+// CLI agents may inspect the adopted run and checkout with native read-only
+// tools. Mutations remain unavailable through native tools and are exposed
+// only by Orca's typed MCP registry.
 type AgentSessionConfig struct {
 	Provider         string
 	Model            string
 	Effort           string
 	SystemPrompt     string
 	WorkDir          string
+	NativeReadDir    string
 	ResumeID         string
 	LLMGatewayURL    string
 	ClaudeBin        string
 	CodexBin         string
+	Investigate      InvestigateConfig
 	MaxSessionTokens int
 	MaxSessionTurns  int
+}
+
+// SessionReadWorkDir picks a native CLI working directory that can see the
+// adopted run. MCP reads still enforce both run and repository roots.
+func SessionReadWorkDir(cfg InvestigateConfig, fallback string) string {
+	if roots := cfg.allowedRoots(); len(roots) > 0 {
+		return roots[0]
+	}
+	return fallback
 }
 
 // DeterministicSessionWorkDir returns a stable, isolated working directory path
@@ -157,6 +166,7 @@ type AgentTurnRequest struct {
 	Prompt       string
 	Model        string
 	SystemPrompt string
+	Investigate  InvestigateConfig
 	MaxToolCalls int
 }
 
@@ -170,7 +180,7 @@ type AgentTurnResult struct {
 }
 
 // AgentSession manages a long-lived Claude or Codex CLI session for one held run
-// and role (Dispatcher or Planner), exposing Orca's ToolRegistry as MCP tools.
+// and role (Dispatcher, Planner, or Concierge), exposing Orca's ToolRegistry as MCP tools.
 type AgentSession struct {
 	bridge       *MCPToolBridge
 	claudeSess   *claude.Session
@@ -253,6 +263,9 @@ func (s *AgentSession) Turn(ctx context.Context, req AgentTurnRequest) (*AgentTu
 			sysPromptChanged = true
 		}
 		s.cfg.SystemPrompt = sys
+	}
+	if req.Investigate.HasRoots() {
+		s.cfg.Investigate = req.Investigate
 	}
 
 	s.bridge.SetRegistry(req.Registry)
@@ -373,10 +386,12 @@ func (s *AgentSession) runClaudeTurnLocked(
 
 		opts := []claude.SessionOption{
 			claude.WithCLIPath(bin),
-			claude.WithPermissionMode(claude.PermissionModeBypass),
+			claude.WithPermissionMode(claude.PermissionModeDefault),
+			claude.WithPermissionPromptToolStdio(),
+			claude.WithPermissionHandler(readOnlyClaudePermissionHandler(s.cfg.Investigate)),
 			claude.WithDisablePlugins(),
-			claude.WithTools(""),
-			claude.WithDisallowedTools("Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"),
+			claude.WithTools("Read,Grep,Glob,Bash"),
+			claude.WithDisallowedTools("Write", "Edit", "MultiEdit", "NotebookEdit"),
 			claude.WithSDKTools("orca", s.bridge),
 		}
 		if len(allowed) > 0 {
@@ -396,9 +411,11 @@ func (s *AgentSession) runClaudeTurnLocked(
 			opts = append(opts, claude.WithEffort(claude.EffortLevel(effort)))
 		}
 		if sys := strings.TrimSpace(s.cfg.SystemPrompt); sys != "" {
-			opts = append(opts, claude.WithSystemPrompt(sys))
+			opts = append(opts, claude.WithSystemPrompt(sys+nativeReadInstruction(s.cfg.Investigate)))
 		}
-		if wd != "" {
+		if nativeWD := strings.TrimSpace(s.cfg.NativeReadDir); nativeWD != "" {
+			opts = append(opts, claude.WithWorkDir(nativeWD))
+		} else if wd != "" {
 			opts = append(opts, claude.WithWorkDir(wd))
 		}
 		if s.sessionID != "" {
@@ -531,13 +548,9 @@ func ensurePrivateSessionDir(clean string) error {
 	return nil
 }
 
-const codexToolConfinementInstruction = "\n\nTool Confinement: Invoke ONLY the `orca` MCP server tools (`mcp__orca__*`). Never invoke built-in shell or filesystem tools."
+const codexToolConfinementInstruction = "\n\nTool Confinement: Use the read-only sandbox for inspection of the adopted run and repository. Never write files, edit, delete, push, merge, or invoke a mutating command. All mutations must use Orca's typed MCP tools (`mcp__orca__*`)."
 
 var codexDisabledBuiltinFeatures = []string{
-	"shell_tool",
-	"unified_exec",
-	"unified_exec_tty",
-	"view_image",
 	"apps",
 	"browser_use",
 	"browser_use_external",
@@ -545,7 +558,6 @@ var codexDisabledBuiltinFeatures = []string{
 	"image_generation",
 	"plugins",
 	"code_mode_host",
-	"sleep_tool",
 }
 
 func (s *AgentSession) runCodexTurnLocked(
@@ -602,7 +614,7 @@ func (s *AgentSession) runCodexTurnLocked(
 		for _, feat := range codexDisabledBuiltinFeatures {
 			disabledFeatureMap[feat] = false
 		}
-		devInstructions := strings.TrimSpace(s.cfg.SystemPrompt) + codexToolConfinementInstruction
+		devInstructions := strings.TrimSpace(s.cfg.SystemPrompt) + codexToolConfinementInstruction + nativeReadInstruction(s.cfg.Investigate)
 		threadCfg := map[string]interface{}{
 			"mcp_servers": map[string]interface{}{
 				"orca": map[string]interface{}{
@@ -625,7 +637,9 @@ func (s *AgentSession) runCodexTurnLocked(
 		if cliModel != "" {
 			threadOpts = append(threadOpts, codex.WithModel(cliModel))
 		}
-		if wd != "" {
+		if nativeWD := strings.TrimSpace(s.cfg.NativeReadDir); nativeWD != "" {
+			threadOpts = append(threadOpts, codex.WithWorkDir(nativeWD))
+		} else if wd != "" {
 			threadOpts = append(threadOpts, codex.WithWorkDir(wd))
 		}
 
@@ -682,6 +696,14 @@ func (s *AgentSession) runCodexTurnLocked(
 	}, nil
 }
 
+func nativeReadInstruction(cfg InvestigateConfig) string {
+	roots := cfg.ReadRoots()
+	if len(roots) == 0 {
+		return ""
+	}
+	return "\n\nNative read scope: " + strings.Join(roots, ", ") + ". Inspect the adopted run's OBJECTIVE.md, PROGRESS.md, EVENTS, reports and repository files directly when needed."
+}
+
 func (s *AgentSession) stopLocked() error {
 	var errs []error
 	if s.claudeSess != nil {
@@ -716,8 +738,7 @@ func (s *AgentSession) Close() error {
 	return err
 }
 
-// AgentSessionMap manages one long-lived AgentSession per runID for a role
-// (Dispatcher or Planner).
+// AgentSessionMap manages one long-lived AgentSession per runID for a role.
 type AgentSessionMap struct {
 	sessions map[string]*AgentSession
 	mu       sync.Mutex

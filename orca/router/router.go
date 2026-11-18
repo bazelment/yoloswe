@@ -71,6 +71,19 @@ func IsPlannerChatQuestion(text string) bool {
 	return false
 }
 
+// IsConciergeOverride identifies requests whose destination is explicit in the
+// owner's words. In particular, "answer here" must never be handed to a
+// parked planner, and retrospectives are front-desk conversations.
+func IsConciergeOverride(text string) bool {
+	l := strings.ToLower(strings.TrimSpace(text))
+	for _, marker := range []string{"answer here", "retro", "report", "status"} {
+		if strings.Contains(l, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // routingRubric is shared by both model backends.
 const routingRubric = "Choose which model handles the owner message. concierge: " + conciergeCriterion + " planner: " + plannerCriterion + " dispatcher: " + dispatcherCriterion
 const marginCut = .15
@@ -205,6 +218,15 @@ type selectedRouter struct {
 }
 
 func (r selectedRouter) Route(ctx context.Context, text string) (Decision, error) {
+	if IsConciergeOverride(text) {
+		d := Decision{Handler: Concierge, Confidence: 1, Backend: "explicit-concierge"}
+		if r.logger != nil {
+			if err := r.logger.LogRouting(ctx, text, d); err != nil {
+				return d, err
+			}
+		}
+		return d, nil
+	}
 	var d Decision
 	var err error
 	if r.primary != nil {
