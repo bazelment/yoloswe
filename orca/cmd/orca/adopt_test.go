@@ -2451,7 +2451,7 @@ func TestShadowAdoptOutputFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Shadow || cfg.AdoptOut != "shadow-out" || cfg.ShadowFor != time.Minute {
+	if !cfg.Shadow || cfg.AdoptOut != "shadow-out" || cfg.ShadowFor != time.Minute || cfg.AgentBackend != model.AgentBackendCLI || cfg.MaxCostPerHourUSD != 0 {
 		t.Fatalf("unexpected shadow/output flags: shadow=%t out=%q for=%s", cfg.Shadow, cfg.AdoptOut, cfg.ShadowFor)
 	}
 }

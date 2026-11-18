@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -409,6 +410,10 @@ func ObjectiveIsDone(md string) bool {
 // HourlyRunCostUSD computes the spend in USD for runID over the trailing hour
 // ending at now, deduplicating costs recorded on both Decisions and Turns.
 func HourlyRunCostUSD(ctx context.Context, st Store, runID string, now time.Time) (float64, error) {
+	return hourlyRunCostUSD(ctx, st, runID, now, nil)
+}
+
+func hourlyRunCostUSD(ctx context.Context, st Store, runID string, now time.Time, subscriptionActors []string) (float64, error) {
 	if st == nil || strings.TrimSpace(runID) == "" {
 		return 0, nil
 	}
@@ -427,6 +432,9 @@ func HourlyRunCostUSD(ctx context.Context, st Store, runID string, now time.Time
 	var unlinkedDecCost float64
 	for i := range decs {
 		d := &decs[i]
+		if slices.Contains(subscriptionActors, d.Actor) {
+			continue
+		}
 		if !d.CreatedAt.IsZero() && d.CreatedAt.Before(windowStart) {
 			continue
 		}
@@ -453,6 +461,9 @@ func HourlyRunCostUSD(ctx context.Context, st Store, runID string, now time.Time
 	}
 	var linkedTurnExtra, unlinkedTurnCost float64
 	for i := range threads {
+		if slices.Contains(subscriptionActors, string(threads[i].Role)) {
+			continue
+		}
 		if !threads[i].UpdatedAt.IsZero() && threads[i].UpdatedAt.Before(windowStart) {
 			continue
 		}
@@ -498,8 +509,9 @@ func HourlyRunCostUSD(ctx context.Context, st Store, runID string, now time.Time
 // hourly spend limit (from RunSettings.MaxCostPerHourUSD or fallbackLimit).
 // When reached, it pauses the run (RunSettings.Paused = true), records an
 // owner notification directive and vetted cost.guard decision once per breach,
-// and returns (true, spent, limit, message, nil).
-func EnforceCostGuard(ctx context.Context, st Store, runID string, now time.Time, fallbackLimit float64) (bool, float64, float64, string, error) {
+// and returns (true, spent, limit, message, nil). CLI subscription actors are
+// excluded from enforcement; HourlyRunCostUSD still reports their estimates.
+func EnforceCostGuard(ctx context.Context, st Store, runID string, now time.Time, fallbackLimit float64, subscriptionActors ...string) (bool, float64, float64, string, error) {
 	if st == nil || strings.TrimSpace(runID) == "" {
 		return false, 0, 0, "", nil
 	}
@@ -522,7 +534,7 @@ func EnforceCostGuard(ctx context.Context, st Store, runID string, now time.Time
 	if limit <= 0 {
 		return false, 0, 0, "", nil
 	}
-	spent, err := HourlyRunCostUSD(ctx, st, runID, now)
+	spent, err := hourlyRunCostUSD(ctx, st, runID, now, subscriptionActors)
 	if err != nil {
 		return false, 0, limit, "", err
 	}

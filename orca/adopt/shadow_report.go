@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
@@ -54,17 +55,19 @@ func WriteShadowReports(ctx context.Context, outDir, runDir, runID string, st st
 	if err != nil {
 		return fmt.Errorf("list shadow decisions: %w", err)
 	}
-	var spend float64
+	usage, err := shadowUsage(ctx, st, runID, decs)
+	if err != nil {
+		return err
+	}
 	var judgments []store.Decision
 	for i := range decs {
-		spend += decs[i].CostUSD
 		if decs[i].Category == store.DecisionJudgment || decs[i].Tool == "judgment.dispatch" {
 			judgments = append(judgments, decs[i])
 		}
 	}
 	sort.Slice(judgments, func(i, j int) bool { return judgments[i].CreatedAt.Before(judgments[j].CreatedAt) })
 	if err := writeShadowReport(filepath.Join(outDir, "summary.md"), func(b *bufio.Writer) error {
-		fmt.Fprintf(b, "# Shadow adopt summary\n\nRun: `%s`\nWindow: %s – %s\nToken spend: $%.4f\nActions: %d\n\n## Counts by action\n", runID, started.UTC().Format(time.RFC3339), ended.UTC().Format(time.RFC3339), spend, total)
+		fmt.Fprintf(b, "# Shadow adopt summary\n\nRun: `%s`\nWindow: %s – %s\nEstimated tokens: %d input, %d output\nEstimated cost: $%.4f\nActions: %d\n\n## Counts by action\n", runID, started.UTC().Format(time.RFC3339), ended.UTC().Format(time.RFC3339), usage.InputTokens, usage.OutputTokens, usage.CostUSD, total)
 		for _, pair := range sortedCounts(counts) {
 			fmt.Fprintf(b, "- %s: %d\n", pair[0], pair[1])
 		}
@@ -172,49 +175,288 @@ func writeShadowReport(path string, render func(*bufio.Writer) error) (retErr er
 	return b.Flush()
 }
 
+// HostEvent is a timestamped host ledger row. Detail stays textual.
+//
+//nolint:govet // report fields follow the ledger columns.
+type HostEvent struct {
+	At     time.Time `json:"time"`
+	Lane   string    `json:"lane"`
+	Kind   string    `json:"kind"`
+	Target string    `json:"target,omitempty"`
+	Detail string    `json:"detail"`
+}
+
+// HostActionMatch describes mechanical agreement, never correctness.
+//
+//nolint:govet // group the action and its corresponding host row.
+type HostActionMatch struct {
+	Action         Action     `json:"action"`
+	Classification string     `json:"classification"`
+	Host           *HostEvent `json:"host,omitempty"`
+}
+
+type HostDiff struct {
+	Counts          map[string]int    `json:"counts"`
+	Actions         []HostActionMatch `json:"actions"`
+	OrcaMissed      []HostEvent       `json:"orca_missed"`
+	EventsAvailable bool              `json:"events_available"`
+}
+
 func writeHostDiff(outDir, runDir, actionPath string, started, ended time.Time) error {
-	return writeShadowReport(filepath.Join(outDir, "host-diff.md"), func(b *bufio.Writer) error {
-		b.WriteString("# Host diff\n\n")
-		b.WriteString("## Orca shadow actions by lane\n")
-		if err := walkShadowActions(actionPath, func(a Action) error {
-			_, err := fmt.Fprintf(b, "- %s `%s` lane=%s\n", a.At.UTC().Format(time.RFC3339), a.Kind, a.Lane)
-			return err
-		}); err != nil {
-			return err
+	events, available, err := readHostEvents(filepath.Join(runDir, "EVENTS"), started.Add(-30*time.Minute), ended.Add(30*time.Minute))
+	if err != nil {
+		return err
+	}
+	report := HostDiff{Counts: map[string]int{"agree": 0, "differs": 0, "host-did-not": 0, "orca-missed": 0}, Actions: []HostActionMatch{}, OrcaMissed: []HostEvent{}, EventsAvailable: available}
+	if err := walkShadowActions(actionPath, func(a Action) error {
+		switch a.Kind {
+		case "exec_read", "http_refused", "read_degraded":
+			return nil
 		}
-		b.WriteString("\n## Host EVENTS rows\n")
-		f, err := os.Open(filepath.Join(runDir, "EVENTS"))
-		if err == nil {
-			defer f.Close()
-			s := bufio.NewScanner(f)
-			rows := 0
-			for s.Scan() {
-				row := s.Text()
-				fields := strings.Fields(row)
-				if len(fields) == 0 {
+		report.Actions = append(report.Actions, HostActionMatch{Action: a, Classification: "host-did-not"})
+		return nil
+	}); err != nil {
+		return err
+	}
+	sort.SliceStable(report.Actions, func(i, j int) bool { return report.Actions[i].Action.At.Before(report.Actions[j].Action.At) })
+	type eventKey struct{ lane, kind string }
+	byKind := make(map[eventKey][]int)
+	for i, e := range events {
+		key := eventKey{e.Lane, e.Kind}
+		byKind[key] = append(byKind[key], i)
+	}
+	for _, indices := range byKind {
+		sort.SliceStable(indices, func(i, j int) bool { return events[indices[i]].At.Before(events[indices[j]].At) })
+	}
+	used := make([]bool, len(events))
+	// Reserve exact matches before pairing differences, so an earlier disagreement
+	// cannot consume a later action's matching host row.
+	for _, classification := range []string{"agree", "differs"} {
+		for i := range report.Actions {
+			match := &report.Actions[i]
+			if match.Host != nil {
+				continue
+			}
+			kind, target := shadowActionIdentity(match.Action)
+			best := -1
+			distance := 31 * time.Minute
+			indices := byKind[eventKey{match.Action.Lane, kind}]
+			earliest, latest := match.Action.At.Add(-30*time.Minute), match.Action.At.Add(30*time.Minute)
+			first := sort.Search(len(indices), func(i int) bool { return !events[indices[i]].At.Before(earliest) })
+			for _, j := range indices[first:] {
+				e := &events[j]
+				if e.At.After(latest) {
+					break
+				}
+				delta := match.Action.At.Sub(e.At)
+				if delta < 0 {
+					delta = -delta
+				}
+				if used[j] {
 					continue
 				}
-				t, parseErr := time.Parse(time.RFC3339Nano, fields[0])
-				if parseErr != nil {
+				same := target != "" && target == e.Target
+				if (classification == "agree") != same {
 					continue
 				}
-				if t.Before(started) || t.After(ended) {
-					continue
+				if delta < distance || (delta == distance && j < best) {
+					best, distance = j, delta
 				}
-				b.WriteString("- " + row + "\n")
-				rows++
 			}
-			if err := s.Err(); err != nil {
-				return fmt.Errorf("read host EVENTS: %w", err)
+			if best >= 0 {
+				used[best] = true
+				match.Host = &events[best]
+				match.Classification = classification
 			}
-			if rows == 0 {
-				b.WriteString("(no host EVENTS rows in shadow window)\n")
+		}
+	}
+	for i := range report.Actions {
+		m := &report.Actions[i]
+		report.Counts[m.Classification]++
+	}
+	for i, e := range events {
+		if !used[i] && !e.At.Before(started) && !e.At.After(ended) {
+			report.OrcaMissed = append(report.OrcaMissed, e)
+			report.Counts["orca-missed"]++
+		}
+	}
+	if err := writeShadowReport(filepath.Join(outDir, "host-diff.json"), func(b *bufio.Writer) error {
+		enc := json.NewEncoder(b)
+		enc.SetIndent("", "  ")
+		return enc.Encode(report)
+	}); err != nil {
+		return err
+	}
+	return writeShadowReport(filepath.Join(outDir, "host-diff.md"), func(b *bufio.Writer) error {
+		b.WriteString("# Host diff\n\nMechanical matching by lane, kind and target within ±30 minutes. Each host row is used at most once. These classifications do not judge correctness.\n\n")
+		if !available {
+			b.WriteString("EVENTS unavailable; host-did-not means no host evidence is available.\n\n")
+		}
+		for _, pair := range sortedCounts(report.Counts) {
+			fmt.Fprintf(b, "- %s: %d\n", pair[0], pair[1])
+		}
+		b.WriteString("\n## Orca actions\n")
+		for i := range report.Actions {
+			m := &report.Actions[i]
+			fmt.Fprintf(b, "- %s `%s` lane=%s **%s**", m.Action.At.UTC().Format(time.RFC3339), m.Action.Kind, m.Action.Lane, m.Classification)
+			if m.Host != nil {
+				fmt.Fprintf(b, " — host %s `%s` target=%s: %s", m.Host.At.UTC().Format(time.RFC3339), m.Host.Kind, m.Host.Target, m.Host.Detail)
 			}
-		} else if !os.IsNotExist(err) {
-			return err
-		} else {
-			b.WriteString("(EVENTS unavailable)\n")
+			b.WriteByte('\n')
+		}
+		b.WriteString("\n## Orca-missed host decisions\n")
+		for _, e := range report.OrcaMissed {
+			fmt.Fprintf(b, "- %s lane=%s `%s` target=%s: %s\n", e.At.UTC().Format(time.RFC3339), e.Lane, e.Kind, e.Target, e.Detail)
 		}
 		return nil
 	})
+}
+
+func shadowActionIdentity(a Action) (string, string) {
+	kind := hostDecisionKind(a.Kind)
+	var args map[string]json.RawMessage
+	_ = json.Unmarshal(a.Arguments, &args)
+	field := func(names ...string) string {
+		for _, name := range names {
+			var value string
+			if raw, ok := args[name]; ok && json.Unmarshal(raw, &value) == nil && value != "" {
+				return value
+			}
+		}
+		return ""
+	}
+	switch kind {
+	case "start_phase":
+		return kind, field("phase", "Phase")
+	case "stop", "steer":
+		target := field("terminal_id", "TerminalID", "target", "Target")
+		if target == "" {
+			target = field("session_id", "SessionID")
+		}
+		return kind, target
+	default:
+		return kind, field("target", "Target", "id", "ID")
+	}
+}
+
+func hostDecisionKind(kind string) string {
+	switch strings.ToLower(kind) {
+	case "spawn", "start_phase", "phase.start", "start", "started", "phase-start", "phase", "step":
+		return "start_phase"
+	case "stop", "stopped", "terminal-stop":
+		return "stop"
+	case "steer", "steered", "steering":
+		return "steer"
+	default:
+		return kind
+	}
+}
+
+func hostEventTarget(kind, detail string) string {
+	for _, field := range strings.Fields(detail) {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ReplaceAll(strings.ToLower(key), "_", "") {
+		case "phase":
+			if kind == "start_phase" {
+				return strings.Trim(value, ",;")
+			}
+		case "terminal", "terminalid", "target":
+			if kind != "start_phase" {
+				return strings.Trim(value, ",;")
+			}
+		}
+	}
+	fields := strings.Fields(detail)
+	if kind == "start_phase" && len(fields) > 0 {
+		if _, next, ok := strings.Cut(detail, "->"); ok {
+			fields = strings.Fields(next)
+		}
+		if len(fields) > 0 {
+			return fields[0]
+		}
+	}
+	// Some ledger writers spell targets as "terminal <id>".
+	if kind == "stop" || kind == "steer" {
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "terminal" {
+				return strings.Trim(fields[i+1], "(),;")
+			}
+		}
+	}
+	return ""
+}
+
+func readHostEvents(path string, started, ended time.Time) ([]HostEvent, bool, error) {
+	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	var events []HostEvent
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.SplitN(scanner.Text(), "\t", 4)
+		if len(fields) < 4 {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339Nano, fields[0])
+		if err != nil || at.Before(started) || at.After(ended) {
+			continue
+		}
+		// Observations are not host decisions. Unrecognized kinds remain visible as
+		// host-only decisions instead of guessing a meaning from their prose.
+		switch fields[2] {
+		case "health-state", "heartbeat", "poll", "report", "completed", "exited":
+			continue
+		}
+		kind := hostDecisionKind(fields[2])
+		events = append(events, HostEvent{At: at, Lane: fields[1], Kind: kind, Target: hostEventTarget(kind, fields[3]), Detail: fields[3]})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, true, fmt.Errorf("read host EVENTS: %w", err)
+	}
+	return events, true, nil
+}
+
+func shadowUsage(ctx context.Context, st store.Store, runID string, decisions []store.Decision) (model.Usage, error) {
+	threads, err := st.Threads().ListThreads(ctx, store.ThreadFilter{RunID: runID})
+	if err != nil {
+		return model.Usage{}, err
+	}
+	byTurn := map[string]model.Usage{}
+	var total model.Usage
+	for i := range decisions {
+		d := &decisions[i]
+		usage := model.Usage{InputTokens: d.InputTokens, OutputTokens: d.OutputTokens, CostUSD: d.CostUSD}
+		if d.TurnID == "" {
+			total = total.Add(usage)
+		} else {
+			byTurn[d.TurnID] = byTurn[d.TurnID].Add(usage)
+		}
+	}
+	for i := range threads {
+		thread := &threads[i]
+		turns, err := st.Threads().ListTurns(ctx, thread.ID)
+		if err != nil {
+			return model.Usage{}, err
+		}
+		for j := range turns {
+			turn := &turns[j]
+			usage := byTurn[turn.ID]
+			usage.InputTokens = max(usage.InputTokens, turn.InputTokens)
+			usage.OutputTokens = max(usage.OutputTokens, turn.OutputTokens)
+			usage.CostUSD = max(usage.CostUSD, turn.CostUSD)
+			byTurn[turn.ID] = usage
+		}
+	}
+	for _, usage := range byTurn {
+		total = total.Add(usage)
+	}
+	return total, nil
 }

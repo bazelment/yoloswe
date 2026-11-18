@@ -133,6 +133,7 @@ func executeShadowAdopt(ctx context.Context, cfg Config, runDir, out string, log
 	ctrls.Mailboxes = adoptedMailboxesWithRecorder(cfg, st, recorder)
 	ctrls.Planner = plannerFn
 	ctrls.MaxCostPerHourUSD = cfg.MaxCostPerHourUSD
+	ctrls.SubscriptionActors = subscriptionActors(effectiveAgentBackend(cfg, client))
 	ctrls.SetMirror(adopt.GitMirror{CacheDir: filepath.Join(out, "mirror")})
 	started := clk.Now().UTC()
 	if err := ctrls.Start(ctx, run); err != nil {
@@ -210,6 +211,7 @@ func newAdoption(ctx context.Context, cfg Config, h hostSwarms, holder string, f
 	ctrls.Mailboxes = adoptedMailboxes(cfg, st)
 	ctrls.Planner = plannerFn
 	ctrls.MaxCostPerHourUSD = cfg.MaxCostPerHourUSD
+	ctrls.SubscriptionActors = subscriptionActors(effectiveAgentBackend(cfg, client))
 	return &adopt.Service{
 		Importer:           h.importer,
 		Labeler:            h.client,

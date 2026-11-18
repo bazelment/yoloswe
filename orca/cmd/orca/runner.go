@@ -357,17 +357,18 @@ func NewRunner(
 	}
 
 	ctrl := controller.New(controller.Config{
-		AnswerQuestion:    r.answerWorkerQuestion,
-		RunID:             cfg.RunID,
-		HolderID:          cfg.HolderID,
-		LeaseTTL:          cfg.LeaseTTL,
-		HeartbeatInterval: cfg.HeartbeatInterval,
-		PollInterval:      cfg.PollInterval,
-		JudgmentDebounce:  cfg.JudgmentDebounce,
-		StallTimeout:      cfg.StallTimeout,
-		StallTimeoutSet:   cfg.HasExplicitStallTimeout(),
-		ConcurrencyCap:    cfg.ConcurrencyCap,
-		MaxCostPerHourUSD: cfg.MaxCostPerHourUSD,
+		AnswerQuestion:     r.answerWorkerQuestion,
+		RunID:              cfg.RunID,
+		HolderID:           cfg.HolderID,
+		LeaseTTL:           cfg.LeaseTTL,
+		HeartbeatInterval:  cfg.HeartbeatInterval,
+		PollInterval:       cfg.PollInterval,
+		JudgmentDebounce:   cfg.JudgmentDebounce,
+		StallTimeout:       cfg.StallTimeout,
+		StallTimeoutSet:    cfg.HasExplicitStallTimeout(),
+		ConcurrencyCap:     cfg.ConcurrencyCap,
+		MaxCostPerHourUSD:  cfg.MaxCostPerHourUSD,
+		SubscriptionActors: subscriptionActors(backend),
 	}, st, drv, clk, controller.JudgeFunc(r.judgeBatch), boxes...)
 
 	r.controller = ctrl

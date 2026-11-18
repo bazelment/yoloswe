@@ -301,7 +301,7 @@ func (c Config) withDefaults() Config {
 			}
 		}
 	}
-	if !c.maxCostPerHourSet && c.MaxCostPerHourUSD <= 0 {
+	if !c.maxCostPerHourSet && c.MaxCostPerHourUSD <= 0 && !c.Shadow {
 		c.MaxCostPerHourUSD = DefaultMaxCostPerHourUSD
 	}
 	c.LogLevel = cmp.Or(strings.ToLower(strings.TrimSpace(c.LogLevel)), "info")
@@ -549,7 +549,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	}
 
 	fs.IntVar(&cfg.ConcurrencyCap, "concurrency-cap", 0, "Maximum concurrent active lanes")
-	fs.Float64Var(&cfg.MaxCostPerHourUSD, "max-cost-per-hour-usd", 0, "Maximum per-run spend in USD per hour before pausing turns (default $5.00/h, 0 = unlimited)")
+	fs.Float64Var(&cfg.MaxCostPerHourUSD, "max-cost-per-hour-usd", 0, "Maximum HTTP-backed role spend in USD per hour before pausing turns (default $5.00/h; shadow defaults to unlimited; 0 = unlimited; CLI subscription estimates are report-only)")
 	fs.Var(&allowedModels, "allowed-models", "Allowed worker models for lane.spawn/lane.retry (comma-separated or repeatable)")
 	fs.Var(&recipes, "recipe-file", "Recipe file path (.json compiled recipe or plain-text NL source; repeatable)")
 	fs.StringVar(&cfg.ReplayPath, "replay", "", "Recorded model replay JSON path for deterministic execution")
@@ -815,6 +815,14 @@ func (c *providerRoutingClient) CreateMessage(ctx context.Context, req model.Req
 func isDefaultRoutingClient(client model.ModelClient) bool {
 	_, ok := client.(*providerRoutingClient)
 	return ok
+}
+
+// subscriptionActors identifies roles executed through the CLI subscription.
+func subscriptionActors(backend model.AgentBackend) []string {
+	if backend == model.AgentBackendCLI {
+		return []string{"dispatcher", "planner", "concierge"}
+	}
+	return nil
 }
 
 func effectiveAgentBackend(cfg Config, client model.ModelClient) model.AgentBackend {

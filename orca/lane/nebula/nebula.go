@@ -1497,13 +1497,27 @@ func (d *Driver) ExecSession(ctx context.Context, sessionID string, command []st
 	d.countSessionCall(sessionID, true)
 	path := fmt.Sprintf("/api/code-sessions/%s/exec", url.PathEscape(sessionID))
 	body := struct {
-		Command []string `json:"command"`
-	}{Command: command}
+		Command   string `json:"command"`
+		TimeoutMs int    `json:"timeoutMs"`
+	}{Command: QuoteExecCommand(command), TimeoutMs: execTimeoutMs}
 	var out ExecResult
 	if err := d.doJSON(ctx, http.MethodPost, path, body, &out); err != nil {
 		return ExecResult{}, err
 	}
 	return out, nil
+}
+
+const execTimeoutMs = 30_000
+
+// QuoteExecCommand renders argv as a shell command without allowing any argument
+// to become shell source. Keeping arguments positional is important for probes:
+// branch names and other untrusted values never enter the script itself.
+func QuoteExecCommand(argv []string) string {
+	quoted := make([]string, len(argv))
+	for i, arg := range argv {
+		quoted[i] = "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
+	}
+	return strings.Join(quoted, " ")
 }
 
 // LaneGitState inspects the lane session's git working tree and unpushed commits.
@@ -1512,7 +1526,8 @@ func (d *Driver) LaneGitState(ctx context.Context, ln lane.Lane) (lane.GitState,
 	return git, err
 }
 
-const gitProbeScript = `set -e
+const gitProbeScript = `export GIT_OPTIONAL_LOCKS=0
+set -e
 base="$1"
 branch="$2"
 ref="origin/$base"
@@ -1581,14 +1596,28 @@ func (d *Driver) LaneSessionHealth(ctx context.Context, ln lane.Lane) (lane.Sess
 }
 
 const healthProbeScript = `df -P . 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print "DISK:" $5}'
-ps -eo args= 2>/dev/null | while IFS= read -r cmd; do
-  printf "PROC:%s\n" "$cmd"
+ps -eo comm= 2>/dev/null | grep -iF -e review_cli -e review-cli -e pr-polish -e bazel -e prepush -e pre-push | while IFS= read -r name; do
+  printf "PROC:%s\n" "$name"
+done
+# Interpreter-launched scripts have comm python/sh; pgrep returns no arguments.
+for name in review_cli review-cli pr-polish prepush pre-push; do
+  if pgrep -f "^[^[:space:]]*(python[0-9.]*|bash|sh)[[:space:]]+([^[:space:]]*/)?$name([.](py|sh))?([[:space:]]|$)" >/dev/null 2>&1; then
+    printf "PROC:%s\n" "$name"
+  fi
 done
 `
 
 // A single command supplies both observations. Cache failures as well as results
 // so unavailable sessions cannot turn the controller tick into an exec storm.
 const laneProbeInterval = time.Minute
+
+const laneProbeScript = "(\n" + gitProbeScript + "\n)\ngit_status=$?\n" + healthProbeScript + "\nexit \"$git_status\"\n"
+
+// IsReadOnlyLaneProbe recognizes only the fixed combined git/health probe.
+// Branches are positional arguments, never interpolated into shell source.
+func IsReadOnlyLaneProbe(command []string) bool {
+	return len(command) == 6 && command[0] == "sh" && command[1] == "-c" && command[2] == laneProbeScript && command[3] == "--"
+}
 
 var errLaneProbePending = errors.New("lane probe unknown until next minute after session, terminal or branch change")
 
@@ -1626,7 +1655,7 @@ func (d *Driver) readLaneProbe(ctx context.Context, ln lane.Lane) (lane.GitState
 		return probe.git, probe.health, probe.err
 	}
 	probe.at, probe.signature = d.clock.Now(), signature
-	script := "(\n" + gitProbeScript + "\n)\ngit_status=$?\n" + healthProbeScript + "\nexit \"$git_status\"\n"
+	script := laneProbeScript
 	result, err := d.ExecSession(ctx, ln.SessionID, []string{"sh", "-c", script, "--", base, branch})
 	if err == nil && result.ExitCode != 0 {
 		err = fmt.Errorf("lane probe exited %d", result.ExitCode)

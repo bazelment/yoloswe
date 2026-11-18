@@ -60,6 +60,55 @@ func TestReportOnlyNoWork404WithoutConfirmedAuthContinues(t *testing.T) {
 	}
 }
 
+func TestExecSessionUsesNebulaExecSchema(t *testing.T) {
+	var seen string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		var command string
+		if err := json.Unmarshal(raw["command"], &command); err != nil {
+			http.Error(w, `{"code":"VALIDATION_ERROR","message":"field \"command\" must be a string"}`, http.StatusBadRequest)
+			return
+		}
+		var timeout int
+		if err := json.Unmarshal(raw["timeoutMs"], &timeout); err != nil || timeout < 1 || timeout > 30000 {
+			http.Error(w, `{"code":"VALIDATION_ERROR","message":"timeoutMs out of bounds"}`, http.StatusBadRequest)
+			return
+		}
+		seen = command
+		_ = json.NewEncoder(w).Encode(nebula.ExecResult{ExitCode: 0})
+	}))
+	defer srv.Close()
+
+	arrayReq, err := http.NewRequest(http.MethodPost, srv.URL+"/api/code-sessions/s/exec", strings.NewReader(`{"command":["sh","-c","true"],"timeoutMs":30000}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	arrayReq.Header.Set("Content-Type", "application/json")
+	arrayResp, err := srv.Client().Do(arrayReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arrayResp.Body.Close()
+	if arrayResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("array command status=%d, want 400", arrayResp.StatusCode)
+	}
+
+	drv, err := nebula.New(nebula.Config{APIURL: srv.URL, Token: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := drv.ExecSession(t.Context(), "s", []string{"sh", "-c", "printf 'x'", "--", "main", "branch with spaces"}); err != nil {
+		t.Fatalf("string command rejected: %v", err)
+	}
+	if seen != `'sh' '-c' 'printf '\''x'\''' '--' 'main' 'branch with spaces'` {
+		t.Fatalf("wire command=%q, want strict POSIX quoting", seen)
+	}
+}
+
 func TestReportOnlyNoWorkTimeoutContinues(t *testing.T) {
 	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		return nil, context.DeadlineExceeded
@@ -333,10 +382,10 @@ func (f *fakeNebulaServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 		if len(parts) == 2 && parts[1] == "exec" && r.Method == http.MethodPost {
 			var req struct {
-				Command []string `json:"command"`
+				Command string `json:"command"`
 			}
 			_ = json.Unmarshal([]byte(body), &req)
-			cmdStr := strings.Join(req.Command, " ")
+			cmdStr := req.Command
 			f.mu.Lock()
 			out := f.execStdout[sessID]
 			if strings.Contains(cmdStr, "DISK:") && strings.Contains(cmdStr, "COMMITS:") {
@@ -1625,7 +1674,7 @@ func TestLaneGitStateAndSessionHealth(t *testing.T) {
 	srv.mu.Lock()
 	srv.sessions["sess-git"] = &nebula.SessionInfo{ID: "sess-git", Status: "ready"}
 	srv.execStdout["sess-git:git"] = "COMMITS:2\nOLDEST_COMMIT:1763180000\nDIRTY:1763179000\torca/controller/controller.go\nDIRTY:1763180500\torca/lane/new.go\n"
-	srv.execStdout["sess-git:health"] = "DISK:94\nPROC:/bin/bash\nPROC:python3 review_cli --pr 419\nPROC:bazel test //orca/...\n"
+	srv.execStdout["sess-git:health"] = "DISK:94\nPROC:review_cli\nPROC:bazel\n"
 	srv.mu.Unlock()
 
 	ln := lane.Lane{
@@ -1645,24 +1694,26 @@ func TestLaneGitStateAndSessionHealth(t *testing.T) {
 	}
 
 	srv.mu.Lock()
-	var gitCmd []string
+	var gitCmd string
 	for _, call := range srv.calls {
 		if call.Method == http.MethodPost && call.Path == "/api/code-sessions/sess-git/exec" {
 			var req struct {
-				Command []string `json:"command"`
+				Command string `json:"command"`
 			}
-			if json.Unmarshal([]byte(call.Body), &req) == nil && len(req.Command) == 6 {
+			if json.Unmarshal([]byte(call.Body), &req) == nil && req.Command != "" {
 				gitCmd = req.Command
 				break
 			}
 		}
 	}
 	srv.mu.Unlock()
-	if len(gitCmd) != 6 || gitCmd[3] != "--" || gitCmd[4] != "main" || gitCmd[5] != "swarm-lane/run-1/lane-git$(touch /tmp/pwn)" {
-		t.Fatalf("LaneGitState exec command = %#v, want positional ['sh','-c',script,'--','main','swarm-lane/run-1/lane-git$(touch /tmp/pwn)']", gitCmd)
+	for _, want := range []string{"'sh' '-c'", "'--' 'main' 'swarm-lane/run-1/lane-git$(touch /tmp/pwn)'"} {
+		if !strings.Contains(gitCmd, want) {
+			t.Fatalf("LaneGitState exec command = %q, missing %q", gitCmd, want)
+		}
 	}
-	if strings.Contains(gitCmd[2], "lane-git") || strings.Contains(gitCmd[2], "origin/origin/") {
-		t.Fatalf("LaneGitState script interpolated branch/base into shell source: %s", gitCmd[2])
+	if strings.Contains(strings.SplitN(gitCmd, "'--'", 2)[0], "lane-git") || strings.Contains(strings.SplitN(gitCmd, "'--'", 2)[0], "origin/origin/") {
+		t.Fatalf("LaneGitState script interpolated branch/base into shell source: %s", gitCmd)
 	}
 
 	health, err := drv.LaneSessionHealth(ctx, ln)
