@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -557,7 +558,7 @@ func shadowReadOnlyCommand(command []string) ([]string, bool) {
 					return nil, false
 				}
 			}
-			if len(parts) >= 2 && parts[len(parts)-2] == ".git" && shadowReportName.MatchString(parts[len(parts)-1]) {
+			if len(parts) >= 2 && slices.Contains(parts[:len(parts)-1], ".git") && shadowReportName.MatchString(parts[len(parts)-1]) {
 				return command, true
 			}
 		}

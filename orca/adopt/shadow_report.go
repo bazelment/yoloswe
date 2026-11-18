@@ -215,6 +215,15 @@ func writeHostDiff(outDir, runDir, actionPath string, started, ended time.Time) 
 		return err
 	}
 	sort.SliceStable(report.Actions, func(i, j int) bool { return report.Actions[i].Action.At.Before(report.Actions[j].Action.At) })
+	type eventKey struct{ lane, kind string }
+	byKind := make(map[eventKey][]int)
+	for i, e := range events {
+		key := eventKey{e.Lane, e.Kind}
+		byKind[key] = append(byKind[key], i)
+	}
+	for _, indices := range byKind {
+		sort.SliceStable(indices, func(i, j int) bool { return events[indices[i]].At.Before(events[indices[j]].At) })
+	}
 	used := make([]bool, len(events))
 	// Reserve exact matches before pairing differences, so an earlier disagreement
 	// cannot consume a later action's matching host row.
@@ -227,22 +236,26 @@ func writeHostDiff(outDir, runDir, actionPath string, started, ended time.Time) 
 			kind, target := shadowActionIdentity(match.Action)
 			best := -1
 			distance := 31 * time.Minute
-			for j, e := range events {
+			indices := byKind[eventKey{match.Action.Lane, kind}]
+			earliest, latest := match.Action.At.Add(-30*time.Minute), match.Action.At.Add(30*time.Minute)
+			first := sort.Search(len(indices), func(i int) bool { return !events[indices[i]].At.Before(earliest) })
+			for _, j := range indices[first:] {
+				e := &events[j]
+				if e.At.After(latest) {
+					break
+				}
 				delta := match.Action.At.Sub(e.At)
 				if delta < 0 {
 					delta = -delta
 				}
-				if used[j] || e.Lane != match.Action.Lane || e.Kind != kind || delta > 30*time.Minute {
+				if used[j] {
 					continue
 				}
-				same := target == e.Target
-				if kind == "start_phase" || kind == "stop" || kind == "steer" {
-					same = same && target != ""
-				}
+				same := target != "" && target == e.Target
 				if (classification == "agree") != same {
 					continue
 				}
-				if delta < distance {
+				if delta < distance || (delta == distance && j < best) {
 					best, distance = j, delta
 				}
 			}

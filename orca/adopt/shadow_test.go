@@ -356,7 +356,7 @@ func TestShadow60LaneExecRate(t *testing.T) {
 	}
 }
 
-func TestShadowTransportRefusesEveryNonGET(t *testing.T) {
+func TestShadowTransportRefusesUnallowlistedNonGET(t *testing.T) {
 	out := t.TempDir()
 	rec, err := NewActionRecorder(out)
 	if err != nil {
@@ -619,6 +619,7 @@ func TestShadowReadOnlyCommandArguments(t *testing.T) {
 	for _, command := range [][]string{
 		{"git", "status", "--porcelain"}, {"git", "rev-parse", "HEAD"}, {"git", "log", "--oneline", "-n", "5"}, {"git", "rev-list", "--count", "origin/main..HEAD"}, {"git", "diff", "--stat", "origin/main"},
 		{"df"}, {"df", "-P", "."}, {"pgrep", "-af", "bazel|review"}, {"cat", "/workspace/project/.git/phase-report.terminal-id.md"},
+		{"cat", "/workspace/project/.git/worktrees/lane/phase-report.terminal-id.md"},
 	} {
 		if _, ok := shadowReadOnlyCommand(command); !ok {
 			t.Errorf("read-only command refused: %q", command)
@@ -642,6 +643,7 @@ func TestHostDiffDoesNotReuseRowsOrGuessMissingTargets(t *testing.T) {
 		{At: at, Lane: "a", Kind: "stop", Arguments: json.RawMessage(`{"terminal_id":"same"}`)},
 		{At: at, Lane: "b", Kind: "steer", Arguments: json.RawMessage(`{"terminal_id":"missing"}`)},
 		{At: at, Lane: "c", Kind: "start_phase", Arguments: json.RawMessage(`{"phase":"swe"}`)},
+		{At: at, Lane: "d", Kind: "fund", Arguments: json.RawMessage(`{}`)},
 	}
 	f, err := os.Create(filepath.Join(out, "actions.jsonl"))
 	if err != nil {
@@ -658,7 +660,8 @@ func TestHostDiffDoesNotReuseRowsOrGuessMissingTargets(t *testing.T) {
 	rows := "2026-11-17T12:00:00Z\ta\tstop\tterminal=same\n" +
 		"2026-11-17T12:00:00Z\tb\tsteer\tno target recorded\n" +
 		"2026-11-17T12:30:00.000000001Z\tc\tstarted\tswe\n" +
-		"2026-11-17T12:00:00Z\tother-lane\tstarted\tswe\n"
+		"2026-11-17T12:00:00Z\tother-lane\tstarted\tswe\n" +
+		"2026-11-17T12:00:00Z\td\tfund\tno target recorded\n"
 	if err := os.WriteFile(filepath.Join(run, "EVENTS"), []byte(rows), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -673,7 +676,7 @@ func TestHostDiffDoesNotReuseRowsOrGuessMissingTargets(t *testing.T) {
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatal(err)
 	}
-	for i, want := range []string{"host-did-not", "agree", "differs", "host-did-not"} {
+	for i, want := range []string{"host-did-not", "agree", "differs", "host-did-not", "differs"} {
 		if result.Actions[i].Classification != want {
 			t.Errorf("action %d=%s, want %s", i, result.Actions[i].Classification, want)
 		}
