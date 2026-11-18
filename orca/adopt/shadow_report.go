@@ -209,6 +209,10 @@ func writeHostDiff(outDir, runDir, actionPath string, started, ended time.Time) 
 	}
 	report := HostDiff{Counts: map[string]int{"agree": 0, "differs": 0, "host-did-not": 0, "orca-missed": 0}, Actions: []HostActionMatch{}, OrcaMissed: []HostEvent{}, EventsAvailable: available}
 	if err := walkShadowActions(actionPath, func(a Action) error {
+		switch a.Kind {
+		case "exec_read", "http_refused", "read_degraded":
+			return nil
+		}
 		report.Actions = append(report.Actions, HostActionMatch{Action: a, Classification: "host-did-not"})
 		return nil
 	}); err != nil {

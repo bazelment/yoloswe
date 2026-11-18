@@ -1599,6 +1599,12 @@ const healthProbeScript = `df -P . 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); pr
 ps -eo comm= 2>/dev/null | grep -iF -e review_cli -e review-cli -e pr-polish -e bazel -e prepush -e pre-push | while IFS= read -r name; do
   printf "PROC:%s\n" "$name"
 done
+# Interpreter-launched scripts have comm python/sh; pgrep returns no arguments.
+for name in review_cli review-cli pr-polish prepush pre-push; do
+  if pgrep -f "^[^[:space:]]*(python[0-9.]*|bash|sh)[[:space:]]+([^[:space:]]*/)?$name([.](py|sh))?([[:space:]]|$)" >/dev/null 2>&1; then
+    printf "PROC:%s\n" "$name"
+  fi
+done
 `
 
 // A single command supplies both observations. Cache failures as well as results

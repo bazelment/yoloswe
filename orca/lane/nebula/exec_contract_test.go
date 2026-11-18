@@ -1,12 +1,17 @@
 package nebula
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bazelment/yoloswe/orca/lane"
 )
@@ -124,4 +129,47 @@ func parseContractShellWords(input string) ([]string, error) {
 		words = append(words, word.String())
 	}
 	return words, nil
+}
+
+func TestHealthProbeSanitizesInterpreterProcesses(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, processes string
+		wantBusy        int
+	}{
+		{"interpreter scripts", "python3 /tmp/review_cli.py --token=synthetic-secret\nbash /tmp/prepush.sh --token=synthetic-secret\n", 2},
+		{"unrelated arguments", "python3 worker.py --note=review_cli\nsh -c echo review_cli\n", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			fixture := filepath.Join(dir, "processes")
+			if err := os.WriteFile(fixture, []byte(tc.processes), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for name, script := range map[string]string{
+				"ps":    "#!/bin/sh\nprintf 'python3\\nbash\\n'\n",
+				"pgrep": "#!/bin/sh\ngrep -E -- \"$2\" \"$PROBE_PROCESS_FIXTURE\" >/dev/null\n",
+			} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "sh", "-c", healthProbeScript)
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "PROBE_PROCESS_FIXTURE="+fixture)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("health probe: %v: %s", err, out)
+			}
+			if strings.Contains(string(out), "synthetic-secret") || strings.Contains(string(out), "python3") || strings.Contains(string(out), "worker.py") {
+				t.Fatalf("health probe leaked arguments: %s", out)
+			}
+			health := parseSessionHealthOutput(string(out))
+			if len(health.BusyProcesses) != tc.wantBusy {
+				t.Fatalf("busy=%v, want %d; output=%s", health.BusyProcesses, tc.wantBusy, out)
+			}
+		})
+	}
 }

@@ -574,6 +574,42 @@ func TestShadowHostDiffClassification(t *testing.T) {
 	}
 }
 
+func TestHostDiffExcludesTransportObservations(t *testing.T) {
+	out, run := t.TempDir(), t.TempDir()
+	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	actionsPath := filepath.Join(out, "actions.jsonl")
+	f, err := os.Create(actionsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []Action{
+		{At: at, Lane: "lane", Kind: "start_phase", Arguments: json.RawMessage(`{"phase":"swe"}`)},
+		{At: at, Lane: "", Kind: "exec_read", Arguments: json.RawMessage(`{"command":"probe"}`)},
+		{At: at, Lane: "lane", Kind: "read_degraded", Arguments: json.RawMessage(`{"kind":"session_health"}`)},
+	} {
+		if err := json.NewEncoder(f).Encode(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHostDiff(out, run, actionsPath, at, at); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(out, "host-diff.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result HostDiff
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Actions) != 1 || result.Actions[0].Action.Kind != "start_phase" {
+		t.Fatalf("actions=%+v, want only decision action", result.Actions)
+	}
+}
+
 func TestShadowTransportRateLimitAndSleepingRead(t *testing.T) {
 	clk := clock.NewFakeClock(time.Time{})
 	rec, err := NewActionRecorder(t.TempDir())
