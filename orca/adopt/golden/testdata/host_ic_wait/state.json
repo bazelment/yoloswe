@@ -1,0 +1,4 @@
+{
+  "config": {"goal": "host hold phrase", "target": "main", "base": "main", "phases": [{"name": "review"}]},
+  "tasks": [{"id": "lane", "phase": "review", "status": "running", "round": 1}]
+}

@@ -176,6 +176,10 @@ type Run struct {
 	// BaseBranch is the configured base branch. Integration evidence is
 	// collected from the target, base, and remote HEAD refs together.
 	BaseBranch string
+	// HistoricalBranches are targets/bases recorded earlier in this run. A
+	// target can be repointed after a squash merge, so those refs remain valid
+	// integration evidence.
+	HistoricalBranches []string
 	// IntegrationError is set when the mirror source or fetch could not be
 	// inspected. Such lanes must be judged, never treated as integrated.
 	IntegrationError string
@@ -474,6 +478,8 @@ type ledgerLane struct {
 	ID             string       `json:"id"`
 	Title          string       `json:"title"`
 	Branch         string       `json:"branch"`
+	Base           string       `json:"base"`
+	Target         string       `json:"target"`
 	Phase          string       `json:"phase"`
 	Status         string       `json:"status"`
 	NebulaSession  string       `json:"nebula_session"`
@@ -568,6 +574,10 @@ func Read(dir string) (Run, error) {
 			}
 			r.Lanes = append(r.Lanes, importLane(dir, &st.Tasks[i]))
 		}
+		r.HistoricalBranches = historicalBranchesFromEvents(dir, r.TargetBranch, r.BaseBranch)
+		for i := range st.Tasks {
+			r.HistoricalBranches = appendBranch(r.HistoricalBranches, st.Tasks[i].Base, st.Tasks[i].Target)
+		}
 		annotateLanes(dir, &r, st.Config.Phases)
 	}
 	if r.Repo == "" && r.RepoID == "" {
@@ -648,6 +658,42 @@ func applyIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) 
 	applyIntegrationEvidenceRefs(ctx, r, mirrorCfg, false)
 }
 
+func appendBranch(branches []string, values ...string) []string {
+	for _, raw := range values {
+		branch := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(raw, "refs/heads/"), "refs/orca/"))
+		if branch == "" || !validBranchName(branch) || slices.Contains(branches, branch) {
+			continue
+		}
+		branches = append(branches, branch)
+	}
+	return branches
+}
+
+func validBranchName(branch string) bool {
+	return branch != "" && !strings.ContainsAny(branch, " \t\r\n") && branch != "target" && branch != "base" && branch != "from" && branch != "to"
+}
+
+func historicalBranchesFromEvents(dir string, current ...string) []string {
+	branches := []string{}
+	branches = appendBranch(branches, current...)
+	data := readText(filepath.Join(dir, "EVENTS"))
+	for _, line := range strings.Split(data, "\n") {
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "target") && !strings.Contains(lower, "base") {
+			continue
+		}
+		for _, token := range strings.FieldsFunc(line, func(r rune) bool {
+			return !(r == '/' || r == '_' || r == '-' || r == '.' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
+		}) {
+			token = strings.TrimPrefix(strings.TrimPrefix(token, "refs/heads/"), "refs/orca/")
+			if token == "main" || strings.Contains(token, "/") || strings.HasPrefix(token, "feat-") || strings.HasPrefix(token, "feature-") {
+				branches = appendBranch(branches, token)
+			}
+		}
+	}
+	return branches
+}
+
 func applyTargetIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) {
 	applyIntegrationEvidenceRefs(ctx, r, mirrorCfg, true)
 }
@@ -687,6 +733,12 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 	if targetOnly {
 		evidenceBranches = []string{r.TargetBranch}
 	}
+	for _, branch := range r.HistoricalBranches {
+		if targetOnly && strings.EqualFold(strings.TrimSpace(branch), strings.TrimSpace(r.BaseBranch)) {
+			continue
+		}
+		evidenceBranches = append(evidenceBranches, branch)
+	}
 	for _, branch := range evidenceBranches {
 		branch = strings.TrimSpace(branch)
 		if branch != "" && !slices.Contains(branches, branch) {
@@ -695,6 +747,19 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 	}
 	refspecs := make([]string, 0, len(branches)+1)
 	fetchedRefs := make([]string, 0, len(branches)+1)
+	// Preserve direct historical refs already present in this run's mirror.
+	// Lane branch refs live under refs/orca/heads and are checked separately;
+	// including them here would let one lane's unmerged head satisfy another.
+	if out, err := gitOutput(gitCtx, mirror, "for-each-ref", "--format=%(refname)", "refs/orca/"); err == nil {
+		for _, ref := range strings.Fields(string(out)) {
+			if ref == "refs/orca/HEAD" || strings.HasPrefix(ref, "refs/orca/heads/") || !strings.HasPrefix(ref, "refs/orca/") {
+				continue
+			}
+			if validBranchName(strings.TrimPrefix(ref, "refs/orca/")) && !slices.Contains(fetchedRefs, ref) {
+				fetchedRefs = append(fetchedRefs, ref)
+			}
+		}
+	}
 	laneRefspecs := []string{}
 	for i := range r.Lanes {
 		ln := r.Lanes[i]
@@ -712,8 +777,15 @@ func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirr
 	}
 	for _, branch := range branches {
 		if !validGitBranch(gitCtx, mirror, branch) {
-			r.IntegrationError = "fetch target " + branch + " failed: invalid branch"
-			return
+			continue
+		}
+		// A historical target may have been deleted after the run moved on.
+		// Probe the remote and fetch only refs that still exist. Current target
+		// and base retain the strict fetch error used by the adoption gate.
+		if branch != strings.TrimSpace(r.TargetBranch) && branch != strings.TrimSpace(r.BaseBranch) {
+			if out, err := exec.CommandContext(gitCtx, "git", "ls-remote", source, "refs/heads/"+branch).Output(); err != nil || strings.TrimSpace(string(out)) == "" {
+				continue
+			}
 		}
 		refspecs = append(refspecs, "+refs/heads/"+branch+":refs/orca/"+branch)
 		fetchedRefs = append(fetchedRefs, "refs/orca/"+branch)
@@ -1090,6 +1162,9 @@ func ledgerHostHold(values ...string) string {
 		value = strings.TrimSpace(value)
 		if value == "" {
 			continue
+		}
+		if hold := decisionHostHold(value); hold != "" {
+			return hold
 		}
 		if i == len(values)-1 && !explicitHostHoldLine(value) {
 			continue
@@ -1856,10 +1931,42 @@ func laneHostHold(ln Lane) string {
 	if strings.TrimSpace(ln.HostHold) != "" {
 		return clip(strings.TrimSpace(ln.HostHold), 240)
 	}
+	if hold := decisionHostHold(ln.LastEvent); hold != "" {
+		return hold
+	}
 	if strings.EqualFold(strings.TrimSpace(ln.Status), "blocked") {
 		return "blocked"
 	}
 	return ""
+}
+
+var decisionHostHoldRE = regexp.MustCompile(`(?i)\b(?:waits?\s+for|waiting\s+on|until\s+(?:the\s+)?[a-z0-9._-]+\s+(?:repl(?:y|ies)|approv(?:e|es|al))|held|\b(?:IC|owner)\s+(?:reply|approval))\b`)
+
+// decisionHostHold recognizes the small set of host-owned wait phrasings
+// emitted in decision rows. It intentionally returns a stable, short reason
+// rather than treating arbitrary prose as a hold.
+func decisionHostHold(event string) string {
+	text := strings.TrimSpace(event)
+	if text == "" || !decisionHostHoldRE.MatchString(text) {
+		return ""
+	}
+	lower := strings.ToLower(text)
+	for _, phrase := range []string{
+		"merge waits for the IC reply",
+		"merge waiting on the IC reply",
+		"waiting on the IC reply",
+		"until the IC replies",
+		"until IC replies",
+		"until the owner replies",
+		"until the owner approves",
+		"owner approval",
+		"IC approval",
+	} {
+		if strings.Contains(lower, strings.ToLower(phrase)) {
+			return phrase
+		}
+	}
+	return clip(text, 240)
 }
 
 func integratedLane(ln Lane) bool {

@@ -107,6 +107,8 @@ type nsLane struct {
 	ID            string                       `json:"id"`
 	Title         string                       `json:"title"`
 	Branch        string                       `json:"branch"`
+	Base          string                       `json:"base"`
+	Target        string                       `json:"target"`
 	Phase         string                       `json:"phase"`
 	Status        string                       `json:"status"`
 	SessionID     string                       `json:"session_id"`
@@ -183,6 +185,10 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 			applyAttnAnswer(dir, &x)
 		}
 		r.Lanes = append(r.Lanes, x)
+	}
+	r.HistoricalBranches = historicalBranchesFromEvents(dir, r.TargetBranch, r.BaseBranch)
+	for i := range st.Tasks {
+		r.HistoricalBranches = appendBranch(r.HistoricalBranches, st.Tasks[i].Base, st.Tasks[i].Target)
 	}
 	annotateLanes(dir, r, st.Config.Phases)
 	return nil

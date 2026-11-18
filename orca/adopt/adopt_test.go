@@ -230,6 +230,31 @@ func TestDryRunIntegrationEvidenceTable(t *testing.T) {
 	}
 }
 
+func TestHistoricalTargetSquashRemainsIntegrationEvidence(t *testing.T) {
+	t.Parallel()
+	root, _, _, laneHead, mergeLaneHead := g52RemoteFixture(t)
+	tc := g52Fixture{name: "retargeted", target: "main", pr: 99, report: "Outcome: done\n"}
+	runDir := g52RunFixture(t, root, tc, laneHead, mergeLaneHead)
+	write(t, filepath.Join(runDir, "state.json"), fmt.Sprintf(`{"config":{"goal":"retargeted","repo":"repo-uuid","target":"main","base":"main","orchestrator_session_id":"fixture","phases":[{"name":"review"}]},"tasks":[{"id":"lane-1","phase":"review","status":"done","pr":99,"pr_head":%q}]}`, laneHead))
+	write(t, filepath.Join(runDir, "EVENTS"), "2026-11-17T00:00:00Z\tlane-1\tdecision\ttarget changed from feat/x to main\n")
+	result, err := (&Service{Mirror: GitMirror{CacheDir: filepath.Join(root, "mirror"), URLTemplate: "file://" + filepath.Join(root, "remote.git")}}).DryRunDir(t.Context(), runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Lanes[0].Move; got != "none" {
+		t.Fatalf("retargeted squash move=%q reason=%q, want none", got, result.Lanes[0].Reason)
+	}
+}
+
+func TestDecisionWaitsForICReplyIsHostHold(t *testing.T) {
+	t.Parallel()
+	ln := Lane{ID: "lane", Phase: "review", Status: "running", Report: "Outcome: done\n", LastEvent: "decision review accepted (Breaks: none, no Verdict line); effect mail to IC, merge waits for the IC reply"}
+	got := previewLaneAt(Run{IntegrateRule: "merge after review"}, ln, time.Now().UTC())
+	if got.Move != "wait" || got.Reason != "host-held: merge waits for the IC reply" {
+		t.Fatalf("decision hold = %+v, want host-held merge wait", got)
+	}
+}
+
 //nolint:govet // compact table keeps each synthetic ledger shape readable.
 type g52Fixture struct {
 	name, event, mode, phase, status, report, repoPath, url, mergeSHA, target string

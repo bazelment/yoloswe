@@ -24,6 +24,8 @@ func TestSanitizeDirDropsSecretsAndPreservesPreview(t *testing.T) {
 	writeSanitizeTest(t, filepath.Join(input, "fake.pem"), "-----BEGIN FAKE PRIVATE KEY-----\n")
 	writeSanitizeTest(t, filepath.Join(input, "lanes.env"), "TOKEN=ghp_FAKE_TOKEN\n")
 	writeSanitizeTest(t, filepath.Join(input, "reports", "secrets", "token.txt"), "sk-FAKE\n")
+	writeSanitizeTest(t, filepath.Join(input, "random.tmp"), "drop me\n")
+	writeSanitizeTest(t, filepath.Join(input, "measurement.swe.prev-1.md"), "drop history\n")
 
 	want, err := (&Service{}).DryRunDir(t.Context(), input)
 	if err != nil {
@@ -31,6 +33,11 @@ func TestSanitizeDirDropsSecretsAndPreservesPreview(t *testing.T) {
 	}
 	if err := SanitizeDir(input, output); err != nil {
 		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(output, "random.tmp"), filepath.Join(output, "measurement.swe.prev-1.md")} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("unknown file survived: %s", path)
+		}
 	}
 	got, err := (&Service{}).DryRunDir(t.Context(), output)
 	if err != nil {
@@ -58,6 +65,19 @@ func TestSanitizeDirDropsSecretsAndPreservesPreview(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSanitizeRefusalPublishesNoOutput(t *testing.T) {
+	input := t.TempDir()
+	output := filepath.Join(t.TempDir(), "corpus")
+	writeSanitizeTest(t, filepath.Join(input, "state.json"), `{"config":{"phases":[{"name":"review"}]},"tasks":[{"id":"lane-ghp_BADTOKEN","phase":"review","status":"done"}]}`)
+	writeSanitizeTest(t, filepath.Join(input, "EVENTS"), "2026-11-17T00:00:00Z\tlane-ghp_BADTOKEN\tdecision\tcompleted\n")
+	if err := SanitizeDir(input, output); err == nil || !strings.Contains(err.Error(), "EVENTS") || !strings.Contains(err.Error(), "github-token") || strings.Contains(err.Error(), "BADTOKEN") {
+		t.Fatalf("refusal = %v, want relative file and pattern class without secret content", err)
+	}
+	if _, err := os.Stat(output); !os.IsNotExist(err) {
+		t.Fatalf("refused sanitize left output: %v", err)
 	}
 }
 

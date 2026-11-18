@@ -13,6 +13,11 @@ import (
 	"strings"
 )
 
+type jsonUnsupportedError struct{ err error }
+
+func (e *jsonUnsupportedError) Error() string { return e.err.Error() }
+func (e *jsonUnsupportedError) Unwrap() error { return e.err }
+
 // LaneDiff is one adoption decision that differs between two binaries.
 type LaneDiff struct {
 	ID      string `json:"id"`
@@ -39,10 +44,16 @@ func DiffBinaries(ctx context.Context, binA, binB, dir string) ([]LaneDiff, erro
 	}
 	a, err := runJSON(ctx, binA, snapshot)
 	if err != nil {
+		if _, ok := err.(*jsonUnsupportedError); ok {
+			return nil, fmt.Errorf("bin-a does not support adopt --dry-run --json; build both from a commit with G60")
+		}
 		return nil, fmt.Errorf("run %s: %w", binA, err)
 	}
 	b, err := runJSON(ctx, binB, snapshot)
 	if err != nil {
+		if _, ok := err.(*jsonUnsupportedError); ok {
+			return nil, fmt.Errorf("bin-b does not support adopt --dry-run --json; build both from a commit with G60")
+		}
 		return nil, fmt.Errorf("run %s: %w", binB, err)
 	}
 	byID := func(rows []DryRunLane) map[string]DryRunLane {
@@ -81,7 +92,11 @@ func runJSON(ctx context.Context, binary, dir string) ([]DryRunLane, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+		message := strings.TrimSpace(stdout.String() + "\n" + stderr.String())
+		if unsupportedJSONHelp(message) {
+			return nil, &jsonUnsupportedError{err: fmt.Errorf("%w: %s", err, message)}
+		}
+		return nil, fmt.Errorf("%w: %s", err, message)
 	}
 	var out []DryRunLane
 	sc := bufio.NewScanner(&stdout)
@@ -96,6 +111,12 @@ func runJSON(ctx context.Context, binary, dir string) ([]DryRunLane, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+func unsupportedJSONHelp(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "usage:") && strings.Contains(lower, "adopt") &&
+		(strings.Contains(lower, "unknown flag") || strings.Contains(lower, "flag provided") || strings.Contains(lower, "invalid option") || !strings.Contains(lower, "--json"))
 }
 
 func copyTree(src, dst string) error {

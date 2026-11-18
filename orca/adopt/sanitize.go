@@ -57,56 +57,209 @@ func SanitizeDir(input, output string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("sanitize: stat output: %w", err)
 	}
-	if err := os.MkdirAll(output, 0o755); err != nil {
-		return fmt.Errorf("sanitize: create output: %w", err)
+	tmp, err := os.MkdirTemp(filepath.Dir(output), "."+filepath.Base(output)+".sanitize-")
+	if err != nil {
+		return fmt.Errorf("sanitize: create temporary output: %w", err)
 	}
-	if err := filepath.WalkDir(input, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		rel, err := filepath.Rel(input, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		if secretPath(rel) {
-			if entry.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		dst := filepath.Join(output, rel)
-		if entry.IsDir() {
-			return os.MkdirAll(dst, 0o755)
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", rel, err)
-		}
-		cleaned := sanitizeFile(filepath.Base(path), rel, data)
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(dst, cleaned, 0o644); err != nil {
-			return fmt.Errorf("write %s: %w", rel, err)
-		}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("sanitize: copy: %w", err)
+	defer os.RemoveAll(tmp)
+	allow, err := sanitizeAllowlist(input)
+	if err != nil {
+		return fmt.Errorf("sanitize: build allowlist: %w", err)
 	}
-	if err := writeTopologyScript(input, output); err != nil {
+	if err := copySanitizedFiles(input, tmp, allow); err != nil {
 		return err
 	}
-	return rejectSecrets(output)
+	if err := rejectSecrets(tmp); err != nil {
+		return err
+	}
+	if info, statErr := os.Stat(output); statErr == nil && info.IsDir() {
+		if removeErr := os.Remove(output); removeErr != nil {
+			return fmt.Errorf("sanitize: replace output: %w", removeErr)
+		}
+	}
+	if err := os.Rename(tmp, output); err != nil {
+		return fmt.Errorf("sanitize: publish output: %w", err)
+	}
+	return nil
 }
 
 // Sanitize is a short alias for callers that do not need the directory suffix.
 func Sanitize(input, output string) error { return SanitizeDir(input, output) }
+
+type sanitizeTask struct {
+	Terminals map[string]map[string]string `json:"terminals"`
+	ID        string                       `json:"id"`
+	Phase     string                       `json:"phase"`
+	SessionID string                       `json:"session_id"`
+}
+
+// sanitizeAllowlist contains only files read by Read and the dry-run preview.
+// In particular, prompts, briefs, history and random host scratch files never
+// enter a corpus snapshot.
+func sanitizeAllowlist(input string) (map[string]bool, error) {
+	allow := map[string]bool{"state.json": true, "EVENTS": true, "OBJECTIVE.md": true, "CONTEXT.md": true, "ESCALATIONS.md": true}
+	data, err := os.ReadFile(filepath.Join(input, "state.json"))
+	if err != nil {
+		return nil, err
+	}
+	var state struct {
+		Tasks  []sanitizeTask `json:"tasks"`
+		Config struct {
+			Orchestrator string `json:"orchestrator_session_id"`
+			Phases       []struct {
+				Name string `json:"name"`
+			} `json:"phases"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, err
+	}
+	lanes := map[string]bool{}
+	phases := map[string]bool{}
+	nebula := state.Config.Orchestrator != ""
+	reportBest := map[string]struct {
+		rel   string
+		round int
+		mtime int64
+	}{}
+	for _, p := range state.Config.Phases {
+		if p.Name != "" {
+			phases[p.Name] = true
+		}
+	}
+	for _, task := range state.Tasks {
+		if task.ID == "" {
+			continue
+		}
+		lanes[task.ID] = true
+		nebula = nebula || task.SessionID != "" || len(task.Terminals) > 0
+		if task.Phase != "" {
+			phases[task.Phase] = true
+		}
+	}
+	for laneID := range lanes {
+		allow[laneID+".hold-advance"] = true
+	}
+	// Walk only the small set of root/report names whose lane and phase are
+	// present in state.json. This also permits all current spawn/attn markers,
+	// while dropping .prev-* and unknown files.
+	err = filepath.WalkDir(input, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			rel, relErr := filepath.Rel(input, path)
+			if relErr == nil && rel != "." && secretPath(rel) {
+				return fs.SkipDir
+			}
+			if filepath.Base(path) == "reports" && path != input {
+				return nil
+			}
+			return nil
+		}
+		rel, relErr := filepath.Rel(input, path)
+		if relErr != nil || secretPath(rel) || entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		base := filepath.Base(rel)
+		if strings.HasPrefix(rel, "reports"+string(filepath.Separator)) {
+			if nebula {
+				if laneID, phase, round, ok := reportLanePhase(base, lanes, phases); ok {
+					info, infoErr := entry.Info()
+					if infoErr != nil {
+						return infoErr
+					}
+					key := laneID + "\x00" + phase
+					candidate := struct {
+						rel   string
+						round int
+						mtime int64
+					}{rel: rel, round: round, mtime: info.ModTime().UnixNano()}
+					best, exists := reportBest[key]
+					if !exists || candidate.round > best.round || (candidate.round == best.round && candidate.mtime > best.mtime) {
+						reportBest[key] = candidate
+					}
+				}
+			}
+			return nil
+		}
+		for laneID := range lanes {
+			for phase := range phases {
+				prefix := laneID + "." + phase
+				if base == prefix+".spawn.json" || strings.HasPrefix(base, prefix+".nebula-attn.handled-") || strings.HasPrefix(base, prefix+".nebula-attn.answered-") {
+					allow[rel] = true
+					return nil
+				}
+				if base == laneID+"."+phase+".md" {
+					allow[rel] = true
+					return nil
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range reportBest {
+		allow[candidate.rel] = true
+	}
+	return allow, nil
+}
+
+func reportLanePhase(base string, lanes, phases map[string]bool) (string, string, int, bool) {
+	if !strings.HasSuffix(base, ".md") || !strings.Contains(base, ".r") {
+		return "", "", 0, false
+	}
+	trimmed := strings.TrimSuffix(base, ".md")
+	for laneID := range lanes {
+		prefix := laneID + "."
+		if !strings.HasPrefix(trimmed, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(trimmed, prefix)
+		for phase := range phases {
+			if strings.HasPrefix(rest, phase+".r") {
+				rawRound := strings.TrimPrefix(rest, phase+".r")
+				rawRound = strings.TrimSuffix(rawRound, ".md")
+				if strings.Contains(rawRound, ".prev-") {
+					return "", "", 0, false
+				}
+				round, err := strconv.Atoi(rawRound)
+				if err == nil {
+					return laneID, phase, round, true
+				}
+			}
+		}
+	}
+	return "", "", 0, false
+}
+
+func copySanitizedFiles(input, output string, allow map[string]bool) error {
+	for rel := range allow {
+		src := filepath.Join(input, rel)
+		info, err := os.Stat(src)
+		if errors.Is(err, os.ErrNotExist) || (err == nil && !info.Mode().IsRegular()) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("sanitize: stat %s: %w", rel, err)
+		}
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return fmt.Errorf("sanitize: read %s: %w", rel, err)
+		}
+		cleaned := sanitizeFile(filepath.Base(src), rel, data)
+		dst := filepath.Join(output, rel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(dst, cleaned, 0o644); err != nil {
+			return fmt.Errorf("sanitize: write %s: %w", rel, err)
+		}
+	}
+	return nil
+}
 
 func secretPath(rel string) bool {
 	parts := strings.Split(filepath.ToSlash(rel), "/")
@@ -311,33 +464,6 @@ func sanitizeEvents(s string) string {
 	return strings.Join(out, "")
 }
 
-func writeTopologyScript(input, output string) error {
-	state, _ := os.ReadFile(filepath.Join(input, "state.json"))
-	var probe struct {
-		Tasks []struct {
-			Branch string `json:"branch"`
-			PR     int    `json:"pr"`
-		} `json:"tasks"`
-	}
-	_ = json.Unmarshal(state, &probe)
-	var lines []string
-	for _, task := range probe.Tasks {
-		branch := strings.TrimSpace(task.Branch)
-		if branch == "" {
-			continue
-		}
-		subject := "synthetic lane"
-		if task.PR > 0 {
-			subject += fmt.Sprintf(" (#%d)", task.PR)
-		}
-		lines = append(lines, fmt.Sprintf("git -C \"$work\" checkout -B %s\n git -C \"$work\" -c user.name=synthetic -c user.email=synthetic@example.invalid commit --allow-empty -m %s >/dev/null\n git -C \"$work\" push -u origin %s >/dev/null", shellQuote(branch), shellQuote(subject), shellQuote(branch)))
-	}
-	script := "#!/bin/sh\nset -eu\n# Generated by orca adopt sanitize; no source tree is copied.\nout=${1:?bare repo path}\nwork=${2:-${out}.work}\ngit init --bare \"$out\" >/dev/null\ngit init \"$work\" >/dev/null\ngit -C \"$work\" remote add origin \"$out\" 2>/dev/null || true\n" + strings.Join(lines, "\n") + "\n"
-	return os.WriteFile(filepath.Join(output, "git-topology.sh"), []byte(script), 0o755)
-}
-
-func shellQuote(s string) string { return strconv.Quote(s) }
-
 func rejectSecrets(root string) error {
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
@@ -348,8 +474,30 @@ func rejectSecrets(root string) error {
 			return readErr
 		}
 		if sanitizeSecretRE.Match(data) {
-			return fmt.Errorf("sanitize: kept file %s still matches a secret pattern", path)
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				rel = filepath.Base(path)
+			}
+			return fmt.Errorf("sanitize: kept file %s still matches %s pattern", filepath.ToSlash(rel), secretPatternClass(data))
 		}
 		return nil
 	})
+}
+
+func secretPatternClass(data []byte) string {
+	text := string(data)
+	switch {
+	case regexp.MustCompile(`(?i)ghp_[A-Za-z0-9_-]+`).MatchString(text):
+		return "github-token"
+	case regexp.MustCompile(`(?i)sk-[A-Za-z0-9_-]+`).MatchString(text):
+		return "api-token"
+	case regexp.MustCompile(`(?i)AIza[A-Za-z0-9_-]+`).MatchString(text):
+		return "google-token"
+	case regexp.MustCompile(`(?i)xox[baprs]-[A-Za-z0-9_-]+`).MatchString(text):
+		return "slack-token"
+	case regexp.MustCompile(`(?i)BEGIN [^-\n]*PRIVATE KEY`).MatchString(text):
+		return "private-key"
+	default:
+		return "secret"
+	}
 }
