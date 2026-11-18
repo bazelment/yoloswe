@@ -339,7 +339,9 @@ func (f *fakeNebulaServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			cmdStr := strings.Join(req.Command, " ")
 			f.mu.Lock()
 			out := f.execStdout[sessID]
-			if strings.Contains(cmdStr, "DISK:") && f.execStdout[sessID+":health"] != "" {
+			if strings.Contains(cmdStr, "DISK:") && strings.Contains(cmdStr, "COMMITS:") {
+				out = f.execStdout[sessID+":git"] + f.execStdout[sessID+":health"]
+			} else if strings.Contains(cmdStr, "DISK:") && f.execStdout[sessID+":health"] != "" {
 				out = f.execStdout[sessID+":health"]
 			} else if strings.Contains(cmdStr, "COMMITS:") && f.execStdout[sessID+":git"] != "" {
 				out = f.execStdout[sessID+":git"]
@@ -2008,5 +2010,79 @@ func TestFindPhaseTerminalAfterDriverRestart(t *testing.T) {
 	found, err = restarted.FindPhaseTerminal(t.Context(), req)
 	if err != nil || found != nil {
 		t.Fatalf("stopped launch found=%+v err=%v", found, err)
+	}
+}
+
+func TestLaneProbeBackoffAndInvalidation(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			var mu sync.Mutex
+			calls := 0
+			fc := clock.NewFakeClock(time.Time{})
+			fc.Set(time.Time{})
+			client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				mu.Lock()
+				calls++
+				mu.Unlock()
+				return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"stdout":"COMMITS:2\nDISK:94\nPROC:bazel test //orca/...\n"}`)), Request: r}, nil
+			})}
+			d, err := nebula.New(nebula.Config{APIURL: "http://synthetic.test", Token: "synthetic", Clock: fc, HTTPClient: client})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ln := lane.Lane{RunID: "r", ID: "lane", SessionID: "s", TerminalID: "t"}
+			var wg sync.WaitGroup
+			for range 20 {
+				wg.Go(func() {
+					git, gitErr := d.LaneGitState(t.Context(), ln)
+					health, healthErr := d.LaneSessionHealth(t.Context(), ln)
+					if status == http.StatusOK {
+						if gitErr != nil || healthErr != nil || git.UnpushedCommits != 2 || health.DiskUsedPercent != 94 {
+							t.Errorf("git=%+v/%v health=%+v/%v", git, gitErr, health, healthErr)
+						}
+					} else if gitErr == nil || healthErr == nil {
+						t.Error("failed probe returned known state")
+					}
+				})
+			}
+			wg.Wait()
+			if calls != 1 {
+				t.Fatalf("concurrent calls=%d, want 1", calls)
+			}
+			stats := d.SessionCallCounts()
+			if len(stats) != 1 || stats[0].Lane != "r/lane" || stats[0].Exec != 1 || stats[0].Wake != 0 {
+				t.Fatalf("stats=%+v", stats)
+			}
+			fc.Advance(time.Minute - time.Nanosecond)
+			_, _ = d.LaneGitState(t.Context(), ln)
+			if calls != 1 {
+				t.Fatalf("early retry: %d calls", calls)
+			}
+			fc.Advance(time.Nanosecond)
+			_, _ = d.LaneSessionHealth(t.Context(), ln)
+			if calls != 2 {
+				t.Fatalf("expired cache: %d calls", calls)
+			}
+			ln.TerminalID = "new-phase"
+			if _, err := d.LaneGitState(t.Context(), ln); err == nil {
+				t.Fatal("new phase returned stale state")
+			}
+			if calls != 2 {
+				t.Fatalf("new phase bypassed rate limit: %d calls", calls)
+			}
+			fc.Advance(time.Minute)
+			_, _ = d.LaneGitState(t.Context(), ln)
+			if calls != 3 {
+				t.Fatalf("new phase not refreshed after interval: %d calls", calls)
+			}
+			if err := d.WakeSession(t.Context(), "s"); status == http.StatusOK && err != nil {
+				t.Fatal(err)
+			}
+			stats = d.SessionCallCounts()
+			if len(stats) != 1 || stats[0].Exec != 1 || stats[0].Wake != 1 {
+				t.Fatalf("stats=%+v", stats)
+			}
+		})
 	}
 }

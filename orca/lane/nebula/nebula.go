@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
@@ -164,6 +165,9 @@ type Driver struct {
 	activeTerminals  map[string]string
 	stoppedTerminals map[string]bool
 	lastResumed      map[string]TerminalEvent
+	probes           map[string]*laneProbe
+	sessionCalls     map[string]SessionCallCount
+	sessionOwners    map[string]string
 	apiURL           string
 	token            string
 	githubToken      string
@@ -190,6 +194,7 @@ func driverLaneKey(runID, laneID string) string {
 func (d *Driver) TrackLane(ln lane.Lane) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.sessionOwners[ln.SessionID] = driverLaneKey(ln.RunID, ln.ID)
 	if ln.ID != "" && ln.TerminalID != "" {
 		if d.activeTerminals == nil {
 			d.activeTerminals = make(map[string]string)
@@ -650,6 +655,9 @@ func New(cfg Config, opts ...Option) (*Driver, error) {
 		activeTerminals:  make(map[string]string),
 		stoppedTerminals: make(map[string]bool),
 		lastResumed:      make(map[string]TerminalEvent),
+		probes:           make(map[string]*laneProbe),
+		sessionCalls:     make(map[string]SessionCallCount),
+		sessionOwners:    make(map[string]string),
 		apiURL:           apiURL,
 		token:            token,
 		githubToken:      strings.TrimSpace(cfg.GitHubToken),
@@ -1043,6 +1051,7 @@ func (d *Driver) settleSession(ctx context.Context, initial SessionInfo) (*Sessi
 
 // WakeSession wakes a sleeping code session.
 func (d *Driver) WakeSession(ctx context.Context, sessionID string) error {
+	d.countSessionCall(sessionID, false)
 	path := fmt.Sprintf("/api/code-sessions/%s/wake", url.PathEscape(sessionID))
 	return d.doJSON(ctx, http.MethodPost, path, struct{}{}, nil)
 }
@@ -1485,6 +1494,7 @@ func (d *Driver) ExecSession(ctx context.Context, sessionID string, command []st
 	if sessionID == "" {
 		return ExecResult{}, fmt.Errorf("%w: session_id is required for ExecSession", store.ErrInvalidArgument)
 	}
+	d.countSessionCall(sessionID, true)
 	path := fmt.Sprintf("/api/code-sessions/%s/exec", url.PathEscape(sessionID))
 	body := struct {
 		Command []string `json:"command"`
@@ -1498,12 +1508,11 @@ func (d *Driver) ExecSession(ctx context.Context, sessionID string, command []st
 
 // LaneGitState inspects the lane session's git working tree and unpushed commits.
 func (d *Driver) LaneGitState(ctx context.Context, ln lane.Lane) (lane.GitState, error) {
-	if strings.TrimSpace(ln.SessionID) == "" {
-		return lane.GitState{}, nil
-	}
-	branch := strings.TrimPrefix(strings.TrimSpace(ln.Branch), "origin/")
-	base := strings.TrimPrefix(cmp.Or(strings.TrimSpace(ln.BaseBranch), d.baseBranch, "main"), "origin/")
-	const script = `set -e
+	git, _, err := d.readLaneProbe(ctx, ln)
+	return git, err
+}
+
+const gitProbeScript = `set -e
 base="$1"
 branch="$2"
 ref="origin/$base"
@@ -1526,16 +1535,6 @@ git status --porcelain 2>/dev/null | while IFS= read -r line; do
   printf "DIRTY:%s\t%s\n" "$mtime" "$file"
 done
 `
-	res, err := d.ExecSession(ctx, ln.SessionID, []string{"sh", "-c", script, "--", base, branch})
-	if err != nil {
-		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-			return lane.GitState{}, nil
-		}
-		return lane.GitState{}, err
-	}
-	return parseGitStateOutput(res.Stdout), nil
-}
 
 func parseGitStateOutput(out string) lane.GitState {
 	var st lane.GitState
@@ -1577,23 +1576,110 @@ func parseGitStateOutput(out string) lane.GitState {
 
 // LaneSessionHealth inspects the lane session's disk usage and active gate/review processes.
 func (d *Driver) LaneSessionHealth(ctx context.Context, ln lane.Lane) (lane.SessionHealth, error) {
-	if strings.TrimSpace(ln.SessionID) == "" {
-		return lane.SessionHealth{}, nil
-	}
-	script := `df -P . 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print "DISK:" $5}'
+	_, health, err := d.readLaneProbe(ctx, ln)
+	return health, err
+}
+
+const healthProbeScript = `df -P . 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print "DISK:" $5}'
 ps -eo args= 2>/dev/null | while IFS= read -r cmd; do
   printf "PROC:%s\n" "$cmd"
 done
 `
-	res, err := d.ExecSession(ctx, ln.SessionID, []string{"sh", "-c", script})
-	if err != nil {
-		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-			return lane.SessionHealth{}, nil
-		}
-		return lane.SessionHealth{}, err
+
+// A single command supplies both observations. Cache failures as well as results
+// so unavailable sessions cannot turn the controller tick into an exec storm.
+const laneProbeInterval = time.Minute
+
+var errLaneProbePending = errors.New("lane probe unknown until next minute after session, terminal or branch change")
+
+type laneProbe struct {
+	err       error
+	at        time.Time
+	signature string
+	git       lane.GitState
+	health    lane.SessionHealth
+	mu        sync.Mutex
+}
+
+func (d *Driver) readLaneProbe(ctx context.Context, ln lane.Lane) (lane.GitState, lane.SessionHealth, error) {
+	if strings.TrimSpace(ln.SessionID) == "" {
+		return lane.GitState{}, lane.SessionHealth{}, nil
 	}
-	return parseSessionHealthOutput(res.Stdout), nil
+	branch := strings.TrimPrefix(strings.TrimSpace(ln.Branch), "origin/")
+	base := strings.TrimPrefix(cmp.Or(strings.TrimSpace(ln.BaseBranch), d.baseBranch, "main"), "origin/")
+	key := driverLaneKey(ln.RunID, ln.ID)
+	signature := ln.SessionID + "\x00" + ln.TerminalID + "\x00" + base + "\x00" + branch
+	d.mu.Lock()
+	probe := d.probes[key]
+	if probe == nil {
+		probe = &laneProbe{}
+		d.probes[key] = probe
+	}
+	d.sessionOwners[ln.SessionID] = key
+	d.mu.Unlock()
+	probe.mu.Lock()
+	defer probe.mu.Unlock()
+	if probe.signature != "" && d.clock.Now().Sub(probe.at) < laneProbeInterval {
+		if probe.signature != signature {
+			return lane.GitState{}, lane.SessionHealth{}, errLaneProbePending
+		}
+		return probe.git, probe.health, probe.err
+	}
+	probe.at, probe.signature = d.clock.Now(), signature
+	script := "(\n" + gitProbeScript + "\n)\ngit_status=$?\n" + healthProbeScript + "\nexit \"$git_status\"\n"
+	result, err := d.ExecSession(ctx, ln.SessionID, []string{"sh", "-c", script, "--", base, branch})
+	if err == nil && result.ExitCode != 0 {
+		err = fmt.Errorf("lane probe exited %d", result.ExitCode)
+	}
+	probe.git, probe.health, probe.err = lane.GitState{}, lane.SessionHealth{}, err
+	if err == nil {
+		probe.git, probe.health = parseGitStateOutput(result.Stdout), parseSessionHealthOutput(result.Stdout)
+	}
+	return probe.git, probe.health, probe.err
+}
+
+// SessionCallCount is the current minute's exec/wake volume for one session.
+// Lane is run/lane when the session has been attached to a lane.
+//
+//nolint:govet // public diagnostics grouped by identity and counters.
+type SessionCallCount struct {
+	SessionID string
+	Lane      string
+	Minute    time.Time
+	Exec      int
+	Wake      int
+}
+
+func (d *Driver) countSessionCall(sessionID string, exec bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	minute := d.clock.Now().UTC().Truncate(time.Minute)
+	count := d.sessionCalls[sessionID]
+	if count.SessionID == "" || count.Minute != minute {
+		count = SessionCallCount{SessionID: sessionID, Minute: minute}
+	}
+	count.Lane = d.sessionOwners[sessionID]
+	if exec {
+		count.Exec++
+	} else {
+		count.Wake++
+	}
+	d.sessionCalls[sessionID] = count
+	slog.Debug("Nebula session calls per minute", "lane", count.Lane, "session", sessionID, "minute", minute, "exec", count.Exec, "wake", count.Wake)
+}
+
+// SessionCallCounts returns current-minute counters, including failed requests.
+func (d *Driver) SessionCallCounts() []SessionCallCount {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var counts []SessionCallCount
+	minute := d.clock.Now().UTC().Truncate(time.Minute)
+	for _, count := range d.sessionCalls {
+		if count.Minute == minute {
+			counts = append(counts, count)
+		}
+	}
+	return counts
 }
 
 func parseSessionHealthOutput(out string) lane.SessionHealth {

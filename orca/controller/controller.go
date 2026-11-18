@@ -242,6 +242,10 @@ type PRProbe func(ctx context.Context, runID, branch string, pr int) (PRStatus, 
 //
 //nolint:govet // config fields are grouped by lifecycle concern.
 type Config struct {
+	// SkipLease disables controller lease acquisition and heartbeat. It is used
+	// by shadow runs, which operate on an isolated recording store and must not
+	// contend with the live run's lease.
+	SkipLease bool
 	// BeforeStep runs immediately before each Run loop step. Returning false
 	// keeps the lease and watches alive while skipping lifecycle work.
 	BeforeStep func(context.Context) (bool, error)
@@ -860,6 +864,9 @@ func (c *Controller) Kill() {
 
 // ReleaseLease explicitly releases the run lease held by this Controller.
 func (c *Controller) ReleaseLease(ctx context.Context) error {
+	if c.cfg.SkipLease {
+		return nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	err := c.store.Runs().ReleaseLease(ctx, c.cfg.RunID, c.cfg.HolderID)
@@ -886,6 +893,9 @@ func (c *Controller) Run(ctx context.Context) error {
 	// Acquire before starting the independent heartbeat. Step also renews the
 	// lease, but a slow provider call must never block heartbeat progress.
 	for {
+		if c.cfg.SkipLease {
+			break
+		}
 		c.mu.Lock()
 		err := c.ensureLease(runCtx)
 		c.mu.Unlock()
@@ -906,7 +916,9 @@ func (c *Controller) Run(ctx context.Context) error {
 	}
 	heartbeatErr := make(chan error, 1)
 	heartbeatDone := make(chan struct{})
-	go c.runHeartbeat(runCtx, heartbeatErr, heartbeatDone)
+	if !c.cfg.SkipLease {
+		go c.runHeartbeat(runCtx, heartbeatErr, heartbeatDone)
+	}
 	defer close(heartbeatDone)
 
 	if err := c.Step(runCtx); err != nil {
@@ -1542,6 +1554,9 @@ func (c *Controller) resolveMailMessageID(ctx context.Context, eventID string) s
 }
 
 func (c *Controller) ensureLease(ctx context.Context) error {
+	if c.cfg.SkipLease {
+		return nil
+	}
 	if c.leaseHeld {
 		_, err := c.store.Runs().HeartbeatLease(ctx, c.cfg.RunID, c.cfg.HolderID, c.cfg.LeaseTTL)
 		if err == nil {

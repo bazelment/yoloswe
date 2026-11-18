@@ -3,8 +3,11 @@ package main
 import (
 	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +41,10 @@ type hostSwarms struct {
 // orchestrators and terminal states, /proc and tmux for live step loops,
 // watch_lanes.sh and swarm_nebula.sh for the host loops, gh for PR state.
 func newHostSwarms(cfg Config, st store.Store, clk clock.Clock) hostSwarms {
+	return newHostSwarmsWithRecorder(cfg, st, clk, nil)
+}
+
+func newHostSwarmsWithRecorder(cfg Config, st store.Store, clk clock.Clock, recorder *adopt.ActionRecorder) hostSwarms {
 	var h hostSwarms
 	h.watcher = adopt.FormatWatcher{
 		SubagentMissing: "watch_lanes.sh not found (install subagent-swarm-nebula or set ORCA_WATCH_LANES)",
@@ -51,7 +58,11 @@ func newHostSwarms(cfg Config, st store.Store, clk clock.Clock) hostSwarms {
 	// installed here; only restarting it on release needs the script.
 	h.watcher.Nebula = adopt.StepLoopWatcher{Script: adopt.FindSwarmScript()}
 	h.importer.Loops = h.watcher
-	client, err := nebula.New(nebula.Config{APIURL: cfg.NebulaAPIURL, Token: cfg.NebulaToken, Events: driverEventStore{st.Events()}, Clock: clk})
+	driverCfg := nebula.Config{APIURL: cfg.NebulaAPIURL, Token: cfg.NebulaToken, Events: driverEventStore{st.Events()}, Clock: clk}
+	if recorder != nil {
+		driverCfg.HTTPClient = adopt.ShadowHTTPClient(nil, recorder)
+	}
+	client, err := nebula.New(driverCfg)
 	if err != nil {
 		h.off = "Nebula API client: " + err.Error() + " (set NEBULA_API_URL and NEBULA_TOKEN)"
 		h.probe.Off = append(h.probe.Off, "lane terminal agent states (no Nebula client)")
@@ -66,6 +77,120 @@ func newHostSwarms(cfg Config, st store.Store, clk clock.Clock) hostSwarms {
 		h.probe.Off = append(h.probe.Off, "PR states (gh not on PATH)")
 	}
 	return h
+}
+
+func executeShadowAdopt(ctx context.Context, cfg Config, runDir, out string, logger *slog.Logger) (retErr error) {
+	if strings.TrimSpace(runDir) == "" {
+		return errors.New("orca adopt --shadow requires --dir <run>")
+	}
+	if strings.TrimSpace(out) == "" {
+		return errors.New("orca adopt --shadow requires --out <dir>")
+	}
+	if err := validateShadowPaths(runDir, out); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(out, "store.db")); err == nil {
+		return fmt.Errorf("shadow output %q already contains store.db; choose a fresh output directory", out)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	clk := clock.NewRealClock()
+	st, err := store.OpenSQLite(filepath.Join(out, "store.db"), clk)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	recorder, err := adopt.NewActionRecorder(out)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := recorder.Close(); retErr == nil && err != nil {
+			retErr = err
+		}
+	}()
+	run, err := adopt.Read(runDir)
+	if err != nil {
+		return err
+	}
+	h := newHostSwarmsWithRecorder(cfg, st, clk, recorder)
+	if h.client == nil {
+		return errors.New("orca adopt --shadow: Nebula client is required (set NEBULA_API_URL and NEBULA_TOKEN)")
+	}
+	client, err := openModelClient(cfg, clk)
+	if err != nil {
+		return err
+	}
+	prProbe := adoptedPRProbe(h, st)
+	judges, plannerFn := adoptedDispatchers(ctx, cfg, h, st, h.client, clk, client, logger, prProbe)
+	ctrls := adopt.NewControllers(ctx, st, h.client, clk, judges)
+	ctrls.Shadow = true
+	ctrls.Recorder = recorder
+	ctrls.PRProbe = prProbe
+	ctrls.Mailboxes = adoptedMailboxesWithRecorder(cfg, st, recorder)
+	ctrls.Planner = plannerFn
+	ctrls.MaxCostPerHourUSD = cfg.MaxCostPerHourUSD
+	ctrls.SetMirror(adopt.GitMirror{CacheDir: filepath.Join(out, "mirror")})
+	started := clk.Now().UTC()
+	if err := ctrls.Start(ctx, run); err != nil {
+		return err
+	}
+	shadowCtx := ctx
+	var cancel context.CancelFunc
+	if cfg.ShadowFor > 0 {
+		shadowCtx, cancel = context.WithTimeout(ctx, cfg.ShadowFor)
+		defer cancel()
+	}
+	<-shadowCtx.Done()
+	_ = ctrls.Stop(context.WithoutCancel(ctx), run)
+	ended := clk.Now().UTC()
+	if err := recorder.Err(); err != nil {
+		return err
+	}
+	return adopt.WriteShadowReports(context.WithoutCancel(ctx), out, runDir, run.ID, st, started, ended)
+}
+
+func validateShadowPaths(runDir, out string) error {
+	runAbs, err := filepath.Abs(runDir)
+	if err != nil {
+		return fmt.Errorf("resolve shadow run directory: %w", err)
+	}
+	outAbs, err := filepath.Abs(out)
+	if err != nil {
+		return fmt.Errorf("resolve shadow output directory: %w", err)
+	}
+	runAbs = resolveShadowPath(runAbs)
+	outAbs = resolveShadowPath(outAbs)
+	inside := func(parent, child string) bool {
+		rel, relErr := filepath.Rel(parent, child)
+		return relErr == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	}
+	if runAbs == outAbs || inside(runAbs, outAbs) || inside(outAbs, runAbs) {
+		return fmt.Errorf("shadow output %q overlaps run directory %q", out, runDir)
+	}
+	return nil
+}
+
+func resolveShadowPath(path string) string {
+	path = filepath.Clean(path)
+	var suffix []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return filepath.Clean(resolved)
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return filepath.Clean(path)
+		}
+		suffix = append(suffix, filepath.Base(path))
+		path = parent
+	}
 }
 
 // newAdoption wires /adopt and /release to the real adapters: the Nebula API
@@ -97,20 +222,28 @@ func newAdoption(ctx context.Context, cfg Config, h hostSwarms, holder string, f
 }
 
 func adoptedMailboxes(cfg Config, st store.Store) func(runID string) []mailbox.Mailbox {
+	return adoptedMailboxesWithRecorder(cfg, st, nil)
+}
+
+func adoptedMailboxesWithRecorder(cfg Config, st store.Store, recorder *adopt.ActionRecorder) func(runID string) []mailbox.Mailbox {
 	baseURL := cmp.Or(cfg.NebulaAPIURL, os.Getenv("NEBULA_API_URL"))
 	token := cmp.Or(cfg.NebulaToken, os.Getenv("NEBULA_TOKEN"))
 	if strings.TrimSpace(baseURL) == "" || strings.TrimSpace(token) == "" {
 		return nil
 	}
 	return func(runID string) []mailbox.Mailbox {
-		box, err := mailboxnebula.New(mailboxnebula.Config{
+		boxCfg := mailboxnebula.Config{
 			OwnerSlackWebhook: os.Getenv("ORCA_OWNER_ASK_SLACK_WEBHOOK"),
 			RunID:             runID,
 			Events:            st.Events(),
 			BaseURL:           baseURL,
 			Token:             token,
 			Host:              true,
-		})
+		}
+		if recorder != nil {
+			boxCfg.Client = adopt.ShadowHTTPClient(nil, recorder)
+		}
+		box, err := mailboxnebula.New(boxCfg)
 		if err != nil {
 			slog.Warn("unable to open adopted run mailbox", "run", runID, "error", err)
 			return nil
