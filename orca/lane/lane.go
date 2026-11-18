@@ -42,6 +42,8 @@ func (s Status) Valid() bool {
 }
 
 // Lane is one unit of work moving through a recipe's phases.
+//
+//nolint:govet // lane fields mirror persisted lifecycle state.
 type Lane struct {
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
@@ -68,6 +70,10 @@ type Lane struct {
 	// adoption. It remains distinct from a controller escalation so an explicit
 	// dispatcher/owner action can still resolve the latter normally.
 	HostHoldReason string `json:"host_hold_reason,omitempty"`
+	// HostHold is a host-owned advance gate (for example .hold-advance).
+	// It remains separate from HostHoldReason so the gate text can still be
+	// presented to the dispatcher without converting a handoff into a block.
+	HostHold bool `json:"host_hold,omitempty"`
 	// AwaitingInputSince records that the active terminal is waiting for a
 	// dispatcher answer. It suppresses quiet-lane replacement and stall
 	// handling while preserving the running lane and terminal.
@@ -262,9 +268,13 @@ func ParsePhaseReport(raw string) (*PhaseReport, error) {
 	rep := &PhaseReport{Raw: raw}
 	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
 	var body []string
+	var hostVerdict string
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if k, v, ok := splitHeader(trimmed); ok && applyReportHeader(rep, k, v) {
+			if strings.EqualFold(k, "verdict") && strings.Contains(strings.ToLower(v), "orchestrator:") {
+				hostVerdict = v
+			}
 			continue
 		}
 		if trimmed != "" {
@@ -272,6 +282,11 @@ func ParsePhaseReport(raw string) (*PhaseReport, error) {
 		}
 	}
 	rep.Summary = strings.Join(body, "\n")
+	if hostVerdict != "" {
+		// Host rulings remain authoritative even when the original review is
+		// quoted after them in the report.
+		rep.Verdict, rep.Outcome = hostVerdict, ""
+	}
 	reconcileVerdictOutcome(rep)
 	if !rep.Outcome.Valid() {
 		return nil, fmt.Errorf("invalid or missing phase report Outcome %q", rep.Outcome)
@@ -571,6 +586,12 @@ type ReportOnlyChecker interface {
 // restart ladder.
 type TerminalStateReader interface {
 	TerminalAgentState(ctx context.Context, terminalID string) (string, error)
+}
+
+// TerminalActivityReader reports worker activity from the terminal lifecycle
+// GET. A zero timestamp is unknown, never evidence of a stall.
+type TerminalActivityReader interface {
+	TerminalLastActivity(ctx context.Context, terminalID string) (time.Time, error)
 }
 
 // ErrStaleTerminal is returned when Steer targets a terminal that has been

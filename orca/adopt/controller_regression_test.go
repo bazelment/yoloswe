@@ -162,12 +162,18 @@ func (e *regressionEnv) control(id, text string) {
 }
 func (e *regressionEnv) lane(id, phase string, status lane.Status) {
 	e.t.Helper()
-	ln := lane.Lane{ID: id, RunID: "regression", RecipeName: "regression", Status: status, Phase: phase, Round: 1, Attempt: 1, PR: 42, PRHead: "head", ApprovalSHA: "head", Checks: "green", LastEventAt: e.clk.Now()}
+	ln := lane.Lane{ID: id, ItemID: id, RunID: "regression", RecipeName: "regression", Status: status, Phase: phase, Round: 1, Attempt: 1, PR: 42, PRHead: "head", ApprovalSHA: "head", Checks: "green", LastEventAt: e.clk.Now()}
 	if id == "X" && status == lane.StatusPlanned {
 		ln.SessionID = "sess-X"
 	}
 	if status == lane.StatusRunning {
 		ln.RecordAttempt(phase, 1, "sess-"+id, "term-"+id)
+	}
+	if status == lane.StatusPlanned {
+		write(e.t, filepath.Join(e.cr.run.Dir, id+".swe.brief"), "Synthetic funded mission")
+		if err := e.st.Backlog().Add(e.ctx, store.BacklogItem{ID: id, RunID: "regression", Title: id, Description: "Synthetic funded mission", Status: store.BacklogOpen}); err != nil {
+			e.t.Fatal(err)
+		}
 	}
 	if err := e.st.Lanes().Upsert(e.ctx, ln); err != nil {
 		e.t.Fatal(err)
@@ -383,8 +389,8 @@ func TestAdoptedRegression(t *testing.T) {
 			}
 			e.clk.Advance(time.Second)
 			e.mustStep()
-			if e.drv.attempts != 3 {
-				t.Errorf("attempts at 3s=%d, want 3", e.drv.attempts)
+			if e.drv.attempts != 2 {
+				t.Errorf("attempts at 3s=%d, want bounded 2", e.drv.attempts)
 			}
 			ln, err := e.st.Lanes().Get(e.ctx, "regression", "X")
 			if err != nil {
@@ -399,7 +405,7 @@ func TestAdoptedRegression(t *testing.T) {
 			if ln.Status != lane.StatusPlanned || stoppedX {
 				t.Errorf("failure blocked/stopped X: status=%s stops=%v", ln.Status, e.drv.Stops)
 			}
-			if e.decisions("phase.start.failure") != 1 || e.judge.BatchCount() != 1 {
+			if e.decisions("phase.start.failure") != 1 || e.decisions("phase.start.attention") != 1 {
 				t.Error("failure was reported more than once")
 			}
 		})
@@ -611,7 +617,7 @@ func TestAdoptedHostContract(t *testing.T) {
 			}
 			tasks := []map[string]any{}
 			add := func(id, phase, status, terminal string) {
-				tasks = append(tasks, map[string]any{"id": id, "title": id, "phase": phase, "status": status, "round": 1, "session_id": "sess-" + id, "terminals": map[string]map[string]string{phase: {"1": terminal}}, "pr": 42, "pr_head": head, "approval_sha": head, "checks": "green"})
+				tasks = append(tasks, map[string]any{"id": id, "title": id, "brief": "Synthetic funded mission", "phase": phase, "status": status, "round": 1, "session_id": "sess-" + id, "terminals": map[string]map[string]string{phase: {"1": terminal}}, "pr": 42, "pr_head": head, "approval_sha": head, "checks": "green"})
 			}
 			switch name[0] {
 			case 'a', 'b', 'c':
@@ -817,6 +823,13 @@ func TestAdoptedHostContract(t *testing.T) {
 					t.Fatal("integrate lost the recorded hold-advance gate after its marker was lifted")
 				}
 			case 'e':
+				if name == "e imported done" {
+					step()
+					if get("lane-1").Status != lane.StatusDone || len(drv.PhaseStarts) != 0 || len(drv.Stops) != 0 {
+						t.Fatal("host done is final")
+					}
+					break
+				}
 				appendEvent("integrate-done", store.EventLaneReport, lane.PhaseReport{Phase: "integrate", Round: 1, Outcome: lane.OutcomeDone, HeadSHA: head, PR: 42})
 				step()
 				ln := get("lane-1")

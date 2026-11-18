@@ -1,0 +1,177 @@
+{
+  "config": {
+    "goal": "adopted decision fixture",
+    "target": "main",
+    "base": "main",
+    "repo": "fixture/repo",
+    "phases": [
+      {
+        "name": "swe"
+      },
+      {
+        "name": "clean"
+      },
+      {
+        "name": "review"
+      },
+      {
+        "name": "integrate"
+      }
+    ],
+    "merge": "squash",
+    "merge_rule": "merge after clean when gates pass"
+  },
+  "tasks": [
+    {
+      "id": "done-override",
+      "title": "done override",
+      "phase": "review",
+      "status": "done",
+      "round": 1,
+      "session_id": "host-done",
+      "terminal_state": "working",
+      "pr": 6683,
+      "pr_state": "merged",
+      "merge_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "id": "held-review",
+      "title": "held review",
+      "phase": "review",
+      "status": "running",
+      "round": 1,
+      "session_id": "held-session",
+      "terminals": {
+        "review": {
+          "1": "held-terminal"
+        }
+      },
+      "waiting_on": "incident commander",
+      "deadline": "2026-11-16T00:00:00Z"
+    },
+    {
+      "id": "parked-draft",
+      "title": "parked draft",
+      "phase": "review",
+      "status": "running",
+      "round": 1,
+      "session_id": "draft-session",
+      "terminals": {
+        "review": {
+          "1": "draft-terminal"
+        }
+      },
+      "pr": 7001,
+      "pr_state": "open",
+      "draft": true
+    },
+    {
+      "id": "planned-no-brief-a",
+      "title": "planned no brief a",
+      "phase": "",
+      "status": "planned",
+      "round": 0
+    },
+    {
+      "id": "planned-no-brief-b",
+      "title": "planned no brief b",
+      "phase": "",
+      "status": "planned",
+      "round": 0,
+      "depends_on": [
+        "held-review"
+      ]
+    },
+    {
+      "id": "review-60m",
+      "title": "slow review",
+      "phase": "review",
+      "status": "running",
+      "round": 1,
+      "session_id": "review-session",
+      "terminals": {
+        "review": {
+          "1": "review-terminal"
+        }
+      },
+      "terminal_state": "unknown"
+    },
+    {
+      "id": "moving",
+      "title": "host moves this lane",
+      "phase": "swe",
+      "status": "running",
+      "round": 1,
+      "session_id": "moving-session",
+      "terminal": "moving-swe",
+      "terminals": {
+        "swe": {
+          "1": "moving-swe"
+        },
+        "review": {
+          "1": "moving-review"
+        },
+        "integrate": {
+          "1": "moving-integrate"
+        }
+      },
+      "terminal_state": "working"
+    },
+    {
+      "id": "clean-done",
+      "title": "clean done",
+      "phase": "clean",
+      "status": "done",
+      "round": 1
+    },
+    {
+      "id": "clean-report",
+      "title": "Clean report follows phase list",
+      "phase": "clean",
+      "status": "running",
+      "round": 1,
+      "session_id": "clean-session",
+      "terminals": {
+        "clean": {
+          "1": "clean-terminal"
+        }
+      },
+      "note": "merge after #7002; required eviction run"
+    },
+    {
+      "id": "parked-pr-hold",
+      "title": "parked PR hold",
+      "phase": "swe",
+      "status": "running",
+      "round": 1,
+      "session_id": "parked-pr-session",
+      "terminals": {
+        "swe": {
+          "1": "parked-pr-terminal"
+        }
+      },
+      "terminal_state": "exited",
+      "pr": 7003,
+      "pr_state": "open"
+    },
+    {
+      "id": "done-expired-wait",
+      "title": "done lane with stale wait",
+      "phase": "review",
+      "status": "done",
+      "round": 1,
+      "waiting_on": "stale host metadata",
+      "deadline": "2026-11-15T00:00:00Z"
+    },
+    {
+      "id": "finish-first-other-pr",
+      "title": "finish first note naming another PR",
+      "phase": "swe",
+      "status": "done",
+      "round": 1,
+      "terminal_state": "exited",
+      "pr": 7005,
+      "pr_state": "open"
+    }
+  ]
+}

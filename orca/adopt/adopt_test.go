@@ -222,7 +222,7 @@ func TestDryRunIntegrationEvidenceTable(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(lanes) != 1 || lanes[0].Status != lane.StatusBlocked || lanes[0].HostHoldReason != "credentials are unavailable" {
+				if len(lanes) != 1 || lanes[0].Status != lane.StatusDone || lanes[0].HostHoldReason != "credentials are unavailable" {
 					t.Fatalf("blocked report imported as %+v; want orchestrator hold with blocker text", lanes)
 				}
 			}
@@ -559,13 +559,13 @@ func TestNebulaSwarmAdoptPreviewFinishedLanesG56(t *testing.T) {
 		{name: "missing lane branch metadata", status: "done", phase: "swe", report: "Outcome: done\n", wantMove: "judge", wantReason: "missing or invalid lane branch"},
 		{name: "measurement hold no branch", status: "done", phase: "swe", branch: "swarm-lane/run/missing/measurement", hold: "measurement lane: never opens a PR; orchestrator advances by hand\n", report: "Outcome: done\n", event: "decision hold-advance: measurement complete", wantMove: "none", wantReason: "finished, no PR"},
 		{name: "empty hold unmerged branch", holdFile: true, status: "done", phase: "swe", branch: "swarm-lane/run/branch/lane", hold: "", report: "Outcome: done\n", event: "decision hold-advance: judgment", wantMove: "judge", wantReason: "unmerged head"},
-		{name: "hold missing report", holdFile: true, status: "done", phase: "swe", branch: "swarm-lane/run/missing/report", hold: "", event: "decision hold-advance: judgment", wantMove: "wait", wantReason: "missing report"},
+		{name: "hold missing report on terminal lane", holdFile: true, status: "done", phase: "swe", branch: "swarm-lane/run/missing/report", hold: "", event: "decision hold-advance: judgment", wantMove: "none", wantReason: "terminal"},
 		{name: "planned not started", status: "planned", phase: "", wantMove: "none", wantReason: "planned, not started; dispatcher decides funding"},
 		{name: "running live terminal", status: "running", phase: "swe", branch: "swarm-lane/run/branch/lane", event: "started swe terminal-live", wantMove: "wait", wantReason: "waiting for terminal terminal-live handback"},
 		{name: "restarted ledger ignores stale spawn", status: "running", phase: "swe", taskExtra: `,"session_id":"restarted-session"`, wantMove: "none", wantReason: "no report or terminal to observe; dispatcher decides recovery"},
 		{name: "current flat report beats historical round", status: "running", phase: "clean", report: "Outcome: needs-input\nAsk: Is the next step funded?\n", historyReport: "Outcome: done\nHEAD: " + baseHead + "\n", wantMove: "judge", wantReason: "lane question:"},
 		{name: "running with no terminal", status: "running", phase: "swe", wantMove: "none", wantReason: "no report or terminal to observe; dispatcher decides recovery"},
-		{name: "host hold still waits", status: "done", phase: "swe", branch: "swarm-lane/run/missing/held", report: "Outcome: done\n", taskExtra: `,"blocked_on":"host deployment"`, wantMove: "wait", wantReason: "host-held: host deployment"},
+		{name: "host hold on terminal lane", status: "done", phase: "swe", branch: "swarm-lane/run/missing/held", report: "Outcome: done\n", taskExtra: `,"blocked_on":"host deployment"`, wantMove: "none", wantReason: "terminal"},
 		{name: "cached branch before deletion", status: "done", phase: "swe", branch: "swarm-lane/run/deleted/lane", report: "Outcome: done\n", wantMove: "judge", wantReason: "unmerged head"},
 		{name: "deleted branch after cached preview", status: "done", phase: "swe", branch: "swarm-lane/run/deleted/lane", report: "Outcome: done\n", wantMove: "none", wantReason: "finished, no PR"},
 		{name: "h ended review needs SWE", status: "running", phase: "review", taskExtra: `,"terminal_state":"ended","terminals":{"review":{"1":"review-ended"}}`, report: "Outcome: needs-swe\nBreaks: unsafe lifecycle transition\nOpen: fix five remaining shapes\n", wantMove: "judge", wantReason: "Breaks: unsafe lifecycle transition", wantText: []string{"Open: fix five remaining shapes"}},
@@ -938,8 +938,8 @@ func TestControllerStateIntegratedLaneWinsHostHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lanes) != 1 || lanes[0].Status != lane.StatusBlocked || lanes[0].HostHoldReason != "held behind deploy" || lanes[0].MergeSHA != "" {
-		t.Fatalf("integrated held lane = %+v, want held and unmerged", lanes)
+	if len(lanes) != 1 || lanes[0].Status != lane.StatusDone || lanes[0].HostHoldReason != "held behind deploy" || lanes[0].MergeSHA != "" {
+		t.Fatalf("integrated held lane = %+v, want terminal despite stale hold", lanes)
 	}
 }
 
@@ -1915,8 +1915,8 @@ func TestReadoptGeneration(t *testing.T) {
 				if len(drv.Stops) != 0 {
 					t.Fatalf("unexpected terminal stops: %+v", drv.Stops)
 				}
-				if scenario == "quiet" && len(drv.Steers) != 1 {
-					t.Fatalf("steers=%d; want 1", len(drv.Steers))
+				if scenario == "quiet" && len(drv.Steers) != 0 {
+					t.Fatalf("steers=%d; want 0 for unknown health", len(drv.Steers))
 				}
 				decs, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: run.ID})
 				if err != nil {

@@ -717,6 +717,7 @@ type TerminalInfo struct {
 	Title           string            `json:"title,omitempty"`
 	Status          string            `json:"status,omitempty"`
 	AgentState      string            `json:"agentState,omitempty"`
+	LastActivityAt  string            `json:"lastActivityAt,omitempty"`
 	AgentSignal     string            `json:"agentSignal,omitempty"`
 	Model           string            `json:"model,omitempty"`
 	ReasoningEffort string            `json:"reasoningEffort,omitempty"`
@@ -1443,6 +1444,14 @@ func (d *Driver) TerminalAgentState(ctx context.Context, terminalID string) (str
 		return "", err
 	}
 	return term.AgentState, nil
+}
+
+func (d *Driver) TerminalLastActivity(ctx context.Context, terminalID string) (time.Time, error) {
+	term, err := d.GetTerminal(ctx, terminalID)
+	if err != nil || term == nil || term.LastActivityAt == "" {
+		return time.Time{}, err
+	}
+	return time.Parse(time.RFC3339Nano, term.LastActivityAt)
 }
 
 // Stop stops a terminal or, when TerminalID is empty, all terminals in the session.

@@ -107,6 +107,10 @@ type Lane struct {
 	// lane notes. It is deliberately textual so the dispatcher can name the
 	// evidence when it asks for a judgment.
 	HostHold string
+	// HostHoldUntil is the deadline attached to a host Hold: comment, when one
+	// was recorded. An expired hold remains a hold; the controller raises one
+	// attention event instead of restarting the lane.
+	HostHoldUntil time.Time
 	// PRDraft and Integrated are host facts. A draft PR is held even when the
 	// report says done; an integrated/merged/closed lane is terminal and must
 	// never be revisited by adopt.
@@ -127,6 +131,8 @@ type Lane struct {
 	// Report is the latest report's Outcome line; LastEvent the lane's newest
 	// EVENTS line; Next what the run files say comes next for the lane.
 	Report, LastEvent, Next     string
+	Note                        string
+	Decisions                   []string
 	reportText                  string
 	holdAdvanceText             string
 	ReportTime, LastTurnStarted time.Time
@@ -194,8 +200,9 @@ type Run struct {
 	// kept separately from the older merge_rule field because adoption verdicts
 	// must report the gate the host actually recorded.
 	MergeGate string
-	NoPR      bool
-	Phases    []string
+
+	NoPR   bool
+	Phases []string
 	// Progress and Escalations are PROGRESS.md and ESCALATIONS.md, clipped.
 	Progress, Escalations string
 	// Unchecked lists what discovery could not check for this run.
@@ -596,10 +603,17 @@ func Read(dir string) (Run, error) {
 	_ = json.Unmarshal(b, &contract)
 	r.IntegrateRule = extractMergeRuleText(contract.Config.MergeRule, r.Objective+"\n"+r.Context)
 	r.MergeGate = strings.TrimSpace(contract.Config.MergeGate)
+	decisionRows := strings.Split(readText(filepath.Join(dir, "EVENTS")), "\n")
+	holdSources := []string{strings.Join(decisionRows, "\n"), readText(filepath.Join(dir, "PROGRESS.md")), readText(filepath.Join(dir, "ESCALATIONS.md")), readText(filepath.Join(dir, "CONTEXT.md")), r.Objective}
 	for i := range r.Lanes {
+		r.Lanes[i].Decisions = hostLaneDecisions(decisionRows, r.Lanes[i].ID, r.Lanes[i].PR)
 		r.Lanes[i].HoldAdvance = fileExists(filepath.Join(dir, r.Lanes[i].ID+".hold-advance"))
 		r.Lanes[i].holdAdvanceText = strings.TrimSpace(readText(filepath.Join(dir, r.Lanes[i].ID+".hold-advance")))
-		r.Lanes[i].HostHold = hostHoldReason(dir, r.Lanes[i].ID, r.Lanes[i].HostHold)
+		r.Lanes[i].HostHold = hostHoldReasonFromSources(dir, r.Lanes[i].ID, r.Lanes[i].PR, r.Lanes[i].HostHold, holdSources)
+		if r.Lanes[i].HostHold == "" && len(r.Lanes[i].Decisions) > 0 {
+			r.Lanes[i].HostHold = decisionHostHold(r.Lanes[i].Decisions[len(r.Lanes[i].Decisions)-1])
+		}
+		r.Lanes[i].HostHoldUntil = hostHoldDeadline(r.Lanes[i].HostHold)
 	}
 	sort.Slice(r.Lanes, func(a, b int) bool { return r.Lanes[a].ID < r.Lanes[b].ID })
 	r.State = RunFinished
@@ -607,6 +621,22 @@ func Read(dir string) (Run, error) {
 		r.State = RunActive
 	}
 	return r, nil
+}
+
+func hostLaneDecisions(rows []string, laneID, pr string) []string {
+	var out []string
+	for i := len(rows) - 1; i >= 0 && len(out) < 3; i-- {
+		parts := strings.SplitN(rows[i], "\t", 4)
+		if len(parts) != 4 || !lineNamesLaneOrPR(rows[i], laneID, pr) || isFinishFirstEvent(rows[i]) {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(parts[2])) {
+		case "decision", "orch-note", "note", "orch-decision":
+			out = append(out, rows[i])
+		}
+	}
+	slices.Reverse(out)
+	return out
 }
 
 func firstLocalRepoPath(runDir string, paths []string) string {
@@ -1122,24 +1152,84 @@ func prNumber(pr string) string {
 // hostHoldReason reads only scrubbed run-local metadata. It is intentionally
 // conservative: a prose line must name the lane and contain an explicit hold,
 // park, or block marker before it can veto a lifecycle action.
-func hostHoldReason(dir, laneID, current string) string {
+func hostHoldReasonFromSources(dir, laneID, pr, current string, sources []string) string {
 	if strings.TrimSpace(current) != "" {
 		return clip(strings.TrimSpace(current), 240)
+	}
+	for _, source := range sources {
+		if hold := hostPRHoldForLane(source, laneID, pr); hold != "" {
+			return hold
+		}
 	}
 	for _, suffix := range []string{".hold", ".park", ".blocked", ".hold-note"} {
 		if text := strings.TrimSpace(readText(filepath.Join(dir, laneID+suffix))); text != "" {
 			return clip(text, 240)
 		}
 	}
-	for _, name := range []string{"ESCALATIONS.md", "PROGRESS.md", "CONTEXT.md", "OBJECTIVE.md"} {
-		for _, line := range strings.Split(readText(filepath.Join(dir, name)), "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed != "" && containsWord(trimmed, laneID) && explicitHostHoldLine(trimmed) {
-				return clip(trimmed, 240)
-			}
+
+	return ""
+}
+
+var hostPRHoldUntilRE = regexp.MustCompile(`(?i)\bhold\b[^\n]*?\buntil\s+([0-9]{4}-[0-9]{2}-[0-9]{2}T[^\s,;]+)`)
+
+func hostPRHold(text, laneID string) string {
+	return hostPRHoldForLane(text, laneID, "")
+}
+
+func hostPRHoldForLane(text, laneID, pr string) string {
+	lines := strings.Split(text, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || !lineNamesLaneOrPR(trimmed, laneID, pr) || isFinishFirstEvent(trimmed) {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		if strings.Contains(lower, "hold released") || strings.Contains(lower, "unblocked") || strings.Contains(lower, "hold: none") || strings.Contains(lower, "hold=none") {
+			return ""
+		}
+		if explicitHostHoldLine(trimmed) {
+			return clip(trimmed, 240)
 		}
 	}
 	return ""
+}
+
+func eventRowKind(row string) string {
+	parts := strings.SplitN(strings.TrimSpace(row), "\t", 4)
+	if len(parts) != 4 {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(parts[2]))
+}
+
+func isFinishFirstEvent(row string) bool {
+	if eventRowKind(row) == "finish-first" {
+		return true
+	}
+	fields := strings.Fields(strings.TrimSpace(row))
+	return (len(fields) >= 2 && strings.EqualFold(fields[1], "finish-first")) ||
+		(len(fields) >= 3 && strings.EqualFold(fields[2], "finish-first"))
+}
+
+func lineNamesLaneOrPR(text, laneID, pr string) bool {
+	if strings.TrimSpace(laneID) == "" && strings.TrimSpace(pr) == "" {
+		return true
+	}
+	if strings.TrimSpace(laneID) != "" && containsWord(text, strings.TrimSpace(laneID)) {
+		return true
+	}
+	return strings.TrimSpace(pr) != "" && containsWord(text, strings.TrimSpace(strings.TrimPrefix(pr, "#")))
+}
+
+func hostHoldDeadline(text string) time.Time {
+	m := hostPRHoldUntilRE.FindStringSubmatch(strings.TrimSpace(text))
+	if len(m) != 2 {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339Nano, strings.TrimRight(m[1], ".")); err == nil {
+		return t.UTC()
+	}
+	return time.Time{}
 }
 
 func explicitHostHoldLine(line string) bool {
@@ -1314,7 +1404,7 @@ func importLane(dir string, l *ledgerLane) Lane {
 	if !validGitSHA(mergeSHA) {
 		mergeSHA = ""
 	}
-	x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: l.Status, Round: l.Round,
+	x := Lane{ID: l.ID, Title: l.Title, Branch: l.Branch, Phase: l.Phase, Status: l.Status, Round: l.Round, Note: l.Note,
 		HostHold: ledgerHostHold(l.BlockedOn, l.HoldNote, l.Hold, l.Park, l.Note), PRDraft: l.PRDraft || l.Draft,
 		PRState: l.PRState, MergeSHA: mergeSHA, Head: firstNonEmpty(l.PRHead, l.Head), Mode: l.Mode, Checks: l.Checks}
 	x.PRDraft = x.PRDraft || isDraftPR(x.PRState)
@@ -1766,28 +1856,58 @@ func previewLaneAt(r Run, ln Lane, now time.Time) (p DryRunLane) {
 		p.Reason = "lane is already integrated, merged, or closed; no lifecycle move"
 		return p
 	}
+	if measurementLane(ln) && reportDone(ln.Report) {
+		p.Reason = "finished, no PR; measurement lane; host never merges"
+		return p
+	}
 	if finishedAnalysisLane(ln) {
 		p.Reason = "analysis lane finished; no PR to integrate"
 		return p
 	}
+	// Terminal status is authoritative for imported waits and holds. Keep
+	// completed lanes available for merge-evidence judgment, but never let
+	// stale host metadata revive one or make it wait for liveness.
+	terminal := terminalStatus(strings.ToLower(strings.TrimSpace(ln.Status)))
+	if terminal && (!strings.EqualFold(strings.TrimSpace(ln.Status), "done") || strings.TrimSpace(ln.WaitingOn) != "" || strings.TrimSpace(ln.HostHold) != "" || ln.PRDraft || (ln.HoldAdvance && previewOutcome(ln.Report) == "")) {
+		p.Reason = "lane is already terminal; no lifecycle move"
+		return p
+	}
+	if strings.EqualFold(strings.TrimSpace(ln.Status), "done") && reportDone(ln.Report) && strings.EqualFold(strings.TrimSpace(ln.Phase), "clean") {
+		for i, phase := range r.Phases {
+			if strings.EqualFold(strings.TrimSpace(phase), "clean") && i+1 < len(r.Phases) && strings.EqualFold(strings.TrimSpace(r.Phases[i+1]), "review") {
+				p.Reason = "clean report is terminal; host phase order retains review; no lifecycle move"
+				return p
+			}
+		}
+	}
+	if hold := laneHostHold(ln); strings.Contains(strings.ToLower(hold), "pr-hold") && !strings.EqualFold(strings.TrimSpace(ln.Status), "done") {
+		p.Move, p.Reason = "wait", "host-held: "+hold
+		return p
+	}
 	report := previewOutcome(ln.Report)
+	if terminal && (report == "" || isFinishFirstEvent(ln.LastEvent)) {
+		p.Reason = "lane is already terminal; no lifecycle move"
+		return p
+	}
 	working := strings.EqualFold(ln.TerminalState, "working") || strings.EqualFold(ln.TerminalState, "busy")
 	questionIsNew := !ln.LastTurnStarted.IsZero() && ln.ReportTime.After(ln.LastTurnStarted)
-	if working && !(report == string(lane.OutcomeNeedsInput) && questionIsNew) {
+	if !terminal && working && !(report == string(lane.OutcomeNeedsInput) && questionIsNew) {
 		p.Move, p.Reason = "wait", "terminal is working; adoption must not complete, release, or stop it"
 		if ln.Terminal != "" {
 			p.Reason += "; waiting for terminal " + ln.Terminal + " handback"
 		}
 		return p
 	}
-	if waitingOn, deadline := ln.expectedHostWait(now); waitingOn != "" {
-		p.Move = "wait"
-		if deadline.IsZero() {
-			p.Reason = "host answered; waiting on " + waitingOn
-		} else {
-			p.Reason = fmt.Sprintf("answered=%t; waiting on %s until %s", ln.AnsweredMarker, waitingOn, deadline.Format(time.RFC3339))
+	if !terminal {
+		if waitingOn, deadline := ln.expectedHostWait(now); strings.TrimSpace(waitingOn) != "" {
+			p.Move = "wait"
+			if deadline.IsZero() {
+				p.Reason = "host answered; waiting on " + waitingOn
+			} else {
+				p.Reason = fmt.Sprintf("answered=%t; waiting on %s until %s", ln.AnsweredMarker, waitingOn, deadline.Format(time.RFC3339))
+			}
+			return p
 		}
-		return p
 	}
 	if report == string(lane.OutcomeNeedsInput) {
 		p.Move, p.Reason = "judge", "lane question: "+quoteLaneQuestion(cmp.Or(ln.ReportQuestion, ln.ReportBlocker, "lane report requires input"))
@@ -1807,16 +1927,11 @@ func previewLaneAt(r Run, ln Lane, now time.Time) (p DryRunLane) {
 	if ln.HoldAdvance {
 		p.Evidence = append(p.Evidence, "hold-advance file present")
 	}
-	// Measurement lanes are deliberately held for the host and never open a
-	// PR. Their branch can contain unmerged commits without creating an
-	// integration judgment; the host advances the lane by hand.
-	if measurementLane(ln) && reportDone(ln.Report) {
-		p.Reason = "finished, no PR; measurement lane; host never merges"
-		return p
-	}
-	if hostHold := laneHostHold(ln); hostHold != "" {
-		p.Move, p.Reason = "wait", "host-held: "+hostHold
-		return p
+	if !terminal {
+		if hostHold := laneHostHold(ln); hostHold != "" {
+			p.Move, p.Reason = "wait", "host-held: "+hostHold
+			return p
+		}
 	}
 	if strings.EqualFold(ln.Status, "blocked") {
 		p.Move, p.Reason = "wait", "host-held: blocked"
@@ -1871,8 +1986,6 @@ func previewLaneAt(r Run, ln Lane, now time.Time) (p DryRunLane) {
 		} else if ln.HoldAdvance || sweOnly(r, ln) {
 			p.Move, p.Gate, p.EvidencePresent = "judge", mergeGate(r, ln), mergeGateEvidence(r, ln)
 			p.Reason = fmt.Sprintf("%s; %s", p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
-		} else if !r.NoPR && (strings.EqualFold(ln.Phase, "review") || strings.EqualFold(ln.Phase, "clean")) && r.IntegrateRule != "" {
-			p.Move, p.Reason = "integrate", "completed report plus the run integrate rule permits the merge path"
 		} else if strings.EqualFold(ln.Status, "done") {
 			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
 		} else {
@@ -1892,7 +2005,7 @@ func previewLaneAt(r Run, ln Lane, now time.Time) (p DryRunLane) {
 
 func (ln Lane) expectedHostWait(now time.Time) (string, time.Time) {
 	waitingOn := strings.TrimSpace(ln.WaitingOn)
-	if waitingOn != "" && ln.WaitDeadline.After(now) {
+	if waitingOn != "" {
 		return waitingOn, ln.WaitDeadline.UTC()
 	}
 	report := previewOutcome(ln.Report)
@@ -1931,8 +2044,19 @@ func laneHostHold(ln Lane) string {
 	if strings.TrimSpace(ln.HostHold) != "" {
 		return clip(strings.TrimSpace(ln.HostHold), 240)
 	}
-	if hold := decisionHostHold(ln.LastEvent); hold != "" {
-		return hold
+	for _, text := range []string{ln.LastEvent, ln.Note} {
+		if hold := decisionHostHold(text); hold != "" {
+			return hold
+		}
+	}
+	if strings.TrimSpace(ln.WaitingOn) != "" {
+		return "waiting on " + strings.TrimSpace(ln.WaitingOn)
+	}
+	if ln.PRDraft {
+		return "PR is draft"
+	}
+	if !finishedAnalysisLane(ln) && strings.EqualFold(previewOutcome(ln.Report), string(lane.OutcomeBlocked)) {
+		return strings.TrimSpace(ln.ReportBlocker)
 	}
 	if strings.EqualFold(strings.TrimSpace(ln.Status), "blocked") {
 		return "blocked"
@@ -1947,6 +2071,12 @@ var decisionHostHoldRE = regexp.MustCompile(`(?i)\b(?:waits?\s+for|waiting\s+on|
 // rather than treating arbitrary prose as a hold.
 func decisionHostHold(event string) string {
 	text := strings.TrimSpace(event)
+	if isFinishFirstEvent(text) {
+		return ""
+	}
+	if explicitHostHoldLine(text) {
+		return clip(text, 240)
+	}
 	if text == "" || !decisionHostHoldRE.MatchString(text) {
 		return ""
 	}

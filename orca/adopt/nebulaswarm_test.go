@@ -1670,7 +1670,7 @@ func TestAdoptedNebulaSwarmSpawnUsesConfigRepo(t *testing.T) {
 	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
 	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"`+wantRepoID+`","orchestrator_session_id":"sess-orch","merge":"none",
 "phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
-"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
+"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","brief":"Synthetic funded mission","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
 	// Keep .repo-slug present so both RepositoryID and Repository slug are set,
 	// proving that an exact repositoryId match short-circuits even when gitUrl
 	// points to an internal mirror with a different slug.
@@ -1740,7 +1740,7 @@ func TestAdoptedSpawnRefusedWhenRepoMissing(t *testing.T) {
 	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
 	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"","orchestrator_session_id":"sess-orch","merge":"none",
 "phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
-"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
+"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","brief":"Synthetic funded mission","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
 	os.Remove(filepath.Join(dir, ".repo-slug"))
 
 	var creates atomic.Int32
@@ -1799,7 +1799,7 @@ func TestAdoptedSpawnReleasesSessionInWrongRepo(t *testing.T) {
 	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
 	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"`+wantRepoID+`","orchestrator_session_id":"sess-orch","merge":"none",
 "phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
-"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
+"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","brief":"Synthetic funded mission","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
 
 	var released atomic.Value
 	var termStarts atomic.Int32
@@ -1959,7 +1959,7 @@ func TestAdoptedBriefCitingObjectiveInlinesItems(t *testing.T) {
 	dir := writeNebulaSwarmRun(t, root, nsRun, "sess-orch", time.Date(2026, 11, 14, 5, 35, 0, 0, time.UTC))
 	write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"trial m1: slim prompts","base":"main","target":"main","repo":"`+wantRepoID+`","orchestrator_session_id":"sess-orch","merge":"none",
 "phases":[{"name":"swe","kind":"claude","model":"opus","effort":"high","prompt":"","chain":[{"kind":"claude","model":"opus","effort":"high"}]}]},
-"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
+"tasks":[{"id":"m2-gaps3","title":"gaps 3","branch":"swarm-lane/`+nsRun+`/m2-gaps3","priority":"p1","status":"planned","brief":"Synthetic funded mission","phase":"swe","round":1,"session_id":"","terminals":{}}]}`)
 	objectiveText := "# 20261114-trial-m1\n\n## m2-gaps3\n- Item A: strip redundant prompt preambles.\n- Item B: verify token count drops below 1200.\n"
 	write(t, filepath.Join(dir, "OBJECTIVE.md"), objectiveText)
 	write(t, filepath.Join(dir, "NOTES.md"), "host-only scratch notes that must not be inlined unless allowlisted\n")
@@ -2182,7 +2182,7 @@ func TestAdoptedSubagentSwarmEnvRepoUsedOnSpawn(t *testing.T) {
 
 	w := newWorld(t)
 	write(t, filepath.Join(w.dir, "env.sh"), "export SNL_REPO_ID=\""+wantRepoID+"\"\nexport SNL_REPO_URL=\"https://github.com/sycamore-labs/nebula.git\"\n")
-	write(t, filepath.Join(w.dir, "state.json"), `{"config":{"goal":"host goal","phases":[{"name":"swe"}]},"tasks":[{"id":"a","title":"A","phase":"swe","status":"planned","round":1,"sessions":{}}]}`)
+	write(t, filepath.Join(w.dir, "state.json"), `{"config":{"goal":"host goal","phases":[{"name":"swe"}]},"tasks":[{"id":"a","title":"A","phase":"swe","status":"planned","brief":"Synthetic funded mission","round":1,"sessions":{}}]}`)
 
 	clk := clock.NewFakeClock(time.Date(2026, 11, 14, 19, 1, 0, 0, time.UTC))
 	st := store.NewMemoryStore(clk)
@@ -2278,16 +2278,16 @@ func TestAdoptedSelfMergeRecipeHasNoControllerMergePhase(t *testing.T) {
 	if _, hasIntegrate := workflow.Phase(recipe.PhaseIntegrate); hasIntegrate {
 		t.Fatalf("self-merge adopted recipe must not have controller merge phase %q: phases=%+v", recipe.PhaseIntegrate, workflow.Phases)
 	}
-	if _, hasReview := workflow.Phase(recipe.PhaseReview); hasReview {
-		t.Fatalf("adopted recipe where a lane merges once pr-polish finishes must not have review phase: phases=%+v", workflow.Phases)
+	if _, hasReview := workflow.Phase(recipe.PhaseReview); !hasReview {
+		t.Fatalf("adopted recipe where a lane merges once pr-polish finishes must retain the declared review phase: phases=%+v", workflow.Phases)
 	}
 	cleanPhase, hasClean := workflow.Phase(recipe.PhaseClean)
-	if !hasClean || !strings.Contains(cleanPhase.BriefTemplate, "/pr-polish-nebula") {
-		t.Fatalf("clean phase = %+v, want /pr-polish-nebula brief", cleanPhase)
+	if !hasClean || !strings.Contains(cleanPhase.BriefTemplate, "/simplify-branch") {
+		t.Fatalf("clean phase = %+v, want /simplify-branch brief", cleanPhase)
 	}
 	mech, _ := workflow.MatchTransitions(recipe.PhaseClean, recipe.OutcomeDone, false, 2)
-	if mech == nil || mech.To != recipe.TargetComplete {
-		t.Fatalf("clean -> done transition = %+v, want To=%q", mech, recipe.TargetComplete)
+	if mech == nil || mech.To != recipe.PhaseReview {
+		t.Fatalf("clean -> done transition = %+v, want To=%q", mech, recipe.PhaseReview)
 	}
 	if len(lanes) != 1 || lanes[0].Phase != recipe.PhaseClean || lanes[0].Round != 2 {
 		t.Fatalf("imported lanes = %+v, want m3-polish in clean r2", lanes)
@@ -2346,17 +2346,16 @@ func TestAdoptedSelfMergeRecipeHasNoControllerMergePhase(t *testing.T) {
 		if _, hasReview := wf3.Phase(recipe.PhaseReview); !hasReview {
 			t.Fatalf("wf3 dropped review phase for %q: %+v", negObj, wf3.Phases)
 		}
-		if _, hasIntegrate := wf3.Phase(recipe.PhaseIntegrate); !hasIntegrate {
-			t.Fatalf("wf3 missing controller integrate phase for %q: %+v", negObj, wf3.Phases)
+		if _, hasIntegrate := wf3.Phase(recipe.PhaseIntegrate); hasIntegrate {
+			t.Fatalf("wf3 invented controller integrate phase for %q: %+v", negObj, wf3.Phases)
 		}
 	}
 
 	// Self-merge rule variants: "Merge mode: self", "Merge: self", "merge_mode=self",
 	// and explicit "Merge rule:" / "## Merge rule" with "without controller".
 	for _, tc := range []struct {
-		name         string
-		objective    string
-		wantNoReview bool
+		name      string
+		objective string
 	}{
 		{
 			name:      "Merge mode: self",
@@ -2371,14 +2370,12 @@ func TestAdoptedSelfMergeRecipeHasNoControllerMergePhase(t *testing.T) {
 			objective: "# 20261114-trial-m1\n\nmerge_mode=self\n",
 		},
 		{
-			name:         "explicit merge rule without controller",
-			objective:    "# 20261114-trial-m1\n\nMerge rule: a lane merges once pr-polish finishes without controller intervention.\n",
-			wantNoReview: true,
+			name:      "explicit merge rule without controller",
+			objective: "# 20261114-trial-m1\n\nMerge rule: a lane merges once pr-polish finishes without controller intervention.\n",
 		},
 		{
-			name:         "merge rule markdown section",
-			objective:    "# 20261114-trial-m1\n\n## Merge rule\nA lane merges once pr-polish finishes.\n",
-			wantNoReview: true,
+			name:      "merge rule markdown section",
+			objective: "# 20261114-trial-m1\n\n## Merge rule\nA lane merges once pr-polish finishes.\n",
 		},
 	} {
 		write(t, filepath.Join(dir, "OBJECTIVE.md"), tc.objective)
@@ -2396,8 +2393,8 @@ func TestAdoptedSelfMergeRecipeHasNoControllerMergePhase(t *testing.T) {
 		if _, hasIntegrate := wfVar.Phase(recipe.PhaseIntegrate); hasIntegrate {
 			t.Fatalf("%s: unexpected integrate phase: %+v", tc.name, wfVar.Phases)
 		}
-		if _, hasReview := wfVar.Phase(recipe.PhaseReview); tc.wantNoReview && hasReview {
-			t.Fatalf("%s: unexpected review phase: %+v", tc.name, wfVar.Phases)
+		if _, hasReview := wfVar.Phase(recipe.PhaseReview); !hasReview {
+			t.Fatalf("%s: missing declared review phase: %+v", tc.name, wfVar.Phases)
 		}
 	}
 }
@@ -3359,7 +3356,7 @@ func TestSubagentSwarmLocalBareRepoResolution(t *testing.T) {
 				"phases": [{"name": "swe", "agent": "agy", "model": "gemini-4-argon-high"}]
 			},
 			"tasks": [
-				{"id": "mem-overhead", "title": "mem overhead", "phase": "swe", "status": "planned", "round": 1, "repo_url": %q, "sessions": {}}
+				{"id": "mem-overhead", "title": "mem overhead", "phase": "swe", "status": "planned", "brief":"Synthetic funded mission", "round": 1, "repo_url": %q, "sessions": {}}
 			]
 		}`, barePath, twoSegPath))
 		const wantRepoID = "11111111-2222-3333-4444-555555555555"
@@ -3425,7 +3422,7 @@ func TestSubagentSwarmLocalBareRepoResolution(t *testing.T) {
 				"phases": [{"name": "swe"}]
 			},
 			"tasks": [
-				{"id": "mem-overhead", "title": "mem overhead", "phase": "swe", "status": "planned", "round": 1, "sessions": {}}
+				{"id": "mem-overhead", "title": "mem overhead", "phase": "swe", "status": "planned", "brief":"Synthetic funded mission", "round": 1, "sessions": {}}
 			]
 		}`, barePath))
 		write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: diskless sandbox\n")
@@ -3477,7 +3474,7 @@ func TestSubagentSwarmLocalBareRepoResolution(t *testing.T) {
 				"phases": [{"name": "swe"}]
 			},
 			"tasks": [
-				{"id": "mem-overhead", "title": "mem overhead", "phase": "swe", "status": "planned", "round": 1, "repo_url": %q, "sessions": {}}
+				{"id": "mem-overhead", "title": "mem overhead", "phase": "swe", "status": "planned", "brief":"Synthetic funded mission", "round": 1, "repo_url": %q, "sessions": {}}
 			]
 		}`, barePath))
 		write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: diskless sandbox\n")
@@ -3512,7 +3509,7 @@ func TestSubagentSwarmLocalBareRepoResolution(t *testing.T) {
 				"phases": [{"name": "swe"}]
 			},
 			"tasks": [
-				{"id": "mem-overhead", "title": "mem overhead", "phase": "swe", "status": "planned", "round": 1, "repo_url": "/host/nebula", "sessions": {}}
+				{"id": "mem-overhead", "title": "mem overhead", "phase": "swe", "status": "planned", "brief":"Synthetic funded mission", "round": 1, "repo_url": "/host/nebula", "sessions": {}}
 			]
 		}`, barePath))
 		write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: diskless sandbox\n")

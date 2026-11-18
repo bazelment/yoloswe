@@ -1,0 +1,62 @@
+[
+  {
+    "id": "clean-done",
+    "move": "none",
+    "reason_class": "none"
+  },
+  {
+    "id": "clean-report",
+    "move": "wait",
+    "reason_class": "wait"
+  },
+  {
+    "id": "done-expired-wait",
+    "move": "none",
+    "reason_class": "none"
+  },
+  {
+    "id": "done-override",
+    "move": "none",
+    "reason_class": "integrated"
+  },
+  {
+    "id": "finish-first-other-pr",
+    "move": "none",
+    "reason_class": "none"
+  },
+  {
+    "id": "held-review",
+    "move": "wait",
+    "reason_class": "wait"
+  },
+  {
+    "id": "moving",
+    "move": "wait",
+    "reason_class": "wait"
+  },
+  {
+    "id": "parked-draft",
+    "move": "wait",
+    "reason_class": "wait"
+  },
+  {
+    "id": "parked-pr-hold",
+    "move": "wait",
+    "reason_class": "wait"
+  },
+  {
+    "id": "planned-no-brief-a",
+    "move": "none",
+    "reason_class": "none"
+  },
+  {
+    "id": "planned-no-brief-b",
+    "move": "none",
+    "reason_class": "none"
+  },
+  {
+    "id": "review-60m",
+    "move": "wait",
+    "reason_class": "wait"
+  }
+]
