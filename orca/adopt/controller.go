@@ -2932,7 +2932,7 @@ func (s *adoptedLaneStore) hostOverlay(ln *lane.Lane) {
 		if ln.HostHoldReason == "" && host.PRDraft {
 			ln.HostHoldReason = "PR is draft"
 		}
-		if !ln.Status.Terminal() {
+		if !ln.Status.Terminal() && s.syncer.HostStatusIsNewer(host.ID, lane.Status(host.Status)) {
 			ln.Status = lane.Status(host.Status)
 		}
 		if !ln.Status.Terminal() && (strings.EqualFold(host.PRState, "merged") || (ln.HostHoldReason == "" && !host.PRDraft && integratedLane(*host))) {
@@ -3170,6 +3170,13 @@ func (s *runLedgerSync) HostLaneIsNewer(ln lane.Lane) bool {
 	defer s.mu.Unlock()
 	prev, ok := s.hostKnown[ln.ID]
 	return !ok || hostLaneDiff(prev, ln)
+}
+
+func (s *runLedgerSync) HostStatusIsNewer(id string, status lane.Status) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev, ok := s.hostKnown[id]
+	return !ok || prev.Status != status
 }
 
 func (s *runLedgerSync) RememberHostLane(ln lane.Lane) {

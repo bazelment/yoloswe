@@ -107,6 +107,18 @@ func TestAdoptedLaneStoreOverlaysSameStatusHostFacts(t *testing.T) {
 	if got.HostHoldReason != "new host hold" {
 		t.Fatalf("HostHoldReason = %q, want same-status host update", got.HostHoldReason)
 	}
+	localBlocked := hostLane
+	localBlocked.Status = lane.StatusBlocked
+	if err := st.Lanes().Upsert(t.Context(), localBlocked); err != nil {
+		t.Fatal(err)
+	}
+	got, err = wrapped.Get(t.Context(), "run", "lane")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != lane.StatusBlocked {
+		t.Fatalf("Status = %q, want unchanged local blocked status", got.Status)
+	}
 }
 
 func TestDryRunNeedsInputUsesHostAnswerAndLaneQuestion(t *testing.T) {
