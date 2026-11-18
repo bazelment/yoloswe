@@ -3949,3 +3949,67 @@ func TestControllerLaunchRecoveryWithoutLiveTerminal(t *testing.T) {
 		})
 	}
 }
+
+func TestTerminalLaneEventsIgnoreHostHolds(t *testing.T) {
+	t.Parallel()
+	for _, status := range []lane.Status{lane.StatusDone, lane.StatusFailed} {
+		for _, tc := range []struct {
+			kind   store.EventKind
+			source string
+		}{
+			{kind: store.EventLaneReport}, {kind: store.EventPhaseExit}, {kind: store.EventCI},
+			{kind: store.EventStall}, {kind: store.EventStall, source: "lane.health"},
+		} {
+			t.Run(string(status)+"/"+string(tc.kind)+"/"+tc.source, func(t *testing.T) {
+				t.Parallel()
+				clk, st, drv, judge := setupTestEnv(t)
+				ctx := t.Context()
+				if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "worker", RunID: "run-1", Status: status, HostHold: true, HostHoldReason: "stale host hold"}); err != nil {
+					t.Fatal(err)
+				}
+				_, err := st.Events().Append(ctx, store.Event{RunID: "run-1", LaneID: "worker", Kind: tc.kind, Source: tc.source})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctrl := controller.New(controller.Config{RunID: "run-1", HostRun: true, JudgmentDebounce: -1}, st, drv, clk, judge)
+				mustStep(t, ctrl)
+				if judge.BatchCount() != 0 {
+					t.Fatalf("terminal event raised %d judgment batches", judge.BatchCount())
+				}
+			})
+		}
+	}
+}
+
+func TestTerminalLaneNamedWaitIsHandledWithoutAttention(t *testing.T) {
+	t.Parallel()
+	clk, st, drv, judge := setupTestEnv(t)
+	ctx := t.Context()
+	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "worker", RunID: "run-1", Status: lane.StatusDone}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := controller.New(controller.Config{RunID: "run-1", JudgmentDebounce: -1}, st, drv, clk, judge)
+	if err := ctrl.Wait(ctx, "stale-host-wait", "worker", clk.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	mustStep(t, ctrl)
+	dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: "run-1", ActiveOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 0 {
+		t.Fatalf("terminal lane retained active waits: %+v", dirs)
+	}
+	events, err := st.Events().List(ctx, store.EventFilter{RunID: "run-1", LaneID: "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if ev.Class == store.EventClassJudgment {
+			t.Errorf("terminal wait raised attention: %+v", ev)
+		}
+	}
+	if judge.BatchCount() != 0 {
+		t.Fatalf("terminal wait raised %d judgment batches", judge.BatchCount())
+	}
+}

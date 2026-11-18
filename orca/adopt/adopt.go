@@ -2040,6 +2040,10 @@ func integrationJudgeReason(r Run, ln Lane) string {
 	return "integration gate: missing merge_sha, merged EVENTS record, and mirror evidence"
 }
 
+func hostLaneTerminal(ln Lane) bool {
+	return terminalStatus(strings.ToLower(strings.TrimSpace(ln.Status))) || strings.EqualFold(strings.TrimSpace(ln.PRState), "merged") || closedLane(ln)
+}
+
 func laneHostHold(ln Lane) string {
 	if strings.TrimSpace(ln.HostHold) != "" {
 		return clip(strings.TrimSpace(ln.HostHold), 240)

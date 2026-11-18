@@ -223,6 +223,26 @@ func TestG62AdoptedFixtureReplay(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("recorded actions mismatch\n got: %v\nwant: %v", got, want)
 	}
+	for _, laneID := range []string{"done-expired-wait", "done-override", "finish-first-other-pr", "clean-done"} {
+		dirs, err := st.Directives().List(ctx, store.DirectiveFilter{RunID: r.ID, ActiveOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, dir := range dirs {
+			if dir.Scope == laneID && strings.HasPrefix(dir.Ref, controller.NamedWaitRefPrefix) {
+				t.Errorf("terminal lane %s imported named wait: %+v", laneID, dir)
+			}
+		}
+		events, err := st.Events().List(ctx, store.EventFilter{RunID: r.ID, LaneID: laneID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ev := range events {
+			if ev.Class == store.EventClassJudgment {
+				t.Errorf("terminal lane %s raised attention: %+v", laneID, ev)
+			}
+		}
+	}
 	t.Logf("Observed: 8 synthetic adopted ticks -> recorded actions %v", got)
 }
 

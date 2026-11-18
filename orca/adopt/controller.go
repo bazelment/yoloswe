@@ -465,7 +465,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	for i := range r.Lanes {
 		imported := &r.Lanes[i]
-		if integratedLane(*imported) || finishedAnalysisLane(*imported) {
+		if hostLaneTerminal(*imported) || integratedLane(*imported) || finishedAnalysisLane(*imported) {
 			continue
 		}
 		waitingOn, until := imported.WaitingOn, imported.WaitDeadline
@@ -1183,7 +1183,7 @@ func (d *Controllers) refreshHostState(ctx context.Context, runID string) error 
 		if until.IsZero() || (!imported.HostHoldUntil.IsZero() && imported.HostHoldUntil.Before(until)) {
 			until = imported.HostHoldUntil
 		}
-		if !until.IsZero() && !d.clock.Now().Before(until) && !lane.Status(imported.Status).Terminal() {
+		if !until.IsZero() && !d.clock.Now().Before(until) && !hostLaneTerminal(*imported) {
 			_, err := d.store.Events().Append(ctx, store.Event{ID: "host-hold-expired:" + imported.ID + ":" + until.Format(time.RFC3339Nano), RunID: runID, LaneID: imported.ID, Kind: store.EventTimer, Class: store.EventClassJudgment, Urgent: true, Source: "host.hold", Summary: "host hold deadline passed; awaiting host release"})
 			if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 				return err

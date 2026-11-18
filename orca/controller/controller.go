@@ -1151,6 +1151,18 @@ func (c *Controller) checkNamedWaits(ctx context.Context) error {
 		if dir.Status != store.DirectiveActive || !strings.HasPrefix(dir.Ref, NamedWaitRefPrefix) || dir.ExpiresAt == nil || c.clock.Now().Before(*dir.ExpiresAt) {
 			continue
 		}
+		if dir.Scope != "" {
+			ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, dir.Scope)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+			if err == nil && ln.Status.Terminal() {
+				if err := c.store.Directives().UpdateStatus(ctx, c.cfg.RunID, dir.ID, store.DirectiveHandled); err != nil {
+					return err
+				}
+				continue
+			}
+		}
 		eventID := "expired-" + dir.ID
 		if strings.HasPrefix(dir.ID, "wait-adopt-") {
 			eventID = c.generationKey(eventID)
@@ -2861,11 +2873,11 @@ func (c *Controller) handleLaneReport(ctx context.Context, ev *store.Event) (sto
 		}
 		return store.EventClassUnclassified, err
 	}
-	if ln.HostHoldReason != "" || ln.HostHold {
-		return store.EventClassJudgment, nil
-	}
 	if ln.Status.Terminal() {
 		return store.EventClassAuto, nil
+	}
+	if ln.HostHoldReason != "" || ln.HostHold {
+		return store.EventClassJudgment, nil
 	}
 
 	rep, err := c.extractReport(ctx, ln, *ev)
@@ -3402,6 +3414,9 @@ func (c *Controller) handlePhaseExit(ctx context.Context, ev *store.Event) (stor
 		}
 		return store.EventClassUnclassified, err
 	}
+	if ln.Status.Terminal() {
+		return store.EventClassAuto, nil
+	}
 	if ln.HostHoldReason != "" || ln.HostHold {
 		return store.EventClassJudgment, nil
 	}
@@ -3630,6 +3645,9 @@ func (c *Controller) handleCI(ctx context.Context, ev *store.Event) (store.Event
 		}
 		return store.EventClassUnclassified, err
 	}
+	if ln.Status.Terminal() {
+		return store.EventClassAuto, nil
+	}
 	if ln.HostHoldReason != "" || ln.HostHold {
 		return store.EventClassJudgment, nil
 	}
@@ -3711,7 +3729,7 @@ func (c *Controller) pendingVerdictForLane(ctx context.Context, ln *lane.Lane) (
 }
 
 func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.EventClass, error) {
-	if ev.LaneID == "" || ev.Source == "lane.unpushed" || ev.Source == "lane.health" || ev.Source == lane.AnswerDeliverySource {
+	if ev.LaneID == "" {
 		return store.EventClassJudgment, nil
 	}
 	ln, err := c.store.Lanes().Get(ctx, c.cfg.RunID, ev.LaneID)
@@ -3721,7 +3739,10 @@ func (c *Controller) handleStall(ctx context.Context, ev *store.Event) (store.Ev
 		}
 		return store.EventClassUnclassified, err
 	}
-	if ln.HostHoldReason != "" || ln.HostHold || ln.Status.Terminal() {
+	if ln.Status.Terminal() {
+		return store.EventClassAuto, nil
+	}
+	if ln.HostHoldReason != "" || ln.HostHold || ev.Source == "lane.unpushed" || ev.Source == "lane.health" || ev.Source == lane.AnswerDeliverySource {
 		return store.EventClassJudgment, nil
 	}
 	if !ln.AwaitingInputSince.IsZero() {
