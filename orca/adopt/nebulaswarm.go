@@ -304,26 +304,46 @@ func laneMergeNotePRs(path string) map[string][]string {
 }
 
 func latestReport(dir, laneID, phase string, round int) string {
+	for _, p := range reportCandidates(dir, laneID, phase, round) {
+		if fileExists(p) {
+			return p
+		}
+	}
+	return ""
+}
+
+// reportCandidates is the single report-location contract shared by the
+// importer and the corpus sanitizer. Keep the order authoritative: the
+// current round report wins, then the legacy flat report, then the newest
+// report in reports/ for the lane.
+func reportCandidates(dir, laneID, phase string, round int) []string {
+	var candidates []string
 	if phase != "" {
-		if p := filepath.Join(dir, "reports", fmt.Sprintf("%s.%s.r%d.md", laneID, phase, round)); fileExists(p) {
-			return p
-		}
-		if p := filepath.Join(dir, fmt.Sprintf("%s.%s.md", laneID, phase)); fileExists(p) {
-			return p
-		}
+		candidates = append(candidates,
+			filepath.Join(dir, "reports", fmt.Sprintf("%s.%s.r%d.md", laneID, phase, round)),
+			filepath.Join(dir, fmt.Sprintf("%s.%s.md", laneID, phase)),
+			filepath.Join(dir, "reports", fmt.Sprintf("%s.%s.md", laneID, phase)),
+		)
 	}
 	paths, _ := filepath.Glob(filepath.Join(dir, "reports", laneID+".*.md"))
-	best, bestMod := "", int64(0)
+	sort.Slice(paths, func(i, j int) bool {
+		ai, aerr := os.Stat(paths[i])
+		bj, berr := os.Stat(paths[j])
+		if aerr != nil || berr != nil {
+			return paths[i] < paths[j]
+		}
+		if ai.ModTime().Equal(bj.ModTime()) {
+			return paths[i] < paths[j]
+		}
+		return ai.ModTime().After(bj.ModTime())
+	})
 	for _, p := range paths {
 		rest := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), laneID+"."), ".md")
-		if strings.Count(rest, ".") != 1 {
-			continue
-		}
-		if info, err := os.Stat(p); err == nil && (best == "" || info.ModTime().UnixNano() > bestMod) {
-			best, bestMod = p, info.ModTime().UnixNano()
+		if strings.Count(rest, ".") == 1 {
+			candidates = append(candidates, p)
 		}
 	}
-	return best
+	return candidates
 }
 
 // reportHeadline is a report's Outcome line, else its first non-empty line.

@@ -94,6 +94,68 @@ func TestPreviewMeasurementHoldAndConfigMergeGate(t *testing.T) {
 	}
 }
 
+func TestSanitizeVerifyPreservesEventVocabularyAndNestedReports(t *testing.T) {
+	input := t.TempDir()
+	output := filepath.Join(t.TempDir(), "sanitized")
+	writeSanitizeTest(t, filepath.Join(input, "state.json"), `{"config":{"phases":[{"name":"swe"}]},"tasks":[{"id":"lane","phase":"swe","status":"done","round":1,"terminal_state":"finished","merge_sha":"abcdef1234567"}]}`)
+	writeSanitizeTest(t, filepath.Join(input, "EVENTS"), "2026-11-17T00:00:00Z\tlane\thealth-state\tfinished sensitive prose\n")
+	writeSanitizeTest(t, filepath.Join(input, "reports", "lane.swe.r1.md"), "Outcome: done\nVerdict: pass\nBreaks: private prose\n")
+	if err := SanitizeDir(input, output); err != nil {
+		t.Fatal(err)
+	}
+	events, err := os.ReadFile(filepath.Join(output, "EVENTS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(events), "\thealth-state\tfinished\n") {
+		t.Fatalf("structured event vocabulary changed: %q", events)
+	}
+	if _, err := os.Stat(filepath.Join(output, "reports", "lane.swe.r1.md")); err != nil {
+		t.Fatalf("nested report was dropped: %v", err)
+	}
+	if err := VerifySanitized(t.Context(), input, output); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSanitizeVerifyReportsPerLaneDifference(t *testing.T) {
+	input := t.TempDir()
+	output := filepath.Join(t.TempDir(), "sanitized")
+	writeSanitizeTest(t, filepath.Join(input, "state.json"), `{"config":{"phases":[{"name":"swe"}]},"tasks":[{"id":"lane","phase":"swe","status":"running","round":1,"session_id":"session","terminal_state":"working"}]}`)
+	writeSanitizeTest(t, filepath.Join(input, "EVENTS"), "2026-11-17T00:00:00Z\tlane\thealth-state\tworking\n")
+	writeSanitizeTest(t, filepath.Join(input, "reports", "lane.swe.r1.md"), "Outcome: done\n")
+	if err := SanitizeDir(input, output); err != nil {
+		t.Fatal(err)
+	}
+	writeSanitizeTest(t, filepath.Join(output, "reports", "lane.swe.r1.md"), "Outcome: needs-input\n")
+	data, err := os.ReadFile(filepath.Join(output, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := strings.Replace(string(data), `"terminal_state": "working"`, `"terminal_state": "finished"`, 1)
+	if err := os.WriteFile(filepath.Join(output, "state.json"), []byte(updated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = VerifySanitized(t.Context(), input, output)
+	if err == nil || !strings.Contains(err.Error(), "lane lane:") || !strings.Contains(err.Error(), "move") {
+		t.Fatalf("verify error = %v, want per-lane move diff", err)
+	}
+}
+
+func TestSanitizeRefusesSecretInEventsDetail(t *testing.T) {
+	input := t.TempDir()
+	output := filepath.Join(t.TempDir(), "sanitized")
+	writeSanitizeTest(t, filepath.Join(input, "state.json"), `{"config":{"phases":[{"name":"swe"}]},"tasks":[{"id":"lane","phase":"swe","status":"done"}]}`)
+	writeSanitizeTest(t, filepath.Join(input, "EVENTS"), "2026-11-17T00:00:00Z\tlane\tdecision\tordinary prose ghp_FAKE_TOKEN\n")
+	err := SanitizeDir(input, output)
+	if err == nil || !strings.Contains(err.Error(), "EVENTS column detail") || !strings.Contains(err.Error(), "github-token") || strings.Contains(err.Error(), "FAKE_TOKEN") {
+		t.Fatalf("sanitize error = %v, want redacted detail-column refusal", err)
+	}
+	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("refused sanitize left output: %v", statErr)
+	}
+}
+
 func writeSanitizeTest(t *testing.T, path, text string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

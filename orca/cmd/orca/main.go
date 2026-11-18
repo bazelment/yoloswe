@@ -284,7 +284,13 @@ func Execute(
 			if strings.TrimSpace(cfg.AdoptDir) == "" || strings.TrimSpace(cfg.AdoptOut) == "" {
 				return errors.New("orca adopt sanitize requires --dir <run> and --out <dir>")
 			}
-			return adopt.SanitizeDir(cfg.AdoptDir, cfg.AdoptOut)
+			if err := adopt.SanitizeDir(cfg.AdoptDir, cfg.AdoptOut); err != nil {
+				return err
+			}
+			if cfg.AdoptSanitizeVerify {
+				return adopt.VerifySanitized(ctx, cfg.AdoptDir, cfg.AdoptOut)
+			}
+			return nil
 		}
 		if cfg.AdoptDiff {
 			diffs, err := adopt.DiffBinaries(ctx, cfg.AdoptBinA, cfg.AdoptBinB, cfg.AdoptDir)

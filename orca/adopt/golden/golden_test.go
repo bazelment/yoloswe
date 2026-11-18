@@ -34,6 +34,9 @@ func TestCorpus(t *testing.T) {
 		}
 		t.Run(entry.Name(), func(t *testing.T) {
 			dir := filepath.Join("testdata", entry.Name())
+			if err := adopt.VerifySanitized(t.Context(), dir, dir); err != nil {
+				t.Fatalf("sanitized decision invariant: %v", err)
+			}
 			gotRun, err := (&adopt.Service{}).DryRunDir(t.Context(), dir)
 			if err != nil {
 				t.Fatal(err)

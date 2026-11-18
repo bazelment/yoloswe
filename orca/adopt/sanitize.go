@@ -6,6 +6,7 @@ package adopt
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,7 +15,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -22,8 +22,39 @@ var (
 	sanitizeSecretRE = regexp.MustCompile(`(?i)(?:ghp_[A-Za-z0-9_\-]+|sk-[A-Za-z0-9_\-]+|AIza[A-Za-z0-9_\-]+|xox[baprs]-[A-Za-z0-9_\-]+|BEGIN [^-\n]*PRIVATE KEY)`)
 	sanitizeSHARE    = regexp.MustCompile(`(?i)\b[0-9a-f]{7,64}\b`)
 	sanitizePRRE     = regexp.MustCompile(`#\d+`)
-	sanitizeTokenRE  = regexp.MustCompile(`(?i)\b(?:still\s+open|measurement\s+lane:\s*never\s+opens\s+a\s+pr|never\s+opens\s+a\s+pr|merge[_ -]?gate|exact\s+head|build\s+and\s+test|lint|soak|a/b|ci|checks?|review|integrat(?:e|ed|ion)|merged|closed|open|no[- ]pr|phase|status|done|blocked|working|running|planned|failed|needs[- ](?:input|swe|human)|hold[- ]advance|unmerged|target|base|swe|clean|analysis|plan|test|build|deploy|verdict|pass|passed|green|required|must|result|safety|next|merge|complete|remaining|work|none|n/a)\b`)
 )
+
+// sanitizeVocabulary is derived from the values the importer actually
+// observes. It prevents the sanitizer and importer from growing separate
+// hand-maintained lists of decision words.
+type sanitizeVocabulary struct {
+	exact  map[string]string
+	tokens map[string]string
+}
+
+func newSanitizeVocabulary() *sanitizeVocabulary {
+	return &sanitizeVocabulary{exact: map[string]string{}, tokens: map[string]string{}}
+}
+
+func (v *sanitizeVocabulary) add(value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	v.exact[strings.ToLower(value)] = value
+	for _, token := range strings.FieldsFunc(value, func(r rune) bool {
+		return !(r == '#' || r == '/' || r == '_' || r == '-' || r == '.' || r == ':' || r == '+' || r == '&' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
+	}) {
+		if token != "" {
+			v.tokens[strings.ToLower(token)] = token
+		}
+	}
+}
+
+func (v *sanitizeVocabulary) hasExact(value string) (string, bool) {
+	got, ok := v.exact[strings.ToLower(strings.TrimSpace(value))]
+	return got, ok
+}
 
 // SanitizeDir writes a credential-free, shape-preserving run copy. The output
 // may be passed directly to DryRunDir. Existing output is rejected to avoid
@@ -42,6 +73,13 @@ func SanitizeDir(input, output string) error {
 	}
 	if _, err := os.Stat(filepath.Join(input, "state.json")); err != nil {
 		return fmt.Errorf("sanitize: input is not a run directory: %w", err)
+	}
+	// EVENTS is part of the kept decision surface. A credential in any of its
+	// columns must refuse before prose replacement can hide it.
+	if data, readErr := os.ReadFile(filepath.Join(input, "EVENTS")); readErr == nil {
+		if err := rejectEventSourceSecrets(data); err != nil {
+			return err
+		}
 	}
 	if info, err := os.Stat(output); err == nil {
 		if !info.IsDir() {
@@ -66,7 +104,11 @@ func SanitizeDir(input, output string) error {
 	if err != nil {
 		return fmt.Errorf("sanitize: build allowlist: %w", err)
 	}
-	if err := copySanitizedFiles(input, tmp, allow); err != nil {
+	vocab, err := sanitizeVocabularyFor(input, allow)
+	if err != nil {
+		return fmt.Errorf("sanitize: build vocabulary: %w", err)
+	}
+	if err := copySanitizedFiles(input, tmp, allow, vocab); err != nil {
 		return err
 	}
 	if err := rejectSecrets(tmp); err != nil {
@@ -85,6 +127,53 @@ func SanitizeDir(input, output string) error {
 
 // Sanitize is a short alias for callers that do not need the directory suffix.
 func Sanitize(input, output string) error { return SanitizeDir(input, output) }
+
+// VerifySanitized previews both directories and checks the invariant promised
+// by the corpus format: sanitization may change prose, but never a lane's
+// move or reason class.
+func VerifySanitized(ctx context.Context, input, output string) error {
+	if strings.TrimSpace(input) == "" || strings.TrimSpace(output) == "" {
+		return errors.New("sanitize verify: input and output directories are required")
+	}
+	service := &Service{}
+	want, err := service.DryRunDir(ctx, input)
+	if err != nil {
+		return fmt.Errorf("sanitize verify: input preview: %w", err)
+	}
+	got, err := service.DryRunDir(ctx, output)
+	if err != nil {
+		return fmt.Errorf("sanitize verify: output preview: %w", err)
+	}
+	wantByID := make(map[string]*DryRunLane, len(want.Lanes))
+	gotByID := make(map[string]*DryRunLane, len(got.Lanes))
+	for i := range want.Lanes {
+		wantByID[want.Lanes[i].ID] = &want.Lanes[i]
+	}
+	for i := range got.Lanes {
+		gotByID[got.Lanes[i].ID] = &got.Lanes[i]
+	}
+	var diffs []string
+	for id, before := range wantByID {
+		after, ok := gotByID[id]
+		if !ok {
+			diffs = append(diffs, fmt.Sprintf("lane %s: missing from sanitized output", id))
+			continue
+		}
+		if before.Move != after.Move || before.ReasonClass != after.ReasonClass {
+			diffs = append(diffs, fmt.Sprintf("lane %s: move %s -> %s; reason_class %s -> %s", id, before.Move, after.Move, before.ReasonClass, after.ReasonClass))
+		}
+	}
+	for id := range gotByID {
+		if _, ok := wantByID[id]; !ok {
+			diffs = append(diffs, fmt.Sprintf("lane %s: added in sanitized output", id))
+		}
+	}
+	sort.Strings(diffs)
+	if len(diffs) > 0 {
+		return fmt.Errorf("sanitize verify: decision differences:\n%s", strings.Join(diffs, "\n"))
+	}
+	return nil
+}
 
 type sanitizeTask struct {
 	Terminals map[string]map[string]string `json:"terminals"`
@@ -117,11 +206,6 @@ func sanitizeAllowlist(input string) (map[string]bool, error) {
 	lanes := map[string]bool{}
 	phases := map[string]bool{}
 	nebula := state.Config.Orchestrator != ""
-	reportBest := map[string]struct {
-		rel   string
-		round int
-		mtime int64
-	}{}
 	for _, p := range state.Config.Phases {
 		if p.Name != "" {
 			phases[p.Name] = true
@@ -164,20 +248,14 @@ func sanitizeAllowlist(input string) (map[string]bool, error) {
 		base := filepath.Base(rel)
 		if strings.HasPrefix(rel, "reports"+string(filepath.Separator)) {
 			if nebula {
-				if laneID, phase, round, ok := reportLanePhase(base, lanes, phases); ok {
-					info, infoErr := entry.Info()
-					if infoErr != nil {
-						return infoErr
-					}
-					key := laneID + "\x00" + phase
-					candidate := struct {
-						rel   string
-						round int
-						mtime int64
-					}{rel: rel, round: round, mtime: info.ModTime().UnixNano()}
-					best, exists := reportBest[key]
-					if !exists || candidate.round > best.round || (candidate.round == best.round && candidate.mtime > best.mtime) {
-						reportBest[key] = candidate
+				for laneID := range lanes {
+					for phase := range phases {
+						for _, candidatePath := range reportCandidates(input, laneID, phase, 1) {
+							candidateRel, relErr := filepath.Rel(input, candidatePath)
+							if relErr == nil && filepath.Clean(candidateRel) == filepath.Clean(rel) {
+								allow[rel] = true
+							}
+						}
 					}
 				}
 			}
@@ -201,41 +279,121 @@ func sanitizeAllowlist(input string) (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, candidate := range reportBest {
-		allow[candidate.rel] = true
-	}
-	return allow, nil
-}
-
-func reportLanePhase(base string, lanes, phases map[string]bool) (string, string, int, bool) {
-	if !strings.HasSuffix(base, ".md") || !strings.Contains(base, ".r") {
-		return "", "", 0, false
-	}
-	trimmed := strings.TrimSuffix(base, ".md")
+	// Include every report path the importer can select, including legacy
+	// reports/<lane>.<phase>.md paths and nested report locations.
 	for laneID := range lanes {
-		prefix := laneID + "."
-		if !strings.HasPrefix(trimmed, prefix) {
-			continue
-		}
-		rest := strings.TrimPrefix(trimmed, prefix)
 		for phase := range phases {
-			if strings.HasPrefix(rest, phase+".r") {
-				rawRound := strings.TrimPrefix(rest, phase+".r")
-				rawRound = strings.TrimSuffix(rawRound, ".md")
-				if strings.Contains(rawRound, ".prev-") {
-					return "", "", 0, false
-				}
-				round, err := strconv.Atoi(rawRound)
-				if err == nil {
-					return laneID, phase, round, true
+			for _, candidatePath := range reportCandidates(input, laneID, phase, 1) {
+				if rel, relErr := filepath.Rel(input, candidatePath); relErr == nil {
+					if info, statErr := os.Stat(candidatePath); statErr == nil && info.Mode().IsRegular() {
+						allow[rel] = true
+					}
 				}
 			}
 		}
 	}
-	return "", "", 0, false
+	return allow, nil
 }
 
-func copySanitizedFiles(input, output string, allow map[string]bool) error {
+func rejectEventSourceSecrets(data []byte) error {
+	for _, line := range strings.Split(string(data), "\n") {
+		parts := strings.SplitN(line, "\t", 4)
+		for i, part := range parts {
+			if !sanitizeSecretRE.MatchString(part) {
+				continue
+			}
+			column := "detail"
+			switch i {
+			case 0:
+				column = "timestamp"
+			case 1:
+				column = "lane-id"
+			case 2:
+				column = "event-kind"
+			}
+			return fmt.Errorf("sanitize: kept file EVENTS column %s still matches %s pattern", column, secretPatternClass([]byte(part)))
+		}
+	}
+	return nil
+}
+
+func sanitizeVocabularyFor(input string, allow map[string]bool) (*sanitizeVocabulary, error) {
+	v := newSanitizeVocabulary()
+	run, err := Read(input)
+	if err != nil {
+		return nil, err
+	}
+	for _, value := range []string{run.ID, run.Format, run.TargetBranch, run.BaseBranch, run.MergeGate, run.IntegrateRule} {
+		v.add(value)
+	}
+	for _, phase := range run.Phases {
+		v.add(phase)
+	}
+	for _, branch := range run.HistoricalBranches {
+		v.add(branch)
+	}
+	for i := range run.Lanes {
+		ln := &run.Lanes[i]
+		for _, value := range []string{ln.ID, ln.Phase, ln.Status, ln.Branch, ln.Session, ln.Terminal, ln.TerminalState, ln.PR, ln.PRState, ln.MergeSHA, ln.Head, ln.Checks, ln.WaitingOn} {
+			v.add(value)
+		}
+		v.add(ln.Next)
+		for _, value := range []string{ln.Report, ln.LastEvent} {
+			for _, token := range strings.Fields(value) {
+				if sanitizePRRE.MatchString(token) || sanitizeSHARE.MatchString(token) {
+					v.add(token)
+				}
+			}
+		}
+		v.add(ln.holdAdvanceText)
+	}
+	// EVENTS kinds and their first detail words are precisely the fields the
+	// importer parses for decisions. Preserve them dynamically.
+	if data, readErr := os.ReadFile(filepath.Join(input, "EVENTS")); readErr == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			parts := strings.SplitN(line, "\t", 4)
+			if len(parts) >= 3 {
+				v.add(parts[2])
+			}
+			if len(parts) == 4 {
+				if fields := strings.Fields(parts[3]); len(fields) > 0 {
+					v.add(fields[0])
+				}
+				detail := parts[3]
+				// Preserve words matched by the importer's own event parsers.
+				for _, parser := range []*regexp.Regexp{openPRRE, prMergedRE, ownLaneMergedRE, decisionHostHoldRE} {
+					for _, match := range parser.FindAllString(detail, -1) {
+						v.add(match)
+					}
+				}
+			}
+		}
+	}
+	// Report metadata is parsed by lane.ParsePhaseReport and
+	// applyReportMetadata. Keep its values and all numeric/sha references.
+	for rel := range allow {
+		if !strings.HasSuffix(strings.ToLower(rel), ".md") {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(input, rel))
+		if readErr != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+			if !ok {
+				continue
+			}
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "outcome", "verdict", "head", "sha", "commit", "checks", "ci", "pr state", "merged", "integrated":
+				v.add(strings.TrimSpace(value))
+			}
+		}
+	}
+	return v, nil
+}
+
+func copySanitizedFiles(input, output string, allow map[string]bool, vocab *sanitizeVocabulary) error {
 	for rel := range allow {
 		src := filepath.Join(input, rel)
 		info, err := os.Stat(src)
@@ -249,7 +407,7 @@ func copySanitizedFiles(input, output string, allow map[string]bool) error {
 		if err != nil {
 			return fmt.Errorf("sanitize: read %s: %w", rel, err)
 		}
-		cleaned := sanitizeFile(filepath.Base(src), rel, data)
+		cleaned := sanitizeFile(filepath.Base(src), rel, data, vocab)
 		dst := filepath.Join(output, rel)
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
@@ -278,14 +436,14 @@ func secretPath(rel string) bool {
 	return false
 }
 
-func sanitizeFile(base, rel string, data []byte) []byte {
+func sanitizeFile(base, rel string, data []byte, vocab *sanitizeVocabulary) []byte {
 	if base == "state.json" {
-		if out, err := sanitizeStateJSON(data); err == nil {
+		if out, err := sanitizeStateJSON(data, vocab); err == nil {
 			return out
 		}
 	}
 	if strings.HasSuffix(strings.ToLower(base), ".json") && (strings.Contains(base, "spawn") || strings.Contains(base, "attn")) {
-		if out, err := sanitizeSpawnJSON(data); err == nil {
+		if out, err := sanitizeSpawnJSON(data, vocab); err == nil {
 			return out
 		}
 	}
@@ -293,49 +451,54 @@ func sanitizeFile(base, rel string, data []byte) []byte {
 		return []byte("synthetic binary omitted\n")
 	}
 	if base == "EVENTS" {
-		return []byte(sanitizeEvents(string(data)))
+		return []byte(sanitizeEvents(string(data), vocab))
 	}
 	if strings.HasPrefix(base, ".hold-advance") || strings.Contains(base, "attn") || strings.Contains(base, "handled") || strings.HasSuffix(base, ".md") || base == "env.sh" || filepath.Ext(rel) == "" {
-		return []byte(sanitizeText(string(data)))
+		return []byte(sanitizeText(string(data), vocab))
 	}
-	return []byte(sanitizeText(string(data)))
+	return []byte(sanitizeText(string(data), vocab))
 }
 
-func sanitizeStateJSON(data []byte) ([]byte, error) {
+func sanitizeStateJSON(data []byte, vocab *sanitizeVocabulary) ([]byte, error) {
 	var value any
 	if err := json.Unmarshal(data, &value); err != nil {
 		return nil, err
 	}
-	value = sanitizeJSONValue("", value, false)
+	value = sanitizeJSONValue("", value, false, vocab)
 	return json.MarshalIndent(value, "", "  ")
 }
 
-func sanitizeSpawnJSON(data []byte) ([]byte, error) {
+func sanitizeSpawnJSON(data []byte, vocab *sanitizeVocabulary) ([]byte, error) {
 	var value any
 	if err := json.Unmarshal(data, &value); err != nil {
 		return nil, err
 	}
-	value = sanitizeJSONValue("spawn", value, true)
+	value = sanitizeJSONValue("spawn", value, true, vocab)
 	return json.MarshalIndent(value, "", "  ")
 }
 
-func sanitizeJSONValue(key string, value any, spawn bool) any {
+func sanitizeJSONValue(key string, value any, spawn bool, vocab *sanitizeVocabulary) any {
 	switch x := value.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(x))
 		for k, v := range x {
-			out[k] = sanitizeJSONValue(k, v, spawn || strings.EqualFold(k, "spawn"))
+			out[k] = sanitizeJSONValue(k, v, spawn || strings.EqualFold(k, "spawn"), vocab)
 		}
 		return out
 	case []any:
 		out := make([]any, len(x))
 		for i, v := range x {
-			out[i] = sanitizeJSONValue(key, v, spawn)
+			out[i] = sanitizeJSONValue(key, v, spawn, vocab)
 		}
 		return out
 	case string:
+		if vocab != nil {
+			if exact, ok := vocab.hasExact(x); ok {
+				return exact
+			}
+		}
 		if preserveJSONString(key, spawn) {
-			return sanitizeJSONString(key, x, spawn)
+			return sanitizeJSONString(key, x, spawn, vocab)
 		}
 		return neutralText(x)
 	default:
@@ -356,7 +519,10 @@ func preserveJSONString(key string, spawn bool) bool {
 	}
 }
 
-func sanitizeJSONString(key, value string, spawn bool) string {
+func sanitizeJSONString(key, value string, spawn bool, vocab *sanitizeVocabulary) string {
+	if exact, ok := vocab.hasExact(value); ok {
+		return exact
+	}
 	key = strings.ToLower(strings.TrimSpace(key))
 	switch key {
 	case "id", "branch", "target", "base", "waiting_on", "deadline":
@@ -365,13 +531,13 @@ func sanitizeJSONString(key, value string, spawn bool) string {
 		if sanitizeGateRE.MatchString(strings.TrimSpace(value)) && !sanitizeSecretRE.MatchString(value) {
 			return strings.TrimSpace(value)
 		}
-		return sanitizeDecisionTokens(value)
+		return sanitizeDecisionTokens(value, vocab)
 	case "session_id", "terminal_id":
 		if spawn {
 			return sanitizeRef(value)
 		}
 	}
-	return sanitizeDecisionTokens(value)
+	return sanitizeDecisionTokens(value, vocab)
 }
 
 var sanitizeGateRE = regexp.MustCompile(`(?i)^[a-z0-9/&+_:. -]+$`)
@@ -398,15 +564,32 @@ func neutralText(s string) string {
 	return "synthetic text"
 }
 
-func sanitizeDecisionTokens(s string) string {
+func sanitizeDecisionTokens(s string, vocab *sanitizeVocabulary) string {
+	if vocab != nil {
+		if exact, ok := vocab.hasExact(s); ok {
+			return exact
+		}
+	}
 	var tokens []string
-	for _, re := range []*regexp.Regexp{sanitizePRRE, sanitizeSHARE, sanitizeTokenRE} {
-		tokens = append(tokens, re.FindAllString(s, -1)...)
+	for _, field := range strings.Fields(s) {
+		trimmed := strings.Trim(field, "()[]{}<>,;\"'`:")
+		if matches := sanitizePRRE.FindAllString(trimmed, -1); len(matches) > 0 {
+			tokens = append(tokens, matches...)
+			continue
+		}
+		if matches := sanitizeSHARE.FindAllString(trimmed, -1); len(matches) > 0 {
+			tokens = append(tokens, matches...)
+			continue
+		}
+		if vocab != nil {
+			if token, ok := vocab.tokens[strings.ToLower(trimmed)]; ok {
+				tokens = append(tokens, token)
+			}
+		}
 	}
 	if len(tokens) == 0 {
 		return neutralText(s)
 	}
-	sort.Slice(tokens, func(i, j int) bool { return len(tokens[i]) < len(tokens[j]) })
 	seen := map[string]bool{}
 	var out []string
 	for _, token := range tokens {
@@ -419,16 +602,22 @@ func sanitizeDecisionTokens(s string) string {
 	return strings.Join(out, " ")
 }
 
-func sanitizeText(s string) string {
+func sanitizeText(s string, vocab *sanitizeVocabulary) string {
 	var out []string
 	for _, line := range strings.SplitAfter(s, "\n") {
 		trim := strings.TrimSuffix(line, "\n")
+		if vocab != nil {
+			if exact, ok := vocab.hasExact(strings.TrimSpace(trim)); ok {
+				out = append(out, exact+map[bool]string{true: "\n", false: ""}[strings.HasSuffix(line, "\n")])
+				continue
+			}
+		}
 		prefix := ""
 		value := trim
 		if key, rest, ok := strings.Cut(trim, ":"); ok {
 			prefix, value = key+":", rest
 		}
-		clean := sanitizeDecisionTokens(value)
+		clean := sanitizeDecisionTokens(value, vocab)
 		if clean == "synthetic text" || clean == "" {
 			clean = "synthetic text"
 		}
@@ -443,7 +632,7 @@ func sanitizeText(s string) string {
 	return strings.Join(out, "")
 }
 
-func sanitizeEvents(s string) string {
+func sanitizeEvents(s string, vocab *sanitizeVocabulary) string {
 	var out []string
 	for _, line := range strings.SplitAfter(s, "\n") {
 		ending := ""
@@ -453,11 +642,11 @@ func sanitizeEvents(s string) string {
 		parts := strings.SplitN(line, "\t", 4)
 		if len(parts) >= 3 {
 			if len(parts) == 4 {
-				parts[3] = sanitizeDecisionTokens(parts[3])
+				parts[3] = sanitizeDecisionTokens(parts[3], vocab)
 			}
 			line = strings.Join(parts, "\t")
 		} else {
-			line = sanitizeText(line)
+			line = sanitizeText(line, vocab)
 		}
 		out = append(out, line+ending)
 	}
@@ -478,10 +667,46 @@ func rejectSecrets(root string) error {
 			if relErr != nil {
 				rel = filepath.Base(path)
 			}
-			return fmt.Errorf("sanitize: kept file %s still matches %s pattern", filepath.ToSlash(rel), secretPatternClass(data))
+			return fmt.Errorf("sanitize: kept file %s column %s still matches %s pattern", filepath.ToSlash(rel), sanitizeSecretColumn(filepath.ToSlash(rel), data), secretPatternClass(data))
 		}
 		return nil
 	})
+}
+
+func sanitizeSecretColumn(rel string, data []byte) string {
+	if rel == "EVENTS" {
+		for _, line := range strings.Split(string(data), "\n") {
+			parts := strings.SplitN(line, "\t", 4)
+			for i, part := range parts {
+				if !sanitizeSecretRE.MatchString(part) {
+					continue
+				}
+				switch i {
+				case 0:
+					return "timestamp"
+				case 1:
+					return "lane-id"
+				case 2:
+					return "event-kind"
+				default:
+					return "detail"
+				}
+			}
+		}
+	}
+	if strings.HasSuffix(strings.ToLower(rel), ".json") {
+		return "structured-value"
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if ok && sanitizeSecretRE.MatchString(value) {
+			key = strings.ToLower(strings.TrimSpace(key))
+			if key != "" {
+				return key
+			}
+		}
+	}
+	return "report-text"
 }
 
 func secretPatternClass(data []byte) string {
