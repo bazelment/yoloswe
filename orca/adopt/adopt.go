@@ -186,8 +186,12 @@ type Run struct {
 	// Next is the stated Next: work from OBJECTIVE.md (or PROGRESS.md).
 	Objective, PlanPath, Next string
 	Context, IntegrateRule    string
-	NoPR                      bool
-	Phases                    []string
+	// MergeGate is the explicit state.json config.merge_gate contract. It is
+	// kept separately from the older merge_rule field because adoption verdicts
+	// must report the gate the host actually recorded.
+	MergeGate string
+	NoPR      bool
+	Phases    []string
 	// Progress and Escalations are PROGRESS.md and ESCALATIONS.md, clipped.
 	Progress, Escalations string
 	// Unchecked lists what discovery could not check for this run.
@@ -501,6 +505,7 @@ type ledger struct {
 		Target    string      `json:"target"`
 		Base      string      `json:"base"`
 		MergeRule string      `json:"merge_rule"`
+		MergeGate string      `json:"merge_gate"`
 		Phases    []hostPhase `json:"phases"`
 	} `json:"config"`
 	Tasks []ledgerLane `json:"tasks"`
@@ -575,10 +580,12 @@ func Read(dir string) (Run, error) {
 	var contract struct {
 		Config struct {
 			MergeRule string `json:"merge_rule"`
+			MergeGate string `json:"merge_gate"`
 		} `json:"config"`
 	}
 	_ = json.Unmarshal(b, &contract)
 	r.IntegrateRule = extractMergeRuleText(contract.Config.MergeRule, r.Objective+"\n"+r.Context)
+	r.MergeGate = strings.TrimSpace(contract.Config.MergeGate)
 	for i := range r.Lanes {
 		r.Lanes[i].HoldAdvance = fileExists(filepath.Join(dir, r.Lanes[i].ID+".hold-advance"))
 		r.Lanes[i].holdAdvanceText = strings.TrimSpace(readText(filepath.Join(dir, r.Lanes[i].ID+".hold-advance")))
@@ -904,6 +911,11 @@ func openPR(ln Lane) bool {
 
 func finishedAnalysisLane(ln Lane) bool {
 	return strings.EqualFold(strings.TrimSpace(ln.Mode), "analysis") && strings.EqualFold(strings.TrimSpace(ln.Status), "done")
+}
+
+func measurementLane(ln Lane) bool {
+	text := strings.ToLower(strings.Join([]string{ln.holdAdvanceText, ln.HostHold, ln.Report, ln.LastEvent}, "\n"))
+	return strings.Contains(text, "measurement lane") && strings.Contains(text, "never opens a pr")
 }
 
 func noPRHandback(ln Lane) bool {
@@ -1565,14 +1577,15 @@ type DryRunResult struct {
 //
 //nolint:govet // lane preview fields are intentionally grouped for report output.
 type DryRunLane struct {
-	ID              string
-	Phase           string
-	Status          string
-	Evidence        []string
-	Move            string
-	Reason          string
-	Gate            string
-	EvidencePresent bool
+	ID              string   `json:"id"`
+	Phase           string   `json:"phase"`
+	Status          string   `json:"status"`
+	Evidence        []string `json:"evidence"`
+	Move            string   `json:"move"`
+	Reason          string   `json:"reason"`
+	Gate            string   `json:"gate,omitempty"`
+	EvidencePresent bool     `json:"evidence_present"`
+	ReasonClass     string   `json:"reason_class"`
 }
 
 // DryRun replays adoption's observe-first boundary from the host files only.
@@ -1627,8 +1640,9 @@ func previewLane(r Run, ln Lane) DryRunLane {
 	return previewLaneAt(r, ln, time.Now().UTC())
 }
 
-func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
-	p := DryRunLane{ID: ln.ID, Phase: cmp.Or(ln.Phase, "unknown"), Status: cmp.Or(ln.Status, "unknown"), Move: "none"}
+func previewLaneAt(r Run, ln Lane, now time.Time) (p DryRunLane) {
+	defer func() { p.ReasonClass = reasonClass(p.Move, p.Reason) }()
+	p = DryRunLane{ID: ln.ID, Phase: cmp.Or(ln.Phase, "unknown"), Status: cmp.Or(ln.Status, "unknown"), Move: "none"}
 	p.Evidence = append(p.Evidence, "format="+r.Format, "phase="+p.Phase, "status="+p.Status)
 	if ln.TerminalState != "" {
 		p.Evidence = append(p.Evidence, "terminal_state="+ln.TerminalState)
@@ -1718,6 +1732,13 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 	if ln.HoldAdvance {
 		p.Evidence = append(p.Evidence, "hold-advance file present")
 	}
+	// Measurement lanes are deliberately held for the host and never open a
+	// PR. Their branch can contain unmerged commits without creating an
+	// integration judgment; the host advances the lane by hand.
+	if measurementLane(ln) && reportDone(ln.Report) {
+		p.Reason = "finished, no PR; measurement lane; host never merges"
+		return p
+	}
 	if hostHold := laneHostHold(ln); hostHold != "" {
 		p.Move, p.Reason = "wait", "host-held: "+hostHold
 		return p
@@ -1764,17 +1785,17 @@ func previewLaneAt(r Run, ln Lane, now time.Time) DryRunLane {
 	}
 	switch {
 	case report == "done" || report == "no-change":
-		if r.IntegrationError != "" {
+		if r.IntegrationError != "" && !ln.HoldAdvance && !sweOnly(r, ln) {
 			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
 		} else if integrationJudgmentApplies(ln) && ln.IntegrationReason != "" {
 			p.Move, p.Reason = "judge", integrationJudgeReason(r, ln)
 			if ln.HoldAdvance {
 				p.Gate, p.EvidencePresent = mergeGate(r, ln), mergeGateEvidence(r, ln)
-				p.Reason = fmt.Sprintf("%s; %s evidence=%s", p.Reason, p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
+				p.Reason = fmt.Sprintf("%s; %s; %s", p.Reason, p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
 			}
 		} else if ln.HoldAdvance || sweOnly(r, ln) {
 			p.Move, p.Gate, p.EvidencePresent = "judge", mergeGate(r, ln), mergeGateEvidence(r, ln)
-			p.Reason = fmt.Sprintf("%s evidence=%s", p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
+			p.Reason = fmt.Sprintf("%s; %s", p.Gate, evidenceLabel(p.EvidencePresent, r, ln))
 		} else if !r.NoPR && (strings.EqualFold(ln.Phase, "review") || strings.EqualFold(ln.Phase, "clean")) && r.IntegrateRule != "" {
 			p.Move, p.Reason = "integrate", "completed report plus the run integrate rule permits the merge path"
 		} else if strings.EqualFold(ln.Status, "done") {
@@ -1883,6 +1904,9 @@ func sweOnly(r Run, ln Lane) bool {
 }
 
 func mergeGateText(r Run, ln Lane) string {
+	if gate := strings.TrimSpace(r.MergeGate); gate != "" {
+		return strings.TrimSpace(gate + "\n" + ln.holdAdvanceText)
+	}
 	gate := strings.TrimSpace(r.IntegrateRule)
 	if gate == "" || strings.EqualFold(gate, "merge gate evidence") {
 		gate = extractMergeRuleText("", r.Objective+"\n"+r.Context)
@@ -1935,16 +1959,53 @@ func isGreenEvidence(checks string) bool {
 
 func evidenceLabel(present bool, r Run, ln Lane) string {
 	if present {
-		return "present"
+		return "evidence: present"
 	}
-	missing := "missing: merge gate result"
+	missing := "evidence: missing: merge gate result"
 	if gate := mergeGateText(r, ln); gate != "" {
-		missing = "missing: " + clip(gate, 120)
+		missing = "evidence: missing: " + clip(gate, 120)
 	} else if !meaningfulHostValue(ln.Head) {
-		missing = "missing: exact head and gate result"
+		missing = "evidence: missing: exact head and gate result"
 	}
 	return missing
 }
+
+// reasonClass is intentionally coarse: goldens and binary diffs compare a
+// verdict category while the textual reason remains useful to an operator.
+func reasonClass(move, reason string) string {
+	if move == "" {
+		return "unknown"
+	}
+	lower := strings.ToLower(reason)
+	if move == "none" {
+		if strings.Contains(lower, "measurement lane") {
+			return "measurement"
+		}
+		if strings.Contains(lower, "integrated") || strings.Contains(lower, "merged") || strings.Contains(lower, "closed") {
+			return "integrated"
+		}
+		return "none"
+	}
+	switch {
+	case strings.Contains(lower, "measurement lane"):
+		return "measurement"
+	case strings.Contains(lower, "merge gate") || strings.Contains(lower, "integration gate"):
+		return "merge-gate"
+	case strings.Contains(lower, "integrated") || strings.Contains(lower, "merged") || strings.Contains(lower, "closed"):
+		return "integrated"
+	case strings.Contains(lower, "terminal") || strings.Contains(lower, "waiting") || strings.Contains(lower, "host-held"):
+		return "wait"
+	case strings.Contains(lower, "question") || strings.Contains(lower, "judgment") || strings.Contains(lower, "judge"):
+		return "judge"
+	case strings.Contains(lower, "advance") || strings.Contains(lower, "next phase"):
+		return "advance"
+	default:
+		return move
+	}
+}
+
+// ReasonClass returns the stable category used by corpus goldens and diffs.
+func ReasonClass(move, reason string) string { return reasonClass(move, reason) }
 
 func previewOutcome(report string) string {
 	rep, err := lane.ParsePhaseReport(report)

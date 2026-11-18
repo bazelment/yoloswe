@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -245,10 +246,18 @@ func Execute(
 			return err
 		}
 	}
+	adoptSanitizePos := false
+	if subcmd == "adopt" && len(rest) > 0 && strings.EqualFold(rest[0], "sanitize") {
+		adoptSanitizePos = true
+		rest = rest[1:]
+	}
 
 	cfg, posArgs, err := parseFlags(subcmd, rest, stderr)
 	if err != nil {
 		return err
+	}
+	if adoptSanitizePos {
+		cfg.AdoptSanitize = true
 	}
 	if !explicitSubcmd && strings.TrimSpace(cfg.RunID) == "" && strings.TrimSpace(cfg.Goal) == "" && strings.TrimSpace(cfg.Objective) == "" {
 		subcmd = "chat"
@@ -271,6 +280,31 @@ func Execute(
 		}
 		return executeChat(ctx, cfg, slices.Clone(args), posArgs, stdin, stdout, stderr, logger)
 	case "adopt":
+		if cfg.AdoptSanitize || (len(posArgs) > 0 && strings.EqualFold(posArgs[0], "sanitize")) {
+			if strings.TrimSpace(cfg.AdoptDir) == "" || strings.TrimSpace(cfg.AdoptOut) == "" {
+				return errors.New("orca adopt sanitize requires --dir <run> and --out <dir>")
+			}
+			return adopt.SanitizeDir(cfg.AdoptDir, cfg.AdoptOut)
+		}
+		if cfg.AdoptDiff {
+			diffs, err := adopt.DiffBinaries(ctx, cfg.AdoptBinA, cfg.AdoptBinB, cfg.AdoptDir)
+			if err != nil {
+				return err
+			}
+			for _, diff := range diffs {
+				data, marshalErr := json.Marshal(diff)
+				if marshalErr != nil {
+					return marshalErr
+				}
+				if _, writeErr := fmt.Fprintln(stdout, string(data)); writeErr != nil {
+					return writeErr
+				}
+			}
+			if len(diffs) > 0 {
+				return fmt.Errorf("adopt diff: %d lane decision(s) differ", len(diffs))
+			}
+			return nil
+		}
 		if !cfg.DryRun {
 			return errors.New("orca adopt currently supports only --dry-run; use /adopt from chat for a live handover")
 		}
@@ -293,6 +327,18 @@ func Execute(
 		}
 		if err != nil {
 			return err
+		}
+		if cfg.AdoptJSON {
+			for i := range result.Lanes {
+				data, marshalErr := json.Marshal(&result.Lanes[i])
+				if marshalErr != nil {
+					return marshalErr
+				}
+				if _, writeErr := fmt.Fprintln(stdout, string(data)); writeErr != nil {
+					return writeErr
+				}
+			}
+			return nil
 		}
 		if _, err := fmt.Fprintf(stdout, "adopt dry-run %s format=%s dir=%s\n", result.Run.ID, result.Run.Format, result.Run.Dir); err != nil {
 			return err

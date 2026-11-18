@@ -136,6 +136,7 @@ type nsLedger struct {
 		Repo         string      `json:"repo"`
 		Target       string      `json:"target"`
 		Base         string      `json:"base"`
+		MergeGate    string      `json:"merge_gate"`
 		Orchestrator string      `json:"orchestrator_session_id"`
 		Phases       []hostPhase `json:"phases"`
 	} `json:"config"`
@@ -152,6 +153,7 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 	r.Goal, r.DrivenBy = st.Config.Goal, st.Config.Orchestrator
 	r.TargetBranch = strings.TrimSpace(st.Config.Target)
 	r.BaseBranch = strings.TrimSpace(st.Config.Base)
+	r.MergeGate = strings.TrimSpace(st.Config.MergeGate)
 	r.Phases = hostPhaseNames(st.Config.Phases)
 	if isLocalRepoPath(st.Config.Repo) && localRepoPaths != nil {
 		*localRepoPaths = append(*localRepoPaths, st.Config.Repo)
