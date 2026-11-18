@@ -1,0 +1,4 @@
+2026-11-16T00:00:00Z	held-review	decision	Hold: incident commander reply until 2026-11-16T00:00:00Z
+2026-11-16T00:00:00Z	done-override	verdict	Verdict: pass (orchestrator: host approved)
+2026-11-16T00:00:01Z	parked-pr-hold	decision	parked pr-hold: #7003 IC-gated, Hold until 2026-11-17T00:00:00Z
+2026-11-16T00:00:02Z	finish-first-other-pr	finish-first	owner approval: other lane PR #7004 remains open

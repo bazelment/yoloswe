@@ -2,7 +2,18 @@ load("@rules_go//go:def.bzl", "go_test")
 
 go_test(
     name = "golden_test",
-    srcs = ["golden_test.go"],
+    srcs = [
+        "golden_test.go",
+        "replay_test.go",
+    ],
     data = glob(["testdata/**"]),
-    deps = ["//orca/adopt"],
+    deps = [
+        "//orca/adopt",
+        "//orca/clock",
+        "//orca/controller",
+        "//orca/dispatcher",
+        "//orca/lane",
+        "//orca/model",
+        "//orca/store",
+    ],
 )

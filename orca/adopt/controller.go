@@ -37,13 +37,16 @@ const escalationAskTTL = 24 * time.Hour
 //
 //nolint:govet // field grouping follows lifecycle ownership and synchronization.
 type Controllers struct {
-	ctx                context.Context
-	store              store.Store
-	driver             lane.LaneDriver
-	clock              clock.Clock
-	judges             JudgeFactory
-	Mailboxes          func(runID string) []mailbox.Mailbox
-	PRProbe            controller.PRProbe
+	ctx       context.Context
+	store     store.Store
+	driver    lane.LaneDriver
+	clock     clock.Clock
+	judges    JudgeFactory
+	Mailboxes func(runID string) []mailbox.Mailbox
+	PRProbe   controller.PRProbe
+	// PRHold reads the host's standing PR Hold: comment. The CLI owns the
+	// external read; adopted decision logic keeps the hold until explicit release.
+	PRHold             func(context.Context, Run, Lane) (string, error)
 	Planner            func(ctx context.Context, runID, reason, planRef string) error
 	ledgerScript       *string
 	runs               map[string]*controlledRun
@@ -82,6 +85,7 @@ type controlledRun struct {
 	notice     string
 	restarts   int
 	stopped    bool
+	funding    []string
 }
 
 type startup struct {
@@ -191,7 +195,10 @@ func (d *Controllers) ControllerStatus(runID string) string {
 	}
 	cr.statusMu.RLock()
 	defer cr.statusMu.RUnlock()
-	return cr.downReason
+	if len(cr.funding) == 0 {
+		return cr.downReason
+	}
+	return strings.TrimSpace(cr.downReason + "\nawaiting funding: " + strings.Join(cr.funding, ", "))
 }
 
 // ControllerNotice returns the latest stop or restart line for an adopted run.
@@ -253,6 +260,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			r.RepoID = ""
 			applyRepoValue(&r, storeRepo)
 		}
+	}
+	if err := d.importPRHolds(ctx, &r); err != nil {
+		return err
 	}
 	workflow, lanes, items, err := controllerState(r)
 	if err != nil {
@@ -455,10 +465,10 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	}
 	for i := range r.Lanes {
 		imported := &r.Lanes[i]
-		if integratedLane(*imported) || finishedAnalysisLane(*imported) {
+		if hostLaneTerminal(*imported) || finishedAnalysisLane(*imported) {
 			continue
 		}
-		waitingOn, until := imported.expectedHostWait(d.clock.Now().UTC())
+		waitingOn, until := imported.WaitingOn, imported.WaitDeadline
 		if waitingOn == "" {
 			continue
 		}
@@ -521,6 +531,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			return ctrl.AnswerOwnerAskTextFromJudge(ctx, askID, text)
 		})
 	}
+	if setter, ok := dispatch.(interface{ SetStore(store.Store) }); ok {
+		setter.SetStore(runStore)
+	}
 	if setter, ok := dispatch.(interface{ SetMailboxes(...mailbox.Mailbox) }); ok && len(boxes) > 0 {
 		setter.SetMailboxes(boxes...)
 	}
@@ -564,6 +577,14 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		integrationCache[key] = integrationResult{merged: merged, proof: proof, err: err}
 		return merged, proof, err
 	}
+	hostBrief := func(ctx context.Context, ln lane.Lane, phase recipe.Phase) string {
+		return d.adoptedPhaseBrief(ctx, r.ID, ln, phase)
+	}
+	if setter, ok := dispatch.(interface {
+		SetHostBrief(func(context.Context, lane.Lane, recipe.Phase) string)
+	}); ok {
+		setter.SetHostBrief(hostBrief)
+	}
 	ctrl = controller.New(controller.Config{
 		BeforeStep: func(ctx context.Context) (bool, error) {
 			integrationMu.Lock()
@@ -571,6 +592,8 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			integrationMu.Unlock()
 			return d.prepareStep(ctx, cr)
 		},
+		HostRefresh:       func(ctx context.Context) error { return d.refreshHostState(ctx, r.ID) },
+		HostBrief:         hostBrief,
 		IsolateLaneErrors: true,
 		StepError: func(err error) {
 			if cr == nil || err == nil {
@@ -586,6 +609,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		HolderID:           holder,
 		PRProbe:            d.runPRProbe(syncer),
 		HostIntegration:    verify,
+		PhaseStallTimeouts: observedPhaseStalls(r),
 		JudgeLaneMail:      true,
 		MaxCostPerHourUSD:  d.MaxCostPerHourUSD,
 		SubscriptionActors: d.SubscriptionActors,
@@ -999,6 +1023,277 @@ func (d *Controllers) syncRunLanes(ctx context.Context, runID string) {
 	if err := cr.syncer.SyncAll(ctx, lanes); err != nil {
 		slog.Warn("sync adopted run lanes failed", "run", runID, "error", err)
 	}
+}
+
+// refreshHostState is the adopted handover's read-before-act fence. Host
+// ledger phase/status/session changes are imported on every tick, including in
+// shadow mode, so a stale local snapshot can never drive a lifecycle action.
+func (d *Controllers) refreshHostState(ctx context.Context, runID string) error {
+	cr := d.lookupRun(runID)
+	if cr == nil || cr.syncer == nil {
+		return nil
+	}
+	hostRun := cr.syncer.CurrentRun()
+	fresh, err := Read(hostRun.Dir)
+	if err != nil {
+		return err
+	}
+	fresh.ID = runID
+	populateRunRepo(&fresh)
+	if err := d.importPRHolds(ctx, &fresh); err != nil {
+		return err
+	}
+	workflow, imported, items, err := controllerState(fresh)
+	if err != nil {
+		return err
+	}
+	itemStates := make(map[string]store.BacklogStatus, len(items))
+	for i := range items {
+		itemStates[items[i].ID] = items[i].Status
+	}
+	var funding []string
+	for i := range items {
+		item := &items[i]
+		if item.Status != store.BacklogOpen {
+			continue
+		}
+		ready := strings.TrimSpace(item.Description) != ""
+		for _, dep := range item.DependsOn {
+			ready = ready && itemStates[dep].Terminal()
+		}
+		if !ready {
+			funding = append(funding, item.ID)
+		}
+	}
+	cr.statusMu.Lock()
+	cr.funding = funding
+	cr.statusMu.Unlock()
+	if !slices.Equal(hostRun.Phases, fresh.Phases) {
+		workflow.Version = 0
+		saved, err := d.store.Recipes().Save(ctx, workflow)
+		if err != nil {
+			return err
+		}
+		for i := range fresh.Lanes {
+			if !lane.Status(fresh.Lanes[i].Status).Terminal() {
+				if cur, getErr := d.store.Lanes().Get(ctx, runID, fresh.Lanes[i].ID); getErr == nil {
+					cur.RecipeName, cur.RecipeVersion = saved.Name, saved.Version
+					_ = d.store.Lanes().Upsert(ctx, *cur)
+				}
+			}
+		}
+	}
+	for i := range items {
+		if err := d.store.Backlog().Add(ctx, items[i]); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return err
+		} else if errors.Is(err, store.ErrAlreadyExists) {
+			cur, err := d.store.Backlog().Get(ctx, runID, items[i].ID)
+			if err != nil {
+				return err
+			}
+			if cur.Description != items[i].Description || !slices.Equal(cur.DependsOn, items[i].DependsOn) || (items[i].Status.Terminal() && cur.Status != items[i].Status) {
+				cur.Description, cur.DependsOn = items[i].Description, items[i].DependsOn
+				if items[i].Status.Terminal() {
+					cur.Status = items[i].Status
+				}
+				if err := d.store.Backlog().Update(ctx, *cur, controller.ActorController, "host funding updated"); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	terminalChanged := false
+	var newlyTerminal []lane.Lane
+	for i := range imported {
+		host := imported[i]
+		if !cr.syncer.HostLaneChanged(host) {
+			continue
+		}
+		cur, getErr := d.store.Lanes().Get(ctx, runID, host.ID)
+		if errors.Is(getErr, store.ErrNotFound) {
+			if err := d.store.Lanes().Upsert(ctx, host); err != nil {
+				return err
+			}
+			cr.syncer.RememberHostLane(host)
+			if host.Status.Terminal() && !d.Shadow {
+				newlyTerminal = append(newlyTerminal, host)
+			}
+			continue
+		}
+		if getErr != nil {
+			return getErr
+		}
+		if cur.Status.Terminal() {
+			cr.syncer.RememberHostLane(host)
+			continue
+		}
+		// Keep controller-owned report/approval timestamps and notes, while
+		// replacing every host-owned lifecycle identity.
+		identityChanged := cur.Phase != host.Phase || cur.TerminalID != host.TerminalID
+		wasTerminal := cur.Status.Terminal()
+		terminalChanged = terminalChanged || (!wasTerminal && host.Status.Terminal())
+		cur.Phase = host.Phase
+		if host.Status.Terminal() || cur.Status != lane.StatusBlocked {
+			cur.Status = host.Status
+		}
+		cur.SessionID, cur.TerminalID = host.SessionID, host.TerminalID
+		cur.TerminalState, cur.HostHold, cur.HostHoldReason = host.TerminalState, host.HostHold, host.HostHoldReason
+		cur.PR, cur.PRHead, cur.MergeSHA, cur.Checks = host.PR, host.PRHead, host.MergeSHA, host.Checks
+		cur.Branch, cur.BaseBranch, cur.BaseCommit, cur.Worktree = host.Branch, host.BaseBranch, host.BaseCommit, host.Worktree
+		if identityChanged {
+			cur.AwaitingInputSince = time.Time{}
+			cur.Question = ""
+		}
+		cur.Round = host.Round
+		if cur.RecipeVersion == 0 {
+			cur.RecipeVersion = 1
+		}
+		cur.Terminals, cur.Sessions = host.Terminals, host.Sessions
+		if cur.Status.Terminal() && !d.Shadow {
+			if err := cr.syncer.SyncLane(ctx, *cur); err != nil {
+				return err
+			}
+			if !wasTerminal {
+				// A host merge/close can make a lane terminal between ticks. The
+				// lifecycle action is a session release only; terminal lanes are
+				// never stopped, steered, restarted, or spawned again.
+				newlyTerminal = append(newlyTerminal, *cur)
+			}
+		}
+		if err := d.store.Lanes().Upsert(ctx, *cur); err != nil {
+			return err
+		}
+		cr.syncer.RememberHostLane(host)
+	}
+	if !d.Shadow {
+		for i := range newlyTerminal {
+			if rel, ok := cr.driver.(lane.SessionReleaser); ok && strings.TrimSpace(newlyTerminal[i].SessionID) != "" {
+				if err := rel.ReleaseSession(ctx, newlyTerminal[i].SessionID, true); err != nil {
+					slog.Warn("release host-terminal lane session failed", "run", runID, "lane", newlyTerminal[i].ID, "error", err)
+				}
+			}
+		}
+	}
+	cr.syncer.mu.Lock()
+	cr.syncer.run = fresh
+	cr.syncer.mu.Unlock()
+	for i := range fresh.Lanes {
+		imported := &fresh.Lanes[i]
+		until := imported.WaitDeadline
+		if until.IsZero() || (!imported.HostHoldUntil.IsZero() && imported.HostHoldUntil.Before(until)) {
+			until = imported.HostHoldUntil
+		}
+		if !until.IsZero() && !d.clock.Now().Before(until) && !hostLaneTerminal(*imported) {
+			_, err := d.store.Events().Append(ctx, store.Event{ID: "host-hold-expired:" + imported.ID + ":" + until.Format(time.RFC3339Nano), RunID: runID, LaneID: imported.ID, Kind: store.EventTimer, Class: store.EventClassJudgment, Urgent: true, Source: "host.hold", Summary: "host hold deadline passed; awaiting host release"})
+			if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+				return err
+			}
+		}
+	}
+	if !d.Shadow && terminalChanged {
+		d.syncRunLanes(ctx, runID)
+		if _, err := d.planNextWorkIfDrained(ctx, runID, "host_refresh"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Controllers) importPRHolds(ctx context.Context, r *Run) error {
+	if d.PRHold == nil {
+		return nil
+	}
+	for i := range r.Lanes {
+		ln := &r.Lanes[i]
+		if lane.Status(ln.Status).Terminal() || ln.PR == "" || strings.EqualFold(ln.PRState, "merged") {
+			continue
+		}
+		comment, err := d.PRHold(ctx, *r, *ln)
+		if err != nil {
+			return fmt.Errorf("read host PR hold for %s: %w", ln.ID, err)
+		}
+		if hold := hostPRHold(comment, ""); hold != "" {
+			ln.HostHold = hold
+			ln.HostHoldUntil = hostHoldDeadline(comment)
+		}
+	}
+	return nil
+}
+
+func (d *Controllers) adoptedPhaseBrief(ctx context.Context, runID string, ln lane.Lane, phase recipe.Phase) string {
+	cr := d.lookupRun(runID)
+	if cr == nil || cr.syncer == nil {
+		return ""
+	}
+	run := cr.syncer.CurrentRun()
+	var parts []string
+	if note := strings.TrimSpace(ln.HostHoldReason); note != "" {
+		parts = append(parts, "Host hold: "+note)
+	}
+	if lnID := strings.TrimSpace(ln.ID); lnID != "" {
+		for i := range run.Lanes {
+			hostLane := &run.Lanes[i]
+			if hostLane.ID == lnID {
+				if text := strings.TrimSpace(hostLane.Note); text != "" {
+					parts = append(parts, "Host lane note: "+text)
+				}
+				if text := strings.TrimSpace(hostLane.Next); text != "" {
+					parts = append(parts, "Host next: "+text)
+				}
+				if text := strings.TrimSpace(hostLane.LastEvent); text != "" {
+					parts = append(parts, "Host last decision: "+text)
+				}
+				for _, row := range hostLane.Decisions {
+					parts = append(parts, "Host decision: "+row)
+				}
+				break
+			}
+		}
+		if notes, err := d.store.Notes().List(ctx, store.NoteFilter{RunID: runID, TaskID: lnID}); err == nil {
+			for _, n := range notes {
+				if text := strings.TrimSpace(n.Text); text != "" {
+					parts = append(parts, "Host note: "+text)
+				}
+			}
+		}
+		if decs, err := d.store.Decisions().List(ctx, store.DecisionFilter{RunID: runID, LaneID: lnID}); err == nil {
+			for i := max(0, len(decs)-3); i < len(decs); i++ {
+				dec := &decs[i]
+				text := strings.TrimSpace(dec.Reason + " — " + dec.Result)
+				if text != "" {
+					parts = append(parts, "Host decision: "+text)
+				}
+			}
+		}
+	}
+	for _, path := range []string{filepath.Join(run.Dir, ".gate-targets"), filepath.Join(run.Dir, ln.ID+".gate-targets"), filepath.Join(run.Dir, ln.ID, ".gate-targets")} {
+		if text := strings.TrimSpace(readText(path)); text != "" {
+			parts = append(parts, ".gate-targets:\n"+text)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Standing host asks for %s phase: \n%s", phase.Name, strings.Join(parts, "\n"))
+}
+
+func observedPhaseStalls(r Run) map[string]time.Duration {
+	values := map[string][]time.Duration{}
+	for i := range r.Lanes {
+		ln := &r.Lanes[i]
+		if ln.LastTurnStarted.IsZero() || ln.ReportTime.IsZero() || !ln.ReportTime.After(ln.LastTurnStarted) {
+			continue
+		}
+		values[strings.ToLower(strings.TrimSpace(ln.Phase))] = append(values[strings.ToLower(strings.TrimSpace(ln.Phase))], ln.ReportTime.Sub(ln.LastTurnStarted))
+	}
+	out := make(map[string]time.Duration, len(values))
+	for phase, ds := range values {
+		slices.Sort(ds)
+		idx := (len(ds)*95 + 99) / 100
+		idx = max(idx-1, 0)
+		out[phase] = ds[idx]
+	}
+	return out
 }
 
 // RefreshObjective re-reads OBJECTIVE.md from the adopted run directory when
@@ -1513,41 +1808,12 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			workflow.Phases = append(workflow.Phases, ph)
 		}
 	}
-	if workflow.MergePolicy.Mode == recipe.MergeModeSelf && mergesAfterCleanOrPolish(ruleText) {
-		hasReviewLane := false
-		for i := range r.Lanes {
-			norm, _ := normalizeHostPhaseName(r.Lanes[i].Phase, hasExplicitClean)
-			if norm == recipe.PhaseReview {
-				hasReviewLane = true
-				break
-			}
-		}
-		if !hasReviewLane {
-			if _, hasClean := workflow.Phase(recipe.PhaseClean); hasClean {
-				workflow.Phases = slices.DeleteFunc(workflow.Phases, func(ph recipe.Phase) bool {
-					return ph.Name == recipe.PhaseReview
-				})
-				if strings.Contains(strings.ToLower(ruleText), "pr-polish") {
-					for i := range workflow.Phases {
-						if workflow.Phases[i].Name == recipe.PhaseClean && strings.Contains(workflow.Phases[i].BriefTemplate, "/simplify-branch") {
-							workflow.Phases[i].BriefTemplate = "Run /pr-polish-nebula."
-						}
-					}
-				}
-			}
-		}
-	}
-	if workflow.MergePolicy.Mode != recipe.MergeModeController {
-		var phases []recipe.Phase
-		for _, ph := range workflow.Phases {
-			if ph.Name != recipe.PhaseIntegrate {
-				phases = append(phases, ph)
-			}
-		}
-		workflow.Phases = phases
-	} else if _, ok := workflow.Phase(recipe.PhaseIntegrate); !ok {
-		ph, _ := defaultRecipe.Phase(recipe.PhaseIntegrate)
-		workflow.Phases = append(workflow.Phases, ph)
+	// An adopted run's declared phase list is authoritative. In particular,
+	// merge policy text never removes review or jumps directly to integrate.
+	// No-PR is the sole explicit exception because it changes the recipe's
+	// handback contract rather than inferring a phase transition.
+	if r.NoPR {
+		workflow = recipe.WithoutIntegrate(workflow)
 	}
 	if _, hasReview := workflow.Phase(recipe.PhaseReview); !hasReview {
 		workflow.MergePolicy.RequireReviewPass = false
@@ -1604,17 +1870,20 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			mergeSHA = ""
 		}
 		hostHoldReason := strings.TrimSpace(imported.HostHold)
+		if hostHoldReason == "" {
+			hostHoldReason = decisionHostHold(imported.LastEvent)
+		}
+		if hostHoldReason == "" && strings.TrimSpace(imported.WaitingOn) != "" {
+			hostHoldReason = "waiting on " + strings.TrimSpace(imported.WaitingOn)
+		}
 		if hostHoldReason == "" && !finishedAnalysisLane(*imported) && strings.EqualFold(previewOutcome(imported.Report), string(lane.OutcomeBlocked)) {
 			hostHoldReason = strings.TrimSpace(imported.ReportBlocker)
 		}
 		if hostHoldReason == "" && imported.PRDraft {
 			hostHoldReason = "PR is draft"
 		}
-		if hostHoldReason == "" && strings.EqualFold(imported.Status, "blocked") {
-			hostHoldReason = "blocked"
-		}
 		mergeForbidden := hostHoldReason != "" || imported.PRDraft
-		terminal := integratedLane(*imported)
+		terminal := status.Terminal() || strings.EqualFold(imported.PRState, "merged") || closedLane(*imported) || (!mergeForbidden && integratedLane(*imported))
 		if strings.EqualFold(imported.Phase, recipe.PhaseIntegrate) {
 			closed := closedLane(*imported)
 			mergeSHA = ""
@@ -1634,7 +1903,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 			// A closed host PR is terminal even though it is not a merge. Merge
 			// prose and an integrate done report remain claims until the target
 			// mirror (or an independent host merge SHA) proves the merge.
-			terminal = closed || (!mergeForbidden && !openPR(*imported) && (imported.targetIntegrated || mergeSHA != ""))
+			terminal = terminal || closed || (!mergeForbidden && !openPR(*imported) && (imported.targetIntegrated || mergeSHA != ""))
 			if !terminal && status == lane.StatusDone {
 				status = lane.StatusRunning
 			}
@@ -1645,7 +1914,7 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		if mergeForbidden || openPR(*imported) {
 			mergeSHA = ""
 		}
-		if terminal {
+		if terminal && !status.Terminal() {
 			// Imported merge/close facts are authoritative even when a host
 			// ledger's status or hold marker is stale. Terminal lanes are never
 			// reopened by adoption.
@@ -1657,13 +1926,13 @@ func controllerState(r Run) (recipe.Recipe, []lane.Lane, []store.BacklogItem, er
 		if terminal && !mergeForbidden {
 			hostHoldReason = ""
 		}
-		if hostHoldReason != "" {
+		if hostHoldReason != "" && !terminal {
 			status = lane.StatusBlocked
 		}
 		if !status.Valid() {
 			return workflow, nil, nil, fmt.Errorf("lane %s: unsupported host status %q", imported.ID, imported.Status)
 		}
-		ln := lane.Lane{ItemID: imported.ID, ID: imported.ID, RunID: r.ID, Title: imported.Title, Branch: imported.Branch, Status: status, RecipeName: workflow.Name, RecipeVersion: 1, BaseBranch: st.Config.Base, Attempt: 1, TerminalState: imported.TerminalState, HostHoldReason: hostHoldReason,
+		ln := lane.Lane{ItemID: imported.ID, ID: imported.ID, RunID: r.ID, Title: imported.Title, Branch: imported.Branch, Status: status, RecipeName: workflow.Name, RecipeVersion: 1, BaseBranch: st.Config.Base, Attempt: 1, TerminalState: imported.TerminalState, HostHoldReason: hostHoldReason, HostHold: imported.HoldAdvance,
 			PRHead: imported.Head, MergeSHA: mergeSHA, Checks: imported.Checks}
 		ln.PR, _ = strconv.Atoi(imported.PR)
 		for j := range st.Tasks {
@@ -1988,31 +2257,6 @@ func hasSelfMergeRule(text string) bool {
 			"merge: self",
 			"merge rule: self-merge",
 			"merge policy: self-merge",
-		} {
-			if strings.Contains(clause, phrase) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func mergesAfterCleanOrPolish(text string) bool {
-	lower := strings.ToLower(text)
-	for _, clause := range splitMergeRuleClauses(lower) {
-		clause = strings.TrimSpace(clause)
-		if clause == "" || isNegatedMergeRuleClause(clause) {
-			continue
-		}
-		for _, phrase := range []string{
-			"merges once pr-polish",
-			"merge once pr-polish",
-			"merges after pr-polish",
-			"merge after pr-polish",
-			"merges once clean",
-			"merge once clean",
-			"merges after clean",
-			"merge after clean",
 		} {
 			if strings.Contains(clause, phrase) {
 				return true
@@ -2479,6 +2723,13 @@ func (d *adoptedRunDriver) TerminalAgentState(ctx context.Context, terminalID st
 	return "", nil
 }
 
+func (d *adoptedRunDriver) TerminalLastActivity(ctx context.Context, terminalID string) (time.Time, error) {
+	if tr, ok := d.LaneDriver.(lane.TerminalActivityReader); ok {
+		return tr.TerminalLastActivity(ctx, terminalID)
+	}
+	return time.Time{}, nil
+}
+
 func (d *adoptedRunDriver) LaneGitState(ctx context.Context, ln lane.Lane) (lane.GitState, error) {
 	if gr, ok := d.LaneDriver.(lane.GitStateReader); ok {
 		return gr.LaneGitState(ctx, ln)
@@ -2563,6 +2814,57 @@ type adoptedLaneStore struct {
 	controllers *Controllers
 }
 
+// hostOverlay restores ephemeral host facts after a SQLite read. Those facts
+// belong to the host ledger, so they deliberately do not require a store schema
+// migration and are re-read before every controller tick.
+func (s *adoptedLaneStore) hostOverlay(ln *lane.Lane) {
+	if ln == nil || s.syncer == nil {
+		return
+	}
+	r := s.syncer.CurrentRun()
+	for i := range r.Lanes {
+		host := &r.Lanes[i]
+		if host.ID != ln.ID {
+			continue
+		}
+		ln.HostHold = host.HoldAdvance
+		ln.HostHoldReason = cmp.Or(host.HostHold, decisionHostHold(host.LastEvent))
+		if ln.HostHoldReason == "" && host.WaitingOn != "" {
+			ln.HostHoldReason = "waiting on " + host.WaitingOn
+		}
+		if ln.HostHoldReason == "" && host.PRDraft {
+			ln.HostHoldReason = "PR is draft"
+		}
+		if !ln.Status.Terminal() && lane.Status(host.Status).Terminal() {
+			ln.Status = lane.Status(host.Status)
+		}
+		if !ln.Status.Terminal() && (strings.EqualFold(host.PRState, "merged") || (ln.HostHoldReason == "" && !host.PRDraft && integratedLane(*host))) {
+			ln.Status = lane.StatusDone
+		}
+		return
+	}
+}
+
+func (s *adoptedLaneStore) Get(ctx context.Context, runID, id string) (*lane.Lane, error) {
+	ln, err := s.LaneStore.Get(ctx, runID, id)
+	if err == nil && runID == s.syncer.runID {
+		s.hostOverlay(ln)
+	}
+	return ln, err
+}
+
+func (s *adoptedLaneStore) List(ctx context.Context, filter store.LaneFilter) ([]lane.Lane, error) {
+	lanes, err := s.LaneStore.List(ctx, filter)
+	if err == nil {
+		for i := range lanes {
+			if lanes[i].RunID == s.syncer.runID {
+				s.hostOverlay(&lanes[i])
+			}
+		}
+	}
+	return lanes, err
+}
+
 // Upsert checkpoints the lane live to the host ledger and, when the lane reaches
 // a terminal status with no active backlog item, triggers planNextWorkIfDrained
 // (controller.stepIntegrate marks merged lanes done directly without calling judge).
@@ -2624,6 +2926,7 @@ func (s *adoptedBacklogStore) Close(ctx context.Context, runID, itemID string, s
 type runLedgerSync struct {
 	clock            clock.Clock
 	known            map[string]lane.Lane
+	hostKnown        map[string]lane.Lane
 	releasedSessions map[string]bool
 	ledgerScript     *string
 	readOnly         bool
@@ -2672,8 +2975,10 @@ func newRunLedgerSync(r Run, clk clock.Clock, initial []lane.Lane) *runLedgerSyn
 		clk = clock.NewRealClock()
 	}
 	known := make(map[string]lane.Lane, len(initial))
+	hostKnown := make(map[string]lane.Lane, len(initial))
 	for i := range initial {
 		known[initial[i].ID] = initial[i].Clone()
+		hostKnown[initial[i].ID] = initial[i].Clone()
 	}
 	objMod, objSize := fileStatSignature(filepath.Join(r.Dir, "OBJECTIVE.md"))
 	progMod, progSize := fileStatSignature(filepath.Join(r.Dir, "PROGRESS.md"))
@@ -2682,6 +2987,7 @@ func newRunLedgerSync(r Run, clk clock.Clock, initial []lane.Lane) *runLedgerSyn
 		run:              r,
 		clock:            clk,
 		known:            known,
+		hostKnown:        hostKnown,
 		releasedSessions: make(map[string]bool),
 		lastObjective:    fullObjectiveWithHandover(r),
 		objModNano:       objMod,
@@ -2740,6 +3046,44 @@ func (s *runLedgerSync) CurrentRun() Run {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.run
+}
+
+// HostLaneChanged reports whether a newly imported ledger row differs from the
+// last ledger snapshot. Controller writes in adopted shadow mode update known,
+// but they must not make an unchanged host row rewind that local state.
+func (s *runLedgerSync) HostLaneChanged(ln lane.Lane) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev, ok := s.hostKnown[ln.ID]
+	changed := !ok || hostLaneDiff(prev, ln)
+	s.hostKnown[ln.ID] = ln.Clone()
+	return changed
+}
+
+func (s *runLedgerSync) RememberHostLane(ln lane.Lane) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hostKnown[ln.ID] = ln.Clone()
+}
+
+func hostLaneDiff(a, b lane.Lane) bool {
+	if lanePersistedDiff(a, b) || a.TerminalState != b.TerminalState || a.HostHold != b.HostHold || a.HostHoldReason != b.HostHoldReason {
+		return true
+	}
+	if len(a.Terminals) != len(b.Terminals) || len(a.Sessions) != len(b.Sessions) {
+		return true
+	}
+	for k, v := range a.Terminals {
+		if b.Terminals[k] != v {
+			return true
+		}
+	}
+	for k, v := range a.Sessions {
+		if b.Sessions[k] != v {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *runLedgerSync) MarkPlanned(key string) bool {
@@ -2919,6 +3263,7 @@ func (s *runLedgerSync) SyncLane(ctx context.Context, ln lane.Lane) error {
 	}
 	s.mu.Lock()
 	s.known[ln.ID] = ln.Clone()
+	s.hostKnown[ln.ID] = ln.Clone()
 	s.mu.Unlock()
 	return nil
 }

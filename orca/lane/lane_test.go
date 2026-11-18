@@ -197,3 +197,20 @@ func TestParsePhaseReportBulletedAndOrderIndependentVerdict(t *testing.T) {
 		})
 	}
 }
+
+func TestHostVerdictOverridesQuotedReviewer(t *testing.T) {
+	t.Parallel()
+	for _, raw := range []string{
+		"Outcome: needs-swe\nVerdict: needs-changes\nVerdict: pass (orchestrator: accepted)\n",
+		"Verdict: pass (orchestrator: accepted)\nOutcome: needs-swe\nVerdict: needs-changes\n",
+	} {
+		report, err := lane.ParsePhaseReport(raw)
+		if err != nil || report.Outcome != lane.OutcomeDone || report.Verdict != "pass (orchestrator: accepted)" {
+			t.Fatalf("host override lost: report=%+v err=%v", report, err)
+		}
+	}
+	report, err := lane.ParsePhaseReport("Outcome: needs-input\nVerdict: pass\n")
+	if err != nil || report.Outcome != lane.OutcomeNeedsInput {
+		t.Fatalf("ordinary reviewer verdict dismissed required input: report=%+v err=%v", report, err)
+	}
+}

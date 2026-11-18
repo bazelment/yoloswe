@@ -151,6 +151,8 @@ type BatchResult struct {
 // a compact Store snapshot, running a bounded tool loop on ModelClient (or a
 // long-lived CLI agent session), vetting every tool call against deterministic
 // invariants, and logging decisions.
+//
+//nolint:govet // dispatcher dependencies are intentionally grouped by lifecycle.
 type Dispatcher struct {
 	store              store.Store
 	driver             lane.LaneDriver
@@ -161,8 +163,77 @@ type Dispatcher struct {
 	sessions           model.AgentSessionMap
 	lastResult         *BatchResult
 	cfg                Config
+	hostBrief          func(context.Context, lane.Lane, recipe.Phase) string
 	seq                int64
 	mu                 sync.Mutex
+}
+
+// SetStore swaps in an adopted store overlay after the host handover has been
+// imported. It is used only during dispatcher construction, before turns run.
+func (d *Dispatcher) SetStore(st store.Store) {
+	if st != nil {
+		d.store = st
+	}
+}
+
+// SetHostBrief supplies standing host asks to dispatcher initiated retries.
+func (d *Dispatcher) SetHostBrief(fn func(context.Context, lane.Lane, recipe.Phase) string) {
+	d.hostBrief = fn
+}
+
+func (d *Dispatcher) adoptedRun(view *StateView) bool {
+	return d.hostBrief != nil || (view != nil && view.Run != nil && view.Run.DefaultRecipe == "adopted")
+}
+
+// adoptedLaneActionAllowed is the final safety fence for delivery paths that
+// do not pass through a tool handler (mail, contract broadcasts and revoke
+// notices). Host authority applies at the driver boundary too.
+func (d *Dispatcher) adoptedLaneActionAllowed(ctx context.Context, runID string, ln *lane.Lane, requireLive bool) error {
+	if ln == nil {
+		return errors.New("lane is missing")
+	}
+	if ln.Status.Terminal() {
+		return fmt.Errorf("lane %s is terminal; lifecycle action is suppressed", ln.ID)
+	}
+	run, err := d.store.Runs().Get(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if run.DefaultRecipe != "adopted" && d.hostBrief == nil {
+		return nil
+	}
+	if ln.HostHold || strings.TrimSpace(ln.HostHoldReason) != "" {
+		return fmt.Errorf("lane %s is host-held; lifecycle action is suppressed", ln.ID)
+	}
+	if !requireLive {
+		return nil
+	}
+	return d.requireCurrentLiveTerminal(ctx, &StateView{Run: run}, *ln)
+}
+
+func (d *Dispatcher) rejectHeldOrTerminalLane(view *StateView, ln lane.Lane) error {
+	if ln.Status.Terminal() {
+		return fmt.Errorf("lane %s is terminal; lifecycle action is suppressed", ln.ID)
+	}
+	if d.adoptedRun(view) && (ln.HostHold || strings.TrimSpace(ln.HostHoldReason) != "") {
+		return fmt.Errorf("lane %s is host-held; lifecycle action is suppressed", ln.ID)
+	}
+	return nil
+}
+
+func (d *Dispatcher) requireCurrentLiveTerminal(ctx context.Context, view *StateView, ln lane.Lane) error {
+	if !d.adoptedRun(view) {
+		return nil
+	}
+	reader, ok := d.laneDriver().(lane.TerminalStateReader)
+	if !ok || strings.TrimSpace(ln.TerminalID) == "" {
+		return fmt.Errorf("lane %s current terminal liveness is unknown", ln.ID)
+	}
+	state, err := reader.TerminalAgentState(ctx, ln.TerminalID)
+	if err != nil || strings.TrimSpace(state) == "" || strings.EqualFold(strings.TrimSpace(state), "unknown") || !controller.TerminalStateLive(state) {
+		return fmt.Errorf("lane %s current terminal is not confirmed alive", ln.ID)
+	}
+	return nil
 }
 
 // ownerAskRunLocks serializes the read/check/register sequence for a run
@@ -1433,6 +1504,22 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		return "", fmt.Errorf("%w: backlog item %q", store.ErrNotFound, p.ItemID)
 	}
 	laneID := cmp.Or(strings.TrimSpace(p.LaneID), item.ID)
+	if d.adoptedRun(view) {
+		for _, depID := range item.DependsOn {
+			dep, exists := view.BacklogItem(depID)
+			if !exists || !dep.Status.Terminal() {
+				return "", fmt.Errorf("lane %s awaiting funding: dependency %s is not terminal", laneID, depID)
+			}
+		}
+	}
+	if existing, exists := view.Lane(laneID); exists {
+		if err := d.rejectHeldOrTerminalLane(view, existing); err != nil {
+			return "", err
+		}
+		if d.adoptedRun(view) && existing.Status == lane.StatusPlanned && strings.TrimSpace(item.Description) == "" {
+			return "", fmt.Errorf("lane %s awaiting funding: mission brief missing", laneID)
+		}
+	}
 
 	base, resolved, _ := view.ResolveSpawnRecipe(p)
 	r := base
@@ -1523,7 +1610,7 @@ func (d *Dispatcher) applyLaneSpawn(ctx context.Context, runID string, view *Sta
 		return msg, err
 	}
 
-	workerBrief, err := d.buildWorkerBrief(view, ln, r, firstPhase, ln.Round, p.Brief)
+	workerBrief, err := d.buildWorkerBrief(ctx, view, ln, r, firstPhase, ln.Round, p.Brief)
 	if err != nil {
 		return "", err
 	}
@@ -1607,7 +1694,11 @@ func directiveRequestsItem(dir store.Directive, itemID, laneID string) bool {
 }
 
 func (d *Dispatcher) reconcileLanePRState(ctx context.Context, runID string, ln *lane.Lane) (bool, string, error) {
-	settled, state, err := controller.ReconcileLanePRState(ctx, d.cfg.PRProbe, d.store, d.laneDriver(), d.clock.Now(), runID, ActorDispatcher, "", ln)
+	drv := d.laneDriver()
+	if d.hostBrief != nil {
+		drv = nil
+	}
+	settled, state, err := controller.ReconcileLanePRState(ctx, d.cfg.PRProbe, d.store, drv, d.clock.Now(), runID, ActorDispatcher, "", ln)
 	if !settled || err != nil {
 		return settled, "", err
 	}
@@ -1618,6 +1709,12 @@ func (d *Dispatcher) applyLaneSteer(ctx context.Context, runID string, view *Sta
 	ln, ok := view.Lane(p.LaneID)
 	if !ok {
 		return "", fmt.Errorf("%w: lane %q", store.ErrNotFound, p.LaneID)
+	}
+	if err := d.rejectHeldOrTerminalLane(view, ln); err != nil {
+		return "", err
+	}
+	if err := d.requireCurrentLiveTerminal(ctx, view, ln); err != nil {
+		return "", err
 	}
 	if settled, msg, err := d.reconcileLanePRState(ctx, runID, &ln); settled || err != nil {
 		return msg, err
@@ -1640,6 +1737,12 @@ func (d *Dispatcher) applyLaneForward(ctx context.Context, runID string, view *S
 	target, ok := view.Lane(p.ToLaneID)
 	if !ok {
 		return "", fmt.Errorf("%w: lane %q", store.ErrNotFound, p.ToLaneID)
+	}
+	if err := d.rejectHeldOrTerminalLane(view, target); err != nil {
+		return "", err
+	}
+	if err := d.requireCurrentLiveTerminal(ctx, view, target); err != nil {
+		return "", err
 	}
 	if settled, msg, err := d.reconcileLanePRState(ctx, runID, &target); settled || err != nil {
 		return msg, err
@@ -1675,6 +1778,9 @@ func (d *Dispatcher) applyLaneForward(ctx context.Context, runID string, view *S
 }
 
 func (d *Dispatcher) deliverLaneAnswer(ctx context.Context, runID string, ln *lane.Lane, message string, selectOption int, liftHostHold bool) error {
+	if err := d.adoptedLaneActionAllowed(ctx, runID, ln, false); err != nil {
+		return err
+	}
 	ln.AnswerAttemptedAt = d.clock.Now().UTC()
 	ln.AnswerConfirmedAt = time.Time{}
 	if err := d.store.Lanes().Upsert(ctx, *ln); err != nil {
@@ -1722,6 +1828,19 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 	if !ok {
 		return "", fmt.Errorf("%w: lane %q", store.ErrNotFound, p.LaneID)
 	}
+	if err := d.rejectHeldOrTerminalLane(view, ln); err != nil {
+		return "", err
+	}
+	if d.adoptedRun(view) {
+		reader, ok := d.laneDriver().(lane.TerminalStateReader)
+		if !ok || strings.TrimSpace(ln.TerminalID) == "" {
+			return "", fmt.Errorf("lane %s current terminal liveness is unknown", ln.ID)
+		}
+		state, err := reader.TerminalAgentState(ctx, ln.TerminalID)
+		if err != nil || strings.TrimSpace(state) == "" || strings.EqualFold(strings.TrimSpace(state), "unknown") {
+			return "", fmt.Errorf("lane %s current terminal liveness is unknown", ln.ID)
+		}
+	}
 	if settled, msg, err := d.reconcileLanePRState(ctx, runID, &ln); settled || err != nil {
 		return msg, err
 	}
@@ -1740,7 +1859,7 @@ func (d *Dispatcher) applyLaneRetry(ctx context.Context, runID string, view *Sta
 		round = ln.MaxRound(targetPhase.Name) + 1
 	}
 
-	workerBrief, err := d.buildWorkerBrief(view, ln, r, targetPhase, round, p.Note)
+	workerBrief, err := d.buildWorkerBrief(ctx, view, ln, r, targetPhase, round, p.Note)
 	if err != nil {
 		return "", err
 	}
@@ -1851,7 +1970,7 @@ func (d *Dispatcher) spawnLaneSession(
 // buildWorkerBrief is the single dispatcher path for briefs sent to a driver.
 // Keeping the report contract here ensures initial spawns and retries have the
 // same handback instructions as controller-started phase terminals.
-func (d *Dispatcher) buildWorkerBrief(view *StateView, ln lane.Lane, r recipe.Recipe, phase recipe.Phase, round int, extra string) (string, error) {
+func (d *Dispatcher) buildWorkerBrief(ctx context.Context, view *StateView, ln lane.Lane, r recipe.Recipe, phase recipe.Phase, round int, extra string) (string, error) {
 	drv := d.laneDriver()
 	raw := d.buildRetryBriefText(view, ln, phase, extra)
 	instructions := ""
@@ -1869,6 +1988,11 @@ func (d *Dispatcher) buildWorkerBrief(view *StateView, ln lane.Lane, r recipe.Re
 	text, err := brief.RenderWithContract(raw, dirs, memories, 0)
 	if err != nil {
 		return "", err
+	}
+	if d.hostBrief != nil {
+		if host := strings.TrimSpace(d.hostBrief(ctx, ln, phase)); host != "" {
+			text += "\n\n" + host
+		}
 	}
 	return lane.AppendReportInstructions(text, instructions, view.EffectiveMaxBriefBytes(r)), nil
 }
@@ -1911,6 +2035,12 @@ func (d *Dispatcher) applyLaneStop(ctx context.Context, runID string, view *Stat
 	ln, ok := view.Lane(p.LaneID)
 	if !ok {
 		return "", fmt.Errorf("%w: lane %q", store.ErrNotFound, p.LaneID)
+	}
+	if err := d.rejectHeldOrTerminalLane(view, ln); err != nil {
+		return "", err
+	}
+	if err := d.requireCurrentLiveTerminal(ctx, view, ln); err != nil {
+		return "", err
 	}
 	if drv := d.laneDriver(); drv != nil && (ln.SessionID != "" || ln.TerminalID != "") {
 		if err := drv.Stop(ctx, lane.StopRequest{
@@ -2198,8 +2328,10 @@ func (d *Dispatcher) prepareOwnerAskLane(ctx context.Context, ask registeredOwne
 		if len(d.mailboxes()) > 0 && ask.HostStep == "" && !strings.HasPrefix(strings.TrimSpace(ask.Default), "hold:") {
 			if drv := d.laneDriver(); drv != nil {
 				msg := cmp.Or(strings.TrimSpace(ask.SteerNote), "Continue with the default: "+ask.Default+". The owner question is pending.")
-				if err := drv.Steer(ctx, lane.SteerRequest{RunID: ask.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: msg}); err != nil {
-					return err
+				if d.adoptedLaneActionAllowed(ctx, ask.RunID, ln, true) == nil {
+					if err := drv.Steer(ctx, lane.SteerRequest{RunID: ask.RunID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID, Message: msg}); err != nil {
+						return err
+					}
 				}
 			}
 		} else {
@@ -2483,7 +2615,7 @@ func (d *Dispatcher) syncRunContract(ctx context.Context, runID string) {
 	}
 	for i := range lanes {
 		ln := lanes[i]
-		if ln.Status != lane.StatusRunning {
+		if ln.Status != lane.StatusRunning || d.adoptedLaneActionAllowed(ctx, runID, &ln, true) != nil {
 			continue
 		}
 		var unsent []store.Directive
@@ -2639,7 +2771,7 @@ func (d *Dispatcher) applyDirectiveRevoke(ctx context.Context, runID string, sta
 			if lanes, listErr := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID}); listErr == nil {
 				for i := range lanes {
 					ln := lanes[i]
-					if ln.Status.Terminal() || (ln.SessionID == "" && ln.TerminalID == "") {
+					if ln.Status.Terminal() || (ln.SessionID == "" && ln.TerminalID == "") || d.adoptedLaneActionAllowed(ctx, runID, &ln, true) != nil {
 						continue
 					}
 					_ = drv.Steer(ctx, lane.SteerRequest{RunID: runID, LaneID: ln.ID, SessionID: ln.SessionID, TerminalID: ln.TerminalID,
@@ -4086,6 +4218,15 @@ func (d *Dispatcher) applyMailAnswer(
 	}
 	if laneID == "" {
 		laneID = bm.msg.LaneID
+	}
+	if laneID != "" {
+		ln, err := d.store.Lanes().Get(ctx, runID, laneID)
+		if err != nil {
+			return "", err
+		}
+		if err := d.adoptedLaneActionAllowed(ctx, runID, ln, false); err != nil {
+			return "", err
+		}
 	}
 	delivered, err := d.respondToLaneMail(ctx, runID, bm, answer)
 	if err != nil {

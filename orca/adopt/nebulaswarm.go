@@ -169,7 +169,7 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 		if !validGitSHA(mergeSHA) {
 			mergeSHA = ""
 		}
-		x := Lane{ID: t.ID, Title: t.Title, Branch: t.Branch, Phase: t.Phase, Status: t.Status, Round: t.Round, Mode: t.Mode,
+		x := Lane{ID: t.ID, Title: t.Title, Branch: t.Branch, Phase: t.Phase, Status: t.Status, Round: t.Round, Mode: t.Mode, Note: t.Note,
 			Session: t.SessionID, Terminal: t.Terminals[t.Phase][strconv.Itoa(round)], TerminalState: t.TerminalState,
 			HostHold: ledgerHostHold(t.BlockedOn, t.HoldNote, t.Hold, t.Park, t.Note), PRDraft: t.PRDraft || t.Draft,
 			PRState: t.PRState, MergeSHA: mergeSHA, Head: firstNonEmpty(t.PRHead, t.Head), Checks: t.Checks}
@@ -181,6 +181,7 @@ func readNebulaSwarm(dir string, b []byte, r *Run, localRepoPaths *[]string) err
 		x.Integrated = x.MergeSHA != "" && strings.TrimSpace(x.HostHold) == "" && !x.PRDraft && !strings.EqualFold(strings.TrimSpace(x.Status), "blocked")
 		x.ReportPath = latestReport(dir, t.ID, x.Phase, round)
 		x.WaitingOn, x.WaitDeadline = parseHostWait(t.WaitingOn, t.Deadline)
+		x.HostHoldUntil = hostHoldDeadline(x.HostHold)
 		if x.ReportPath != "" {
 			applyAttnAnswer(dir, &x)
 		}
