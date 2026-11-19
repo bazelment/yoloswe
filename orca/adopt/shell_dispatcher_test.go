@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -454,6 +455,147 @@ func TestShellDispatcherTerminalCare(t *testing.T) {
 			raw, _ := os.ReadFile(filepath.Join(intent, "actions.jsonl"))
 			if steered := strings.Contains(string(raw), `"action":"lane.steer"`); steered != tc.steer {
 				t.Fatalf("steer intent = %s, want steered=%v", raw, tc.steer)
+			}
+		})
+	}
+}
+
+// handRun is one synthetic run whose OBJECTIVE says integration is by hand:
+// the owner conditions PR #7's merge on a readback that a later EVENTS row
+// reports. CI is green at L1's exact head, and the oldest base commit missing
+// from it is baseAge old. L1's reviewer t1 is stuck in lint; L2 has a hold_note.
+func handRun(t *testing.T, baseAge time.Duration) (live, scripts, calls string) {
+	t.Helper()
+	live, scripts, repo := t.TempDir(), t.TempDir(), t.TempDir()
+	calls = filepath.Join(scripts, "calls")
+	git := func(date time.Time, args ...string) string {
+		cmd := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_DATE="+date.Format(time.RFC3339), "GIT_COMMITTER_DATE="+date.Format(time.RFC3339))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	now := time.Now()
+	git(now, "init", "-q", "-b", "lane")
+	git(now.Add(-4*time.Hour), "commit", "-q", "--allow-empty", "-m", "root")
+	root := git(now, "rev-parse", "HEAD")
+	git(now, "commit", "-q", "--allow-empty", "-m", "lane")
+	head := git(now, "rev-parse", "HEAD")
+	git(now, "update-ref", "refs/remotes/origin/main", git(now.Add(-baseAge), "commit-tree", root+"^{tree}", "-p", root, "-m", "main"))
+	write(t, filepath.Join(scripts, "swarm_nebula_lanes.sh"), "snl_merge_claims() { :; }\nsnl_head_checks() { [ \"$3\" = "+head+" ]; }\n"+
+		"snl_task() { echo 7; }\nsnl_terminal_agent_state() { echo working; }\nsnl_nb() { echo \"nb $*\" >> "+shq(calls)+"; }\n")
+	for _, name := range []string{"lane_ops.sh", "step.sh"} {
+		write(t, filepath.Join(scripts, name), "")
+	}
+	write(t, filepath.Join(live, "OBJECTIVE.md"), "Integration: no auto-integrate; the orchestrator advances and merges by hand.\n")
+	write(t, filepath.Join(live, "EVENTS"), "2026-11-19T01:00:00Z\towner\tmail\tmerge PR #7 only after the code promote carrying A and B is read back clean\n"+
+		"2026-11-19T02:00:00Z\tpromote\treadback\tthe code promote carrying A and B read back clean\n")
+	write(t, filepath.Join(live, "state.json"), `{"config":{"repo":`+strconv.Quote(repo)+`},"tasks":[`+
+		`{"id":"L1","status":"running","phase":"review","round":1,"nebula_session":"s1","nebula_terminal":"t1","pr":7,"pr_head":"`+head+`","approval_sha":"`+head+`"},`+
+		`{"id":"L2","status":"running","phase":"review","round":1,"nebula_session":"s1","nebula_terminal":"t2","hold_note":"owner: wait for the promote"}]}`)
+	return live, scripts, calls
+}
+
+// .hold-advance gates phase advance and integration, not steering: a reviewer
+// stuck in lint under it is steered. A hold_note still refuses the steer.
+func TestSteerUnderHoldAdvance(t *testing.T) {
+	t.Parallel()
+	live, scripts, calls := handRun(t, 10*time.Minute)
+	for _, lane := range []string{"L1", "L2"} {
+		write(t, filepath.Join(live, lane+".hold-advance"), "run rule: hold-advance on every lane\n")
+	}
+	steer := func(lane string) error {
+		return toolbox.Run(t.Context(), []string{"lane", "steer", lane, "Interrupt the lint and run a narrower one.", "--dir", live, "--skill", scripts}, io.Discard)
+	}
+	if err := steer("L1"); err != nil {
+		t.Fatalf("steer under hold-advance: %v", err)
+	}
+	if err := steer("L2"); !errors.Is(err, toolbox.ErrRefused) {
+		t.Fatalf("steer under hold_note: %v", err)
+	}
+	if raw, _ := os.ReadFile(calls); !regexp.MustCompile(`^nb term send t1 --file \S+\n$`).Match(raw) {
+		t.Fatalf("skill calls = %q", raw)
+	}
+}
+
+// The fake integrate session follows its system prompt's integration by hand:
+// in a run whose OBJECTIVE says "no auto-integrate", a PR whose owner condition
+// an EVENTS row meets is readied, its stale base updated when ready refuses
+// only on that, and merged once ready. It logs each toolbox call and result.
+func TestFakeIntegrateClaude(t *testing.T) {
+	dir := os.Getenv("ORCA_FAKE_INTEGRATE_DIR")
+	if dir == "" {
+		return
+	}
+	var prompt string
+	if i := slices.Index(os.Args, "--system-prompt"); i > 0 && i+1 < len(os.Args) {
+		prompt = os.Args[i+1]
+	}
+	act := func(args ...string) string {
+		result := "ok"
+		if err := toolbox.Run(context.Background(), args, io.Discard); err != nil {
+			result = err.Error()
+		}
+		f, _ := os.OpenFile(filepath.Join(dir, "actions"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		_, _ = fmt.Fprintf(f, "%s -> %s\n", strings.Join(args, " "), result)
+		_ = f.Close()
+		return result
+	}
+	fakeClaude(func(int) {
+		run := os.Getenv("ORCA_TOOLBOX_DIR")
+		objective, _ := os.ReadFile(filepath.Join(run, "OBJECTIVE.md"))
+		raw, _ := os.ReadFile(filepath.Join(run, "EVENTS"))
+		events := string(raw)
+		byHand := strings.Contains(string(objective), "no auto-integrate") && strings.Contains(prompt, "A condition the owner set is a condition") && strings.Contains(prompt, "orca pr update <pr>")
+		if c := regexp.MustCompile(`merge PR #(\d+) only after (.+) is read back clean`).FindStringSubmatchIndex(events); byHand && c != nil &&
+			strings.Contains(events[c[1]:], events[c[4]:c[5]]+" read back clean") {
+			pr := events[c[2]:c[3]]
+			switch ready := act("pr", "ready", pr); {
+			case ready == "ok":
+				act("pr", "merge", pr, "--action-key", "merge-"+pr)
+			case strings.Contains(ready, "stale base"):
+				act("pr", "update", pr, "--action-key", "update-"+pr)
+			}
+		}
+		act("wait", "--timeout", "50ms")
+	})
+}
+
+// Integration by hand: once the readback row meets the owner's condition at a
+// green exact head, the dispatcher readies and merges PR #7; with a 3 h old
+// base it updates the branch first and does not merge yet.
+func TestShellDispatcherIntegratesByHand(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		want    []string
+		baseAge time.Duration
+	}{
+		{"fresh base", []string{"pr ready 7 -> ok", "pr merge 7 --action-key merge-7 -> ok"}, 10 * time.Minute},
+		{"stale base", []string{"pr ready 7 -> orca toolbox refused: PR #7 is not ready at", "pr update 7 --action-key update-7 -> ok"}, 3 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			live, scripts, _ := handRun(t, tc.baseAge)
+			fake := t.TempDir()
+			_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, "TestFakeIntegrateClaude", "ORCA_FAKE_INTEGRATE_DIR="+shq(fake)+" ORCA_SNL_DIR="+shq(scripts))
+			var actions []string
+			waitFor(t, func() bool {
+				raw, _ := os.ReadFile(filepath.Join(fake, "actions"))
+				actions = strings.Split(strings.TrimSpace(string(raw)), "\n")
+				return slices.ContainsFunc(actions, func(a string) bool { return strings.HasPrefix(a, "wait ") })
+			})
+			if len(actions) != 3 || !strings.HasPrefix(actions[0], tc.want[0]) || actions[1] != tc.want[1] {
+				t.Fatalf("actions = %q, want %q then wait", actions, tc.want)
+			}
+			raw, _ := os.ReadFile(filepath.Join(intent, "actions.jsonl"))
+			if merged, updated := strings.Contains(string(raw), `"action":"pr.merge"`), strings.Contains(string(raw), `"action":"pr.update"`); merged != (tc.baseAge < time.Hour) || updated == merged {
+				t.Fatalf("shadow intents = %s", raw)
+			}
+			if tc.baseAge > time.Hour && !strings.Contains(actions[0], "stale base: the oldest origin/main commit missing from") {
+				t.Fatalf("ready refusal = %q, want the stale base", actions[0])
 			}
 		})
 	}

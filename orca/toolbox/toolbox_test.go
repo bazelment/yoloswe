@@ -66,6 +66,8 @@ snl_fund_planned() { log fund-planned "$@"; }
 snl_merge_claims() { log claims "$1" "$2"; }
 snl_head_checks() { log head-checks "$1" "$2" "$3"; }
 snl_merge() { log merge "$1"; }
+snl_lane_slug() { echo o/r; }
+ghx() { log ghx "$@"; }
 `
 
 // fixture returns a run directory whose env.sh exports RUN as that directory,
@@ -153,13 +155,14 @@ func TestActionsRunSkillOncePerKey(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, args := range [][]string{{"lane", "steer", "working", "rebase"}, {"pr", "merge", "7"}} {
+	for _, args := range [][]string{{"lane", "steer", "working", "rebase"}, {"pr", "update", "7"}, {"pr", "merge", "7"}} {
 		if _, err := run(t, dir, skill, args...); err != nil {
 			t.Fatalf("%v: %v", args, err)
 		}
 	}
 	got := skillCalls(t, calls)
-	want := "^" + regexp.QuoteMeta("fund-planned funded\nnb term send t1 --file ") + `\S+\n` + regexp.QuoteMeta("claims working abc123\nhead-checks working 7 abc123\nmerge working\n") + "$"
+	want := "^" + regexp.QuoteMeta("fund-planned funded\nnb term send t1 --file ") + `\S+\n` +
+		regexp.QuoteMeta("ghx api -X PUT repos/o/r/pulls/7/update-branch -f expected_head_sha=abc123\nclaims working abc123\nhead-checks working 7 abc123\nmerge working\n") + "$"
 	if !regexp.MustCompile(want).MatchString(got) {
 		t.Fatalf("skill calls=%q", got)
 	}

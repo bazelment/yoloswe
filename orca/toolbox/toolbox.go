@@ -93,7 +93,7 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		return errors.New("a lane id or pull request number is required")
 	}
 	match := func(t task) bool { return t.ID == rest[0] }
-	if cmd == "pr.ready" || cmd == "pr.merge" {
+	if strings.HasPrefix(cmd, "pr.") {
 		match = func(t task) bool { return t.PR > 0 && strconv.Itoa(t.PR) == rest[0] }
 	}
 	i := slices.IndexFunc(tasks, match)
@@ -110,7 +110,7 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	case "lane.start", "lane.steer", "lane.stop":
 		return mutate(ctx, o, cmd, t, strings.Join(rest[1:], " "), out)
-	case "pr.ready", "pr.merge":
+	case "pr.ready", "pr.update", "pr.merge":
 		if err := validate(ctx, o, cmd, t, tasks); err != nil {
 			return err
 		}
@@ -118,6 +118,9 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		// claim and check gates then verify that head against the live PR.
 		if t.PRHead == "" || t.ApprovalSHA != t.PRHead {
 			return refuse("PR #%d approval %q does not match ledger head %q", t.PR, t.ApprovalSHA, t.PRHead)
+		}
+		if cmd == "pr.update" {
+			return mutate(ctx, o, cmd, t, t.PRHead, out)
 		}
 		if _, err := skill(ctx, o, "ready", t, t.PRHead); err != nil {
 			return refuse("PR #%d is not ready at %s: %v", t.PR, t.PRHead, err)
@@ -190,7 +193,8 @@ func validate(ctx context.Context, o options, op string, t *task, tasks []task) 
 	if t.Status == "done" || t.Status == "cancelled" || t.MergeSHA != "" || strings.EqualFold(t.PRState, "merged") {
 		return refuse("lane %s is done or merged", t.ID)
 	}
-	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); err == nil || t.Hold+t.HoldNote+t.WaitingOn != "" {
+	// .hold-advance gates phase advance and integration, not steering.
+	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); (err == nil && op != "lane.steer") || t.Hold+t.HoldNote+t.WaitingOn != "" {
 		return refuse("lane %s is held %s", t.ID, strings.TrimSpace(t.Hold+" "+t.HoldNote+" "+t.WaitingOn))
 	}
 	switch op {
@@ -398,7 +402,12 @@ case $op in
  lane.start) if [ -n "$phase" ]; then snl_spawn "$lane" "$phase" "$RUN/$brief"; else snl_fund_planned "$lane"; fi ;;
  lane.steer) snl_nb term send "$tid" --file "$msg" ;;
  lane.stop) snl_nb term stop "$tid" ;;
- ready) snl_merge_claims "$lane" "$text"; snl_head_checks "$lane" "$(snl_task "$lane" pr)" "$text" ;;
+ ready) snl_merge_claims "$lane" "$text"; snl_head_checks "$lane" "$(snl_task "$lane" pr)" "$text"
+  # SKILL.md's fresh-base guard: the oldest base commit missing from the head is at most two hours old.
+  old=$(git log --format=%ct "$text..origin/${BASE:-main}" 2>/dev/null | tail -1)
+  [ -z "$old" ] || [ $(($(date +%s) - old)) -le 7200 ] ||
+   { echo "stale base: the oldest origin/${BASE:-main} commit missing from $text is $((($(date +%s) - old) / 60)) min old (limit 120); orca pr update"; exit 3; } ;;
+ pr.update) ghx api -X PUT "repos/$(snl_lane_slug "$lane")/pulls/$(snl_task "$lane" pr)/update-branch" -f expected_head_sha="$text" >/dev/null ;;
  pr.merge) snl_merge "$lane" ;;
  ask) "$SNL_NEBULA" mail send --to owner --class fyi --run "$SNL_RUN_ID" --body-file "$msg" ;;
  note) snl_event "$lane" note "$text" ;;
