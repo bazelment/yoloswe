@@ -238,6 +238,45 @@ func TestCheckRunsInHostCheckout(t *testing.T) {
 	}
 }
 
+// When config.repo is a bare repository, as a nebula-swarm host's .bare common
+// dir is, skill calls run from its worktree, where lane_ops.sh's
+// git rev-parse --show-toplevel resolves.
+func TestCheckRunsInWorktreeOfBareRepo(t *testing.T) {
+	t.Parallel()
+	dir, skill, _ := fixture(t)
+	src, root := t.TempDir(), t.TempDir()
+	bare, wt := filepath.Join(root, ".bare"), filepath.Join(root, "main")
+	for _, args := range [][]string{
+		{"init", "-q", "-b", "main", src},
+		{"-C", src, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"},
+		{"clone", "-q", "--bare", src, bare},
+		{"-C", bare, "worktree", "add", "-q", wt, "main"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err == nil {
+		raw = regexp.MustCompile(`"repo":"[^"]*"`).ReplaceAll(raw, []byte(`"repo":"`+bare+`"`))
+		err = os.WriteFile(filepath.Join(dir, "state.json"), raw, 0o600)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, dir, skill, "check", "working")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err = filepath.EvalSymlinks(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "lane working status=running terminal=working remote=OK " + wt + "\nbusy=no\n"; out != want {
+		t.Fatalf("check=%q, want %q", out, want)
+	}
+}
+
 // In shadow, the copy's env.sh names the live run as RUN; skill calls still
 // read and write only in the copy.
 func TestShadowSkillCallsStayInCopy(t *testing.T) {

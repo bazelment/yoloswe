@@ -382,9 +382,9 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 	if op == "lane.start" && t.Status == "running" {
 		phase, brief = t.Phase, phaseBrief(o.dir, t)
 	}
-	repo := checkout(o.dir)
-	if repo == "" {
-		return "", refuse("state.json config.repo names no host checkout for run %s", o.dir)
+	repo, err := checkout(ctx, o.dir)
+	if err != nil {
+		return "", err
 	}
 	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", o.skill, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief)
 	cmd.Dir = repo
@@ -397,21 +397,61 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 
 // checkout is the host's repository checkout for the run, where the skill's
 // git helpers run: the worktree of state.json's config.repo, the git common
-// dir the skill's ledger records at init. Empty when it names no directory.
-func checkout(dir string) string {
-	var s struct{ Config struct{ Repo string } }
+// dir the skill's ledger records at init. A bare repo or common dir with no
+// work tree resolves to its worktree on config.base, else the first listed.
+func checkout(ctx context.Context, dir string) (string, error) {
+	var s struct{ Config struct{ Repo, Base string } }
 	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
 	if err != nil || json.Unmarshal(raw, &s) != nil || !filepath.IsAbs(s.Config.Repo) {
-		return ""
+		return "", refuse("state.json config.repo names no host checkout for run %s", dir)
 	}
 	repo := s.Config.Repo
 	if filepath.Base(repo) == ".git" {
 		repo = filepath.Dir(repo)
 	}
-	if info, err := os.Stat(repo); err != nil || !info.IsDir() {
-		return ""
+	if !isDir(repo) {
+		return "", refuse("state.json config.repo %s names no host checkout for run %s", repo, dir)
 	}
-	return repo
+	out, err := exec.CommandContext(ctx, "git", "-C", repo, "rev-parse", "--is-inside-work-tree").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "false" {
+		return repo, nil
+	}
+	out, err = exec.CommandContext(ctx, "git", "-C", repo, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return "", refuse("state.json config.repo %s has no work tree and git worktree list failed: %v", repo, err)
+	}
+	base, first := "refs/heads/"+cmp.Or(s.Config.Base, "main"), ""
+	for _, rec := range strings.Split(string(out), "\n\n") {
+		var path, branch string
+		bare := false
+		for _, line := range strings.Split(rec, "\n") {
+			if p, ok := strings.CutPrefix(line, "worktree "); ok {
+				path = p
+			} else if b, ok := strings.CutPrefix(line, "branch "); ok {
+				branch = b
+			} else if line == "bare" {
+				bare = true
+			}
+		}
+		if path == "" || bare || !isDir(path) {
+			continue
+		}
+		if branch == base {
+			return path, nil
+		}
+		if first == "" {
+			first = path
+		}
+	}
+	if first == "" {
+		return "", refuse("state.json config.repo %s has no work tree and no worktree of it exists", repo)
+	}
+	return first, nil
+}
+
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // Heartbeat bounds an orca wait that sees no change.
