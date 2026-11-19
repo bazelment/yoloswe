@@ -60,9 +60,8 @@ func ParseAgentBackend(raw string) (AgentBackend, error) {
 }
 
 // AgentSessionConfig configures a long-lived CLI agent session for a run role.
-// CLI agents may inspect the adopted run and checkout with native read-only
-// tools. Mutations remain unavailable through native tools and are exposed
-// only by Orca's typed MCP registry, unless AllowBuiltins is set.
+// Claude roles launch like the host orchestrator: built-in tools on and
+// permissions bypassed.
 type AgentSessionConfig struct {
 	Env              map[string]string
 	Provider         string
@@ -76,8 +75,8 @@ type AgentSessionConfig struct {
 	CodexBin         string
 	MaxSessionTokens int
 	MaxSessionTurns  int
-	// AllowBuiltins launches the adopted dispatcher like the host
-	// orchestrator: built-in tools on, permissions bypassed.
+	// AllowBuiltins marks the adopted dispatcher, which acts through the orca
+	// shell toolbox and gets no typed MCP tools.
 	AllowBuiltins bool
 }
 
@@ -376,24 +375,12 @@ func (s *AgentSession) runClaudeTurnLocked(
 			claude.WithCLIPath(bin),
 			claude.WithDisablePlugins(),
 			claude.WithEnv(s.cfg.Env),
+			// Every role works like the host orchestrator, in live and shadow
+			// alike; shadow safety is the synced copy and the external proxy.
+			claude.WithPermissionMode(claude.PermissionModeBypass),
 		}
-		if s.cfg.AllowBuiltins {
-			// The adopted dispatcher works like the host orchestrator: built-in
-			// tools on and permissions bypassed, in live and shadow alike.
-			opts = append(opts, claude.WithPermissionMode(claude.PermissionModeBypass))
-		} else {
-			opts = append(opts,
-				claude.WithPermissionMode(claude.PermissionModeDefault),
-				claude.WithPermissionPromptToolStdio(),
-				claude.WithSDKTools("orca", s.bridge),
-			)
-			// Shadow mode uses Claude's own best-effort permission grammar. The
-			// external read-only proxy and command wrappers are the safety boundary.
-			allowed = append(allowed,
-				"Bash(git log:*)", "Bash(git show:*)", "Bash(git status:*)", "Bash(git diff:*)",
-				"Bash(cat:*)", "Bash(ls:*)", "Bash(rg:*)", "Bash(gh pr view:*)", "Bash(gh pr list:*)",
-				"Bash(nebula term screen:*)",
-			)
+		if !s.cfg.AllowBuiltins {
+			opts = append(opts, claude.WithSDKTools("orca", s.bridge))
 		}
 		opts = append(opts, claude.WithAllowedTools(allowed...))
 		if cliModel != "" {

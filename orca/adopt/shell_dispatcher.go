@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -135,6 +134,9 @@ func (d *ShellDispatcher) Supervise(ctx context.Context) {
 			slog.Error("relay adopted events", "error", err)
 			return
 		}
+		d.mu.Lock()
+		relayed := d.relayed
+		d.mu.Unlock()
 		turnID := fmt.Sprintf("%s-shell-%d-%d", threadID, time.Now().UnixNano(), seq)
 		if _, err := d.Store.Threads().StartTurn(ctx, store.Turn{ID: turnID, ThreadID: threadID, RunID: d.Run.ID, Input: wake}); err != nil {
 			slog.Error("start adopted dispatcher turn", "error", err)
@@ -159,10 +161,29 @@ func (d *ShellDispatcher) Supervise(ctx context.Context) {
 			case <-time.After(30 * time.Second):
 			}
 			wake = "session restart; reread current host evidence"
-		} else if err := toolbox.Run(ctx, []string{"wait", "--dir", d.workspace}, io.Discard); err != nil && ctx.Err() == nil {
+		} else if err := d.waitAfterTurn(ctx, relayed); err != nil && ctx.Err() == nil {
 			slog.Warn("adopted wait failed", "run", d.Run.ID, "error", err)
 		}
 	}
+}
+
+// waitAfterTurn waits for new evidence, unless an owner message was relayed
+// during the turn. The baseline is taken before that check: a relay writes the
+// inbox and bumps the count under d.mu, so a relay racing the check either
+// shows in the count or changes the inbox after the baseline.
+func (d *ShellDispatcher) waitAfterTurn(ctx context.Context, relayed int) error {
+	before, err := toolbox.Snapshot(d.workspace)
+	if err != nil {
+		return err
+	}
+	d.mu.Lock()
+	missed := d.relayed != relayed
+	d.mu.Unlock()
+	if missed {
+		return nil
+	}
+	_, err = toolbox.WaitSince(ctx, d.workspace, before)
+	return err
 }
 
 // syncEventFiles relays owner and chat messages to the session's inbox file,

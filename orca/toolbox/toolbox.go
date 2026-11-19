@@ -354,18 +354,19 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 
 // Wait blocks until run evidence changes, with no model or network calls.
 func Wait(ctx context.Context, dir string) ([]string, error) {
-	before, err := snapshot(dir)
+	before, err := Snapshot(dir)
 	if err != nil {
 		return nil, err
 	}
-	return waitChanged(ctx, dir, before)
+	return WaitSince(ctx, dir, before)
 }
 
-func waitChanged(ctx context.Context, dir string, before map[string]string) ([]string, error) {
+// WaitSince blocks until run evidence differs from the before snapshot.
+func WaitSince(ctx context.Context, dir string, before map[string]string) ([]string, error) {
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		after, err := snapshot(dir)
+		after, err := Snapshot(dir)
 		if err != nil {
 			return nil, err
 		}
@@ -395,7 +396,8 @@ func waitChanged(ctx context.Context, dir string, before map[string]string) ([]s
 	}
 }
 
-func snapshot(dir string) (map[string]string, error) {
+// Snapshot stamps each run evidence file under dir.
+func Snapshot(dir string) (map[string]string, error) {
 	out := map[string]string{}
 	err := filepath.WalkDir(dir, func(p string, e os.DirEntry, err error) error {
 		if err != nil {

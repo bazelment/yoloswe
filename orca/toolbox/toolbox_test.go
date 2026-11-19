@@ -130,7 +130,7 @@ func TestWaitEvidence(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"EVENTS", "funded.swe.done"} {
 		dir, _, _ := fixture(t)
-		before, err := snapshot(dir)
+		before, err := Snapshot(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -138,7 +138,7 @@ func TestWaitEvidence(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-		changed, err := waitChanged(ctx, dir, before)
+		changed, err := WaitSince(ctx, dir, before)
 		cancel()
 		if err != nil || len(changed) != 1 || changed[0] != name {
 			t.Fatalf("changed=%v err=%v", changed, err)

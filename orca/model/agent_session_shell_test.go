@@ -2,6 +2,7 @@ package model_test
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bazelment/yoloswe/orca/model"
 )
@@ -40,9 +42,10 @@ func TestShellClaudeHelper(t *testing.T) {
 	os.Exit(0)
 }
 
+// Every Claude role runs Bash without a permission prompt: the adopted
+// dispatcher and the concierge and planner, which keep their typed MCP tools.
 func TestAdoptedSessionBashWorks(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -52,12 +55,20 @@ func TestAdoptedSessionBashWorks(t *testing.T) {
 	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	sess := model.NewAgentSession(model.AgentSessionConfig{Provider: "claude", Model: "sonnet", ClaudeBin: bin, WorkDir: dir, AllowBuiltins: true})
-	defer sess.Close()
-	if _, err := sess.Turn(t.Context(), model.AgentTurnRequest{Prompt: "Use Bash to write the synthetic proof"}); err != nil {
-		t.Fatal(err)
-	}
-	if proof, err := os.ReadFile(filepath.Join(dir, "bash-proof")); err != nil || string(proof) != "shell-works" {
-		t.Fatalf("proof=%q err=%v", proof, err)
+	for _, dispatcher := range []bool{true, false} {
+		t.Run(fmt.Sprintf("dispatcher=%v", dispatcher), func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			sess := model.NewAgentSession(model.AgentSessionConfig{Provider: "claude", Model: "sonnet", ClaudeBin: bin, WorkDir: dir, AllowBuiltins: dispatcher})
+			defer sess.Close()
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancel()
+			if _, err := sess.Turn(ctx, model.AgentTurnRequest{Prompt: "Use Bash to write the synthetic proof"}); err != nil {
+				t.Fatal(err)
+			}
+			if proof, err := os.ReadFile(filepath.Join(dir, "bash-proof")); err != nil || string(proof) != "shell-works" {
+				t.Fatalf("proof=%q err=%v", proof, err)
+			}
+		})
 	}
 }
