@@ -39,7 +39,7 @@ type options struct {
 type task struct {
 	ID, Status, Phase, Brief, Mission, Description, Checks, Hold string
 	WaitingOn                                                    string `json:"waiting_on"`
-	SessionID                                                    string `json:"session_id"`
+	NebulaSession                                                string `json:"nebula_session"`
 	NebulaTerminal                                               string `json:"nebula_terminal"`
 	PRHead                                                       string `json:"pr_head"`
 	ApprovalSHA                                                  string `json:"approval_sha"`
@@ -47,15 +47,7 @@ type task struct {
 	PRState                                                      string `json:"pr_state"`
 	HoldNote                                                     string `json:"hold_note"`
 	PR, Round                                                    int
-	Terminals                                                    map[string]map[string]string
 	DependsOn                                                    []string `json:"depends_on"`
-}
-
-func (t task) terminal() string {
-	if id := t.Terminals[t.Phase][strconv.Itoa(t.Round)]; id != "" {
-		return id
-	}
-	return t.NebulaTerminal
 }
 
 func refuse(format string, args ...any) error {
@@ -203,18 +195,28 @@ func validate(ctx context.Context, o options, op string, t *task, tasks []task) 
 	}
 	switch op {
 	case "lane.start":
-		if t.Status != "planned" || t.SessionID != "" || t.terminal() != "" {
+		// A running lane whose current terminal is gone or no longer alive gets
+		// a fresh terminal for its current phase from the phase's stored brief.
+		if t.Status == "running" {
+			if phaseBrief(o.dir, t) == "" {
+				return refuse("lane %s has no brief for its current phase %q", t.ID, t.Phase)
+			}
+			if t.NebulaTerminal == "" {
+				return nil
+			}
+			if state, err := skill(ctx, o, "state", t, ""); err != nil || state == "working" || state == "waiting" {
+				return refuse("lane %s current terminal %s is alive or unreadable (%s)", t.ID, t.NebulaTerminal, cmp.Or(state, "unknown"))
+			}
+			return nil
+		}
+		if t.Status != "planned" || t.NebulaSession != "" || t.NebulaTerminal != "" {
 			return refuse("lane %s is already started or not planned", t.ID)
 		}
 		if strings.TrimSpace(t.Brief+t.Mission+t.Description) == "" {
 			return refuse("lane %s has no brief", t.ID)
 		}
-		if name := strings.TrimSpace(t.Brief); strings.HasSuffix(name, ".brief") {
-			path, err := filepath.EvalSymlinks(filepath.Join(o.dir, name))
-			info, statErr := os.Stat(path)
-			if err != nil || statErr != nil || !inside(o.dir, path) || !info.Mode().IsRegular() || info.Size() == 0 {
-				return refuse("lane %s brief file is missing, empty or outside the run", t.ID)
-			}
+		if name := strings.TrimSpace(t.Brief); strings.HasSuffix(name, ".brief") && !runFile(o.dir, name) {
+			return refuse("lane %s brief file is missing, empty or outside the run", t.ID)
 		}
 		for _, id := range t.DependsOn {
 			if i := slices.IndexFunc(tasks, func(d task) bool { return d.ID == id }); i < 0 || tasks[i].Status != "done" {
@@ -222,7 +224,7 @@ func validate(ctx context.Context, o options, op string, t *task, tasks []task) 
 			}
 		}
 	case "lane.steer", "lane.stop":
-		if t.SessionID == "" || t.terminal() == "" {
+		if t.NebulaSession == "" || t.NebulaTerminal == "" {
 			return refuse("lane %s has no current terminal", t.ID)
 		}
 		if state, err := skill(ctx, o, "state", t, ""); err != nil || (state != "working" && state != "waiting") {
@@ -230,6 +232,30 @@ func validate(ctx context.Context, o options, op string, t *task, tasks []task) 
 		}
 	}
 	return nil
+}
+
+// runFile reports whether name is a non-empty regular file inside the run.
+func runFile(dir, name string) bool {
+	path, err := filepath.EvalSymlinks(filepath.Join(dir, name))
+	if err != nil || !inside(dir, path) {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() && info.Size() > 0
+}
+
+// phaseBrief is the run-relative brief the skill stored for the lane's
+// current phase: the copy snl_spawn keeps, else the written phase brief.
+func phaseBrief(dir string, t *task) string {
+	if t.Phase == "" {
+		return ""
+	}
+	for _, name := range []string{t.ID + "." + t.Phase + ".brief.txt", filepath.Join("briefs", t.ID+"."+t.Phase+".md")} {
+		if runFile(dir, name) {
+			return name
+		}
+	}
+	return ""
 }
 
 // mutate refuses unsafe actions, then runs the skill once per action key. A
@@ -301,7 +327,7 @@ func recordIntent(dir, op string, t *task, text, key string) error {
 	id := "shadow-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	b, err := json.Marshal(map[string]any{
 		"time": time.Now().UTC().Format(time.RFC3339Nano), "lane": t.ID, "action": op,
-		"arguments":   map[string]string{"action_key": key, "text": text, "phase": t.Phase, "terminal_id": t.terminal()},
+		"arguments":   map[string]string{"action_key": key, "text": text, "phase": t.Phase, "terminal_id": t.NebulaTerminal},
 		"decision_id": id, "event_id": id, "reason": "dispatcher toolbox shadow intent",
 	})
 	if err != nil {
@@ -318,8 +344,10 @@ func recordIntent(dir, op string, t *task, text, key string) error {
 
 // skillOps maps toolbox operations onto the subagent-swarm-nebula scripts.
 const skillOps = `set -eu
-SW=$1; export RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7
-[ ! -r "$RUN/env.sh" ] || . "$RUN/env.sh"
+SW=$1; RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7; phase=$8; brief=$9
+run=$RUN; [ ! -r "$RUN/env.sh" ] || . "$RUN/env.sh"
+# env.sh names the live run; a shadow copy's skill calls stay in the copy.
+export RUN=$run
 export SNL_RUN_ID=${SNL_RUN_ID:-$(basename "$RUN")}
 . "$SW/swarm_nebula_lanes.sh"; . "$SW/lane_ops.sh"; . "$SW/step.sh"
 ` + LeaseGuard + `
@@ -328,7 +356,7 @@ case $op in
  state) snl_terminal_agent_state "$sid" "$tid" ;;
  check) echo "terminal=$(snl_terminal_agent_state "$sid" "$tid") remote=$(snl_lane_remote_head "$lane")"
   if snl_sandbox_busy "$lane"; then echo "busy=yes"; else echo "busy=no"; fi ;;
- lane.start) snl_spawn "$lane" ;;
+ lane.start) if [ -n "$phase" ]; then snl_spawn "$lane" "$phase" "$RUN/$brief"; else snl_spawn "$lane"; fi ;;
  lane.steer) snl_nb term send "$tid" --file "$msg" ;;
  lane.stop) snl_nb term stop "$tid" ;;
  ready) snl_merge_claims "$lane" "$text"; snl_head_checks "$lane" "$(snl_task "$lane" pr)" "$text" ;;
@@ -342,11 +370,36 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 	if _, err := os.Stat(filepath.Join(o.skill, "lane_ops.sh")); err != nil {
 		return "", refuse("swarm skill scripts unavailable in %s", o.skill)
 	}
-	raw, err := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", o.skill, o.dir, op, t.ID, t.SessionID, t.terminal(), text).CombinedOutput()
+	phase, brief := "", ""
+	if op == "lane.start" && t.Status == "running" {
+		phase, brief = t.Phase, phaseBrief(o.dir, t)
+	}
+	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", o.skill, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief)
+	cmd.Dir = checkout(o.dir)
+	raw, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("swarm skill %s failed: %w: %s", op, err, strings.TrimSpace(string(raw)))
 	}
 	return strings.TrimSpace(string(raw)), nil
+}
+
+// checkout is the host's repository checkout for the run, where the skill's
+// git helpers run: the worktree of state.json's config.repo, the git common
+// dir the skill's ledger records at init. Empty keeps the caller's cwd.
+func checkout(dir string) string {
+	var s struct{ Config struct{ Repo string } }
+	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil || json.Unmarshal(raw, &s) != nil || !filepath.IsAbs(s.Config.Repo) {
+		return ""
+	}
+	repo := s.Config.Repo
+	if filepath.Base(repo) == ".git" {
+		repo = filepath.Dir(repo)
+	}
+	if info, err := os.Stat(repo); err != nil || !info.IsDir() {
+		return ""
+	}
+	return repo
 }
 
 // Heartbeat bounds an orca wait that sees no change.

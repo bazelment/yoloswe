@@ -31,6 +31,7 @@ Each wake is one tick of the run's skill: read ` + skill + ` and run its section
 The watcher moves lanes swe to clean to review only; verifying reports, integrating, terminal care, and funding are yours.
 Make every write the tick calls for through the orca shell toolbox: orca lane start|steer|stop <lane>, orca pr ready|merge <pr>, orca ask, orca note. orca status and orca check <lane> read.
 Pass --action-key for each mutation; reuse that key on retry.
+A note never reports an action the toolbox refused.
 The controller arms the watcher and wakes you: skip the skill's watcher and loop scheduling, and end each tick with orca wait.
 Do not infer a stall or expiry from age. Read what the host has already handled.
 Owner and chat messages arrive in .orca-inbox/events.jsonl.
