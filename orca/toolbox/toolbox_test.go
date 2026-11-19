@@ -29,15 +29,16 @@ const ledger = `{"config":{"repo":"REPO/.git","base":"main"},"tasks":[
 {"id":"expired","status":"running","phase":"review","round":3,"sessions":{"swe":"nebula:t4a","swe2":"nebula:t4b","review3":"nebula:t4"},"nebula_session":"s4","nebula_terminal":"t4"}]}`
 
 // fakeNebula answers term list per session (t1, t2 alive; t3 idle; t4 gone)
-// and logs each terminal write.
+// and t1's screen, and logs each terminal write.
 const fakeNebula = `#!/bin/sh
 case "$1 $2" in
 "term list") case $3 in
-  s1) echo '{"terminals":[{"id":"t1","status":"running","agentState":"working"}]}' ;;
+  s1) echo '{"terminals":[{"id":"t1","status":"running","agentState":"working","backgroundTasks":{"shells":1}}]}' ;;
   s2) echo '{"terminals":[{"id":"t2","status":"running","agentState":"waiting"}]}' ;;
   s3) echo '{"terminals":[{"id":"t3","status":"running","agentState":"idle"}]}' ;;
   *) echo '{"terminals":[]}' ;;
   esac ;;
+"term screen") [ "$3" = t1 ] && printf '> \n\n  1 shell still running\n' ;;
 *) echo "nb $*" >> "$CALLS" ;;
 esac
 `
@@ -100,8 +101,10 @@ func fixture(t *testing.T) (dir, skill, calls string) {
 	return dir, skill, calls
 }
 
-// workingCare is orca check's terminal-care line for t1, which lists only its state.
-const workingCare = "phase=swe agent=working signal= output_min_ago=unknown background={} report_filed=no\nlast_turn_line=\"\"\n"
+// workingCare is orca check's terminal care for t1: its state, background
+// from its screen, and backgroundTasks as term list reports it.
+const workingCare = "phase=swe agent=working signal= output_min_ago=unknown background=yes backgroundTasks={\"shells\":1} report_filed=no\n" +
+	"last_turn_line=\"\"\nscreen_tail=[\">\", \"1 shell still running\"]\n"
 
 func shq(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 

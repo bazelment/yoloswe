@@ -364,8 +364,8 @@ func TestOrcaWaitReturnsOnlyOnLiveChange(t *testing.T) {
 
 // The fake care session follows its system prompt's terminal care: it reads
 // orca status, runs orca check on each running lane, and steers an idle lane
-// whose last turn printed a verdict with no report filed, unless a background
-// shell still runs. It logs each toolbox call and its result.
+// whose last turn printed a verdict with no report filed, only when its screen
+// shows no background shell. It logs each toolbox call and its result.
 func TestFakeCareClaude(t *testing.T) {
 	dir := os.Getenv("ORCA_FAKE_CARE_DIR")
 	if dir == "" {
@@ -384,6 +384,7 @@ func TestFakeCareClaude(t *testing.T) {
 		f, _ := os.OpenFile(filepath.Join(dir, "actions"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		_, _ = fmt.Fprintf(f, "%s -> %s\n", args[0], result)
 		_ = f.Close()
+		_ = os.WriteFile(filepath.Join(dir, args[0]+".out"), out.Bytes(), 0o600)
 		return out.String()
 	}
 	fakeClaude(func(int) {
@@ -391,8 +392,8 @@ func TestFakeCareClaude(t *testing.T) {
 		_ = json.Unmarshal([]byte(act("status")), &lanes)
 		for _, l := range lanes {
 			check := act("check", l.ID)
-			if l.Status == "running" && strings.Contains(prompt, "report_filed=no") && strings.Contains(prompt, "shell still running") &&
-				strings.Contains(check, "agent=idle") && strings.Contains(check, "report_filed=no") && strings.Contains(check, "background={}") &&
+			if l.Status == "running" && strings.Contains(prompt, "report_filed=no") && strings.Contains(prompt, "only when background=no") &&
+				strings.Contains(check, "agent=idle") && strings.Contains(check, "report_filed=no") && strings.Contains(check, "background=no") &&
 				regexp.MustCompile(`last_turn_line=.*(PASS|Verdict)`).MatchString(check) {
 				act("lane", "steer", l.ID, "Your last turn printed a verdict but filed no phase report. File it now.", "--action-key", "care-"+l.ID)
 			}
@@ -401,40 +402,59 @@ func TestFakeCareClaude(t *testing.T) {
 	})
 }
 
-// A review terminal idle 25 min after printing PASS, with no report filed, is
-// steered to file it; the same terminal with a background shell still running
-// waits on its own gate and is left alone.
+// A review terminal idle 25 min after printing PASS, with no report filed and
+// no backgroundTasks in term list, is steered to file it only when its screen
+// shows no background shell. With "1 shell still running" on screen it waits
+// on its own gate; with an unreadable screen it is not steered blind.
 func TestShellDispatcherTerminalCare(t *testing.T) {
 	t.Parallel()
-	for background, want := range map[string]bool{"": true, `"backgroundTasks":{"shells":1},`: false} {
-		live, fake, scripts := t.TempDir(), t.TempDir(), t.TempDir()
-		terms := filepath.Join(scripts, "terms.json")
-		write(t, terms, `{"terminals":[{"id":"t1","status":"running","agentState":"idle",`+background+`"lastOutputAt":"`+
-			time.Now().Add(-25*time.Minute).UTC().Format(time.RFC3339)+`","lastTurnText":"Gate green on abc123.\nVerdict: PASS\n"}]}`)
-		write(t, filepath.Join(scripts, "swarm_nebula_lanes.sh"), "snl_nb() { cat "+shq(terms)+"; }\n"+
-			"snl_terminal_agent_state() { snl_nb | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"terminals\"][0][\"agentState\"])'; }\n"+
-			"snl_lane_remote_head() { echo OK; }\nsnl_sandbox_busy() { false; }\n")
-		for _, name := range []string{"lane_ops.sh", "step.sh"} {
-			write(t, filepath.Join(scripts, name), "")
-		}
-		write(t, filepath.Join(live, "state.json"), `{"config":{"repo":`+strconv.Quote(t.TempDir())+`},"tasks":[{"id":"L1","status":"running","phase":"review","round":1,"nebula_session":"s1","nebula_terminal":"t1","pr":7}]}`)
-		_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, "TestFakeCareClaude", "ORCA_FAKE_CARE_DIR="+shq(fake)+" ORCA_SNL_DIR="+shq(scripts))
-		var actions []string
-		waitFor(t, func() bool {
-			raw, _ := os.ReadFile(filepath.Join(fake, "actions"))
-			actions = strings.Split(strings.TrimSpace(string(raw)), "\n")
-			return slices.ContainsFunc(actions, func(a string) bool { return strings.HasPrefix(a, "wait ") })
+	idle := "Verdict: PASS\n╭──╮\n│ > │\n╰──╯\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+	for _, tc := range []struct {
+		name, screen, background string
+		steer                    bool
+	}{
+		{"idle", idle, "no", true},
+		{"own shell", strings.Replace(idle, "(shift+tab to cycle)", "· 1 shell still running · ↓ to manage", 1), "yes", false},
+		{"screen unreadable", "", "unknown", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			live, fake, scripts := t.TempDir(), t.TempDir(), t.TempDir()
+			terms, screen := filepath.Join(scripts, "terms.json"), filepath.Join(scripts, "screen.txt")
+			write(t, terms, `{"terminals":[{"id":"t1","status":"running","agentState":"idle","lastOutputAt":"`+
+				time.Now().Add(-25*time.Minute).UTC().Format(time.RFC3339Nano)+`","lastTurnText":"Gate green on abc123.\nVerdict: PASS\n"}]}`)
+			if tc.screen != "" {
+				write(t, screen, tc.screen)
+			}
+			write(t, filepath.Join(scripts, "swarm_nebula_lanes.sh"), "snl_nb() { if [ \"${2:-}\" = screen ]; then cat "+shq(screen)+"; else cat "+shq(terms)+"; fi; }\n"+
+				"snl_terminal_agent_state() { snl_nb | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"terminals\"][0][\"agentState\"])'; }\n"+
+				"snl_lane_remote_head() { echo OK; }\nsnl_sandbox_busy() { false; }\n")
+			for _, name := range []string{"lane_ops.sh", "step.sh"} {
+				write(t, filepath.Join(scripts, name), "")
+			}
+			write(t, filepath.Join(live, "state.json"), `{"config":{"repo":`+strconv.Quote(t.TempDir())+`},"tasks":[{"id":"L1","status":"running","phase":"review","round":1,"nebula_session":"s1","nebula_terminal":"t1","pr":7}]}`)
+			_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, "TestFakeCareClaude", "ORCA_FAKE_CARE_DIR="+shq(fake)+" ORCA_SNL_DIR="+shq(scripts))
+			var actions []string
+			waitFor(t, func() bool {
+				raw, _ := os.ReadFile(filepath.Join(fake, "actions"))
+				actions = strings.Split(strings.TrimSpace(string(raw)), "\n")
+				return slices.ContainsFunc(actions, func(a string) bool { return strings.HasPrefix(a, "wait ") })
+			})
+			wantActions := []string{"status -> ok", "check -> ok"}
+			if tc.steer {
+				wantActions = append(wantActions, "lane -> ok")
+			}
+			if i := slices.IndexFunc(actions, func(a string) bool { return strings.HasPrefix(a, "wait ") }); !slices.Equal(actions[:i], wantActions) {
+				t.Fatalf("actions = %q, want %q", actions, wantActions)
+			}
+			check, _ := os.ReadFile(filepath.Join(fake, "check.out"))
+			if want := "output_min_ago=25 background=" + tc.background + " report_filed=no\n"; !strings.Contains(string(check), want) {
+				t.Fatalf("check = %q, want %q", check, want)
+			}
+			raw, _ := os.ReadFile(filepath.Join(intent, "actions.jsonl"))
+			if steered := strings.Contains(string(raw), `"action":"lane.steer"`); steered != tc.steer {
+				t.Fatalf("steer intent = %s, want steered=%v", raw, tc.steer)
+			}
 		})
-		wantActions := []string{"status -> ok", "check -> ok"}
-		if want {
-			wantActions = append(wantActions, "lane -> ok")
-		}
-		if i := slices.IndexFunc(actions, func(a string) bool { return strings.HasPrefix(a, "wait ") }); !slices.Equal(actions[:i], wantActions) {
-			t.Fatalf("background %q: actions = %q, want %q", background, actions, wantActions)
-		}
-		raw, _ := os.ReadFile(filepath.Join(intent, "actions.jsonl"))
-		if steered := strings.Contains(string(raw), `"action":"lane.steer"`); steered != want {
-			t.Fatalf("background %q: steer intent = %s, want steered=%v", background, raw, want)
-		}
 	}
 }

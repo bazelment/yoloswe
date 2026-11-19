@@ -361,23 +361,40 @@ export SNL_RUN_ID=${SNL_RUN_ID:-$(basename "$RUN")}
 . "$SW/swarm_nebula_lanes.sh"; . "$SW/lane_ops.sh"; . "$SW/step.sh"
 ` + LeaseGuard + `
 # care is the phase terminal as nebula term list reports it, for terminal care.
-care='import datetime as d,json,sys
-tid,ph,rep=sys.argv[1:]
+# background comes from the screen's tail, as the host reads it: an idle Claude
+# terminal on its own gate shows "N shell[, M monitor] still running"; term list
+# omits backgroundTasks both then and with no shell, so its absence proves nothing.
+care='import datetime as d,json,re,sys
+tid,ph,rep,scr=sys.argv[1:]
+raw=open(scr).read()
+try: s=json.loads(raw)
+except ValueError: s=None
+ls=s.get("lines") if isinstance(s,dict) else None
+if not isinstance(ls,list): ls=raw.splitlines()
+ls=[(l if isinstance(l,str) else str(l.get("text","")) if isinstance(l,dict) else str(l)).strip() for l in ls]
+tail=[l for l in ls if l][-6:]
+bg="unknown" if not tail else "yes" if any(re.search(r"\b\d+ (shell|monitor)s?\b.*\bstill running\b",l) for l in tail) else "no"
 for t in json.load(sys.stdin).get("terminals",[]):
     if t.get("id")!=tid: continue
-    at=t.get("lastOutputAt") or ""
-    age=int((d.datetime.now(d.timezone.utc)-d.datetime.strptime(at[:19],"%Y-%m-%dT%H:%M:%S").replace(tzinfo=d.timezone.utc)).total_seconds()//60) if at else "unknown"
+    try:
+        at=d.datetime.fromisoformat(t.get("lastOutputAt") or "")
+        age=int((d.datetime.now(d.timezone.utc)-(at if at.tzinfo else at.replace(tzinfo=d.timezone.utc))).total_seconds()//60)
+    except ValueError: age="unknown"
+    bt=t.get("backgroundTasks")
+    bt="" if bt is None else " backgroundTasks="+json.dumps(bt,separators=(",",":"))
     last=[l.strip() for l in (t.get("lastTurnText") or "").splitlines() if l.strip()][-1:] or [""]
-    print("phase=%s agent=%s signal=%s output_min_ago=%s background=%s report_filed=%s" % (ph,t.get("agentState") or "",t.get("agentSignal") or "",age,json.dumps(t.get("backgroundTasks") or {},separators=(",",":")),rep))
-    print("last_turn_line="+json.dumps(last[0][:200]))'
-msg=$(mktemp); trap 'rm -f "$msg"' EXIT; printf '%s\n' "$text" > "$msg"
+    print("phase=%s agent=%s signal=%s output_min_ago=%s background=%s%s report_filed=%s" % (ph,t.get("agentState") or "",t.get("agentSignal") or "",age,bg,bt,rep))
+    print("last_turn_line="+json.dumps(last[0][:200]))
+    print("screen_tail="+json.dumps([l[:200] for l in tail]))'
+msg=$(mktemp); scr=$(mktemp); trap 'rm -f "$msg" "$scr"' EXIT; printf '%s\n' "$text" > "$msg"
 case $op in
  state) snl_terminal_agent_state "$sid" "$tid" ;;
  check) echo "terminal=$(snl_terminal_agent_state "$sid" "$tid") remote=$(snl_lane_remote_head "$lane")"
   if snl_sandbox_busy "$lane"; then echo "busy=yes"; else echo "busy=no"; fi
   ph=$(snl_term_phase "$lane" "$tid" 2>/dev/null) || ph=$phase
   if [ -s "$RUN/$lane.$ph.md" ]; then rep=yes; else rep=no; fi
-  snl_nb term list "$sid" | /usr/bin/env python3 -c "$care" "$tid" "$ph" "$rep" ;;
+  snl_nb term screen "$tid" > "$scr" 2>/dev/null || : > "$scr"
+  snl_nb term list "$sid" | /usr/bin/env python3 -c "$care" "$tid" "$ph" "$rep" "$scr" ;;
  lane.start) if [ -n "$phase" ]; then snl_spawn "$lane" "$phase" "$RUN/$brief"; else snl_fund_planned "$lane"; fi ;;
  lane.steer) snl_nb term send "$tid" --file "$msg" ;;
  lane.stop) snl_nb term stop "$tid" ;;
