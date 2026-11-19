@@ -454,3 +454,21 @@ func TestSkillScriptsRefusalNamesPathsTried(t *testing.T) {
 		t.Fatalf("skill calls=%q", got)
 	}
 }
+
+// lane hold writes the skill's .hold-advance file with its reason, under any
+// other hold, once; a done lane is refused.
+func TestLaneHoldWritesHoldAdvance(t *testing.T) {
+	t.Parallel()
+	dir, skill, _ := fixture(t)
+	for _, want := range []string{"lane held holds advance\n", "lane held already holds advance\n"} {
+		if out, err := run(t, dir, skill, "lane", "hold", "held", "--reason", "run rule: hold-advance on every lane"); err != nil || out != want {
+			t.Fatalf("out=%q err=%v, want %q", out, err, want)
+		}
+	}
+	if raw, err := os.ReadFile(filepath.Join(dir, "held.hold-advance")); err != nil || string(raw) != "run rule: hold-advance on every lane\n" {
+		t.Fatalf("hold file = %q, %v", raw, err)
+	}
+	if _, err := run(t, dir, skill, "lane", "hold", "done"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("hold on a done lane: %v", err)
+	}
+}

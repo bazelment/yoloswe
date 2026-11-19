@@ -3,6 +3,7 @@ package adopt
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -602,7 +603,8 @@ func handSkill(t *testing.T, scripts, head string) (calls string) {
 		"snl_merge_claims() { :; }\nsnl_head_checks() { [ \"$3\" = \"$(cat "+prHead+")\" ]; }\n"+
 		"snl_lane_gh() { cat "+prHead+"; }\nsnl_lane_slug() { echo o/r; }\nsnl_merge() { log merge \"$1\"; }\n"+
 		"ghx() { log ghx \"$@\"; git -c user.name=t -c user.email=t@t merge -q --no-ff -m main origin/main && git rev-parse HEAD > "+prHead+"; }\n"+
-		"snl_task() { echo 7; }\nsnl_terminal_agent_state() { echo working; }\nsnl_nb() { log nb \"$*\"; }\n")
+		"snl_task() { echo 7; }\nsnl_terminal_agent_state() { echo working; }\nsnl_nb() { log nb \"$*\"; }\n"+
+		"snl_report_word() { sed -n \"s/^$3:[[:space:]]*//p\" \"$RUN/$1.$2.md\" | awk '{print tolower($1)}' | head -1; }\n")
 	write(t, filepath.Join(scripts, "lane_ops.sh"), `snl_only_base_merges() {
   local c="$2"
   while [ "$c" != "$1" ]; do
@@ -821,6 +823,105 @@ func TestShellDispatcherIntegratesByHand(t *testing.T) {
 			}
 			if tc.baseAge > time.Hour && !strings.Contains(actions[0], "stale base: the oldest origin/main commit missing from") {
 				t.Fatalf("ready refusal = %q, want the stale base", actions[0])
+			}
+		})
+	}
+}
+
+// The fake hold session follows its system prompt: on a run whose notes hold
+// every lane's advance, it holds each lane that lacks a hold, then waits.
+func TestFakeHoldClaude(t *testing.T) {
+	dir := os.Getenv("ORCA_FAKE_HOLD_DIR")
+	if dir == "" {
+		return
+	}
+	var prompt string
+	if i := slices.Index(os.Args, "--system-prompt"); i > 0 && i+1 < len(os.Args) {
+		prompt = os.Args[i+1]
+	}
+	act := func(args ...string) {
+		result := "ok"
+		if err := toolbox.Run(context.Background(), args, io.Discard); err != nil {
+			result = err.Error()
+		}
+		f, _ := os.OpenFile(filepath.Join(dir, "actions"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		_, _ = fmt.Fprintf(f, "%s -> %s\n", strings.Join(args, " "), result)
+		_ = f.Close()
+	}
+	fakeClaude(func(int) {
+		run := os.Getenv("ORCA_TOOLBOX_DIR")
+		objective, _ := os.ReadFile(filepath.Join(run, "OBJECTIVE.md"))
+		var s struct{ Tasks []struct{ ID string } }
+		raw, _ := os.ReadFile(filepath.Join(run, "state.json"))
+		_ = json.Unmarshal(raw, &s)
+		for _, ln := range s.Tasks {
+			if _, err := os.Stat(filepath.Join(run, ln.ID+".hold-advance")); err != nil && strings.Contains(string(objective), "hold-advance on every lane") && strings.Contains(prompt, "run orca lane hold <lane>") {
+				act("lane", "hold", ln.ID, "--action-key", "hold-"+ln.ID)
+			}
+		}
+		act("wait", "--timeout", "50ms")
+	})
+}
+
+// A run whose notes hold every lane: the dispatcher holds L1, which lacks a
+// hold, and not L2, which has one. In shadow the hold is an intent only.
+func TestShellDispatcherHoldsEveryLane(t *testing.T) {
+	t.Parallel()
+	live, scripts, _ := handRun(t, 10*time.Minute)
+	write(t, filepath.Join(live, "OBJECTIVE.md"), "## Notes\n- No auto-integrate: hold-advance on every lane; the orchestrator advances and merges by hand.\n")
+	write(t, filepath.Join(live, "L2.hold-advance"), "run rule\n")
+	fake := t.TempDir()
+	_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, scripts, "TestFakeHoldClaude", "ORCA_FAKE_HOLD_DIR="+shq(fake)+" ORCA_SNL_DIR="+shq(scripts))
+	var actions []string
+	waitFor(t, func() bool {
+		raw, _ := os.ReadFile(filepath.Join(fake, "actions"))
+		actions = strings.Split(strings.TrimSpace(string(raw)), "\n")
+		return slices.ContainsFunc(actions, func(a string) bool { return strings.HasPrefix(a, "wait ") })
+	})
+	if len(actions) != 2 || actions[0] != "lane hold L1 --action-key hold-L1 -> ok" {
+		t.Fatalf("actions = %q, want lane hold L1 then wait", actions)
+	}
+	raw, _ := os.ReadFile(filepath.Join(intent, "actions.jsonl"))
+	if !strings.Contains(string(raw), `"action":"lane.hold","arguments":`) || !strings.Contains(string(raw), `"lane":"L1"`) || strings.Contains(string(raw), `"lane":"L2"`) {
+		t.Fatalf("shadow intents = %s", raw)
+	}
+	if _, err := os.Stat(filepath.Join(live, "L1.hold-advance")); !os.IsNotExist(err) {
+		t.Fatalf("shadow hold reached the live run: %v", err)
+	}
+}
+
+// A by-hand run holds L1 and no gate recorded its review PASS: approve
+// records it when the report passes at the PR head, so ready and merge
+// succeed. A report at another head or a verdict that is not pass is refused.
+func TestApproveVerifiedPassUnderHoldAdvance(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, head, verdict, refusal string }{
+		{name: "pass at PR head", verdict: "pass"},
+		{name: "report at another head", head: strings.Repeat("a", 40), verdict: "pass", refusal: "is not PR head"},
+		{name: "verdict fail", verdict: "fail", refusal: "not pass"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			live, scripts, calls := handRun(t, 10*time.Minute)
+			prHead, _ := os.ReadFile(filepath.Join(scripts, "pr-head"))
+			head := strings.TrimSpace(string(prHead))
+			write(t, filepath.Join(live, "L1.hold-advance"), "run rule: hold-advance on every lane\n")
+			write(t, filepath.Join(live, "L1.review.md"), "Outcome: done\nHEAD: "+cmp.Or(tc.head, head)+"\nVerdict: "+tc.verdict+"\n")
+			raw, _ := os.ReadFile(filepath.Join(live, "state.json"))
+			write(t, filepath.Join(live, "state.json"), strings.Replace(string(raw), `"approval_sha":"`+head+`"`, `"approval_sha":""`, 1))
+			pr := func(args ...string) error {
+				return toolbox.Run(t.Context(), append([]string{"pr"}, append(args, "7", "--dir", live, "--skill", scripts)...), io.Discard)
+			}
+			approve, ready, merge := pr("approve"), pr("ready"), pr("merge")
+			got, _ := os.ReadFile(calls)
+			if tc.refusal != "" {
+				if !errors.Is(approve, toolbox.ErrRefused) || !strings.Contains(approve.Error(), tc.refusal) || !errors.Is(ready, toolbox.ErrRefused) || !errors.Is(merge, toolbox.ErrRefused) || len(got) != 0 {
+					t.Fatalf("approve = %v, ready = %v, merge = %v, calls = %q; want all refused, approve with %q", approve, ready, merge, got, tc.refusal)
+				}
+				return
+			}
+			if approve != nil || ready != nil || merge != nil || string(got) != "merge L1\n" {
+				t.Fatalf("approve = %v, ready = %v, merge = %v, calls = %q", approve, ready, merge, got)
 			}
 		})
 	}
