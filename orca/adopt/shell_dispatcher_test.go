@@ -48,9 +48,11 @@ func fakeClaude(onTurn func(turn int)) {
 }
 
 // superviseFake supervises a shadow of live whose CLI is this test binary
-// running the named fake with the given shell exports.
-func superviseFake(t *testing.T, st store.Store, live, fake, exports string) (d *ShellDispatcher, intent string) {
+// running the named fake with the given shell exports. live's env.sh names
+// scripts (a stub when "") as its skill's SW.
+func superviseFake(t *testing.T, st store.Store, live, scripts, fake, exports string) (d *ShellDispatcher, intent string) {
 	t.Helper()
+	envSkill(t, live, scripts)
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -73,6 +75,30 @@ func superviseFake(t *testing.T, st store.Store, live, fake, exports string) (d 
 	go func() { defer close(done); d.Supervise(ctx) }()
 	t.Cleanup(func() { cancel(); <-done })
 	return d, intent
+}
+
+// envSkill points live's env.sh SW at scripts, a stub skill in a temp dir
+// when "", and returns it. No home skill folder is involved.
+func envSkill(t *testing.T, live, scripts string) string {
+	t.Helper()
+	if scripts == "" {
+		scripts = filepath.Join(t.TempDir(), "scripts")
+		if err := os.MkdirAll(scripts, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		write(t, filepath.Join(scripts, "lane_ops.sh"), "")
+	}
+	f, err := os.OpenFile(filepath.Join(live, "env.sh"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("export SW=" + shq(scripts) + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return scripts
 }
 
 // The fake CLI logs each turn and holds its first turn open until the test
@@ -102,7 +128,7 @@ func TestFakeDispatcherClaude(t *testing.T) {
 func TestShellDispatcherWakesForOwnerMessageDuringTurn(t *testing.T) {
 	t.Parallel()
 	fake, st := t.TempDir(), store.NewMemoryStore(clock.RealClock{})
-	d, _ := superviseFake(t, st, t.TempDir(), "TestFakeDispatcherClaude", "ORCA_FAKE_DISPATCHER_DIR="+shq(fake))
+	d, _ := superviseFake(t, st, t.TempDir(), "", "TestFakeDispatcherClaude", "ORCA_FAKE_DISPATCHER_DIR="+shq(fake))
 	turns := func() int {
 		raw, _ := os.ReadFile(filepath.Join(fake, "turns"))
 		return strings.Count(string(raw), "\n")
@@ -162,7 +188,7 @@ func TestFakeResumeClaude(t *testing.T) {
 func TestShellDispatcherWakesContinueOneSession(t *testing.T) {
 	t.Parallel()
 	fake, st := t.TempDir(), store.NewMemoryStore(clock.RealClock{})
-	d, _ := superviseFake(t, st, t.TempDir(), "TestFakeResumeClaude", "ORCA_FAKE_RESUME_DIR="+shq(fake))
+	d, _ := superviseFake(t, st, t.TempDir(), "", "TestFakeResumeClaude", "ORCA_FAKE_RESUME_DIR="+shq(fake))
 	turns := func() []string {
 		raw, _ := os.ReadFile(filepath.Join(fake, "turns"))
 		return strings.Fields(string(raw))
@@ -185,13 +211,71 @@ func TestShellDispatcherWakesContinueOneSession(t *testing.T) {
 func TestShellDispatcherDefaultsToHostModel(t *testing.T) {
 	t.Parallel()
 	for set, want := range map[string]string{"": HostModel, "claude-sonnet-5-5": "claude-sonnet-5-5", "gpt-6.1-sol": HostModel} {
-		d := &ShellDispatcher{Run: Run{ID: "r", Dir: t.TempDir()}, Shadow: true, IntentDir: t.TempDir(), Config: model.AgentSessionConfig{Model: set, WorkDir: t.TempDir()}}
+		live := t.TempDir()
+		envSkill(t, live, "")
+		d := &ShellDispatcher{Run: Run{ID: "r", Dir: live}, Shadow: true, IntentDir: t.TempDir(), Config: model.AgentSessionConfig{Model: set, WorkDir: t.TempDir()}}
 		if err := d.Prepare(); err != nil {
 			t.Fatal(err)
 		}
 		if d.Config.Model != want {
 			t.Errorf("model %q prepared as %q, want %q", set, d.Config.Model, want)
 		}
+	}
+}
+
+// The run's env.sh SW names the skill, with no home skill folder: the
+// adopted prompt names its SKILL.md and references, and the adopted watcher
+// and the host watcher run its watch_lanes.sh.
+func TestAdoptedSkillFromRunEnvSW(t *testing.T) {
+	t.Parallel()
+	live, skill := t.TempDir(), t.TempDir()
+	scripts, marker := filepath.Join(skill, "scripts"), filepath.Join(skill, "watched")
+	if err := os.MkdirAll(scripts, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(scripts, "lane_ops.sh"), "")
+	write(t, filepath.Join(scripts, "watch_lanes.sh"), "echo \"$*\" >> "+shq(marker)+"\necho armed: none; echo bridges: 42\n")
+	envSkill(t, live, scripts)
+	write(t, filepath.Join(live, ".orca-lease.json"), `{"Holder":"h","Marker":"m","State":"adopted"}`)
+	d := &ShellDispatcher{Store: store.NewMemoryStore(clock.RealClock{}), Run: Run{ID: "r", Dir: live}}
+	if err := d.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{filepath.Join(skill, "SKILL.md"), filepath.Join(skill, "references", "nebula-lanes.md"), filepath.Join(skill, "references", "standing-rules.md")} {
+		if !strings.Contains(d.Config.SystemPrompt, want) {
+			t.Errorf("adopted prompt does not name %s", want)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); d.watch(ctx) }()
+	waitFor(t, func() bool { _, err := os.Stat(marker); return err == nil })
+	cancel()
+	<-done
+	if pids, err := (ScriptWatcher{}).Running(t.Context(), live); err != nil || !slices.Equal(pids, []int{42}) {
+		t.Fatalf("host watcher status = %v, %v", pids, err)
+	}
+	raw, _ := os.ReadFile(marker)
+	if got, want := string(raw), live+"\n--status "+live+"\n"; got != want {
+		t.Fatalf("watch_lanes.sh calls = %q, want %q", got, want)
+	}
+}
+
+// With no SW in the run's env.sh and no home skill folder, adoption refuses
+// before launching, naming the paths tried. Not parallel: it sets HOME.
+func TestAdoptedSkillRefusalNamesPathsTried(t *testing.T) {
+	home, live := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ORCA_SNL_DIR", "")
+	d := &ShellDispatcher{Run: Run{ID: "r", Dir: live}, Shadow: true, IntentDir: t.TempDir(), Config: model.AgentSessionConfig{WorkDir: t.TempDir()}}
+	err := d.Prepare()
+	want := "orca toolbox refused: swarm skill scripts unavailable: " + filepath.Join(live, "env.sh") +
+		" exports no SW and no lane_ops.sh in " + filepath.Join(home, ".claude", "skills", "subagent-swarm-nebula", "scripts")
+	if err == nil || err.Error() != want || d.Config.SystemPrompt != "" {
+		t.Fatalf("Prepare err=%v prompt=%q\nwant %s", err, d.Config.SystemPrompt, want)
+	}
+	if _, err := (ScriptWatcher{}).Running(t.Context(), live); err == nil || err.Error() != want {
+		t.Fatalf("host watcher err=%v\nwant %s", err, want)
 	}
 }
 
@@ -231,9 +315,9 @@ func TestFakeTickClaude(t *testing.T) {
 }
 
 // A wake runs the skill's tick: a lane whose review passed at a green exact
-// head is integrated first, not left waiting on the watcher. Not parallel:
-// the run's skill is found through ORCA_WATCH_LANES.
+// head is integrated first, not left waiting on the watcher.
 func TestShellDispatcherTickIntegratesReviewPass(t *testing.T) {
+	t.Parallel()
 	live, fake, skill := t.TempDir(), t.TempDir(), t.TempDir()
 	scripts := filepath.Join(skill, "scripts")
 	for _, d := range []string{filepath.Join(live, "reports"), scripts} {
@@ -245,11 +329,9 @@ func TestShellDispatcherTickIntegratesReviewPass(t *testing.T) {
 	// Exact-head CI is green only at the approved head, on a fresh base.
 	repo, head := handRepo(t, 10*time.Minute)
 	handSkill(t, scripts, head)
-	write(t, filepath.Join(scripts, "watch_lanes.sh"), "")
 	write(t, filepath.Join(live, "state.json"), `{"config":{"repo":`+strconv.Quote(repo)+`},"tasks":[{"id":"L1","status":"running","phase":"review","round":1,"sessions":{"review":"nebula:t1"},"nebula_session":"s1","nebula_terminal":"t1","pr":7,"pr_head":"`+head+`","approval_sha":"`+head+`"}]}`)
 	write(t, filepath.Join(live, "reports", "L1.review.md"), "PR #7\nVerdict: pass\n")
-	t.Setenv("ORCA_WATCH_LANES", filepath.Join(scripts, "watch_lanes.sh"))
-	_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, "TestFakeTickClaude", "ORCA_FAKE_TICK_DIR="+shq(fake)+" ORCA_SNL_DIR="+shq(scripts))
+	_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, scripts, "TestFakeTickClaude", "ORCA_FAKE_TICK_DIR="+shq(fake)+" ORCA_SNL_DIR="+shq(scripts))
 	var actions []string
 	waitFor(t, func() bool {
 		raw, _ := os.ReadFile(filepath.Join(fake, "actions"))
@@ -304,7 +386,7 @@ func TestShellDispatcherNoteQuotesRefusedWrite(t *testing.T) {
 		write(t, filepath.Join(scripts, name), "")
 	}
 	write(t, filepath.Join(live, "state.json"), `{"config":{"repo":`+strconv.Quote(t.TempDir())+`},"tasks":[{"id":"L1","status":"running","phase":"review","pr":7,"pr_head":"abc123","approval_sha":"abc123"}]}`)
-	_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, "TestFakeNoteClaude", "ORCA_FAKE_NOTE=1 ORCA_SNL_DIR="+shq(scripts))
+	_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, scripts, "TestFakeNoteClaude", "ORCA_FAKE_NOTE=1 ORCA_SNL_DIR="+shq(scripts))
 	var note string
 	waitFor(t, func() bool {
 		raw, _ := os.ReadFile(filepath.Join(intent, "actions.jsonl"))
@@ -433,7 +515,7 @@ func TestShellDispatcherTerminalCare(t *testing.T) {
 				write(t, filepath.Join(scripts, name), "")
 			}
 			write(t, filepath.Join(live, "state.json"), `{"config":{"repo":`+strconv.Quote(t.TempDir())+`},"tasks":[{"id":"L1","status":"running","phase":"review","round":1,"nebula_session":"s1","nebula_terminal":"t1","pr":7}]}`)
-			_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, "TestFakeCareClaude", "ORCA_FAKE_CARE_DIR="+shq(fake)+" ORCA_SNL_DIR="+shq(scripts))
+			_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, scripts, "TestFakeCareClaude", "ORCA_FAKE_CARE_DIR="+shq(fake)+" ORCA_SNL_DIR="+shq(scripts))
 			var actions []string
 			waitFor(t, func() bool {
 				raw, _ := os.ReadFile(filepath.Join(fake, "actions"))
@@ -699,7 +781,7 @@ func TestShellDispatcherIntegratesByHand(t *testing.T) {
 			t.Parallel()
 			live, scripts, _ := handRun(t, tc.baseAge)
 			fake := t.TempDir()
-			_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, "TestFakeIntegrateClaude", "ORCA_FAKE_INTEGRATE_DIR="+shq(fake)+" ORCA_SNL_DIR="+shq(scripts))
+			_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, scripts, "TestFakeIntegrateClaude", "ORCA_FAKE_INTEGRATE_DIR="+shq(fake)+" ORCA_SNL_DIR="+shq(scripts))
 			var actions []string
 			waitFor(t, func() bool {
 				raw, _ := os.ReadFile(filepath.Join(fake, "actions"))

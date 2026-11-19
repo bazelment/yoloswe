@@ -13,44 +13,48 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/bazelment/yoloswe/orca/toolbox"
 )
 
 // ScriptWatcher controls watch_lanes.sh (subagent-swarm-nebula) processes
-// with OS signals. Script is the watch_lanes.sh path.
+// with OS signals. Script, when set, is the watch_lanes.sh path; empty uses
+// each run's WatchScript.
 type ScriptWatcher struct {
 	Script string
 	// StopTimeout bounds the wait for SIGTERM before SIGKILL (default 10s).
 	StopTimeout time.Duration
 }
 
-// FindWatchScript returns $ORCA_WATCH_LANES, else the installed
-// subagent-swarm-nebula watch_lanes.sh, else "".
-func FindWatchScript() string {
-	if v := os.Getenv("ORCA_WATCH_LANES"); v != "" {
-		if fileExists(v) {
-			return v
+// WatchScript is runDir's watch_lanes.sh in the skill scripts directory
+// toolbox.SkillDir resolves (ORCA_SNL_DIR, else the run's env.sh SW, else the
+// home skill folder); its error names the paths tried.
+func WatchScript(ctx context.Context, runDir string) (string, error) {
+	scripts, err := toolbox.SkillDir(ctx, os.Getenv("ORCA_SNL_DIR"), runDir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(scripts, "watch_lanes.sh"), nil
+}
+
+func (w ScriptWatcher) script(ctx context.Context, runDir string) (string, error) {
+	if w.Script != "" {
+		if !fileExists(w.Script) {
+			return "", fmt.Errorf("watch_lanes.sh not found at %s", w.Script)
 		}
-		return ""
+		return w.Script, nil
 	}
-	var cands []string
-	if home, err := os.UserHomeDir(); err == nil {
-		cands = append(cands, filepath.Join(home, ".claude", "skills", "subagent-swarm-nebula", "scripts", "watch_lanes.sh"))
-	}
-	cands = append(cands, "/opt/nebula/skills/subagent-swarm-nebula/scripts/watch_lanes.sh")
-	glob, _ := filepath.Glob("/opt/nebula/skills/.nebula-tree-subagent-swarm-nebula.*/scripts/watch_lanes.sh")
-	cands = append(cands, glob...)
-	for _, c := range cands {
-		if fileExists(c) {
-			return c
-		}
-	}
-	return ""
+	return WatchScript(ctx, runDir)
 }
 
 // Running parses `watch_lanes.sh --status <run>`: its armed and bridge pids.
 // Exit 1 (none armed) and 2 (several armed) are answers, not failures.
 func (w ScriptWatcher) Running(ctx context.Context, runDir string) ([]int, error) {
-	out, err := exec.CommandContext(ctx, "bash", w.Script, "--status", runDir).Output()
+	script, err := w.script(ctx, runDir)
+	if err != nil {
+		return nil, err
+	}
+	out, err := exec.CommandContext(ctx, "bash", script, "--status", runDir).Output()
 	var exit *exec.ExitError
 	if err != nil && !(errors.As(err, &exit) && (exit.ExitCode() == 1 || exit.ExitCode() == 2)) {
 		return nil, fmt.Errorf("watch_lanes.sh --status: %w", err)
@@ -128,12 +132,16 @@ func waitGone(ctx context.Context, pids []int, timeout time.Duration) bool {
 // Start launches a detached bridge (`watch_lanes.sh --bridge <run>`) owned by
 // the run's last armed watcher, the way an exiting watcher hands off, so lane
 // steps continue until the host orchestrator re-arms its watcher.
-func (w ScriptWatcher) Start(_ context.Context, runDir string) error {
+func (w ScriptWatcher) Start(ctx context.Context, runDir string) error {
 	if holder, ok := HeldByOrca(runDir); ok {
 		return fmt.Errorf("%w: %s", ErrLeaseHeld, holder)
 	}
+	script, err := w.script(ctx, runDir)
+	if err != nil {
+		return err
+	}
 	owner, _ := os.ReadFile(filepath.Join(runDir, ".watch-owner"))
-	cmd := exec.Command("bash", w.Script, "--bridge", runDir)
+	cmd := exec.Command("bash", script, "--bridge", runDir)
 	cmd.Env = append(os.Environ(), "WATCH_BRIDGE_OF="+strings.TrimSpace(string(owner)))
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {

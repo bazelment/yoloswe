@@ -402,7 +402,7 @@ const skillOps = `set -eu
 sw=$1; RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7; phase=$8; brief=$9
 run=$RUN; [ ! -r "$RUN/env.sh" ] || . "$RUN/env.sh"
 # env.sh names the live run; a shadow copy's skill calls stay in the copy.
-# SW is the scripts directory skillDir resolved, env.sh's own unless overridden.
+# SW is the scripts directory SkillDir resolved, env.sh's own unless overridden.
 export RUN=$run SW=$sw
 export SNL_RUN_ID=${SNL_RUN_ID:-$(basename "$RUN")}
 . "$SW/swarm_nebula_lanes.sh"; . "$SW/lane_ops.sh"; . "$SW/step.sh"
@@ -469,17 +469,18 @@ case $op in
  *) exit 2 ;;
 esac`
 
-// skillDir is the run's swarm skill scripts directory: --skill or
-// ORCA_SNL_DIR when given, else the SW the run's env.sh exports, else the
-// home skill folder only when env.sh names none.
-func skillDir(ctx context.Context, o options) (string, error) {
-	if o.skill != "" {
-		if !isFile(filepath.Join(o.skill, "lane_ops.sh")) {
-			return "", refuse("swarm skill scripts unavailable: no lane_ops.sh in --skill %s", o.skill)
+// SkillDir is runDir's swarm skill scripts directory: explicit (--skill or
+// ORCA_SNL_DIR) when given, else the SW the run's env.sh exports, else the
+// home skill folder only when env.sh names none. Its error names the paths
+// tried.
+func SkillDir(ctx context.Context, explicit, runDir string) (string, error) {
+	if explicit != "" {
+		if !isFile(filepath.Join(explicit, "lane_ops.sh")) {
+			return "", refuse("swarm skill scripts unavailable: no lane_ops.sh in --skill %s", explicit)
 		}
-		return o.skill, nil
+		return explicit, nil
 	}
-	envFile := filepath.Join(o.dir, "env.sh")
+	envFile := filepath.Join(runDir, "env.sh")
 	sw := ""
 	if isFile(envFile) {
 		// Source it as skillOps does, so an SW set by any shell form is found.
@@ -504,7 +505,7 @@ func skillDir(ctx context.Context, o options) (string, error) {
 }
 
 func skill(ctx context.Context, o options, op string, t *task, text string) (string, error) {
-	sw, err := skillDir(ctx, o)
+	sw, err := SkillDir(ctx, o.skill, o.dir)
 	if err != nil {
 		return "", err
 	}

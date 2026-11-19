@@ -28,9 +28,9 @@ func (l *labeler) SetRunOrchestrator(_ context.Context, _ string, v string) erro
 }
 
 func TestHandoverWithRealWatchLanes(t *testing.T) {
-	script := adopt.FindWatchScript()
+	script := os.Getenv("ORCA_WATCH_LANES")
 	if script == "" {
-		t.Skip("watch_lanes.sh not installed; set ORCA_WATCH_LANES")
+		t.Skip("set ORCA_WATCH_LANES to a watch_lanes.sh")
 	}
 	root := t.TempDir()
 	dir := filepath.Join(root, ".shared", "subagent-swarm", "20261113-000000-real")

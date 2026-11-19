@@ -43,13 +43,12 @@ func newHostSwarms(cfg Config, st store.Store, clk clock.Clock) hostSwarms {
 
 func newHostSwarmsWithRecorder(cfg Config, st store.Store, clk clock.Clock, recorder *adopt.ActionRecorder) hostSwarms {
 	var h hostSwarms
+	// Each run's watch_lanes.sh resolves from its own skill directory;
+	// ORCA_WATCH_LANES overrides it for every run.
 	h.watcher = adopt.FormatWatcher{
-		SubagentMissing: "watch_lanes.sh not found (install subagent-swarm-nebula or set ORCA_WATCH_LANES)",
-		NebulaMissing:   "swarm_nebula.sh not found (install nebula-swarm or set ORCA_NEBULA_SWARM_SH)",
-		Panes:           adopt.TmuxPanes,
-	}
-	if script := adopt.FindWatchScript(); script != "" {
-		h.watcher.Subagent = adopt.ScriptWatcher{Script: script}
+		Subagent:      adopt.ScriptWatcher{Script: os.Getenv("ORCA_WATCH_LANES")},
+		NebulaMissing: "swarm_nebula.sh not found (install nebula-swarm or set ORCA_NEBULA_SWARM_SH)",
+		Panes:         adopt.TmuxPanes,
 	}
 	// The step loop is found from /proc even when swarm_nebula.sh is not
 	// installed here; only restarting it on release needs the script.
