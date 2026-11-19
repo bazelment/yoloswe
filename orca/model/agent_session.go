@@ -62,25 +62,23 @@ func ParseAgentBackend(raw string) (AgentBackend, error) {
 // AgentSessionConfig configures a long-lived CLI agent session for a run role.
 // CLI agents may inspect the adopted run and checkout with native read-only
 // tools. Mutations remain unavailable through native tools and are exposed
-// only by Orca's typed MCP registry.
-//
-//nolint:govet // AgentSessionConfig mirrors persisted role launch settings.
+// only by Orca's typed MCP registry, unless AllowBuiltins is set.
 type AgentSessionConfig struct {
-	Provider      string
-	Model         string
-	Effort        string
-	SystemPrompt  string
-	WorkDir       string
-	ResumeID      string
-	LLMGatewayURL string
-	ClaudeBin     string
-	CodexBin      string
-	// AllowBuiltins enables the adopted dispatcher shell toolbox. The session
-	// still runs in WorkDir and all mutations are guarded by the toolbox.
-	AllowBuiltins    bool
 	Env              map[string]string
+	Provider         string
+	Model            string
+	Effort           string
+	SystemPrompt     string
+	WorkDir          string
+	ResumeID         string
+	LLMGatewayURL    string
+	ClaudeBin        string
+	CodexBin         string
 	MaxSessionTokens int
 	MaxSessionTurns  int
+	// AllowBuiltins launches the adopted dispatcher like the host
+	// orchestrator: built-in tools on, permissions bypassed.
+	AllowBuiltins bool
 }
 
 // DeterministicSessionWorkDir returns a stable, isolated working directory path
@@ -355,56 +353,6 @@ func (s *AgentSession) resolvedGatewayURL() string {
 	return cmp.Or(strings.TrimSpace(s.cfg.LLMGatewayURL), strings.TrimSpace(os.Getenv("LLM_GATEWAY_URL")))
 }
 
-// adoptedShellPermissionHandler is the final guard around Claude's built-in
-// tools. The CLI's allowed-tools list is advisory; permission requests must
-// still reject writes and arbitrary shell commands in a native adopted run.
-func adoptedShellPermissionHandler(shadow bool) claude.PermissionHandler {
-	return claude.PermissionHandlerFunc(func(ctx context.Context, req *claude.PermissionRequest) (*claude.PermissionResponse, error) {
-		_ = ctx
-		allow := func() (*claude.PermissionResponse, error) {
-			return &claude.PermissionResponse{Behavior: claude.PermissionAllow}, nil
-		}
-		deny := func(reason string) (*claude.PermissionResponse, error) {
-			return &claude.PermissionResponse{Behavior: claude.PermissionDeny, Message: reason}, nil
-		}
-		switch req.ToolName {
-		case "Read", "Glob", "Grep":
-			return allow()
-		case "Write", "Edit", "NotebookEdit":
-			if shadow {
-				return allow()
-			}
-			return deny("native adopted sessions must write through orca")
-		case "Bash":
-			command, _ := req.Input["command"].(string)
-			command = strings.TrimSpace(command)
-			if shadow {
-				for _, blocked := range []string{"curl", "wget", "nc ", "ssh ", "scp ", "git push", "gh pr merge", "gh api", "nebula "} {
-					if strings.Contains(command, blocked) && !strings.HasPrefix(command, "nebula term screen ") {
-						return deny("shadow sessions cannot call external mutation tools")
-					}
-				}
-			} else if strings.ContainsAny(command, "|;&><`$") {
-				return deny("shell operators are not allowed in adopted sessions")
-			}
-			if shadow {
-				return allow()
-			}
-			if strings.HasPrefix(command, "orca ") || strings.HasPrefix(command, "orca\t") || command == "orca" {
-				return allow()
-			}
-			for _, prefix := range []string{"cat ", "ls ", "rg ", "git log ", "git show ", "git status ", "git diff ", "gh pr view ", "gh pr list ", "nebula term screen "} {
-				if strings.HasPrefix(command, prefix) {
-					return allow()
-				}
-			}
-			return deny("adopted sessions allow only read-only shell commands and orca")
-		default:
-			return deny("adopted session tool is not allowed")
-		}
-	})
-}
-
 func (s *AgentSession) runClaudeTurnLocked(
 	ctx context.Context,
 	prompt string,
@@ -426,28 +374,21 @@ func (s *AgentSession) runClaudeTurnLocked(
 
 		opts := []claude.SessionOption{
 			claude.WithCLIPath(bin),
-			claude.WithPermissionMode(claude.PermissionModeDefault),
 			claude.WithDisablePlugins(),
 			claude.WithEnv(s.cfg.Env),
 		}
 		if s.cfg.AllowBuiltins {
-			// Adopted sessions use the shell toolbox. Read-only shell patterns and
-			// the orca wrapper are available in live runs; shadow copies may also
-			// use native file tools because their workspace is sandboxed separately.
-			adopted := strings.TrimSpace(s.cfg.Env["ORCA_TOOLBOX_DIR"]) != ""
-			if adopted {
-				opts = append(opts, claude.WithPermissionPromptToolStdio(), claude.WithPermissionHandler(adoptedShellPermissionHandler(s.cfg.Env["ORCA_TOOLBOX_SHADOW"] == "1")))
-			} else {
-				opts = append(opts, claude.WithPermissionPromptToolStdio(), claude.WithPermissionHandler(claude.AllowAllPermissionHandler()))
-			}
-			allowed = []string{"Read", "Glob", "Grep", "Bash(orca:*)", "Bash(cat:*)", "Bash(ls:*)", "Bash(rg:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(gh pr view:*)", "Bash(gh pr list:*)", "Bash(nebula term screen:*)"}
-			if s.cfg.Env["ORCA_TOOLBOX_SHADOW"] == "1" {
-				allowed = append(allowed, "Write", "Edit")
-			} else if adopted {
-				opts = append(opts, claude.WithDisallowedTools("Write", "Edit", "NotebookEdit"))
-			}
+			// The adopted dispatcher works like the host orchestrator: built-in
+			// tools on and permissions bypassed, in live and shadow alike.
+			opts = append(opts, claude.WithPermissionMode(claude.PermissionModeBypass))
 		} else {
-			opts = append(opts, claude.WithPermissionPromptToolStdio(), claude.WithSDKTools("orca", s.bridge))
+			opts = append(opts,
+				claude.WithPermissionMode(claude.PermissionModeDefault),
+				claude.WithPermissionPromptToolStdio(),
+				claude.WithSDKTools("orca", s.bridge),
+			)
+			// Shadow mode uses Claude's own best-effort permission grammar. The
+			// external read-only proxy and command wrappers are the safety boundary.
 			allowed = append(allowed,
 				"Bash(git log:*)", "Bash(git show:*)", "Bash(git status:*)", "Bash(git diff:*)",
 				"Bash(cat:*)", "Bash(ls:*)", "Bash(rg:*)", "Bash(gh pr view:*)", "Bash(gh pr list:*)",
@@ -479,7 +420,7 @@ func (s *AgentSession) runClaudeTurnLocked(
 		}
 
 		sess := claude.NewSession(opts...)
-		if err := sess.Start(ctx); err != nil {
+		if err := sess.Start(context.WithoutCancel(ctx)); err != nil {
 			return nil, fmt.Errorf("orca/model: start claude session: %w", err)
 		}
 		s.claudeSess = sess

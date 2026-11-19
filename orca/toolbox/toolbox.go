@@ -1,21 +1,22 @@
-// Package toolbox provides the small, file-backed command surface used by an
-// adopted dispatcher.  It deliberately speaks text or JSON and keeps all
-// mutations idempotent through an action key recorded beside the run.
+// Package toolbox is the shell command surface of an adopted run's dispatcher.
+// Reads come from the run ledger; every mutation runs the swarm skill's own
+// scripts, so PR readiness, merges, leases and probes stay the skill's.
 package toolbox
 
 import (
-	"bufio"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -28,133 +29,285 @@ var (
 )
 
 //nolint:govet // CLI options are grouped by parse concern.
-type Options struct {
-	Dir       string
-	JSON      bool
-	Timeout   time.Duration
-	Shadow    bool
-	IntentDir string
-	Script    string
-	ActionKey string
+type options struct {
+	dir, intent, skill, key string
+	shadow                  bool
+	timeout                 time.Duration
 }
 
-//nolint:govet // textual ledger projection follows the run JSON shape.
+//nolint:govet // ledger projection follows the run JSON shape.
 type task struct {
-	ID             string                       `json:"id"`
-	Title          string                       `json:"title"`
-	Status         string                       `json:"status"`
-	Phase          string                       `json:"phase"`
-	Brief          string                       `json:"brief"`
-	Mission        string                       `json:"mission"`
-	Description    string                       `json:"description"`
-	WaitingOn      string                       `json:"waiting_on"`
-	Deadline       any                          `json:"deadline"`
-	TerminalState  string                       `json:"terminal_state"`
-	NebulaTerminal string                       `json:"nebula_terminal"`
-	SessionID      string                       `json:"session_id"`
-	PR             int                          `json:"pr"`
-	PRHead         string                       `json:"pr_head"`
-	MergeSHA       string                       `json:"merge_sha"`
-	MergeClaim     string                       `json:"merge_claim"`
-	PRState        string                       `json:"pr_state"`
-	Checks         string                       `json:"checks"`
-	Base           string                       `json:"base"`
-	Branch         string                       `json:"branch"`
-	Hold           string                       `json:"hold"`
-	HoldNote       string                       `json:"hold_note"`
-	Target         string                       `json:"target"`
-	ApprovalSHA    string                       `json:"approval_sha"`
-	Round          int                          `json:"round"`
-	Terminals      map[string]map[string]string `json:"terminals"`
-	Worktree       string                       `json:"worktree"`
-	DependsOn      []string                     `json:"depends_on"`
+	ID, Status, Phase, Brief, Mission, Description, Checks, Hold string
+	WaitingOn                                                    string `json:"waiting_on"`
+	SessionID                                                    string `json:"session_id"`
+	NebulaTerminal                                               string `json:"nebula_terminal"`
+	PRHead                                                       string `json:"pr_head"`
+	ApprovalSHA                                                  string `json:"approval_sha"`
+	MergeSHA                                                     string `json:"merge_sha"`
+	PRState                                                      string `json:"pr_state"`
+	HoldNote                                                     string `json:"hold_note"`
+	PR, Round                                                    int
+	Terminals                                                    map[string]map[string]string
+	DependsOn                                                    []string `json:"depends_on"`
 }
 
-type state struct {
-	Config map[string]any `json:"config"`
-	Tasks  []task         `json:"tasks"`
-}
-
-// helper invokes the installed swarm operation, passing all user input as argv.
-// It never manufactures lifecycle state; the skill owns ledger updates.
-func helper(ctx context.Context, o Options, op, id, text string) (string, error) {
-	script := o.Script
-	if script == "" {
-		script = os.Getenv("ORCA_TOOLBOX_SCRIPT")
+func (t task) terminal() string {
+	if id := t.Terminals[t.Phase][strconv.Itoa(t.Round)]; id != "" {
+		return id
 	}
-	if script == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		script = filepath.Join(home, ".claude", "skills", "nebula-swarm", "scripts", "swarm_nebula.sh")
-	}
-	if _, err := os.Stat(script); err != nil {
-		return "", refuse("swarm skill script unavailable")
-	}
-	cmd := exec.CommandContext(ctx, "bash", "-c", skillAdapter, "orca-toolbox", script, o.Dir, op, id, text)
-	raw, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("swarm helper %s failed: %w: %s", op, err, strings.TrimSpace(string(raw)))
-	}
-	return strings.TrimSpace(string(raw)), nil
-}
-
-const skillAdapter = `set -e
-source "$1"
-` + AdoptedLeaseGuard + `
-run=$2; op=$3; lane=$4; text=$5
-case "$op" in
- start) sw_spawn "$run" "$lane" ;;
- steer)
-  note=$(mktemp); trap 'rm -f "$note"' EXIT
-  printf '%s' "$text" > "$note"
-  sw_nudge "$run" "$lane" "$note" ;;
- stop) tid=$(sw_terminal "$run" "$lane")
-  [[ -n "$tid" ]] || { echo "no terminal for $lane" >&2; exit 2; }
-  sw_cli term stop "$tid" ;;
- merge) sw_merge "$run" "$lane" ;;
- ask) sw_mail "$run" fyi owner "$text" ;;
- note) sw_event "$run" "$lane" note "$text" ;;
- *) exit 2 ;;
-esac`
-
-func load(dir string) (state, error) {
-	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
-	if err != nil {
-		return state{}, fmt.Errorf("read state.json: %w", err)
-	}
-	var s state
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return state{}, fmt.Errorf("parse state.json: %w", err)
-	}
-	return s, nil
-}
-
-func actionKey(dir, key string) string {
-	h := sha256.Sum256([]byte(key))
-	return filepath.Join(dir, ".orca-actions", hex.EncodeToString(h[:]))
+	return t.NebulaTerminal
 }
 
 func refuse(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrRefused, fmt.Sprintf(format, args...))
 }
 
-func taskFor(s state, id string) (*task, error) {
-	for i := range s.Tasks {
-		if s.Tasks[i].ID == id {
-			return &s.Tasks[i], nil
+// Run executes one toolbox command: wait, status, check, lane, pr, ask or note.
+func Run(ctx context.Context, args []string, out io.Writer) error {
+	if len(args) > 1 && (args[0] == "lane" || args[0] == "pr") {
+		args = append([]string{args[0] + "." + args[1]}, args[2:]...)
+	}
+	if len(args) == 0 {
+		return errors.New("orca: toolbox command required")
+	}
+	cmd := args[0]
+	o, rest, err := parse(args[1:])
+	if err != nil {
+		return err
+	}
+	if cmd == "wait" {
+		if o.timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, o.timeout)
+			defer cancel()
+		}
+		changed, err := Wait(ctx, o.dir)
+		if err == nil {
+			_, err = fmt.Fprintln(out, "changed: "+strings.Join(changed, ", "))
+		}
+		return err
+	}
+	if cmd == "ask" || cmd == "note" {
+		if len(rest) == 0 {
+			return errors.New("message text is required")
+		}
+		return mutate(ctx, o, cmd, &task{ID: "run"}, strings.Join(rest, " "), out)
+	}
+	tasks, err := load(o.dir)
+	if err != nil {
+		return err
+	}
+	if cmd == "status" {
+		return json.NewEncoder(out).Encode(tasks)
+	}
+	if len(rest) == 0 {
+		return errors.New("a lane id or pull request number is required")
+	}
+	match := func(t task) bool { return t.ID == rest[0] }
+	if cmd == "pr.ready" || cmd == "pr.merge" {
+		match = func(t task) bool { return t.PR > 0 && strconv.Itoa(t.PR) == rest[0] }
+	}
+	i := slices.IndexFunc(tasks, match)
+	if i < 0 {
+		return refuse("%q is not in this run", rest[0])
+	}
+	t := &tasks[i]
+	switch cmd {
+	case "check":
+		res, err := skill(ctx, o, "check", t, "")
+		if err == nil {
+			_, err = fmt.Fprintf(out, "lane %s status=%s %s\n", t.ID, t.Status, res)
+		}
+		return err
+	case "lane.start", "lane.steer", "lane.stop":
+		return mutate(ctx, o, cmd, t, strings.Join(rest[1:], " "), out)
+	case "pr.ready", "pr.merge":
+		if err := validate(ctx, o, cmd, t, tasks); err != nil {
+			return err
+		}
+		// Exact head: the ledger's head and approval agree, and the skill's
+		// claim and check gates then verify that head against the live PR.
+		if t.PRHead == "" || t.ApprovalSHA != t.PRHead {
+			return refuse("PR #%d approval %q does not match ledger head %q", t.PR, t.ApprovalSHA, t.PRHead)
+		}
+		if _, err := skill(ctx, o, "ready", t, t.PRHead); err != nil {
+			return refuse("PR #%d is not ready at %s: %v", t.PR, t.PRHead, err)
+		}
+		if cmd == "pr.ready" {
+			_, err := fmt.Fprintf(out, "PR #%d ready at %s\n", t.PR, t.PRHead)
+			return err
+		}
+		return mutate(ctx, o, cmd, t, t.PRHead, out)
+	}
+	return fmt.Errorf("orca: unknown toolbox command %q", cmd)
+}
+
+// parse accepts flags anywhere among the positional arguments.
+func parse(args []string) (options, []string, error) {
+	o := options{}
+	fs := flag.NewFlagSet("orca", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&o.dir, "dir", cmp.Or(os.Getenv("ORCA_TOOLBOX_DIR"), "."), "run directory")
+	fs.StringVar(&o.intent, "intent-dir", os.Getenv("ORCA_TOOLBOX_INTENT_DIR"), "shadow intent directory")
+	fs.StringVar(&o.skill, "skill", os.Getenv("ORCA_SNL_DIR"), "swarm skill scripts directory")
+	fs.StringVar(&o.key, "action-key", "", "idempotency key")
+	fs.BoolVar(&o.shadow, "shadow", os.Getenv("ORCA_TOOLBOX_SHADOW") == "1", "record intent only")
+	fs.DurationVar(&o.timeout, "timeout", 0, "wait timeout")
+	var rest []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return o, nil, err
+		}
+		if args = fs.Args(); len(args) == 0 {
+			break
+		}
+		rest, args = append(rest, args[0]), args[1:]
+	}
+	if bound := os.Getenv("ORCA_TOOLBOX_DIR"); bound != "" && !(inside(bound, o.dir) && inside(o.dir, bound)) {
+		return o, nil, refuse("session toolbox is bound to its run workspace")
+	}
+	if o.shadow && (o.intent == "" || inside(o.dir, o.intent)) {
+		return o, nil, refuse("shadow intent directory must be outside the run workspace")
+	}
+	if o.skill == "" {
+		home, _ := os.UserHomeDir()
+		o.skill = filepath.Join(home, ".claude", "skills", "subagent-swarm-nebula", "scripts")
+	}
+	return o, rest, nil
+}
+
+// inside reports whether path is dir itself or below it.
+func inside(dir, path string) bool {
+	d, err1 := filepath.Abs(dir)
+	p, err2 := filepath.Abs(path)
+	return err1 == nil && err2 == nil && (p == d || strings.HasPrefix(p, d+string(os.PathSeparator)))
+}
+
+func load(dir string) ([]task, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		return nil, fmt.Errorf("read state.json: %w", err)
+	}
+	var s struct{ Tasks []task }
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, fmt.Errorf("parse state.json: %w", err)
+	}
+	return s.Tasks, nil
+}
+
+// validate holds the refusals: host holds, waits and finished lanes win over
+// any dispatcher action, and a live action needs a live current terminal.
+func validate(ctx context.Context, o options, op string, t *task, tasks []task) error {
+	if t.Status == "done" || t.Status == "cancelled" || t.MergeSHA != "" || strings.EqualFold(t.PRState, "merged") {
+		return refuse("lane %s is done or merged", t.ID)
+	}
+	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); err == nil || t.Hold+t.HoldNote+t.WaitingOn != "" {
+		return refuse("lane %s is held %s", t.ID, strings.TrimSpace(t.Hold+" "+t.HoldNote+" "+t.WaitingOn))
+	}
+	switch op {
+	case "lane.start":
+		if t.Status != "planned" || t.SessionID != "" || t.terminal() != "" {
+			return refuse("lane %s is already started or not planned", t.ID)
+		}
+		if strings.TrimSpace(t.Brief+t.Mission+t.Description) == "" {
+			return refuse("lane %s has no brief", t.ID)
+		}
+		if name := strings.TrimSpace(t.Brief); strings.HasSuffix(name, ".brief") {
+			path, err := filepath.EvalSymlinks(filepath.Join(o.dir, name))
+			info, statErr := os.Stat(path)
+			if err != nil || statErr != nil || !inside(o.dir, path) || !info.Mode().IsRegular() || info.Size() == 0 {
+				return refuse("lane %s brief file is missing, empty or outside the run", t.ID)
+			}
+		}
+		for _, id := range t.DependsOn {
+			if i := slices.IndexFunc(tasks, func(d task) bool { return d.ID == id }); i < 0 || tasks[i].Status != "done" {
+				return refuse("lane %s depends on unfinished lane %s", t.ID, id)
+			}
+		}
+	case "lane.steer", "lane.stop":
+		if t.SessionID == "" || t.terminal() == "" {
+			return refuse("lane %s has no current terminal", t.ID)
+		}
+		if state, err := skill(ctx, o, "state", t, ""); err != nil || (state != "working" && state != "waiting") {
+			return refuse("lane %s current terminal is not alive (%s)", t.ID, cmp.Or(state, "unknown"))
 		}
 	}
-	return nil, refuse("lane %q does not exist", id)
+	return nil
 }
 
-func taskBrief(t task) string {
-	return strings.TrimSpace(t.Brief + "\n" + t.Mission + "\n" + t.Description)
+// mutate refuses unsafe actions, then runs the skill once per action key. A
+// pending receipt after a crash refuses a retry whose effect is uncertain.
+func mutate(ctx context.Context, o options, op string, t *task, text string, out io.Writer) error {
+	dir := o.dir
+	if o.shadow {
+		dir = o.intent
+	}
+	actions := filepath.Join(dir, ".orca-actions")
+	if err := os.MkdirAll(actions, 0o700); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(filepath.Join(actions, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	fingerprint := op + "\x00" + t.ID + "\x00" + text
+	sum := sha256.Sum256([]byte(cmp.Or(o.key, fingerprint)))
+	receipt := filepath.Join(actions, hex.EncodeToString(sum[:]))
+	switch raw, err := os.ReadFile(receipt); {
+	case err == nil && string(raw) == "done\n"+fingerprint:
+		_, err = fmt.Fprintln(out, "already recorded")
+		return err
+	case err == nil && string(raw) == "pending\n"+fingerprint:
+		return refuse("action %s has uncertain effects; inspect before issuing a new action key", op)
+	case err == nil:
+		return refuse("action key %q was already used with different arguments", o.key)
+	case !os.IsNotExist(err):
+		return err
+	}
+	if t.ID != "run" { // recheck under the lock against the current ledger
+		tasks, err := load(o.dir)
+		if err != nil {
+			return err
+		}
+		if i := slices.IndexFunc(tasks, func(c task) bool { return c.ID == t.ID }); i >= 0 {
+			t = &tasks[i]
+		}
+		if err := validate(ctx, o, op, t, tasks); err != nil {
+			return err
+		}
+	}
+	if err := os.WriteFile(receipt, []byte("pending\n"+fingerprint), 0o600); err != nil {
+		return err
+	}
+	result := "shadow: recorded"
+	if o.shadow {
+		err = recordIntent(dir, op, t, text, o.key)
+	} else {
+		result, err = skill(ctx, o, op, t, text)
+	}
+	if err == nil {
+		err = os.WriteFile(receipt, []byte("done\n"+fingerprint), 0o600)
+	}
+	if err == nil {
+		_, err = fmt.Fprintln(out, result)
+	}
+	return err
 }
 
-func recordIntent(dir, lane, kind string, args any) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+// recordIntent appends a shadow action in the adopt.Action shape that the
+// shadow reports and host-diff scorer read.
+func recordIntent(dir, op string, t *task, text, key string) error {
+	id := "shadow-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	b, err := json.Marshal(map[string]any{
+		"time": time.Now().UTC().Format(time.RFC3339Nano), "lane": t.ID, "action": op,
+		"arguments":   map[string]string{"action_key": key, "text": text, "phase": t.Phase, "terminal_id": t.terminal()},
+		"decision_id": id, "event_id": id, "reason": "dispatcher toolbox shadow intent",
+	})
+	if err != nil {
 		return err
 	}
 	f, err := os.OpenFile(filepath.Join(dir, "actions.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -162,439 +315,50 @@ func recordIntent(dir, lane, kind string, args any) error {
 		return err
 	}
 	defer f.Close()
-	// Keep the shadow ledger compatible with adopt.Action.  Reports and the
-	// host-diff scorer rely on a timestamp and stable decision identity even
-	// when the action is only recorded locally.
-	identity := "shadow-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	b, err := json.Marshal(map[string]any{
-		"time":        time.Now().UTC().Format(time.RFC3339Nano),
-		"lane":        lane,
-		"action":      kind,
-		"arguments":   args,
-		"decision_id": identity,
-		"event_id":    identity,
-		"reason":      "dispatcher toolbox shadow intent",
-		"recorded":    "shadow: recorded",
-	})
-	if err != nil {
-		return err
-	}
 	_, err = f.Write(append(b, '\n'))
 	return err
 }
 
-func output(w io.Writer, jsonMode bool, v any, text string) error {
-	if jsonMode {
-		b, err := json.Marshal(v)
-		if err != nil {
-			return err
-		}
-		_, err = fmt.Fprintln(w, string(b))
-		return err
-	}
-	_, err := fmt.Fprintln(w, text)
-	return err
-}
+// skillOps maps toolbox operations onto the subagent-swarm-nebula scripts.
+const skillOps = `set -eu
+SW=$1; export RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7
+[ ! -r "$RUN/env.sh" ] || . "$RUN/env.sh"
+export SNL_RUN_ID=${SNL_RUN_ID:-$(basename "$RUN")}
+. "$SW/swarm_nebula_lanes.sh"; . "$SW/lane_ops.sh"; . "$SW/step.sh"
+` + LeaseGuard + `
+msg=$(mktemp); trap 'rm -f "$msg"' EXIT; printf '%s\n' "$text" > "$msg"
+case $op in
+ state) snl_terminal_agent_state "$sid" "$tid" ;;
+ check) echo "terminal=$(snl_terminal_agent_state "$sid" "$tid") remote=$(snl_lane_remote_head "$lane")"
+  if snl_sandbox_busy "$lane"; then echo "busy=yes"; else echo "busy=no"; fi ;;
+ lane.start) snl_spawn "$lane" ;;
+ lane.steer) snl_nb term send "$tid" --file "$msg" ;;
+ lane.stop) snl_nb term stop "$tid" ;;
+ ready) snl_merge_claims "$lane" "$text"; snl_head_checks "$lane" "$(snl_task "$lane" pr)" "$text" ;;
+ pr.merge) snl_merge "$lane" ;;
+ ask) "$SNL_NEBULA" mail send --to owner --class fyi --run "$SNL_RUN_ID" --body-file "$msg" ;;
+ note) snl_event "$lane" note "$text" ;;
+ *) exit 2 ;;
+esac`
 
-func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
-	if len(args) == 0 {
-		return errors.New("orca: toolbox command required")
+func skill(ctx context.Context, o options, op string, t *task, text string) (string, error) {
+	if _, err := os.Stat(filepath.Join(o.skill, "lane_ops.sh")); err != nil {
+		return "", refuse("swarm skill scripts unavailable in %s", o.skill)
 	}
-	switch args[0] {
-	case "wait":
-		return wait(ctx, args[1:], out)
-	case "status":
-		return status(ctx, args[1:], out)
-	case "check":
-		return check(ctx, args[1:], out)
-	case "lane":
-		return laneCommand(ctx, args[1:], out)
-	case "pr":
-		return prCommand(ctx, args[1:], out)
-	case "ask":
-		return writeMessage(ctx, args[1:], out, "ask")
-	case "note":
-		return writeMessage(ctx, args[1:], out, "note")
-	default:
-		return fmt.Errorf("orca: unknown toolbox command %q", args[0])
-	}
-}
-
-func parseDir(args []string) (Options, []string, error) {
-	o := Options{Dir: os.Getenv("ORCA_TOOLBOX_DIR"), Shadow: os.Getenv("ORCA_TOOLBOX_SHADOW") == "1", IntentDir: os.Getenv("ORCA_TOOLBOX_INTENT_DIR")}
-	var rest []string
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--dir":
-			if i+1 >= len(args) {
-				return o, nil, errors.New("--dir requires a value")
-			}
-			o.Dir = args[i+1]
-			i++
-		case "--json":
-			o.JSON = true
-		case "--shadow":
-			o.Shadow = true
-		case "--script", "--action-key":
-			if i+1 >= len(args) {
-				return o, nil, errors.New(args[i] + " requires a value")
-			}
-			if args[i] == "--script" {
-				o.Script = args[i+1]
-			} else {
-				o.ActionKey = args[i+1]
-			}
-			i++
-		case "--intent-dir":
-			if i+1 >= len(args) {
-				return o, nil, errors.New("--intent-dir requires a value")
-			}
-			o.IntentDir = args[i+1]
-			i++
-		case "--timeout":
-			if i+1 >= len(args) {
-				return o, nil, errors.New("--timeout requires a value")
-			}
-			d, err := time.ParseDuration(args[i+1])
-			if err != nil {
-				return o, nil, err
-			}
-			o.Timeout = d
-			i++
-		default:
-			rest = append(rest, args[i])
-		}
-	}
-	if strings.TrimSpace(o.Dir) == "" {
-		o.Dir = "."
-	}
-	if bound := os.Getenv("ORCA_TOOLBOX_DIR"); bound != "" {
-		want, err := filepath.Abs(bound)
-		if err != nil {
-			return o, nil, err
-		}
-		got, err := filepath.Abs(o.Dir)
-		if err != nil {
-			return o, nil, err
-		}
-		if got != want {
-			return o, nil, refuse("session toolbox is bound to its run workspace")
-		}
-	}
-	if os.Getenv("ORCA_TOOLBOX_SHADOW") == "1" {
-		o.Shadow = true
-		o.IntentDir = os.Getenv("ORCA_TOOLBOX_INTENT_DIR")
-	}
-	if o.Shadow {
-		dir, dirErr := filepath.Abs(o.Dir)
-		intent, intentErr := filepath.Abs(o.IntentDir)
-		if dirErr != nil || intentErr != nil || o.IntentDir == "" || dir == intent || strings.HasPrefix(intent, dir+string(os.PathSeparator)) {
-			return o, nil, refuse("shadow intent directory must be outside the run workspace")
-		}
-	}
-	return o, rest, nil
-}
-
-func status(ctx context.Context, args []string, out io.Writer) error {
-	o, _, err := parseDir(args)
+	raw, err := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", o.skill, o.dir, op, t.ID, t.SessionID, t.terminal(), text).CombinedOutput()
 	if err != nil {
-		return err
+		return "", fmt.Errorf("swarm skill %s failed: %w: %s", op, err, strings.TrimSpace(string(raw)))
 	}
-	s, err := load(o.Dir)
-	if err != nil {
-		return err
-	}
-	rows := make([]map[string]any, 0, len(s.Tasks))
-	for i := range s.Tasks {
-		t := &s.Tasks[i]
-		rows = append(rows, map[string]any{"lane": t.ID, "phase": t.Phase, "status": t.Status, "terminal": t.TerminalState, "pr": t.PR, "pr_head": t.PRHead, "checks": t.Checks, "wait": t.WaitingOn})
-	}
-	return output(out, o.JSON, rows, formatRows(rows))
+	return strings.TrimSpace(string(raw)), nil
 }
 
-func formatRows(rows []map[string]any) string {
-	var b strings.Builder
-	for _, r := range rows {
-		fmt.Fprintf(&b, "lane %v: phase=%v status=%v terminal=%v pr=%v checks=%v wait=%v\n", r["lane"], r["phase"], r["status"], r["terminal"], r["pr"], r["checks"], r["wait"])
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func check(ctx context.Context, args []string, out io.Writer) error {
-	o, rest, err := parseDir(args)
-	if err != nil {
-		return err
-	}
-	if len(rest) != 1 {
-		return errors.New("orca check requires a lane id")
-	}
-	s, err := load(o.Dir)
-	if err != nil {
-		return err
-	}
-	t, err := taskFor(s, rest[0])
-	if err != nil {
-		return err
-	}
-	v := inspectLane(ctx, *t)
-	return output(out, o.JSON, v, fmt.Sprint(v))
-}
-
-func laneCommand(ctx context.Context, args []string, out io.Writer) error {
-	if len(args) == 0 {
-		return errors.New("orca lane requires start, steer or stop")
-	}
-	op := args[0]
-	o, rest, err := parseDir(args[1:])
-	if err != nil {
-		return err
-	}
-	if len(rest) < 1 {
-		return errors.New("orca lane command requires a lane id")
-	}
-	id := rest[0]
-	if id == "." || id == ".." || filepath.Base(id) != id || strings.ContainsAny(id, "\\\x00") {
-		return refuse("invalid lane id")
-	}
-	key := o.ActionKey
-	if key == "" {
-		key = "lane:" + op + ":" + id + ":" + strings.Join(rest[1:], " ")
-	}
-	return mutate(ctx, o, "lane."+op, id, key, strings.Join(rest[1:], " "), out)
-}
-
-func validateLane(ctx context.Context, o Options, op, id string) (*task, error) {
-	s, err := load(o.Dir)
+// Wait blocks until run evidence changes, with no model or network calls.
+func Wait(ctx context.Context, dir string) ([]string, error) {
+	before, err := snapshot(dir)
 	if err != nil {
 		return nil, err
 	}
-	t, err := taskFor(s, id)
-	if err != nil {
-		return nil, err
-	}
-	if t.Status == "done" || t.Status == "cancelled" || t.MergeSHA != "" || strings.EqualFold(t.PRState, "merged") {
-		return nil, refuse("lane %s is done or merged", id)
-	}
-	if t.Hold != "" || t.HoldNote != "" {
-		return nil, refuse("lane %s is held: %s %s", id, t.Hold, t.HoldNote)
-	}
-	if _, err := os.Stat(filepath.Join(o.Dir, id+".hold-advance")); err == nil {
-		return nil, refuse("lane %s is held", id)
-	}
-	switch op {
-	case "start":
-		if t.Status != "planned" || t.SessionID != "" || currentTerminal(*t) != "" {
-			return nil, refuse("lane %s is already started or not planned", id)
-		}
-		if taskBrief(*t) == "" {
-			return nil, refuse("lane %s has no brief", id)
-		}
-		if strings.HasSuffix(strings.TrimSpace(t.Brief), ".brief") {
-			name := strings.TrimSpace(t.Brief)
-			path, err := filepath.EvalSymlinks(filepath.Join(o.Dir, name))
-			root, rootErr := filepath.EvalSymlinks(o.Dir)
-			if err != nil || rootErr != nil || !strings.HasPrefix(path, root+string(os.PathSeparator)) {
-				return nil, refuse("lane %s brief file is missing or escapes the run", id)
-			}
-			info, err := os.Stat(path)
-			if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
-				return nil, refuse("lane %s brief file is missing or empty", id)
-			}
-		}
-		if t.WaitingOn != "" {
-			return nil, refuse("lane %s is held", id)
-		}
-		for _, dependency := range t.DependsOn {
-			dep, err := taskFor(s, dependency)
-			if err != nil {
-				return nil, err
-			}
-			if dep.Status != "done" {
-				return nil, refuse("lane %s depends on unfinished lane %s", id, dependency)
-			}
-		}
-	case "steer", "stop":
-		if t.WaitingOn != "" {
-			if eventMentions(o.Dir, id, "resolved") {
-				return nil, refuse("lane %s wait was already resolved by host EVENTS", id)
-			}
-			return nil, refuse("lane %s is held waiting on %s", id, t.WaitingOn)
-		}
-		state, err := liveTerminal(ctx, *t)
-		if err != nil {
-			return nil, err
-		}
-		if state != "working" && state != "waiting" {
-			return nil, refuse("lane %s current terminal is not alive", id)
-		}
-	default:
-		return nil, refuse("unknown lane action %s", op)
-	}
-	return t, nil
-}
-
-// mutate serializes receipt creation and the safety read across toolbox
-// processes. A pending receipt refuses uncertain retries after a crash rather
-// than duplicating an external side effect.
-func mutate(ctx context.Context, o Options, op, id, key, message string, out io.Writer) error {
-	dir := o.Dir
-	if o.Shadow {
-		dir = o.IntentDir
-	}
-	if dir == "" {
-		return refuse("shadow requires an intent directory")
-	}
-	if err := os.MkdirAll(filepath.Join(dir, ".orca-actions"), 0700); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(filepath.Join(dir, ".orca-actions", "lock"), os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	fingerprint := op + "\x00" + id + "\x00" + message
-	if raw, err := os.ReadFile(actionKey(dir, key)); err == nil {
-		if string(raw) == "done\n"+fingerprint {
-			return output(out, o.JSON, map[string]any{"action": op, "result": "already recorded"}, "already recorded")
-		}
-		if string(raw) == "pending\n"+fingerprint {
-			return refuse("action %s has uncertain effects; inspect before issuing a new action key", key)
-		}
-		return refuse("action key %s was already used with different arguments", key)
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	args := map[string]string{"action_key": key, "text": message}
-	if strings.HasPrefix(op, "lane.") {
-		t, err := validateLane(ctx, o, strings.TrimPrefix(op, "lane."), id)
-		if err != nil {
-			return err
-		}
-		args["phase"], args["terminal_id"] = t.Phase, currentTerminal(*t)
-	}
-	if err := os.WriteFile(actionKey(dir, key), []byte("pending\n"+fingerprint), 0600); err != nil {
-		return err
-	}
-	var result string
-	if o.Shadow {
-		err = recordIntent(dir, id, op, args)
-		result = "shadow: recorded"
-	} else {
-		result, err = helper(ctx, o, strings.TrimPrefix(op, "lane."), id, message)
-	}
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(actionKey(dir, key), []byte("done\n"+fingerprint), 0600); err != nil {
-		return err
-	}
-	return output(out, o.JSON, map[string]any{"action": op, "result": result}, result)
-}
-
-func eventMentions(dir, lane, word string) bool {
-	f, err := os.Open(filepath.Join(dir, "EVENTS"))
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		x := strings.ToLower(sc.Text())
-		if strings.Contains(x, "\t"+strings.ToLower(lane)+"\t") && strings.Contains(x, strings.ToLower(word)) {
-			return true
-		}
-	}
-	return false
-}
-
-func prCommand(ctx context.Context, args []string, out io.Writer) error {
-	if len(args) == 0 {
-		return errors.New("orca pr requires ready or merge")
-	}
-	op := args[0]
-	if op != "ready" && op != "merge" {
-		return fmt.Errorf("orca pr: unknown action %q", op)
-	}
-	o, rest, err := parseDir(args[1:])
-	if err != nil {
-		return err
-	}
-	if len(rest) != 1 {
-		return errors.New("orca pr command requires a pull request number")
-	}
-	n, err := strconv.Atoi(rest[0])
-	if err != nil {
-		return err
-	}
-	s, err := load(o.Dir)
-	if err != nil {
-		return err
-	}
-	var t *task
-	for i := range s.Tasks {
-		if s.Tasks[i].PR == n {
-			t = &s.Tasks[i]
-			break
-		}
-	}
-	if t == nil {
-		return refuse("pull request #%d is not in this run", n)
-	}
-	v := readyPR(ctx, o, s, *t)
-	if op == "ready" {
-		if err := output(out, o.JSON, v, readinessText(v)); err != nil {
-			return err
-		}
-		if !v.Ready {
-			return refuse("PR #%d is not ready", n)
-		}
-		return nil
-	}
-	if !v.Ready {
-		return refuse("PR #%d is not ready", n)
-	}
-	return mutate(ctx, o, "merge", t.ID, "pr.merge:"+rest[0]+":"+t.PRHead, "", out)
-}
-
-func writeMessage(ctx context.Context, args []string, out io.Writer, kind string) error {
-	o, rest, err := parseDir(args)
-	if err != nil {
-		return err
-	}
-	if len(rest) == 0 {
-		return errors.New("message text is required")
-	}
-	text := strings.Join(rest, " ")
-	key := o.ActionKey
-	if key == "" {
-		key = kind + ":" + text
-	}
-	return mutate(ctx, o, kind, "run", key, text, out)
-}
-
-func wait(ctx context.Context, args []string, out io.Writer) error {
-	o, _, err := parseDir(args)
-	if err != nil {
-		return err
-	}
-	before, err := snapshot(o.Dir)
-	if err != nil {
-		return err
-	}
-	if o.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, o.Timeout)
-		defer cancel()
-	}
-	changed, err := waitChanged(ctx, o.Dir, before)
-	if err != nil {
-		return err
-	}
-	return output(out, o.JSON, map[string]any{"changed": changed}, "changed: "+strings.Join(changed, ", "))
+	return waitChanged(ctx, dir, before)
 }
 
 func waitChanged(ctx context.Context, dir string, before map[string]string) ([]string, error) {
@@ -617,7 +381,7 @@ func waitChanged(ctx context.Context, dir string, before map[string]string) ([]s
 			}
 		}
 		if len(changed) > 0 {
-			sort.Strings(changed)
+			slices.Sort(changed)
 			return changed, nil
 		}
 		select {
@@ -632,41 +396,59 @@ func waitChanged(ctx context.Context, dir string, before map[string]string) ([]s
 }
 
 func snapshot(dir string) (map[string]string, error) {
-	out := make(map[string]string)
+	out := map[string]string{}
 	err := filepath.WalkDir(dir, func(p string, e os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(dir, p)
-		if err != nil {
-			return err
+		rel, _ := filepath.Rel(dir, p)
+		if e.IsDir() && rel != "." && strings.HasPrefix(e.Name(), ".") && e.Name() != ".orca-inbox" {
+			return filepath.SkipDir
 		}
-		if e.IsDir() {
-			if strings.HasPrefix(e.Name(), ".orca") && e.Name() != ".orca-inbox" || e.Name() == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
+		top, _, nested := strings.Cut(rel, string(os.PathSeparator))
 		name := e.Name()
-		evidence := strings.HasPrefix(rel, ".orca-inbox/") || name == "EVENTS" || name == "state.json" || name == "heartbeat" || strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".done") || strings.HasSuffix(name, ".needs-swe") || strings.HasSuffix(name, ".hold-advance") || strings.HasSuffix(name, ".signal") || strings.HasPrefix(rel, "reports/") || strings.HasPrefix(rel, "signals/") || strings.HasPrefix(rel, "mail/") || strings.HasPrefix(rel, "chat/")
-		if !evidence {
+		evidence := name == "EVENTS" || name == "state.json" || name == "heartbeat" ||
+			slices.Contains([]string{".md", ".done", ".needs-swe", ".hold-advance", ".signal"}, filepath.Ext(name)) ||
+			nested && slices.Contains([]string{".orca-inbox", "reports", "signals", "mail", "chat"}, top)
+		if e.IsDir() || !evidence {
 			return nil
 		}
-		i, err := e.Info()
+		info, err := e.Info()
 		if err != nil {
 			return err
 		}
-		out[rel] = fmt.Sprintf("%d:%d", i.Size(), i.ModTime().UnixNano())
+		out[rel] = fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
 		return nil
 	})
 	return out, err
 }
 
-// Wait blocks on the same evidence as the CLI, with no model or network calls.
-func Wait(ctx context.Context, dir string) ([]string, error) {
-	before, err := snapshot(dir)
+// ReadLeaseAuthority returns the run's current handover, which guarded skill
+// calls must still match; a re-adoption or release invalidates it.
+func ReadLeaseAuthority(dir string) (string, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, ".orca-lease.json"))
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return waitChanged(ctx, dir, before)
+	var lease struct{ Holder, Marker, State string }
+	if err := json.Unmarshal(raw, &lease); err != nil {
+		return "", err
+	}
+	if lease.State != "adopted" || lease.Holder == "" || lease.Marker == "" {
+		return "", refuse("adopted lease is not current")
+	}
+	data, err := json.Marshal(map[string]string{"holder": lease.Holder, "marker": lease.Marker, "state": lease.State})
+	return string(data), err
 }
+
+// LeaseGuard replaces the skill's stand-down check, after the skill scripts are
+// sourced, with one that also requires this run path and exact handover.
+const LeaseGuard = `if [ -n "${ORCA_ADOPT_AUTH:-}" ]; then
+snl_orca_lease_check() {
+  python3 -c 'import json,os,sys
+root=os.path.realpath(os.environ["ORCA_TOOLBOX_DIR"]); want=json.loads(os.environ["ORCA_ADOPT_AUTH"])
+cur=json.load(open(os.path.join(root,".orca-lease.json")))
+sys.exit(os.path.realpath(sys.argv[1])!=root or any(cur.get(k)!=want.get(k) for k in ("holder","marker","state")))' "$1" ||
+  { echo "orca: refused: adopted lease is no longer current" >&2; return 2; }
+}
+fi`

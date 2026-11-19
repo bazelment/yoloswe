@@ -6,12 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/bazelment/yoloswe/orca/adopt"
 	chatui "github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
-	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/store"
 )
@@ -29,18 +27,8 @@ func (noWatcher) Running(context.Context, string) ([]int, error) { return nil, n
 func (noWatcher) Stop(context.Context, []int) error              { return nil }
 func (noWatcher) Start(context.Context, string) error            { return nil }
 
-// eventJudge records events delivered to an adopted dispatcher.
-type eventJudge struct{ events chan store.Event }
-
-func (j eventJudge) Judge(_ context.Context, _ string, events []store.Event) error {
-	for i := range events {
-		j.events <- events[i]
-	}
-	return nil
-}
-
 // frontDeskWithAdoptedRuns builds a front desk with live adopted controllers.
-func frontDeskWithAdoptedRuns(t *testing.T, ids ...string) (*chatui.StoreBackend, store.Store, map[string]eventJudge) {
+func frontDeskWithAdoptedRuns(t *testing.T, ids ...string) (*chatui.StoreBackend, store.Store) {
 	t.Helper()
 	root := t.TempDir()
 	for _, id := range ids {
@@ -56,13 +44,7 @@ func frontDeskWithAdoptedRuns(t *testing.T, ids ...string) (*chatui.StoreBackend
 	if err := st.Runs().Create(t.Context(), store.Run{ID: frontDeskRunID}); err != nil {
 		t.Fatal(err)
 	}
-	judges := map[string]eventJudge{}
-	for _, id := range ids {
-		judges[id] = eventJudge{events: make(chan store.Event, 64)}
-	}
-	ctrls := adopt.NewControllers(t.Context(), st, lane.NewFakeDriver(), clk, func(runID string, _ func(context.Context, string, string, string) error) controller.Judge {
-		return judges[runID]
-	})
+	ctrls := adopt.NewControllers(t.Context(), st, lane.NewFakeDriver(), clk, nil)
 	t.Cleanup(func() { _ = ctrls.Close(context.Background()) })
 	b := chatui.NewStoreBackend(st, frontDeskRunID)
 	b.FrontDesk, b.Now = frontDeskRunID, clk.Now
@@ -78,7 +60,7 @@ func frontDeskWithAdoptedRuns(t *testing.T, ids ...string) (*chatui.StoreBackend
 			t.Fatalf("/adopt %s = %q, %v", id, out, err)
 		}
 	}
-	return b, st, judges
+	return b, st
 }
 
 func conciergeDirectives(t *testing.T, st store.Store, runID string) []store.Directive {
@@ -128,7 +110,7 @@ func TestConciergeDirectiveLandsOnTheRunItIsAbout(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			b, st, judges := frontDeskWithAdoptedRuns(t, tc.held...)
+			b, st := frontDeskWithAdoptedRuns(t, tc.held...)
 			c := NewConcierge(frontDeskRunID, st, nil, scriptedModel(
 				toolUse("dir", ToolDirectiveSubmit, tc.args),
 				textAnswer(tc.answer),
@@ -150,19 +132,13 @@ func TestConciergeDirectiveLandsOnTheRunItIsAbout(t *testing.T) {
 			if !chatui.Mentions(streamed.String(), heldRun) {
 				t.Fatalf("reply %q does not name run %s", streamed.String(), heldRun)
 			}
-			deadline := time.After(10 * time.Second)
-			for {
-				select {
-				case ev := <-judges[heldRun].events:
-					if ev.Kind == store.EventOwnerMessage && ev.Source == ActorConcierge && strings.Contains(ev.Summary, hold) {
-						if ev.RunID != heldRun {
-							t.Fatalf("owner event run = %q, want %q", ev.RunID, heldRun)
-						}
-						return
-					}
-				case <-deadline:
-					t.Fatalf("the dispatcher of %s never saw the hold", heldRun)
-				}
+			// The adopted CLI dispatcher reads owner messages from the run's events.
+			events, err := st.Events().List(t.Context(), store.EventFilter{RunID: heldRun, Kinds: []store.EventKind{store.EventOwnerMessage}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 1 || events[0].Source != ActorConcierge || !strings.Contains(events[0].Summary, hold) {
+				t.Fatalf("owner messages on %s = %+v, want the hold", heldRun, events)
 			}
 		})
 	}
@@ -171,7 +147,7 @@ func TestConciergeDirectiveLandsOnTheRunItIsAbout(t *testing.T) {
 // The reply identifies the stored run even when the model omits it.
 func TestConciergeDirectiveReplyQuotesStoredRun(t *testing.T) {
 	t.Parallel()
-	b, st, _ := frontDeskWithAdoptedRuns(t, heldRun)
+	b, st := frontDeskWithAdoptedRuns(t, heldRun)
 	c := NewConcierge(frontDeskRunID, st, nil, scriptedModel(
 		toolUse("dir", ToolDirectiveSubmit, `{"kind":"instruction","text":"hold"}`),
 		textAnswer("I submitted the directive."),
@@ -193,7 +169,7 @@ func TestConciergeDirectiveReplyQuotesStoredRun(t *testing.T) {
 // An unheld explicit run is rejected without writing a directive.
 func TestConciergeDirectiveRefusesUnheldRun(t *testing.T) {
 	t.Parallel()
-	b, st, _ := frontDeskWithAdoptedRuns(t, heldRun)
+	b, st := frontDeskWithAdoptedRuns(t, heldRun)
 	c := NewConcierge(frontDeskRunID, st, nil, scriptedModel(
 		toolUse("dir", ToolDirectiveSubmit, `{"kind":"instruction","text":"hold","run_id":"run-elsewhere"}`),
 		textAnswer("I could not save it: this chat does not hold run-elsewhere."),
@@ -211,7 +187,7 @@ func TestConciergeDirectiveRefusesUnheldRun(t *testing.T) {
 
 func TestConciergeDirectiveAcceptsContractKind(t *testing.T) {
 	t.Parallel()
-	b, st, _ := frontDeskWithAdoptedRuns(t, heldRun)
+	b, st := frontDeskWithAdoptedRuns(t, heldRun)
 	const rule = "Never modify .github/workflows without owner approval"
 	c := NewConcierge(frontDeskRunID, st, nil, scriptedModel(
 		toolUse("dir", ToolDirectiveSubmit, `{"kind":"contract","text":"`+rule+`"}`),

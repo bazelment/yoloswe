@@ -2,11 +2,8 @@ package chat
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -16,7 +13,6 @@ import (
 
 	"github.com/bazelment/yoloswe/orca/adopt"
 	"github.com/bazelment/yoloswe/orca/clock"
-	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/lane"
 	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/router"
@@ -158,21 +154,9 @@ func TestLanesWithoutAdoptedRunSaysSo(t *testing.T) {
 	}
 }
 
-// recordingJudge stands in for an adopted run's dispatcher.
-type recordingJudge struct{ batches chan []store.Event }
-
-func (j recordingJudge) Judge(_ context.Context, _ string, events []store.Event) error {
-	j.batches <- events
-	return nil
-}
-
 func TestInstructionNamingAdoptedRunReachesItsDispatcher(t *testing.T) {
 	t.Parallel()
-	judged := map[string]recordingJudge{}
-	f := newAdoptedFixture(t, func(runID string, _ func(context.Context, string, string, string) error) controller.Judge {
-		judged[runID] = recordingJudge{batches: make(chan []store.Event, 8)}
-		return judged[runID]
-	})
+	f := newAdoptedFixture(t, nil)
 	text := "Owner decision for run " + adoptedRun + ": start swe round 4 on orca-bare"
 	var ack string
 	if err := f.backend.Dispatch(t.Context(), router.Decision{Handler: router.Dispatcher}, text, func(s string) { ack += s }); err != nil {
@@ -187,14 +171,19 @@ func TestInstructionNamingAdoptedRunReachesItsDispatcher(t *testing.T) {
 	if got := instructions(t, f.store, chatRun); len(got) != 0 {
 		t.Fatalf("chat run instructions = %q, want none", got)
 	}
-	select {
-	case batch := <-judged[adoptedRun].batches:
-		if len(batch) != 1 || batch[0].Kind != store.EventOwnerMessage || batch[0].Summary != text {
-			t.Fatalf("dispatcher batch = %+v, want the owner message", batch)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("adopted run's dispatcher never saw the owner instruction")
+	// The adopted CLI dispatcher reads owner messages from the run's events.
+	if got := ownerMessages(t, f.store, adoptedRun); len(got) != 1 || got[0].Summary != text {
+		t.Fatalf("adopted run owner messages = %+v, want the owner's", got)
 	}
+}
+
+func ownerMessages(t *testing.T, st store.Store, runID string) []store.Event {
+	t.Helper()
+	events, err := st.Events().List(t.Context(), store.EventFilter{RunID: runID, Kinds: []store.EventKind{store.EventOwnerMessage}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events
 }
 
 func TestInstructionTargetAmongHeldRuns(t *testing.T) {
@@ -415,89 +404,6 @@ func instructions(t *testing.T, st store.Store, runID string) []string {
 	return out
 }
 
-// failingJudge is a dispatcher whose every turn fails.
-type failingJudge struct{ batches chan []store.Event }
-
-func (j failingJudge) Judge(_ context.Context, _ string, events []store.Event) error {
-	j.batches <- events
-	return errors.New("model unavailable")
-}
-
-func TestControllerEscalationBecomesChatQuestion(t *testing.T) {
-	t.Parallel()
-	for _, failing := range []bool{false, true} {
-		t.Run(fmt.Sprint("dispatcher fails=", failing), func(t *testing.T) {
-			t.Parallel()
-			var judges adopt.JudgeFactory
-			fj := failingJudge{batches: make(chan []store.Event, 8)}
-			if failing {
-				judges = func(string, func(context.Context, string, string, string) error) controller.Judge { return fj }
-			}
-			testEscalationBecomesChatQuestion(t, judges)
-			if failing {
-				// The controller outlives the failed turn and judges the answer.
-				timeout := time.After(10 * time.Second)
-				for answered := false; !answered; {
-					select {
-					case batch := <-fj.batches:
-						answered = len(batch) == 1 && batch[0].Summary == "rework"
-					case <-timeout:
-						t.Fatal("controller stopped judging after the failed dispatcher turn")
-					}
-				}
-			}
-		})
-	}
-}
-
-func testEscalationBecomesChatQuestion(t *testing.T, judges adopt.JudgeFactory) {
-	t.Helper()
-	f := newAdoptedFixture(t, judges)
-	// Review asks for another SWE round past the cap: the controller escalates.
-	f.driver.Emit(lane.Event{Kind: lane.EventPhaseReported, RunID: adoptedRun, LaneID: "orca-bare", TerminalID: "t-bare", Phase: "review", Report: &lane.PhaseReport{
-		LaneID: "orca-bare", TerminalID: "t-bare", Phase: "review", Round: 3, Outcome: "needs-swe", HeadSHA: "abc123", PR: 401, Summary: "still broken",
-	}})
-	var s Snapshot
-	deadline := time.Now().Add(10 * time.Second)
-	for len(s.Questions) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("escalation never reached chat; status %q", s.Status)
-		}
-		// Let the judgment debounce elapse in fake time.
-		f.clock.Advance(10 * time.Second)
-		var err error
-		if s, err = f.backend.Snapshot(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-		runtime.Gosched()
-	}
-	if len(s.Questions) != 1 || !strings.Contains(s.Status, "open questions: 1") {
-		t.Fatalf("questions = %q status = %q, want one", s.Questions, s.Status)
-	}
-	q := s.Questions[0]
-	for _, want := range []string{
-		"[" + adoptedRun + "]",
-		"Lane orca-bare escalated (escalated from review on verdict needs-swe at round 3)",
-		"lane orca-bare",
-		"choices: rework: start swe round 4 | stop: drop orca-bare | hold: keep orca-bare blocked",
-		"default: hold: keep orca-bare blocked",
-	} {
-		if !strings.Contains(q, want) {
-			t.Fatalf("question %q lacks %q", q, want)
-		}
-	}
-	if out, err := f.backend.Command(t.Context(), "/asks"); err != nil || out != q {
-		t.Fatalf("/asks = %q, %v", out, err)
-	}
-	// The owner's answer goes to the run that asked.
-	if err := f.backend.Dispatch(t.Context(), router.Decision{Handler: router.Dispatcher}, "rework", nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := instructions(t, f.store, adoptedRun); len(got) != 1 || got[0] != "rework" {
-		t.Fatalf("adopted run instructions = %q", got)
-	}
-}
-
 func TestSlashCompletion(t *testing.T) {
 	t.Parallel()
 	f := newAdoptedFixture(t, nil, adoptedRun, "20261113-070000-other")
@@ -558,88 +464,6 @@ func TestSlashCompletion(t *testing.T) {
 	if m = press(m, tab); m.input != "/st" || !slices.Equal(m.hints, []string{"/status", "/stop"}) {
 		t.Fatalf("/s + Tab = %q hints %q", m.input, m.hints)
 	}
-}
-
-func TestDispatcherOutcomePrintedInChatAndTranscript(t *testing.T) {
-	t.Parallel()
-	t.Run("failed dispatcher turn prints outcome under Queued line", func(t *testing.T) {
-		t.Parallel()
-		fj := failingJudge{batches: make(chan []store.Event, 8)}
-		f := newAdoptedFixture(t, func(string, func(context.Context, string, string, string) error) controller.Judge {
-			return fj
-		})
-		r := routeFunc(func(context.Context, string) (router.Decision, error) {
-			return router.Decision{Handler: router.Dispatcher, Confidence: 1}, nil
-		})
-		m := New(t.Context(), chatRun, nil, r)
-		m.Backend = f.backend
-		m.Dispatch = f.backend.Dispatch
-		var out strings.Builder
-		if err := Run(t.Context(), strings.NewReader("yes: clear both hold directives and start M4\n"), &out, m); err != nil {
-			t.Fatal(err)
-		}
-		got := out.String()
-		wantQueued := "Queued for the dispatcher of adopted run " + adoptedRun + ": yes: clear both hold directives and start M4"
-		wantOutcome := "dispatcher failed: model unavailable"
-		if !strings.Contains(got, wantQueued+"\n"+wantOutcome) {
-			t.Fatalf("chat output missing dispatcher failure outcome directly under Queued line:\n%s", got)
-		}
-	})
-
-	t.Run("dispatcher turn outcome and assistant message printed under Queued line", func(t *testing.T) {
-		t.Parallel()
-		var f *adoptedFixture
-		f = newAdoptedFixture(t, func(runID string, _ func(context.Context, string, string, string) error) controller.Judge {
-			return controller.JudgeFunc(func(ctx context.Context, rID string, _ []store.Event) error {
-				_, _ = f.store.Threads().StartThread(ctx, store.Thread{
-					ID:    "dispatcher-" + rID,
-					RunID: rID,
-					Role:  store.ThreadRoleDispatcher,
-				})
-				tr, err := f.store.Threads().StartTurn(ctx, store.Turn{
-					ID:       "turn-m4-1",
-					ThreadID: "dispatcher-" + rID,
-					RunID:    rID,
-					Input:    "owner instruction",
-				})
-				if err != nil {
-					return err
-				}
-				_, _ = f.store.Decisions().Append(ctx, store.Decision{
-					RunID:    rID,
-					TurnID:   tr.ID,
-					Category: store.DecisionJudgment,
-					Actor:    "dispatcher",
-					Tool:     "backlog.add",
-					Result:   "added backlog item m4-metrics (open ready)",
-					Vetted:   true,
-				})
-				_, _ = f.store.Threads().AppendItem(ctx, store.Item{
-					ThreadID: tr.ThreadID,
-					TurnID:   tr.ID,
-					Kind:     store.ItemKindAssistantMessage,
-					Content:  "I could not spawn the M4 lane.",
-				})
-				return f.store.Threads().CompleteTurn(ctx, tr.ThreadID, tr.ID, store.TurnStatusCompleted, model.Usage{}, "")
-			})
-		})
-		r := routeFunc(func(context.Context, string) (router.Decision, error) {
-			return router.Decision{Handler: router.Dispatcher, Confidence: 1}, nil
-		})
-		m := New(t.Context(), chatRun, nil, r)
-		m.Backend = f.backend
-		m.Dispatch = f.backend.Dispatch
-		var out strings.Builder
-		if err := Run(t.Context(), strings.NewReader("yes: clear both hold directives and start M4\n"), &out, m); err != nil {
-			t.Fatal(err)
-		}
-		got := out.String()
-		wantQueued := "Queued for the dispatcher of adopted run " + adoptedRun + ": yes: clear both hold directives and start M4"
-		wantOutcome := "dispatcher: backlog.add (added backlog item m4-metrics (open ready)) — I could not spawn the M4 lane."
-		if !strings.Contains(got, wantQueued+"\n"+wantOutcome) {
-			t.Fatalf("chat output missing dispatcher outcome under Queued line:\n%s", got)
-		}
-	})
 }
 
 func TestCostLineSumsTurnAndDecisionCostsAcrossFrontDeskAndHeldRuns(t *testing.T) {
@@ -784,104 +608,5 @@ func TestStatusListsStandingRules(t *testing.T) {
 	}
 	if !strings.Contains(gotRun.Objective, "updated host goal") || !strings.Contains(gotRun.Objective, "Next: staff m4") {
 		t.Fatalf("expected /status to refresh adopted run objective from disk, got %q", gotRun.Objective)
-	}
-}
-
-func TestDispatchDoesNotHoldRLockAcrossStepAdopted(t *testing.T) {
-	t.Parallel()
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	f := newAdoptedFixture(t, func(string, func(context.Context, string, string, string) error) controller.Judge {
-		return controller.JudgeFunc(func(context.Context, string, []store.Event) error {
-			select {
-			case <-entered:
-			default:
-				close(entered)
-			}
-			<-release
-			return nil
-		})
-	})
-	ctx := t.Context()
-
-	done := make(chan error, 1)
-	go func() {
-		done <- f.backend.Dispatch(ctx, router.Decision{Handler: router.Dispatcher, Confidence: 1}, "start M4", nil)
-	}()
-
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for Dispatch to enter Step")
-	}
-
-	// Queue and complete a write-lock caller (Attach) while Step is still in-flight;
-	// if Dispatch held b.mu.RLock across Step, Attach and any subsequent Snapshot/RunID
-	// would deadlock here.
-	attachDone := make(chan struct{})
-	go func() {
-		f.backend.Attach(f.store, adoptedRun)
-		close(attachDone)
-	}()
-
-	select {
-	case <-attachDone:
-	case <-time.After(5 * time.Second):
-		close(release)
-		t.Fatal("Attach blocked while Dispatch was in Step (RLock held across stepAdopted)")
-	}
-
-	if gotRun := f.backend.RunID(); gotRun != adoptedRun {
-		close(release)
-		t.Fatalf("RunID() = %q, want %q", gotRun, adoptedRun)
-	}
-	if _, err := f.backend.Snapshot(ctx); err != nil {
-		close(release)
-		t.Fatalf("Snapshot() while Step running: %v", err)
-	}
-
-	close(release)
-	if err := <-done; err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
-}
-
-func TestDispatcherOutcomesDoNotCollideAcrossRunsWithOverlappingSeq(t *testing.T) {
-	t.Parallel()
-	f := newAdoptedFixture(t, func(string, func(context.Context, string, string, string) error) controller.Judge {
-		return controller.JudgeFunc(func(context.Context, string, []store.Event) error {
-			return errors.New("lane.spawn unavailable in session")
-		})
-	})
-	ctx := t.Context()
-
-	// Seed prior dispatcher decisions on the chatRun (Seq 1 and 2) and
-	// re-attach so seedSeenDispatcherRun records Seq 1..2 on chatRun.
-	for i := 0; i < 2; i++ {
-		if _, err := f.store.Decisions().Append(ctx, store.Decision{
-			RunID:     chatRun,
-			Category:  store.DecisionJudgment,
-			Actor:     "dispatcher",
-			Tool:      controller.ToolJudgmentDispatch,
-			Reason:    "prior front-desk decision",
-			Result:    "noop",
-			Vetted:    true,
-			CreatedAt: f.clock.Now(),
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := f.backend.Attach(f.store, chatRun); err != nil {
-		t.Fatal(err)
-	}
-
-	var emitted string
-	if err := f.backend.Dispatch(ctx, router.Decision{Handler: router.Dispatcher, Confidence: 1}, "start M4 now", func(s string) {
-		emitted += s
-	}); err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
-	if !strings.Contains(emitted, "dispatcher failed: lane.spawn unavailable in session") {
-		t.Fatalf("adopted run Seq=1 failed-judgment outcome was suppressed by chatRun Seq=1..2:\n%s", emitted)
 	}
 }

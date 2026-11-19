@@ -724,10 +724,6 @@ func historicalBranchesFromEvents(dir string, current ...string) []string {
 	return branches
 }
 
-func applyTargetIntegrationEvidence(ctx context.Context, r *Run, mirrorCfg GitMirror) {
-	applyIntegrationEvidenceRefs(ctx, r, mirrorCfg, true)
-}
-
 func applyIntegrationEvidenceRefs(ctx context.Context, r *Run, mirrorCfg GitMirror, targetOnly bool) {
 	if r == nil {
 		return
@@ -2038,10 +2034,6 @@ func integrationJudgeReason(r Run, ln Lane) string {
 		return strings.TrimSpace(ln.IntegrationReason)
 	}
 	return "integration gate: missing merge_sha, merged EVENTS record, and mirror evidence"
-}
-
-func hostLaneTerminal(ln Lane) bool {
-	return lane.Status(strings.ToLower(strings.TrimSpace(ln.Status))).Terminal() || strings.EqualFold(strings.TrimSpace(ln.PRState), "merged") || closedLane(ln) || integratedLane(ln)
 }
 
 func laneHostHold(ln Lane) string {

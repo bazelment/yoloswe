@@ -75,22 +75,14 @@ func IsPlannerChatQuestion(text string) bool {
 // in the owner's words. All other messages go through the model router.
 func IsConciergeOverride(text string) bool {
 	l := strings.ToLower(strings.TrimSpace(text))
-	if strings.Contains(l, "answer here") || strings.Contains(l, "answer in chat") {
-		return true
-	}
-	return false
+	return strings.Contains(l, "answer here") || strings.Contains(l, "answer in chat")
 }
 
 // IsConciergeDeliverable routes explicit report and retrospective requests to
 // the front desk without changing the narrower override contract.
 func IsConciergeDeliverable(text string) bool {
 	l := strings.ToLower(strings.TrimSpace(text))
-	for _, marker := range []string{"perform a retro", "perform a retrospective", "give me a retro", "give me a report", "show me a report", "run report", "progress report"} {
-		if strings.Contains(l, marker) {
-			return true
-		}
-	}
-	return strings.Contains(l, "give me a ") && strings.Contains(l, "report")
+	return strings.Contains(l, "a retro") || strings.Contains(l, "report") && (strings.Contains(l, "give me") || strings.Contains(l, "show me"))
 }
 
 // routingRubric is shared by both model backends.

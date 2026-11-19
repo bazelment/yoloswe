@@ -250,7 +250,7 @@ func TestShadowAdoptExecReads(t *testing.T) {
 	if err := st.Runs().Create(t.Context(), store.Run{ID: "exec-shadow"}); err != nil {
 		t.Fatal(err)
 	}
-	drv := NewRecordingDriver(&adoptedRunDriver{LaneDriver: inner, store: st, run: Run{Dir: t.TempDir()}, clock: clk}, rec)
+	drv := NewRecordingDriver(inner, rec)
 	launched, err := drv.SpawnSession(t.Context(), lane.SpawnRequest{RunID: "exec-shadow", LaneID: "launched", Phase: "swe"})
 	if err != nil {
 		t.Fatal(err)
@@ -883,38 +883,27 @@ func TestShadowSummaryIncludesCLITurnUsageWithoutActions(t *testing.T) {
 
 func TestSessionWorkspaceDirectWritesAreIsolated(t *testing.T) {
 	t.Parallel()
-	live := t.TempDir()
-	copyDir := filepath.Join(t.TempDir(), "workspace")
-	if err := os.WriteFile(filepath.Join(live, "EVENTS"), []byte("host event\n"), 0600); err != nil {
+	live, copyDir := t.TempDir(), filepath.Join(t.TempDir(), "workspace")
+	write(t, filepath.Join(live, "EVENTS"), "host event\n")
+	write(t, filepath.Join(live, "env.sh"), "synthetic excluded environment\n")
+	if err := SyncWorkspace(live, copyDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(live, "env.sh"), []byte("synthetic excluded environment\n"), 0600); err != nil {
+	// A session edit through a link must not reach the live run on refresh.
+	if err := os.Remove(filepath.Join(copyDir, "EVENTS")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(live, "EVENTS"), filepath.Join(copyDir, "EVENTS")); err != nil {
 		t.Fatal(err)
 	}
 	if err := SyncWorkspace(live, copyDir); err != nil {
 		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(copyDir, "EVENTS"), []byte("session edit\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(filepath.Join(live, "EVENTS"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(raw) != "host event\n" {
-		t.Fatalf("live changed: %s", raw)
 	}
 	if _, err := os.Stat(filepath.Join(copyDir, "env.sh")); !os.IsNotExist(err) {
 		t.Fatalf("env copied: %v", err)
 	}
-	if err := SyncWorkspace(live, copyDir); err != nil {
-		t.Fatal(err)
-	}
-	raw, err = os.ReadFile(filepath.Join(copyDir, "EVENTS"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(raw) != "host event\n" {
-		t.Fatalf("copy was not refreshed: %s", raw)
+	info, err := os.Lstat(filepath.Join(copyDir, "EVENTS"))
+	if err != nil || !info.Mode().IsRegular() || readText(filepath.Join(live, "EVENTS")) != "host event\n" {
+		t.Fatalf("refresh followed a session link: %v %v", info, err)
 	}
 }

@@ -246,7 +246,7 @@ func Execute(
 			explicitSubcmd = true
 			rest = args[1:]
 		case "wait", "status", "check", "lane", "pr", "ask", "note":
-			return toolbox.Run(ctx, args, stdin, stdout)
+			return toolbox.Run(ctx, args, stdout)
 		case "-h", "--help", "help":
 			printUsage(stdout)
 			return nil
