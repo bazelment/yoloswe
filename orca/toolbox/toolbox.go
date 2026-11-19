@@ -125,6 +125,14 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		if _, err := skill(ctx, o, "ready", t, t.PRHead); err != nil {
 			return refuse("PR #%d is not ready at %s: %v", t.PR, t.PRHead, err)
 		}
+		// ready records the head it passed: the approved head or its base-only update.
+		if tasks, err = load(o.dir); err != nil {
+			return err
+		}
+		if i = slices.IndexFunc(tasks, func(c task) bool { return c.ID == t.ID }); i < 0 {
+			return refuse("lane %s left the ledger", t.ID)
+		}
+		t = &tasks[i]
 		if cmd == "pr.ready" {
 			_, err := fmt.Fprintf(out, "PR #%d ready at %s\n", t.PR, t.PRHead)
 			return err
@@ -193,8 +201,10 @@ func validate(ctx context.Context, o options, op string, t *task, tasks []task) 
 	if t.Status == "done" || t.Status == "cancelled" || t.MergeSHA != "" || strings.EqualFold(t.PRState, "merged") {
 		return refuse("lane %s is done or merged", t.ID)
 	}
-	// .hold-advance gates phase advance and integration, not steering.
-	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); (err == nil && op != "lane.steer") || t.Hold+t.HoldNote+t.WaitingOn != "" {
+	// .hold-advance stops the watcher advancing and integrating a lane; it
+	// reserves those for the orchestrator, so steering and a hand merge
+	// (pr ready|update|merge) pass it.
+	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); (err == nil && strings.HasPrefix(op, "lane.") && op != "lane.steer") || t.Hold+t.HoldNote+t.WaitingOn != "" {
 		return refuse("lane %s is held %s", t.ID, strings.TrimSpace(t.Hold+" "+t.HoldNote+" "+t.WaitingOn))
 	}
 	switch op {
@@ -402,11 +412,23 @@ case $op in
  lane.start) if [ -n "$phase" ]; then snl_spawn "$lane" "$phase" "$RUN/$brief"; else snl_fund_planned "$lane"; fi ;;
  lane.steer) snl_nb term send "$tid" --file "$msg" ;;
  lane.stop) snl_nb term stop "$tid" ;;
- ready) snl_merge_claims "$lane" "$text"; snl_head_checks "$lane" "$(snl_task "$lane" pr)" "$text"
+ ready) pr=$(snl_task "$lane" pr); base=origin/${BASE:-main}
+  git fetch -q origin "$(snl_task "$lane" branch)" "${BASE:-main}" 2>/dev/null || :
+  # After orca pr update the PR head is the approved head plus base merges:
+  # carry the approval and record the head as snl_gate does; refuse anything else.
+  new=$(snl_lane_gh "$lane" pr view "$pr" --json headRefOid --jq .headRefOid 2>/dev/null) || new=$text
+  if [ -n "$new" ] && [ "$new" != "$text" ]; then
+   snl_only_base_merges "$text" "$new" || { echo "PR head $new is not approved head $text updated from base"; exit 3; }
+   python3 "$SW/ledger.py" set "$RUN" --id "$lane" --pr-head "$new" --approval-sha "$new" >/dev/null
+   [ "$(sed -n 's/^PASS \([^ ]*\).*/\1/p' "$RUN/$lane.gate" 2>/dev/null)" != "$text" ] || echo "PASS $new" > "$RUN/$lane.gate"
+   text=$new
+  fi
+  snl_merge_claims "$lane" "$text"; snl_head_checks "$lane" "$pr" "$text"
   # SKILL.md's fresh-base guard: the oldest base commit missing from the head is at most two hours old.
-  old=$(git log --format=%ct "$text..origin/${BASE:-main}" 2>/dev/null | tail -1)
+  ages=$(git log --format=%ct "$text..$base" 2>"$scr") || { echo "base age unknown: git cannot read $text..$base: $(head -c 300 "$scr")"; exit 3; }
+  old=$(printf '%s\n' "$ages" | tail -1)
   [ -z "$old" ] || [ $(($(date +%s) - old)) -le 7200 ] ||
-   { echo "stale base: the oldest origin/${BASE:-main} commit missing from $text is $((($(date +%s) - old) / 60)) min old (limit 120); orca pr update"; exit 3; } ;;
+   { echo "stale base: the oldest $base commit missing from $text is $((($(date +%s) - old) / 60)) min old (limit 120); orca pr update"; exit 3; } ;;
  pr.update) ghx api -X PUT "repos/$(snl_lane_slug "$lane")/pulls/$(snl_task "$lane" pr)/update-branch" -f expected_head_sha="$text" >/dev/null ;;
  pr.merge) snl_merge "$lane" ;;
  ask) "$SNL_NEBULA" mail send --to owner --class fyi --run "$SNL_RUN_ID" --body-file "$msg" ;;

@@ -242,12 +242,11 @@ func TestShellDispatcherTickIntegratesReviewPass(t *testing.T) {
 		}
 	}
 	write(t, filepath.Join(skill, "SKILL.md"), "Each tick:\n3. Drain reports; verify each completion claim against commits and artifacts.\n4. Advance, rework, integrate, or mark lanes.\n")
-	// Exact-head CI is green only at the approved head.
-	write(t, filepath.Join(scripts, "swarm_nebula_lanes.sh"), "snl_merge_claims() { :; }\nsnl_head_checks() { [ \"$3\" = abc123 ]; }\n")
-	for _, name := range []string{"lane_ops.sh", "step.sh", "watch_lanes.sh"} {
-		write(t, filepath.Join(scripts, name), "")
-	}
-	write(t, filepath.Join(live, "state.json"), `{"config":{"repo":`+strconv.Quote(t.TempDir())+`},"tasks":[{"id":"L1","status":"running","phase":"review","round":1,"sessions":{"review":"nebula:t1"},"nebula_session":"s1","nebula_terminal":"t1","pr":7,"pr_head":"abc123","approval_sha":"abc123"}]}`)
+	// Exact-head CI is green only at the approved head, on a fresh base.
+	repo, head := handRepo(t, 10*time.Minute)
+	handSkill(t, scripts, head)
+	write(t, filepath.Join(scripts, "watch_lanes.sh"), "")
+	write(t, filepath.Join(live, "state.json"), `{"config":{"repo":`+strconv.Quote(repo)+`},"tasks":[{"id":"L1","status":"running","phase":"review","round":1,"sessions":{"review":"nebula:t1"},"nebula_session":"s1","nebula_terminal":"t1","pr":7,"pr_head":"`+head+`","approval_sha":"`+head+`"}]}`)
 	write(t, filepath.Join(live, "reports", "L1.review.md"), "PR #7\nVerdict: pass\n")
 	t.Setenv("ORCA_WATCH_LANES", filepath.Join(scripts, "watch_lanes.sh"))
 	_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, "TestFakeTickClaude", "ORCA_FAKE_TICK_DIR="+shq(fake)+" ORCA_SNL_DIR="+shq(scripts))
@@ -300,7 +299,7 @@ func TestFakeNoteClaude(t *testing.T) {
 func TestShellDispatcherNoteQuotesRefusedWrite(t *testing.T) {
 	t.Parallel()
 	live, scripts := t.TempDir(), t.TempDir()
-	write(t, filepath.Join(scripts, "swarm_nebula_lanes.sh"), "snl_merge_claims() { :; }\nsnl_head_checks() { echo checks pending; return 1; }\n")
+	write(t, filepath.Join(scripts, "swarm_nebula_lanes.sh"), "snl_task() { echo 7; }\nsnl_merge_claims() { :; }\nsnl_head_checks() { echo checks pending; return 1; }\n")
 	for _, name := range []string{"lane_ops.sh", "step.sh"} {
 		write(t, filepath.Join(scripts, name), "")
 	}
@@ -460,14 +459,11 @@ func TestShellDispatcherTerminalCare(t *testing.T) {
 	}
 }
 
-// handRun is one synthetic run whose OBJECTIVE says integration is by hand:
-// the owner conditions PR #7's merge on a readback that a later EVENTS row
-// reports. CI is green at L1's exact head, and the oldest base commit missing
-// from it is baseAge old. L1's reviewer t1 is stuck in lint; L2 has a hold_note.
-func handRun(t *testing.T, baseAge time.Duration) (live, scripts, calls string) {
+// handRepo is a host checkout whose branch lane is one commit on root, and
+// whose origin/main adds a commit baseAge old. It returns the lane head.
+func handRepo(t *testing.T, baseAge time.Duration) (repo, head string) {
 	t.Helper()
-	live, scripts, repo := t.TempDir(), t.TempDir(), t.TempDir()
-	calls = filepath.Join(scripts, "calls")
+	repo = t.TempDir()
 	git := func(date time.Time, args ...string) string {
 		cmd := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
 		cmd.Env = append(os.Environ(), "GIT_AUTHOR_DATE="+date.Format(time.RFC3339), "GIT_COMMITTER_DATE="+date.Format(time.RFC3339))
@@ -482,13 +478,58 @@ func handRun(t *testing.T, baseAge time.Duration) (live, scripts, calls string) 
 	git(now.Add(-4*time.Hour), "commit", "-q", "--allow-empty", "-m", "root")
 	root := git(now, "rev-parse", "HEAD")
 	git(now, "commit", "-q", "--allow-empty", "-m", "lane")
-	head := git(now, "rev-parse", "HEAD")
+	head = git(now, "rev-parse", "HEAD")
 	git(now, "update-ref", "refs/remotes/origin/main", git(now.Add(-baseAge), "commit-tree", root+"^{tree}", "-p", root, "-m", "main"))
-	write(t, filepath.Join(scripts, "swarm_nebula_lanes.sh"), "snl_merge_claims() { :; }\nsnl_head_checks() { [ \"$3\" = "+head+" ]; }\n"+
-		"snl_task() { echo 7; }\nsnl_terminal_agent_state() { echo working; }\nsnl_nb() { echo \"nb $*\" >> "+shq(calls)+"; }\n")
-	for _, name := range []string{"lane_ops.sh", "step.sh"} {
-		write(t, filepath.Join(scripts, name), "")
-	}
+	return repo, head
+}
+
+// handSkill fakes the skill around a host checkout. The live PR head is the
+// file pr-head, CI is green only on it, GitHub's update-branch merges
+// origin/main into it, and ledger.py set records heads in state.json.
+// snl_only_base_merges is the skill's own, copied from lane_ops.sh.
+func handSkill(t *testing.T, scripts, head string) (calls string) {
+	t.Helper()
+	calls = filepath.Join(scripts, "calls")
+	prHead := shq(filepath.Join(scripts, "pr-head"))
+	write(t, filepath.Join(scripts, "pr-head"), head+"\n")
+	write(t, filepath.Join(scripts, "swarm_nebula_lanes.sh"), "log() { echo \"$*\" >> "+shq(calls)+"; }\n"+
+		"snl_merge_claims() { :; }\nsnl_head_checks() { [ \"$3\" = \"$(cat "+prHead+")\" ]; }\n"+
+		"snl_lane_gh() { cat "+prHead+"; }\nsnl_lane_slug() { echo o/r; }\nsnl_merge() { log merge \"$1\"; }\n"+
+		"ghx() { log ghx \"$@\"; git -c user.name=t -c user.email=t@t merge -q --no-ff -m main origin/main && git rev-parse HEAD > "+prHead+"; }\n"+
+		"snl_task() { echo 7; }\nsnl_terminal_agent_state() { echo working; }\nsnl_nb() { log nb \"$*\"; }\n")
+	write(t, filepath.Join(scripts, "lane_ops.sh"), `snl_only_base_merges() {
+  local c="$2"
+  while [ "$c" != "$1" ]; do
+    [ "$(git rev-list --parents -n1 "$c" | wc -w)" = 3 ] &&
+      git merge-base --is-ancestor "$(git rev-parse "$c^2")" "origin/${BASE:-main}" &&
+      [ "$(git merge-tree --write-tree "$c^1" "$c^2" 2>/dev/null)" = "$(git rev-parse "$c^{tree}")" ] || return 1
+    c="$(git rev-parse "$c^1")"
+  done
+}
+`)
+	write(t, filepath.Join(scripts, "step.sh"), "")
+	write(t, filepath.Join(scripts, "ledger.py"), `import json, sys
+_, cmd, run, *rest = sys.argv
+opts = dict(zip(rest[::2], rest[1::2]))
+path = run + "/state.json"
+state = json.load(open(path))
+for t in state["tasks"]:
+    if cmd == "set" and t["id"] == opts["--id"]:
+        t["pr_head"], t["approval_sha"] = opts["--pr-head"], opts["--approval-sha"]
+json.dump(state, open(path, "w"))
+`)
+	return calls
+}
+
+// handRun is one synthetic run whose OBJECTIVE says integration is by hand:
+// the owner conditions PR #7's merge on a readback that a later EVENTS row
+// reports. CI is green at L1's exact head, and the oldest base commit missing
+// from it is baseAge old. L1's reviewer t1 is stuck in lint; L2 has a hold_note.
+func handRun(t *testing.T, baseAge time.Duration) (live, scripts, calls string) {
+	t.Helper()
+	live, scripts = t.TempDir(), t.TempDir()
+	repo, head := handRepo(t, baseAge)
+	calls = handSkill(t, scripts, head)
 	write(t, filepath.Join(live, "OBJECTIVE.md"), "Integration: no auto-integrate; the orchestrator advances and merges by hand.\n")
 	write(t, filepath.Join(live, "EVENTS"), "2026-11-19T01:00:00Z\towner\tmail\tmerge PR #7 only after the code promote carrying A and B is read back clean\n"+
 		"2026-11-19T02:00:00Z\tpromote\treadback\tthe code promote carrying A and B read back clean\n")
@@ -517,6 +558,84 @@ func TestSteerUnderHoldAdvance(t *testing.T) {
 	}
 	if raw, _ := os.ReadFile(calls); !regexp.MustCompile(`^nb term send t1 --file \S+\n$`).Match(raw) {
 		t.Fatalf("skill calls = %q", raw)
+	}
+}
+
+// The host's hand merge on a run that holds every lane's advance: a verified
+// PASS at a green exact head on a fresh base is readied and merged; a stale
+// base is updated from main and the base-only head, green, carries the
+// approval. A head with more than base merges, or a base git cannot read, is
+// refused.
+func TestHandMergeUnderHoldAdvance(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		before  func(t *testing.T, repo, scripts string) // runs after a refused stale-base ready
+		refusal string
+		baseAge time.Duration
+	}{
+		{name: "fresh base", baseAge: 10 * time.Minute},
+		{name: "base-only update", baseAge: 3 * time.Hour},
+		{name: "update plus a commit", baseAge: 3 * time.Hour, refusal: "is not approved head", before: func(t *testing.T, repo, scripts string) {
+			out, err := exec.Command("bash", "-c", `git -C "$1" -c user.name=t -c user.email=t@t commit -q --allow-empty -m extra && git -C "$1" rev-parse HEAD > "$2"`,
+				"-", repo, filepath.Join(scripts, "pr-head")).CombinedOutput()
+			if err != nil {
+				t.Fatalf("extra commit: %v %s", err, out)
+			}
+		}},
+		{name: "base unreadable", baseAge: 10 * time.Minute, refusal: "base age unknown", before: func(t *testing.T, repo, _ string) {
+			if out, err := exec.Command("git", "-C", repo, "update-ref", "-d", "refs/remotes/origin/main").CombinedOutput(); err != nil {
+				t.Fatalf("drop origin/main: %v %s", err, out)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			live, scripts, calls := handRun(t, tc.baseAge)
+			write(t, filepath.Join(live, "L1.hold-advance"), "run rule: hold-advance on every lane\n")
+			var s struct{ Config struct{ Repo string } }
+			raw, _ := os.ReadFile(filepath.Join(live, "state.json"))
+			if err := json.Unmarshal(raw, &s); err != nil {
+				t.Fatal(err)
+			}
+			pr := func(args ...string) error {
+				return toolbox.Run(t.Context(), append([]string{"pr"}, append(args, "7", "--dir", live, "--skill", scripts)...), io.Discard)
+			}
+			if tc.baseAge > time.Hour {
+				if err := pr("ready"); err == nil || !strings.Contains(err.Error(), "stale base") {
+					t.Fatalf("ready on a stale base: %v", err)
+				}
+				if err := pr("update"); err != nil {
+					t.Fatalf("update: %v", err)
+				}
+			}
+			if tc.before != nil {
+				tc.before(t, s.Config.Repo, scripts)
+			}
+			ready, merge := pr("ready"), pr("merge")
+			got, _ := os.ReadFile(calls)
+			if tc.refusal != "" {
+				if !errors.Is(ready, toolbox.ErrRefused) || !strings.Contains(ready.Error(), tc.refusal) || !errors.Is(merge, toolbox.ErrRefused) || strings.Contains(string(got), "merge L1") {
+					t.Fatalf("ready = %v, merge = %v, calls = %q; want both refused with %q", ready, merge, got, tc.refusal)
+				}
+				return
+			}
+			if ready != nil || merge != nil || !strings.HasSuffix(string(got), "merge L1\n") {
+				t.Fatalf("ready = %v, merge = %v, calls = %q", ready, merge, got)
+			}
+			// The ledger records the head merged: the base-only update when there was one.
+			prHead, _ := os.ReadFile(filepath.Join(scripts, "pr-head"))
+			raw, _ = os.ReadFile(filepath.Join(live, "state.json"))
+			var ledger struct {
+				Tasks []struct {
+					PRHead      string `json:"pr_head"`
+					ApprovalSHA string `json:"approval_sha"`
+				}
+			}
+			if err := json.Unmarshal(raw, &ledger); err != nil || ledger.Tasks[0].PRHead != strings.TrimSpace(string(prHead)) || ledger.Tasks[0].ApprovalSHA != ledger.Tasks[0].PRHead {
+				t.Fatalf("state.json = %s, want L1 at PR head %s: %v", raw, prHead, err)
+			}
+		})
 	}
 }
 

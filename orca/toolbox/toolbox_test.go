@@ -76,8 +76,12 @@ ghx() { log ghx "$@"; }
 func fixture(t *testing.T) (dir, skill, calls string) {
 	t.Helper()
 	dir, skill, repo := t.TempDir(), t.TempDir(), t.TempDir()
-	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v %s", err, out)
+	// The ledger head abc123 is a branch at origin/main, so pr ready reads a fresh base.
+	for _, args := range [][]string{{"init", "-q"}, {"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "root"},
+		{"branch", "abc123"}, {"update-ref", "refs/remotes/origin/main", "HEAD"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
 	}
 	calls = filepath.Join(skill, "calls")
 	env := "export RUN=" + shq(dir) + "\nexport SNL_NEBULA=" + shq(filepath.Join(skill, "nebula")) + "\nexport CALLS=" + shq(calls) + "\n"
