@@ -264,6 +264,67 @@ func TestShellDispatcherTickIntegratesReviewPass(t *testing.T) {
 	}
 }
 
+// The fake note session reports a write as its system prompt orders. Batched,
+// the note is composed before the write's result is back and claims success;
+// told to read the result first, it quotes that result.
+func TestFakeNoteClaude(t *testing.T) {
+	if os.Getenv("ORCA_FAKE_NOTE") == "" {
+		return
+	}
+	var prompt string
+	if i := slices.Index(os.Args, "--system-prompt"); i > 0 && i+1 < len(os.Args) {
+		prompt = os.Args[i+1]
+	}
+	run := func(args ...string) string {
+		if err := toolbox.Run(context.Background(), args, io.Discard); err != nil {
+			return err.Error()
+		}
+		return "ok"
+	}
+	fakeClaude(func(turn int) {
+		if turn > 1 {
+			return
+		}
+		if strings.Contains(prompt, "read its result") {
+			run("note", "pr ready 7: "+run("pr", "ready", "7"))
+			return
+		}
+		run("note", "Marked #7 ready")
+		run("pr", "ready", "7")
+	})
+}
+
+// A note never runs before the result it reports: pr ready is refused with
+// checks pending, and the note that follows quotes the refusal.
+func TestShellDispatcherNoteQuotesRefusedWrite(t *testing.T) {
+	t.Parallel()
+	live, scripts := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(scripts, "swarm_nebula_lanes.sh"), "snl_merge_claims() { :; }\nsnl_head_checks() { echo checks pending; return 1; }\n")
+	for _, name := range []string{"lane_ops.sh", "step.sh"} {
+		write(t, filepath.Join(scripts, name), "")
+	}
+	write(t, filepath.Join(live, "state.json"), `{"config":{"repo":`+strconv.Quote(t.TempDir())+`},"tasks":[{"id":"L1","status":"running","phase":"review","pr":7,"pr_head":"abc123","approval_sha":"abc123"}]}`)
+	_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, "TestFakeNoteClaude", "ORCA_FAKE_NOTE=1 ORCA_SNL_DIR="+shq(scripts))
+	var note string
+	waitFor(t, func() bool {
+		raw, _ := os.ReadFile(filepath.Join(intent, "actions.jsonl"))
+		for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+			var a struct {
+				Arguments map[string]string
+				Action    string
+			}
+			if json.Unmarshal([]byte(line), &a) == nil && a.Action == "note" {
+				note = a.Arguments["text"]
+				return true
+			}
+		}
+		return false
+	})
+	if !strings.Contains(note, "refused") || !strings.Contains(note, "checks pending") {
+		t.Fatalf("note = %q, want it to quote the pr ready refusal", note)
+	}
+}
+
 // orca wait keeps the caller's baseline across calls: a change between calls
 // returns at once, and neither a sync's rewrite nor the session's own edits
 // in the copy end a wait with no live change.
