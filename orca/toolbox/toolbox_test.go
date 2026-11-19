@@ -104,7 +104,7 @@ func fixture(t *testing.T) (dir, skill, calls string) {
 // workingCare is orca check's terminal care for t1: its state, background
 // from its screen, and backgroundTasks as term list reports it.
 const workingCare = "phase=swe agent=working signal= output_min_ago=unknown background=yes backgroundTasks={\"shells\":1} report_filed=no\n" +
-	"last_turn_line=\"\"\nscreen_tail=[\">\", \"1 shell still running\"]\n"
+	"last_turn_line=\"\"\nscreen_tail=[\"1 shell still running\"]\n"
 
 func shq(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 

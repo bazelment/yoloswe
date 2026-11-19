@@ -372,20 +372,20 @@ except ValueError: s=None
 ls=s.get("lines") if isinstance(s,dict) else None
 if not isinstance(ls,list): ls=raw.splitlines()
 ls=[(l if isinstance(l,str) else str(l.get("text","")) if isinstance(l,dict) else str(l)).strip() for l in ls]
-tail=[l for l in ls if l][-6:]
+tail=[l for l in ls if any(c.isalnum() for c in l)][-6:]
 bg="unknown" if not tail else "yes" if any(re.search(r"\b\d+ (shell|monitor)s?\b.*\bstill running\b",l) for l in tail) else "no"
 for t in json.load(sys.stdin).get("terminals",[]):
     if t.get("id")!=tid: continue
     try:
         at=d.datetime.fromisoformat(t.get("lastOutputAt") or "")
-        age=int((d.datetime.now(d.timezone.utc)-(at if at.tzinfo else at.replace(tzinfo=d.timezone.utc))).total_seconds()//60)
+        age=max(0,int((d.datetime.now(d.timezone.utc)-(at if at.tzinfo else at.replace(tzinfo=d.timezone.utc))).total_seconds()//60))
     except ValueError: age="unknown"
     bt=t.get("backgroundTasks")
     bt="" if bt is None else " backgroundTasks="+json.dumps(bt,separators=(",",":"))
     last=[l.strip() for l in (t.get("lastTurnText") or "").splitlines() if l.strip()][-1:] or [""]
     print("phase=%s agent=%s signal=%s output_min_ago=%s background=%s%s report_filed=%s" % (ph,t.get("agentState") or "",t.get("agentSignal") or "",age,bg,bt,rep))
     print("last_turn_line="+json.dumps(last[0][:200]))
-    print("screen_tail="+json.dumps([l[:200] for l in tail]))'
+    print("screen_tail="+json.dumps([l[:200] for l in tail],ensure_ascii=False))'
 msg=$(mktemp); scr=$(mktemp); trap 'rm -f "$msg" "$scr"' EXIT; printf '%s\n' "$text" > "$msg"
 case $op in
  state) snl_terminal_agent_state "$sid" "$tid" ;;
