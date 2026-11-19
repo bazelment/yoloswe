@@ -472,3 +472,173 @@ func TestLaneHoldWritesHoldAdvance(t *testing.T) {
 		t.Fatalf("hold on a done lane: %v", err)
 	}
 }
+
+// realSnlMerge is the swarm skill's snl_merge, verbatim from
+// sycamore-labs/nebula@f623ed57 .claude/skills/subagent-swarm-nebula/scripts/lane_ops.sh.
+const realSnlMerge = `
+snl_merge() {
+  [[ ${SWARM_HOST_GATE_MODE:-required} == required || ${SWARM_HOST_GATE_MODE:-required} == optional ]] || return 1
+  local lane="$1" g head pr m sha merr q
+  snl_lane_own "$lane" || { echo "$lane: $(_snl_foreign_why "$lane")" >&2; return 1; }
+  if _snl_host_gate_optional "$lane"; then
+    head=$(_snl_reviewed_head "$lane") || return $?
+  else
+    g="$(cat "$RUN/$lane.gate" 2>/dev/null)"
+    [ "${g%% *}" = PASS ] || { echo "$lane: gate is '$g'" >&2; return 1; }
+    head="${g#PASS }"; head="${head%% *}"
+  fi
+  pr="$(snl_task "$lane" pr)"
+  snl_merge_claims "$lane" "$head" || { echo "$lane: #$pr not merged: a status claim is not backed (above)" >&2; return 1; }
+  snl_head_checks "$lane" "$pr" "$head" || return $?
+  snl_merge_queue "$lane"; q=$?
+  [ "$q" != 76 ] || { echo "$lane: #$pr merge not confirmed: $(ghx_limit_active)" >&2; return 76; }
+  [ "$q" != 2 ] || { echo "$lane: #$pr not merged: cannot read the merge queue rules of the base branch; run again" >&2; return 75; }
+  merr=""
+  if [ "$q" = 0 ]; then
+    snl_enqueue "$lane" "$pr" "$head" || return $?
+  else
+    # The queue probe can observe a changing base or check status. Re-run the
+    # guard immediately before the direct merge so the mutation is covered by
+    # the same exact-head and fresh-base evidence.
+    snl_head_checks "$lane" "$pr" "$head" || return $?
+    snl_require_ready "$lane" "$pr" || return $?
+    merr="$(snl_lane_gh "$lane" pr merge "$pr" --squash --match-head-commit "$head" 2>&1 >/dev/null)"
+  fi
+  m="$(snl_lane_gh "$lane" pr view "$pr" --json state,mergeCommit --jq '.state+" "+.mergeCommit.oid')"; sha="${m#MERGED }"
+  # A limit at the merge or at the read-back is not "not merged": the merge may have landed.
+  ! ghx_limit_active >/dev/null || { echo "$lane: #$pr merge not confirmed: $(ghx_limit_active)" >&2; return 76; }
+  [ "${m%% *}" = MERGED ] && git fetch -q origin "${BASE:-main}" &&
+    git merge-base --is-ancestor "$sha" "origin/${BASE:-main}" ||
+    { echo "$lane: #$pr not merged ($m)${merr:+: $merr}" >&2; return 1; }
+  # A merge is terminal whatever the phase: a gate repointed at a lane on an earlier phase
+  # merges it too, and stepping that phase would leave the merged lane running.
+  python3 "$SW/ledger.py" set "$RUN" --id "$lane" --status done --merge-sha "$sha" --pr-head "$head" --approval-sha "$head" --note "merged #$pr" >/dev/null
+  snl_reap "$lane" --force
+  # Drop stale watcher notices after merging.
+  snl_retire_notices "$lane"
+  snl_describe
+  echo "$lane: merged #$pr -> $sha"
+}
+`
+
+// byHandSkill is the stub skill with the real snl_merge, a pr_merge.sh that
+// logs its call and reports a merge, and a ledger.py that sets row fields.
+func byHandSkill(t *testing.T) (dir, skill, calls string) {
+	t.Helper()
+	dir, skill, calls = fixture(t)
+	files := map[string]string{
+		"lane_ops.sh": "snl_lane_own() { :; }\n_snl_host_gate_optional() { return 1; }\n" + realSnlMerge,
+		"pr_merge.sh": `log() { echo "$*" >> "$CALLS"; }; log pr_merge "$@"; for pr; do :; done; echo "merged $pr feed1234"` + "\n",
+		"ledger.py": `import json,sys
+a=sys.argv[1:]; kv=dict(zip(a[2::2],a[3::2])); p=a[1]+"/state.json"; s=json.load(open(p))
+for t in s["tasks"]:
+    if a[0]=="set" and t["id"]==kv["--id"]: t.update({k[2:].replace("-","_"):v for k,v in kv.items() if k!="--id"})
+json.dump(s,open(p,"w"))
+`,
+	}
+	for name, body := range files {
+		f, err := os.OpenFile(filepath.Join(skill, name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o700)
+		if err == nil {
+			_, err = f.WriteString(body)
+			err = errors.Join(err, f.Close())
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir, skill, calls
+}
+
+func ledgerRow(t *testing.T, dir, id string) map[string]any {
+	t.Helper()
+	var s struct{ Tasks []map[string]any }
+	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err == nil {
+		err = json.Unmarshal(raw, &s)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range s.Tasks {
+		if row["id"] == id {
+			return row
+		}
+	}
+	t.Fatalf("no ledger row %s", id)
+	return nil
+}
+
+func writeRun(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A held lane has no gate, so snl_merge refuses it: pr merge merges the
+// approved head by hand through pr_merge.sh and records the merge; shadow
+// records intent only.
+func TestHeldLaneMergesByHand(t *testing.T) {
+	t.Parallel()
+	dir, skill, calls := byHandSkill(t)
+	writeRun(t, dir, "working.hold-advance", "run rule\n")
+	writeRun(t, dir, "working.review.md", "Verdict: pass\nHEAD: abc123\n")
+	intent := t.TempDir()
+	if out, err := run(t, dir, skill, "pr", "merge", "7", "--shadow", "--intent-dir", intent); err != nil || out != "shadow: recorded\n" {
+		t.Fatalf("shadow out=%q err=%v", out, err)
+	}
+	if got := skillCalls(t, calls); strings.Contains(got, "pr_merge") || ledgerRow(t, dir, "working")["merge_sha"] != nil {
+		t.Fatalf("shadow merged: calls=%q", got)
+	}
+	if actions, err := os.ReadFile(filepath.Join(intent, "actions.jsonl")); err != nil || !strings.Contains(string(actions), `"action":"pr.merge"`) {
+		t.Fatalf("intent: %s %v", actions, err)
+	}
+	out, err := run(t, dir, skill, "pr", "merge", "7")
+	if err != nil || out != "working: merged #7 -> feed1234\n" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	want := "claims working abc123\nhead-checks working 7 abc123\n" +
+		"claims working abc123\nhead-checks working 7 abc123\n" +
+		"pr_merge --repo o/r --head abc123 --report " + filepath.Join(dir, "working.review.md") + " 7\n"
+	if got := skillCalls(t, calls); got != want {
+		t.Fatalf("skill calls=%q, want %q", got, want)
+	}
+	row := ledgerRow(t, dir, "working")
+	if row["status"] != "done" || row["merge_sha"] != "feed1234" || row["pr_head"] != "abc123" {
+		t.Fatalf("ledger row=%v", row)
+	}
+}
+
+// Without an approval at the PR head, a held lane's merge is refused before
+// any merge runs.
+func TestHeldLaneMergeNeedsApproval(t *testing.T) {
+	t.Parallel()
+	dir, skill, calls := byHandSkill(t)
+	writeRun(t, dir, "working.hold-advance", "run rule\n")
+	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRun(t, dir, "state.json", strings.Replace(string(raw), `"approval_sha":"abc123"`, `"approval_sha":""`, 1))
+	if _, err := run(t, dir, skill, "pr", "merge", "7"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "approval") {
+		t.Fatalf("merge without approval: %v", err)
+	}
+	if got := skillCalls(t, calls); got != "" {
+		t.Fatalf("unapproved merge reached the skill: %q", got)
+	}
+}
+
+// A lane that is not held merges through snl_merge, which still requires
+// its gate: with an empty one it refuses, and pr_merge.sh is never called.
+// (With no gate file, skillOps' set -e exits at snl_merge's cat, silently.)
+func TestUnheldLaneMergesThroughSnlMerge(t *testing.T) {
+	t.Parallel()
+	dir, skill, calls := byHandSkill(t)
+	writeRun(t, dir, "working.gate", "")
+	if _, err := run(t, dir, skill, "pr", "merge", "7"); err == nil || !strings.Contains(err.Error(), "working: gate is ''") {
+		t.Fatalf("merge without a gate: %v", err)
+	}
+	if got := skillCalls(t, calls); strings.Contains(got, "pr_merge") {
+		t.Fatalf("unheld lane merged by hand: %q", got)
+	}
+}

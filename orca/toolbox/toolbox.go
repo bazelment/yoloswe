@@ -491,7 +491,16 @@ case $op in
   echo "$head" ;;
  pr.approve) python3 "$SW/ledger.py" set "$RUN" --id "$lane" --pr-head "$text" --approval-sha "$text" >/dev/null; echo "PR #$(snl_task "$lane" pr) approved at $text" ;;
  pr.update) ghx api -X PUT "repos/$(snl_lane_slug "$lane")/pulls/$(snl_task "$lane" pr)/update-branch" -f expected_head_sha="$text" >/dev/null ;;
- pr.merge) snl_merge "$lane" ;;
+ pr.merge) [ -e "$RUN/$lane.hold-advance" ] || { snl_merge "$lane"; exit; }
+  # A held lane has no gate for snl_merge: merge the head ready passed by hand,
+  # pinned, through pr_merge.sh, and record it as snl_merge does.
+  pr=$(snl_task "$lane" pr); set --
+  for p in swe clean review; do [ ! -f "$RUN/$lane.$p.md" ] || set -- "$@" --report "$RUN/$lane.$p.md"; done
+  out=$(bash "$SW/pr_merge.sh" --repo "$(snl_lane_slug "$lane")" --head "$text" "$@" "$pr")
+  sha=$(printf '%s\n' "$out" | sed -n "s/^merged $pr \([0-9a-f][0-9a-f]*\)\$/\1/p")
+  [ -n "$sha" ] || { echo "PR #$pr merge not confirmed: $out"; exit 1; }
+  python3 "$SW/ledger.py" set "$RUN" --id "$lane" --status done --merge-sha "$sha" --pr-head "$text" --approval-sha "$text" --note "merged #$pr by hand" >/dev/null
+  echo "$lane: merged #$pr -> $sha" ;;
  ask) "$SNL_NEBULA" mail send --to owner --class fyi --run "$SNL_RUN_ID" --body-file "$msg" ;;
  note) snl_event "$lane" note "$text" ;;
  *) exit 2 ;;
