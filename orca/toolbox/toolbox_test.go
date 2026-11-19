@@ -58,7 +58,10 @@ for t in json.load(sys.stdin).get("terminals", []):
 }
 snl_lane_remote_head() { : > "$RUN/.snl-lsr.probe"; echo "OK $(git rev-parse --show-toplevel)"; }
 snl_sandbox_busy() { false; }
-snl_spawn() { log spawn "$@"; }
+# snl_spawn takes the real _snl_spawn_locked arguments; a planned lane is
+# funded through snl_fund_planned, which writes its swe brief first.
+snl_spawn() { : "${1:?lane}" "${2:?phase}" "${3:?brief-file}"; [ -r "$3" ] || return 2; log spawn "$@"; }
+snl_fund_planned() { log fund-planned "$@"; }
 snl_merge_claims() { log claims "$1" "$2"; }
 snl_head_checks() { log head-checks "$1" "$2" "$3"; }
 snl_merge() { log merge "$1"; }
@@ -150,7 +153,7 @@ func TestActionsRunSkillOncePerKey(t *testing.T) {
 		}
 	}
 	got := skillCalls(t, calls)
-	want := "^" + regexp.QuoteMeta("spawn funded\nnb term send t1 --file ") + `\S+\n` + regexp.QuoteMeta("claims working abc123\nhead-checks working 7 abc123\nmerge working\n") + "$"
+	want := "^" + regexp.QuoteMeta("fund-planned funded\nnb term send t1 --file ") + `\S+\n` + regexp.QuoteMeta("claims working abc123\nhead-checks working 7 abc123\nmerge working\n") + "$"
 	if !regexp.MustCompile(want).MatchString(got) {
 		t.Fatalf("skill calls=%q", got)
 	}
@@ -284,5 +287,28 @@ func TestLaneStartRestartsDeadPhaseTerminal(t *testing.T) {
 		"spawn stale review " + filepath.Join(dir, "stale.review.brief.txt") + "\n"
 	if skillCalls(t, calls) != want {
 		t.Fatalf("skill calls=%q, want %q", skillCalls(t, calls), want)
+	}
+}
+
+// Without a host checkout in state.json config.repo, skill calls refuse with
+// that reason instead of running from the run directory.
+func TestSkillCallsRefuseWithoutHostCheckout(t *testing.T) {
+	t.Parallel()
+	dir, skill, calls := fixture(t)
+	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err == nil {
+		raw = regexp.MustCompile(`"config":\{[^}]*\},`).ReplaceAll(raw, nil)
+		err = os.WriteFile(filepath.Join(dir, "state.json"), raw, 0o600)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"check", "working"}, {"lane", "steer", "working", "rebase"}} {
+		if _, err := run(t, dir, skill, args...); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "config.repo") {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+	if got := skillCalls(t, calls); got != "" {
+		t.Fatalf("skill ran without a host checkout: %q", got)
 	}
 }

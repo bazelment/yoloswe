@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -169,7 +170,7 @@ func TestShellDispatcherTickIntegratesReviewPass(t *testing.T) {
 	for _, name := range []string{"lane_ops.sh", "step.sh", "watch_lanes.sh"} {
 		write(t, filepath.Join(scripts, name), "")
 	}
-	write(t, filepath.Join(live, "state.json"), `{"tasks":[{"id":"L1","status":"running","phase":"review","round":1,"sessions":{"review":"nebula:t1"},"nebula_session":"s1","nebula_terminal":"t1","pr":7,"pr_head":"abc123","approval_sha":"abc123"}]}`)
+	write(t, filepath.Join(live, "state.json"), `{"config":{"repo":`+strconv.Quote(t.TempDir())+`},"tasks":[{"id":"L1","status":"running","phase":"review","round":1,"sessions":{"review":"nebula:t1"},"nebula_session":"s1","nebula_terminal":"t1","pr":7,"pr_head":"abc123","approval_sha":"abc123"}]}`)
 	write(t, filepath.Join(live, "reports", "L1.review.md"), "PR #7\nVerdict: pass\n")
 	t.Setenv("ORCA_WATCH_LANES", filepath.Join(scripts, "watch_lanes.sh"))
 	_, intent := superviseFake(t, store.NewMemoryStore(clock.RealClock{}), live, "TestFakeTickClaude", "ORCA_FAKE_TICK_DIR="+shq(fake)+" ORCA_SNL_DIR="+shq(scripts))

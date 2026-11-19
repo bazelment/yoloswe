@@ -204,7 +204,11 @@ func validate(ctx context.Context, o options, op string, t *task, tasks []task) 
 			if t.NebulaTerminal == "" {
 				return nil
 			}
-			if state, err := skill(ctx, o, "state", t, ""); err != nil || state == "working" || state == "waiting" {
+			state, err := skill(ctx, o, "state", t, "")
+			if errors.Is(err, ErrRefused) {
+				return err
+			}
+			if err != nil || state == "working" || state == "waiting" {
 				return refuse("lane %s current terminal %s is alive or unreadable (%s)", t.ID, t.NebulaTerminal, cmp.Or(state, "unknown"))
 			}
 			return nil
@@ -227,7 +231,11 @@ func validate(ctx context.Context, o options, op string, t *task, tasks []task) 
 		if t.NebulaSession == "" || t.NebulaTerminal == "" {
 			return refuse("lane %s has no current terminal", t.ID)
 		}
-		if state, err := skill(ctx, o, "state", t, ""); err != nil || (state != "working" && state != "waiting") {
+		state, err := skill(ctx, o, "state", t, "")
+		if errors.Is(err, ErrRefused) {
+			return err
+		}
+		if err != nil || (state != "working" && state != "waiting") {
 			return refuse("lane %s current terminal is not alive (%s)", t.ID, cmp.Or(state, "unknown"))
 		}
 	}
@@ -356,7 +364,7 @@ case $op in
  state) snl_terminal_agent_state "$sid" "$tid" ;;
  check) echo "terminal=$(snl_terminal_agent_state "$sid" "$tid") remote=$(snl_lane_remote_head "$lane")"
   if snl_sandbox_busy "$lane"; then echo "busy=yes"; else echo "busy=no"; fi ;;
- lane.start) if [ -n "$phase" ]; then snl_spawn "$lane" "$phase" "$RUN/$brief"; else snl_spawn "$lane"; fi ;;
+ lane.start) if [ -n "$phase" ]; then snl_spawn "$lane" "$phase" "$RUN/$brief"; else snl_fund_planned "$lane"; fi ;;
  lane.steer) snl_nb term send "$tid" --file "$msg" ;;
  lane.stop) snl_nb term stop "$tid" ;;
  ready) snl_merge_claims "$lane" "$text"; snl_head_checks "$lane" "$(snl_task "$lane" pr)" "$text" ;;
@@ -374,8 +382,12 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 	if op == "lane.start" && t.Status == "running" {
 		phase, brief = t.Phase, phaseBrief(o.dir, t)
 	}
+	repo := checkout(o.dir)
+	if repo == "" {
+		return "", refuse("state.json config.repo names no host checkout for run %s", o.dir)
+	}
 	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", o.skill, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief)
-	cmd.Dir = checkout(o.dir)
+	cmd.Dir = repo
 	raw, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("swarm skill %s failed: %w: %s", op, err, strings.TrimSpace(string(raw)))
@@ -385,7 +397,7 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 
 // checkout is the host's repository checkout for the run, where the skill's
 // git helpers run: the worktree of state.json's config.repo, the git common
-// dir the skill's ledger records at init. Empty keeps the caller's cwd.
+// dir the skill's ledger records at init. Empty when it names no directory.
 func checkout(dir string) string {
 	var s struct{ Config struct{ Repo string } }
 	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
