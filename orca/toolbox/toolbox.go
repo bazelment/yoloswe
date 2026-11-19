@@ -30,9 +30,9 @@ var (
 
 //nolint:govet // CLI options are grouped by parse concern.
 type options struct {
-	dir, intent, skill, key string
-	shadow                  bool
-	timeout                 time.Duration
+	dir, intent, skill, key, reason string
+	shadow                          bool
+	timeout                         time.Duration
 }
 
 //nolint:govet // ledger projection follows the run JSON shape.
@@ -129,6 +129,23 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	case "lane.start", "lane.steer", "lane.stop":
 		return mutate(ctx, o, cmd, t, strings.Join(rest[1:], " "), out)
+	case "lane.hold":
+		if isFile(filepath.Join(o.dir, t.ID+".hold-advance")) {
+			_, err := fmt.Fprintf(out, "lane %s already holds advance\n", t.ID)
+			return err
+		}
+		return mutate(ctx, o, cmd, t, cmp.Or(o.reason, "orca: the orchestrator advances and merges this lane by hand"), out)
+	case "pr.approve":
+		// On a run that holds advance, no gate records a review PASS: approve
+		// records it, as snl_gate does, once the report's HEAD is the PR head.
+		if err := validate(ctx, o, cmd, t, tasks); err != nil {
+			return err
+		}
+		head, err := skill(ctx, o, "approval", t, "")
+		if err != nil {
+			return refuse("PR #%d has no review PASS at its head: %v", t.PR, err)
+		}
+		return mutate(ctx, o, cmd, t, head, out)
 	case "pr.ready", "pr.update", "pr.merge":
 		if err := validate(ctx, o, cmd, t, tasks); err != nil {
 			return err
@@ -170,6 +187,7 @@ func parse(args []string) (options, []string, error) {
 	fs.StringVar(&o.intent, "intent-dir", os.Getenv("ORCA_TOOLBOX_INTENT_DIR"), "shadow intent directory")
 	fs.StringVar(&o.skill, "skill", os.Getenv("ORCA_SNL_DIR"), "swarm skill scripts directory")
 	fs.StringVar(&o.key, "action-key", "", "idempotency key")
+	fs.StringVar(&o.reason, "reason", "", "lane hold reason")
 	fs.BoolVar(&o.shadow, "shadow", os.Getenv("ORCA_TOOLBOX_SHADOW") == "1", "record intent only")
 	fs.DurationVar(&o.timeout, "timeout", 0, "wait timeout")
 	var rest []string
@@ -223,6 +241,9 @@ func load(dir string) ([]task, error) {
 func validate(ctx context.Context, o options, op string, t *task, tasks []task) error {
 	if t.Status == "done" || t.Status == "cancelled" || t.MergeSHA != "" || strings.EqualFold(t.PRState, "merged") {
 		return refuse("lane %s is done or merged", t.ID)
+	}
+	if op == "lane.hold" { // adding a hold is never unsafe
+		return nil
 	}
 	// .hold-advance stops the watcher advancing and integrating a lane; it
 	// reserves those for the orchestrator, so steering and a hand merge
@@ -462,6 +483,13 @@ case $op in
   old=$(printf '%s\n' "$ages" | tail -1)
   [ -z "$old" ] || [ $(($(date +%s) - old)) -le 7200 ] ||
    { echo "stale base: the oldest $base commit missing from $text is $((($(date +%s) - old) / 60)) min old (limit 120); orca pr update"; exit 3; } ;;
+ lane.hold) [ -e "$RUN/$lane.hold-advance" ] || printf '%s\n' "$text" > "$RUN/$lane.hold-advance"; echo "lane $lane holds advance" ;;
+ approval) pr=$(snl_task "$lane" pr); head=$(snl_report_word "$lane" review HEAD); verdict=$(snl_report_word "$lane" review Verdict)
+  [ "$verdict" = pass ] || { echo "review Verdict is '$verdict', not pass"; exit 3; }
+  new=$(snl_lane_gh "$lane" pr view "$pr" --json headRefOid --jq .headRefOid) || { echo "PR head unreadable"; exit 3; }
+  [ -n "$head" ] && [ "$head" = "$new" ] || { echo "review HEAD ${head:-none} is not PR head ${new:-unknown}"; exit 3; }
+  echo "$head" ;;
+ pr.approve) python3 "$SW/ledger.py" set "$RUN" --id "$lane" --pr-head "$text" --approval-sha "$text" >/dev/null; echo "PR #$(snl_task "$lane" pr) approved at $text" ;;
  pr.update) ghx api -X PUT "repos/$(snl_lane_slug "$lane")/pulls/$(snl_task "$lane" pr)/update-branch" -f expected_head_sha="$text" >/dev/null ;;
  pr.merge) snl_merge "$lane" ;;
  ask) "$SNL_NEBULA" mail send --to owner --class fyi --run "$SNL_RUN_ID" --body-file "$msg" ;;
