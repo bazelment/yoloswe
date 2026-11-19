@@ -53,14 +53,6 @@ In shadow, write tools record intent; direct file edits affect only the copy.
 // unless --dispatcher-model names a Claude model.
 const HostModel = "claude-opus-5-5"
 
-// runSkill is the SKILL.md beside the run's watch_lanes.sh.
-func runSkill() string {
-	if script := FindWatchScript(); script != "" {
-		return filepath.Join(filepath.Dir(filepath.Dir(script)), "SKILL.md")
-	}
-	return "~/.claude/skills/subagent-swarm-nebula/SKILL.md"
-}
-
 // ShellDispatcher supervises a persistent CLI session with the host's tools.
 // The skill's watcher and the shell toolbox own lifecycle operations; this
 // supervisor only relays owner messages and wakes the agent.
@@ -75,10 +67,12 @@ type ShellDispatcher struct {
 
 	mu        sync.Mutex
 	workspace string
-	sessions  model.AgentSessionMap
-	done      chan struct{}
-	stop      context.CancelFunc
-	relayed   int
+	// scripts is the run's skill scripts directory toolbox.SkillDir resolved.
+	scripts  string
+	sessions model.AgentSessionMap
+	done     chan struct{}
+	stop     context.CancelFunc
+	relayed  int
 }
 
 // Judge is inert: controller event batches cannot act on host runs.
@@ -100,13 +94,20 @@ func (d *ShellDispatcher) Prepare() error {
 			return err
 		}
 	}
+	// The prompt and the watcher use the skill the toolbox resolves for the
+	// live run, so a run without one fails here, not in a dead prompt path.
+	scripts, err := toolbox.SkillDir(context.Background(), os.Getenv("ORCA_SNL_DIR"), d.Run.Dir)
+	if err != nil {
+		return err
+	}
+	d.scripts = scripts
 	if m := strings.ToLower(d.Config.Model); m == "" || strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "openai") {
 		d.Config.Model = HostModel
 	}
 	// One session for the run: it rotates on a crash, a failed resume, or the
 	// context limit, never on a turn count.
 	d.Config.MaxSessionTurns = math.MaxInt
-	d.Config.Provider, d.Config.WorkDir, d.Config.AllowBuiltins, d.Config.SystemPrompt = "claude", d.workspace, true, adoptedSystemPrompt(runSkill())
+	d.Config.Provider, d.Config.WorkDir, d.Config.AllowBuiltins, d.Config.SystemPrompt = "claude", d.workspace, true, adoptedSystemPrompt(filepath.Join(filepath.Dir(scripts), "SKILL.md"))
 	binDir := filepath.Join(d.workspace, ".orca-bin")
 	executable, err := os.Executable()
 	if err == nil {
@@ -119,7 +120,8 @@ func (d *ShellDispatcher) Prepare() error {
 	if err != nil {
 		return err
 	}
-	d.Config.Env = map[string]string{"PATH": binDir + string(os.PathListSeparator) + os.Getenv("PATH"), "ORCA_TOOLBOX_DIR": d.workspace}
+	// The session's toolbox uses the same skill: a shadow copy has no env.sh.
+	d.Config.Env = map[string]string{"PATH": binDir + string(os.PathListSeparator) + os.Getenv("PATH"), "ORCA_TOOLBOX_DIR": d.workspace, "ORCA_SNL_DIR": scripts}
 	if d.Shadow {
 		d.Config.Env["ORCA_TOOLBOX_SHADOW"], d.Config.Env["ORCA_TOOLBOX_INTENT_DIR"] = "1", d.IntentDir
 		return nil
@@ -292,11 +294,10 @@ func skillShim(scripts, dir string) (string, error) {
 // watch runs the run's own watch_lanes.sh under the current handover and
 // restarts it when it exits. Shadow runs leave the live watcher to the host.
 func (d *ShellDispatcher) watch(ctx context.Context) {
-	script := FindWatchScript()
-	if d.Shadow || script == "" {
+	if d.Shadow {
 		return
 	}
-	watcher, err := skillShim(filepath.Dir(script), filepath.Join(d.workspace, ".orca-bin", "snl"))
+	watcher, err := skillShim(d.scripts, filepath.Join(d.workspace, ".orca-bin", "snl"))
 	if err != nil {
 		slog.Error("adopted watcher unavailable", "run", d.Run.ID, "error", err)
 		return
