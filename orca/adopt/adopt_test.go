@@ -89,6 +89,38 @@ func TestDryRunDirFixtures(t *testing.T) {
 	}
 }
 
+func TestAdoptedLaneStoreOverlaysSameStatusHostFacts(t *testing.T) {
+	t.Parallel()
+	clk := clock.NewFakeClock(time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC))
+	hostLane := lane.Lane{RunID: "run", ID: "lane", Status: lane.StatusRunning}
+	syncer := newRunLedgerSync(Run{ID: "run", Lanes: []Lane{{ID: "lane", Status: "running", HostHold: "new host hold"}}}, clk, []lane.Lane{hostLane})
+	st := store.NewMemoryStore(clk)
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Lanes().Upsert(t.Context(), hostLane); err != nil {
+		t.Fatal(err)
+	}
+	wrapped := &adoptedLaneStore{LaneStore: st.Lanes(), syncer: syncer}
+	got, err := wrapped.Get(t.Context(), "run", "lane")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HostHoldReason != "new host hold" {
+		t.Fatalf("HostHoldReason = %q, want same-status host update", got.HostHoldReason)
+	}
+	localBlocked := hostLane
+	localBlocked.Status = lane.StatusBlocked
+	if err := st.Lanes().Upsert(t.Context(), localBlocked); err != nil {
+		t.Fatal(err)
+	}
+	got, err = wrapped.Get(t.Context(), "run", "lane")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != lane.StatusBlocked {
+		t.Fatalf("Status = %q, want unchanged local blocked status", got.Status)
+	}
+}
+
 func TestDryRunNeedsInputUsesHostAnswerAndLaneQuestion(t *testing.T) {
 	t.Parallel()
 	deadline := "2030-01-01T13:00:00Z"
@@ -139,37 +171,6 @@ func TestMarkerOnlyHostWaitHasDeadline(t *testing.T) {
 	waitingOn, deadline := ln.expectedHostWait(now)
 	if waitingOn != "lane progress" || !deadline.Equal(now.Add(markerOnlyHostWaitTTL)) {
 		t.Fatalf("marker-only wait = %q until %s, want lane progress until %s", waitingOn, deadline, now.Add(markerOnlyHostWaitTTL))
-	}
-}
-
-func TestEscalationFallbackKeepsOneOpenAskPerLane(t *testing.T) {
-	t.Parallel()
-	clk := clock.NewFakeClock(time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC))
-	st := store.NewMemoryStore(clk)
-	t.Cleanup(func() { _ = st.Close() })
-	if err := st.Lanes().Upsert(t.Context(), lane.Lane{RunID: "run", ID: "lane", Status: lane.StatusBlocked, Round: 1}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.Decisions().Append(t.Context(), store.Decision{RunID: "run", LaneID: "lane", Tool: controller.ToolLaneEscalate, Reason: "needs owner", Seq: 1}); err != nil {
-		t.Fatal(err)
-	}
-	ctrls := NewControllers(t.Context(), st, lane.NewFakeDriver(), clk, nil)
-	events := []store.Event{{RunID: "run", LaneID: "lane"}}
-	if err := ctrls.askOwnerOnEscalation(t.Context(), "run", events); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.Decisions().Append(t.Context(), store.Decision{RunID: "run", LaneID: "lane", Tool: controller.ToolLaneEscalate, Reason: "needs owner again", Seq: 2}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ctrls.askOwnerOnEscalation(t.Context(), "run", events); err != nil {
-		t.Fatal(err)
-	}
-	dirs, err := st.Directives().List(t.Context(), store.DirectiveFilter{RunID: "run", ActiveOnly: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(dirs) != 1 || dirs[0].Scope != "lane" || !strings.HasPrefix(dirs[0].Ref, ownerAskRef) {
-		t.Fatalf("open fallback asks = %+v, want one owner ask for lane", dirs)
 	}
 }
 
@@ -1668,281 +1669,6 @@ func TestFailedReleaseResumesController(t *testing.T) {
 	}
 }
 
-func TestLiveAdoptImportsHostWaitAndNamesLaneQuestions(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name, outcome     string
-		answered, waiting bool
-	}{
-		{name: "answered with ledger wait", outcome: "needs-input", answered: true, waiting: true},
-		{name: "unanswered", outcome: "needs-input"},
-		{name: "completed with handled marker", outcome: "done", answered: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			now := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
-			waitFields := ""
-			if tc.waiting {
-				waitFields = `,"waiting_on":"chaos-24h-final","deadline":"2030-01-01T13:00:00Z"`
-			}
-			write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"fixture","phases":[{"name":"swe"}]},"tasks":[{"id":"lane","title":"Chaos result","phase":"swe","status":"running","round":1`+waitFields+`}]}`)
-			write(t, filepath.Join(dir, "OBJECTIVE.md"), "# Objective\nfixture\n")
-			write(t, filepath.Join(dir, "lane.swe.md"), "Outcome: "+tc.outcome+"\nAsk: Should the host provide the final chaos result?\n")
-			if tc.answered {
-				write(t, filepath.Join(dir, "lane.swe.nebula-attn.answered-123"), "answered")
-				old := now.Add(-time.Hour)
-				if err := os.Chtimes(filepath.Join(dir, "lane.swe.md"), old, old); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Chtimes(filepath.Join(dir, "lane.swe.nebula-attn.answered-123"), now, now); err != nil {
-					t.Fatal(err)
-				}
-			}
-			write(t, filepath.Join(dir, leaseFile), `{"holder":"orca-chat:fixture","state":"adopted","marker":"ORCHESTRATOR: orca since 2030-01-01T12:00:00Z"}`)
-			run, err := Read(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			clk := clock.NewFakeClock(now)
-			st := store.NewMemoryStore(clk)
-			t.Cleanup(func() { _ = st.Close() })
-			ctrls := NewControllers(t.Context(), st, lane.NewFakeDriver(), clk, nil)
-			t.Cleanup(func() { _ = ctrls.Close(context.Background()) })
-			if err := ctrls.Start(t.Context(), run); err != nil {
-				t.Fatal(err)
-			}
-			events, err := st.Events().List(t.Context(), store.EventFilter{RunID: run.ID})
-			if err != nil {
-				t.Fatal(err)
-			}
-			var questions []store.Event
-			for _, event := range events {
-				if strings.HasPrefix(event.ID, "adopt-") && event.Class == store.EventClassJudgment {
-					questions = append(questions, event)
-				}
-			}
-			if tc.outcome == "done" {
-				if _, err := st.Directives().Get(t.Context(), run.ID, "wait-adopt-lane"); !errors.Is(err, store.ErrNotFound) {
-					t.Fatalf("completed report retained an indefinite host wait: %v", err)
-				}
-			} else if tc.answered {
-				if len(questions) != 0 {
-					t.Fatalf("answered report re-judged: %+v", questions)
-				}
-				wait, err := st.Directives().Get(t.Context(), run.ID, "wait-adopt-lane")
-				if err != nil || wait.Text != "waiting on chaos-24h-final" || !wait.ExpiresAt.Equal(now.Add(time.Hour)) {
-					t.Fatalf("host wait=%+v err=%v", wait, err)
-				}
-			} else if len(questions) != 1 || !strings.HasPrefix(questions[0].Summary, "lane question:") || !strings.Contains(questions[0].Summary, `"Should the host provide the final chaos result?"`) {
-				t.Fatalf("unanswered report must be a quoted lane question: %+v", questions)
-			}
-		})
-	}
-}
-
-func TestAdoptedWaitSuppressesOnlyTheAnsweredReport(t *testing.T) {
-	t.Parallel()
-	clk := clock.NewFakeClock(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
-	st := store.NewMemoryStore(clk)
-	t.Cleanup(func() { _ = st.Close() })
-	deadline := clk.Now().Add(time.Hour)
-	if err := st.Directives().Add(t.Context(), store.Directive{ID: "wait-adopt-lane", RunID: "run", Scope: "lane", Ref: "named-wait:lane", Text: "waiting on chaos-24h-final", ExpiresAt: &deadline, Status: store.DirectiveActive}); err != nil {
-		t.Fatal(err)
-	}
-	const raw = "Outcome: needs-input\nAsk: Is the final chaos result available?"
-	old, err := lane.ParsePhaseReport(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := lane.NewFakeDriver()
-	base.SetReport("terminal", *old)
-	drv := &adoptedRunDriver{LaneDriver: base, store: st, clock: clk, run: Run{ID: "run", Lanes: []Lane{{ID: "lane", reportText: raw}}}}
-	if rep, err := drv.ReadReport(t.Context(), "run", "lane", "terminal"); err != nil || rep != nil {
-		t.Fatalf("answered report replayed: %+v err=%v", rep, err)
-	}
-	watch := drv.Watch(t.Context(), "run")
-	base.Emit(lane.Event{Kind: lane.EventPhaseReported, RunID: "run", LaneID: "lane", Report: old})
-	fresh := &lane.PhaseReport{Outcome: lane.OutcomeNeedsInput, Raw: "Outcome: needs-input\nAsk: A new host question?"}
-	base.Emit(lane.Event{Kind: lane.EventPhaseReported, RunID: "run", LaneID: "lane", Report: fresh})
-	select {
-	case event := <-watch:
-		if event.Report != fresh {
-			t.Fatalf("expected fresh report, got %+v", event)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("fresh report was not forwarded")
-	}
-	clk.Advance(2 * time.Hour)
-	if rep, err := drv.ReadReport(t.Context(), "run", "lane", "terminal"); err != nil || rep == nil {
-		t.Fatalf("expired wait swallowed report: %+v err=%v", rep, err)
-	}
-}
-
-// All host files here are synthetic; adoption never needs a real run directory.
-func TestReadoptGeneration(t *testing.T) {
-	for _, scenario := range []string{"wait", "quiet", "retry", "judgment", "question"} {
-		t.Run(scenario, func(t *testing.T) {
-			clk := clock.NewFakeClock(time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC))
-			st := store.NewMemoryStore(clk)
-			t.Cleanup(func() { _ = st.Close() })
-			drv := lane.NewFakeDriver()
-			judge := controller.NewFakeJudge()
-			ctrls := NewControllers(t.Context(), st, drv, clk, func(string, func(context.Context, string, string, string) error) controller.Judge { return judge })
-			t.Cleanup(func() { _ = ctrls.Close(context.Background()) })
-			dir := t.TempDir()
-			write(t, filepath.Join(dir, "OBJECTIVE.md"), "Goal: synthetic adoption\n")
-			importRun := func(wait string) Run {
-				t.Helper()
-				fields := ""
-				if wait != "" {
-					fields = fmt.Sprintf(`,"waiting_on":%q,"deadline":%q`, wait, clk.Now().Add(time.Hour).Format(time.RFC3339))
-					if wait == "Y" {
-						fields = fmt.Sprintf(`,"waiting_on":"Y","deadline":%q`, clk.Now().Add(2*time.Hour).Format(time.RFC3339))
-					}
-				}
-				write(t, filepath.Join(dir, "state.json"), `{"config":{"goal":"fixture","phases":[{"name":"swe"}]},"tasks":[{"id":"lane","title":"fixture","phase":"swe","status":"running","round":1,"session_id":"session","terminals":{"swe":{"1":"terminal"}}`+fields+`}]}`)
-				write(t, filepath.Join(dir, leaseFile), fmt.Sprintf(`{"holder":"orca-chat:fixture","state":"adopted","marker":%q}`, "ORCHESTRATOR: orca since "+clk.Now().Format(time.RFC3339)))
-				if scenario == "judgment" {
-					write(t, filepath.Join(dir, "lane.swe.md"), "Outcome: done\nPR: 42\nHEAD: synthetic\n")
-				}
-				if scenario == "question" {
-					write(t, filepath.Join(dir, "lane.swe.md"), "Outcome: needs-input\nAsk: Which target?\n")
-				}
-				r, err := Read(dir)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return r
-			}
-			wait := ""
-			if scenario == "wait" {
-				wait = "X"
-			}
-			run := importRun(wait)
-			if err := ctrls.Start(t.Context(), run); err != nil {
-				t.Fatal(err)
-			}
-			if scenario == "judgment" || scenario == "question" {
-				clk.Advance(3 * time.Minute)
-				if err := ctrls.runs[run.ID].controller.Step(t.Context()); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := ctrls.Stop(t.Context(), run); err != nil {
-				t.Fatal(err)
-			}
-			before := len(judge.AllEvents())
-			keys := []string{"restart:nudge:lane:swe:1", "restart:fresh:lane:swe:1", "phase.retry:lane:swe:attempt-2"}
-			for _, key := range append([]string(nil), keys...) {
-				keys = append(keys, key+":adopt:2030-01-01T12:00:00Z")
-			}
-			for _, key := range keys {
-				args, err := json.Marshal(controller.DecisionArgs{ActionKey: key})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := st.Decisions().Append(t.Context(), store.Decision{RunID: run.ID, LaneID: "lane", Tool: controller.ToolPhaseRetry, Args: args}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			pendingKey := "phase.start:lane:swe:attempt-1:adopt:2030-01-01T12:00:00Z"
-			pendingArgs, err := json.Marshal(controller.DecisionArgs{ActionKey: "intent:" + pendingKey, Phase: "swe", Round: 1, Attempt: 1})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := st.Decisions().Append(t.Context(), store.Decision{RunID: run.ID, LaneID: "lane", Tool: controller.ToolPhaseStart + ".intent", Args: pendingArgs}); err != nil {
-				t.Fatal(err)
-			}
-			clk.Advance(3 * time.Hour)
-			if scenario == "wait" {
-				wait = "Y"
-			}
-			run = importRun(wait)
-			if err := ctrls.Start(t.Context(), run); err != nil {
-				t.Fatal(err)
-			}
-			decisions, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: run.ID, LaneID: "lane"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			resolved := 0
-			for i := range decisions {
-				var args controller.DecisionArgs
-				if err := json.Unmarshal(decisions[i].Args, &args); err != nil {
-					t.Fatal(err)
-				}
-				if args.ActionKey == pendingKey && decisions[i].Tool == "adopt.launch.supersede" {
-					resolved++
-				}
-			}
-			ctrl := ctrls.runs[run.ID].controller
-			switch scenario {
-			case "wait":
-				w, err := st.Directives().Get(t.Context(), run.ID, "wait-adopt-lane")
-				if err != nil || !w.IsActive(clk.Now()) || w.Text != "waiting on Y" || !w.ExpiresAt.Equal(clk.Now().Add(2*time.Hour)) {
-					t.Fatalf("re-adopt wait=%+v err=%v; want active Y until now+2h", w, err)
-				}
-				clk.Advance(50 * time.Minute)
-				if err := ctrl.Step(t.Context()); err != nil {
-					t.Fatal(err)
-				}
-			case "quiet", "retry":
-				kind := lane.EventNoActivity
-				if scenario == "retry" {
-					kind = lane.EventExited
-				}
-				payload, err := json.Marshal(controller.PhaseExitPayload{Kind: kind, TerminalID: "terminal", Phase: "swe"})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := st.Events().Append(t.Context(), store.Event{RunID: run.ID, LaneID: "lane", Kind: store.EventPhaseExit, Source: "lane.watch", Payload: payload}); err != nil {
-					t.Fatal(err)
-				}
-				if err := ctrl.Step(t.Context()); err != nil {
-					t.Fatal(err)
-				}
-			case "judgment", "question":
-				clk.Advance(3 * time.Minute)
-				if err := ctrl.Step(t.Context()); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := ctrls.Stop(t.Context(), run); err != nil {
-				t.Fatal(err)
-			}
-			switch scenario {
-			case "wait", "quiet":
-				if len(drv.Stops) != 0 {
-					t.Fatalf("unexpected terminal stops: %+v", drv.Stops)
-				}
-				if scenario == "quiet" && len(drv.Steers) != 0 {
-					t.Fatalf("steers=%d; want 0 for unknown health", len(drv.Steers))
-				}
-				decs, err := st.Decisions().List(t.Context(), store.DecisionFilter{RunID: run.ID})
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, dec := range decs {
-					if dec.Tool == controller.ToolLaneStall {
-						t.Fatalf("unexpected stall: %+v", dec)
-					}
-				}
-			case "retry":
-				if len(drv.PhaseStarts) != 1 {
-					t.Fatalf("phase starts=%d; want 1", len(drv.PhaseStarts))
-				}
-			case "judgment", "question":
-				if got := len(judge.AllEvents()) - before; got != 1 {
-					t.Fatalf("new judgment events=%d; want 1 (all=%+v)", got, judge.AllEvents())
-				}
-			}
-			if resolved != 1 {
-				t.Fatalf("old in-flight reservations resolved=%d; want 1", resolved)
-			}
-		})
-	}
-}
-
 func TestAdoptSameGenerationPreservesDedup(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
@@ -2004,5 +1730,31 @@ func TestAdoptSameGenerationPreservesDedup(t *testing.T) {
 				t.Fatalf("same generation repeated an effect: steers=%v starts=%v stops=%v", drv.Steers, drv.PhaseStarts, drv.Stops)
 			}
 		})
+	}
+}
+
+// The run's own watch_lanes.sh runs through the shim: the skill's stand-down
+// check is replaced only while the exact adopted handover is current.
+func TestSkillShimAdmitsOnlyCurrentHandover(t *testing.T) {
+	t.Parallel()
+	skill, run := filepath.Join(t.TempDir(), "scripts"), t.TempDir()
+	if err := os.MkdirAll(skill, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(skill, "step.sh"), "snl_orca_lease_check() { return 3; }\n")
+	write(t, filepath.Join(skill, "watch_lanes.sh"), `. "$(dirname "$0")/step.sh"; snl_orca_lease_check "$1" && echo admitted > "$1/proof"`)
+	lease := `{"holder":"orca","marker":"m1","state":"adopted"}`
+	write(t, filepath.Join(run, leaseFile), lease)
+	watcher, err := skillShim(skill, filepath.Join(t.TempDir(), "snl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, auth := range []string{`{"holder":"orca","marker":"old","state":"adopted"}`, lease} {
+		cmd := exec.Command("bash", watcher, run)
+		cmd.Env = append(os.Environ(), "ORCA_TOOLBOX_DIR="+run, "ORCA_ADOPT_AUTH="+auth)
+		_ = cmd.Run()
+	}
+	if got := readText(filepath.Join(run, "proof")); got != "admitted\n" {
+		t.Fatalf("proof=%q", got)
 	}
 }

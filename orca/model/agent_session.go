@@ -60,12 +60,10 @@ func ParseAgentBackend(raw string) (AgentBackend, error) {
 }
 
 // AgentSessionConfig configures a long-lived CLI agent session for a run role.
-// For Claude sessions, built-in tools are disabled via WithTools("") and
-// WithDisallowedTools so the model can only invoke Orca's MCP tools. For Codex
-// sessions, the thread runs in a read-only sandbox inside WorkDir with
-// ApprovalPolicyNever and developer instructions restricting tool calls to the
-// Orca MCP server.
+// Claude roles launch like the host orchestrator: built-in tools on and
+// permissions bypassed.
 type AgentSessionConfig struct {
+	Env              map[string]string
 	Provider         string
 	Model            string
 	Effort           string
@@ -77,6 +75,9 @@ type AgentSessionConfig struct {
 	CodexBin         string
 	MaxSessionTokens int
 	MaxSessionTurns  int
+	// AllowBuiltins marks the adopted dispatcher, which acts through the orca
+	// shell toolbox and gets no typed MCP tools.
+	AllowBuiltins bool
 }
 
 // DeterministicSessionWorkDir returns a stable, isolated working directory path
@@ -165,12 +166,16 @@ type AgentTurnResult struct {
 	Text      string
 	SessionID string
 	Usage     Usage
-	TurnCount int
-	Rotated   bool
+	// ContextTokens is the session's context size after the turn; zero when
+	// the CLI did not report it. Usage sums every API call in the turn, so it
+	// is not a context size.
+	ContextTokens int
+	TurnCount     int
+	Rotated       bool
 }
 
 // AgentSession manages a long-lived Claude or Codex CLI session for one held run
-// and role (Dispatcher or Planner), exposing Orca's ToolRegistry as MCP tools.
+// and role (Dispatcher, Planner, or Concierge), exposing Orca's ToolRegistry as MCP tools.
 type AgentSession struct {
 	bridge       *MCPToolBridge
 	claudeSess   *claude.Session
@@ -254,7 +259,6 @@ func (s *AgentSession) Turn(ctx context.Context, req AgentTurnRequest) (*AgentTu
 		}
 		s.cfg.SystemPrompt = sys
 	}
-
 	s.bridge.SetRegistry(req.Registry)
 	s.bridge.SetMaxCalls(req.MaxToolCalls)
 	s.bridge.SetObserver(req.Observer)
@@ -313,9 +317,7 @@ func (s *AgentSession) Turn(ctx context.Context, req AgentTurnRequest) (*AgentTu
 
 	res.Rotated = rotated
 	s.turnCount++
-	// Track the latest turn's context window size (input + cached + output)
-	// rather than summing context windows quadratically across turns.
-	s.totalTokens = int(res.Usage.InputTokens + res.Usage.OutputTokens + res.Usage.CacheReadInputTokens + res.Usage.CacheCreationInputTokens)
+	s.totalTokens = res.ContextTokens
 	return res, nil
 }
 
@@ -373,15 +375,16 @@ func (s *AgentSession) runClaudeTurnLocked(
 
 		opts := []claude.SessionOption{
 			claude.WithCLIPath(bin),
-			claude.WithPermissionMode(claude.PermissionModeBypass),
 			claude.WithDisablePlugins(),
-			claude.WithTools(""),
-			claude.WithDisallowedTools("Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"),
-			claude.WithSDKTools("orca", s.bridge),
+			claude.WithEnv(s.cfg.Env),
+			// Every role works like the host orchestrator, in live and shadow
+			// alike; shadow safety is the synced copy and the external proxy.
+			claude.WithPermissionMode(claude.PermissionModeBypass),
 		}
-		if len(allowed) > 0 {
-			opts = append(opts, claude.WithAllowedTools(allowed...))
+		if !s.cfg.AllowBuiltins {
+			opts = append(opts, claude.WithSDKTools("orca", s.bridge))
 		}
+		opts = append(opts, claude.WithAllowedTools(allowed...))
 		if cliModel != "" {
 			opts = append(opts, claude.WithModel(cliModel))
 		}
@@ -437,11 +440,22 @@ func (s *AgentSession) runClaudeTurnLocked(
 		usage.CostUSD = CalculateCost(cmp.Or(effectiveModel, s.cfg.Model), usage, nil)
 	}
 
+	// The result's usage sums every API call of the turn; a multi-tool turn
+	// would read as over the limit and rotate the session on every wake. Ask
+	// the CLI for its actual context size instead.
+	var contextTokens int
+	if cu, err := s.claudeSess.ContextUsage(ctx); err == nil {
+		contextTokens = cu.TotalTokens
+	} else {
+		slog.Warn("agent session context usage unavailable", "session_id", s.sessionID, "error", err)
+	}
+
 	return &AgentTurnResult{
-		Text:      strings.TrimSpace(askRes.Text),
-		SessionID: s.sessionID,
-		Usage:     usage,
-		TurnCount: max(1, s.bridge.CallCount()),
+		Text:          strings.TrimSpace(askRes.Text),
+		SessionID:     s.sessionID,
+		Usage:         usage,
+		ContextTokens: contextTokens,
+		TurnCount:     max(1, s.bridge.CallCount()),
 	}, nil
 }
 
@@ -531,23 +545,6 @@ func ensurePrivateSessionDir(clean string) error {
 	return nil
 }
 
-const codexToolConfinementInstruction = "\n\nTool Confinement: Invoke ONLY the `orca` MCP server tools (`mcp__orca__*`). Never invoke built-in shell or filesystem tools."
-
-var codexDisabledBuiltinFeatures = []string{
-	"shell_tool",
-	"unified_exec",
-	"unified_exec_tty",
-	"view_image",
-	"apps",
-	"browser_use",
-	"browser_use_external",
-	"computer_use",
-	"image_generation",
-	"plugins",
-	"code_mode_host",
-	"sleep_tool",
-}
-
 func (s *AgentSession) runCodexTurnLocked(
 	ctx context.Context,
 	prompt string,
@@ -570,9 +567,6 @@ func (s *AgentSession) runCodexTurnLocked(
 		appArgs := []string{
 			"-c", fmt.Sprintf("mcp_servers.orca.url=%q", mcpURL),
 			"-c", fmt.Sprintf("mcp_servers.orca.enabled_tools=%s", string(enabledToolsJSON)),
-		}
-		for _, feat := range codexDisabledBuiltinFeatures {
-			appArgs = append(appArgs, "--disable", feat)
 		}
 		if effort := strings.TrimSpace(s.cfg.Effort); effort != "" {
 			appArgs = append(appArgs, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
@@ -598,11 +592,7 @@ func (s *AgentSession) runCodexTurnLocked(
 			return nil, fmt.Errorf("orca/model: start codex app-server: %w", err)
 		}
 
-		disabledFeatureMap := make(map[string]interface{}, len(codexDisabledBuiltinFeatures))
-		for _, feat := range codexDisabledBuiltinFeatures {
-			disabledFeatureMap[feat] = false
-		}
-		devInstructions := strings.TrimSpace(s.cfg.SystemPrompt) + codexToolConfinementInstruction
+		devInstructions := strings.TrimSpace(s.cfg.SystemPrompt)
 		threadCfg := map[string]interface{}{
 			"mcp_servers": map[string]interface{}{
 				"orca": map[string]interface{}{
@@ -610,7 +600,6 @@ func (s *AgentSession) runCodexTurnLocked(
 					"enabled_tools": slices.Clone(newTools),
 				},
 			},
-			"features":               disabledFeatureMap,
 			"developer_instructions": strings.TrimSpace(devInstructions),
 		}
 		if effort := strings.TrimSpace(s.cfg.Effort); effort != "" {
@@ -675,10 +664,11 @@ func (s *AgentSession) runCodexTurnLocked(
 	usage.CostUSD = CalculateCost(cmp.Or(effectiveModel, s.cfg.Model), usage, nil)
 
 	return &AgentTurnResult{
-		Text:      strings.TrimSpace(turnRes.FullText),
-		SessionID: s.sessionID,
-		Usage:     usage,
-		TurnCount: max(1, s.bridge.CallCount()),
+		Text:          strings.TrimSpace(turnRes.FullText),
+		SessionID:     s.sessionID,
+		Usage:         usage,
+		ContextTokens: int(usage.InputTokens + usage.OutputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens),
+		TurnCount:     max(1, s.bridge.CallCount()),
 	}, nil
 }
 
@@ -716,8 +706,7 @@ func (s *AgentSession) Close() error {
 	return err
 }
 
-// AgentSessionMap manages one long-lived AgentSession per runID for a role
-// (Dispatcher or Planner).
+// AgentSessionMap manages one long-lived AgentSession per runID for a role.
 type AgentSessionMap struct {
 	sessions map[string]*AgentSession
 	mu       sync.Mutex
@@ -841,6 +830,8 @@ func RunFakeClaudeStreamCLI(streamFile, argsFile, mcpRespFile, counterFile strin
 		}
 	}
 
+	// contextTokens is the last API call's context, as the CLI reports it.
+	var contextTokens int
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -860,8 +851,11 @@ func RunFakeClaudeStreamCLI(streamFile, argsFile, mcpRespFile, counterFile strin
 		}
 		switch msg.Type {
 		case "control_request":
-			if msg.Request.Subtype == "initialize" {
+			switch msg.Request.Subtype {
+			case "initialize":
 				fmt.Fprintf(os.Stdout, `{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{}}}`+"\n", msg.RequestID)
+			case "get_context_usage":
+				fmt.Fprintf(os.Stdout, `{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{"totalTokens":%d}}}`+"\n", msg.RequestID, contextTokens)
 			}
 		case "user":
 			if turnIdx >= len(turns) {
@@ -875,9 +869,21 @@ func RunFakeClaudeStreamCLI(streamFile, argsFile, mcpRespFile, counterFile strin
 			for _, outLine := range turnLines {
 				fmt.Fprintln(os.Stdout, outLine)
 				var outEnv struct {
-					Type string `json:"type"`
+					Type    string `json:"type"`
+					Message struct {
+						Usage struct {
+							InputTokens              int `json:"input_tokens"`
+							OutputTokens             int `json:"output_tokens"`
+							CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+							CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+						} `json:"usage"`
+					} `json:"message"`
 				}
-				if json.Unmarshal([]byte(outLine), &outEnv) == nil && outEnv.Type == "control_request" {
+				_ = json.Unmarshal([]byte(outLine), &outEnv)
+				if u := outEnv.Message.Usage; outEnv.Type == "assistant" {
+					contextTokens = u.InputTokens + u.OutputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+				}
+				if outEnv.Type == "control_request" {
 					for scanner.Scan() {
 						respLine := strings.TrimSpace(scanner.Text())
 						if respLine == "" {

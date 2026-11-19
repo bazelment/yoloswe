@@ -250,7 +250,7 @@ func TestShadowAdoptExecReads(t *testing.T) {
 	if err := st.Runs().Create(t.Context(), store.Run{ID: "exec-shadow"}); err != nil {
 		t.Fatal(err)
 	}
-	drv := NewRecordingDriver(&adoptedRunDriver{LaneDriver: inner, store: st, run: Run{Dir: t.TempDir()}, clock: clk}, rec)
+	drv := NewRecordingDriver(inner, rec)
 	launched, err := drv.SpawnSession(t.Context(), lane.SpawnRequest{RunID: "exec-shadow", LaneID: "launched", Phase: "swe"})
 	if err != nil {
 		t.Fatal(err)
@@ -567,7 +567,7 @@ func TestShadowHostDiffClassification(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("mechanical classifications: %v", result.Counts)
-	for kind, want := range map[string]int{"agree": 3, "differs": 2, "host-did-not": 0, "orca-missed": 2} {
+	for kind, want := range map[string]int{"agree": 1, "differs": 2, "host-did-not": 2, "orca-missed": 2} {
 		if result.Counts[kind] != want {
 			t.Errorf("%s=%d, want %d; %s", kind, result.Counts[kind], want, raw)
 		}
@@ -755,6 +755,96 @@ func TestHostDiffDoesNotReuseRowsOrGuessMissingTargets(t *testing.T) {
 	}
 }
 
+func TestSoleOperatorHostDiffCountsPostRunRows(t *testing.T) {
+	out, run := t.TempDir(), t.TempDir()
+	start := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	actions := []Action{
+		{At: start.Add(time.Minute), Lane: "a", Kind: "start_phase", Arguments: json.RawMessage(`{"phase":"review"}`)},
+		{At: start.Add(2 * time.Minute), Lane: "b", Kind: "stop", Arguments: json.RawMessage(`{"terminal_id":"term-b"}`)},
+	}
+	f, err := os.Create(filepath.Join(out, "actions.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range actions {
+		if err := json.NewEncoder(f).Encode(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rows := strings.Join([]string{
+		start.Add(time.Minute).Format(time.RFC3339Nano) + "\ta\tstarted\treview",
+		start.Add(2*time.Minute).Format(time.RFC3339Nano) + "\tb\tstop\tterminal=term-b",
+		start.Add(5*time.Minute).Format(time.RFC3339Nano) + "\tc\tstarted\tswe",
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(run, "EVENTS"), []byte(rows), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHostDiffWithWindow(out, run, filepath.Join(out, "actions.jsonl"), start, start, true); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(out, "host-diff.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got HostDiff
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Matched != 2 || got.MatchedPercent < 66.6 || got.MatchedPercent > 66.7 || got.Counts["orca-missed"] != 1 {
+		t.Fatalf("sole operator score = %+v", got)
+	}
+}
+
+func TestRecordingDriverDeduplicatesIdenticalShadowIntents(t *testing.T) {
+	out := t.TempDir()
+	rec, err := NewActionRecorder(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drv := NewRecordingDriver(nil, rec)
+	req := lane.StopRequest{RunID: "run", LaneID: "lane", TerminalID: "term"}
+	if err := drv.Stop(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	if err := drv.Stop(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+	actions, err := readShadowActions(filepath.Join(out, "actions.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("identical intents recorded %d times, want 1", len(actions))
+	}
+}
+
+func TestRunFileSignatureWatchesLedgerAndReports(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "EVENTS"), []byte("one\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	first := runFileSignature(dir)
+	if err := os.WriteFile(filepath.Join(dir, "reports", "lane.review.md"), []byte("report"), 0600); err == nil {
+		t.Fatal("writing a report in a missing directory unexpectedly succeeded")
+	}
+	if err := os.Mkdir(filepath.Join(dir, "reports"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "reports", "lane.review.md"), []byte("report"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	second := runFileSignature(dir)
+	if first == second {
+		t.Fatal("ledger/report change did not change watcher signature")
+	}
+}
+
 func TestShadowSummaryIncludesCLITurnUsageWithoutActions(t *testing.T) {
 	out := t.TempDir()
 	rec, err := NewActionRecorder(out)
@@ -788,5 +878,32 @@ func TestShadowSummaryIncludesCLITurnUsageWithoutActions(t *testing.T) {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("summary missing %q: %s", want, raw)
 		}
+	}
+}
+
+func TestSessionWorkspaceDirectWritesAreIsolated(t *testing.T) {
+	t.Parallel()
+	live, copyDir := t.TempDir(), filepath.Join(t.TempDir(), "workspace")
+	write(t, filepath.Join(live, "EVENTS"), "host event\n")
+	write(t, filepath.Join(live, "env.sh"), "synthetic excluded environment\n")
+	if err := SyncWorkspace(live, copyDir); err != nil {
+		t.Fatal(err)
+	}
+	// A session edit through a link must not reach the live run on refresh.
+	if err := os.Remove(filepath.Join(copyDir, "EVENTS")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(live, "EVENTS"), filepath.Join(copyDir, "EVENTS")); err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncWorkspace(live, copyDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(copyDir, "env.sh")); !os.IsNotExist(err) {
+		t.Fatalf("env copied: %v", err)
+	}
+	info, err := os.Lstat(filepath.Join(copyDir, "EVENTS"))
+	if err != nil || !info.Mode().IsRegular() || readText(filepath.Join(live, "EVENTS")) != "host event\n" {
+		t.Fatalf("refresh followed a session link: %v %v", info, err)
 	}
 }

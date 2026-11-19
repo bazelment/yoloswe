@@ -1224,36 +1224,27 @@ func TestControllerReportOnlyCompletionSignals(t *testing.T) {
 	}
 }
 
-func TestControllerHostRunSWEReportOnlyRequiresJudgment(t *testing.T) {
+// An adopted run's CLI dispatcher and skill watcher own lifecycle judgment:
+// the controller keeps the lease but never spawns, steers or judges.
+func TestControllerHostRunTakesNoLifecycleAction(t *testing.T) {
 	t.Parallel()
 	clk, st, drv, judge := setupTestEnv(t)
 	ctx := t.Context()
-	adopted := recipe.Default().Clone()
-	adopted.RunID = "run-1"
-	adopted.Name = "host-swe"
-	adopted.Phases = []recipe.Phase{adopted.Phases[0]}
-	adopted.Transitions = []recipe.Transition{{From: recipe.PhaseSWE, To: recipe.TargetComplete, On: recipe.Condition{Verdict: recipe.OutcomeDone}}}
-	adopted.MergePolicy.Mode = recipe.MergeModeNone
-	if _, err := st.Recipes().Save(ctx, adopted); err != nil {
+	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-host", RunID: "run-1", Status: lane.StatusPlanned, Branch: "lane-host"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "lane-host", RunID: "run-1", Status: lane.StatusPlanned, RecipeName: adopted.Name, BaseCommit: "base-sha", Branch: "lane-host"}); err != nil {
-		t.Fatal(err)
+	appendReportEvent(t, st, "lane-host", lane.PhaseReport{Phase: recipe.PhaseSWE, Outcome: lane.OutcomeDone})
+	ctrl := controller.New(controller.Config{RunID: "run-1", HostRun: true, JudgmentDebounce: -1}, st, drv, clk, judge)
+	mustStep(t, ctrl)
+	if len(drv.Spawns)+len(drv.PhaseStarts) != 0 || judge.BatchCount() != 0 {
+		t.Fatalf("host run spawns=%d starts=%d batches=%d, want none", len(drv.Spawns), len(drv.PhaseStarts), judge.BatchCount())
 	}
-	ctrl := controller.New(controller.Config{RunID: "run-1", HostRun: true, NoPR: true}, st, drv, clk, judge)
-	if err := ctrl.Step(ctx); err != nil {
-		t.Fatal(err)
-	}
-	appendReportEvent(t, st, "lane-host", lane.PhaseReport{Phase: recipe.PhaseSWE, Outcome: lane.OutcomeDone, HeadSHA: "base-sha"})
-	if err := ctrl.Step(ctx); err != nil {
-		t.Fatal(err)
-	}
-	ln, err := st.Lanes().Get(ctx, "run-1", "lane-host")
+	run, err := st.Runs().Get(ctx, "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ln.Status == lane.StatusDone {
-		t.Fatalf("host SWE report-only lane completed without a merge judgment: %+v", ln)
+	if run.Lease == nil || run.Lease.HolderID == "" {
+		t.Fatalf("host run lease not held: %+v", run.Lease)
 	}
 }
 
@@ -3947,38 +3938,6 @@ func TestControllerLaunchRecoveryWithoutLiveTerminal(t *testing.T) {
 				t.Fatalf("completed decisions=%d; want 1", completed)
 			}
 		})
-	}
-}
-
-func TestTerminalLaneEventsIgnoreHostHolds(t *testing.T) {
-	t.Parallel()
-	for _, status := range []lane.Status{lane.StatusDone, lane.StatusFailed} {
-		for _, tc := range []struct {
-			kind   store.EventKind
-			source string
-		}{
-			{kind: store.EventLaneReport}, {kind: store.EventPhaseExit}, {kind: store.EventCI},
-			{kind: store.EventStall}, {kind: store.EventStall, source: "lane.health"},
-			{kind: store.EventStall, source: "lane.unpushed"}, {kind: store.EventStall, source: lane.AnswerDeliverySource},
-		} {
-			t.Run(string(status)+"/"+string(tc.kind)+"/"+tc.source, func(t *testing.T) {
-				t.Parallel()
-				clk, st, drv, judge := setupTestEnv(t)
-				ctx := t.Context()
-				if err := st.Lanes().Upsert(ctx, lane.Lane{ID: "worker", RunID: "run-1", Status: status, HostHold: true, HostHoldReason: "stale host hold"}); err != nil {
-					t.Fatal(err)
-				}
-				_, err := st.Events().Append(ctx, store.Event{RunID: "run-1", LaneID: "worker", Kind: tc.kind, Source: tc.source})
-				if err != nil {
-					t.Fatal(err)
-				}
-				ctrl := controller.New(controller.Config{RunID: "run-1", HostRun: true, JudgmentDebounce: -1}, st, drv, clk, judge)
-				mustStep(t, ctrl)
-				if judge.BatchCount() != 0 {
-					t.Fatalf("terminal event raised %d judgment batches", judge.BatchCount())
-				}
-			})
-		}
 	}
 }
 

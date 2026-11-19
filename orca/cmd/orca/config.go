@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/adopt"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/dispatcher"
@@ -203,9 +204,11 @@ type Config struct {
 	AdoptOut            string             `json:"-"`
 	ClaudeBin           string             `json:"-"`
 	CodexBin            string             `json:"-"`
+	SessionWorkDir      string             `json:"-"`
 	AllowedModels       []string           `json:"allowed_models,omitempty"`
 	RecipeFiles         []string           `json:"recipe_files,omitempty"`
 	Shadow              bool               `json:"-"`
+	DecideAsOperator    bool               `json:"-"`
 	ShadowFor           time.Duration      `json:"-"`
 	// launchArgs are the command-line flags a controller launched from this
 	// invocation inherits; see controllerFlags.
@@ -228,6 +231,7 @@ type Config struct {
 	stallTimeoutFlagSet   bool
 	maxCostPerHourSet     bool
 	agentBackendDefaulted bool
+	dispatcherModelSet    bool
 }
 
 // HasExplicitStallTimeout reports whether --stall-timeout or its config value was set.
@@ -520,7 +524,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.StringVar(&cfg.DriverKind, "driver", "", "Worker lane driver: nebula or fake (default nebula)")
 	fs.StringVar(&cfg.ModelProvider, "model-provider", "", "Model provider: anthropic, openai, claude-cli, or codex-cli")
 	fs.StringVar(&cfg.LLMGatewayURL, "llm-gateway-url", "", "Messages API / llm-gateway base URL")
-	fs.StringVar(&cfg.Models.Dispatcher, "dispatcher-model", "", "Model for Dispatcher turns (default "+DefaultDispatcherModel+")")
+	fs.StringVar(&cfg.Models.Dispatcher, "dispatcher-model", "", "Model for Dispatcher turns (default "+DefaultDispatcherModel+"; adopted runs "+adopt.HostModel+")")
 	fs.StringVar(&cfg.Models.DispatcherHard, "dispatcher-hard-model", "", "Escalation model for hard Dispatcher batches")
 	fs.StringVar(&cfg.Models.Concierge, "concierge-model", "", "Model for Concierge chat turns")
 	fs.StringVar(&cfg.Models.Planner, "planner-model", "", "Model for Planner compilation and replanning turns (default "+DefaultPlannerModel+")")
@@ -571,6 +575,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "Print adoption moves without changing the run")
 	fs.StringVar(&cfg.AdoptDir, "dir", "", "Read an adoption dry-run from this copied run directory")
 	fs.BoolVar(&cfg.Shadow, "shadow", false, "Run adopted controller and dispatcher in recording mode")
+	fs.BoolVar(&cfg.DecideAsOperator, "decide-as-operator", false, "In shadow mode, decide from the adopted snapshot without host-side decisions")
 	fs.DurationVar(&cfg.ShadowFor, "for", 0, "Shadow duration (for example 2h; 0 waits for SIGINT)")
 	fs.BoolVar(&cfg.AdoptJSON, "json", false, "Emit one JSON adoption verdict per lane")
 	fs.BoolVar(&cfg.AdoptDiff, "diff", false, "Compare two orca binaries on one adoption snapshot")
@@ -620,6 +625,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 		// preserve them across the JSON merge so --dir remains authoritative.
 		cfg.AdoptDir = cliCfg.AdoptDir
 		cfg.Shadow = cliCfg.Shadow
+		cfg.DecideAsOperator = cliCfg.DecideAsOperator
 		cfg.ShadowFor = cliCfg.ShadowFor
 		cfg.AdoptJSON = cliCfg.AdoptJSON
 		cfg.AdoptDiff = cliCfg.AdoptDiff
@@ -669,6 +675,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 		cfg.Repository = inferRepository()
 	}
 	cfg.launchArgs = launchArgs
+	cfg.dispatcherModelSet = strings.TrimSpace(cmp.Or(cfg.Models.Roles["dispatcher"].Model, cfg.Models.Dispatcher)) != ""
 	return cfg.withDefaults(), fs.Args(), nil
 }
 

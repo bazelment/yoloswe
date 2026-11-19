@@ -50,7 +50,7 @@ func FormatInput(text, questions string) string {
 	return text + "\nOpen questions:\n" + questions
 }
 
-const conciergeCriterion = "Status and fact questions about current run state, existing behavior or policy; standing rules, durable preferences or corrections; pause, resume or stop execution; starting a new goal or run from chat. Also unclear messages or mixed independent requests needing front-desk handling."
+const conciergeCriterion = "Status and fact questions about current run state, existing behavior or policy; standing rules, durable preferences or corrections; pause, resume or stop execution; starting a new goal or run from chat. Also unclear messages or mixed independent requests needing front-desk handling. An explicit 'answer here' or 'answer in chat' instruction is concierge."
 const plannerCriterion = "Changes to an existing goal, plan, scope, task order, timing or acceptance criteria, including dropping work or changing duration; design questions, 'research / think about / what's the best we can do' asks, trade-off questions, and new constraints on the run's design (while status and fact questions about current state or existing behavior stay with concierge). A one-time plan update or design constraint is planner, not a standing rule."
 const dispatcherCriterion = "Do work now: assign, fund, retry, merge, review, or steer a lane or PR. Also an owner reply answering a listed open question; the Open questions block is context, not an additional request."
 
@@ -69,6 +69,20 @@ func IsPlannerChatQuestion(text string) bool {
 		}
 	}
 	return false
+}
+
+// IsConciergeOverride identifies only requests whose destination is explicit
+// in the owner's words. All other messages go through the model router.
+func IsConciergeOverride(text string) bool {
+	l := strings.ToLower(strings.TrimSpace(text))
+	return strings.Contains(l, "answer here") || strings.Contains(l, "answer in chat")
+}
+
+// IsConciergeDeliverable routes explicit report and retrospective requests to
+// the front desk without changing the narrower override contract.
+func IsConciergeDeliverable(text string) bool {
+	l := strings.ToLower(strings.TrimSpace(text))
+	return strings.Contains(l, "a retro") || strings.Contains(l, "report") && (strings.Contains(l, "give me") || strings.Contains(l, "show me"))
 }
 
 // routingRubric is shared by both model backends.
@@ -205,6 +219,15 @@ type selectedRouter struct {
 }
 
 func (r selectedRouter) Route(ctx context.Context, text string) (Decision, error) {
+	if IsConciergeOverride(text) || IsConciergeDeliverable(text) {
+		d := Decision{Handler: Concierge, Confidence: 1, Backend: "explicit-concierge"}
+		if r.logger != nil {
+			if err := r.logger.LogRouting(ctx, text, d); err != nil {
+				return d, err
+			}
+		}
+		return d, nil
+	}
 	var d Decision
 	var err error
 	if r.primary != nil {

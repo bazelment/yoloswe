@@ -69,6 +69,31 @@ func TestIsPlannerChatQuestionSeparatesResearchFromPlanEdits(t *testing.T) {
 		}
 	}
 }
+
+func TestConciergeOverrideRequiresExplicitRequest(t *testing.T) {
+	for _, text := range []string{
+		"answer here: what happened?",
+		"answer in chat: what happened?",
+	} {
+		if !IsConciergeOverride(text) {
+			t.Errorf("%q should route to concierge", text)
+		}
+	}
+	for _, text := range []string{
+		"status?",
+		"give me a status report",
+		"please provide a report",
+		"perform a retro",
+		"run the retrospective",
+		"the soak report says X, fund the next round",
+		"the retro lane is blocked; retry it",
+		"status is green, merge the PR",
+	} {
+		if IsConciergeOverride(text) {
+			t.Errorf("incidental concierge word in %q forced concierge", text)
+		}
+	}
+}
 func TestGeminiSingleChoiceAndOpenQuestion(t *testing.T) {
 	raw, err := os.ReadFile("testdata/gemini.json")
 	if err != nil {
@@ -218,5 +243,16 @@ func TestDesignAndResearchAskRoutesToPlanner(t *testing.T) {
 	}
 	if gd.Handler != Planner {
 		t.Fatalf("GeminiRouter handler = %q, want %q", gd.Handler, Planner)
+	}
+}
+
+func TestReportAndRetroRequestsAreConcierge(t *testing.T) {
+	t.Parallel()
+	for _, text := range []string{"give me a progress report", "give me a detailed report on this run", "perform a retro on run 5", "perform a retrospective", "give me a run report"} {
+		r := selectedRouter{primary: LLMRouter{Client: fake{err: errors.New("must not call the model")}}}
+		d, err := r.Route(t.Context(), text)
+		if err != nil || d.Handler != Concierge {
+			t.Fatalf("%q: %+v %v", text, d, err)
+		}
 	}
 }

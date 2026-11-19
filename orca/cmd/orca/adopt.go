@@ -8,16 +8,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bazelment/yoloswe/orca/adopt"
 	chatui "github.com/bazelment/yoloswe/orca/chat"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
-	"github.com/bazelment/yoloswe/orca/dispatcher"
 	"github.com/bazelment/yoloswe/orca/lane/nebula"
 	"github.com/bazelment/yoloswe/orca/mailbox"
 	mailboxnebula "github.com/bazelment/yoloswe/orca/mailbox/nebula"
@@ -92,6 +89,11 @@ func executeShadowAdopt(ctx context.Context, cfg Config, runDir, out string, log
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return err
 	}
+	workspace := filepath.Join(out, "session-workspace")
+	if err := adopt.SyncWorkspace(runDir, workspace); err != nil {
+		return fmt.Errorf("prepare shadow session workspace: %w", err)
+	}
+	cfg.SessionWorkDir = workspace
 	if _, err := os.Stat(filepath.Join(out, "store.db")); err == nil {
 		return fmt.Errorf("shadow output %q already contains store.db; choose a fresh output directory", out)
 	} else if !os.IsNotExist(err) {
@@ -124,17 +126,13 @@ func executeShadowAdopt(ctx context.Context, cfg Config, runDir, out string, log
 	if err != nil {
 		return err
 	}
-	prProbe := adoptedPRProbe(h, st)
-	judges, plannerFn := adoptedDispatchers(ctx, cfg, h, st, h.client, clk, client, logger, prProbe)
-	ctrls := adopt.NewControllers(ctx, st, h.client, clk, judges)
+	ctrls := adopt.NewControllers(ctx, st, h.client, clk, adoptedDispatchers(cfg, st, client))
 	ctrls.Shadow = true
+	ctrls.DecideAsOperator = cfg.DecideAsOperator
 	ctrls.Recorder = recorder
-	ctrls.PRProbe = prProbe
 	ctrls.Mailboxes = adoptedMailboxesWithRecorder(cfg, st, recorder)
-	ctrls.Planner = plannerFn
 	ctrls.MaxCostPerHourUSD = cfg.MaxCostPerHourUSD
 	ctrls.SubscriptionActors = subscriptionActors(effectiveAgentBackend(cfg, client))
-	ctrls.SetMirror(adopt.GitMirror{CacheDir: filepath.Join(out, "mirror")})
 	started := clk.Now().UTC()
 	if err := ctrls.Start(ctx, run); err != nil {
 		return err
@@ -151,7 +149,7 @@ func executeShadowAdopt(ctx context.Context, cfg Config, runDir, out string, log
 	if err := recorder.Err(); err != nil {
 		return err
 	}
-	return adopt.WriteShadowReports(context.WithoutCancel(ctx), out, runDir, run.ID, st, started, ended)
+	return adopt.WriteShadowReportsWithOptions(context.WithoutCancel(ctx), out, runDir, run.ID, st, started, ended, cfg.DecideAsOperator)
 }
 
 func validateShadowPaths(runDir, out string) error {
@@ -204,12 +202,8 @@ func newAdoption(ctx context.Context, cfg Config, h hostSwarms, holder string, f
 	if h.client == nil {
 		return nil, h.off
 	}
-	prProbe := adoptedPRProbe(h, st)
-	judges, plannerFn := adoptedDispatchers(ctx, cfg, h, st, h.client, clk, client, logger, prProbe)
-	ctrls := adopt.NewControllers(ctx, st, h.client, clk, judges)
-	ctrls.PRProbe = prProbe
+	ctrls := adopt.NewControllers(ctx, st, h.client, clk, adoptedDispatchers(cfg, st, client))
 	ctrls.Mailboxes = adoptedMailboxes(cfg, st)
-	ctrls.Planner = plannerFn
 	ctrls.MaxCostPerHourUSD = cfg.MaxCostPerHourUSD
 	ctrls.SubscriptionActors = subscriptionActors(effectiveAgentBackend(cfg, client))
 	return &adopt.Service{
@@ -263,174 +257,23 @@ func loopVerifyInterval() time.Duration {
 	return 0
 }
 
-func adoptedPRProbe(h hostSwarms, st store.Store) controller.PRProbe {
-	if h.probe.PR == nil {
+// adoptedDispatchers gives each adopted run a persistent Claude CLI session
+// that acts through the orca toolbox, the way the host orchestrator does.
+func adoptedDispatchers(cfg Config, st store.Store, client model.ModelClient) adopt.JudgeFactory {
+	// Replay and unconfigured embedded callers are offline: no live CLI.
+	if cfg.ReplayPath != "" || (cfg.AgentBackend == "" && client == nil && cfg.ClaudeBin == "") {
 		return nil
 	}
-	return func(ctx context.Context, runID, branch string, pr int) (controller.PRStatus, error) {
-		target := strings.TrimSpace(branch)
-		if pr > 0 {
-			target = strconv.Itoa(pr)
-		}
-		if target == "" {
-			return controller.PRStatus{}, nil
-		}
-		var repo string
-		if st != nil && runID != "" {
-			if run, err := st.Runs().Get(ctx, runID); err == nil && run != nil {
-				repo = run.Repository
-			}
-		}
-		var runDir string
-		if runID != "" {
-			runDir, _ = h.importer.Find(runID)
-		}
-		if repo == "" && runDir != "" {
-			if hr, err := adopt.Read(runDir); err == nil {
-				repo = hr.Repo
-			}
-		}
-		res, err := h.probe.PR(ctx, repo, runDir, target)
-		if err != nil {
-			return controller.PRStatus{}, err
-		}
-		return controller.PRStatus{
-			State:    res.State,
-			MergeSHA: res.MergeSHA,
-			Number:   cmp.Or(res.Number, max(pr, 0)),
-		}, nil
+	// Unset, the dispatcher runs on the host's model (adopt.HostModel).
+	dispatcherModel := ""
+	if cfg.dispatcherModelSet {
+		dispatcherModel = cfg.Models.Dispatcher
 	}
-}
-
-func newAdoptedPlanner(cfg Config, h hostSwarms, st store.Store, clk clock.Clock, client model.ModelClient, logger *slog.Logger, backend model.AgentBackend, runID string) (*Planner, model.InvestigateConfig) {
-	var runDir string
-	if runID != "" {
-		runDir, _ = h.importer.Find(runID)
+	return func(string) controller.Judge {
+		return &adopt.ShellDispatcher{Store: st, Config: model.AgentSessionConfig{
+			Provider: "claude", Model: dispatcherModel, Effort: cfg.Models.Roles["dispatcher"].Effort,
+			ClaudeBin: cfg.ClaudeBin, LLMGatewayURL: cfg.LLMGatewayURL,
+			WorkDir: cfg.SessionWorkDir, AllowBuiltins: true,
+		}, Shadow: cfg.Shadow, IntentDir: cfg.AdoptOut}
 	}
-	investigate := model.InvestigateConfig{
-		RunDir:  runDir,
-		RepoDir: model.ResolveRunRepoDir(runDir, ""),
-	}
-	planner := NewPlanner(st, clk, roleClient(client, cfg, "planner"), cfg.Models.Planner, logger)
-	planner.critic = roleClient(client, cfg, "critic")
-	planner.criticModel = cfg.Models.Roles["critic"].Model
-	planner.providerName = cfg.Models.Roles["planner"].Provider
-	planner.criticProvider = cfg.Models.Roles["critic"].Provider
-	planner.effort = cfg.Models.Roles["planner"].Effort
-	planner.agentBackend = backend
-	planner.llmGatewayURL = cfg.LLMGatewayURL
-	planner.investigate = investigate
-	planner.claudeBin = cfg.ClaudeBin
-	planner.codexBin = cfg.CodexBin
-	return planner, investigate
-}
-
-// adoptedDispatchers gives each adopted run the dispatcher and planner `orca run`
-// uses, so owner instructions, escalations, and backlog-drained replans on that
-// run share the same per-run Planner and investigation roots.
-func adoptedDispatchers(
-	ctx context.Context,
-	cfg Config,
-	h hostSwarms,
-	st store.Store,
-	lanes *nebula.Driver,
-	clk clock.Clock,
-	client model.ModelClient,
-	logger *slog.Logger,
-	prProbe controller.PRProbe,
-) (adopt.JudgeFactory, func(context.Context, string, string, string) error) {
-	backend := effectiveAgentBackend(cfg, client)
-	if client == nil && backend != model.AgentBackendCLI {
-		return nil, nil
-	}
-	var (
-		mu       sync.Mutex
-		planners = make(map[string]*Planner)
-	)
-	if ctx != nil {
-		context.AfterFunc(ctx, func() {
-			mu.Lock()
-			active := planners
-			planners = make(map[string]*Planner)
-			mu.Unlock()
-			for _, p := range active {
-				if p != nil {
-					_ = p.Close()
-				}
-			}
-		})
-	}
-	judges := func(runID string, answer func(context.Context, string, string, string) error) controller.Judge {
-		planner, investigate := newAdoptedPlanner(cfg, h, st, clk, client, logger, backend, runID)
-		mu.Lock()
-		prev := planners[runID]
-		planners[runID] = planner
-		mu.Unlock()
-		if prev != nil {
-			_ = prev.Close()
-		}
-
-		disp := dispatcher.New(dispatcher.Config{
-			AgentBackend:     backend,
-			Investigate:      investigate,
-			Model:            cfg.Models.Dispatcher,
-			Provider:         cfg.Models.Roles["dispatcher"].Provider,
-			Effort:           cfg.Models.Roles["dispatcher"].Effort,
-			LLMGatewayURL:    cfg.LLMGatewayURL,
-			ClaudeBin:        cfg.ClaudeBin,
-			CodexBin:         cfg.CodexBin,
-			HardBatchModel:   cfg.Models.DispatcherHard,
-			AllowedModels:    cfg.AllowedModels,
-			RecipeCompiler:   planner,
-			OnPlannerRequest: planner.HandlePlannerRequest,
-			Logger:           logger,
-			PRProbe:          prProbe,
-		}, st, lanes, clk, roleClient(client, cfg, "dispatcher"))
-		disp.SetOwnerAnswer(answer)
-		return &adoptedJudge{
-			Dispatcher: disp,
-			planner:    planner,
-			onClose: func() {
-				mu.Lock()
-				if planners[runID] == planner {
-					delete(planners, runID)
-				}
-				mu.Unlock()
-			},
-		}
-	}
-	plannerFn := func(pCtx context.Context, runID, reason, planRef string) error {
-		mu.Lock()
-		planner := planners[runID]
-		mu.Unlock()
-		if planner != nil {
-			return planner.HandlePlannerRequest(pCtx, runID, reason, planRef)
-		}
-		tmpPlanner, _ := newAdoptedPlanner(cfg, h, st, clk, client, logger, backend, runID)
-		defer func() { _ = tmpPlanner.Close() }()
-		return tmpPlanner.HandlePlannerRequest(pCtx, runID, reason, planRef)
-	}
-	return judges, plannerFn
-}
-
-type adoptedJudge struct {
-	*dispatcher.Dispatcher
-	planner *Planner
-	onClose func()
-}
-
-func (j *adoptedJudge) Close() error {
-	if j.onClose != nil {
-		j.onClose()
-	}
-	var err error
-	if j.Dispatcher != nil {
-		err = j.Dispatcher.Close()
-	}
-	if j.planner != nil {
-		if pErr := j.planner.Close(); pErr != nil && err == nil {
-			err = pErr
-		}
-	}
-	return err
 }

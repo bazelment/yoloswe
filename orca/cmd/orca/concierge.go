@@ -496,7 +496,6 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 			// directory. investigateConfig adds held-run directories as read roots;
 			// using its promoted RunDir here would change the resume path whenever
 			// runs are adopted or released.
-			WorkDir:       model.DeterministicSessionWorkDir(c.Investigate.RunDir, cmp.Or(c.runID, threadID), ActorConcierge),
 			LLMGatewayURL: c.LLMGatewayURL,
 			ClaudeBin:     c.ClaudeBin,
 			CodexBin:      c.CodexBin,
@@ -506,7 +505,7 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 			Model:        c.modelName,
 			SystemPrompt: systemPrompt,
 			Registry:     reg,
-			MaxToolCalls: DefaultConciergeMaxTurn,
+			MaxToolCalls: 0,
 			Observer: func(name string, args json.RawMessage, output string, isError bool) {
 				if name != ToolRunStart {
 					chat.EmitToolCall(ctx, name, args, c.runID)
@@ -564,7 +563,8 @@ func (c *Concierge) ask(ctx context.Context, question string, emit func(string))
 			&conciergeEscalationClient{inner: c.client, start: start},
 			req,
 			reg,
-			// The last turn of the budget is kept for a forced answer.
+			// The loop backend keeps its bounded fallback; CLI sessions use the
+			// AgentSession bridge with MaxToolCalls=0 and are intentionally uncapped.
 			model.WithMaxTurns(DefaultConciergeMaxTurn-1),
 			model.WithToolCallLog(c.Logger, ActorConcierge),
 			model.WithOnTurn(func(_ int, resp model.Response) {

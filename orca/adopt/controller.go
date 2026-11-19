@@ -27,11 +27,8 @@ import (
 	"github.com/bazelment/yoloswe/orca/store"
 )
 
-// JudgeFactory creates a dispatcher for an adopted run.
-type JudgeFactory func(runID string, answer func(ctx context.Context, runID, askID, text string) error) controller.Judge
-
-// escalationAskTTL bounds an unanswered escalation question.
-const escalationAskTTL = 24 * time.Hour
+// JudgeFactory creates the dispatcher session for an adopted run.
+type JudgeFactory func(runID string) controller.Judge
 
 // Controllers attaches host runs to orca's deterministic lane lifecycle.
 //
@@ -43,31 +40,21 @@ type Controllers struct {
 	clock     clock.Clock
 	judges    JudgeFactory
 	Mailboxes func(runID string) []mailbox.Mailbox
-	PRProbe   controller.PRProbe
 	// PRHold reads the host's standing PR Hold: comment. The CLI owns the
 	// external read; adopted decision logic keeps the hold until explicit release.
 	PRHold             func(context.Context, Run, Lane) (string, error)
-	Planner            func(ctx context.Context, runID, reason, planRef string) error
 	ledgerScript       *string
 	runs               map[string]*controlledRun
 	starting           map[string]*startup
-	Mirror             GitMirror
 	SubscriptionActors []string
 	MaxCostPerHourUSD  float64
 	// Shadow runs execute the normal controller against an isolated store while
 	// recording transport effects. They never acquire leases or checkpoint the
 	// host run directory.
-	Shadow   bool
-	Recorder *ActionRecorder
-	mu       sync.Mutex
-}
-
-// SetMirror updates the commit mirror used for live integration verification.
-// The service owns this setting, so it is applied when a run is started.
-func (d *Controllers) SetMirror(mirror GitMirror) {
-	d.mu.Lock()
-	d.Mirror = mirror
-	d.mu.Unlock()
+	Shadow           bool
+	DecideAsOperator bool
+	Recorder         *ActionRecorder
+	mu               sync.Mutex
 }
 
 //nolint:govet // field alignment
@@ -298,97 +285,6 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		return err
 	}
 	resume := sameAdoptionGeneration(storedRun.PlanRef, generation)
-	actionGeneration := markerGeneration(generation)
-	if resume {
-		// Older controllers used unscoped keys; preserve their restart dedup.
-		actionGeneration = ""
-		decs, err := d.store.Decisions().List(ctx, store.DecisionFilter{RunID: r.ID})
-		if err != nil {
-			return err
-		}
-		for i := range decs {
-			dec := &decs[i]
-			var args controller.DecisionArgs
-			if json.Unmarshal(dec.Args, &args) == nil && args.ActionKey == "adopt-generation:"+markerGeneration(generation) {
-				actionGeneration = markerGeneration(generation)
-				break
-			}
-		}
-	}
-	// Host state is authoritative at a new handover. Retain the audit log but
-	// retire waits and pending adopt judgments from the previous handover.
-	if !resume {
-		dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: r.ID, ActiveOnly: true})
-		if err != nil {
-			return err
-		}
-		for i := range dirs {
-			dir := &dirs[i]
-			if strings.HasPrefix(dir.ID, "wait-adopt-") {
-				if err := d.store.Directives().UpdateStatus(ctx, r.ID, dir.ID, store.DirectiveExpired); err != nil {
-					return err
-				}
-			}
-		}
-		events, err := d.store.Events().List(ctx, store.EventFilter{RunID: r.ID})
-		if err != nil {
-			return err
-		}
-		var superseded []string
-		for i := range events {
-			ev := &events[i]
-			if (ev.Source == "adopt" && (strings.HasPrefix(ev.ID, "adopt-merge-judgment-") || strings.HasPrefix(ev.ID, "adopt-lane-question-"))) || strings.HasPrefix(ev.ID, "expired-wait-adopt-") {
-				superseded = append(superseded, ev.ID)
-			}
-		}
-		// Resolve old launch reservations as superseded so consumers of the
-		// audit log do not keep counting them as in-flight spawns.
-		decs, err := d.store.Decisions().List(ctx, store.DecisionFilter{RunID: r.ID})
-		if err != nil {
-			return err
-		}
-		completed := make(map[string]bool)
-		type pendingLaunch struct {
-			laneID string
-			args   controller.DecisionArgs
-		}
-		var pending []pendingLaunch
-		for i := range decs {
-			var args controller.DecisionArgs
-			if json.Unmarshal(decs[i].Args, &args) != nil {
-				continue
-			}
-			if strings.HasPrefix(args.ActionKey, "intent:phase.") || strings.HasPrefix(args.ActionKey, "intent:integrate-launch:") {
-				args.ActionKey = strings.TrimPrefix(args.ActionKey, "intent:")
-				pending = append(pending, pendingLaunch{args: args, laneID: decs[i].LaneID})
-			} else {
-				completed[args.ActionKey] = true
-			}
-		}
-		for i := range pending {
-			args := pending[i].args
-			if completed[args.ActionKey] {
-				continue
-			}
-			args.TriggerEventID = ""
-			raw, err := json.Marshal(args)
-			if err != nil {
-				return err
-			}
-			if _, err := d.store.Decisions().Append(ctx, store.Decision{RunID: r.ID, Actor: controller.ActorController, LaneID: pending[i].laneID, Tool: controller.ToolAdoptLaunchSupersede, Reason: "host state supersedes unfinished launch", Args: raw}); err != nil {
-				return err
-			}
-			completed[args.ActionKey] = true
-		}
-		args, err := json.Marshal(controller.DecisionArgs{ActionKey: "adopt-generation:" + actionGeneration, EventIDs: superseded})
-		if err != nil {
-			return err
-		}
-		if _, err := d.store.Decisions().Append(ctx, store.Decision{RunID: r.ID, Actor: controller.ActorController, Tool: controller.ToolAdoptSupersede, Reason: "new host adoption generation", Args: args}); err != nil {
-			return err
-		}
-	}
-
 	workflow.Version = 0
 	saved, err := d.store.Recipes().Save(ctx, workflow)
 	if err != nil {
@@ -438,57 +334,6 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			}
 		}
 	}
-	for i := range r.Lanes {
-		imported := &r.Lanes[i]
-		if r.NoPR || !strings.EqualFold(strings.TrimSpace(imported.Phase), recipe.PhaseIntegrate) || closedLane(*imported) || imported.targetIntegrated || (!openPR(*imported) && validGitSHA(strings.TrimSpace(imported.MergeSHA))) {
-			continue
-		}
-		// A host's merged/done claim is not merge proof. Keep the imported
-		// lane waiting so the controller rechecks its mirror on every step.
-		if !integratedLane(*imported) && !reportDone(imported.Report) {
-			continue
-		}
-		ln := lanes[i]
-		report := lane.PhaseReport{Phase: ln.Phase, Round: max(ln.Round, 1), Outcome: lane.OutcomeDone, HeadSHA: ln.PRHead, PR: ln.PR}
-		payload, err := json.Marshal(report)
-		if err != nil {
-			return err
-		}
-		waitID := "host-integration:" + ln.ID + ":adopt:" + strings.TrimSpace(ln.PRHead)
-		wait := store.Directive{ID: waitID, RunID: r.ID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Scope: ln.ID, Ref: controller.HostIntegrationWaitRefPrefix + ln.ID, Text: string(payload), Status: store.DirectiveActive}
-		if err := d.store.Directives().Add(ctx, wait); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-			return err
-		}
-		if _, err := d.store.Events().Append(ctx, store.Event{ID: "judgment:" + waitID, RunID: r.ID, LaneID: ln.ID, Kind: store.EventStall, Class: store.EventClassJudgment, Source: controller.ActorController, Summary: fmt.Sprintf("PR #%d remains open or unverified on target; waiting for mirror evidence", ln.PR)}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-			return err
-		}
-	}
-	for i := range r.Lanes {
-		imported := &r.Lanes[i]
-		if hostLaneTerminal(*imported) || finishedAnalysisLane(*imported) {
-			continue
-		}
-		waitingOn, until := imported.WaitingOn, imported.WaitDeadline
-		if waitingOn == "" {
-			continue
-		}
-		var deadline *time.Time
-		if !until.IsZero() {
-			deadline = &until
-		}
-		wait := store.Directive{ID: "wait-adopt-" + imported.ID, RunID: r.ID, Kind: store.DirectiveInstruction, Source: store.DirectiveSourceDispatcher, Scope: imported.ID, Ref: controller.NamedWaitRefPrefix + imported.ID, Text: "waiting on " + waitingOn, ExpiresAt: deadline, Status: store.DirectiveActive}
-		if err := d.store.Directives().Add(ctx, wait); err != nil {
-			if !errors.Is(err, store.ErrAlreadyExists) {
-				return err
-			}
-			if !resume {
-				if err := d.store.Directives().Replace(ctx, wait); err != nil {
-					return err
-				}
-			}
-		}
-	}
-
 	if err := d.store.Runs().UpdateObjective(ctx, r.ID, fullObjectiveWithHandover(r), generation); err != nil {
 		return err
 	}
@@ -511,36 +356,27 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			syncer:   syncer,
 		},
 		lanes: &adoptedLaneStore{
-			LaneStore:   d.store.Lanes(),
-			syncer:      syncer,
-			controllers: d,
-		},
-		backlog: &adoptedBacklogStore{
-			BacklogStore: d.store.Backlog(),
-			controllers:  d,
+			LaneStore: d.store.Lanes(),
+			syncer:    syncer,
+			// Sole-operator mode still observes the host ledger, but its local
+			// lifecycle writes must never reach the adopted run.
+			shadow:   d.Shadow,
+			operator: d.DecideAsOperator,
 		},
 	}
-	var ctrl *controller.Controller
 	var cr *controlledRun
 	var dispatch controller.Judge
 	if d.judges != nil {
-		dispatch = d.judges(r.ID, func(ctx context.Context, runID, askID, text string) error {
-			if runID != r.ID {
-				return fmt.Errorf("owner answer run %q does not match adopted run %q", runID, r.ID)
-			}
-			return ctrl.AnswerOwnerAskTextFromJudge(ctx, askID, text)
-		})
+		dispatch = d.judges(r.ID)
+	}
+	if shell, ok := dispatch.(*ShellDispatcher); ok {
+		shell.Run = r
+		if err := shell.Prepare(); err != nil {
+			return err
+		}
 	}
 	if setter, ok := dispatch.(interface{ SetStore(store.Store) }); ok {
 		setter.SetStore(runStore)
-	}
-	if setter, ok := dispatch.(interface{ SetMailboxes(...mailbox.Mailbox) }); ok && len(boxes) > 0 {
-		setter.SetMailboxes(boxes...)
-	}
-	if setter, ok := dispatch.(interface {
-		SetRunCloseout(func(context.Context, string, dispatcher.RunCloseoutParams) (string, error))
-	}); ok {
-		setter.SetRunCloseout(d.CloseoutRun)
 	}
 	adoptedAt := parseAdoptCutoff(generation, d.clock)
 	for i := range boxes {
@@ -550,76 +386,25 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		}
 	}
 	runDriver := d.driver
-	if runDriver != nil {
-		runDriver = &adoptedRunDriver{LaneDriver: runDriver, run: r, store: runStore, syncer: syncer, clock: d.clock}
-		if d.Shadow && d.Recorder != nil {
-			runDriver = NewRecordingDriver(runDriver, d.Recorder)
-		}
-		if ds, ok := dispatch.(interface{ SetDriver(lane.LaneDriver) }); ok {
-			ds.SetDriver(runDriver)
-		} else if dispatch != nil {
-			slog.DebugContext(ctx, "orca/adopt: judge does not implement SetDriver; adoptedRunDriver not attached to judge", "run_id", r.ID)
-		}
+	if runDriver != nil && d.Shadow && d.Recorder != nil {
+		runDriver = NewRecordingDriver(runDriver, d.Recorder)
 	}
-	d.mu.Lock()
-	mirror := d.Mirror
-	d.mu.Unlock()
-	var integrationMu sync.Mutex
-	integrationCache := map[string]integrationResult{}
-	verify := func(ctx context.Context, ln lane.Lane) (bool, string, error) {
-		integrationMu.Lock()
-		defer integrationMu.Unlock()
-		key := ln.ID + ":" + ln.PRHead
-		if result, ok := integrationCache[key]; ok {
-			return result.merged, result.proof, result.err
-		}
-		merged, proof, err := d.verifyIntegration(ctx, syncer, ln, mirror)
-		integrationCache[key] = integrationResult{merged: merged, proof: proof, err: err}
-		return merged, proof, err
-	}
-	hostBrief := func(ctx context.Context, ln lane.Lane, phase recipe.Phase) string {
-		return d.adoptedPhaseBrief(ctx, r.ID, ln, phase)
-	}
-	if setter, ok := dispatch.(interface {
-		SetHostBrief(func(context.Context, lane.Lane, recipe.Phase) string)
-	}); ok {
-		setter.SetHostBrief(hostBrief)
-	}
-	ctrl = controller.New(controller.Config{
+	// The CLI dispatcher and the skill's watcher own judgment; the controller
+	// keeps the lease, heartbeat and host refresh for the adopted run.
+	ctrl := controller.New(controller.Config{
 		BeforeStep: func(ctx context.Context) (bool, error) {
-			integrationMu.Lock()
-			clear(integrationCache)
-			integrationMu.Unlock()
 			return d.prepareStep(ctx, cr)
 		},
-		HostRefresh:       func(ctx context.Context) error { return d.refreshHostState(ctx, r.ID) },
-		HostBrief:         hostBrief,
-		IsolateLaneErrors: true,
-		StepError: func(err error) {
-			if cr == nil || err == nil {
-				return
-			}
-			cr.statusMu.Lock()
-			cr.downReason = err.Error()
-			cr.notice = fmt.Sprintf("⚠ controller lane failure: %s", err)
-			cr.statusMu.Unlock()
+		HostRefresh: func(ctx context.Context) error {
+			return d.refreshHostState(ctx, r.ID)
 		},
 		RunID:              r.ID,
-		AdoptionGeneration: actionGeneration,
 		HolderID:           holder,
-		PRProbe:            d.runPRProbe(syncer),
-		HostIntegration:    verify,
-		PhaseStallTimeouts: observedPhaseStalls(r),
-		JudgeLaneMail:      true,
 		MaxCostPerHourUSD:  d.MaxCostPerHourUSD,
 		SubscriptionActors: d.SubscriptionActors,
-		NoPR:               r.NoPR,
-		HoldAdvance:        holdAdvanceLanes(r),
-		HoldAdvanceCheck:   func(id string) bool { return fileExists(filepath.Join(r.Dir, id+".hold-advance")) },
-		ImportedHostState:  true,
 		HostRun:            true,
 		SkipLease:          d.Shadow,
-	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
+	}, runStore, runDriver, d.clock, dispatch, boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
 	cr = &controlledRun{
 		controller: ctrl,
@@ -641,40 +426,6 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		}
 		close(cr.done)
 	}
-	if err := d.observeFirst(ctx, r, dispatch); err != nil {
-		cleanupFailedStart()
-		return err
-	}
-	// A host lane can already have handed back a completed SWE report before
-	// adoption. Surface the same merge judgment used by a live report instead
-	// of treating the imported done status as permission to merge or advance.
-	for i := range r.Lanes {
-		preview := previewLaneAt(r, r.Lanes[i], d.clock.Now().UTC())
-		if preview.Move != "judge" {
-			continue
-		}
-		prefix, summary := "adopt-merge-judgment-", "host merge judgment: "
-		if strings.HasPrefix(preview.Reason, "lane question:") {
-			prefix, summary = "adopt-lane-question-", ""
-		}
-		eventID := prefix + r.Lanes[i].ID
-		if actionGeneration != "" {
-			eventID += ":adopt:" + actionGeneration
-		}
-		_, err := d.store.Events().Append(ctx, store.Event{
-			ID:      eventID,
-			RunID:   r.ID,
-			LaneID:  r.Lanes[i].ID,
-			Kind:    store.EventTimer,
-			Class:   store.EventClassJudgment,
-			Source:  "adopt",
-			Summary: summary + preview.Reason,
-		})
-		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-			cleanupFailedStart()
-			return err
-		}
-	}
 	if !r.HasNextWork() || ObjectiveIsDone(r.Objective) {
 		expireHoldDirectivesIfRunDone(ctx, runStore, r.ID)
 	}
@@ -686,11 +437,6 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		}
 		slog.Warn("adopted controller initial step failed; retrying", "run", r.ID, "error", err)
 	}
-	if planned, err := d.planNextWorkIfDrained(ctx, r.ID, "adopt"); err != nil {
-		slog.Warn("plan next work on adopt failed", "run", r.ID, "error", err)
-	} else if planned {
-		_ = ctrl.Step(ctx)
-	}
 	if err := ctrl.StartWatches(runCtx); err != nil {
 		cleanupFailedStart()
 		_ = ctrl.ReleaseLease(ctx)
@@ -700,41 +446,89 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	d.runs[r.ID] = cr
 	d.mu.Unlock()
 	started = true
+	go d.watchRunFiles(runCtx, cr)
 	go d.supervise(runCtx, cr)
+	if shell, ok := dispatch.(*ShellDispatcher); ok {
+		go shell.Supervise(runCtx)
+	}
 	return nil
 }
 
-func holdAdvanceLanes(r Run) map[string]bool {
-	if len(r.Lanes) == 0 {
-		return nil
+// watchRunFiles turns host ledger/report changes into immediate controller
+// wakes. The controller still polls as a backstop, but an EVENTS append or a
+// report/.done/.needs-swe update is visible without waiting for that tick.
+func (d *Controllers) watchRunFiles(ctx context.Context, cr *controlledRun) {
+	if cr == nil {
+		return
 	}
-	out := make(map[string]bool)
-	for i := range r.Lanes {
-		if r.Lanes[i].HoldAdvance {
-			out[r.Lanes[i].ID] = true
+	lastDir := strings.TrimSpace(cr.run.Dir)
+	if cr.syncer != nil {
+		lastDir = strings.TrimSpace(cr.syncer.CurrentRun().Dir)
+	}
+	last := runFileSignature(lastDir)
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if shell, ok := cr.dispatch.(*ShellDispatcher); ok {
+				if err := shell.syncEventFiles(ctx); err != nil {
+					slog.Warn("relay adopted owner events", "error", err)
+				}
+			}
+			dir := strings.TrimSpace(cr.run.Dir)
+			if cr.syncer != nil {
+				dir = strings.TrimSpace(cr.syncer.CurrentRun().Dir)
+			}
+			now := runFileSignature(dir)
+			if dir != lastDir {
+				if lastDir != "" {
+					cr.controller.Wake()
+				}
+				lastDir, last = dir, now
+				continue
+			}
+			if now != last {
+				if shell, ok := cr.dispatch.(*ShellDispatcher); ok {
+					if err := shell.Refresh(); err != nil {
+						slog.Warn("refresh shadow workspace", "error", err)
+						continue
+					}
+				}
+				last = now
+				cr.controller.Wake()
+			}
 		}
 	}
-	return out
 }
 
-func (d *Controllers) observeFirst(ctx context.Context, r Run, dispatch controller.Judge) error {
-	holds := make(map[string]string)
-	for i := range r.Lanes {
-		if !r.Lanes[i].HoldAdvance {
-			continue
+func runFileSignature(dir string) string {
+	var b strings.Builder
+	_ = filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry == nil {
+			return nil
 		}
-		p := filepath.Join(r.Dir, r.Lanes[i].ID+".hold-advance")
-		holds[r.Lanes[i].ID] = readText(p)
-	}
-	obs := controller.ContractObservation{Objective: r.FullObjective(), Context: r.Context, IntegrateRule: r.IntegrateRule, NoPR: r.NoPR, HoldAdvance: holds}
-	if observer, ok := dispatch.(controller.ContractObserver); ok {
-		return observer.ObserveRunContract(ctx, r.ID, obs)
-	}
-	// Test and embedded judges that do not expose the richer observer still get
-	// a durable gate record; no lane or host state is touched by this fallback.
-	args, _ := json.Marshal(obs)
-	_, err := d.store.Decisions().Append(ctx, store.Decision{RunID: r.ID, Category: store.DecisionJudgment, Actor: "dispatcher", Tool: "adopt.observe", Reason: "read host run contract before lifecycle actions", Result: "observe-first pass complete", Args: args, Vetted: true, CreatedAt: d.clock.Now().UTC()})
-	return err
+		if entry.IsDir() {
+			return nil
+		}
+		name := entry.Name()
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return nil
+		}
+		if name != "EVENTS" && name != "state.json" && !strings.HasSuffix(name, ".md") &&
+			!strings.HasSuffix(name, ".done") && !strings.HasSuffix(name, ".needs-swe") &&
+			!strings.HasPrefix(filepath.ToSlash(rel), "reports/") {
+			return nil
+		}
+		if info, statErr := entry.Info(); statErr == nil {
+			fmt.Fprintf(&b, "%s:%d:%d;", path, info.Size(), info.ModTime().UnixNano())
+		}
+		return nil
+	})
+	return b.String()
 }
 
 const maxControllerRestarts = 5
@@ -869,8 +663,8 @@ func sameAdoptionGeneration(storedPlanRef, currentMarker string) bool {
 	return g1 != "" && g1 == g2
 }
 
-// Stop stops r's controller, checkpoints its lanes, and releases its SQLite
-// run lease (used by /release).
+// Stop stops r's controller and releases its SQLite run lease (used by
+// /release).
 func (d *Controllers) Stop(ctx context.Context, r Run) error {
 	return d.stop(ctx, r, true)
 }
@@ -889,24 +683,10 @@ func (d *Controllers) stop(ctx context.Context, r Run, releaseLease bool) error 
 		return nil
 	}
 	cr.controller.Kill()
-	<-cr.done
 	cr.cancel()
+	<-cr.done
 	if closer, ok := cr.dispatch.(interface{ Close() error }); ok {
 		_ = closer.Close()
-	}
-	current, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: r.ID})
-	if err != nil {
-		return err
-	}
-	if cr.syncer != nil && !d.Shadow {
-		if err := cr.syncer.SyncAll(ctx, current); err != nil {
-			slog.Warn("sync adopted run lanes on stop failed", "run", r.ID, "error", err)
-		}
-	}
-	if !d.Shadow {
-		if err := checkpoint(r.Dir, current); err != nil {
-			return err
-		}
 	}
 	if releaseLease {
 		if !d.Shadow {
@@ -921,56 +701,6 @@ func (d *Controllers) stop(ctx context.Context, r Run, releaseLease bool) error 
 	}
 	d.mu.Unlock()
 	return nil
-}
-
-// judge runs the dispatcher and exposes unresolved escalations to the owner.
-func (d *Controllers) judge(holder string, dispatch controller.Judge) controller.Judge {
-	return controller.JudgeFunc(func(ctx context.Context, runID string, events []store.Event) error {
-		_, _ = d.RefreshObjective(ctx, runID)
-		var err error
-		if dispatch != nil {
-			var turnsBefore int
-			if d.store != nil {
-				if turns, tErr := d.store.Threads().ListTurns(ctx, "dispatcher-"+runID); tErr == nil {
-					turnsBefore = len(turns)
-				}
-			}
-			stop := func() {}
-			if !d.Shadow {
-				stop = d.keepLease(ctx, runID, holder)
-			}
-			err = dispatch.Judge(ctx, runID, events)
-			stop()
-			if err != nil {
-				if d.store != nil {
-					var turnsAfter int
-					if turns, tErr := d.store.Threads().ListTurns(ctx, "dispatcher-"+runID); tErr == nil {
-						turnsAfter = len(turns)
-					}
-					if turnsAfter == turnsBefore {
-						_, _ = d.store.Decisions().Append(ctx, store.Decision{
-							RunID:     runID,
-							Category:  store.DecisionJudgment,
-							Actor:     "dispatcher",
-							Tool:      controller.ToolJudgmentDispatch,
-							Reason:    "dispatcher turn failed",
-							Result:    "dispatcher failed: " + err.Error(),
-							Vetted:    false,
-							CreatedAt: d.clock.Now().UTC(),
-						})
-					}
-				}
-			}
-		}
-		d.syncRunLanes(ctx, runID)
-		if _, pErr := d.planNextWorkIfDrained(ctx, runID, "backlog_drained"); pErr != nil {
-			slog.Warn("plan next work after judge failed", "run", runID, "error", pErr)
-		}
-		if err != nil {
-			slog.Error("adopted run dispatcher failed; asking the owner about its escalations", "run", runID, "error", err)
-		}
-		return d.askOwnerOnEscalation(ctx, runID, events)
-	})
 }
 
 func adoptNormalizeContractions(s string) string {
@@ -1008,21 +738,6 @@ func adoptContainsWholeWord(text, word string) bool {
 
 func isWordByte(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-}
-
-func (d *Controllers) syncRunLanes(ctx context.Context, runID string) {
-	cr := d.lookupRun(runID)
-	if cr == nil || cr.syncer == nil {
-		return
-	}
-	_, _ = cr.syncer.RefreshObjectiveIfChanged(ctx, d.store.Runs())
-	lanes, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
-	if err != nil {
-		return
-	}
-	if err := cr.syncer.SyncAll(ctx, lanes); err != nil {
-		slog.Warn("sync adopted run lanes failed", "run", runID, "error", err)
-	}
 }
 
 // refreshHostState is the adopted handover's read-before-act fence. Host
@@ -1102,8 +817,6 @@ func (d *Controllers) refreshHostState(ctx context.Context, runID string) error 
 			}
 		}
 	}
-	terminalChanged := false
-	var newlyTerminal []lane.Lane
 	for i := range imported {
 		host := imported[i]
 		if !cr.syncer.HostLaneChanged(host) {
@@ -1115,9 +828,6 @@ func (d *Controllers) refreshHostState(ctx context.Context, runID string) error 
 				return err
 			}
 			cr.syncer.RememberHostLane(host)
-			if host.Status.Terminal() && !d.Shadow {
-				newlyTerminal = append(newlyTerminal, host)
-			}
 			continue
 		}
 		if getErr != nil {
@@ -1130,12 +840,10 @@ func (d *Controllers) refreshHostState(ctx context.Context, runID string) error 
 		// Keep controller-owned report/approval timestamps and notes, while
 		// replacing every host-owned lifecycle identity.
 		identityChanged := cur.Phase != host.Phase || cur.TerminalID != host.TerminalID
-		wasTerminal := cur.Status.Terminal()
-		terminalChanged = terminalChanged || (!wasTerminal && host.Status.Terminal())
 		cur.Phase = host.Phase
-		if host.Status.Terminal() || cur.Status != lane.StatusBlocked {
-			cur.Status = host.Status
-		}
+		// The host ledger owns lifecycle status. A previous shadow intent must
+		// never pin a lane in blocked after the host has moved it on.
+		cur.Status = host.Status
 		cur.SessionID, cur.TerminalID = host.SessionID, host.TerminalID
 		cur.TerminalState, cur.HostHold, cur.HostHoldReason = host.TerminalState, host.HostHold, host.HostHoldReason
 		cur.PR, cur.PRHead, cur.MergeSHA, cur.Checks = host.PR, host.PRHead, host.MergeSHA, host.Checks
@@ -1149,53 +857,14 @@ func (d *Controllers) refreshHostState(ctx context.Context, runID string) error 
 			cur.RecipeVersion = 1
 		}
 		cur.Terminals, cur.Sessions = host.Terminals, host.Sessions
-		if cur.Status.Terminal() && !d.Shadow {
-			if err := cr.syncer.SyncLane(ctx, *cur); err != nil {
-				return err
-			}
-			if !wasTerminal {
-				// A host merge/close can make a lane terminal between ticks. The
-				// lifecycle action is a session release only; terminal lanes are
-				// never stopped, steered, restarted, or spawned again.
-				newlyTerminal = append(newlyTerminal, *cur)
-			}
-		}
 		if err := d.store.Lanes().Upsert(ctx, *cur); err != nil {
 			return err
 		}
 		cr.syncer.RememberHostLane(host)
 	}
-	if !d.Shadow {
-		for i := range newlyTerminal {
-			if rel, ok := cr.driver.(lane.SessionReleaser); ok && strings.TrimSpace(newlyTerminal[i].SessionID) != "" {
-				if err := rel.ReleaseSession(ctx, newlyTerminal[i].SessionID, true); err != nil {
-					slog.Warn("release host-terminal lane session failed", "run", runID, "lane", newlyTerminal[i].ID, "error", err)
-				}
-			}
-		}
-	}
 	cr.syncer.mu.Lock()
 	cr.syncer.run = fresh
 	cr.syncer.mu.Unlock()
-	for i := range fresh.Lanes {
-		imported := &fresh.Lanes[i]
-		until := imported.WaitDeadline
-		if until.IsZero() || (!imported.HostHoldUntil.IsZero() && imported.HostHoldUntil.Before(until)) {
-			until = imported.HostHoldUntil
-		}
-		if !until.IsZero() && !d.clock.Now().Before(until) && !hostLaneTerminal(*imported) {
-			_, err := d.store.Events().Append(ctx, store.Event{ID: "host-hold-expired:" + imported.ID + ":" + until.Format(time.RFC3339Nano), RunID: runID, LaneID: imported.ID, Kind: store.EventTimer, Class: store.EventClassJudgment, Urgent: true, Source: "host.hold", Summary: "host hold deadline passed; awaiting host release"})
-			if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-				return err
-			}
-		}
-	}
-	if !d.Shadow && terminalChanged {
-		d.syncRunLanes(ctx, runID)
-		if _, err := d.planNextWorkIfDrained(ctx, runID, "host_refresh"); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -1220,82 +889,6 @@ func (d *Controllers) importPRHolds(ctx context.Context, r *Run) error {
 	return nil
 }
 
-func (d *Controllers) adoptedPhaseBrief(ctx context.Context, runID string, ln lane.Lane, phase recipe.Phase) string {
-	cr := d.lookupRun(runID)
-	if cr == nil || cr.syncer == nil {
-		return ""
-	}
-	run := cr.syncer.CurrentRun()
-	var parts []string
-	if note := strings.TrimSpace(ln.HostHoldReason); note != "" {
-		parts = append(parts, "Host hold: "+note)
-	}
-	if lnID := strings.TrimSpace(ln.ID); lnID != "" {
-		for i := range run.Lanes {
-			hostLane := &run.Lanes[i]
-			if hostLane.ID == lnID {
-				if text := strings.TrimSpace(hostLane.Note); text != "" {
-					parts = append(parts, "Host lane note: "+text)
-				}
-				if text := strings.TrimSpace(hostLane.Next); text != "" {
-					parts = append(parts, "Host next: "+text)
-				}
-				if text := strings.TrimSpace(hostLane.LastEvent); text != "" {
-					parts = append(parts, "Host last decision: "+text)
-				}
-				for _, row := range hostLane.Decisions {
-					parts = append(parts, "Host decision: "+row)
-				}
-				break
-			}
-		}
-		if notes, err := d.store.Notes().List(ctx, store.NoteFilter{RunID: runID, TaskID: lnID}); err == nil {
-			for _, n := range notes {
-				if text := strings.TrimSpace(n.Text); text != "" {
-					parts = append(parts, "Host note: "+text)
-				}
-			}
-		}
-		if decs, err := d.store.Decisions().List(ctx, store.DecisionFilter{RunID: runID, LaneID: lnID}); err == nil {
-			for i := max(0, len(decs)-3); i < len(decs); i++ {
-				dec := &decs[i]
-				text := strings.TrimSpace(dec.Reason + " — " + dec.Result)
-				if text != "" {
-					parts = append(parts, "Host decision: "+text)
-				}
-			}
-		}
-	}
-	for _, path := range []string{filepath.Join(run.Dir, ".gate-targets"), filepath.Join(run.Dir, ln.ID+".gate-targets"), filepath.Join(run.Dir, ln.ID, ".gate-targets")} {
-		if text := strings.TrimSpace(readText(path)); text != "" {
-			parts = append(parts, ".gate-targets:\n"+text)
-		}
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return fmt.Sprintf("Standing host asks for %s phase: \n%s", phase.Name, strings.Join(parts, "\n"))
-}
-
-func observedPhaseStalls(r Run) map[string]time.Duration {
-	values := map[string][]time.Duration{}
-	for i := range r.Lanes {
-		ln := &r.Lanes[i]
-		if ln.LastTurnStarted.IsZero() || ln.ReportTime.IsZero() || !ln.ReportTime.After(ln.LastTurnStarted) {
-			continue
-		}
-		values[strings.ToLower(strings.TrimSpace(ln.Phase))] = append(values[strings.ToLower(strings.TrimSpace(ln.Phase))], ln.ReportTime.Sub(ln.LastTurnStarted))
-	}
-	out := make(map[string]time.Duration, len(values))
-	for phase, ds := range values {
-		slices.Sort(ds)
-		idx := (len(ds)*95 + 99) / 100
-		idx = max(idx-1, 0)
-		out[phase] = ds[idx]
-	}
-	return out
-}
-
 // RefreshObjective re-reads OBJECTIVE.md from the adopted run directory when
 // its stat signature changes and updates store.Run.Objective if the content changed.
 func (d *Controllers) RefreshObjective(ctx context.Context, runID string) (bool, error) {
@@ -1304,232 +897,6 @@ func (d *Controllers) RefreshObjective(ctx context.Context, runID string) (bool,
 		return false, nil
 	}
 	return cr.syncer.RefreshObjectiveIfChanged(ctx, d.store.Runs())
-}
-
-func (d *Controllers) runPRProbe(syncer *runLedgerSync) controller.PRProbe {
-	if d.PRProbe == nil {
-		return nil
-	}
-	var cacheMu sync.Mutex
-	var cachedDir string
-	var cachedHasGit bool
-	var cachedSet bool
-	checkGit := func(dir string) bool {
-		cacheMu.Lock()
-		defer cacheMu.Unlock()
-		if cachedSet && cachedDir == dir {
-			return cachedHasGit
-		}
-		cachedDir = dir
-		cachedHasGit = hasGitCheckout(dir)
-		cachedSet = true
-		return cachedHasGit
-	}
-	return func(ctx context.Context, runID, branch string, pr int) (controller.PRStatus, error) {
-		if syncer != nil {
-			curRun := syncer.CurrentRun()
-			if strings.TrimSpace(curRun.Repo) == "" && strings.TrimSpace(curRun.RepoID) == "" && !checkGit(curRun.Dir) {
-				var storeRepo string
-				if d.store != nil && runID != "" {
-					if sr, err := d.store.Runs().Get(ctx, runID); err == nil && sr != nil {
-						storeRepo = strings.TrimSpace(sr.Repository)
-					}
-				}
-				if storeRepo == "" {
-					return controller.PRStatus{}, nil
-				}
-			}
-		}
-		return d.PRProbe(ctx, runID, branch, pr)
-	}
-}
-
-type integrationResult struct {
-	err    error
-	proof  string
-	merged bool
-}
-
-// verifyIntegration deliberately ignores report outcomes and host PR-state prose.
-// Only a recorded merge SHA or commit evidence on the configured target counts.
-func (d *Controllers) verifyIntegration(ctx context.Context, syncer *runLedgerSync, ln lane.Lane, mirror GitMirror) (bool, string, error) {
-	if strings.TrimSpace(ln.HostHoldReason) != "" {
-		return false, fmt.Sprintf("PR #%d remains host-held or draft; merge is forbidden", ln.PR), nil
-	}
-	r := syncer.CurrentRun()
-	r.TargetBranch = cmp.Or(strings.TrimSpace(r.TargetBranch), recipe.Default().MergePolicy.TargetBranch)
-	b, err := os.ReadFile(filepath.Join(r.Dir, "state.json"))
-	if err != nil {
-		return false, "", err
-	}
-	var host ledger
-	if err := json.Unmarshal(b, &host); err != nil {
-		return false, "", err
-	}
-	for i := range host.Tasks {
-		if host.Tasks[i].ID == ln.ID {
-			state := strings.ToLower(strings.TrimSpace(host.Tasks[i].PRState))
-			if state == "open" || strings.HasPrefix(state, "open ") {
-				return false, fmt.Sprintf("PR #%d remains open or unverified on target %s: open PR has no merge evidence", ln.PR, r.TargetBranch), nil
-			}
-			if validGitSHA(strings.TrimSpace(host.Tasks[i].MergeSHA)) {
-				return true, strings.TrimSpace(host.Tasks[i].MergeSHA), nil
-			}
-		}
-	}
-	r.Lanes = []Lane{{ID: ln.ID, Branch: ln.Branch, Head: ln.PRHead, PR: strconv.Itoa(ln.PR), Status: "running"}}
-	applyTargetIntegrationEvidence(ctx, &r, mirror)
-	if r.Lanes[0].Integrated {
-		return true, ln.PRHead, nil
-	}
-	return false, fmt.Sprintf("PR #%d remains open or unverified on target %s: %s", ln.PR, r.TargetBranch, cmp.Or(r.IntegrationError, r.Lanes[0].IntegrationReason)), nil
-}
-
-const maxGitCheckoutSearchDepth = 4
-
-func hasGitCheckout(dir string) bool {
-	cur := strings.TrimSpace(dir)
-	if cur == "" {
-		return false
-	}
-	cur = filepath.Clean(cur)
-	for depth := 0; depth <= maxGitCheckoutSearchDepth; depth++ {
-		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
-			return true
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return false
-		}
-		cur = parent
-	}
-	return false
-}
-
-func (d *Controllers) planNextWorkIfDrained(ctx context.Context, runID, trigger string) (bool, error) {
-	cr := d.lookupRun(runID)
-	d.mu.Lock()
-	plannerFn := d.Planner
-	d.mu.Unlock()
-	if cr == nil || cr.syncer == nil {
-		return false, nil
-	}
-	_, _ = cr.syncer.RefreshObjectiveIfChanged(ctx, d.store.Runs())
-	lanes, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
-	if err != nil {
-		return false, err
-	}
-	items, err := d.store.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
-	if err != nil {
-		return false, err
-	}
-	if dispatcher.CheckRunTerminal(lanes, items, false) != nil {
-		return false, nil
-	}
-	curRun := cr.syncer.CurrentRun()
-	needsCloseout := shouldAutoCloseoutRun(curRun, lanes, items)
-	if !needsCloseout && (!curRun.HasNextWork() || ObjectiveIsDone(curRun.Objective)) {
-		expireHoldDirectivesIfRunDone(ctx, d.store, runID)
-		return false, nil
-	}
-	now := d.clock.Now().UTC()
-	if paused, _, _, _, _ := store.EnforceCostGuard(ctx, d.store, runID, now, d.MaxCostPerHourUSD, d.SubscriptionActors...); paused {
-		return false, nil
-	}
-	if settings, sErr := d.store.Runs().GetSettings(ctx, runID); sErr == nil && settings.Paused {
-		return false, nil
-	}
-	var doneSummary []string
-	for i := range items {
-		it := &items[i]
-		doneSummary = append(doneSummary, fmt.Sprintf("%s:%s", it.ID, it.Status))
-	}
-	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
-	if err != nil {
-		return false, err
-	}
-	for i := range dirs {
-		dir := &dirs[i]
-		if strings.HasPrefix(dir.Ref, ownerAskRef) && (dir.ExpiresAt == nil || now.Before(*dir.ExpiresAt)) {
-			return false, nil
-		}
-	}
-	if needsCloseout {
-		if cr.syncer.MarkClosedOut() {
-			if _, cErr := d.CloseoutRun(ctx, runID, dispatcher.RunCloseoutParams{
-				Reason: "all lanes terminal (" + trigger + "); execute remaining handover close-out steps",
-			}); cErr != nil {
-				cr.syncer.ClearClosedOut()
-				return false, cErr
-			}
-			return true, nil
-		}
-		return false, nil
-	}
-	if plannerFn == nil {
-		return false, nil
-	}
-	planKey := curRun.FullObjective() + "|" + strings.Join(doneSummary, ",")
-	if !cr.syncer.MarkPlanned(planKey) {
-		return false, nil
-	}
-	var reason strings.Builder
-	fmt.Fprintf(&reason, "Adopted run %s backlog drained (%s); turn the remaining Next: / open work in OBJECTIVE.md into backlog items, or ask the owner one question if a decision is required.\n\n", runID, trigger)
-	fmt.Fprintf(&reason, "OBJECTIVE.md:\n%s\n", curRun.FullObjective())
-	if curRun.Next != "" {
-		fmt.Fprintf(&reason, "\nNext: %s\n", curRun.Next)
-	}
-	if curRun.PlanPath != "" {
-		fmt.Fprintf(&reason, "Plan path: %s\n", curRun.PlanPath)
-	}
-	planRef := ""
-	if curRun.PlanPath != "" && fileExists(curRun.PlanPath) {
-		planRef = curRun.PlanPath
-	}
-	stop := func() {}
-	if cr.holder != "" {
-		stop = d.keepLease(ctx, runID, cr.holder)
-	}
-	err = plannerFn(ctx, runID, reason.String(), planRef)
-	stop()
-	_, _, _, _, _ = store.EnforceCostGuard(ctx, d.store, runID, d.clock.Now().UTC(), d.MaxCostPerHourUSD, d.SubscriptionActors...)
-	if err != nil {
-		if ctx.Err() != nil {
-			cr.syncer.ClearPlanned(planKey)
-		} else {
-			_, _ = d.store.Events().Append(context.WithoutCancel(ctx), store.Event{
-				RunID:   runID,
-				Kind:    store.EventTimer,
-				Class:   store.EventClassJudgment,
-				Source:  "planner",
-				Summary: "planner next-work handoff failed: " + err.Error(),
-			})
-		}
-		return false, err
-	}
-	afterItems, err := d.store.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
-	if err != nil {
-		return true, nil
-	}
-	addedOpen := false
-	for i := range afterItems {
-		if afterItems[i].Status == store.BacklogOpen {
-			addedOpen = true
-			break
-		}
-	}
-	if addedOpen {
-		_, _ = d.store.Events().Append(ctx, store.Event{
-			RunID:   runID,
-			Kind:    store.EventTimer,
-			Class:   store.EventClassJudgment,
-			Source:  "planner",
-			Urgent:  true,
-			Summary: "planner created next backlog items from OBJECTIVE.md",
-		})
-		d.Wake(runID)
-	}
-	return true, nil
 }
 
 func (d *Controllers) keepLease(ctx context.Context, runID, holder string) func() {
@@ -1552,119 +919,9 @@ func (d *Controllers) keepLease(ctx context.Context, runID, holder string) func(
 	return func() { close(stop); <-done }
 }
 
-// askOwnerOnEscalation creates one owner question per unresolved escalation.
-func (d *Controllers) askOwnerOnEscalation(ctx context.Context, runID string, events []store.Event) error {
-	var laneIDs []string
-	for i := range events {
-		if id := events[i].LaneID; id != "" && !slices.Contains(laneIDs, id) {
-			laneIDs = append(laneIDs, id)
-		}
-	}
-	if len(laneIDs) == 0 {
-		return nil
-	}
-	now := d.clock.Now().UTC()
-	var errs []error
-	for _, id := range laneIDs {
-		ln, err := d.store.Lanes().Get(ctx, runID, id)
-		if err != nil {
-			if !errors.Is(err, store.ErrNotFound) {
-				errs = append(errs, err)
-			}
-			continue
-		}
-		if ln.Status != lane.StatusBlocked {
-			continue
-		}
-		decs, err := d.store.Decisions().List(ctx, store.DecisionFilter{RunID: runID, LaneID: id})
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		var esc *store.Decision
-		for j := len(decs) - 1; j >= 0 && esc == nil; j-- {
-			if decs[j].Tool == controller.ToolLaneEscalate {
-				esc = &decs[j]
-			}
-		}
-		if esc == nil {
-			continue
-		}
-		errs = append(errs, d.addEscalationAsk(ctx, runID, ln, esc, now))
-	}
-	return errors.Join(errs...)
-}
-
-const ownerAskRef = "owner_ask:"
-
-func (d *Controllers) addEscalationAsk(ctx context.Context, runID string, ln *lane.Lane, esc *store.Decision, now time.Time) error {
-	if d.Shadow && d.Recorder == nil {
-		return errors.New("shadow controller requires an action recorder")
-	}
-	hold := "hold: keep " + ln.ID + " blocked"
-	ask := controller.OwnerAsk{
-		ID:       fmt.Sprintf("escalation-%s-%d", ln.ID, esc.Seq),
-		RunID:    runID,
-		LaneID:   ln.ID,
-		Question: fmt.Sprintf("Lane %s escalated (%s). How should it continue?", ln.ID, esc.Reason),
-		Options:  []string{fmt.Sprintf("rework: start swe round %d", ln.Round+1), "stop: drop " + ln.ID, hold},
-		Default:  hold,
-		Deadline: now.Add(escalationAskTTL),
-	}
-	if d.Mailboxes != nil {
-		boxes := d.Mailboxes(runID)
-		driver := d.driver
-		if d.Shadow {
-			for i := range boxes {
-				boxes[i] = NewRecordingMailbox(boxes[i], d.Recorder)
-			}
-			if cr := d.lookupRun(runID); cr != nil && cr.driver != nil {
-				driver = cr.driver
-			}
-		}
-		notifier := dispatcher.New(dispatcher.Config{Mailboxes: boxes}, d.store, driver, d.clock, nil)
-		_, err := notifier.RegisterOwnerAsk(ctx, runID, dispatcher.OwnerAskParams{ID: ask.ID, LaneID: ask.LaneID, Question: ask.Question, Options: ask.Options, Default: ask.Default, Deadline: ask.Deadline.Format(time.RFC3339)})
-		return err
-	}
-	// Without a mailbox there is no delivery retry path, but the fallback must
-	// still preserve the one-open-ask-per-lane invariant.
-	dirs, err := d.store.Directives().List(ctx, store.DirectiveFilter{RunID: runID, ActiveOnly: true})
-	if err != nil {
-		return err
-	}
-	for i := range dirs {
-		if dirs[i].Scope == ln.ID && strings.HasPrefix(dirs[i].Ref, ownerAskRef) {
-			return nil
-		}
-	}
-	// Keep the ask scoped to the blocked lane so its default cannot change lane state.
-	if err := ask.Validate(); err != nil {
-		return err
-	}
-	raw, err := json.Marshal(ask)
-	if err != nil {
-		return err
-	}
-	err = d.store.Directives().Add(ctx, store.Directive{
-		ID:        "ask-" + ask.ID,
-		RunID:     runID,
-		Kind:      store.DirectiveInstruction,
-		Source:    store.DirectiveSourceDispatcher,
-		Scope:     ln.ID,
-		Ref:       ownerAskRef + ask.ID,
-		Text:      string(raw),
-		ExpiresAt: &ask.Deadline,
-		Status:    store.DirectiveActive,
-	})
-	if errors.Is(err, store.ErrAlreadyExists) {
-		return nil
-	}
-	return err
-}
-
-// Close stops controllers and checkpoints their lanes while keeping both the
-// handover lease and the SQLite run lease so a restarted or re-opened chat
-// continues holding adopted host runs until /release.
+// Close stops controllers while keeping both the handover lease and the
+// SQLite run lease, so a restarted or re-opened chat continues holding adopted
+// host runs until /release.
 func (d *Controllers) Close(ctx context.Context) error {
 	d.mu.Lock()
 	var starts []*startup
@@ -2291,69 +1548,6 @@ func nebulaSwarmPhaseBrief(dir, phase, specPrompt string) string {
 	}
 }
 
-//nolint:govet // field alignment
-type adoptedRunDriver struct {
-	lane.LaneDriver
-	clock  clock.Clock
-	store  store.Store
-	syncer *runLedgerSync
-	run    Run
-}
-
-func (d *adoptedRunDriver) PhaseSkill(phase string) string {
-	if d.run.Format == FormatNebulaSwarm && (phase == recipe.PhaseClean || phase == recipe.PhaseReview) {
-		return ""
-	}
-	return d.LaneDriver.PhaseSkill(phase)
-}
-
-func (d *adoptedRunDriver) ReportInstructions(runID, laneID, phase string, round int) string {
-	if d.run.Format != FormatNebulaSwarm {
-		return d.LaneDriver.ReportInstructions(runID, laneID, phase, round)
-	}
-	r := max(round, 1)
-	reportFile := filepath.Join(d.run.Dir, "reports", fmt.Sprintf("%s.%s.r%d.md", laneID, phase, r))
-	return fmt.Sprintf(
-		"Hand back: push your branch before reporting. Write the phase report for lane %s phase %s round %d to R=\"$(git rev-parse --git-dir)/phase-report.$NEBULA_TERMINAL_ID.md\" (and/or %s) with headers:\n"+
-			"Outcome: done | no-change | needs-swe | blocked | needs-input\n"+
-			"HEAD: <pushed commit sha>\n"+
-			"PR: #<number>\n"+
-			"Verdict: pass | needs-changes\n"+
-			"Then file it with:\n"+
-			"nebula phase report --outcome <outcome> [--pr <n>] --file \"$R\"\n"+
-			"The phase is not finished until the phase report is filed.",
-		laneID, phase, r, reportFile,
-	)
-}
-
-func (d *adoptedRunDriver) SpawnSession(ctx context.Context, req lane.SpawnRequest) (lane.SpawnResult, error) {
-	repoID, repo := d.resolveRepository(ctx, req.RepositoryID, req.Repository)
-	if repoID == "" && repo == "" {
-		return lane.SpawnResult{}, fmt.Errorf("spawn lane %s for adopted run %s: repository is not configured", req.LaneID, cmp.Or(req.RunID, d.run.ID))
-	}
-	req.RepositoryID = repoID
-	req.Repository = cmp.Or(repo, repoID)
-	if req.RunDir == "" {
-		req.RunDir = d.run.Dir
-	}
-	req.Brief = d.expandRunBrief(ctx, req.LaneID, req.Phase, req.Brief)
-	return d.LaneDriver.SpawnSession(ctx, req)
-}
-
-func (d *adoptedRunDriver) StartPhaseTerminal(ctx context.Context, req lane.StartPhaseRequest) (lane.StartPhaseResult, error) {
-	repoID, repo := d.resolveRepository(ctx, req.RepositoryID, req.Repository)
-	if strings.TrimSpace(req.SessionID) == "" && repoID == "" && repo == "" {
-		return lane.StartPhaseResult{}, fmt.Errorf("start phase %s on lane %s for adopted run %s: repository is not configured", req.Phase, req.LaneID, cmp.Or(req.RunID, d.run.ID))
-	}
-	req.RepositoryID = repoID
-	req.Repository = cmp.Or(repo, repoID)
-	if req.RunDir == "" {
-		req.RunDir = d.run.Dir
-	}
-	req.Brief = d.expandRunBrief(ctx, req.LaneID, req.Phase, req.Brief)
-	return d.LaneDriver.StartPhaseTerminal(ctx, req)
-}
-
 func populateRunRepo(r *Run) {
 	if r == nil {
 		return
@@ -2410,94 +1604,6 @@ func resolveStoreRepository(ctx context.Context, st store.Store, runID, ignoreOr
 		}
 	}
 	return ""
-}
-
-func (d *adoptedRunDriver) resolveRepository(ctx context.Context, reqRepoID, reqRepo string) (repoID, repo string) {
-	tmp := d.run
-	sanitizeRunRepo(&tmp)
-	populateRunRepo(&tmp)
-	_, _, originRepo, hasTier1 := readTier1AndOriginRepo(tmp.Dir)
-	if hasTier1 {
-		applyRepoValue(&tmp, reqRepoID)
-		applyRepoValue(&tmp, reqRepo)
-		if tmp.Repo == "" && tmp.RepoID != "" {
-			tmp.Repo = tmp.RepoID
-		}
-		return tmp.RepoID, tmp.Repo
-	}
-
-	var tier2 Run
-	if originRepo == "" || strings.TrimSpace(reqRepoID) != originRepo {
-		applyRepoValue(&tier2, reqRepoID)
-	}
-	if originRepo == "" || strings.TrimSpace(reqRepo) != originRepo {
-		applyRepoValue(&tier2, reqRepo)
-	}
-	if tier2.Repo == "" && tier2.RepoID == "" {
-		if storeRepo := resolveStoreRepository(ctx, d.store, tmp.ID, originRepo); storeRepo != "" {
-			applyRepoValue(&tier2, storeRepo)
-		}
-	}
-	if tier2.Repo != "" || tier2.RepoID != "" {
-		if tier2.Repo == "" && tier2.RepoID != "" {
-			tier2.Repo = tier2.RepoID
-		}
-		return tier2.RepoID, tier2.Repo
-	}
-
-	if tmp.Repo == "" && tmp.RepoID != "" {
-		tmp.Repo = tmp.RepoID
-	}
-	return tmp.RepoID, tmp.Repo
-}
-
-func (d *adoptedRunDriver) expandRunBrief(ctx context.Context, laneID, phase, brief string) string {
-	body, tail := splitReportTail(brief)
-	out := strings.ReplaceAll(body, "@LANE@", laneID)
-	if d.run.Format == FormatNebulaSwarm && validatePathComponent("lane id", laneID) == nil && validatePathComponent("phase", phase) == nil {
-		for _, name := range []string{laneID + "." + phase + ".brief", laneID + "." + phase + ".prompt"} {
-			if custom := strings.TrimSpace(readText(filepath.Join(d.run.Dir, name))); custom != "" && !strings.Contains(out, custom) {
-				out = custom + "\n\n" + out
-				break
-			}
-		}
-	}
-	if d.store != nil {
-		if ln, err := d.store.Lanes().Get(ctx, d.run.ID, laneID); err == nil && ln != nil {
-			out = strings.ReplaceAll(out, "@BRANCH@", ln.Branch)
-			if d.run.Format == FormatNebulaSwarm && phase == recipe.PhaseReview && ln.PR > 0 {
-				prTag := fmt.Sprintf("PR #%d", ln.PR)
-				if !strings.Contains(out, prTag) {
-					out = fmt.Sprintf("Review lane %s (%s).\n\n%s", laneID, prTag, out)
-				}
-			}
-		}
-	}
-	if phase == recipe.PhaseIntegrate && validatePathComponent("lane id", laneID) == nil {
-		gate := strings.TrimSpace(readText(filepath.Join(d.run.Dir, laneID+".hold-advance")))
-		if gate == "" {
-			for i := range d.run.Lanes {
-				if d.run.Lanes[i].ID == laneID {
-					gate = d.run.Lanes[i].holdAdvanceText
-					break
-				}
-			}
-		}
-		if gate != "" {
-			out += "\nAdditional host gate: " + gate
-		}
-	}
-	out = inlineRunFileCitations(d.run.Dir, laneID, out)
-	return out + tail
-}
-
-func splitReportTail(brief string) (body, tail string) {
-	for _, marker := range []string{"\n\nHand back:", "\n\nFile the phase report for lane "} {
-		if idx := strings.LastIndex(brief, marker); idx >= 0 {
-			return brief[:idx], brief[idx:]
-		}
-	}
-	return brief, ""
 }
 
 const maxInlinedRunFileBytes = 16384
@@ -2561,200 +1667,10 @@ func inlineRunFileCitations(dir, laneID, brief string) string {
 	return out
 }
 
-// An adopted expected wait acknowledges the imported report only. Fresh
-// handbacks must still pass through, even while the host deadline is pending.
-func (d *adoptedRunDriver) hostAnsweredReport(ctx context.Context, runID, laneID string, rep *lane.PhaseReport) bool {
-	if rep == nil || (rep.Outcome != lane.OutcomeNeedsInput && rep.Outcome != lane.OutcomeBlocked) || d.store == nil {
-		return false
-	}
-	var original string
-	for i := range d.run.Lanes {
-		if d.run.Lanes[i].ID == laneID {
-			original = d.run.Lanes[i].reportText
-			break
-		}
-	}
-	if original == "" || strings.TrimSpace(rep.Raw) != original {
-		return false
-	}
-	wait, err := d.store.Directives().Get(ctx, runID, "wait-adopt-"+laneID)
-	return err == nil && wait.Scope == laneID && wait.IsActive(d.clock.Now().UTC())
-}
-
-func (d *adoptedRunDriver) Watch(ctx context.Context, runID string) <-chan lane.Event {
-	in := d.LaneDriver.Watch(ctx, runID)
-	out := make(chan lane.Event)
-	go func() {
-		defer close(out)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case event, ok := <-in:
-				if !ok {
-					return
-				}
-				if event.Kind == lane.EventPhaseReported && d.hostAnsweredReport(ctx, runID, event.LaneID, event.Report) {
-					continue
-				}
-				select {
-				case out <- event:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
-	}()
-	return out
-}
-
-func (d *adoptedRunDriver) ReadReport(ctx context.Context, runID, laneID, terminalID string) (*lane.PhaseReport, error) {
-	rep, err := d.LaneDriver.ReadReport(ctx, runID, laneID, terminalID)
-	if err == nil && rep != nil && rep.Outcome.Valid() {
-		if d.hostAnsweredReport(ctx, runID, laneID, rep) {
-			return nil, nil
-		}
-		return rep, nil
-	}
-	if fileRep := d.readRunReportFile(ctx, runID, laneID, terminalID); fileRep != nil {
-		if d.hostAnsweredReport(ctx, runID, laneID, fileRep) {
-			return nil, nil
-		}
-		return fileRep, nil
-	}
-	return rep, err
-}
-
-func (d *adoptedRunDriver) readRunReportFile(ctx context.Context, runID, laneID, terminalID string) *lane.PhaseReport {
-	if validatePathComponent("lane id", laneID) != nil {
-		return nil
-	}
-	var phase, worktree string
-	round := 1
-	if d.store != nil {
-		if ln, err := d.store.Lanes().Get(ctx, runID, laneID); err == nil && ln != nil {
-			phase = ln.Phase
-			round = max(ln.Round, 1)
-			worktree = ln.Worktree
-			for k, tid := range ln.Terminals {
-				if tid == terminalID {
-					p, r := lane.SplitPhaseRound(k)
-					if p != "" {
-						phase, round = p, max(r, 1)
-					}
-					break
-				}
-			}
-		}
-	}
-	if phase == "" {
-		for i := range d.run.Lanes {
-			if d.run.Lanes[i].ID == laneID {
-				phase = d.run.Lanes[i].Phase
-				round = max(d.run.Lanes[i].Round, 1)
-				break
-			}
-		}
-	}
-	var candidates []string
-	if worktree != "" && terminalID != "" && validatePathComponent("terminal id", terminalID) == nil {
-		candidates = append(candidates, filepath.Join(worktree, ".git", "phase-report."+terminalID+".md"))
-	}
-	if phase != "" && validatePathComponent("phase", phase) == nil {
-		candidates = append(candidates,
-			filepath.Join(d.run.Dir, "reports", fmt.Sprintf("%s.%s.r%d.md", laneID, phase, round)),
-			filepath.Join(d.run.Dir, fmt.Sprintf("%s.%s.r%d.md", laneID, phase, round)),
-			filepath.Join(d.run.Dir, "reports", fmt.Sprintf("%s.%s.md", laneID, phase)),
-			filepath.Join(d.run.Dir, fmt.Sprintf("%s.%s.md", laneID, phase)),
-			filepath.Join(d.run.Dir, "reports", fmt.Sprintf("%s.%s.done", laneID, phase)),
-			filepath.Join(d.run.Dir, fmt.Sprintf("%s.%s.done", laneID, phase)),
-		)
-	}
-	for _, p := range candidates {
-		raw := strings.TrimSpace(readText(p))
-		if raw == "" {
-			continue
-		}
-		rep, err := lane.ParsePhaseReport(raw)
-		if err != nil || rep == nil || !rep.Outcome.Valid() {
-			continue
-		}
-		rep.LaneID = cmp.Or(rep.LaneID, laneID)
-		rep.TerminalID = cmp.Or(rep.TerminalID, terminalID)
-		rep.Phase = cmp.Or(rep.Phase, phase)
-		if rep.Round == 0 {
-			rep.Round = round
-		}
-		return rep
-	}
-	return nil
-}
-
-func (d *adoptedRunDriver) ReleaseSession(ctx context.Context, sessionID string, force ...bool) error {
-	if rel, ok := d.LaneDriver.(lane.SessionReleaser); ok {
-		if err := rel.ReleaseSession(ctx, sessionID, force...); err != nil {
-			return err
-		}
-		if d.syncer != nil {
-			d.syncer.MarkSessionReleased(sessionID)
-		}
-	}
-	return nil
-}
-
-func (d *adoptedRunDriver) UpdatePost(ctx context.Context, postID, content string) error {
-	if pub, ok := d.LaneDriver.(lane.PostPublisher); ok {
-		return pub.UpdatePost(ctx, postID, content)
-	}
-	return fmt.Errorf("republish post %s: driver does not support post updates", postID)
-}
-
-func (d *adoptedRunDriver) ReportOnlyNoWork(ctx context.Context, ln lane.Lane) (bool, error) {
-	if rc, ok := d.LaneDriver.(lane.ReportOnlyChecker); ok {
-		return rc.ReportOnlyNoWork(ctx, ln)
-	}
-	return false, nil
-}
-
-func (d *adoptedRunDriver) TerminalAgentState(ctx context.Context, terminalID string) (string, error) {
-	if tr, ok := d.LaneDriver.(lane.TerminalStateReader); ok {
-		return tr.TerminalAgentState(ctx, terminalID)
-	}
-	return "", nil
-}
-
-func (d *adoptedRunDriver) TerminalLastActivity(ctx context.Context, terminalID string) (time.Time, error) {
-	if tr, ok := d.LaneDriver.(lane.TerminalActivityReader); ok {
-		return tr.TerminalLastActivity(ctx, terminalID)
-	}
-	return time.Time{}, nil
-}
-
-func (d *adoptedRunDriver) LaneGitState(ctx context.Context, ln lane.Lane) (lane.GitState, error) {
-	if gr, ok := d.LaneDriver.(lane.GitStateReader); ok {
-		return gr.LaneGitState(ctx, ln)
-	}
-	return lane.GitState{}, nil
-}
-
-func (d *adoptedRunDriver) LaneSessionHealth(ctx context.Context, ln lane.Lane) (lane.SessionHealth, error) {
-	if hr, ok := d.LaneDriver.(lane.SessionHealthReader); ok {
-		return hr.LaneSessionHealth(ctx, ln)
-	}
-	return lane.SessionHealth{}, nil
-}
-
-func (d *adoptedRunDriver) TrackLane(ln lane.Lane) {
-	if tl, ok := d.LaneDriver.(interface{ TrackLane(lane.Lane) }); ok {
-		tl.TrackLane(ln)
-	}
-}
-
 type adoptedStore struct {
 	store.Store
-	runs    store.RunStore
-	lanes   store.LaneStore
-	backlog store.BacklogStore
+	runs  store.RunStore
+	lanes store.LaneStore
 }
 
 func (s *adoptedStore) Runs() store.RunStore {
@@ -2765,13 +1681,6 @@ func (s *adoptedStore) Runs() store.RunStore {
 }
 
 func (s *adoptedStore) Lanes() store.LaneStore { return s.lanes }
-
-func (s *adoptedStore) Backlog() store.BacklogStore {
-	if s.backlog != nil {
-		return s.backlog
-	}
-	return s.Store.Backlog()
-}
 
 type adoptedRunStore struct {
 	store.RunStore
@@ -2810,15 +1719,16 @@ func (s *adoptedRunStore) List(ctx context.Context) ([]store.Run, error) {
 
 type adoptedLaneStore struct {
 	store.LaneStore
-	syncer      *runLedgerSync
-	controllers *Controllers
+	syncer   *runLedgerSync
+	shadow   bool
+	operator bool
 }
 
 // hostOverlay restores ephemeral host facts after a SQLite read. Those facts
 // belong to the host ledger, so they deliberately do not require a store schema
 // migration and are re-read before every controller tick.
 func (s *adoptedLaneStore) hostOverlay(ln *lane.Lane) {
-	if ln == nil || s.syncer == nil {
+	if ln == nil || s.syncer == nil || s.operator {
 		return
 	}
 	r := s.syncer.CurrentRun()
@@ -2835,7 +1745,7 @@ func (s *adoptedLaneStore) hostOverlay(ln *lane.Lane) {
 		if ln.HostHoldReason == "" && host.PRDraft {
 			ln.HostHoldReason = "PR is draft"
 		}
-		if !ln.Status.Terminal() && lane.Status(host.Status).Terminal() {
+		if !ln.Status.Terminal() && s.syncer.HostStatusIsNewer(host.ID, lane.Status(host.Status)) {
 			ln.Status = lane.Status(host.Status)
 		}
 		if !ln.Status.Terminal() && (strings.EqualFold(host.PRState, "merged") || (ln.HostHoldReason == "" && !host.PRDraft && integratedLane(*host))) {
@@ -2865,86 +1775,48 @@ func (s *adoptedLaneStore) List(ctx context.Context, filter store.LaneFilter) ([
 	return lanes, err
 }
 
-// Upsert checkpoints the lane live to the host ledger and, when the lane reaches
-// a terminal status with no active backlog item, triggers planNextWorkIfDrained
-// (controller.stepIntegrate marks merged lanes done directly without calling judge).
+// Upsert checkpoints the lane live to the host ledger.
 func (s *adoptedLaneStore) Upsert(ctx context.Context, ln lane.Lane) error {
+	if s.shadow {
+		// Shadow lifecycle intents are recorded by the RecordingDriver. Keeping
+		// them out of the overlay means the next tick starts from host state.
+		return nil
+	}
 	if s.syncer != nil && ln.RunID == s.syncer.runID {
 		if err := s.syncer.SyncLane(ctx, ln); err != nil {
 			slog.Warn("live checkpoint adopted lane failed", "run", ln.RunID, "lane", ln.ID, "error", err)
 		}
 	}
-	if err := s.LaneStore.Upsert(ctx, ln); err != nil {
-		return err
-	}
-	if ln.Status.Terminal() && s.controllers != nil {
-		itemID := cmp.Or(ln.ItemID, ln.ID)
-		hasActiveItem := false
-		if itemID != "" {
-			if item, err := s.controllers.store.Backlog().Get(ctx, ln.RunID, itemID); err == nil && !item.Status.Terminal() {
-				hasActiveItem = true
-			}
-		}
-		if !hasActiveItem {
-			if _, err := s.controllers.planNextWorkIfDrained(ctx, ln.RunID, "lane_completed"); err != nil {
-				slog.Warn("plan next work after lane completion failed", "run", ln.RunID, "lane", ln.ID, "error", err)
-			}
-		}
-	}
-	return nil
-}
-
-type adoptedBacklogStore struct {
-	store.BacklogStore
-	controllers *Controllers
-}
-
-// Close triggers planNextWorkIfDrained after closing a backlog item so merges
-// handled directly by controller.stepIntegrate hand off remaining OBJECTIVE.md work.
-func (s *adoptedBacklogStore) Close(ctx context.Context, runID, itemID string, status store.BacklogStatus, actor, reason string) error {
-	if err := s.BacklogStore.Close(ctx, runID, itemID, status, actor, reason); err != nil {
-		return err
-	}
-	if s.controllers != nil {
-		if _, err := s.controllers.planNextWorkIfDrained(ctx, runID, "backlog_drained"); err != nil {
-			slog.Warn("plan next work after backlog close failed", "run", runID, "item", itemID, "error", err)
-		}
-	}
-	return nil
+	return s.LaneStore.Upsert(ctx, ln)
 }
 
 // runLedgerSync mirrors controller lane transitions and OBJECTIVE.md updates
 // to an adopted host run directory.
 //
-// Lock ordering: closeoutMu serializes CloseoutRun execution per run; ioMu
-// serializes disk and subprocess I/O in SyncLane; mu guards in-memory state
-// (run, known, lastObjective, lastPlannedKey, stat signatures). Callers may
-// acquire ioMu or mu while holding closeoutMu, and mu while holding ioMu,
-// never the reverse, and mu is never held across file or subprocess I/O.
+// Lock ordering: ioMu serializes disk and subprocess I/O in SyncLane; mu
+// guards in-memory state (run, known, lastObjective, stat signatures). Callers
+// may acquire mu while holding ioMu, never the reverse, and mu is never held
+// across file or subprocess I/O.
 //
 //nolint:govet // fields mirror the host ledger and synchronization state.
 type runLedgerSync struct {
-	clock            clock.Clock
-	known            map[string]lane.Lane
-	hostKnown        map[string]lane.Lane
-	releasedSessions map[string]bool
-	ledgerScript     *string
-	readOnly         bool
-	runID            string
-	resolvedScript   string
-	lastObjective    string
-	lastPlannedKey   string
-	run              Run
-	objModNano       int64
-	objSize          int64
-	progModNano      int64
-	progSize         int64
-	statReady        bool
-	scriptResolved   bool
-	closedOut        bool
-	closeoutMu       sync.Mutex
-	ioMu             sync.Mutex
-	mu               sync.Mutex
+	clock          clock.Clock
+	known          map[string]lane.Lane
+	hostKnown      map[string]lane.Lane
+	ledgerScript   *string
+	readOnly       bool
+	runID          string
+	resolvedScript string
+	lastObjective  string
+	run            Run
+	objModNano     int64
+	objSize        int64
+	progModNano    int64
+	progSize       int64
+	statReady      bool
+	scriptResolved bool
+	ioMu           sync.Mutex
+	mu             sync.Mutex
 }
 
 func fullObjectiveWithHandover(r Run) string {
@@ -2983,63 +1855,18 @@ func newRunLedgerSync(r Run, clk clock.Clock, initial []lane.Lane) *runLedgerSyn
 	objMod, objSize := fileStatSignature(filepath.Join(r.Dir, "OBJECTIVE.md"))
 	progMod, progSize := fileStatSignature(filepath.Join(r.Dir, "PROGRESS.md"))
 	return &runLedgerSync{
-		runID:            r.ID,
-		run:              r,
-		clock:            clk,
-		known:            known,
-		hostKnown:        hostKnown,
-		releasedSessions: make(map[string]bool),
-		lastObjective:    fullObjectiveWithHandover(r),
-		objModNano:       objMod,
-		objSize:          objSize,
-		progModNano:      progMod,
-		progSize:         progSize,
-		statReady:        r.Dir != "",
+		runID:         r.ID,
+		run:           r,
+		clock:         clk,
+		known:         known,
+		hostKnown:     hostKnown,
+		lastObjective: fullObjectiveWithHandover(r),
+		objModNano:    objMod,
+		objSize:       objSize,
+		progModNano:   progMod,
+		progSize:      progSize,
+		statReady:     r.Dir != "",
 	}
-}
-
-func (s *runLedgerSync) MarkSessionReleased(sessionID string) bool {
-	sid := strings.TrimSpace(sessionID)
-	if sid == "" {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.releasedSessions == nil {
-		s.releasedSessions = make(map[string]bool)
-	}
-	if s.releasedSessions[sid] {
-		return false
-	}
-	s.releasedSessions[sid] = true
-	return true
-}
-
-func (s *runLedgerSync) ReleasedSessions() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]string, 0, len(s.releasedSessions))
-	for sid := range s.releasedSessions {
-		out = append(out, sid)
-	}
-	slices.Sort(out)
-	return out
-}
-
-func (s *runLedgerSync) MarkClosedOut() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closedOut {
-		return false
-	}
-	s.closedOut = true
-	return true
-}
-
-func (s *runLedgerSync) ClearClosedOut() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.closedOut = false
 }
 
 func (s *runLedgerSync) CurrentRun() Run {
@@ -3058,6 +1885,23 @@ func (s *runLedgerSync) HostLaneChanged(ln lane.Lane) bool {
 	changed := !ok || hostLaneDiff(prev, ln)
 	s.hostKnown[ln.ID] = ln.Clone()
 	return changed
+}
+
+// HostLaneIsNewer reports whether the current ledger row differs from the
+// last host snapshot. It is intentionally read-only; callers record the row
+// after deciding whether to overlay it.
+func (s *runLedgerSync) HostLaneIsNewer(ln lane.Lane) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev, ok := s.hostKnown[ln.ID]
+	return !ok || hostLaneDiff(prev, ln)
+}
+
+func (s *runLedgerSync) HostStatusIsNewer(id string, status lane.Status) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev, ok := s.hostKnown[id]
+	return !ok || prev.Status != status
 }
 
 func (s *runLedgerSync) RememberHostLane(ln lane.Lane) {
@@ -3084,24 +1928,6 @@ func hostLaneDiff(a, b lane.Lane) bool {
 		}
 	}
 	return false
-}
-
-func (s *runLedgerSync) MarkPlanned(key string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.lastPlannedKey == key {
-		return false
-	}
-	s.lastPlannedKey = key
-	return true
-}
-
-func (s *runLedgerSync) ClearPlanned(key string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.lastPlannedKey == key {
-		s.lastPlannedKey = ""
-	}
 }
 
 func (s *runLedgerSync) RefreshObjectiveIfChanged(ctx context.Context, runs store.RunStore) (bool, error) {
@@ -3266,14 +2092,6 @@ func (s *runLedgerSync) SyncLane(ctx context.Context, ln lane.Lane) error {
 	s.hostKnown[ln.ID] = ln.Clone()
 	s.mu.Unlock()
 	return nil
-}
-
-func (s *runLedgerSync) SyncAll(ctx context.Context, lanes []lane.Lane) error {
-	var errs []error
-	for i := range lanes {
-		errs = append(errs, s.SyncLane(ctx, lanes[i]))
-	}
-	return errors.Join(errs...)
 }
 
 // lockLedgerFile acquires an exclusive flock on state.json.lock, retrying
@@ -3480,376 +2298,4 @@ func checkpointNebulaSwarm(task map[string]json.RawMessage, ln *lane.Lane, cfgPh
 	}
 	task["terminals"], _ = json.Marshal(terminals)
 	return nil
-}
-
-// CloseoutRun closes out an adopted run once every lane and backlog item is
-// terminal: validates that all file writes stay inside the run directory and
-// target files named in OBJECTIVE.md, releases remaining lane sessions, appends
-// to the plan's log file when named in OBJECTIVE.md, republishes any Nebula post
-// named in OBJECTIVE.md, writes FINAL.md, updates PROGRESS.md and OBJECTIVE.md's
-// Next: line, and records one-line summaries for the owner with a /release offer.
-func (d *Controllers) CloseoutRun(ctx context.Context, runID string, params dispatcher.RunCloseoutParams) (string, error) {
-	if d.Shadow {
-		if d.Recorder == nil {
-			return "", errors.New("shadow controller requires an action recorder")
-		}
-		if err := d.Recorder.Record("run", "closeout", params, "shadow closeout"); err != nil {
-			return "", err
-		}
-		return "recorded shadow closeout", nil
-	}
-	cr := d.lookupRun(runID)
-	if cr == nil || cr.syncer == nil {
-		return "", fmt.Errorf("adopted run %q is not active", runID)
-	}
-	cr.syncer.closeoutMu.Lock()
-	defer cr.syncer.closeoutMu.Unlock()
-
-	curRun := cr.syncer.CurrentRun()
-	if strings.TrimSpace(curRun.Dir) == "" {
-		return "", fmt.Errorf("adopted run %q has no run directory", runID)
-	}
-
-	lanes, err := d.store.Lanes().List(ctx, store.LaneFilter{RunID: runID})
-	if err != nil {
-		return "", err
-	}
-	slices.SortFunc(lanes, func(a, b lane.Lane) int {
-		return strings.Compare(a.ID, b.ID)
-	})
-	items, err := d.store.Backlog().List(ctx, store.BacklogFilter{RunID: runID})
-	if err != nil {
-		return "", err
-	}
-	if err := dispatcher.CheckRunTerminal(lanes, items, true); err != nil {
-		return "", err
-	}
-
-	objPath := filepath.Join(curRun.Dir, "OBJECTIVE.md")
-	progPath := filepath.Join(curRun.Dir, "PROGRESS.md")
-	handoverPath := filepath.Join(curRun.Dir, "HANDOVER.md")
-	rawObj := stripMarker(readText(objPath))
-	if strings.TrimSpace(rawObj) == "" {
-		rawObj = curRun.Objective
-	}
-	rawProg := stripMarker(readText(progPath))
-	if strings.TrimSpace(rawProg) == "" {
-		rawProg = curRun.Progress
-	}
-	handoverText := stripMarker(readText(handoverPath))
-	var storedObj, storedPlanRef string
-	if sr, gErr := d.store.Runs().Get(ctx, runID); gErr == nil && sr != nil {
-		storedObj = sr.Objective
-		storedPlanRef = sr.PlanRef
-	}
-
-	if strings.TrimSpace(params.PlanFile) != "" {
-		if _, vErr := ValidateCloseoutWrite(curRun.Dir, rawObj, params.PlanFile); vErr != nil {
-			return "", vErr
-		}
-	}
-	fileKeys := make([]string, 0, len(params.Files))
-	resolvedFiles := make(map[string]string, len(params.Files))
-	for k := range params.Files {
-		resolvedTarget, vErr := ValidateCloseoutWrite(curRun.Dir, rawObj, k)
-		if vErr != nil {
-			return "", vErr
-		}
-		resolvedFiles[k] = resolvedTarget
-		fileKeys = append(fileKeys, k)
-	}
-	slices.Sort(fileKeys)
-
-	if err := dispatcher.ValidateCloseoutPostID(params.PostID, rawObj, storedObj, rawProg, handoverText, storedPlanRef); err != nil {
-		return "", err
-	}
-
-	now := d.clock.Now().UTC()
-	ts := now.Format(time.RFC3339)
-
-	var prRefs []string
-	var prLines []string
-	doneLanes := 0
-	failedLanes := 0
-	for i := range lanes {
-		ln := lanes[i]
-		if ln.Status == lane.StatusDone {
-			doneLanes++
-		} else {
-			failedLanes++
-		}
-		isMerged := ln.MergeSHA != "" || (ln.Status == lane.StatusDone && ln.PR > 0)
-		if isMerged && ln.PR > 0 {
-			prRefs = append(prRefs, fmt.Sprintf("#%d", ln.PR))
-		}
-		switch {
-		case isMerged && ln.PR > 0 && ln.MergeSHA != "":
-			prLines = append(prLines, fmt.Sprintf("- %s: #%d (%s) — %s", ln.ID, ln.PR, ln.MergeSHA, cmp.Or(ln.Title, ln.ID)))
-		case isMerged && ln.PR > 0:
-			prLines = append(prLines, fmt.Sprintf("- %s: #%d — %s", ln.ID, ln.PR, cmp.Or(ln.Title, ln.ID)))
-		case ln.PR > 0:
-			prLines = append(prLines, fmt.Sprintf("- %s: %s (#%d, unmerged) — %s", ln.ID, ln.Status, ln.PR, cmp.Or(ln.Title, ln.ID)))
-		default:
-			prLines = append(prLines, fmt.Sprintf("- %s: %s — %s", ln.ID, ln.Status, cmp.Or(ln.Title, ln.ID)))
-		}
-	}
-	defaultOutcome := "done"
-	if failedLanes > 0 {
-		if doneLanes > 0 {
-			defaultOutcome = "partial"
-		} else {
-			defaultOutcome = "failed"
-		}
-	}
-	outcome := cmp.Or(strings.TrimSpace(params.Outcome), defaultOutcome)
-	prSummary := strings.Join(prRefs, ", ")
-	if prSummary == "" {
-		prSummary = fmt.Sprintf("%d terminal lane(s)", len(lanes))
-	}
-
-	var stepSummaries []string
-	recordStep := func(summary string) {
-		stepSummaries = append(stepSummaries, summary)
-	}
-
-	// 1. Release any remaining lane sessions.
-	sessionSet := make(map[string]bool)
-	for i := range lanes {
-		if sid := strings.TrimSpace(lanes[i].SessionID); sid != "" {
-			sessionSet[sid] = true
-		}
-		for _, sid := range lanes[i].Sessions {
-			if trimmed := strings.TrimSpace(sid); trimmed != "" {
-				sessionSet[trimmed] = true
-			}
-		}
-	}
-	for i := range curRun.Lanes {
-		if sid := strings.TrimSpace(curRun.Lanes[i].Session); sid != "" {
-			sessionSet[sid] = true
-		}
-	}
-	if orchSess := strings.TrimSpace(curRun.DrivenBy); orchSess != "" {
-		delete(sessionSet, orchSess)
-	}
-	var allSessions []string
-	for sid := range sessionSet {
-		allSessions = append(allSessions, sid)
-	}
-	slices.Sort(allSessions)
-	alreadyReleased := make(map[string]bool)
-	for _, sid := range cr.syncer.ReleasedSessions() {
-		alreadyReleased[sid] = true
-	}
-	var releaseFailed []string
-	if releaser, ok := d.driver.(lane.SessionReleaser); ok {
-		for _, sid := range allSessions {
-			if alreadyReleased[sid] {
-				continue
-			}
-			if rErr := releaser.ReleaseSession(ctx, sid, true); rErr != nil {
-				slog.Warn("release lane session during closeout", "run", runID, "session", sid, "error", rErr)
-				releaseFailed = append(releaseFailed, sid)
-				continue
-			}
-			cr.syncer.MarkSessionReleased(sid)
-		}
-	} else {
-		for _, sid := range allSessions {
-			if !alreadyReleased[sid] {
-				releaseFailed = append(releaseFailed, sid)
-			}
-		}
-	}
-	releasedList := cr.syncer.ReleasedSessions()
-	if len(releasedList) > 0 && len(releaseFailed) > 0 {
-		recordStep(fmt.Sprintf("released lane sessions (%s); failed to release (%s)", strings.Join(releasedList, ", "), strings.Join(releaseFailed, ", ")))
-	} else if len(releasedList) > 0 {
-		recordStep(fmt.Sprintf("released lane sessions (%s)", strings.Join(releasedList, ", ")))
-	} else if len(releaseFailed) > 0 {
-		recordStep(fmt.Sprintf("failed to release lane sessions (%s)", strings.Join(releaseFailed, ", ")))
-	}
-
-	// 2. Apply any additional validated file writes named in OBJECTIVE.md.
-	for _, relKey := range fileKeys {
-		resolvedTarget := resolvedFiles[relKey]
-		if filepath.ToSlash(filepath.Clean(relKey)) == "FINAL.md" {
-			if strings.TrimSpace(params.FinalMarkdown) == "" {
-				params.FinalMarkdown = params.Files[relKey]
-			}
-			continue
-		}
-		existingContent := stripMarker(readText(resolvedTarget))
-		if trimmedAdd := strings.TrimSpace(params.Files[relKey]); trimmedAdd != "" && !strings.Contains(existingContent, trimmedAdd) {
-			if _, wErr := WriteCloseoutFile(curRun.Dir, rawObj, relKey, params.Files[relKey], true); wErr != nil {
-				return "", wErr
-			}
-		}
-		recordStep(fmt.Sprintf("updated %s in run directory", relKey))
-	}
-	if len(fileKeys) > 0 {
-		if refreshedObj := stripMarker(readText(objPath)); strings.TrimSpace(refreshedObj) != "" {
-			rawObj = refreshedObj
-		}
-		if refreshedProg := stripMarker(readText(progPath)); strings.TrimSpace(refreshedProg) != "" {
-			rawProg = refreshedProg
-		}
-	}
-
-	// 3. Append to plan log file (e.g. PLAN.md) if named in OBJECTIVE.md.
-	planRel := strings.TrimSpace(params.PlanFile)
-	if planRel == "" {
-		planRel = extractCloseoutPlanFile(curRun.Dir, rawObj)
-	}
-	if planRel != "" {
-		planAbs, vErr := ValidateCloseoutWrite(curRun.Dir, rawObj, planRel)
-		if vErr != nil {
-			return "", vErr
-		}
-		logLine := strings.TrimSpace(params.PlanLogLine)
-		dedupeKey := logLine
-		if logLine == "" {
-			dedupeKey = fmt.Sprintf("%s %s: merged %s", runID, outcome, prSummary)
-			logLine = fmt.Sprintf("- %s %s", ts, dedupeKey)
-		}
-		existingPlan := readText(planAbs)
-		if !strings.Contains(existingPlan, dedupeKey) {
-			if _, wErr := WriteCloseoutFile(curRun.Dir, rawObj, planRel, logLine, true); wErr != nil {
-				return "", wErr
-			}
-		}
-		recordStep(fmt.Sprintf("appended close-out log entry to %s (%s)", planRel, prSummary))
-	}
-
-	// 4. Build FINAL.md content and republish Nebula post before marking OBJECTIVE.md done.
-	var finalContent string
-	if explicitFinal := strings.TrimSpace(params.FinalMarkdown); explicitFinal != "" {
-		finalContent = explicitFinal + "\n"
-	} else {
-		var finalBuilder strings.Builder
-		fmt.Fprintf(&finalBuilder, "# Final Report: %s\n\n", runID)
-		fmt.Fprintf(&finalBuilder, "Outcome: %s\n", outcome)
-		fmt.Fprintf(&finalBuilder, "Completed: %s\n", ts)
-		if curRun.Goal != "" {
-			fmt.Fprintf(&finalBuilder, "Goal: %s\n", curRun.Goal)
-		}
-		finalBuilder.WriteString("\n## Merged PRs\n")
-		for _, line := range prLines {
-			finalBuilder.WriteString(line + "\n")
-		}
-		if len(releaseFailed) > 0 {
-			fmt.Fprintf(&finalBuilder, "\n## Unreleased Sessions\n- %d session(s) failed to release: %s\n", len(releaseFailed), strings.Join(releaseFailed, ", "))
-		}
-		if extra := strings.TrimSpace(params.Summary); extra != "" {
-			finalBuilder.WriteString("\n## Summary\n")
-			finalBuilder.WriteString(extra + "\n")
-		} else {
-			fmt.Fprintf(&finalBuilder, "\n## Summary\nAll lanes terminal (%s). Remaining orchestrator handover steps completed; run `/release` when ready.\n", prSummary)
-		}
-		finalContent = finalBuilder.String()
-	}
-
-	handoverText = stripMarker(readText(handoverPath))
-	postID := cmp.Or(strings.TrimSpace(params.PostID), extractCloseoutPostID(rawObj, storedObj, rawProg, handoverText, storedPlanRef))
-	if postID != "" {
-		if vErr := dispatcher.ValidateCloseoutPostID(postID, rawObj, storedObj, rawProg, handoverText, storedPlanRef); vErr != nil {
-			return "", vErr
-		}
-		postBody := strings.TrimSpace(params.PostContent)
-		if postBody == "" {
-			if planRel != "" {
-				if planText := strings.TrimSpace(readText(filepath.Join(curRun.Dir, planRel))); planText != "" {
-					postBody = planText + "\n\n" + finalContent
-				}
-			}
-			if postBody == "" {
-				postBody = finalContent
-			}
-		}
-		postDrv := cmp.Or(cr.driver, d.driver)
-		pub, ok := postDrv.(lane.PostPublisher)
-		if !ok {
-			return "", fmt.Errorf("republish post %s: driver does not support post updates", postID)
-		}
-		if pErr := pub.UpdatePost(ctx, postID, postBody); pErr != nil {
-			if !strings.HasPrefix(pErr.Error(), "republish post ") {
-				return "", fmt.Errorf("republish post %s: %w", postID, pErr)
-			}
-			return "", pErr
-		}
-		recordStep(fmt.Sprintf("republished Nebula post %s with close-out summary (%s)", postID, prSummary))
-	}
-
-	// 5. Write FINAL.md inside the run directory.
-	if _, wErr := WriteCloseoutFile(curRun.Dir, rawObj, "FINAL.md", finalContent, false); wErr != nil {
-		return "", wErr
-	}
-	recordStep(fmt.Sprintf("wrote FINAL.md (outcome=%s, merged %s)", outcome, prSummary))
-
-	// 6. Update PROGRESS.md and OBJECTIVE.md Next: line.
-	nextLine := strings.TrimSpace(params.Next)
-	if nextLine == "" {
-		if failedLanes > 0 {
-			nextLine = fmt.Sprintf("Next: none. Run DONE %s — lanes terminal (%s, outcome=%s); FINAL.md written. Run /release when ready.", ts, prSummary, outcome)
-		} else {
-			nextLine = fmt.Sprintf("Next: none. Run DONE %s — all lanes merged (%s); FINAL.md written. Run /release when ready.", ts, prSummary)
-		}
-	} else if !ObjectiveIsDone(nextLine) {
-		nextLine = strings.TrimRight(nextLine, ".") + fmt.Sprintf(" — Run DONE %s (FINAL.md written; /release ready).", ts)
-	}
-	updatedObj := replaceObjectiveNextLine(rawObj, nextLine)
-	if _, wErr := WriteCloseoutFile(curRun.Dir, rawObj, "OBJECTIVE.md", updatedObj, false); wErr != nil {
-		return "", wErr
-	}
-	progAppend := strings.TrimSpace(params.ProgressMarkdown)
-	progDedupe := progAppend
-	if progAppend == "" {
-		progDedupe = fmt.Sprintf("- Outcome: %s (merged %s)", outcome, prSummary)
-		progAppend = fmt.Sprintf("\n## Close-out (%s)\n%s\n- Wrote FINAL.md and updated OBJECTIVE.md Next:\n- Run `/release` to hand back the run.\n", ts, progDedupe)
-	}
-	if !strings.Contains(rawProg, progDedupe) {
-		if _, wErr := WriteCloseoutFile(curRun.Dir, rawObj, "PROGRESS.md", progAppend, true); wErr != nil {
-			return "", wErr
-		}
-	}
-	_, _ = cr.syncer.RefreshObjective(ctx, d.store.Runs())
-	expireHoldDirectivesIfRunDone(ctx, d.store, runID)
-	cr.syncer.MarkClosedOut()
-	recordStep(fmt.Sprintf("updated OBJECTIVE.md Next: and PROGRESS.md (run DONE, merged %s)", prSummary))
-
-	// 7. Offer /release to the owner.
-	finalMsg := fmt.Sprintf("run %s close-out complete (outcome=%s, merged %s, FINAL.md written); run /release to hand back the run", runID, outcome, prSummary)
-	if len(releaseFailed) > 0 {
-		finalMsg = fmt.Sprintf("run %s close-out complete with %d unreleased session(s) (%s; outcome=%s, merged %s, FINAL.md written); run /release to hand back the run", runID, len(releaseFailed), strings.Join(releaseFailed, ", "), outcome, prSummary)
-	}
-	recordStep(finalMsg)
-	if d.store != nil {
-		existingResults := make(map[string]bool)
-		if prevDecs, lErr := d.store.Decisions().List(context.WithoutCancel(ctx), store.DecisionFilter{RunID: runID}); lErr == nil {
-			for i := range prevDecs {
-				if prevDecs[i].Tool == dispatcher.ToolRunCloseout {
-					existingResults[prevDecs[i].Result] = true
-				}
-			}
-		}
-		reason := cmp.Or(strings.TrimSpace(params.Reason), "close out adopted run")
-		for _, summary := range stepSummaries {
-			if existingResults[summary] {
-				continue
-			}
-			existingResults[summary] = true
-			_, _ = d.store.Decisions().Append(context.WithoutCancel(ctx), store.Decision{
-				RunID:     runID,
-				Category:  store.DecisionJudgment,
-				Actor:     dispatcher.ActorDispatcher,
-				Tool:      dispatcher.ToolRunCloseout,
-				Reason:    reason,
-				Result:    summary,
-				Output:    summary,
-				Vetted:    true,
-				CreatedAt: now,
-			})
-		}
-	}
-	return strings.Join(stepSummaries, "; "), nil
 }

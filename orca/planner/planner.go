@@ -890,7 +890,6 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 				Model:            p.cfg.Model,
 				Effort:           p.cfg.Effort,
 				SystemPrompt:     p.cfg.SystemPrompt,
-				WorkDir:          model.DeterministicSessionWorkDir(cmp.Or(p.cfg.Investigate.RunDir, p.cfg.Investigate.RepoDir), runID, ActorPlanner),
 				ResumeID:         strings.TrimSpace(th.ResumeID),
 				LLMGatewayURL:    p.cfg.LLMGatewayURL,
 				ClaudeBin:        p.cfg.ClaudeBin,
@@ -903,7 +902,7 @@ func (p *Planner) reconcile(ctx context.Context, runID string, mode Mode, planRe
 				Model:        p.cfg.Model,
 				SystemPrompt: p.cfg.SystemPrompt,
 				Registry:     reg,
-				MaxToolCalls: p.cfg.MaxTurns,
+				MaxToolCalls: 0,
 			},
 			nil,
 		)
@@ -2080,7 +2079,6 @@ func (p *Planner) AskWithFindings(ctx context.Context, runID, question, findings
 				Model:            p.cfg.Model,
 				Effort:           p.cfg.Effort,
 				SystemPrompt:     ChatSystemPrompt,
-				WorkDir:          model.DeterministicSessionWorkDir(cmp.Or(p.cfg.Investigate.RunDir, p.cfg.Investigate.RepoDir), runID, ActorPlanner),
 				ResumeID:         strings.TrimSpace(th.ResumeID),
 				LLMGatewayURL:    p.cfg.LLMGatewayURL,
 				ClaudeBin:        p.cfg.ClaudeBin,
@@ -2093,7 +2091,7 @@ func (p *Planner) AskWithFindings(ctx context.Context, runID, question, findings
 				Model:        p.cfg.Model,
 				SystemPrompt: ChatSystemPrompt,
 				Registry:     reg,
-				MaxToolCalls: p.cfg.MaxTurns,
+				MaxToolCalls: 0,
 			},
 			nil,
 		)

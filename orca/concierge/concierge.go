@@ -570,7 +570,7 @@ func (c *Concierge) AskInThread(ctx context.Context, runID, threadID, question s
 			Model:        c.cfg.Model,
 			SystemPrompt: systemPrompt,
 			Registry:     reg,
-			MaxToolCalls: c.cfg.MaxTurns,
+			MaxToolCalls: 0,
 		}, nil)
 		loopErr = cliErr
 		if turnRes != nil {

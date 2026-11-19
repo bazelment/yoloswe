@@ -33,6 +33,7 @@ import (
 	"github.com/bazelment/yoloswe/orca/model"
 	"github.com/bazelment/yoloswe/orca/router"
 	"github.com/bazelment/yoloswe/orca/store"
+	"github.com/bazelment/yoloswe/orca/toolbox"
 )
 
 // restartEnvVar carries "<pid>:<version>" across an in-place /restart exec
@@ -213,6 +214,12 @@ func main() {
 			os.Exit(130)
 		}
 		fmt.Fprintf(os.Stderr, "orca: %v\n", err)
+		if errors.Is(err, toolbox.ErrRefused) {
+			os.Exit(2)
+		}
+		if errors.Is(err, toolbox.ErrTimeout) {
+			os.Exit(124)
+		}
 		os.Exit(1)
 	}
 }
@@ -238,6 +245,8 @@ func Execute(
 			subcmd = args[0]
 			explicitSubcmd = true
 			rest = args[1:]
+		case "wait", "status", "check", "lane", "pr", "ask", "note":
+			return toolbox.Run(ctx, args, stdout)
 		case "-h", "--help", "help":
 			printUsage(stdout)
 			return nil
@@ -280,6 +289,9 @@ func Execute(
 		}
 		return executeChat(ctx, cfg, slices.Clone(args), posArgs, stdin, stdout, stderr, logger)
 	case "adopt":
+		if cfg.DecideAsOperator && !cfg.Shadow {
+			return errors.New("orca adopt --decide-as-operator requires --shadow")
+		}
 		if cfg.Shadow {
 			runDir := strings.TrimSpace(cfg.AdoptDir)
 			if runDir == "" {

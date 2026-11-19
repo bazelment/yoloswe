@@ -513,7 +513,6 @@ func (p *Planner) proposePlanCLI(ctx context.Context, runID, threadID, turnID st
 			Model:         p.modelName,
 			Effort:        p.effort,
 			SystemPrompt:  req.System,
-			WorkDir:       model.DeterministicSessionWorkDir(p.investigate.RunDir, runID, ActorPlanner),
 			LLMGatewayURL: p.llmGatewayURL,
 			ClaudeBin:     p.claudeBin,
 			CodexBin:      p.codexBin,
@@ -523,7 +522,7 @@ func (p *Planner) proposePlanCLI(ctx context.Context, runID, threadID, turnID st
 			Model:        p.modelName,
 			SystemPrompt: req.System,
 			Registry:     reg,
-			MaxToolCalls: model.DefaultMaxTurns,
+			MaxToolCalls: 0,
 		},
 		p.logger,
 	)
@@ -981,7 +980,6 @@ func (p *Planner) askStream(
 				Model:         p.modelName,
 				Effort:        p.effort,
 				SystemPrompt:  planreader.ChatSystemPrompt,
-				WorkDir:       model.DeterministicSessionWorkDir(cmp.Or(icfg.RunDir, icfg.RepoDir), runID, ActorPlanner),
 				LLMGatewayURL: p.llmGatewayURL,
 				ClaudeBin:     p.claudeBin,
 				CodexBin:      p.codexBin,
@@ -991,7 +989,7 @@ func (p *Planner) askStream(
 				Model:        p.modelName,
 				SystemPrompt: planreader.ChatSystemPrompt,
 				Registry:     reg,
-				MaxToolCalls: model.DefaultMaxTurns,
+				MaxToolCalls: 0,
 				Observer: func(name string, args json.RawMessage, _ string, _ bool) {
 					chat.EmitToolCall(ctx, name, args, runID)
 				},
