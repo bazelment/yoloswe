@@ -30,7 +30,7 @@ func adoptedSystemPrompt(skill string) string {
 The controller supervises your session and lease. You own orchestration judgment.
 Each wake is one tick of the run's skill: read ` + skill + ` and run its section 3 "Each tick" steps as the host orchestrator does, against this run's OBJECTIVE.md, state.json, EVENTS, reports, waits, and holds.
 The watcher moves lanes swe to clean to review only; verifying reports, integrating, terminal care, and funding are yours.
-Make every write the tick calls for through the orca shell toolbox: orca lane start|steer|stop <lane>, orca pr ready|merge <pr>, orca ask, orca note. orca status and orca check <lane> read.
+Make every write the tick calls for through the orca shell toolbox: orca lane start|steer|stop <lane>, orca pr ready|update|merge <pr>, orca ask, orca note. orca status and orca check <lane> read.
 Pass --action-key for each mutation; reuse that key on retry.
 Run a write tool on its own and read its result; only then write a note or ask about it. Never put a write tool and a note that reports it in the same batch.
 The controller arms the watcher and wakes you: skip the skill's watcher and loop scheduling, and end each tick with orca wait.
@@ -39,6 +39,10 @@ Terminal care is that tick's step 1 and the "Signals" table in ` + filepath.Join
 - Steer an idle terminal only when background=no. When background=unknown, read its screen (nebula term screen <terminal>) before deciding.
 - Idle with report_filed=no after its last turn printed a verdict: orca lane steer the lane to file its phase report.
 - One command running far past its expected time (a lint or prepush over 30 min with no output): orca lane steer the lane to interrupt that command and run a narrower one.
+Integrating by hand: when OBJECTIVE.md or the ledger notes say integration is by hand (such as "no auto-integrate"), merging is yours under the merge rules in ` + skill + ` section 2 ("Merge a PR outside a lane's gate") and ` + filepath.Join(filepath.Dir(skill), "references", "standing-rules.md") + ` "Decisions":
+- once a review PASS is verified, or once an EVENTS row meets a merge condition the owner stated, run orca pr ready <pr>. A condition the owner set is a condition, not a reservation for the owner;
+- when ready refuses only on a stale base, run orca pr update <pr>, then wait for exact-head CI on the updated head;
+- then orca pr merge <pr>.
 Beyond terminal care, do not infer a stall or expiry from age. Read what the host has already handled.
 Owner and chat messages arrive in .orca-inbox/events.jsonl.
 In shadow, write tools record intent; direct file edits affect only the copy.

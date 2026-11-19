@@ -66,6 +66,8 @@ snl_fund_planned() { log fund-planned "$@"; }
 snl_merge_claims() { log claims "$1" "$2"; }
 snl_head_checks() { log head-checks "$1" "$2" "$3"; }
 snl_merge() { log merge "$1"; }
+snl_lane_slug() { echo o/r; }
+ghx() { log ghx "$@"; }
 `
 
 // fixture returns a run directory whose env.sh exports RUN as that directory,
@@ -74,8 +76,12 @@ snl_merge() { log merge "$1"; }
 func fixture(t *testing.T) (dir, skill, calls string) {
 	t.Helper()
 	dir, skill, repo := t.TempDir(), t.TempDir(), t.TempDir()
-	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v %s", err, out)
+	// The ledger head abc123 is a branch at origin/main, so pr ready reads a fresh base.
+	for _, args := range [][]string{{"init", "-q"}, {"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "root"},
+		{"branch", "abc123"}, {"update-ref", "refs/remotes/origin/main", "HEAD"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
 	}
 	calls = filepath.Join(skill, "calls")
 	env := "export RUN=" + shq(dir) + "\nexport SNL_NEBULA=" + shq(filepath.Join(skill, "nebula")) + "\nexport CALLS=" + shq(calls) + "\n"
@@ -153,15 +159,52 @@ func TestActionsRunSkillOncePerKey(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, args := range [][]string{{"lane", "steer", "working", "rebase"}, {"pr", "merge", "7"}} {
+	for _, args := range [][]string{{"lane", "steer", "working", "rebase"}, {"pr", "update", "7"}, {"pr", "merge", "7"}} {
 		if _, err := run(t, dir, skill, args...); err != nil {
 			t.Fatalf("%v: %v", args, err)
 		}
 	}
 	got := skillCalls(t, calls)
-	want := "^" + regexp.QuoteMeta("fund-planned funded\nnb term send t1 --file ") + `\S+\n` + regexp.QuoteMeta("claims working abc123\nhead-checks working 7 abc123\nmerge working\n") + "$"
+	want := "^" + regexp.QuoteMeta("fund-planned funded\nnb term send t1 --file ") + `\S+\n` +
+		regexp.QuoteMeta("ghx api -X PUT repos/o/r/pulls/7/update-branch -f expected_head_sha=abc123\nclaims working abc123\nhead-checks working 7 abc123\nmerge working\n") + "$"
 	if !regexp.MustCompile(want).MatchString(got) {
 		t.Fatalf("skill calls=%q", got)
+	}
+}
+
+// .hold-advance passes a hand merge, but no other hold on the same lane does:
+// a hold file or a set hold field refuses steer, ready, update and merge.
+func TestHoldsRefuseUnderHoldAdvance(t *testing.T) {
+	t.Parallel()
+	for _, hold := range []string{"working.hold", "working.hold-merge", "working.hold-note", "working.park", "working.blocked",
+		`"hold_merge":true`, `"blocked_on":"deploy"`, `"park":"owner"`} {
+		t.Run(hold, func(t *testing.T) {
+			t.Parallel()
+			dir, skill, calls := fixture(t)
+			files := map[string]string{"working.hold-advance": "run rule\n"}
+			if strings.HasPrefix(hold, "working.") {
+				files[hold] = "owner: hold the merge\n"
+			} else {
+				raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				files["state.json"] = strings.Replace(string(raw), `"id":"working",`, `"id":"working",`+hold+`,`, 1)
+			}
+			for name, body := range files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, args := range [][]string{{"lane", "steer", "working", "go"}, {"pr", "ready", "7"}, {"pr", "update", "7"}, {"pr", "merge", "7"}} {
+				if _, err := run(t, dir, skill, args...); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "is held") {
+					t.Errorf("%v: %v", args, err)
+				}
+			}
+			if got := skillCalls(t, calls); got != "" {
+				t.Fatalf("held actions reached the skill: %q", got)
+			}
+		})
 	}
 }
 

@@ -48,7 +48,26 @@ type task struct {
 	HoldNote                                                     string `json:"hold_note"`
 	PR, Round                                                    int
 	DependsOn                                                    []string `json:"depends_on"`
+	holds                                                        []string
 }
+
+// ledgerHolds lists a ledger row's set holds: hold and any hold_* field, as
+// the skill's enqueue reads them, and waiting_on, blocked_on and park, as
+// orca adopt reads them.
+func ledgerHolds(fields map[string]any) []string {
+	var holds []string
+	for k, v := range fields {
+		if (k == "hold" || strings.HasPrefix(k, "hold_") || k == "waiting_on" || k == "blocked_on" || k == "park") && v != nil && v != false && v != "" {
+			holds = append(holds, fmt.Sprintf("%s=%v", k, v))
+		}
+	}
+	slices.Sort(holds)
+	return holds
+}
+
+// holdFiles are the per-lane hold files: the skill's .hold-merge, and those
+// orca adopt reads as host holds. .hold-advance is not one (see validate).
+var holdFiles = []string{".hold", ".hold-merge", ".hold-note", ".park", ".blocked"}
 
 func refuse(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrRefused, fmt.Sprintf(format, args...))
@@ -93,7 +112,7 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		return errors.New("a lane id or pull request number is required")
 	}
 	match := func(t task) bool { return t.ID == rest[0] }
-	if cmd == "pr.ready" || cmd == "pr.merge" {
+	if strings.HasPrefix(cmd, "pr.") {
 		match = func(t task) bool { return t.PR > 0 && strconv.Itoa(t.PR) == rest[0] }
 	}
 	i := slices.IndexFunc(tasks, match)
@@ -110,7 +129,7 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	case "lane.start", "lane.steer", "lane.stop":
 		return mutate(ctx, o, cmd, t, strings.Join(rest[1:], " "), out)
-	case "pr.ready", "pr.merge":
+	case "pr.ready", "pr.update", "pr.merge":
 		if err := validate(ctx, o, cmd, t, tasks); err != nil {
 			return err
 		}
@@ -119,9 +138,20 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		if t.PRHead == "" || t.ApprovalSHA != t.PRHead {
 			return refuse("PR #%d approval %q does not match ledger head %q", t.PR, t.ApprovalSHA, t.PRHead)
 		}
+		if cmd == "pr.update" {
+			return mutate(ctx, o, cmd, t, t.PRHead, out)
+		}
 		if _, err := skill(ctx, o, "ready", t, t.PRHead); err != nil {
 			return refuse("PR #%d is not ready at %s: %v", t.PR, t.PRHead, err)
 		}
+		// ready records the head it passed: the approved head or its base-only update.
+		if tasks, err = load(o.dir); err != nil {
+			return err
+		}
+		if i = slices.IndexFunc(tasks, func(c task) bool { return c.ID == t.ID }); i < 0 {
+			return refuse("lane %s left the ledger", t.ID)
+		}
+		t = &tasks[i]
 		if cmd == "pr.ready" {
 			_, err := fmt.Fprintf(out, "PR #%d ready at %s\n", t.PR, t.PRHead)
 			return err
@@ -177,11 +207,19 @@ func load(dir string) ([]task, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read state.json: %w", err)
 	}
-	var s struct{ Tasks []task }
+	var s struct{ Tasks []json.RawMessage }
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return nil, fmt.Errorf("parse state.json: %w", err)
 	}
-	return s.Tasks, nil
+	tasks := make([]task, len(s.Tasks))
+	for i, row := range s.Tasks {
+		var fields map[string]any
+		if err := errors.Join(json.Unmarshal(row, &tasks[i]), json.Unmarshal(row, &fields)); err != nil {
+			return nil, fmt.Errorf("parse state.json: %w", err)
+		}
+		tasks[i].holds = ledgerHolds(fields)
+	}
+	return tasks, nil
 }
 
 // validate holds the refusals: host holds, waits and finished lanes win over
@@ -190,8 +228,20 @@ func validate(ctx context.Context, o options, op string, t *task, tasks []task) 
 	if t.Status == "done" || t.Status == "cancelled" || t.MergeSHA != "" || strings.EqualFold(t.PRState, "merged") {
 		return refuse("lane %s is done or merged", t.ID)
 	}
-	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); err == nil || t.Hold+t.HoldNote+t.WaitingOn != "" {
-		return refuse("lane %s is held %s", t.ID, strings.TrimSpace(t.Hold+" "+t.HoldNote+" "+t.WaitingOn))
+	// .hold-advance stops the watcher advancing and integrating a lane; it
+	// reserves those for the orchestrator, so steering and a hand merge
+	// (pr ready|update|merge) pass it. Every other hold refuses every action.
+	held := slices.Clone(t.holds)
+	for _, suffix := range holdFiles {
+		if _, err := os.Stat(filepath.Join(o.dir, t.ID+suffix)); err == nil {
+			held = append(held, t.ID+suffix)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); err == nil && strings.HasPrefix(op, "lane.") && op != "lane.steer" {
+		held = append(held, t.ID+".hold-advance")
+	}
+	if len(held) > 0 {
+		return refuse("lane %s is held: %s", t.ID, strings.Join(held, ", "))
 	}
 	switch op {
 	case "lane.start":
@@ -398,7 +448,24 @@ case $op in
  lane.start) if [ -n "$phase" ]; then snl_spawn "$lane" "$phase" "$RUN/$brief"; else snl_fund_planned "$lane"; fi ;;
  lane.steer) snl_nb term send "$tid" --file "$msg" ;;
  lane.stop) snl_nb term stop "$tid" ;;
- ready) snl_merge_claims "$lane" "$text"; snl_head_checks "$lane" "$(snl_task "$lane" pr)" "$text" ;;
+ ready) pr=$(snl_task "$lane" pr); base=origin/${BASE:-main}
+  git fetch -q origin "$(snl_task "$lane" branch)" "${BASE:-main}" 2>/dev/null || :
+  # After orca pr update the PR head is the approved head plus base merges:
+  # carry the approval and record the head as snl_gate does; refuse anything else.
+  new=$(snl_lane_gh "$lane" pr view "$pr" --json headRefOid --jq .headRefOid 2>/dev/null) || new=$text
+  if [ -n "$new" ] && [ "$new" != "$text" ]; then
+   snl_only_base_merges "$text" "$new" || { echo "PR head $new is not approved head $text updated from base"; exit 3; }
+   python3 "$SW/ledger.py" set "$RUN" --id "$lane" --pr-head "$new" --approval-sha "$new" >/dev/null
+   [ "$(sed -n 's/^PASS \([^ ]*\).*/\1/p' "$RUN/$lane.gate" 2>/dev/null)" != "$text" ] || echo "PASS $new" > "$RUN/$lane.gate"
+   text=$new
+  fi
+  snl_merge_claims "$lane" "$text"; snl_head_checks "$lane" "$pr" "$text"
+  # SKILL.md's fresh-base guard: the oldest base commit missing from the head is at most two hours old.
+  ages=$(git log --format=%ct "$text..$base" 2>"$scr") || { echo "base age unknown: git cannot read $text..$base: $(head -c 300 "$scr")"; exit 3; }
+  old=$(printf '%s\n' "$ages" | tail -1)
+  [ -z "$old" ] || [ $(($(date +%s) - old)) -le 7200 ] ||
+   { echo "stale base: the oldest $base commit missing from $text is $((($(date +%s) - old) / 60)) min old (limit 120); orca pr update"; exit 3; } ;;
+ pr.update) ghx api -X PUT "repos/$(snl_lane_slug "$lane")/pulls/$(snl_task "$lane" pr)/update-branch" -f expected_head_sha="$text" >/dev/null ;;
  pr.merge) snl_merge "$lane" ;;
  ask) "$SNL_NEBULA" mail send --to owner --class fyi --run "$SNL_RUN_ID" --body-file "$msg" ;;
  note) snl_event "$lane" note "$text" ;;
