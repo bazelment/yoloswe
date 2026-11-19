@@ -3,6 +3,8 @@ package adopt
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -20,19 +22,29 @@ import (
 	"github.com/bazelment/yoloswe/orca/toolbox"
 )
 
-const adoptedSystemPrompt = `You are the dispatcher for this adopted swarm run.
+// adoptedSystemPrompt makes each wake one tick of the host's skill, read from
+// the skill file itself rather than restated here.
+func adoptedSystemPrompt(skill string) string {
+	return `You are the orchestrator for this adopted swarm run.
 The controller supervises your session and lease. You own orchestration judgment.
-Read the run's skill, OBJECTIVE.md, state.json, EVENTS, reports, waits, and holds.
-At every wake read EVENTS or run orca status before making any write decision.
-Act through the orca shell toolbox: orca wait, orca status, orca check <lane>,
-orca lane start|steer|stop <lane>, orca pr ready|merge <pr>, orca ask, orca note.
+Each wake is one tick of the run's skill: read ` + skill + ` and run its section 3 "Each tick" steps as the host orchestrator does, against this run's OBJECTIVE.md, state.json, EVENTS, reports, waits, and holds.
+The watcher moves lanes swe to clean to review only; verifying reports, integrating, terminal care, and funding are yours.
+Make every write the tick calls for through the orca shell toolbox: orca lane start|steer|stop <lane>, orca pr ready|merge <pr>, orca ask, orca note. orca status and orca check <lane> read.
 Pass --action-key for each mutation; reuse that key on retry.
-The watcher owns mechanical phase moves. Wait for it; inspect its current state.
+The controller arms the watcher and wakes you: skip the skill's watcher and loop scheduling, and end each tick with orca wait.
 Do not infer a stall or expiry from age. Read what the host has already handled.
 Owner and chat messages arrive in .orca-inbox/events.jsonl.
 In shadow, write tools record intent; direct file edits affect only the copy.
-Loop: orca wait, read what changed, decide, act through the toolbox, then wait again.
 `
+}
+
+// runSkill is the SKILL.md beside the run's watch_lanes.sh.
+func runSkill() string {
+	if script := FindWatchScript(); script != "" {
+		return filepath.Join(filepath.Dir(filepath.Dir(script)), "SKILL.md")
+	}
+	return "~/.claude/skills/subagent-swarm-nebula/SKILL.md"
+}
 
 // ShellDispatcher supervises a persistent CLI session with the host's tools.
 // The skill's watcher and the shell toolbox own lifecycle operations; this
@@ -76,7 +88,7 @@ func (d *ShellDispatcher) Prepare() error {
 	if m := strings.ToLower(d.Config.Model); strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "openai") {
 		d.Config.Model = "sonnet"
 	}
-	d.Config.Provider, d.Config.WorkDir, d.Config.AllowBuiltins, d.Config.SystemPrompt = "claude", d.workspace, true, adoptedSystemPrompt
+	d.Config.Provider, d.Config.WorkDir, d.Config.AllowBuiltins, d.Config.SystemPrompt = "claude", d.workspace, true, adoptedSystemPrompt(runSkill())
 	binDir := filepath.Join(d.workspace, ".orca-bin")
 	executable, err := os.Executable()
 	if err == nil {
@@ -142,7 +154,7 @@ func (d *ShellDispatcher) Supervise(ctx context.Context) {
 			slog.Error("start adopted dispatcher turn", "error", err)
 			return
 		}
-		prompt := fmt.Sprintf("Wake: %s. This run is in %q; all relative edits belong there. Read the evidence and run orca status before deciding, act through the toolbox, then orca wait.", wake, d.workspace)
+		prompt := fmt.Sprintf("Wake: %s. This run is in %q; all relative edits belong there. Run one tick of the skill now, then orca wait.", wake, d.workspace)
 		res, err := store.RunRoleAgentTurn(ctx, d.Store.Threads(), &d.sessions, d.Run.ID, threadID, turnID, "dispatcher", d.Config, model.AgentTurnRequest{Prompt: prompt}, nil)
 		status, usage, result := store.TurnStatusCompleted, model.Usage{}, ""
 		if res != nil {
@@ -182,7 +194,7 @@ func (d *ShellDispatcher) waitAfterTurn(ctx context.Context, relayed int) error 
 	if missed {
 		return nil
 	}
-	_, err = toolbox.WaitSince(ctx, d.workspace, before)
+	_, _, err = toolbox.WaitSince(ctx, d.workspace, before)
 	return err
 }
 
@@ -301,7 +313,7 @@ func SyncWorkspace(source, dest string) error {
 	if source == dest || strings.HasPrefix(dest, source+"/") || strings.HasPrefix(source, dest+"/") {
 		return fmt.Errorf("shadow workspace overlaps source")
 	}
-	seen := map[string]bool{}
+	seen := map[string]string{}
 	err = filepath.WalkDir(source, func(path string, e fs.DirEntry, err error) error {
 		rel, _ := filepath.Rel(source, path)
 		switch {
@@ -314,11 +326,12 @@ func SyncWorkspace(source, dest string) error {
 		case e.Type()&fs.ModeSymlink != 0 || !workspaceEvidence(rel, e.Name()):
 			return nil
 		}
-		seen[rel] = true
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
+		sum := sha256.Sum256(raw)
+		seen[rel] = hex.EncodeToString(sum[:])
 		// Replace rather than truncate, so a link the session made is not followed.
 		target := filepath.Join(dest, rel)
 		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
@@ -330,18 +343,24 @@ func SyncWorkspace(source, dest string) error {
 		return err
 	}
 	// Evidence the host removed (a hold, a report) disappears from the copy.
-	return filepath.WalkDir(dest, func(path string, e fs.DirEntry, err error) error {
+	err = filepath.WalkDir(dest, func(path string, e fs.DirEntry, err error) error {
 		rel, _ := filepath.Rel(dest, path)
 		switch {
 		case err != nil:
 			return err
 		case e.IsDir() && rel != "." && strings.HasPrefix(e.Name(), "."):
 			return filepath.SkipDir
-		case !e.IsDir() && workspaceEvidence(rel, e.Name()) && !seen[rel]:
+		case !e.IsDir() && workspaceEvidence(rel, e.Name()) && seen[rel] == "":
 			return os.Remove(path)
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	// Stamp by live content: this sync rewrites every file, and orca wait
+	// must see only what the host changed.
+	return toolbox.WriteJSON(filepath.Join(dest, toolbox.SyncManifest), seen)
 }
 
 func workspaceEvidence(rel, name string) bool {

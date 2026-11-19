@@ -138,7 +138,7 @@ func TestWaitEvidence(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-		changed, err := WaitSince(ctx, dir, before)
+		_, changed, err := WaitSince(ctx, dir, before)
 		cancel()
 		if err != nil || len(changed) != 1 || changed[0] != name {
 			t.Fatalf("changed=%v err=%v", changed, err)

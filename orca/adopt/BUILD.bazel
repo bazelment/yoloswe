@@ -53,5 +53,6 @@ go_test(
         "//orca/planner",
         "//orca/recipe",
         "//orca/store",
+        "//orca/toolbox",
     ],
 )

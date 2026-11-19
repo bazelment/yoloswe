@@ -76,12 +76,9 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	if cmd == "wait" {
-		if o.timeout > 0 {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, o.timeout)
-			defer cancel()
-		}
-		changed, err := Wait(ctx, o.dir)
+		ctx, cancel := context.WithTimeout(ctx, cmp.Or(o.timeout, Heartbeat))
+		defer cancel()
+		changed, err := waitBaseline(ctx, o.dir)
 		if err == nil {
 			_, err = fmt.Fprintln(out, "changed: "+strings.Join(changed, ", "))
 		}
@@ -352,23 +349,58 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 	return strings.TrimSpace(string(raw)), nil
 }
 
-// Wait blocks until run evidence changes, with no model or network calls.
-func Wait(ctx context.Context, dir string) ([]string, error) {
-	before, err := Snapshot(dir)
+// Heartbeat bounds an orca wait that sees no change.
+const Heartbeat = 20 * time.Minute
+
+// SyncManifest is a shadow copy's record of the live evidence its sync copied,
+// so the copy's evidence is what the host wrote, never the session's own edits.
+const SyncManifest = ".orca-sync.json"
+
+// waitBaseline is orca wait: it compares against the evidence the caller saw
+// when its previous wait returned, saved in the run dir across calls.
+func waitBaseline(ctx context.Context, dir string) ([]string, error) {
+	path := filepath.Join(dir, ".orca-wait.json")
+	var before map[string]string
+	raw, err := os.ReadFile(path)
+	if err == nil {
+		err = json.Unmarshal(raw, &before)
+	} else if os.IsNotExist(err) {
+		if before, err = Snapshot(dir); err == nil {
+			err = WriteJSON(path, before)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
-	return WaitSince(ctx, dir, before)
+	after, changed, err := WaitSince(ctx, dir, before)
+	if err != nil {
+		return nil, err
+	}
+	return changed, WriteJSON(path, after)
 }
 
-// WaitSince blocks until run evidence differs from the before snapshot.
-func WaitSince(ctx context.Context, dir string, before map[string]string) ([]string, error) {
+// WriteJSON replaces path atomically, so a concurrent reader sees whole JSON.
+func WriteJSON(path string, v any) error {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// WaitSince blocks until run evidence differs from the before snapshot and
+// returns the new snapshot with the paths that changed.
+func WaitSince(ctx context.Context, dir string, before map[string]string) (map[string]string, []string, error) {
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		after, err := Snapshot(dir)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		var changed []string
 		for path, stamp := range after {
@@ -383,39 +415,54 @@ func WaitSince(ctx context.Context, dir string, before map[string]string) ([]str
 		}
 		if len(changed) > 0 {
 			slices.Sort(changed)
-			return changed, nil
+			return after, changed, nil
 		}
 		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return nil, ErrTimeout
+				return nil, nil, ErrTimeout
 			}
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		case <-tick.C:
 		}
 	}
 }
 
-// Snapshot stamps each run evidence file under dir.
+// Snapshot stamps each run evidence file under dir. In a shadow copy the
+// sync manifest stands for every file but the inbox the supervisor writes.
 func Snapshot(dir string) (map[string]string, error) {
 	out := map[string]string{}
-	err := filepath.WalkDir(dir, func(p string, e os.DirEntry, err error) error {
+	raw, err := os.ReadFile(filepath.Join(dir, SyncManifest))
+	synced := err == nil
+	if synced {
+		err = json.Unmarshal(raw, &out)
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	err = filepath.WalkDir(dir, func(p string, e os.DirEntry, err error) error {
+		if os.IsNotExist(err) { // removed mid-sync
+			return nil
+		}
 		if err != nil {
 			return err
 		}
 		rel, _ := filepath.Rel(dir, p)
-		if e.IsDir() && rel != "." && strings.HasPrefix(e.Name(), ".") && e.Name() != ".orca-inbox" {
+		top, _, nested := strings.Cut(rel, string(os.PathSeparator))
+		if e.IsDir() && rel != "." && (strings.HasPrefix(e.Name(), ".") || synced) && e.Name() != ".orca-inbox" {
 			return filepath.SkipDir
 		}
-		top, _, nested := strings.Cut(rel, string(os.PathSeparator))
 		name := e.Name()
 		evidence := name == "EVENTS" || name == "state.json" || name == "heartbeat" ||
 			slices.Contains([]string{".md", ".done", ".needs-swe", ".hold-advance", ".signal"}, filepath.Ext(name)) ||
 			nested && slices.Contains([]string{".orca-inbox", "reports", "signals", "mail", "chat"}, top)
-		if e.IsDir() || !evidence {
+		if e.IsDir() || !evidence || synced && top != ".orca-inbox" {
 			return nil
 		}
 		info, err := e.Info()
+		if os.IsNotExist(err) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
