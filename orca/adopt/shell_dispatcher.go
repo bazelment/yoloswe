@@ -120,7 +120,8 @@ func (d *ShellDispatcher) Prepare() error {
 	if err != nil {
 		return err
 	}
-	d.Config.Env = map[string]string{"PATH": binDir + string(os.PathListSeparator) + os.Getenv("PATH"), "ORCA_TOOLBOX_DIR": d.workspace}
+	// The session's toolbox uses the same skill: a shadow copy has no env.sh.
+	d.Config.Env = map[string]string{"PATH": binDir + string(os.PathListSeparator) + os.Getenv("PATH"), "ORCA_TOOLBOX_DIR": d.workspace, "ORCA_SNL_DIR": scripts}
 	if d.Shadow {
 		d.Config.Env["ORCA_TOOLBOX_SHADOW"], d.Config.Env["ORCA_TOOLBOX_INTENT_DIR"] = "1", d.IntentDir
 		return nil

@@ -261,6 +261,30 @@ func TestAdoptedSkillFromRunEnvSW(t *testing.T) {
 	}
 }
 
+// A shadow copy has no env.sh, so the session's toolbox, bound to the copy,
+// resolves the skill Prepare found through the live run's SW. Not parallel:
+// it sets HOME and the session's environment.
+func TestShadowToolboxUsesLiveRunSkill(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ORCA_SNL_DIR", "")
+	live := t.TempDir()
+	scripts := envSkill(t, live, "")
+	d := &ShellDispatcher{Run: Run{ID: "r", Dir: live}, Shadow: true, IntentDir: t.TempDir(), Config: model.AgentSessionConfig{WorkDir: t.TempDir()}}
+	if err := d.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(d.workspace, "env.sh")); !os.IsNotExist(err) {
+		t.Fatalf("shadow copy has env.sh: %v", err)
+	}
+	for k, v := range d.Config.Env {
+		t.Setenv(k, v)
+	}
+	// As the toolbox's --skill and --dir defaults read them.
+	if got, err := toolbox.SkillDir(t.Context(), os.Getenv("ORCA_SNL_DIR"), os.Getenv("ORCA_TOOLBOX_DIR")); err != nil || got != scripts {
+		t.Fatalf("session toolbox skill = %q, %v; want %s", got, err, scripts)
+	}
+}
+
 // With no SW in the run's env.sh and no home skill folder, adoption refuses
 // before launching, naming the paths tried. Not parallel: it sets HOME.
 func TestAdoptedSkillRefusalNamesPathsTried(t *testing.T) {
