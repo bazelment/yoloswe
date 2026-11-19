@@ -118,6 +118,82 @@ func TestShellDispatcherWakesForOwnerMessageDuringTurn(t *testing.T) {
 	waitFor(t, func() bool { return turns() >= 2 })
 }
 
+// The fake resume CLI names its session by process unless --resume names it,
+// logs each turn's session, and reports a tick's usage the way the CLI does:
+// the result sums eight API calls (240k cache reads) while the context holds 30k.
+func TestFakeResumeClaude(t *testing.T) {
+	dir := os.Getenv("ORCA_FAKE_RESUME_DIR")
+	if dir == "" {
+		return
+	}
+	session := fmt.Sprintf("sess-%d", os.Getpid())
+	if i := slices.Index(os.Args, "--resume"); i > 0 && i+1 < len(os.Args) {
+		session = os.Args[i+1]
+	}
+	for scan := bufio.NewScanner(os.Stdin); scan.Scan(); {
+		var m struct {
+			Type      string
+			RequestID string `json:"request_id"`
+			Request   struct{ Subtype string }
+		}
+		_ = json.Unmarshal(scan.Bytes(), &m)
+		switch {
+		case m.Type == "control_request" && m.Request.Subtype == "get_context_usage":
+			fmt.Printf("{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":%q,\"response\":{\"totalTokens\":30000}}}\n", m.RequestID)
+		case m.Type == "control_request":
+			fmt.Printf("{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":%q,\"response\":{}}}\n", m.RequestID)
+		case m.Type == "user":
+			f, err := os.OpenFile(filepath.Join(dir, "turns"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+			if err != nil {
+				os.Exit(4)
+			}
+			_, _ = f.WriteString(session + "\n")
+			_ = f.Close()
+			fmt.Printf("{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":%q,\"model\":\"opus\"}\n", session)
+			fmt.Printf("{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"session_id\":%q,\"num_turns\":8,\"usage\":{\"input_tokens\":80,\"output_tokens\":4000,\"cache_read_input_tokens\":240000,\"cache_creation_input_tokens\":2000}}\n", session)
+		}
+	}
+	os.Exit(0)
+}
+
+// Each wake continues the run's one CLI session, so the dispatcher remembers
+// what it asked: a tick of many tool calls is not a context overflow.
+func TestShellDispatcherWakesContinueOneSession(t *testing.T) {
+	t.Parallel()
+	fake, st := t.TempDir(), store.NewMemoryStore(clock.RealClock{})
+	d, _ := superviseFake(t, st, t.TempDir(), "TestFakeResumeClaude", "ORCA_FAKE_RESUME_DIR="+shq(fake))
+	turns := func() []string {
+		raw, _ := os.ReadFile(filepath.Join(fake, "turns"))
+		return strings.Fields(string(raw))
+	}
+	waitFor(t, func() bool { return len(turns()) == 1 })
+	if _, err := st.Events().Append(t.Context(), store.Event{RunID: "run-fake", Kind: store.EventOwnerMessage, Source: "owner", Summary: "status?"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.syncEventFiles(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return len(turns()) >= 2 })
+	if got := turns()[:2]; got[1] != got[0] {
+		t.Fatalf("second wake ran in session %q, want the first wake's %q", got[1], got[0])
+	}
+}
+
+// Unset, the adopted dispatcher runs on the host's model; a set Claude model
+// stays, and an OpenAI one falls back to the host's.
+func TestShellDispatcherDefaultsToHostModel(t *testing.T) {
+	t.Parallel()
+	for set, want := range map[string]string{"": HostModel, "claude-sonnet-5-5": "claude-sonnet-5-5", "gpt-6.1-sol": HostModel} {
+		d := &ShellDispatcher{Run: Run{ID: "r", Dir: t.TempDir()}, Shadow: true, IntentDir: t.TempDir(), Config: model.AgentSessionConfig{Model: set, WorkDir: t.TempDir()}}
+		if err := d.Prepare(); err != nil {
+			t.Fatal(err)
+		}
+		if d.Config.Model != want {
+			t.Errorf("model %q prepared as %q, want %q", set, d.Config.Model, want)
+		}
+	}
+}
+
 // The fake tick session follows its system prompt: when the prompt names a
 // skill whose tick integrates, it integrates each review PASS through the
 // toolbox, then waits. It logs each toolbox call and its result.

@@ -166,8 +166,12 @@ type AgentTurnResult struct {
 	Text      string
 	SessionID string
 	Usage     Usage
-	TurnCount int
-	Rotated   bool
+	// ContextTokens is the session's context size after the turn; zero when
+	// the CLI did not report it. Usage sums every API call in the turn, so it
+	// is not a context size.
+	ContextTokens int
+	TurnCount     int
+	Rotated       bool
 }
 
 // AgentSession manages a long-lived Claude or Codex CLI session for one held run
@@ -313,9 +317,7 @@ func (s *AgentSession) Turn(ctx context.Context, req AgentTurnRequest) (*AgentTu
 
 	res.Rotated = rotated
 	s.turnCount++
-	// Track the latest turn's context window size (input + cached + output)
-	// rather than summing context windows quadratically across turns.
-	s.totalTokens = int(res.Usage.InputTokens + res.Usage.OutputTokens + res.Usage.CacheReadInputTokens + res.Usage.CacheCreationInputTokens)
+	s.totalTokens = res.ContextTokens
 	return res, nil
 }
 
@@ -438,11 +440,22 @@ func (s *AgentSession) runClaudeTurnLocked(
 		usage.CostUSD = CalculateCost(cmp.Or(effectiveModel, s.cfg.Model), usage, nil)
 	}
 
+	// The result's usage sums every API call of the turn; a multi-tool turn
+	// would read as over the limit and rotate the session on every wake. Ask
+	// the CLI for its actual context size instead.
+	var contextTokens int
+	if cu, err := s.claudeSess.ContextUsage(ctx); err == nil {
+		contextTokens = cu.TotalTokens
+	} else {
+		slog.Warn("agent session context usage unavailable", "session_id", s.sessionID, "error", err)
+	}
+
 	return &AgentTurnResult{
-		Text:      strings.TrimSpace(askRes.Text),
-		SessionID: s.sessionID,
-		Usage:     usage,
-		TurnCount: max(1, s.bridge.CallCount()),
+		Text:          strings.TrimSpace(askRes.Text),
+		SessionID:     s.sessionID,
+		Usage:         usage,
+		ContextTokens: contextTokens,
+		TurnCount:     max(1, s.bridge.CallCount()),
 	}, nil
 }
 
@@ -651,10 +664,11 @@ func (s *AgentSession) runCodexTurnLocked(
 	usage.CostUSD = CalculateCost(cmp.Or(effectiveModel, s.cfg.Model), usage, nil)
 
 	return &AgentTurnResult{
-		Text:      strings.TrimSpace(turnRes.FullText),
-		SessionID: s.sessionID,
-		Usage:     usage,
-		TurnCount: max(1, s.bridge.CallCount()),
+		Text:          strings.TrimSpace(turnRes.FullText),
+		SessionID:     s.sessionID,
+		Usage:         usage,
+		ContextTokens: int(usage.InputTokens + usage.OutputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens),
+		TurnCount:     max(1, s.bridge.CallCount()),
 	}, nil
 }
 
@@ -816,6 +830,8 @@ func RunFakeClaudeStreamCLI(streamFile, argsFile, mcpRespFile, counterFile strin
 		}
 	}
 
+	// contextTokens is the last API call's context, as the CLI reports it.
+	var contextTokens int
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -835,8 +851,11 @@ func RunFakeClaudeStreamCLI(streamFile, argsFile, mcpRespFile, counterFile strin
 		}
 		switch msg.Type {
 		case "control_request":
-			if msg.Request.Subtype == "initialize" {
+			switch msg.Request.Subtype {
+			case "initialize":
 				fmt.Fprintf(os.Stdout, `{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{}}}`+"\n", msg.RequestID)
+			case "get_context_usage":
+				fmt.Fprintf(os.Stdout, `{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{"totalTokens":%d}}}`+"\n", msg.RequestID, contextTokens)
 			}
 		case "user":
 			if turnIdx >= len(turns) {
@@ -850,9 +869,21 @@ func RunFakeClaudeStreamCLI(streamFile, argsFile, mcpRespFile, counterFile strin
 			for _, outLine := range turnLines {
 				fmt.Fprintln(os.Stdout, outLine)
 				var outEnv struct {
-					Type string `json:"type"`
+					Type    string `json:"type"`
+					Message struct {
+						Usage struct {
+							InputTokens              int `json:"input_tokens"`
+							OutputTokens             int `json:"output_tokens"`
+							CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+							CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+						} `json:"usage"`
+					} `json:"message"`
 				}
-				if json.Unmarshal([]byte(outLine), &outEnv) == nil && outEnv.Type == "control_request" {
+				_ = json.Unmarshal([]byte(outLine), &outEnv)
+				if u := outEnv.Message.Usage; outEnv.Type == "assistant" {
+					contextTokens = u.InputTokens + u.OutputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+				}
+				if outEnv.Type == "control_request" {
 					for scanner.Scan() {
 						respLine := strings.TrimSpace(scanner.Text())
 						if respLine == "" {

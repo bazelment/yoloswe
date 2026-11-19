@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bazelment/yoloswe/orca/adopt"
 	"github.com/bazelment/yoloswe/orca/clock"
 	"github.com/bazelment/yoloswe/orca/controller"
 	"github.com/bazelment/yoloswe/orca/dispatcher"
@@ -230,6 +231,7 @@ type Config struct {
 	stallTimeoutFlagSet   bool
 	maxCostPerHourSet     bool
 	agentBackendDefaulted bool
+	dispatcherModelSet    bool
 }
 
 // HasExplicitStallTimeout reports whether --stall-timeout or its config value was set.
@@ -522,7 +524,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 	fs.StringVar(&cfg.DriverKind, "driver", "", "Worker lane driver: nebula or fake (default nebula)")
 	fs.StringVar(&cfg.ModelProvider, "model-provider", "", "Model provider: anthropic, openai, claude-cli, or codex-cli")
 	fs.StringVar(&cfg.LLMGatewayURL, "llm-gateway-url", "", "Messages API / llm-gateway base URL")
-	fs.StringVar(&cfg.Models.Dispatcher, "dispatcher-model", "", "Model for Dispatcher turns (default "+DefaultDispatcherModel+")")
+	fs.StringVar(&cfg.Models.Dispatcher, "dispatcher-model", "", "Model for Dispatcher turns (default "+DefaultDispatcherModel+"; adopted runs "+adopt.HostModel+")")
 	fs.StringVar(&cfg.Models.DispatcherHard, "dispatcher-hard-model", "", "Escalation model for hard Dispatcher batches")
 	fs.StringVar(&cfg.Models.Concierge, "concierge-model", "", "Model for Concierge chat turns")
 	fs.StringVar(&cfg.Models.Planner, "planner-model", "", "Model for Planner compilation and replanning turns (default "+DefaultPlannerModel+")")
@@ -673,6 +675,7 @@ func parseFlags(cmdName string, args []string, errOut io.Writer) (Config, []stri
 		cfg.Repository = inferRepository()
 	}
 	cfg.launchArgs = launchArgs
+	cfg.dispatcherModelSet = strings.TrimSpace(cmp.Or(cfg.Models.Roles["dispatcher"].Model, cfg.Models.Dispatcher)) != ""
 	return cfg.withDefaults(), fs.Args(), nil
 }
 

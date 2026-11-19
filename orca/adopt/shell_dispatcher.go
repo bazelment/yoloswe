@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,6 +39,10 @@ Owner and chat messages arrive in .orca-inbox/events.jsonl.
 In shadow, write tools record intent; direct file edits affect only the copy.
 `
 }
+
+// HostModel is the host orchestrator's model. Adopted dispatchers run on it
+// unless --dispatcher-model names a Claude model.
+const HostModel = "claude-opus-5-5"
 
 // runSkill is the SKILL.md beside the run's watch_lanes.sh.
 func runSkill() string {
@@ -86,9 +91,12 @@ func (d *ShellDispatcher) Prepare() error {
 			return err
 		}
 	}
-	if m := strings.ToLower(d.Config.Model); strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "openai") {
-		d.Config.Model = "sonnet"
+	if m := strings.ToLower(d.Config.Model); m == "" || strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "openai") {
+		d.Config.Model = HostModel
 	}
+	// One session for the run: it rotates on a crash, a failed resume, or the
+	// context limit, never on a turn count.
+	d.Config.MaxSessionTurns = math.MaxInt
 	d.Config.Provider, d.Config.WorkDir, d.Config.AllowBuiltins, d.Config.SystemPrompt = "claude", d.workspace, true, adoptedSystemPrompt(runSkill())
 	binDir := filepath.Join(d.workspace, ".orca-bin")
 	executable, err := os.Executable()

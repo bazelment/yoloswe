@@ -264,9 +264,14 @@ func adoptedDispatchers(cfg Config, st store.Store, client model.ModelClient) ad
 	if cfg.ReplayPath != "" || (cfg.AgentBackend == "" && client == nil && cfg.ClaudeBin == "") {
 		return nil
 	}
+	// Unset, the dispatcher runs on the host's model (adopt.HostModel).
+	dispatcherModel := ""
+	if cfg.dispatcherModelSet {
+		dispatcherModel = cfg.Models.Dispatcher
+	}
 	return func(string) controller.Judge {
 		return &adopt.ShellDispatcher{Store: st, Config: model.AgentSessionConfig{
-			Provider: "claude", Model: cfg.Models.Dispatcher, Effort: cfg.Models.Roles["dispatcher"].Effort,
+			Provider: "claude", Model: dispatcherModel, Effort: cfg.Models.Roles["dispatcher"].Effort,
 			ClaudeBin: cfg.ClaudeBin, LLMGatewayURL: cfg.LLMGatewayURL,
 			WorkDir: cfg.SessionWorkDir, AllowBuiltins: true,
 		}, Shadow: cfg.Shadow, IntentDir: cfg.AdoptOut}

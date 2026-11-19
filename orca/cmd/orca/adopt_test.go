@@ -1374,6 +1374,24 @@ func TestShadowNebulaClientsGuardInnerWrites(t *testing.T) {
 	}
 }
 
+// Adopted dispatchers leave the model unset (the host's) unless
+// --dispatcher-model names one.
+func TestAdoptedDispatcherModel(t *testing.T) {
+	for args, want := range map[string]string{"": "", "claude-sonnet-5-5": "claude-sonnet-5-5"} {
+		flags := []string{"--shadow", "--dir", "run", "--out", "shadow-out"}
+		if args != "" {
+			flags = append(flags, "--dispatcher-model", args)
+		}
+		cfg, _, err := parseFlags("adopt", flags, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d := adoptedDispatchers(cfg, nil, nil)("r").(*adopt.ShellDispatcher); d.Config.Model != want {
+			t.Errorf("--dispatcher-model %q: dispatcher model %q, want %q", args, d.Config.Model, want)
+		}
+	}
+}
+
 func TestShadowAdoptOutputFlags(t *testing.T) {
 	cfg, _, err := parseFlags("adopt", []string{"--shadow", "--dir", "run", "--out", "shadow-out", "--for", "1m"}, io.Discard)
 	if err != nil {
