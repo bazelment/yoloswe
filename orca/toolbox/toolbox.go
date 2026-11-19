@@ -516,6 +516,9 @@ func prCommand(ctx context.Context, args []string, out io.Writer) error {
 		return errors.New("orca pr requires ready or merge")
 	}
 	op := args[0]
+	if op != "ready" && op != "merge" {
+		return fmt.Errorf("orca pr: unknown action %q", op)
+	}
 	o, rest, err := parseDir(args[1:])
 	if err != nil {
 		return err
@@ -550,9 +553,6 @@ func prCommand(ctx context.Context, args []string, out io.Writer) error {
 			return refuse("PR #%d is not ready", n)
 		}
 		return nil
-	}
-	if op != "merge" {
-		return fmt.Errorf("orca pr: unknown action %q", op)
 	}
 	if !v.Ready {
 		return refuse("PR #%d is not ready", n)

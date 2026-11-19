@@ -85,7 +85,12 @@ func IsConciergeOverride(text string) bool {
 // the front desk without changing the narrower override contract.
 func IsConciergeDeliverable(text string) bool {
 	l := strings.ToLower(strings.TrimSpace(text))
-	return strings.Contains(l, "perform a retro") || strings.Contains(l, "perform a retrospective") || strings.Contains(l, "give me a retro") || strings.Contains(l, "give me a report") || strings.Contains(l, "give me a ") && strings.Contains(l, "report") || strings.Contains(l, "show me a report") || strings.Contains(l, "run report") || strings.Contains(l, "progress report")
+	for _, marker := range []string{"perform a retro", "perform a retrospective", "give me a retro", "give me a report", "show me a report", "run report", "progress report"} {
+		if strings.Contains(l, marker) {
+			return true
+		}
+	}
+	return strings.Contains(l, "give me a ") && strings.Contains(l, "report")
 }
 
 // routingRubric is shared by both model backends.

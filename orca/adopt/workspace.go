@@ -50,8 +50,7 @@ func SyncWorkspace(source, dest string) error {
 			return workspaceDir(filepath.Join(dest, rel))
 		}
 		// Only run evidence belongs in a shadow workspace. env.sh may contain credentials.
-		allowed := name == "EVENTS" || name == "state.json" || strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".done") || strings.HasSuffix(name, ".needs-swe") || strings.HasSuffix(name, ".hold-advance") || strings.HasSuffix(name, ".brief") || name == "heartbeat" || strings.HasSuffix(name, ".signal") || strings.HasPrefix(filepath.ToSlash(rel), "mail/") || strings.HasPrefix(filepath.ToSlash(rel), "chat/") || strings.HasPrefix(filepath.ToSlash(rel), ".orca-inbox/")
-		if !allowed {
+		if !workspaceEvidence(rel, name) {
 			return nil
 		}
 		seen[rel] = true
@@ -59,7 +58,6 @@ func SyncWorkspace(source, dest string) error {
 		if err != nil {
 			return err
 		}
-		defer from.Close()
 		target := filepath.Join(dest, rel)
 		if fi, err := os.Lstat(target); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 			if err := os.Remove(target); err != nil {
@@ -71,9 +69,13 @@ func SyncWorkspace(source, dest string) error {
 			return err
 		}
 		_, err = io.Copy(to, from)
+		fromCloseErr := from.Close()
 		closeErr := to.Close()
 		if err != nil {
 			return err
+		}
+		if fromCloseErr != nil {
+			return fromCloseErr
 		}
 		return closeErr
 	})
@@ -94,12 +96,16 @@ func SyncWorkspace(source, dest string) error {
 			return nil
 		}
 		name := entry.Name()
-		allowed := name == "EVENTS" || name == "state.json" || strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".done") || strings.HasSuffix(name, ".needs-swe") || strings.HasSuffix(name, ".hold-advance") || strings.HasSuffix(name, ".brief") || name == "heartbeat" || strings.HasSuffix(name, ".signal") || strings.HasPrefix(filepath.ToSlash(rel), "mail/") || strings.HasPrefix(filepath.ToSlash(rel), "chat/") || strings.HasPrefix(filepath.ToSlash(rel), ".orca-inbox/")
-		if allowed && !seen[rel] {
+		if workspaceEvidence(rel, name) && !seen[rel] {
 			return os.Remove(path)
 		}
 		return nil
 	})
+}
+
+func workspaceEvidence(rel, name string) bool {
+	rel = filepath.ToSlash(rel)
+	return name == "EVENTS" || name == "state.json" || strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".done") || strings.HasSuffix(name, ".needs-swe") || strings.HasSuffix(name, ".hold-advance") || strings.HasSuffix(name, ".brief") || name == "heartbeat" || strings.HasSuffix(name, ".signal") || strings.HasPrefix(rel, "mail/") || strings.HasPrefix(rel, "chat/") || strings.HasPrefix(rel, ".orca-inbox/")
 }
 
 // A session can create a symlink in its copy. Refuse to refresh through one,
