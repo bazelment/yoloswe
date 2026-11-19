@@ -172,6 +172,42 @@ func TestActionsRunSkillOncePerKey(t *testing.T) {
 	}
 }
 
+// .hold-advance passes a hand merge, but no other hold on the same lane does:
+// a hold file or a set hold field refuses steer, ready, update and merge.
+func TestHoldsRefuseUnderHoldAdvance(t *testing.T) {
+	t.Parallel()
+	for _, hold := range []string{"working.hold", "working.hold-merge", "working.hold-note", "working.park", "working.blocked",
+		`"hold_merge":true`, `"blocked_on":"deploy"`, `"park":"owner"`} {
+		t.Run(hold, func(t *testing.T) {
+			t.Parallel()
+			dir, skill, calls := fixture(t)
+			files := map[string]string{"working.hold-advance": "run rule\n"}
+			if strings.HasPrefix(hold, "working.") {
+				files[hold] = "owner: hold the merge\n"
+			} else {
+				raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				files["state.json"] = strings.Replace(string(raw), `"id":"working",`, `"id":"working",`+hold+`,`, 1)
+			}
+			for name, body := range files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, args := range [][]string{{"lane", "steer", "working", "go"}, {"pr", "ready", "7"}, {"pr", "update", "7"}, {"pr", "merge", "7"}} {
+				if _, err := run(t, dir, skill, args...); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "is held") {
+					t.Errorf("%v: %v", args, err)
+				}
+			}
+			if got := skillCalls(t, calls); got != "" {
+				t.Fatalf("held actions reached the skill: %q", got)
+			}
+		})
+	}
+}
+
 func TestShadowNoLiveWrites(t *testing.T) {
 	t.Parallel()
 	dir, skill, calls := fixture(t)

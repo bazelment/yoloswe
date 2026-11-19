@@ -48,7 +48,26 @@ type task struct {
 	HoldNote                                                     string `json:"hold_note"`
 	PR, Round                                                    int
 	DependsOn                                                    []string `json:"depends_on"`
+	holds                                                        []string
 }
+
+// ledgerHolds lists a ledger row's set holds: hold and any hold_* field, as
+// the skill's enqueue reads them, and waiting_on, blocked_on and park, as
+// orca adopt reads them.
+func ledgerHolds(fields map[string]any) []string {
+	var holds []string
+	for k, v := range fields {
+		if (k == "hold" || strings.HasPrefix(k, "hold_") || k == "waiting_on" || k == "blocked_on" || k == "park") && v != nil && v != false && v != "" {
+			holds = append(holds, fmt.Sprintf("%s=%v", k, v))
+		}
+	}
+	slices.Sort(holds)
+	return holds
+}
+
+// holdFiles are the per-lane hold files: the skill's .hold-merge, and those
+// orca adopt reads as host holds. .hold-advance is not one (see validate).
+var holdFiles = []string{".hold", ".hold-merge", ".hold-note", ".park", ".blocked"}
 
 func refuse(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrRefused, fmt.Sprintf(format, args...))
@@ -188,11 +207,19 @@ func load(dir string) ([]task, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read state.json: %w", err)
 	}
-	var s struct{ Tasks []task }
+	var s struct{ Tasks []json.RawMessage }
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return nil, fmt.Errorf("parse state.json: %w", err)
 	}
-	return s.Tasks, nil
+	tasks := make([]task, len(s.Tasks))
+	for i, row := range s.Tasks {
+		var fields map[string]any
+		if err := errors.Join(json.Unmarshal(row, &tasks[i]), json.Unmarshal(row, &fields)); err != nil {
+			return nil, fmt.Errorf("parse state.json: %w", err)
+		}
+		tasks[i].holds = ledgerHolds(fields)
+	}
+	return tasks, nil
 }
 
 // validate holds the refusals: host holds, waits and finished lanes win over
@@ -203,9 +230,18 @@ func validate(ctx context.Context, o options, op string, t *task, tasks []task) 
 	}
 	// .hold-advance stops the watcher advancing and integrating a lane; it
 	// reserves those for the orchestrator, so steering and a hand merge
-	// (pr ready|update|merge) pass it.
-	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); (err == nil && strings.HasPrefix(op, "lane.") && op != "lane.steer") || t.Hold+t.HoldNote+t.WaitingOn != "" {
-		return refuse("lane %s is held %s", t.ID, strings.TrimSpace(t.Hold+" "+t.HoldNote+" "+t.WaitingOn))
+	// (pr ready|update|merge) pass it. Every other hold refuses every action.
+	held := slices.Clone(t.holds)
+	for _, suffix := range holdFiles {
+		if _, err := os.Stat(filepath.Join(o.dir, t.ID+suffix)); err == nil {
+			held = append(held, t.ID+suffix)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); err == nil && strings.HasPrefix(op, "lane.") && op != "lane.steer" {
+		held = append(held, t.ID+".hold-advance")
+	}
+	if len(held) > 0 {
+		return refuse("lane %s is held: %s", t.ID, strings.Join(held, ", "))
 	}
 	switch op {
 	case "lane.start":
