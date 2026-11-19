@@ -34,7 +34,11 @@ Make every write the tick calls for through the orca shell toolbox: orca lane st
 Pass --action-key for each mutation; reuse that key on retry.
 Run a write tool on its own and read its result; only then write a note or ask about it. Never put a write tool and a note that reports it in the same batch.
 The controller arms the watcher and wakes you: skip the skill's watcher and loop scheduling, and end each tick with orca wait.
-Do not infer a stall or expiry from age. Read what the host has already handled.
+Terminal care is that tick's step 1 and the "Signals" table in ` + filepath.Join(filepath.Dir(skill), "references", "nebula-lanes.md") + `: run orca check <lane> for each running swe, clean or review lane; it shows the phase terminal's agent state, minutes since its last output, background tasks, whether its phase report is filed, and its last turn's final line.
+- Idle with report_filed=no after its last turn printed a verdict: orca lane steer the lane to file its phase report.
+- One command running far past its expected time (a lint or prepush over 30 min with no output): orca lane steer the lane to interrupt that command and run a narrower one.
+- An idle Claude terminal with a background shell still running ("N shell still running") waits on its own gate; it is not stuck.
+Beyond terminal care, do not infer a stall or expiry from age. Read what the host has already handled.
 Owner and chat messages arrive in .orca-inbox/events.jsonl.
 In shadow, write tools record intent; direct file edits affect only the copy.
 `

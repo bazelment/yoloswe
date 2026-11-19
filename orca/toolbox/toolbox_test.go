@@ -100,6 +100,9 @@ func fixture(t *testing.T) (dir, skill, calls string) {
 	return dir, skill, calls
 }
 
+// workingCare is orca check's terminal-care line for t1, which lists only its state.
+const workingCare = "phase=swe agent=working signal= output_min_ago=unknown background={} report_filed=no\nlast_turn_line=\"\"\n"
+
 func shq(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 
 func run(t *testing.T, dir, skill string, args ...string) (string, error) {
@@ -125,7 +128,7 @@ func TestRefusalsNeverReachTheSkill(t *testing.T) {
 		{"lane", "start", "unfunded"}, {"lane", "start", "nobrief"}, {"lane", "start", "missingfile"},
 		{"lane", "start", "held"}, {"lane", "start", "working"}, {"lane", "start", "answered"},
 		{"lane", "start", "done"}, {"lane", "steer", "done", "go"},
-		{"lane", "steer", "answered", "go"}, {"lane", "steer", "stale", "go"}, {"lane", "stop", "funded"},
+		{"lane", "steer", "answered", "go"}, {"lane", "steer", "expired", "go"}, {"lane", "stop", "funded"},
 		{"pr", "merge", "8"},
 	} {
 		_, err := run(t, dir, skill, args...)
@@ -233,7 +236,7 @@ func TestCheckRunsInHostCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "lane working status=running terminal=working remote=OK " + repo + "\nbusy=no\n"; out != want {
+	if want := "lane working status=running terminal=working remote=OK " + repo + "\nbusy=no\n" + workingCare; out != want {
 		t.Fatalf("check=%q, want %q", out, want)
 	}
 }
@@ -272,7 +275,7 @@ func TestCheckRunsInWorktreeOfBareRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "lane working status=running terminal=working remote=OK " + wt + "\nbusy=no\n"; out != want {
+	if want := "lane working status=running terminal=working remote=OK " + wt + "\nbusy=no\n" + workingCare; out != want {
 		t.Fatalf("check=%q, want %q", out, want)
 	}
 }
