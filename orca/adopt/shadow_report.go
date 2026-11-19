@@ -385,11 +385,11 @@ func shadowActionIdentity(a Action) (string, string) {
 
 func hostDecisionKind(kind string) string {
 	switch strings.ToLower(kind) {
-	case "spawn", "start_phase", "phase.start", "start", "started", "phase-start", "phase", "step":
+	case "spawn", "start_phase", "phase.start", "lane.start", "start", "started", "phase-start", "phase", "step":
 		return "start_phase"
-	case "stop", "stopped", "terminal-stop":
+	case "stop", "lane.stop", "stopped", "terminal-stop":
 		return "stop"
-	case "steer", "steered", "steering":
+	case "steer", "lane.steer", "steered", "steering":
 		return "steer"
 	default:
 		return kind

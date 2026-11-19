@@ -245,3 +245,14 @@ func TestDesignAndResearchAskRoutesToPlanner(t *testing.T) {
 		t.Fatalf("GeminiRouter handler = %q, want %q", gd.Handler, Planner)
 	}
 }
+
+func TestReportAndRetroRequestsAreConcierge(t *testing.T) {
+	t.Parallel()
+	for _, text := range []string{"give me a progress report", "give me a detailed report on this run", "perform a retro on run 5", "perform a retrospective", "give me a run report"} {
+		r := selectedRouter{primary: LLMRouter{Client: fake{err: errors.New("must not call the model")}}}
+		d, err := r.Route(t.Context(), text)
+		if err != nil || d.Handler != Concierge {
+			t.Fatalf("%q: %+v %v", text, d, err)
+		}
+	}
+}

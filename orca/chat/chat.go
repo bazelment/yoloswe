@@ -755,7 +755,7 @@ func (m Model) route(text string) tea.Cmd {
 		if IsNewGoal(text) {
 			return routeMsg{text: text, decision: router.Decision{Handler: router.Concierge, Confidence: 1, Backend: "goal-detection"}}
 		}
-		if router.IsConciergeOverride(text) {
+		if router.IsConciergeOverride(text) || router.IsConciergeDeliverable(text) {
 			return routeMsg{text: text, decision: router.Decision{Handler: router.Concierge, Confidence: 1, Backend: "explicit-concierge"}}
 		}
 		if m.router == nil {

@@ -1,0 +1,23 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "toolbox",
+    srcs = [
+        "lease.go",
+        "observations.go",
+        "pr.go",
+        "toolbox.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/orca/toolbox",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//orca/lane",
+        "//orca/lane/nebula",
+    ],
+)
+
+go_test(
+    name = "toolbox_test",
+    srcs = ["toolbox_test.go"],
+    embed = [":toolbox"],
+)

@@ -60,6 +60,7 @@ type Controllers struct {
 	Shadow           bool
 	DecideAsOperator bool
 	Recorder         *ActionRecorder
+	SupervisionOnly  bool
 	mu               sync.Mutex
 }
 
@@ -536,6 +537,12 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 			return ctrl.AnswerOwnerAskTextFromJudge(ctx, askID, text)
 		})
 	}
+	if shell, ok := dispatch.(*ShellDispatcher); ok {
+		shell.Run = r
+		if err := shell.Prepare(); err != nil {
+			return err
+		}
+	}
 	if setter, ok := dispatch.(interface{ SetStore(store.Store) }); ok {
 		setter.SetStore(runStore)
 	}
@@ -641,6 +648,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		HoldAdvanceCheck:  configuredHoldAdvanceCheck,
 		ImportedHostState: true,
 		HostRun:           true,
+		SupervisionOnly:   d.SupervisionOnly,
 		SkipLease:         d.Shadow,
 	}, runStore, runDriver, d.clock, d.judge(holder, dispatch), boxes...)
 	runCtx, cancel := context.WithCancel(d.ctx)
@@ -672,7 +680,7 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	// adoption. Surface the same merge judgment used by a live report instead
 	// of treating the imported done status as permission to merge or advance.
 	for i := range r.Lanes {
-		if d.DecideAsOperator {
+		if d.DecideAsOperator || d.SupervisionOnly {
 			// The host's completed report is observed input, not an Orca verdict.
 			// A sole operator must reach its own judgment from the refreshed state.
 			continue
@@ -714,10 +722,12 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 		}
 		slog.Warn("adopted controller initial step failed; retrying", "run", r.ID, "error", err)
 	}
-	if planned, err := d.planNextWorkIfDrained(ctx, r.ID, "adopt"); err != nil {
-		slog.Warn("plan next work on adopt failed", "run", r.ID, "error", err)
-	} else if planned {
-		_ = ctrl.Step(ctx)
+	if !d.SupervisionOnly {
+		if planned, err := d.planNextWorkIfDrained(ctx, r.ID, "adopt"); err != nil {
+			slog.Warn("plan next work on adopt failed", "run", r.ID, "error", err)
+		} else if planned {
+			_ = ctrl.Step(ctx)
+		}
 	}
 	if err := ctrl.StartWatches(runCtx); err != nil {
 		cleanupFailedStart()
@@ -730,6 +740,9 @@ func (d *Controllers) Start(ctx context.Context, r Run) (retErr error) {
 	started = true
 	go d.watchRunFiles(runCtx, cr)
 	go d.supervise(runCtx, cr)
+	if shell, ok := dispatch.(*ShellDispatcher); ok {
+		go shell.Supervise(runCtx)
+	}
 	return nil
 }
 
@@ -752,6 +765,11 @@ func (d *Controllers) watchRunFiles(ctx context.Context, cr *controlledRun) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if shell, ok := cr.dispatch.(*ShellDispatcher); ok {
+				if err := shell.syncEventFiles(ctx); err != nil {
+					slog.Warn("relay adopted owner events", "error", err)
+				}
+			}
 			dir := strings.TrimSpace(cr.run.Dir)
 			if cr.syncer != nil {
 				dir = strings.TrimSpace(cr.syncer.CurrentRun().Dir)
@@ -765,6 +783,12 @@ func (d *Controllers) watchRunFiles(ctx context.Context, cr *controlledRun) {
 				continue
 			}
 			if now != last {
+				if shell, ok := cr.dispatch.(*ShellDispatcher); ok {
+					if err := shell.Refresh(); err != nil {
+						slog.Warn("refresh shadow workspace", "error", err)
+						continue
+					}
+				}
 				last = now
 				cr.controller.Wake()
 			}
@@ -984,8 +1008,8 @@ func (d *Controllers) stop(ctx context.Context, r Run, releaseLease bool) error 
 		return nil
 	}
 	cr.controller.Kill()
-	<-cr.done
 	cr.cancel()
+	<-cr.done
 	if closer, ok := cr.dispatch.(interface{ Close() error }); ok {
 		_ = closer.Close()
 	}
@@ -993,12 +1017,12 @@ func (d *Controllers) stop(ctx context.Context, r Run, releaseLease bool) error 
 	if err != nil {
 		return err
 	}
-	if cr.syncer != nil && !d.Shadow {
+	if cr.syncer != nil && !d.Shadow && !d.SupervisionOnly {
 		if err := cr.syncer.SyncAll(ctx, current); err != nil {
 			slog.Warn("sync adopted run lanes on stop failed", "run", r.ID, "error", err)
 		}
 	}
-	if !d.Shadow {
+	if !d.Shadow && !d.SupervisionOnly {
 		if err := checkpoint(r.Dir, current); err != nil {
 			return err
 		}
@@ -1058,11 +1082,16 @@ func (d *Controllers) judge(holder string, dispatch controller.Judge) controller
 			}
 		}
 		d.syncRunLanes(ctx, runID)
-		if _, pErr := d.planNextWorkIfDrained(ctx, runID, "backlog_drained"); pErr != nil {
-			slog.Warn("plan next work after judge failed", "run", runID, "error", pErr)
+		if !d.SupervisionOnly {
+			if _, pErr := d.planNextWorkIfDrained(ctx, runID, "backlog_drained"); pErr != nil {
+				slog.Warn("plan next work after judge failed", "run", runID, "error", pErr)
+			}
 		}
 		if err != nil {
-			slog.Error("adopted run dispatcher failed; asking the owner about its escalations", "run", runID, "error", err)
+			slog.Error("adopted run dispatcher failed", "run", runID, "error", err)
+		}
+		if d.SupervisionOnly {
+			return err
 		}
 		return d.askOwnerOnEscalation(ctx, runID, events)
 	})
@@ -1260,7 +1289,7 @@ func (d *Controllers) refreshHostState(ctx context.Context, runID string) error 
 		}
 		cr.syncer.RememberHostLane(host)
 	}
-	if !d.Shadow {
+	if !d.Shadow && !d.SupervisionOnly {
 		for i := range newlyTerminal {
 			if rel, ok := cr.driver.(lane.SessionReleaser); ok && strings.TrimSpace(newlyTerminal[i].SessionID) != "" {
 				if err := rel.ReleaseSession(ctx, newlyTerminal[i].SessionID, true); err != nil {
@@ -1273,6 +1302,9 @@ func (d *Controllers) refreshHostState(ctx context.Context, runID string) error 
 	cr.syncer.run = fresh
 	cr.syncer.mu.Unlock()
 	for i := range fresh.Lanes {
+		if d.SupervisionOnly {
+			break
+		}
 		imported := &fresh.Lanes[i]
 		until := imported.WaitDeadline
 		if until.IsZero() || (!imported.HostHoldUntil.IsZero() && imported.HostHoldUntil.Before(until)) {
@@ -1285,7 +1317,7 @@ func (d *Controllers) refreshHostState(ctx context.Context, runID string) error 
 			}
 		}
 	}
-	if !d.Shadow && terminalChanged {
+	if !d.Shadow && !d.SupervisionOnly && terminalChanged {
 		d.syncRunLanes(ctx, runID)
 		if _, err := d.planNextWorkIfDrained(ctx, runID, "host_refresh"); err != nil {
 			return err
@@ -2979,7 +3011,7 @@ func (s *adoptedLaneStore) Upsert(ctx context.Context, ln lane.Lane) error {
 	if err := s.LaneStore.Upsert(ctx, ln); err != nil {
 		return err
 	}
-	if ln.Status.Terminal() && s.controllers != nil {
+	if ln.Status.Terminal() && s.controllers != nil && !s.controllers.SupervisionOnly {
 		itemID := cmp.Or(ln.ItemID, ln.ID)
 		hasActiveItem := false
 		if itemID != "" {
@@ -3007,7 +3039,7 @@ func (s *adoptedBacklogStore) Close(ctx context.Context, runID, itemID string, s
 	if err := s.BacklogStore.Close(ctx, runID, itemID, status, actor, reason); err != nil {
 		return err
 	}
-	if s.controllers != nil {
+	if s.controllers != nil && !s.controllers.SupervisionOnly {
 		if _, err := s.controllers.planNextWorkIfDrained(ctx, runID, "backlog_drained"); err != nil {
 			slog.Warn("plan next work after backlog close failed", "run", runID, "item", itemID, "error", err)
 		}

@@ -203,6 +203,7 @@ type Config struct {
 	AdoptOut            string             `json:"-"`
 	ClaudeBin           string             `json:"-"`
 	CodexBin            string             `json:"-"`
+	SessionWorkDir      string             `json:"-"`
 	AllowedModels       []string           `json:"allowed_models,omitempty"`
 	RecipeFiles         []string           `json:"recipe_files,omitempty"`
 	Shadow              bool               `json:"-"`

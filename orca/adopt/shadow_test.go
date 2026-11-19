@@ -880,3 +880,41 @@ func TestShadowSummaryIncludesCLITurnUsageWithoutActions(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionWorkspaceDirectWritesAreIsolated(t *testing.T) {
+	t.Parallel()
+	live := t.TempDir()
+	copyDir := filepath.Join(t.TempDir(), "workspace")
+	if err := os.WriteFile(filepath.Join(live, "EVENTS"), []byte("host event\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "env.sh"), []byte("synthetic excluded environment\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncWorkspace(live, copyDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(copyDir, "EVENTS"), []byte("session edit\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(live, "EVENTS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "host event\n" {
+		t.Fatalf("live changed: %s", raw)
+	}
+	if _, err := os.Stat(filepath.Join(copyDir, "env.sh")); !os.IsNotExist(err) {
+		t.Fatalf("env copied: %v", err)
+	}
+	if err := SyncWorkspace(live, copyDir); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(filepath.Join(copyDir, "EVENTS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "host event\n" {
+		t.Fatalf("copy was not refreshed: %s", raw)
+	}
+}

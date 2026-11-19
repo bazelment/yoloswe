@@ -6,12 +6,15 @@ go_library(
         "adopt.go",
         "controller.go",
         "diff.go",
+        "mechanical_watcher.go",
         "nebulaswarm.go",
         "sanitize.go",
         "shadow.go",
         "shadow_report.go",
+        "shell_dispatcher.go",
         "steploop.go",
         "watcher.go",
+        "workspace.go",
     ],
     importpath = "github.com/bazelment/yoloswe/orca/adopt",
     visibility = ["//visibility:public"],
@@ -25,6 +28,7 @@ go_library(
         "//orca/model",
         "//orca/recipe",
         "//orca/store",
+        "//orca/toolbox",
     ],
 )
 

@@ -26,6 +26,7 @@ go_library(
 go_test(
     name = "model_test",
     srcs = [
+        "agent_session_shell_test.go",
         "cli_client_test.go",
         "model_test.go",
         "openai_client_test.go",

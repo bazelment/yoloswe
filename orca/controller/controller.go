@@ -242,6 +242,8 @@ type PRProbe func(ctx context.Context, runID, branch string, pr int) (PRStatus, 
 //
 //nolint:govet // config fields are grouped by lifecycle concern.
 type Config struct {
+	// SupervisionOnly leaves adopted-run judgment to the CLI session and watcher.
+	SupervisionOnly bool
 	// SkipLease disables controller lease acquisition and heartbeat. It is used
 	// by shadow runs, which operate on an isolated recording store and must not
 	// contend with the live run's lease.
@@ -1064,7 +1066,7 @@ func (c *Controller) Step(ctx context.Context) error {
 	if err := c.ensureLease(ctx); err != nil {
 		return err
 	}
-	if c.runtimePaused {
+	if c.runtimePaused || c.cfg.SupervisionOnly {
 		return nil
 	}
 

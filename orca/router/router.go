@@ -75,7 +75,17 @@ func IsPlannerChatQuestion(text string) bool {
 // in the owner's words. All other messages go through the model router.
 func IsConciergeOverride(text string) bool {
 	l := strings.ToLower(strings.TrimSpace(text))
-	return strings.Contains(l, "answer here") || strings.Contains(l, "answer in chat")
+	if strings.Contains(l, "answer here") || strings.Contains(l, "answer in chat") {
+		return true
+	}
+	return false
+}
+
+// IsConciergeDeliverable routes explicit report and retrospective requests to
+// the front desk without changing the narrower override contract.
+func IsConciergeDeliverable(text string) bool {
+	l := strings.ToLower(strings.TrimSpace(text))
+	return strings.Contains(l, "perform a retro") || strings.Contains(l, "perform a retrospective") || strings.Contains(l, "give me a retro") || strings.Contains(l, "give me a report") || strings.Contains(l, "give me a ") && strings.Contains(l, "report") || strings.Contains(l, "show me a report") || strings.Contains(l, "run report") || strings.Contains(l, "progress report")
 }
 
 // routingRubric is shared by both model backends.
@@ -212,7 +222,7 @@ type selectedRouter struct {
 }
 
 func (r selectedRouter) Route(ctx context.Context, text string) (Decision, error) {
-	if IsConciergeOverride(text) {
+	if IsConciergeOverride(text) || IsConciergeDeliverable(text) {
 		d := Decision{Handler: Concierge, Confidence: 1, Backend: "explicit-concierge"}
 		if r.logger != nil {
 			if err := r.logger.LogRouting(ctx, text, d); err != nil {

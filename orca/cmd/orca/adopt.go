@@ -92,6 +92,11 @@ func executeShadowAdopt(ctx context.Context, cfg Config, runDir, out string, log
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return err
 	}
+	workspace := filepath.Join(out, "session-workspace")
+	if err := adopt.SyncWorkspace(runDir, workspace); err != nil {
+		return fmt.Errorf("prepare shadow session workspace: %w", err)
+	}
+	cfg.SessionWorkDir = workspace
 	if _, err := os.Stat(filepath.Join(out, "store.db")); err == nil {
 		return fmt.Errorf("shadow output %q already contains store.db; choose a fresh output directory", out)
 	} else if !os.IsNotExist(err) {
@@ -128,6 +133,7 @@ func executeShadowAdopt(ctx context.Context, cfg Config, runDir, out string, log
 	judges, plannerFn := adoptedDispatchers(ctx, cfg, h, st, h.client, clk, client, logger, prProbe)
 	ctrls := adopt.NewControllers(ctx, st, h.client, clk, judges)
 	ctrls.Shadow = true
+	ctrls.SupervisionOnly = adoptedAgentBackend(cfg, client) == model.AgentBackendCLI
 	ctrls.DecideAsOperator = cfg.DecideAsOperator
 	ctrls.Recorder = recorder
 	ctrls.PRProbe = prProbe
@@ -208,6 +214,7 @@ func newAdoption(ctx context.Context, cfg Config, h hostSwarms, holder string, f
 	prProbe := adoptedPRProbe(h, st)
 	judges, plannerFn := adoptedDispatchers(ctx, cfg, h, st, h.client, clk, client, logger, prProbe)
 	ctrls := adopt.NewControllers(ctx, st, h.client, clk, judges)
+	ctrls.SupervisionOnly = adoptedAgentBackend(cfg, client) == model.AgentBackendCLI
 	ctrls.PRProbe = prProbe
 	ctrls.Mailboxes = adoptedMailboxes(cfg, st)
 	ctrls.Planner = plannerFn
@@ -340,7 +347,7 @@ func adoptedDispatchers(
 	logger *slog.Logger,
 	prProbe controller.PRProbe,
 ) (adopt.JudgeFactory, func(context.Context, string, string, string) error) {
-	backend := effectiveAgentBackend(cfg, client)
+	backend := adoptedAgentBackend(cfg, client)
 	if client == nil && backend != model.AgentBackendCLI {
 		return nil, nil
 	}
@@ -362,6 +369,13 @@ func adoptedDispatchers(
 		})
 	}
 	judges := func(runID string, answer func(context.Context, string, string, string) error) controller.Judge {
+		if backend == model.AgentBackendCLI {
+			return &adopt.ShellDispatcher{Store: st, Config: model.AgentSessionConfig{
+				Provider: "claude", Model: cfg.Models.Dispatcher, Effort: cfg.Models.Roles["dispatcher"].Effort,
+				ClaudeBin: cfg.ClaudeBin, LLMGatewayURL: cfg.LLMGatewayURL,
+				WorkDir: cfg.SessionWorkDir, AllowBuiltins: true,
+			}, Shadow: cfg.Shadow, IntentDir: cfg.AdoptOut}
+		}
 		planner := newAdoptedPlanner(cfg, h, st, clk, client, logger, backend, runID)
 		mu.Lock()
 		prev := planners[runID]
@@ -433,4 +447,13 @@ func (j *adoptedJudge) Close() error {
 		}
 	}
 	return err
+}
+
+// Unconfigured embedded callers have no CLI dispatcher. Production configs
+// resolve AgentBackend before entering the adoption service.
+func adoptedAgentBackend(cfg Config, client model.ModelClient) model.AgentBackend {
+	if cfg.AgentBackend == "" && client == nil && cfg.ClaudeBin == "" {
+		return model.AgentBackendLoop
+	}
+	return effectiveAgentBackend(cfg, client)
 }
