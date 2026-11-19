@@ -188,10 +188,6 @@ func parse(args []string) (options, []string, error) {
 	if o.shadow && (o.intent == "" || inside(o.dir, o.intent)) {
 		return o, nil, refuse("shadow intent directory must be outside the run workspace")
 	}
-	if o.skill == "" {
-		home, _ := os.UserHomeDir()
-		o.skill = filepath.Join(home, ".claude", "skills", "subagent-swarm-nebula", "scripts")
-	}
 	return o, rest, nil
 }
 
@@ -403,10 +399,11 @@ func recordIntent(dir, op string, t *task, text, key string) error {
 
 // skillOps maps toolbox operations onto the subagent-swarm-nebula scripts.
 const skillOps = `set -eu
-SW=$1; RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7; phase=$8; brief=$9
+sw=$1; RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7; phase=$8; brief=$9
 run=$RUN; [ ! -r "$RUN/env.sh" ] || . "$RUN/env.sh"
 # env.sh names the live run; a shadow copy's skill calls stay in the copy.
-export RUN=$run
+# SW is the scripts directory skillDir resolved, env.sh's own unless overridden.
+export RUN=$run SW=$sw
 export SNL_RUN_ID=${SNL_RUN_ID:-$(basename "$RUN")}
 . "$SW/swarm_nebula_lanes.sh"; . "$SW/lane_ops.sh"; . "$SW/step.sh"
 ` + LeaseGuard + `
@@ -472,9 +469,44 @@ case $op in
  *) exit 2 ;;
 esac`
 
+// skillDir is the run's swarm skill scripts directory: --skill or
+// ORCA_SNL_DIR when given, else the SW the run's env.sh exports, else the
+// home skill folder only when env.sh names none.
+func skillDir(ctx context.Context, o options) (string, error) {
+	if o.skill != "" {
+		if !isFile(filepath.Join(o.skill, "lane_ops.sh")) {
+			return "", refuse("swarm skill scripts unavailable: no lane_ops.sh in --skill %s", o.skill)
+		}
+		return o.skill, nil
+	}
+	envFile := filepath.Join(o.dir, "env.sh")
+	sw := ""
+	if isFile(envFile) {
+		// Source it as skillOps does, so an SW set by any shell form is found.
+		out, err := exec.CommandContext(ctx, "bash", "-c", `unset SW; . "$1" >/dev/null 2>&1; printf %s "${SW:-}"`, "orca-toolbox", envFile).Output()
+		if err != nil {
+			return "", refuse("swarm skill scripts unavailable: cannot source %s: %v", envFile, err)
+		}
+		sw = string(out)
+	}
+	if sw != "" {
+		if !isFile(filepath.Join(sw, "lane_ops.sh")) {
+			return "", refuse("swarm skill scripts unavailable: no lane_ops.sh in SW=%s from %s", sw, envFile)
+		}
+		return sw, nil
+	}
+	home, _ := os.UserHomeDir()
+	fallback := filepath.Join(home, ".claude", "skills", "subagent-swarm-nebula", "scripts")
+	if !isFile(filepath.Join(fallback, "lane_ops.sh")) {
+		return "", refuse("swarm skill scripts unavailable: %s exports no SW and no lane_ops.sh in %s", envFile, fallback)
+	}
+	return fallback, nil
+}
+
 func skill(ctx context.Context, o options, op string, t *task, text string) (string, error) {
-	if _, err := os.Stat(filepath.Join(o.skill, "lane_ops.sh")); err != nil {
-		return "", refuse("swarm skill scripts unavailable in %s", o.skill)
+	sw, err := skillDir(ctx, o)
+	if err != nil {
+		return "", err
 	}
 	phase, brief := "", ""
 	if op == "lane.start" && t.Status == "running" {
@@ -486,7 +518,7 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", o.skill, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief)
+	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", sw, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief)
 	cmd.Dir = repo
 	raw, err := cmd.CombinedOutput()
 	if err != nil {
@@ -547,6 +579,11 @@ func checkout(ctx context.Context, dir string) (string, error) {
 		return "", refuse("state.json config.repo %s has no work tree and no worktree of it exists", repo)
 	}
 	return first, nil
+}
+
+func isFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func isDir(path string) bool {

@@ -68,6 +68,7 @@ snl_head_checks() { log head-checks "$1" "$2" "$3"; }
 snl_merge() { log merge "$1"; }
 snl_lane_slug() { echo o/r; }
 ghx() { log ghx "$@"; }
+snl_event() { log event "$@"; }
 `
 
 // fixture returns a run directory whose env.sh exports RUN as that directory,
@@ -398,5 +399,58 @@ func TestSkillCallsRefuseWithoutHostCheckout(t *testing.T) {
 	}
 	if got := skillCalls(t, calls); got != "" {
 		t.Fatalf("skill ran without a host checkout: %q", got)
+	}
+}
+
+// runNoSkill runs the toolbox as an adopted dispatcher does: no --skill, no
+// ORCA_SNL_DIR, and a HOME with no .claude/skills.
+func runNoSkill(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
+	var out bytes.Buffer
+	err := Run(t.Context(), append(args, "--dir", dir), &out)
+	return out.String(), err
+}
+
+// The run's env.sh SW is the skill runtime; the home folder is not needed.
+// Not parallel: it sets HOME and ORCA_SNL_DIR.
+func TestSkillScriptsFromRunEnvSW(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ORCA_SNL_DIR", "")
+	dir, skill, calls := fixture(t)
+	f, err := os.OpenFile(filepath.Join(dir, "env.sh"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("export SW=" + shq(skill) + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runNoSkill(t, dir, "note", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runNoSkill(t, dir, "lane", "steer", "working", "rebase"); err != nil {
+		t.Fatal(err)
+	}
+	if got := skillCalls(t, calls); !regexp.MustCompile(`^event run note hello\nnb term send t1 --file \S+\n$`).MatchString(got) {
+		t.Fatalf("skill calls=%q", got)
+	}
+}
+
+// With no SW in env.sh and no home skill folder, the refusal names both.
+func TestSkillScriptsRefusalNamesPathsTried(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ORCA_SNL_DIR", "")
+	dir, _, calls := fixture(t)
+	_, err := runNoSkill(t, dir, "note", "hello")
+	want := "orca toolbox refused: swarm skill scripts unavailable: " + filepath.Join(dir, "env.sh") +
+		" exports no SW and no lane_ops.sh in " + filepath.Join(home, ".claude", "skills", "subagent-swarm-nebula", "scripts")
+	if !errors.Is(err, ErrRefused) || err.Error() != want {
+		t.Fatalf("err=%v\nwant %s", err, want)
+	}
+	if got := skillCalls(t, calls); got != "" {
+		t.Fatalf("skill calls=%q", got)
 	}
 }
