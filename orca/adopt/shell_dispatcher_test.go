@@ -605,6 +605,7 @@ func handSkill(t *testing.T, scripts, head string) (calls string) {
 		"ghx() { log ghx \"$@\"; git -c user.name=t -c user.email=t@t merge -q --no-ff -m main origin/main && git rev-parse HEAD > "+prHead+"; }\n"+
 		"snl_task() { echo 7; }\nsnl_terminal_agent_state() { echo working; }\nsnl_nb() { log nb \"$*\"; }\n"+
 		"snl_report_word() { sed -n \"s/^$3:[[:space:]]*//p\" \"$RUN/$1.$2.md\" | awk '{print tolower($1)}' | head -1; }\n")
+	write(t, filepath.Join(scripts, "pr_merge.sh"), "#!/bin/sh\necho \"pr_merge $*\" >> "+shq(calls)+"\necho 'merged 7 deadbeef'\n")
 	write(t, filepath.Join(scripts, "lane_ops.sh"), `snl_only_base_merges() {
   local c="$2"
   while [ "$c" != "$1" ]; do
@@ -722,17 +723,18 @@ func TestHandMergeUnderHoldAdvance(t *testing.T) {
 			}
 			ready, merge := pr("ready"), pr("merge")
 			got, _ := os.ReadFile(calls)
+			prHead, _ := os.ReadFile(filepath.Join(scripts, "pr-head"))
+			wantHandMerge := "pr_merge --repo o/r --head " + strings.TrimSpace(string(prHead))
 			if tc.refusal != "" {
 				if !errors.Is(ready, toolbox.ErrRefused) || !strings.Contains(ready.Error(), tc.refusal) || !errors.Is(merge, toolbox.ErrRefused) || strings.Contains(string(got), "merge L1") {
 					t.Fatalf("ready = %v, merge = %v, calls = %q; want both refused with %q", ready, merge, got, tc.refusal)
 				}
 				return
 			}
-			if ready != nil || merge != nil || !strings.HasSuffix(string(got), "merge L1\n") {
+			if ready != nil || merge != nil || strings.Contains(string(got), "merge L1") || !strings.Contains(string(got), wantHandMerge) {
 				t.Fatalf("ready = %v, merge = %v, calls = %q", ready, merge, got)
 			}
 			// The ledger records the head merged: the base-only update when there was one.
-			prHead, _ := os.ReadFile(filepath.Join(scripts, "pr-head"))
 			raw, _ = os.ReadFile(filepath.Join(live, "state.json"))
 			var ledger struct {
 				Tasks []struct {
@@ -914,13 +916,14 @@ func TestApproveVerifiedPassUnderHoldAdvance(t *testing.T) {
 			}
 			approve, ready, merge := pr("approve"), pr("ready"), pr("merge")
 			got, _ := os.ReadFile(calls)
+			wantHandMerge := "pr_merge --repo o/r --head " + head
 			if tc.refusal != "" {
 				if !errors.Is(approve, toolbox.ErrRefused) || !strings.Contains(approve.Error(), tc.refusal) || !errors.Is(ready, toolbox.ErrRefused) || !errors.Is(merge, toolbox.ErrRefused) || len(got) != 0 {
 					t.Fatalf("approve = %v, ready = %v, merge = %v, calls = %q; want all refused, approve with %q", approve, ready, merge, got, tc.refusal)
 				}
 				return
 			}
-			if approve != nil || ready != nil || merge != nil || string(got) != "merge L1\n" {
+			if approve != nil || ready != nil || merge != nil || strings.Contains(string(got), "merge L1") || !strings.Contains(string(got), wantHandMerge) {
 				t.Fatalf("approve = %v, ready = %v, merge = %v, calls = %q", approve, ready, merge, got)
 			}
 		})
