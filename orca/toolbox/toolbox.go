@@ -110,6 +110,20 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		return err
 	}
+	if o.shadow {
+		// Take the overlay lock before mutate's action lock on every shadow path.
+		if err := os.MkdirAll(o.intent, 0o700); err != nil {
+			return err
+		}
+		lock, err := os.OpenFile(filepath.Join(o.intent, ".ledger-overlay.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+			return err
+		}
+	}
 	if cmd == "ask" || cmd == "note" {
 		if len(rest) == 0 {
 			return errors.New("message text is required")
@@ -319,7 +333,8 @@ func loadFor(o options) ([]task, error) {
 			dirty = true
 			continue
 		}
-		if err := applyOverlay(&tasks[i], entry.Fields); err != nil {
+		fields, _ := json.Marshal(entry.Fields)
+		if err := json.Unmarshal(fields, &tasks[i]); err != nil {
 			return nil, err
 		}
 		if tasks[i].Hold == "__hold-advance" {
@@ -330,14 +345,6 @@ func loadFor(o options) ([]task, error) {
 		return tasks, saveOverlay(o, rows)
 	}
 	return tasks, nil
-}
-
-func applyOverlay(t *task, fields map[string]any) error {
-	raw, err := json.Marshal(fields)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(raw, t)
 }
 
 func validateFunding(o options, t *task, tasks []task) error {
