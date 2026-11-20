@@ -344,12 +344,12 @@ func validateAdvance(ctx context.Context, o options, t *task) error {
 	if t.Status != "running" || o.phase == "" || t.Phase == o.phase {
 		return refuse("lane %s cannot advance from phase %q to %q", t.ID, t.Phase, o.phase)
 	}
-	if o.phase != "review" && o.phase != "clean" {
-		return refuse("lane %s cannot advance to phase %q", t.ID, o.phase)
-	}
-	wantPhase := map[string]string{"swe": "review", "review": "clean"}[t.Phase]
-	if wantPhase == "" || o.phase != wantPhase {
+	wantPhase := map[string][]string{"swe": {"clean", "review"}, "clean": {"review"}, "review": {"swe"}}[t.Phase]
+	if !slices.Contains(wantPhase, o.phase) {
 		return refuse("lane %s cannot advance from phase %q to %q", t.ID, t.Phase, o.phase)
+	}
+	if t.Phase == "review" && (o.brief == "" || !runFile(o.dir, o.brief)) {
+		return refuse("lane %s rework needs a non-empty --brief inside the run", t.ID)
 	}
 	advanceHeld := slices.Contains(t.holds, t.ID+".hold-advance")
 	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); err == nil {
@@ -368,25 +368,35 @@ func validateAdvance(ctx context.Context, o options, t *task) error {
 			return refuse("lane %s is held: %s%s", t.ID, t.ID, suffix)
 		}
 	}
-	for _, name := range phaseReportCandidates(t) {
-		if !runFile(o.dir, name) {
-			continue
+	name := t.ID + "." + t.Phase + ".md"
+	if !runFile(o.dir, name) {
+		return refuse("lane %s current phase %q has no verified done report", t.ID, t.Phase)
+	}
+	raw, _ := os.ReadFile(filepath.Join(o.dir, name))
+	if t.Phase == "review" && o.phase == "swe" {
+		if t.Round >= reviewRoundCap() {
+			return refuse("lane %s review round %d reaches the review round cap %d", t.ID, t.Round, reviewRoundCap())
 		}
-		raw, _ := os.ReadFile(filepath.Join(o.dir, name))
-		if reportOutcomeDone(string(raw)) {
+		if reportNeedsSWEWithBreaks(string(raw)) {
 			return nil
 		}
+	} else if reportOutcomeDone(string(raw)) {
+		return nil
 	}
 	return refuse("lane %s current phase %q has no verified done report", t.ID, t.Phase)
 }
 
-func phaseReportCandidates(t *task) []string {
-	round := max(t.Round, 1)
-	candidates := []string{filepath.Join("reports", fmt.Sprintf("%s.%s.r%d.md", t.ID, t.Phase, round))}
-	if round <= 1 {
-		candidates = append(candidates, t.ID+"."+t.Phase+".md", filepath.Join("reports", t.ID+"."+t.Phase+".md"))
+// reviewRoundCap mirrors the swarm skill's default and environment override.
+// The current review round is inclusive: a lane at the cap is escalated rather
+// than starting another SWE session.
+func reviewRoundCap() int {
+	const defaultCap = 3
+	raw := os.Getenv("SNL_MAX_ROUNDS")
+	cap, err := strconv.Atoi(raw)
+	if err != nil || cap < 1 {
+		return defaultCap
 	}
-	return candidates
+	return cap
 }
 
 func reportOutcomeDone(raw string) bool {
@@ -396,6 +406,37 @@ func reportOutcomeDone(raw string) bool {
 		}
 	}
 	return false
+}
+
+func reportNeedsSWEWithBreaks(raw string) bool {
+	lines := strings.Split(raw, "\n")
+	needsSWE := false
+	breaks := false
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "Outcome: needs-swe" {
+			needsSWE = true
+		}
+		if !strings.HasPrefix(line, "Breaks:") {
+			continue
+		}
+		if strings.TrimSpace(strings.TrimPrefix(line, "Breaks:")) != "" {
+			breaks = true
+			continue
+		}
+		for _, next := range lines[i+1:] {
+			next = strings.TrimSpace(next)
+			if next == "" {
+				continue
+			}
+			if !strings.HasPrefix(next, "-") && !strings.HasPrefix(next, "*") && strings.Contains(next, ":") {
+				break
+			}
+			breaks = true
+			break
+		}
+	}
+	return needsSWE && breaks
 }
 
 // validate holds the refusals: host holds, waits and finished lanes win over
@@ -686,7 +727,7 @@ func recordOverlay(o options, op string, t *task, text string) error {
 
 // skillOps maps toolbox operations onto the subagent-swarm-nebula scripts.
 const skillOps = `set -eu
-sw=$1; RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7; phase=$8; brief=$9; status=${10}
+sw=$1; RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7; phase=$8; brief=$9; status=${10}; round=${11:-1}; current=${12:-}
 run=$RUN; [ ! -r "$RUN/env.sh" ] || . "$RUN/env.sh"
 # env.sh names the live run; a shadow copy's skill calls stay in the copy.
 # SW is the scripts directory SkillDir resolved, env.sh's own unless overridden.
@@ -730,8 +771,14 @@ case $op in
   snl_nb term screen "$tid" > "$scr" 2>/dev/null || : > "$scr"
   snl_nb term list "$sid" | /usr/bin/env python3 -c "$care" "$tid" "$ph" "$rep" "$scr" ;;
  lane.start) if [ -n "$phase" ]; then
-  if [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && type snl_to_review >/dev/null 2>&1 && [ "$phase" = review ]; then snl_to_review "$lane"
-  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && type snl_to_clean >/dev/null 2>&1 && [ "$phase" = clean ]; then snl_to_clean "$lane"
+  if [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$current" != "$phase" ] && [ "$phase" = review ]; then snl_to_review "$lane"
+  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$current" != "$phase" ] && [ "$phase" = clean ]; then snl_to_clean "$lane"
+  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$current" = review ] && [ "$phase" = swe ]; then
+    cap=${SNL_MAX_ROUNDS:-3}
+    [ "$round" -lt "$cap" ] || { echo "lane $lane review round $round reaches the review round cap $cap" >&2; exit 3; }
+    snl_brief swe "$lane" "$RUN/$brief"
+    python3 "$SW/ledger.py" set "$RUN" --id "$lane" --phase swe --round "$((round + 1))" >/dev/null
+    snl_spawn "$lane" swe "$RUN/briefs/$lane.swe.md"
   elif [ "$status" != running ] && type snl_fund_swe >/dev/null 2>&1; then snl_fund_swe "$lane" "$RUN/$brief"
   else
     [ "$status" = running ] || python3 "$SW/ledger.py" add "$RUN" --id "$lane" --title "$(basename "$brief")" --branch "${SNL_LANE_BRANCH:-swarm-lane/run/$SNL_RUN_ID/$lane}" --brief "$RUN/$brief" >/dev/null
@@ -860,7 +907,7 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", sw, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief, t.Status)
+	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", sw, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief, t.Status, strconv.Itoa(max(t.Round, 1)), t.Phase)
 	cmd.Dir = repo
 	raw, err := cmd.CombinedOutput()
 	if err != nil {

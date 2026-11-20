@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,7 @@ gh() {
 # snl_spawn takes the real _snl_spawn_locked arguments; a planned lane is
 # funded through snl_fund_planned, which writes its swe brief first.
 snl_spawn() { : "${1:?lane}" "${2:?phase}" "${3:?brief-file}"; [ -r "$3" ] || return 2; log spawn "$@"; }
+snl_brief() { log brief "$@"; mkdir -p "$RUN/briefs"; printf 'rendered SWE brief\n' > "$RUN/briefs/$2.swe.md"; }
 snl_to_review() { log to-review "$@"; }
 snl_to_clean() { log to-clean "$@"; }
 snl_fund_planned() { log fund-planned "$@"; }
@@ -80,6 +82,28 @@ snl_merge() { log merge "$1"; }
 snl_lane_slug() { echo o/r; }
 ghx() { log ghx "$@"; }
 snl_event() { log event "$@"; }
+`
+
+const ledgerStub = `import json, os, sys
+
+if sys.argv[1] == "set":
+    run = sys.argv[2]
+    args = dict(zip(sys.argv[3::2], sys.argv[4::2]))
+    with open(os.path.join(run, "state.json")) as f:
+        state = json.load(f)
+    for task in state["tasks"]:
+        if task.get("id") == args["--id"]:
+            for key, value in args.items():
+                field = key[2:].replace("-", "_")
+                if field == "round":
+                    value = int(value)
+                task[field] = value
+            break
+    with open(os.path.join(run, "state.json"), "w") as f:
+        json.dump(state, f)
+    if "--phase" in args and "--round" in args:
+        with open(os.environ["CALLS"], "a") as f:
+            f.write("ledger set %s %s %s\n" % (args["--id"], args["--phase"], args["--round"]))
 `
 
 // fixture returns a run directory whose env.sh exports RUN as that directory,
@@ -103,7 +127,7 @@ func fixture(t *testing.T) (dir, skill, calls string) {
 		filepath.Join(skill, "lane_ops.sh"):               `SNL_REPO_CONFIG="${SNL_REPO_CONFIG:-$(git rev-parse --show-toplevel)/.claude/swarm/repo-config.sh}"` + "\n",
 		filepath.Join(skill, "step.sh"):                   "",
 		filepath.Join(skill, "nebula"):                    fakeNebula,
-		filepath.Join(skill, "ledger.py"):                 "import sys\n",
+		filepath.Join(skill, "ledger.py"):                 ledgerStub,
 		filepath.Join(dir, "state.json"):                  strings.ReplaceAll(ledger, "REPO", repo),
 		filepath.Join(dir, "env.sh"):                      env,
 		filepath.Join(dir, "briefs", "expired.review.md"): "Review PR #9.\n",
@@ -398,37 +422,102 @@ func TestFundAndAdvanceByHand(t *testing.T) {
 	if !strings.Contains(skillCalls(t, calls), "spawn new swe "+brief) {
 		t.Fatalf("fund did not use skill spawn: %q", skillCalls(t, calls))
 	}
-	writeRun(t, dir, "working.hold-advance", "run rule\n")
-	writeRun(t, dir, "working.swe.md", "Outcome: done\nHEAD: abc123\n")
-	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "review"); err != nil {
-		t.Fatalf("advance: %v", err)
-	}
-	if got := skillCalls(t, calls); !strings.Contains(got, "to-review working\n") {
-		t.Fatalf("advance did not use the skill hand-off: %q", got)
-	}
-	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw = bytes.Replace(raw, []byte(`"id":"working","status":"running","phase":"swe"`), []byte(`"id":"working","status":"running","phase":"review"`), 1)
-	writeRun(t, dir, "state.json", string(raw))
-	writeRun(t, dir, "working.review.md", "Outcome: done\n")
-	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "clean"); err != nil {
-		t.Fatalf("second advance: %v", err)
-	}
-	if got := skillCalls(t, calls); !strings.Contains(got, "to-clean working\n") {
-		t.Fatalf("second advance did not use the skill hand-off: %q", got)
-	}
-	if err := os.Remove(filepath.Join(dir, "working.review.md")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "clean"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "phase") {
-		t.Fatalf("advance without verified current report: %v", err)
-	}
-	writeRun(t, dir, "working.review.md", "Outcome: done\n")
-	writeRun(t, dir, "working.hold", "owner hold\n")
-	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "clean"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "held") {
-		t.Fatalf("real hold allowed advance: %v", err)
+}
+
+func TestHandAdvance(t *testing.T) {
+	for _, tc := range []struct {
+		name, from, to string
+		round          int
+	}{
+		{"a", "clean", "review", 1},
+		{"b", "review", "swe", 1},
+		{"c", "swe", "clean", 2},
+		{"d", "review", "clean", 1},
+		{"swe-review", "swe", "review", 1},
+		{"rework-round-3", "review", "swe", 2},
+		{"rework-round-cap", "review", "swe", 3},
+		{"rework-default-round", "review", "swe", 0},
+		{"restart-swe", "swe", "swe", 1},
+		{"restart-review", "review", "review", 1},
+		{"restart-clean", "clean", "clean", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			modes := []string{"live", "hold", "no-advance-hold", "no-report", "shadow", "no-helper"}
+			if tc.to == "swe" {
+				modes = append(modes, "no-brief", "no-breaks", "done-report")
+			}
+			if tc.from == tc.to {
+				modes = []string{"live"}
+			}
+			for _, mode := range modes {
+				t.Run(mode, func(t *testing.T) {
+					t.Parallel()
+					dir, skill, calls := fixture(t)
+					raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					raw = bytes.Replace(raw, []byte(`"phase":"swe","round":1`), []byte(`"phase":"`+tc.from+`","round":`+strconv.Itoa(tc.round)), 1)
+					if tc.from == tc.to {
+						raw = bytes.Replace(raw, []byte(`"nebula_terminal":"t1"`), []byte(`"nebula_terminal":""`), 1)
+						writeRun(t, dir, "working."+tc.from+".brief.txt", "stored mission\n")
+					}
+					writeRun(t, dir, "state.json", string(raw))
+					if mode != "no-advance-hold" {
+						writeRun(t, dir, "working.hold-advance", "run rule\n")
+					}
+					if mode == "hold" {
+						writeRun(t, dir, "working.hold", "owner hold\n")
+					}
+					report := "Outcome: done\n"
+					if tc.to == "swe" && mode != "done-report" {
+						report = "Outcome: needs-swe\n"
+						if mode != "no-breaks" {
+							report += "Breaks: named defect\n"
+						}
+					}
+					if mode != "no-report" {
+						writeRun(t, dir, "working."+tc.from+".md", report)
+					}
+					writeRun(t, dir, "rework.md", "fix the named defect\n")
+					if mode == "no-helper" {
+						writeRun(t, skill, "swarm_nebula_lanes.sh", skillStub+"\nunset -f snl_brief snl_to_review snl_to_clean\n")
+					}
+					args := []string{"lane", "start", "working", "--phase", tc.to}
+					if tc.to == "swe" && mode != "no-brief" && tc.from != tc.to {
+						args = append(args, "--brief", "rework.md")
+					}
+					if mode == "shadow" {
+						args = append(args, "--shadow", "--intent-dir", t.TempDir())
+					}
+					_, err = run(t, dir, skill, args...)
+					refused := tc.name == "d" || tc.name == "rework-round-cap" || mode != "live" && mode != "shadow"
+					if refused && err == nil || !refused && err != nil || refused && mode != "no-helper" && !errors.Is(err, ErrRefused) {
+						t.Fatalf("refused=%t: %v", refused, err)
+					}
+					want := ""
+					if !refused && mode != "shadow" {
+						want = "to-" + tc.to + " working\n"
+						if tc.from == tc.to {
+							want = "spawn working " + tc.to + " " + filepath.Join(dir, "working."+tc.from+".brief.txt") + "\n"
+						} else if tc.to == "swe" {
+							mission := filepath.Join(dir, "rework.md") + "\n"
+							spawnBrief := filepath.Join(dir, "briefs", "working.swe.md")
+							want = "brief swe working " + mission + "ledger set working swe " + strconv.Itoa(max(tc.round, 1)+1) + "\nspawn working swe " + spawnBrief + "\n"
+						}
+					}
+					if got := skillCalls(t, calls); got != want {
+						t.Fatalf("skill calls = %q, want %q", got, want)
+					}
+					if tc.name == "b" && mode == "live" {
+						row := ledgerRow(t, dir, "working")
+						if row["phase"] != "swe" || row["round"] != float64(2) {
+							t.Fatalf("rework ledger row=%v, want phase=swe round=2", row)
+						}
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -446,7 +535,7 @@ func TestAdvanceNeedsCurrentRoundDoneReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeRun(t, dir, "reports/working.swe.r1.md", "Outcome: done\n")
-	writeRun(t, dir, "working.swe.md", "Outcome: done\n")
+	writeRun(t, dir, "working.swe.md", "The text says Outcome: done but is not a field\n")
 	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "review"); !errors.Is(err, ErrRefused) {
 		t.Fatalf("stale report allowed advance: %v", err)
 	}
