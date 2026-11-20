@@ -675,6 +675,50 @@ func TestSweReworkByHand(t *testing.T) {
 	}
 }
 
+func TestSweSamePhaseRestartStaysOnValidateWithoutReworkEvidence(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, args string
+		report     bool
+	}{
+		{name: "new brief without report", args: "--brief m.md"},
+		{name: "done report without brief", report: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, skill, calls := fixture(t)
+			raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A missing terminal is the restart case accepted by validate. The
+			// stored phase brief is still present for both same-phase starts.
+			raw = bytes.Replace(raw, []byte(`"nebula_terminal":"t1"`), []byte(`"nebula_terminal":""`), 1)
+			writeRun(t, dir, "state.json", string(raw))
+			writeRun(t, dir, "working.swe.brief.txt", "stored mission\n")
+			if tc.report {
+				writeRun(t, dir, "working.swe.md", "Outcome: done\n")
+			} else {
+				writeRun(t, dir, "m.md", "new mission\n")
+			}
+			args := []string{"lane", "start", "working", "--phase", "swe"}
+			if tc.args != "" {
+				args = append(args, strings.Fields(tc.args)...)
+			}
+			if _, err := run(t, dir, skill, args...); err != nil {
+				t.Fatalf("same-phase restart refused: %v", err)
+			}
+			brief := filepath.Join(dir, "working.swe.brief.txt")
+			if !tc.report {
+				brief = filepath.Join(dir, "m.md")
+			}
+			want := "spawn working swe " + brief + "\n"
+			if got := skillCalls(t, calls); got != want {
+				t.Fatalf("skill calls=%q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestAdvanceNeedsCurrentRoundDoneReport(t *testing.T) {
 	t.Parallel()
 	dir, skill, _ := fixture(t)

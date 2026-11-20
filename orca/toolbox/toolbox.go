@@ -172,7 +172,7 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 	case "lane.start", "lane.steer", "lane.stop":
 		if cmd == "lane.start" && o.phase != "" {
 			var err error
-			if t.Phase == o.phase && !(t.Phase == "swe" && (o.brief != "" || sweDoneReport(o.dir, t.ID))) {
+			if t.Phase == o.phase && !sweRework(o, t) {
 				err = validate(ctx, o, cmd, t, tasks)
 			} else {
 				err = validateAdvance(ctx, o, t)
@@ -396,15 +396,15 @@ func validateFunding(o options, t *task, tasks []task) error {
 }
 
 func validateAdvance(ctx context.Context, o options, t *task) error {
-	sweRework := t.Phase == "swe" && o.phase == "swe" && o.brief != ""
-	if t.Status != "running" || o.phase == "" || (t.Phase == o.phase && !sweRework) {
+	rework := sweRework(o, t)
+	if t.Status != "running" || o.phase == "" || (t.Phase == o.phase && !rework) {
 		return refuse("lane %s cannot advance from phase %q to %q", t.ID, t.Phase, o.phase)
 	}
 	wantPhase := map[string][]string{"swe": {"clean", "review", "swe"}, "clean": {"review"}, "review": {"swe"}}[t.Phase]
 	if !slices.Contains(wantPhase, o.phase) {
 		return refuse("lane %s cannot advance from phase %q to %q", t.ID, t.Phase, o.phase)
 	}
-	if (t.Phase == "review" && o.phase == "swe" || sweRework) && (o.brief == "" || !runFile(o.dir, o.brief)) {
+	if (t.Phase == "review" && o.phase == "swe" || rework) && (o.brief == "" || !runFile(o.dir, o.brief)) {
 		return refuse("lane %s rework needs a non-empty --brief inside the run", t.ID)
 	}
 	advanceHeld := slices.Contains(t.holds, t.ID+".hold-advance")
@@ -436,7 +436,7 @@ func validateAdvance(ctx context.Context, o options, t *task) error {
 		if reportNeedsSWEWithBreaks(string(raw)) {
 			return nil
 		}
-	} else if sweRework {
+	} else if rework {
 		if t.Round >= reviewRoundCap() {
 			return refuse("lane %s swe round %d reaches the review round cap %d", t.ID, t.Round, reviewRoundCap())
 		}
@@ -452,6 +452,11 @@ func validateAdvance(ctx context.Context, o options, t *task) error {
 func sweDoneReport(dir, id string) bool {
 	raw, err := os.ReadFile(filepath.Join(dir, id+".swe.md"))
 	return err == nil && reportOutcomeDone(string(raw))
+}
+
+func sweRework(o options, t *task) bool {
+	return t.Phase == "swe" && o.phase == "swe" && o.brief != "" &&
+		isFile(filepath.Join(o.dir, t.ID+".hold-advance")) && sweDoneReport(o.dir, t.ID)
 }
 
 // reviewRoundCap mirrors the swarm skill's default and environment override.
@@ -680,7 +685,7 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 		if found {
 			var validationErr error
 			if op == "lane.start" && o.phase != "" {
-				if t.Phase == o.phase && !(t.Phase == "swe" && (o.brief != "" || sweDoneReport(o.dir, t.ID))) {
+				if t.Phase == o.phase && !sweRework(o, t) {
 					validationErr = validate(ctx, o, op, t, tasks)
 				} else {
 					validationErr = validateAdvance(ctx, o, t)
@@ -787,7 +792,7 @@ func recordOverlay(o options, op string, t *task, text string) error {
 		entry.Fields["hold"] = "__hold-advance"
 	case "lane.start":
 		round := max(t.Round, 1)
-		if (t.Phase == "review" || t.Phase == "swe") && o.phase == "swe" && o.brief != "" {
+		if (t.Phase == "review" && o.phase == "swe" && o.brief != "") || sweRework(o, t) {
 			round++
 		}
 		entry.Fields["phase"], entry.Fields["round"] = cmp.Or(o.phase, t.Phase, "swe"), round
@@ -1025,7 +1030,7 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 		return "", err
 	}
 	rework := ""
-	if op == "lane.start" && o.phase != "" && o.phase == t.Phase && o.brief != "" {
+	if op == "lane.start" && sweRework(o, t) {
 		rework = "1"
 	}
 	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", sw, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief, t.Status, strconv.Itoa(max(t.Round, 1)), t.Phase, o.accept, rework)
