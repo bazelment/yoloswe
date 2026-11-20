@@ -192,6 +192,11 @@ func TestActionReceiptArgumentsMustMatchExactly(t *testing.T) {
 	if _, err := run(t, dir, skill, "note", "long", "--action-key", "same"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "different arguments") {
 		t.Fatalf("reused key with changed text: %v", err)
 	}
+	for range 2 {
+		if out, err := run(t, dir, skill, "note", "line one\nline two", "--action-key", "multiline"); err != nil || (out != "event run note line one\nline two\n" && out != "already recorded\n") {
+			t.Fatalf("multiline receipt out=%q err=%v", out, err)
+		}
+	}
 }
 
 func TestPRRerunIsExactHeadOnce(t *testing.T) {
@@ -228,16 +233,7 @@ func TestPRRerunPreflightRefusalCanBeRetried(t *testing.T) {
 	dir, skill, _ := byHandSkill(t)
 	writeRun(t, dir, "working.hold-advance", "run rule\n")
 	writeRun(t, dir, "working.review.md", "Verdict: pass\nHEAD: abc123\n")
-	f, err := os.OpenFile(filepath.Join(skill, "swarm_nebula_lanes.sh"), os.O_APPEND|os.O_WRONLY, 0o700)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = f.WriteString("\ngh() { case \"$1 $2\" in \"run list\") return 0;; esac; return 0; }\n"); err != nil {
-		t.Fatal(err)
-	}
-	if err = f.Close(); err != nil {
-		t.Fatal(err)
-	}
+	writeRun(t, skill, "step.sh", "gh() { return 0; }\n")
 	for _, key := range []string{"rerun-1", "rerun-2"} {
 		if _, err := run(t, dir, skill, "pr", "rerun", "7", "--action-key", key); err == nil || !strings.Contains(err.Error(), "no failed exact-head runs") {
 			t.Fatalf("rerun %s: %v", key, err)
@@ -282,18 +278,7 @@ func TestNeedsSWEMustStillMatchHeadAndGreenCI(t *testing.T) {
 			dir, skill, _ := byHandSkill(t)
 			writeRun(t, dir, "working.hold-advance", "run rule\n")
 			writeRun(t, dir, "working.review.md", tc.review)
-			if tc.override != "" {
-				f, err := os.OpenFile(filepath.Join(skill, "lane_ops.sh"), os.O_APPEND|os.O_WRONLY, 0o700)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err = f.WriteString(tc.override); err != nil {
-					t.Fatal(err)
-				}
-				if err = f.Close(); err != nil {
-					t.Fatal(err)
-				}
-			}
+			writeRun(t, skill, "step.sh", tc.override)
 			if _, err := run(t, dir, skill, "pr", "approve", "7", "--action-key", "approve"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("approval err=%v", err)
 			}

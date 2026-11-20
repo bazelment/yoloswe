@@ -371,7 +371,7 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 				continue
 			}
 			raw, readErr := os.ReadFile(filepath.Join(actions, entry.Name()))
-			if readErr == nil && receiptFingerprint(string(raw)) == fingerprint {
+			if readErr == nil && (strings.HasPrefix(string(raw), "done\n"+fingerprint+"\nkey=") || strings.HasPrefix(string(raw), "pending\n"+fingerprint+"\nkey=")) {
 				return refuse("PR rerun is already recorded for exact head %s", text)
 			}
 		}
@@ -428,23 +428,12 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 	return err
 }
 
-func receiptFingerprint(raw string) string {
-	lines := strings.Split(raw, "\n")
-	if len(lines) < 2 || (lines[0] != "done" && lines[0] != "pending") {
-		return ""
-	}
-	return lines[1]
-}
-
 func receiptMatches(raw, status, fingerprint, op, key string) bool {
-	lines := strings.Split(raw, "\n")
-	if len(lines) < 2 || lines[0] != status || lines[1] != fingerprint {
-		return false
-	}
+	want := status + "\n" + fingerprint
 	if op == "pr.rerun" {
-		return len(lines) == 3 && lines[2] == "key="+key
+		want += "\nkey=" + key
 	}
-	return len(lines) == 2
+	return raw == want
 }
 
 func rerunPreflightRefusal(err error) bool {
