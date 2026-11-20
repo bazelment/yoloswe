@@ -59,6 +59,15 @@ for t in json.load(sys.stdin).get("terminals", []):
 }
 snl_lane_remote_head() { : > "$RUN/.snl-lsr.probe"; echo "OK $(git rev-parse --show-toplevel)"; }
 snl_sandbox_busy() { false; }
+snl_lane_gh() { [ "$2" = pr ] && [ "$3" = view ] && echo abc123; }
+snl_report_word() { sed -n "s/^$3:[[:space:]]*//p" "$RUN/$1.$2.md" | head -1; }
+gh() {
+  case "$1 $2" in
+  "run list") echo 42 ;;
+  "run rerun") echo "gh-run-rerun $3 $4" >> "$CALLS" ;;
+  esac
+  return 0
+}
 # snl_spawn takes the real _snl_spawn_locked arguments; a planned lane is
 # funded through snl_fund_planned, which writes its swe brief first.
 snl_spawn() { : "${1:?lane}" "${2:?phase}" "${3:?brief-file}"; [ -r "$3" ] || return 2; log spawn "$@"; }
@@ -92,6 +101,7 @@ func fixture(t *testing.T) (dir, skill, calls string) {
 		filepath.Join(skill, "lane_ops.sh"):               `SNL_REPO_CONFIG="${SNL_REPO_CONFIG:-$(git rev-parse --show-toplevel)/.claude/swarm/repo-config.sh}"` + "\n",
 		filepath.Join(skill, "step.sh"):                   "",
 		filepath.Join(skill, "nebula"):                    fakeNebula,
+		filepath.Join(skill, "ledger.py"):                 "import sys\n",
 		filepath.Join(dir, "state.json"):                  strings.ReplaceAll(ledger, "REPO", repo),
 		filepath.Join(dir, "env.sh"):                      env,
 		filepath.Join(dir, "briefs", "expired.review.md"): "Review PR #9.\n",
@@ -170,6 +180,60 @@ func TestActionsRunSkillOncePerKey(t *testing.T) {
 		regexp.QuoteMeta("ghx api -X PUT repos/o/r/pulls/7/update-branch -f expected_head_sha=abc123\nclaims working abc123\nhead-checks working 7 abc123\nmerge working\n") + "$"
 	if !regexp.MustCompile(want).MatchString(got) {
 		t.Fatalf("skill calls=%q", got)
+	}
+}
+
+func TestPRRerunIsExactHeadOnce(t *testing.T) {
+	t.Parallel()
+	dir, skill, _ := byHandSkill(t)
+	writeRun(t, dir, "working.hold-advance", "run rule\n")
+	writeRun(t, dir, "working.review.md", "Verdict: pass\nHEAD: abc123\n")
+	if out, err := run(t, dir, skill, "pr", "rerun", "7", "--action-key", "rerun-1"); err != nil || out != "PR #7 rerun requested at abc123\n" {
+		t.Fatalf("first rerun out=%q err=%v", out, err)
+	}
+	if _, err := run(t, dir, skill, "pr", "approve", "7", "--action-key", "approve"); err != nil {
+		t.Fatalf("approve after green rerun: %v", err)
+	}
+	if _, err := run(t, dir, skill, "pr", "ready", "7", "--action-key", "ready"); err != nil {
+		t.Fatalf("ready after green rerun: %v", err)
+	}
+	if _, err := run(t, dir, skill, "pr", "merge", "7", "--action-key", "merge"); err != nil {
+		t.Fatalf("merge after green rerun: %v", err)
+	}
+	secondDir, secondSkill, secondCalls := fixture(t)
+	if _, err := run(t, secondDir, secondSkill, "pr", "rerun", "7", "--action-key", "rerun-1"); err != nil {
+		t.Fatalf("second fixture first rerun: %v", err)
+	}
+	if _, err := run(t, secondDir, secondSkill, "pr", "rerun", "7", "--action-key", "rerun-2"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "already recorded") {
+		t.Fatalf("second rerun err=%v", err)
+	}
+	if got := skillCalls(t, secondCalls); got != "gh-run-rerun 42 --failed\n" {
+		t.Fatalf("rerun calls=%q", got)
+	}
+}
+
+func TestNeedsSWEWithoutBreaksUsesApprovalPath(t *testing.T) {
+	t.Parallel()
+	dir, skill, calls := byHandSkill(t)
+	writeRun(t, dir, "working.hold-advance", "run rule\n")
+	writeRun(t, dir, "working.review.md", "Verdict: needs-swe\nBreaks:\nHEAD: abc123\n")
+	if out, err := run(t, dir, skill, "pr", "approve", "7", "--action-key", "approve"); err != nil || !strings.Contains(out, "approved at abc123") {
+		t.Fatalf("needs-swe approval out=%q err=%v", out, err)
+	}
+	if _, err := run(t, dir, skill, "pr", "ready", "7", "--action-key", "ready"); err != nil {
+		t.Fatalf("needs-swe ready: %v", err)
+	}
+	if _, err := run(t, dir, skill, "pr", "merge", "7", "--action-key", "merge"); err != nil {
+		t.Fatalf("needs-swe merge: %v", err)
+	}
+	if got := skillCalls(t, calls); !strings.Contains(got, "head-checks working 7 abc123") {
+		t.Fatalf("needs-swe did not verify CI: %q", got)
+	}
+	namedDir, namedSkill, _ := byHandSkill(t)
+	writeRun(t, namedDir, "working.hold-advance", "run rule\n")
+	writeRun(t, namedDir, "working.review.md", "Verdict: needs-swe\nBreaks: named defect\nHEAD: abc123\n")
+	if _, err := run(t, namedDir, namedSkill, "pr", "approve", "7", "--action-key", "approve-2"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "names Breaks") {
+		t.Fatalf("named Breaks err=%v", err)
 	}
 }
 

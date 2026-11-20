@@ -146,6 +146,14 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 			return refuse("PR #%d has no review PASS at its head: %v", t.PR, err)
 		}
 		return mutate(ctx, o, cmd, t, head, out)
+	case "pr.rerun":
+		if err := validate(ctx, o, cmd, t, tasks); err != nil {
+			return err
+		}
+		if t.PRHead == "" {
+			return refuse("PR #%d has no exact head to rerun", t.PR)
+		}
+		return mutate(ctx, o, cmd, t, t.PRHead, out)
 	case "pr.ready", "pr.update", "pr.merge":
 		if err := validate(ctx, o, cmd, t, tasks); err != nil {
 			return err
@@ -356,11 +364,28 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 	fingerprint := op + "\x00" + t.ID + "\x00" + text
 	sum := sha256.Sum256([]byte(cmp.Or(o.key, fingerprint)))
 	receipt := filepath.Join(actions, hex.EncodeToString(sum[:]))
+	if op == "pr.rerun" {
+		entries, _ := os.ReadDir(actions)
+		for _, entry := range entries {
+			if entry.Name() == "lock" || entry.Name() == filepath.Base(receipt) || entry.IsDir() {
+				continue
+			}
+			raw, readErr := os.ReadFile(filepath.Join(actions, entry.Name()))
+			if readErr == nil && strings.Contains(string(raw), "\n"+fingerprint) {
+				return refuse("PR rerun is already recorded for exact head %s", text)
+			}
+		}
+	}
 	switch raw, err := os.ReadFile(receipt); {
-	case err == nil && string(raw) == "done\n"+fingerprint:
+	case err == nil && strings.HasPrefix(string(raw), "done\n"+fingerprint):
+		if op == "pr.rerun" {
+			if strings.TrimPrefix(string(raw), "done\n"+fingerprint) != "\nkey="+o.key {
+				return refuse("PR rerun is already recorded for exact head %s", text)
+			}
+		}
 		_, err = fmt.Fprintln(out, "already recorded")
 		return err
-	case err == nil && string(raw) == "pending\n"+fingerprint:
+	case err == nil && strings.HasPrefix(string(raw), "pending\n"+fingerprint):
 		return refuse("action %s has uncertain effects; inspect before issuing a new action key", op)
 	case err == nil:
 		return refuse("action key %q was already used with different arguments", o.key)
@@ -379,7 +404,11 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 			return err
 		}
 	}
-	if err := os.WriteFile(receipt, []byte("pending\n"+fingerprint), 0o600); err != nil {
+	receiptBody := "pending\n" + fingerprint
+	if op == "pr.rerun" {
+		receiptBody += "\nkey=" + o.key
+	}
+	if err := os.WriteFile(receipt, []byte(receiptBody), 0o600); err != nil {
 		return err
 	}
 	result := "shadow: recorded"
@@ -389,7 +418,11 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 		result, err = skill(ctx, o, op, t, text)
 	}
 	if err == nil {
-		err = os.WriteFile(receipt, []byte("done\n"+fingerprint), 0o600)
+		done := "done\n" + fingerprint
+		if op == "pr.rerun" {
+			done += "\nkey=" + o.key
+		}
+		err = os.WriteFile(receipt, []byte(done), 0o600)
 	}
 	if err == nil {
 		_, err = fmt.Fprintln(out, result)
@@ -466,6 +499,19 @@ case $op in
  lane.start) if [ -n "$phase" ]; then snl_spawn "$lane" "$phase" "$RUN/$brief"; else snl_fund_planned "$lane"; fi ;;
  lane.steer) snl_nb term send "$tid" --file "$msg" ;;
  lane.stop) snl_nb term stop "$tid" ;;
+ pr.rerun) pr=$(snl_task "$lane" pr)
+  live=$(snl_lane_gh "$lane" pr view "$pr" --json headRefOid --jq .headRefOid) || { echo "PR head unreadable" >&2; exit 3; }
+  [ "$live" = "$text" ] || { echo "PR #$pr head $live does not match exact ledger head $text" >&2; exit 3; }
+  if type snl_pr_rerun_failed >/dev/null 2>&1; then
+    snl_pr_rerun_failed "$pr" "$text"
+  else
+    ids=$(gh run list --repo "$(snl_lane_slug "$lane")" --limit 100 --json databaseId,headSha,status,conclusion --jq '.[] | select(.headSha=="'"$text"'") | select(.status=="completed" and (.conclusion=="failure" or .conclusion=="timed_out")) | .databaseId')
+    [ -n "$ids" ] || { echo "PR #$pr has no failed exact-head runs to rerun" >&2; exit 3; }
+    while IFS= read -r id; do [ -z "$id" ] || gh run rerun "$id" --failed; done <<EOF
+$ids
+EOF
+  fi
+  echo "PR #$pr rerun requested at $text" ;;
  ready) pr=$(snl_task "$lane" pr); base=origin/${BASE:-main}
   git fetch -q origin "$(snl_task "$lane" branch)" "${BASE:-main}" 2>/dev/null || :
   # After orca pr update the PR head is the approved head plus base merges:
@@ -485,9 +531,21 @@ case $op in
    { echo "stale base: the oldest $base commit missing from $text is $((($(date +%s) - old) / 60)) min old (limit 120); orca pr update"; exit 3; } ;;
  lane.hold) [ -e "$RUN/$lane.hold-advance" ] || printf '%s\n' "$text" > "$RUN/$lane.hold-advance"; echo "lane $lane holds advance" ;;
  approval) pr=$(snl_task "$lane" pr); head=$(snl_report_word "$lane" review HEAD); verdict=$(snl_report_word "$lane" review Verdict)
-  [ "$verdict" = pass ] || { echo "review Verdict is '$verdict', not pass"; exit 3; }
+  case "$verdict" in
+  pass) ;;
+  needs-swe)
+    breaks=$(awk '
+      /^Breaks:/ {seen=1; sub(/^Breaks:[[:space:]]*/, ""); if (length($0)) {print; exit}; next}
+      seen && /^[[:alnum:] _-]+:/ {exit}
+      seen && $0 !~ /^[[:space:]]*$/ {print; exit}
+    ' "$RUN/$lane.review.md")
+    [ -z "$breaks" ] || { echo "review needs-swe names Breaks: $breaks"; exit 3; }
+    ;;
+  *) echo "review Verdict is '$verdict', not pass"; exit 3 ;;
+  esac
   new=$(snl_lane_gh "$lane" pr view "$pr" --json headRefOid --jq .headRefOid) || { echo "PR head unreadable"; exit 3; }
   [ -n "$head" ] && [ "$head" = "$new" ] || { echo "review HEAD ${head:-none} is not PR head ${new:-unknown}"; exit 3; }
+  [ "$verdict" != needs-swe ] || snl_head_checks "$lane" "$pr" "$head" >/dev/null
   echo "$head" ;;
  pr.approve) python3 "$SW/ledger.py" set "$RUN" --id "$lane" --pr-head "$text" --approval-sha "$text" >/dev/null; echo "PR #$(snl_task "$lane" pr) approved at $text" ;;
  pr.update) ghx api -X PUT "repos/$(snl_lane_slug "$lane")/pulls/$(snl_task "$lane" pr)/update-branch" -f expected_head_sha="$text" >/dev/null ;;
