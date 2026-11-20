@@ -414,11 +414,17 @@ func TestHandAdvance(t *testing.T) {
 		{"swe-review", "swe", "review", 1},
 		{"rework-round-3", "review", "swe", 2},
 		{"rework-default-round", "review", "swe", 0},
+		{"restart-swe", "swe", "swe", 1},
+		{"restart-review", "review", "review", 1},
+		{"restart-clean", "clean", "clean", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			modes := []string{"live", "hold", "no-advance-hold", "no-report", "shadow", "no-helper"}
 			if tc.to == "swe" {
 				modes = append(modes, "no-brief", "no-breaks", "done-report")
+			}
+			if tc.from == tc.to {
+				modes = []string{"live"}
 			}
 			for _, mode := range modes {
 				t.Run(mode, func(t *testing.T) {
@@ -429,6 +435,10 @@ func TestHandAdvance(t *testing.T) {
 						t.Fatal(err)
 					}
 					raw = bytes.Replace(raw, []byte(`"phase":"swe","round":1`), []byte(`"phase":"`+tc.from+`","round":`+strconv.Itoa(tc.round)), 1)
+					if tc.from == tc.to {
+						raw = bytes.Replace(raw, []byte(`"nebula_terminal":"t1"`), []byte(`"nebula_terminal":""`), 1)
+						writeRun(t, dir, "working."+tc.from+".brief.txt", "stored mission\n")
+					}
 					writeRun(t, dir, "state.json", string(raw))
 					if mode != "no-advance-hold" {
 						writeRun(t, dir, "working.hold-advance", "run rule\n")
@@ -451,7 +461,7 @@ func TestHandAdvance(t *testing.T) {
 						writeRun(t, skill, "swarm_nebula_lanes.sh", skillStub+"\nunset -f snl_brief snl_to_review snl_to_clean\n")
 					}
 					args := []string{"lane", "start", "working", "--phase", tc.to}
-					if tc.to == "swe" && mode != "no-brief" {
+					if tc.to == "swe" && mode != "no-brief" && tc.from != tc.to {
 						args = append(args, "--brief", "rework.md")
 					}
 					if mode == "shadow" {
@@ -459,27 +469,21 @@ func TestHandAdvance(t *testing.T) {
 					}
 					_, err = run(t, dir, skill, args...)
 					refused := tc.name == "d" || mode != "live" && mode != "shadow"
-					if refused {
-						if err == nil || mode != "no-helper" && !errors.Is(err, ErrRefused) {
-							t.Fatalf("expected refusal: %v", err)
-						}
-					} else if err != nil {
-						t.Fatal(err)
+					if refused && err == nil || !refused && err != nil || refused && mode != "no-helper" && !errors.Is(err, ErrRefused) {
+						t.Fatalf("refused=%t: %v", refused, err)
 					}
-					got := skillCalls(t, calls)
-					if refused || mode == "shadow" {
-						if got != "" {
-							t.Fatalf("unexpected skill write: %q", got)
-						}
-					} else {
-						want := "to-" + tc.to + " working\n"
-						if tc.to == "swe" {
+					want := ""
+					if !refused && mode != "shadow" {
+						want = "to-" + tc.to + " working\n"
+						if tc.from == tc.to {
+							want = "spawn working " + tc.to + " " + filepath.Join(dir, "working."+tc.from+".brief.txt") + "\n"
+						} else if tc.to == "swe" {
 							mission := filepath.Join(dir, "rework.md") + " " + strconv.Itoa(max(tc.round, 1)+1) + "\n"
 							want = "brief swe working " + mission + "spawn working swe " + mission
 						}
-						if got != want {
-							t.Fatalf("skill calls = %q, want %q", got, want)
-						}
+					}
+					if got := skillCalls(t, calls); got != want {
+						t.Fatalf("skill calls = %q, want %q", got, want)
 					}
 				})
 			}

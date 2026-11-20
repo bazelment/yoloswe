@@ -711,7 +711,7 @@ func recordOverlay(o options, op string, t *task, text string) error {
 
 // skillOps maps toolbox operations onto the subagent-swarm-nebula scripts.
 const skillOps = `set -eu
-sw=$1; RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7; phase=$8; brief=$9; status=${10}; round=${11:-1}
+sw=$1; RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7; phase=$8; brief=$9; status=${10}; round=${11:-1}; current=${12:-}
 run=$RUN; [ ! -r "$RUN/env.sh" ] || . "$RUN/env.sh"
 # env.sh names the live run; a shadow copy's skill calls stay in the copy.
 # SW is the scripts directory SkillDir resolved, env.sh's own unless overridden.
@@ -755,9 +755,9 @@ case $op in
   snl_nb term screen "$tid" > "$scr" 2>/dev/null || : > "$scr"
   snl_nb term list "$sid" | /usr/bin/env python3 -c "$care" "$tid" "$ph" "$rep" "$scr" ;;
  lane.start) if [ -n "$phase" ]; then
-  if [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$phase" = review ]; then snl_to_review "$lane"
-  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$phase" = clean ]; then snl_to_clean "$lane"
-  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$phase" = swe ]; then snl_brief swe "$lane" "$RUN/$brief" "$((round + 1))"; snl_spawn "$lane" swe "$RUN/$brief" "$((round + 1))"
+  if [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$current" != "$phase" ] && [ "$phase" = review ]; then snl_to_review "$lane"
+  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$current" != "$phase" ] && [ "$phase" = clean ]; then snl_to_clean "$lane"
+  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$current" = review ] && [ "$phase" = swe ]; then snl_brief swe "$lane" "$RUN/$brief" "$((round + 1))"; snl_spawn "$lane" swe "$RUN/$brief" "$((round + 1))"
   elif [ "$status" != running ] && type snl_fund_swe >/dev/null 2>&1; then snl_fund_swe "$lane" "$RUN/$brief"
   else
     [ "$status" = running ] || python3 "$SW/ledger.py" add "$RUN" --id "$lane" --title "$(basename "$brief")" --branch "${SNL_LANE_BRANCH:-swarm-lane/run/$SNL_RUN_ID/$lane}" --brief "$RUN/$brief" >/dev/null
@@ -886,7 +886,7 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", sw, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief, t.Status, strconv.Itoa(max(t.Round, 1)))
+	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", sw, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief, t.Status, strconv.Itoa(max(t.Round, 1)), t.Phase)
 	cmd.Dir = repo
 	raw, err := cmd.CombinedOutput()
 	if err != nil {
