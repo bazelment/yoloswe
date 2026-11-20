@@ -375,6 +375,35 @@ func TestShadowNoLiveWrites(t *testing.T) {
 	}
 }
 
+func TestShadowOverlayYieldsToMirror(t *testing.T) {
+	t.Parallel()
+	dir, skill, _ := fixture(t)
+	intent := t.TempDir()
+	writeRun(t, dir, "working.hold-advance", "run rule\n")
+	writeRun(t, dir, "working.swe.md", "Outcome: done\n")
+	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "review", "--shadow", "--intent-dir", intent); err != nil {
+		t.Fatal(err)
+	}
+	raw := skillCalls(t, filepath.Join(dir, "state.json"))
+	moved := strings.NewReplacer(`"phase":"swe","round":1`, `"phase":"clean","round":2`, `"nebula_session":"s1"`, `"nebula_session":"s3"`, `"nebula_terminal":"t1"`, `"nebula_terminal":"t3"`).Replace(raw)
+	writeRun(t, dir, "state.json", moved)
+	if _, err := run(t, dir, skill, "lane", "steer", "working", "file your report", "--shadow", "--intent-dir", intent); err != nil {
+		t.Fatal(err)
+	}
+	if actions := skillCalls(t, filepath.Join(intent, "actions.jsonl")); !strings.Contains(actions, `"terminal_id":"t3"`) {
+		t.Fatalf("steer missed mirror terminal: %s", actions)
+	}
+	if status, err := run(t, dir, skill, "status", "--shadow", "--intent-dir", intent); err != nil || !strings.Contains(status, `"Phase":"clean"`) {
+		t.Fatalf("status=%s err=%v", status, err)
+	}
+	if check, err := run(t, dir, skill, "check", "working", "--shadow", "--intent-dir", intent); err != nil || !strings.Contains(check, "phase=clean agent=idle") {
+		t.Fatalf("check=%s err=%v", check, err)
+	}
+	if overlay := skillCalls(t, filepath.Join(intent, "ledger-overlay.json")); overlay != "{}" {
+		t.Fatalf("stale intent retained: %s", overlay)
+	}
+}
+
 func TestShadowApprovalOverlayFeedsReady(t *testing.T) {
 	t.Parallel()
 	dir, skill, _ := fixture(t)
@@ -408,6 +437,10 @@ func TestShadowFundingOverlayAddsStatusRow(t *testing.T) {
 	out, err := run(t, dir, skill, "status", "--shadow", "--intent-dir", intent)
 	if err != nil || !strings.Contains(out, `"ID":"new"`) || !strings.Contains(out, `"Status":"running"`) {
 		t.Fatalf("status out=%q err=%v", out, err)
+	}
+	writeRun(t, dir, "state.json", strings.Replace(skillCalls(t, filepath.Join(dir, "state.json")), `"tasks":[`, `"tasks":[{"id":"new","status":"cancelled"},`, 1))
+	if out, err := run(t, dir, skill, "status", "--shadow", "--intent-dir", intent); err != nil || !strings.Contains(out, `"ID":"new","Status":"cancelled"`) {
+		t.Fatalf("mirror did not replace funded intent: %s %v", out, err)
 	}
 }
 

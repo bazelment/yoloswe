@@ -49,6 +49,13 @@ type task struct {
 	PR, Round                                                    int
 	DependsOn                                                    []string `json:"depends_on"`
 	holds                                                        []string
+	snapshot                                                     string
+}
+
+// overlayEntry applies only intent fields while the mirrored row is unchanged.
+type overlayEntry struct {
+	Fields map[string]any
+	Base   string
 }
 
 // ledgerHolds lists a ledger row's set holds: hold and any hold_* field, as
@@ -102,6 +109,20 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 			_, err = fmt.Fprintln(out, "changed: "+strings.Join(changed, ", "))
 		}
 		return err
+	}
+	if o.shadow {
+		// Take the overlay lock before mutate's action lock on every shadow path.
+		if err := os.MkdirAll(o.intent, 0o700); err != nil {
+			return err
+		}
+		lock, err := os.OpenFile(filepath.Join(o.intent, ".ledger-overlay.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+			return err
+		}
 	}
 	if cmd == "ask" || cmd == "note" {
 		if len(rest) == 0 {
@@ -274,6 +295,8 @@ func load(dir string) ([]task, error) {
 			return nil, fmt.Errorf("parse state.json: %w", err)
 		}
 		tasks[i].holds = ledgerHolds(fields)
+		canonical, _ := json.Marshal(fields)
+		tasks[i].snapshot = string(canonical)
 	}
 	return tasks, nil
 }
@@ -293,26 +316,33 @@ func loadFor(o options) ([]task, error) {
 	if err != nil {
 		return nil, err
 	}
-	var rows map[string]task
+	var rows map[string]overlayEntry
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		return nil, fmt.Errorf("parse shadow ledger overlay: %w", err)
 	}
+	dirty := false
 	for id := range rows {
-		fields := rows[id]
+		entry := rows[id]
 		i := slices.IndexFunc(tasks, func(t task) bool { return t.ID == id })
-		if i < 0 {
-			fields.ID, fields.Status = id, cmp.Or(fields.Status, "planned")
-			tasks = append(tasks, fields)
-		} else {
-			tasks[i] = fields
+		if i < 0 && entry.Base == "" && entry.Fields != nil {
+			tasks = append(tasks, task{ID: id})
+			i = len(tasks) - 1
 		}
-		if fields.Hold == "__hold-advance" {
-			j := i
-			if j < 0 {
-				j = len(tasks) - 1
-			}
-			tasks[j].holds = append(tasks[j].holds, id+".hold-advance")
+		if i < 0 || entry.Fields == nil || entry.Base != tasks[i].snapshot {
+			delete(rows, id)
+			dirty = true
+			continue
 		}
+		fields, _ := json.Marshal(entry.Fields)
+		if err := json.Unmarshal(fields, &tasks[i]); err != nil {
+			return nil, err
+		}
+		if tasks[i].Hold == "__hold-advance" {
+			tasks[i].holds = append(tasks[i].holds, id+".hold-advance")
+		}
+	}
+	if dirty {
+		return tasks, saveOverlay(o, rows)
 	}
 	return tasks, nil
 }
@@ -637,7 +667,7 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 	result := "shadow: recorded"
 	if o.shadow {
 		err = recordIntent(dir, op, t, text, o.key)
-		if err == nil && t.ID != "run" {
+		if err == nil && t.ID != "run" && (op == "lane.start" || op == "lane.hold" || op == "pr.approve") {
 			err = recordOverlay(o, op, t, text)
 		}
 	} else {
@@ -700,7 +730,7 @@ func recordIntent(dir, op string, t *task, text, key string) error {
 
 func recordOverlay(o options, op string, t *task, text string) error {
 	path := filepath.Join(o.intent, "ledger-overlay.json")
-	rows := map[string]task{}
+	rows := map[string]overlayEntry{}
 	if raw, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(raw, &rows); err != nil {
 			return err
@@ -708,21 +738,35 @@ func recordOverlay(o options, op string, t *task, text string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	row := *t
+	entry := rows[t.ID]
+	if entry.Fields == nil {
+		entry = overlayEntry{Base: t.snapshot, Fields: map[string]any{}}
+	}
 	switch op {
 	case "pr.approve":
-		row.PRHead, row.ApprovalSHA = text, text
+		entry.Fields["pr_head"], entry.Fields["approval_sha"] = text, text
 	case "lane.hold":
-		row.Hold = "__hold-advance"
+		entry.Fields["hold"] = "__hold-advance"
 	case "lane.start":
-		row.Status, row.Phase, row.Brief = "running", o.phase, t.Brief
+		round := max(t.Round, 1)
+		if t.Phase == "review" && o.phase == "swe" {
+			round++
+		}
+		entry.Fields["phase"], entry.Fields["round"] = cmp.Or(o.phase, t.Phase, "swe"), round
+		if entry.Base == "" { // preserve funding a lane absent from the mirror
+			entry.Fields["status"], entry.Fields["brief"], entry.Fields["depends_on"] = "running", t.Brief, t.DependsOn
+		}
 	}
-	rows[t.ID] = row
+	rows[t.ID] = entry
+	return saveOverlay(o, rows)
+}
+
+func saveOverlay(o options, rows map[string]overlayEntry) error {
 	b, err := json.Marshal(rows)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	return os.WriteFile(filepath.Join(o.intent, "ledger-overlay.json"), b, 0o600)
 }
 
 // skillOps maps toolbox operations onto the subagent-swarm-nebula scripts.
