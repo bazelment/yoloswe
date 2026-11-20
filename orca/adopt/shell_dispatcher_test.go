@@ -247,6 +247,11 @@ func TestAdoptedSkillFromRunEnvSW(t *testing.T) {
 			t.Errorf("adopted prompt does not name %s", want)
 		}
 	}
+	for _, want := range []string{"target repository's CLAUDE.md (Build and Test)", "scripts/known_reds.py --match <log>", "orca pr rerun <pr>", "needs-swe with an empty Breaks:", "exact-head CI is green"} {
+		if !strings.Contains(d.Config.SystemPrompt, want) {
+			t.Errorf("adopted prompt does not state %q", want)
+		}
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() { defer close(done); d.watch(ctx) }()
