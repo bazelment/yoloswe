@@ -1091,6 +1091,79 @@ func writeRun(t *testing.T, dir, name, body string) {
 	}
 }
 
+func draftPRSkill(t *testing.T, dir, skill, live string, onlyBase bool) string {
+	t.Helper()
+	draft := filepath.Join(dir, "draft-state")
+	writeRun(t, dir, "draft-state", "true\n")
+	f, err := os.OpenFile(filepath.Join(dir, "env.sh"), os.O_APPEND|os.O_WRONLY, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = fmt.Fprintf(f, "export DRAFT_STATE=%s\n", shq(draft))
+	_ = f.Close()
+	body := fmt.Sprintf(`snl_lane_gh() { if [ "$2" = pr ] && [ "$3" = view ]; then case "$*" in *isDraft*) cat "$DRAFT_STATE" ;; *) printf '%%s\n' %s ;; esac; elif [ "$2" = pr ] && [ "$3" = ready ]; then echo "pr-ready $4" >> "$CALLS"; printf 'false\n' > "$DRAFT_STATE"; else return 1; fi; }; snl_head_checks() { [ "$(cat "$DRAFT_STATE")" = false ] || return 1; log head-checks "$1" "$2" "$3"; }
+`, shq(live))
+	if onlyBase {
+		body += "snl_only_base_merges() { return 1; }\n"
+	}
+	f, err = os.OpenFile(filepath.Join(skill, "lane_ops.sh"), os.O_APPEND|os.O_WRONLY, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(body)
+	_ = f.Close()
+	return draft
+}
+
+func TestReadyDraftAndHeldFundingInnerLoop(t *testing.T) {
+	for _, tc := range []struct {
+		name, live, op      string
+		onlyBase, wantReady bool
+	}{{"approved draft", "abc123", "ready", false, true}, {"moved head", "def456", "ready", true, false}, {"merge draft", "abc123", "merge", false, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, skill, calls := fixture(t)
+			draft := draftPRSkill(t, dir, skill, tc.live, tc.onlyBase)
+			out, err := run(t, dir, skill, "pr", tc.op, "7")
+			got := skillCalls(t, calls)
+			if tc.wantReady {
+				if err != nil || out != "PR #7 ready at abc123\n" || strings.Count(got, "pr-ready 7\n") != 1 || !strings.Contains(got, "head-checks working 7 abc123") {
+					t.Fatalf("out=%q err=%v calls=%q", out, err, got)
+				}
+				return
+			}
+			if !errors.Is(err, ErrRefused) || strings.Contains(got, "pr-ready 7\n") {
+				t.Fatalf("out=%q err=%v calls=%q", out, err, got)
+			}
+			if tc.op == "merge" {
+				raw, _ := os.ReadFile(draft)
+				if strings.TrimSpace(string(raw)) != "true" {
+					t.Fatalf("draft state=%q", raw)
+				}
+			}
+		})
+	}
+
+	for _, hold := range []struct {
+		name  string
+		allow bool
+	}{{"hold-advance", true}, {"hold", false}, {"park", false}} {
+		t.Run("planned lane "+hold.name, func(t *testing.T) {
+			dir, skill, calls := fixture(t)
+			writeRun(t, dir, "funded."+hold.name, "owner hold\n")
+			_, err := run(t, dir, skill, "lane", "start", "funded")
+			if hold.allow {
+				if err != nil || !strings.Contains(skillCalls(t, calls), "fund-planned funded") {
+					t.Fatalf("fund err=%v calls=%q", err, skillCalls(t, calls))
+				}
+				return
+			}
+			if !errors.Is(err, ErrRefused) || skillCalls(t, calls) != "" {
+				t.Fatalf("hold=%s err=%v calls=%q", hold.name, err, skillCalls(t, calls))
+			}
+		})
+	}
+}
+
 // A held lane has no gate, so snl_merge refuses it: pr merge merges the
 // approved head by hand through pr_merge.sh and records the merge; shadow
 // records intent only.

@@ -237,7 +237,13 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		if cmd == "pr.update" {
 			return mutate(ctx, o, cmd, t, t.PRHead, out)
 		}
-		if _, err := skill(ctx, o, "ready", t, t.PRHead); err != nil {
+		readyOp := "ready"
+		if cmd == "pr.merge" {
+			// Merge still performs the ready checks, but a draft PR must remain a
+			// draft: only the explicit pr ready action may promote it.
+			readyOp = "merge-check"
+		}
+		if _, err := skill(ctx, o, readyOp, t, t.PRHead); err != nil {
 			return refuse("PR #%d is not ready at %s: %v", t.PR, t.PRHead, err)
 		}
 		// ready records the head it passed: the approved head or its base-only update.
@@ -541,7 +547,7 @@ func validate(ctx context.Context, o options, op string, t *task, tasks []task) 
 	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); err == nil {
 		virtualAdvance = true
 	}
-	if virtualAdvance && strings.HasPrefix(op, "lane.") && op != "lane.steer" && !(op == "lane.start" && o.phase != "") {
+	if virtualAdvance && strings.HasPrefix(op, "lane.") && op != "lane.steer" && !(op == "lane.start" && (o.phase != "" || t.Status == "planned")) {
 		held = append(held, t.ID+".hold-advance")
 	}
 	if len(held) > 0 {
@@ -905,7 +911,7 @@ $ids
 EOF
   fi
   echo "PR #$pr rerun requested at $text" ;;
- ready) pr=$(snl_task "$lane" pr); base=origin/${BASE:-main}
+ready|merge-check) pr=$(snl_task "$lane" pr); base=origin/${BASE:-main}
   git fetch -q origin "$(snl_task "$lane" branch)" "${BASE:-main}" 2>/dev/null || :
   # After orca pr update the PR head is the approved head plus base merges:
   # carry the approval and record the head as snl_gate does; refuse anything else.
@@ -916,12 +922,19 @@ EOF
    [ "$(sed -n 's/^PASS \([^ ]*\).*/\1/p' "$RUN/$lane.gate" 2>/dev/null)" != "$text" ] || echo "PASS $new" > "$RUN/$lane.gate"
    text=$new
   fi
-  snl_merge_claims "$lane" "$text"; snl_head_checks "$lane" "$pr" "$text"
+  snl_merge_claims "$lane" "$text"
   # SKILL.md's fresh-base guard: the oldest base commit missing from the head is at most two hours old.
-  ages=$(git log --format=%ct "$text..$base" 2>"$scr") || { echo "base age unknown: git cannot read $text..$base: $(head -c 300 "$scr")"; exit 3; }
+  ages=$(git log --format=%ct "$text..$base" 2>"$scr") || { snl_head_checks "$lane" "$pr" "$text" || exit $?; echo "base age unknown: git cannot read $text..$base: $(head -c 300 "$scr")"; exit 3; }
   old=$(printf '%s\n' "$ages" | tail -1)
   [ -z "$old" ] || [ $(($(date +%s) - old)) -le 7200 ] ||
-   { echo "stale base: the oldest $base commit missing from $text is $((($(date +%s) - old) / 60)) min old (limit 120); orca pr update"; exit 3; } ;;
+   { echo "stale base: the oldest $base commit missing from $text is $((($(date +%s) - old) / 60)) min old (limit 120); orca pr update"; exit 3; }
+  if [ "$op" = ready ]; then
+    draft=$(snl_lane_gh "$lane" pr view "$pr" --json isDraft --jq .isDraft) || { echo "PR draft state unreadable"; exit 3; }
+    if [ "$draft" = true ]; then
+      snl_lane_gh "$lane" pr ready "$pr" >/dev/null || { echo "PR #$pr could not be made ready"; exit 3; }
+    fi
+  fi
+  snl_head_checks "$lane" "$pr" "$text" ;;
  lane.hold) [ -e "$RUN/$lane.hold-advance" ] || printf '%s\n' "$text" > "$RUN/$lane.hold-advance"; echo "lane $lane holds advance" ;;
  accept-review-check) accept_review_gate; echo "$head" ;;
  approval|accept-review) pr=$(snl_task "$lane" pr); head=$(snl_report_word "$lane" review HEAD); verdict=$(snl_report_word "$lane" review Verdict)
