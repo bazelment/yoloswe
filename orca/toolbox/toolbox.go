@@ -368,7 +368,7 @@ func validateAdvance(ctx context.Context, o options, t *task) error {
 			return refuse("lane %s is held: %s%s", t.ID, t.ID, suffix)
 		}
 	}
-	for _, name := range phaseReportCandidates(o.dir, t) {
+	for _, name := range phaseReportCandidates(t) {
 		if !runFile(o.dir, name) {
 			continue
 		}
@@ -380,13 +380,13 @@ func validateAdvance(ctx context.Context, o options, t *task) error {
 	return refuse("lane %s current phase %q has no verified done report", t.ID, t.Phase)
 }
 
-func phaseReportCandidates(dir string, t *task) []string {
+func phaseReportCandidates(t *task) []string {
 	round := max(t.Round, 1)
-	return []string{
-		filepath.Join("reports", fmt.Sprintf("%s.%s.r%d.md", t.ID, t.Phase, round)),
-		t.ID + "." + t.Phase + ".md",
-		filepath.Join("reports", t.ID+"."+t.Phase+".md"),
+	candidates := []string{filepath.Join("reports", fmt.Sprintf("%s.%s.r%d.md", t.ID, t.Phase, round))}
+	if round <= 1 {
+		candidates = append(candidates, t.ID+"."+t.Phase+".md", filepath.Join("reports", t.ID+"."+t.Phase+".md"))
 	}
+	return candidates
 }
 
 func reportOutcomeDone(raw string) bool {

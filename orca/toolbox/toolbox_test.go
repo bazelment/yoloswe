@@ -446,6 +446,7 @@ func TestAdvanceNeedsCurrentRoundDoneReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeRun(t, dir, "reports/working.swe.r1.md", "Outcome: done\n")
+	writeRun(t, dir, "working.swe.md", "Outcome: done\n")
 	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "review"); !errors.Is(err, ErrRefused) {
 		t.Fatalf("stale report allowed advance: %v", err)
 	}
