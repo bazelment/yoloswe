@@ -374,6 +374,9 @@ func validateAdvance(ctx context.Context, o options, t *task) error {
 	}
 	raw, _ := os.ReadFile(filepath.Join(o.dir, name))
 	if t.Phase == "review" && o.phase == "swe" {
+		if t.Round >= reviewRoundCap() {
+			return refuse("lane %s review round %d reaches the review round cap %d", t.ID, t.Round, reviewRoundCap())
+		}
 		if reportNeedsSWEWithBreaks(string(raw)) {
 			return nil
 		}
@@ -381,6 +384,19 @@ func validateAdvance(ctx context.Context, o options, t *task) error {
 		return nil
 	}
 	return refuse("lane %s current phase %q has no verified done report", t.ID, t.Phase)
+}
+
+// reviewRoundCap mirrors the swarm skill's default and environment override.
+// The current review round is inclusive: a lane at the cap is escalated rather
+// than starting another SWE session.
+func reviewRoundCap() int {
+	const defaultCap = 3
+	raw := os.Getenv("SNL_MAX_ROUNDS")
+	cap, err := strconv.Atoi(raw)
+	if err != nil || cap < 1 {
+		return defaultCap
+	}
+	return cap
 }
 
 func reportOutcomeDone(raw string) bool {
@@ -757,7 +773,12 @@ case $op in
  lane.start) if [ -n "$phase" ]; then
   if [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$current" != "$phase" ] && [ "$phase" = review ]; then snl_to_review "$lane"
   elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$current" != "$phase" ] && [ "$phase" = clean ]; then snl_to_clean "$lane"
-  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$current" = review ] && [ "$phase" = swe ]; then snl_brief swe "$lane" "$RUN/$brief" "$((round + 1))"; snl_spawn "$lane" swe "$RUN/$brief" "$((round + 1))"
+  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$current" = review ] && [ "$phase" = swe ]; then
+    cap=${SNL_MAX_ROUNDS:-3}
+    [ "$round" -lt "$cap" ] || { echo "lane $lane review round $round reaches the review round cap $cap" >&2; exit 3; }
+    snl_brief swe "$lane" "$RUN/$brief"
+    python3 "$SW/ledger.py" set "$RUN" --id "$lane" --phase swe --round "$((round + 1))" >/dev/null
+    snl_spawn "$lane" swe "$RUN/briefs/$lane.swe.md"
   elif [ "$status" != running ] && type snl_fund_swe >/dev/null 2>&1; then snl_fund_swe "$lane" "$RUN/$brief"
   else
     [ "$status" = running ] || python3 "$SW/ledger.py" add "$RUN" --id "$lane" --title "$(basename "$brief")" --branch "${SNL_LANE_BRANCH:-swarm-lane/run/$SNL_RUN_ID/$lane}" --brief "$RUN/$brief" >/dev/null

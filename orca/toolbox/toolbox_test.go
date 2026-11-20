@@ -72,7 +72,7 @@ gh() {
 # snl_spawn takes the real _snl_spawn_locked arguments; a planned lane is
 # funded through snl_fund_planned, which writes its swe brief first.
 snl_spawn() { : "${1:?lane}" "${2:?phase}" "${3:?brief-file}"; [ -r "$3" ] || return 2; log spawn "$@"; }
-snl_brief() { log brief "$@"; }
+snl_brief() { log brief "$@"; mkdir -p "$RUN/briefs"; printf 'rendered SWE brief\n' > "$RUN/briefs/$2.swe.md"; }
 snl_to_review() { log to-review "$@"; }
 snl_to_clean() { log to-clean "$@"; }
 snl_fund_planned() { log fund-planned "$@"; }
@@ -82,6 +82,28 @@ snl_merge() { log merge "$1"; }
 snl_lane_slug() { echo o/r; }
 ghx() { log ghx "$@"; }
 snl_event() { log event "$@"; }
+`
+
+const ledgerStub = `import json, os, sys
+
+if sys.argv[1] == "set":
+    run = sys.argv[2]
+    args = dict(zip(sys.argv[3::2], sys.argv[4::2]))
+    with open(os.path.join(run, "state.json")) as f:
+        state = json.load(f)
+    for task in state["tasks"]:
+        if task.get("id") == args["--id"]:
+            for key, value in args.items():
+                field = key[2:].replace("-", "_")
+                if field == "round":
+                    value = int(value)
+                task[field] = value
+            break
+    with open(os.path.join(run, "state.json"), "w") as f:
+        json.dump(state, f)
+    if "--phase" in args and "--round" in args:
+        with open(os.environ["CALLS"], "a") as f:
+            f.write("ledger set %s %s %s\n" % (args["--id"], args["--phase"], args["--round"]))
 `
 
 // fixture returns a run directory whose env.sh exports RUN as that directory,
@@ -105,7 +127,7 @@ func fixture(t *testing.T) (dir, skill, calls string) {
 		filepath.Join(skill, "lane_ops.sh"):               `SNL_REPO_CONFIG="${SNL_REPO_CONFIG:-$(git rev-parse --show-toplevel)/.claude/swarm/repo-config.sh}"` + "\n",
 		filepath.Join(skill, "step.sh"):                   "",
 		filepath.Join(skill, "nebula"):                    fakeNebula,
-		filepath.Join(skill, "ledger.py"):                 "import sys\n",
+		filepath.Join(skill, "ledger.py"):                 ledgerStub,
 		filepath.Join(dir, "state.json"):                  strings.ReplaceAll(ledger, "REPO", repo),
 		filepath.Join(dir, "env.sh"):                      env,
 		filepath.Join(dir, "briefs", "expired.review.md"): "Review PR #9.\n",
@@ -413,6 +435,7 @@ func TestHandAdvance(t *testing.T) {
 		{"d", "review", "clean", 1},
 		{"swe-review", "swe", "review", 1},
 		{"rework-round-3", "review", "swe", 2},
+		{"rework-round-cap", "review", "swe", 3},
 		{"rework-default-round", "review", "swe", 0},
 		{"restart-swe", "swe", "swe", 1},
 		{"restart-review", "review", "review", 1},
@@ -468,7 +491,7 @@ func TestHandAdvance(t *testing.T) {
 						args = append(args, "--shadow", "--intent-dir", t.TempDir())
 					}
 					_, err = run(t, dir, skill, args...)
-					refused := tc.name == "d" || mode != "live" && mode != "shadow"
+					refused := tc.name == "d" || tc.name == "rework-round-cap" || mode != "live" && mode != "shadow"
 					if refused && err == nil || !refused && err != nil || refused && mode != "no-helper" && !errors.Is(err, ErrRefused) {
 						t.Fatalf("refused=%t: %v", refused, err)
 					}
@@ -478,12 +501,19 @@ func TestHandAdvance(t *testing.T) {
 						if tc.from == tc.to {
 							want = "spawn working " + tc.to + " " + filepath.Join(dir, "working."+tc.from+".brief.txt") + "\n"
 						} else if tc.to == "swe" {
-							mission := filepath.Join(dir, "rework.md") + " " + strconv.Itoa(max(tc.round, 1)+1) + "\n"
-							want = "brief swe working " + mission + "spawn working swe " + mission
+							mission := filepath.Join(dir, "rework.md") + "\n"
+							spawnBrief := filepath.Join(dir, "briefs", "working.swe.md")
+							want = "brief swe working " + mission + "ledger set working swe " + strconv.Itoa(max(tc.round, 1)+1) + "\nspawn working swe " + spawnBrief + "\n"
 						}
 					}
 					if got := skillCalls(t, calls); got != want {
 						t.Fatalf("skill calls = %q, want %q", got, want)
+					}
+					if tc.name == "b" && mode == "live" {
+						row := ledgerRow(t, dir, "working")
+						if row["phase"] != "swe" || row["round"] != float64(2) {
+							t.Fatalf("rework ledger row=%v, want phase=swe round=2", row)
+						}
 					}
 				})
 			}
