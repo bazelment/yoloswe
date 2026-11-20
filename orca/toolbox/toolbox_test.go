@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -399,64 +400,90 @@ func TestFundAndAdvanceByHand(t *testing.T) {
 	if !strings.Contains(skillCalls(t, calls), "spawn new swe "+brief) {
 		t.Fatalf("fund did not use skill spawn: %q", skillCalls(t, calls))
 	}
-	writeRun(t, dir, "working.hold-advance", "run rule\n")
-	writeRun(t, dir, "working.swe.md", "Outcome: done\nHEAD: abc123\n")
-	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "review", "--action-key", "swe-review"); err != nil {
-		t.Fatalf("swe to review: %v", err)
-	}
-	if got := skillCalls(t, calls); !strings.Contains(got, "to-review working\n") {
-		t.Fatalf("advance did not use the skill hand-off: %q", got)
-	}
-	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw = bytes.Replace(raw, []byte(`"id":"working","status":"running","phase":"swe"`), []byte(`"id":"working","status":"running","phase":"clean"`), 1)
-	writeRun(t, dir, "state.json", string(raw))
-	writeRun(t, dir, "working.clean.md", "Outcome: done\n")
-	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "review", "--action-key", "clean-review"); err != nil {
-		t.Fatalf("clean to review: %v", err)
-	}
-	if got := skillCalls(t, calls); strings.Count(got, "to-review working\n") != 2 {
-		t.Fatalf("clean to review did not use the skill hand-off: %q", got)
-	}
-	raw = bytes.Replace(raw, []byte(`"id":"working","status":"running","phase":"clean"`), []byte(`"id":"working","status":"running","phase":"swe","round":2`), 1)
-	writeRun(t, dir, "state.json", string(raw))
-	writeRun(t, dir, "working.swe.md", "Outcome: done\n")
-	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "clean", "--action-key", "swe-clean"); err != nil {
-		t.Fatalf("swe round 2 to clean: %v", err)
-	}
-	if got := skillCalls(t, calls); !strings.Contains(got, "to-clean working\n") {
-		t.Fatalf("swe round 2 did not use the skill hand-off: %q", got)
-	}
-	raw = bytes.Replace(raw, []byte(`"id":"working","status":"running","phase":"swe","round":2`), []byte(`"id":"working","status":"running","phase":"review","round":2`), 1)
-	writeRun(t, dir, "state.json", string(raw))
-	writeRun(t, dir, "working.review.md", "Outcome: needs-swe\nBreaks: named defect\n")
-	writeRun(t, dir, "rework.md", "fix the named defect\n")
-	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "swe", "--brief", "rework.md", "--action-key", "review-swe"); err != nil {
-		t.Fatalf("review to swe rework: %v", err)
-	}
-	if got := skillCalls(t, calls); !strings.Contains(got, "spawn working swe "+filepath.Join(dir, "rework.md")+" 2\n") {
-		t.Fatalf("rework did not use the skill spawn path: %q", got)
-	}
-	raw = bytes.Replace(raw, []byte(`"id":"working","status":"running","phase":"review","round":2`), []byte(`"id":"working","status":"running","phase":"review"`), 1)
-	writeRun(t, dir, "state.json", string(raw))
-	writeRun(t, dir, "working.review.md", "Outcome: done\n")
-	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "clean"); !errors.Is(err, ErrRefused) {
-		t.Fatalf("review to clean was allowed: %v", err)
-	}
-	writeRun(t, dir, "working.hold", "owner hold\n")
-	for _, phase := range []string{"review", "clean", "swe"} {
-		args := []string{"lane", "start", "working", "--phase", phase}
-		if phase == "swe" {
-			args = append(args, "--brief", "rework.md")
-		}
-		if _, err := run(t, dir, skill, args...); !errors.Is(err, ErrRefused) {
-			t.Fatalf("real hold allowed %s: %v", phase, err)
-		}
-	}
-	if got := skillCalls(t, calls); strings.Count(got, "to-clean working\n") != 1 || strings.Count(got, "spawn working swe") != 1 {
-		t.Fatalf("real hold reached the skill: %q", got)
+}
+
+func TestHandAdvance(t *testing.T) {
+	for _, tc := range []struct {
+		name, from, to string
+		round          int
+	}{
+		{"a", "clean", "review", 1},
+		{"b", "review", "swe", 1},
+		{"c", "swe", "clean", 2},
+		{"d", "review", "clean", 1},
+		{"swe-review", "swe", "review", 1},
+		{"rework-round-3", "review", "swe", 2},
+		{"rework-default-round", "review", "swe", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			modes := []string{"live", "hold", "no-advance-hold", "no-report", "shadow", "no-helper"}
+			if tc.to == "swe" {
+				modes = append(modes, "no-brief", "no-breaks", "done-report")
+			}
+			for _, mode := range modes {
+				t.Run(mode, func(t *testing.T) {
+					t.Parallel()
+					dir, skill, calls := fixture(t)
+					raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					raw = bytes.Replace(raw, []byte(`"phase":"swe","round":1`), []byte(`"phase":"`+tc.from+`","round":`+strconv.Itoa(tc.round)), 1)
+					writeRun(t, dir, "state.json", string(raw))
+					if mode != "no-advance-hold" {
+						writeRun(t, dir, "working.hold-advance", "run rule\n")
+					}
+					if mode == "hold" {
+						writeRun(t, dir, "working.hold", "owner hold\n")
+					}
+					report := "Outcome: done\n"
+					if tc.to == "swe" && mode != "done-report" {
+						report = "Outcome: needs-swe\n"
+						if mode != "no-breaks" {
+							report += "Breaks: named defect\n"
+						}
+					}
+					if mode != "no-report" {
+						writeRun(t, dir, "working."+tc.from+".md", report)
+					}
+					writeRun(t, dir, "rework.md", "fix the named defect\n")
+					if mode == "no-helper" {
+						writeRun(t, skill, "swarm_nebula_lanes.sh", skillStub+"\nunset -f snl_brief snl_to_review snl_to_clean\n")
+					}
+					args := []string{"lane", "start", "working", "--phase", tc.to}
+					if tc.to == "swe" && mode != "no-brief" {
+						args = append(args, "--brief", "rework.md")
+					}
+					if mode == "shadow" {
+						args = append(args, "--shadow", "--intent-dir", t.TempDir())
+					}
+					_, err = run(t, dir, skill, args...)
+					refused := tc.name == "d" || mode != "live" && mode != "shadow"
+					if refused {
+						if err == nil || mode != "no-helper" && !errors.Is(err, ErrRefused) {
+							t.Fatalf("expected refusal: %v", err)
+						}
+					} else if err != nil {
+						t.Fatal(err)
+					}
+					got := skillCalls(t, calls)
+					if refused || mode == "shadow" {
+						if got != "" {
+							t.Fatalf("unexpected skill write: %q", got)
+						}
+					} else {
+						want := "to-" + tc.to + " working\n"
+						if tc.to == "swe" {
+							mission := filepath.Join(dir, "rework.md") + " " + strconv.Itoa(max(tc.round, 1)+1) + "\n"
+							want = "brief swe working " + mission + "spawn working swe " + mission
+						}
+						if got != want {
+							t.Fatalf("skill calls = %q, want %q", got, want)
+						}
+					}
+				})
+			}
+		})
 	}
 }
 

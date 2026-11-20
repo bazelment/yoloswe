@@ -344,17 +344,12 @@ func validateAdvance(ctx context.Context, o options, t *task) error {
 	if t.Status != "running" || o.phase == "" || t.Phase == o.phase {
 		return refuse("lane %s cannot advance from phase %q to %q", t.ID, t.Phase, o.phase)
 	}
-	if o.phase != "review" && o.phase != "clean" {
-		if !(t.Phase == "review" && o.phase == "swe") {
-			return refuse("lane %s cannot advance to phase %q", t.ID, o.phase)
-		}
-	}
-	if t.Phase == "review" && o.phase == "swe" {
-		if o.brief == "" || !runFile(o.dir, o.brief) {
-			return refuse("lane %s rework needs a non-empty --brief inside the run", t.ID)
-		}
-	} else if wantPhase := map[string][]string{"swe": {"clean", "review"}, "clean": {"review"}}[t.Phase]; !slices.Contains(wantPhase, o.phase) {
+	wantPhase := map[string][]string{"swe": {"clean", "review"}, "clean": {"review"}, "review": {"swe"}}[t.Phase]
+	if !slices.Contains(wantPhase, o.phase) {
 		return refuse("lane %s cannot advance from phase %q to %q", t.ID, t.Phase, o.phase)
+	}
+	if t.Phase == "review" && (o.brief == "" || !runFile(o.dir, o.brief)) {
+		return refuse("lane %s rework needs a non-empty --brief inside the run", t.ID)
 	}
 	advanceHeld := slices.Contains(t.holds, t.ID+".hold-advance")
 	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); err == nil {
@@ -373,7 +368,7 @@ func validateAdvance(ctx context.Context, o options, t *task) error {
 			return refuse("lane %s is held: %s%s", t.ID, t.ID, suffix)
 		}
 	}
-	name := phaseReportCandidates(t)[0]
+	name := t.ID + "." + t.Phase + ".md"
 	if !runFile(o.dir, name) {
 		return refuse("lane %s current phase %q has no verified done report", t.ID, t.Phase)
 	}
@@ -386,10 +381,6 @@ func validateAdvance(ctx context.Context, o options, t *task) error {
 		return nil
 	}
 	return refuse("lane %s current phase %q has no verified done report", t.ID, t.Phase)
-}
-
-func phaseReportCandidates(t *task) []string {
-	return []string{t.ID + "." + t.Phase + ".md"}
 }
 
 func reportOutcomeDone(raw string) bool {
@@ -764,9 +755,9 @@ case $op in
   snl_nb term screen "$tid" > "$scr" 2>/dev/null || : > "$scr"
   snl_nb term list "$sid" | /usr/bin/env python3 -c "$care" "$tid" "$ph" "$rep" "$scr" ;;
  lane.start) if [ -n "$phase" ]; then
-  if [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && type snl_to_review >/dev/null 2>&1 && [ "$phase" = review ]; then snl_to_review "$lane"
-  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && type snl_to_clean >/dev/null 2>&1 && [ "$phase" = clean ]; then snl_to_clean "$lane"
-  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$phase" = swe ] && type snl_brief >/dev/null 2>&1; then snl_brief swe "$lane" "$RUN/$brief" "$((round + 1))"; snl_spawn "$lane" swe "$RUN/$brief" "$((round + 1))"
+  if [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$phase" = review ]; then snl_to_review "$lane"
+  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$phase" = clean ]; then snl_to_clean "$lane"
+  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$phase" = swe ]; then snl_brief swe "$lane" "$RUN/$brief" "$((round + 1))"; snl_spawn "$lane" swe "$RUN/$brief" "$((round + 1))"
   elif [ "$status" != running ] && type snl_fund_swe >/dev/null 2>&1; then snl_fund_swe "$lane" "$RUN/$brief"
   else
     [ "$status" = running ] || python3 "$SW/ledger.py" add "$RUN" --id "$lane" --title "$(basename "$brief")" --branch "${SNL_LANE_BRANCH:-swarm-lane/run/$SNL_RUN_ID/$lane}" --brief "$RUN/$brief" >/dev/null
@@ -895,7 +886,7 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", sw, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief, t.Status, strconv.Itoa(t.Round))
+	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", sw, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief, t.Status, strconv.Itoa(max(t.Round, 1)))
 	cmd.Dir = repo
 	raw, err := cmd.CombinedOutput()
 	if err != nil {
