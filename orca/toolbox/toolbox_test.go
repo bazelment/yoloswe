@@ -183,6 +183,17 @@ func TestActionsRunSkillOncePerKey(t *testing.T) {
 	}
 }
 
+func TestActionReceiptArgumentsMustMatchExactly(t *testing.T) {
+	t.Parallel()
+	dir, skill, _ := fixture(t)
+	if _, err := run(t, dir, skill, "note", "long message", "--action-key", "same"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, dir, skill, "note", "long", "--action-key", "same"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "different arguments") {
+		t.Fatalf("reused key with changed text: %v", err)
+	}
+}
+
 func TestPRRerunIsExactHeadOnce(t *testing.T) {
 	t.Parallel()
 	dir, skill, _ := byHandSkill(t)
@@ -212,6 +223,28 @@ func TestPRRerunIsExactHeadOnce(t *testing.T) {
 	}
 }
 
+func TestPRRerunPreflightRefusalCanBeRetried(t *testing.T) {
+	t.Parallel()
+	dir, skill, _ := byHandSkill(t)
+	writeRun(t, dir, "working.hold-advance", "run rule\n")
+	writeRun(t, dir, "working.review.md", "Verdict: pass\nHEAD: abc123\n")
+	f, err := os.OpenFile(filepath.Join(skill, "swarm_nebula_lanes.sh"), os.O_APPEND|os.O_WRONLY, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.WriteString("\ngh() { case \"$1 $2\" in \"run list\") return 0;; esac; return 0; }\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"rerun-1", "rerun-2"} {
+		if _, err := run(t, dir, skill, "pr", "rerun", "7", "--action-key", key); err == nil || !strings.Contains(err.Error(), "no failed exact-head runs") {
+			t.Fatalf("rerun %s: %v", key, err)
+		}
+	}
+}
+
 func TestNeedsSWEWithoutBreaksUsesApprovalPath(t *testing.T) {
 	t.Parallel()
 	dir, skill, calls := byHandSkill(t)
@@ -234,6 +267,37 @@ func TestNeedsSWEWithoutBreaksUsesApprovalPath(t *testing.T) {
 	writeRun(t, namedDir, "working.review.md", "Verdict: needs-swe\nBreaks: named defect\nHEAD: abc123\n")
 	if _, err := run(t, namedDir, namedSkill, "pr", "approve", "7", "--action-key", "approve-2"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "names Breaks") {
 		t.Fatalf("named Breaks err=%v", err)
+	}
+}
+
+func TestNeedsSWEMustStillMatchHeadAndGreenCI(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, review, override, want string
+	}{
+		{"report head differs", "Verdict: needs-swe\nBreaks:\nHEAD: stale\n", "", "review HEAD stale is not PR head abc123"},
+		{"exact head CI is red", "Verdict: needs-swe\nBreaks:\nHEAD: abc123\n", "snl_head_checks() { return 3; }\n", "no review PASS at its head"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, skill, _ := byHandSkill(t)
+			writeRun(t, dir, "working.hold-advance", "run rule\n")
+			writeRun(t, dir, "working.review.md", tc.review)
+			if tc.override != "" {
+				f, err := os.OpenFile(filepath.Join(skill, "lane_ops.sh"), os.O_APPEND|os.O_WRONLY, 0o700)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = f.WriteString(tc.override); err != nil {
+					t.Fatal(err)
+				}
+				if err = f.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := run(t, dir, skill, "pr", "approve", "7", "--action-key", "approve"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("approval err=%v", err)
+			}
+		})
 	}
 }
 

@@ -371,21 +371,16 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 				continue
 			}
 			raw, readErr := os.ReadFile(filepath.Join(actions, entry.Name()))
-			if readErr == nil && strings.Contains(string(raw), "\n"+fingerprint) {
+			if readErr == nil && receiptFingerprint(string(raw)) == fingerprint {
 				return refuse("PR rerun is already recorded for exact head %s", text)
 			}
 		}
 	}
 	switch raw, err := os.ReadFile(receipt); {
-	case err == nil && strings.HasPrefix(string(raw), "done\n"+fingerprint):
-		if op == "pr.rerun" {
-			if strings.TrimPrefix(string(raw), "done\n"+fingerprint) != "\nkey="+o.key {
-				return refuse("PR rerun is already recorded for exact head %s", text)
-			}
-		}
+	case err == nil && receiptMatches(string(raw), "done", fingerprint, op, o.key):
 		_, err = fmt.Fprintln(out, "already recorded")
 		return err
-	case err == nil && strings.HasPrefix(string(raw), "pending\n"+fingerprint):
+	case err == nil && receiptMatches(string(raw), "pending", fingerprint, op, o.key):
 		return refuse("action %s has uncertain effects; inspect before issuing a new action key", op)
 	case err == nil:
 		return refuse("action key %q was already used with different arguments", o.key)
@@ -426,8 +421,40 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 	}
 	if err == nil {
 		_, err = fmt.Fprintln(out, result)
+	} else if op == "pr.rerun" && rerunPreflightRefusal(err) {
+		// No GitHub mutation occurred for these checks, so a retry is safe.
+		_ = os.Remove(receipt)
 	}
 	return err
+}
+
+func receiptFingerprint(raw string) string {
+	lines := strings.Split(raw, "\n")
+	if len(lines) < 2 || (lines[0] != "done" && lines[0] != "pending") {
+		return ""
+	}
+	return lines[1]
+}
+
+func receiptMatches(raw, status, fingerprint, op, key string) bool {
+	lines := strings.Split(raw, "\n")
+	if len(lines) < 2 || lines[0] != status || lines[1] != fingerprint {
+		return false
+	}
+	if op == "pr.rerun" {
+		return len(lines) == 3 && lines[2] == "key="+key
+	}
+	return len(lines) == 2
+}
+
+func rerunPreflightRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "head unreadable") ||
+		strings.Contains(message, "does not match exact ledger head") ||
+		strings.Contains(message, "no failed exact-head runs to rerun")
 }
 
 // recordIntent appends a shadow action in the adopt.Action shape that the
