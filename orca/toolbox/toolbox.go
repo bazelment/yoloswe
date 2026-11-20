@@ -86,6 +86,9 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if absDir, absErr := filepath.Abs(o.dir); absErr == nil {
+		o.dir = absDir
+	}
 	if filepath.IsAbs(o.brief) {
 		if rel, relErr := filepath.Rel(o.dir, o.brief); relErr == nil && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".." {
 			o.brief = rel
@@ -146,7 +149,13 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	case "lane.start", "lane.steer", "lane.stop":
 		if cmd == "lane.start" && o.phase != "" {
-			if err := validateAdvance(ctx, o, t); err != nil {
+			var err error
+			if t.Phase == o.phase {
+				err = validate(ctx, o, cmd, t, tasks)
+			} else {
+				err = validateAdvance(ctx, o, t)
+			}
+			if err != nil {
 				return err
 			}
 		}
@@ -309,6 +318,12 @@ func loadFor(o options) ([]task, error) {
 }
 
 func validateFunding(o options, t *task, tasks []task) error {
+	if o.phase != "swe" {
+		return refuse("lane %s can only be funded at phase swe", t.ID)
+	}
+	if t.ID == "" || t.ID == "run" || strings.ContainsAny(t.ID, `/\\`) || t.ID == "." || t.ID == ".." {
+		return refuse("lane %s is not a valid lane id", t.ID)
+	}
 	if !runFile(o.dir, t.Brief) {
 		return refuse("lane %s brief file is missing, empty or outside the run", t.ID)
 	}
@@ -329,6 +344,13 @@ func validateAdvance(ctx context.Context, o options, t *task) error {
 	if t.Status != "running" || o.phase == "" || t.Phase == o.phase {
 		return refuse("lane %s cannot advance from phase %q to %q", t.ID, t.Phase, o.phase)
 	}
+	if o.phase != "review" && o.phase != "clean" {
+		return refuse("lane %s cannot advance to phase %q", t.ID, o.phase)
+	}
+	wantPhase := map[string]string{"swe": "review", "review": "clean"}[t.Phase]
+	if wantPhase == "" || o.phase != wantPhase {
+		return refuse("lane %s cannot advance from phase %q to %q", t.ID, t.Phase, o.phase)
+	}
 	advanceHeld := slices.Contains(t.holds, t.ID+".hold-advance")
 	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); err == nil {
 		advanceHeld = true
@@ -346,16 +368,34 @@ func validateAdvance(ctx context.Context, o options, t *task) error {
 			return refuse("lane %s is held: %s%s", t.ID, t.ID, suffix)
 		}
 	}
-	for _, name := range []string{t.ID + "." + t.Phase + ".md", filepath.Join("reports", t.ID+"."+t.Phase+".r1.md")} {
+	for _, name := range phaseReportCandidates(o.dir, t) {
 		if !runFile(o.dir, name) {
 			continue
 		}
 		raw, _ := os.ReadFile(filepath.Join(o.dir, name))
-		if strings.Contains(string(raw), "Outcome: done") {
+		if reportOutcomeDone(string(raw)) {
 			return nil
 		}
 	}
 	return refuse("lane %s current phase %q has no verified done report", t.ID, t.Phase)
+}
+
+func phaseReportCandidates(dir string, t *task) []string {
+	round := max(t.Round, 1)
+	return []string{
+		filepath.Join("reports", fmt.Sprintf("%s.%s.r%d.md", t.ID, t.Phase, round)),
+		t.ID + "." + t.Phase + ".md",
+		filepath.Join("reports", t.ID+"."+t.Phase+".md"),
+	}
+}
+
+func reportOutcomeDone(raw string) bool {
+	for _, line := range strings.Split(raw, "\n") {
+		if strings.TrimSpace(line) == "Outcome: done" {
+			return true
+		}
+	}
+	return false
 }
 
 // validate holds the refusals: host holds, waits and finished lanes win over
@@ -490,6 +530,9 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 		return err
 	}
 	fingerprint := op + "\x00" + t.ID + "\x00" + text
+	if op == "lane.start" {
+		fingerprint += "\x00phase=" + o.phase + "\x00brief=" + o.brief
+	}
 	sum := sha256.Sum256([]byte(cmp.Or(o.key, fingerprint)))
 	receipt := filepath.Join(actions, hex.EncodeToString(sum[:]))
 	if op == "pr.rerun" {
@@ -528,7 +571,11 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 		if found {
 			var validationErr error
 			if op == "lane.start" && o.phase != "" {
-				validationErr = validateAdvance(ctx, o, t)
+				if t.Phase == o.phase {
+					validationErr = validate(ctx, o, op, t, tasks)
+				} else {
+					validationErr = validateAdvance(ctx, o, t)
+				}
 			} else {
 				validationErr = validate(ctx, o, op, t, tasks)
 			}
@@ -549,7 +596,7 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 	result := "shadow: recorded"
 	if o.shadow {
 		err = recordIntent(dir, op, t, text, o.key)
-		if err == nil {
+		if err == nil && t.ID != "run" {
 			err = recordOverlay(o, op, t, text)
 		}
 	} else {
@@ -639,7 +686,7 @@ func recordOverlay(o options, op string, t *task, text string) error {
 
 // skillOps maps toolbox operations onto the subagent-swarm-nebula scripts.
 const skillOps = `set -eu
-sw=$1; RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7; phase=$8; brief=$9; status=$10
+sw=$1; RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7; phase=$8; brief=$9; status=${10}
 run=$RUN; [ ! -r "$RUN/env.sh" ] || . "$RUN/env.sh"
 # env.sh names the live run; a shadow copy's skill calls stay in the copy.
 # SW is the scripts directory SkillDir resolved, env.sh's own unless overridden.
@@ -683,8 +730,8 @@ case $op in
   snl_nb term screen "$tid" > "$scr" 2>/dev/null || : > "$scr"
   snl_nb term list "$sid" | /usr/bin/env python3 -c "$care" "$tid" "$ph" "$rep" "$scr" ;;
  lane.start) if [ -n "$phase" ]; then
-  if [ "$status" = running ] && type snl_to_review >/dev/null 2>&1 && [ "$phase" = review ]; then snl_to_review "$lane"
-  elif [ "$status" = running ] && type snl_to_clean >/dev/null 2>&1 && [ "$phase" = clean ]; then snl_to_clean "$lane"
+  if [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && type snl_to_review >/dev/null 2>&1 && [ "$phase" = review ]; then snl_to_review "$lane"
+  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && type snl_to_clean >/dev/null 2>&1 && [ "$phase" = clean ]; then snl_to_clean "$lane"
   elif [ "$status" != running ] && type snl_fund_swe >/dev/null 2>&1; then snl_fund_swe "$lane" "$RUN/$brief"
   else
     [ "$status" = running ] || python3 "$SW/ledger.py" add "$RUN" --id "$lane" --title "$(basename "$brief")" --branch "${SNL_LANE_BRANCH:-swarm-lane/run/$SNL_RUN_ID/$lane}" --brief "$RUN/$brief" >/dev/null

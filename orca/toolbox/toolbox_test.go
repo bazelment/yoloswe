@@ -342,6 +342,13 @@ func TestShadowNoLiveWrites(t *testing.T) {
 	if err != nil || !strings.Contains(string(actions), `"action":"lane.start"`) {
 		t.Fatalf("intent: %s %v", actions, err)
 	}
+	if _, err := run(t, dir, skill, "note", "shadow note", "--shadow", "--intent-dir", intent); err != nil {
+		t.Fatal(err)
+	}
+	status, err := run(t, dir, skill, "status", "--shadow", "--intent-dir", intent)
+	if err != nil || strings.Contains(status, `"ID":"run"`) {
+		t.Fatalf("shadow note created a phantom lane: %q %v", status, err)
+	}
 }
 
 func TestShadowApprovalOverlayFeedsReady(t *testing.T) {
@@ -396,16 +403,55 @@ func TestFundAndAdvanceByHand(t *testing.T) {
 	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "review"); err != nil {
 		t.Fatalf("advance: %v", err)
 	}
-	if err := os.Remove(filepath.Join(dir, "working.swe.md")); err != nil {
+	if got := skillCalls(t, calls); !strings.Contains(got, "to-review working\n") {
+		t.Fatalf("advance did not use the skill hand-off: %q", got)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = bytes.Replace(raw, []byte(`"id":"working","status":"running","phase":"swe"`), []byte(`"id":"working","status":"running","phase":"review"`), 1)
+	writeRun(t, dir, "state.json", string(raw))
+	writeRun(t, dir, "working.review.md", "Outcome: done\n")
+	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "clean"); err != nil {
+		t.Fatalf("second advance: %v", err)
+	}
+	if got := skillCalls(t, calls); !strings.Contains(got, "to-clean working\n") {
+		t.Fatalf("second advance did not use the skill hand-off: %q", got)
+	}
+	if err := os.Remove(filepath.Join(dir, "working.review.md")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "clean"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "phase") {
 		t.Fatalf("advance without verified current report: %v", err)
 	}
-	writeRun(t, dir, "working.swe.md", "Outcome: done\n")
+	writeRun(t, dir, "working.review.md", "Outcome: done\n")
 	writeRun(t, dir, "working.hold", "owner hold\n")
-	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "review"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "held") {
+	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "clean"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "held") {
 		t.Fatalf("real hold allowed advance: %v", err)
+	}
+}
+
+func TestAdvanceNeedsCurrentRoundDoneReport(t *testing.T) {
+	t.Parallel()
+	dir, skill, _ := fixture(t)
+	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = bytes.Replace(raw, []byte(`"id":"working","status":"running","phase":"swe","round":1`), []byte(`"id":"working","status":"running","phase":"swe","round":2`), 1)
+	writeRun(t, dir, "state.json", string(raw))
+	writeRun(t, dir, "working.hold-advance", "run rule\n")
+	if err := os.MkdirAll(filepath.Join(dir, "reports"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeRun(t, dir, "reports/working.swe.r1.md", "Outcome: done\n")
+	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "review"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("stale report allowed advance: %v", err)
+	}
+	writeRun(t, dir, "reports/working.swe.r2.md", "The text says Outcome: done but is not a field\n")
+	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "review"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("malformed report allowed advance: %v", err)
 	}
 }
 
