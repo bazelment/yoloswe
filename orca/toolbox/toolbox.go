@@ -172,7 +172,7 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 	case "lane.start", "lane.steer", "lane.stop":
 		if cmd == "lane.start" && o.phase != "" {
 			var err error
-			if t.Phase == o.phase {
+			if t.Phase == o.phase && !(t.Phase == "swe" && (o.brief != "" || sweDoneReport(o.dir, t.ID))) {
 				err = validate(ctx, o, cmd, t, tasks)
 			} else {
 				err = validateAdvance(ctx, o, t)
@@ -396,14 +396,15 @@ func validateFunding(o options, t *task, tasks []task) error {
 }
 
 func validateAdvance(ctx context.Context, o options, t *task) error {
-	if t.Status != "running" || o.phase == "" || t.Phase == o.phase {
+	sweRework := t.Phase == "swe" && o.phase == "swe" && o.brief != ""
+	if t.Status != "running" || o.phase == "" || (t.Phase == o.phase && !sweRework) {
 		return refuse("lane %s cannot advance from phase %q to %q", t.ID, t.Phase, o.phase)
 	}
-	wantPhase := map[string][]string{"swe": {"clean", "review"}, "clean": {"review"}, "review": {"swe"}}[t.Phase]
+	wantPhase := map[string][]string{"swe": {"clean", "review", "swe"}, "clean": {"review"}, "review": {"swe"}}[t.Phase]
 	if !slices.Contains(wantPhase, o.phase) {
 		return refuse("lane %s cannot advance from phase %q to %q", t.ID, t.Phase, o.phase)
 	}
-	if t.Phase == "review" && (o.brief == "" || !runFile(o.dir, o.brief)) {
+	if (t.Phase == "review" && o.phase == "swe" || sweRework) && (o.brief == "" || !runFile(o.dir, o.brief)) {
 		return refuse("lane %s rework needs a non-empty --brief inside the run", t.ID)
 	}
 	advanceHeld := slices.Contains(t.holds, t.ID+".hold-advance")
@@ -435,10 +436,22 @@ func validateAdvance(ctx context.Context, o options, t *task) error {
 		if reportNeedsSWEWithBreaks(string(raw)) {
 			return nil
 		}
+	} else if sweRework {
+		if t.Round >= reviewRoundCap() {
+			return refuse("lane %s swe round %d reaches the review round cap %d", t.ID, t.Round, reviewRoundCap())
+		}
+		if reportOutcomeDone(string(raw)) {
+			return nil
+		}
 	} else if reportOutcomeDone(string(raw)) {
 		return nil
 	}
 	return refuse("lane %s current phase %q has no verified done report", t.ID, t.Phase)
+}
+
+func sweDoneReport(dir, id string) bool {
+	raw, err := os.ReadFile(filepath.Join(dir, id+".swe.md"))
+	return err == nil && reportOutcomeDone(string(raw))
 }
 
 // reviewRoundCap mirrors the swarm skill's default and environment override.
@@ -667,7 +680,7 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 		if found {
 			var validationErr error
 			if op == "lane.start" && o.phase != "" {
-				if t.Phase == o.phase {
+				if t.Phase == o.phase && !(t.Phase == "swe" && (o.brief != "" || sweDoneReport(o.dir, t.ID))) {
 					validationErr = validate(ctx, o, op, t, tasks)
 				} else {
 					validationErr = validateAdvance(ctx, o, t)
@@ -774,7 +787,7 @@ func recordOverlay(o options, op string, t *task, text string) error {
 		entry.Fields["hold"] = "__hold-advance"
 	case "lane.start":
 		round := max(t.Round, 1)
-		if t.Phase == "review" && o.phase == "swe" {
+		if (t.Phase == "review" || t.Phase == "swe") && o.phase == "swe" && o.brief != "" {
 			round++
 		}
 		entry.Fields["phase"], entry.Fields["round"] = cmp.Or(o.phase, t.Phase, "swe"), round
@@ -796,7 +809,7 @@ func saveOverlay(o options, rows map[string]overlayEntry) error {
 
 // skillOps maps toolbox operations onto the subagent-swarm-nebula scripts.
 const skillOps = `set -eu
-sw=$1; RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7; phase=$8; brief=$9; status=${10}; round=${11:-1}; current=${12:-}
+sw=$1; RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7; phase=$8; brief=$9; status=${10}; round=${11:-1}; current=${12:-}; rework=${14:-}
 run=$RUN; [ ! -r "$RUN/env.sh" ] || . "$RUN/env.sh"
 # env.sh names the live run; a shadow copy's skill calls stay in the copy.
 # SW is the scripts directory SkillDir resolved, env.sh's own unless overridden.
@@ -854,6 +867,12 @@ case $op in
  lane.start) if [ -n "$phase" ]; then
   if [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$current" != "$phase" ] && [ "$phase" = review ]; then snl_to_review "$lane"
   elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$current" != "$phase" ] && [ "$phase" = clean ]; then snl_to_clean "$lane"
+  elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$current" = swe ] && [ "$phase" = swe ] && [ "$rework" = 1 ]; then
+    cap=${SNL_MAX_ROUNDS:-3}
+    [ "$round" -lt "$cap" ] || { echo "lane $lane swe round $round reaches the review round cap $cap" >&2; exit 3; }
+    snl_brief swe "$lane" "$RUN/$brief"
+    python3 "$SW/ledger.py" set "$RUN" --id "$lane" --phase swe --round "$((round + 1))" >/dev/null
+    snl_spawn "$lane" swe "$RUN/briefs/$lane.swe.md"
   elif [ "$status" = running ] && [ -e "$RUN/$lane.hold-advance" ] && [ "$current" = review ] && [ "$phase" = swe ]; then
     cap=${SNL_MAX_ROUNDS:-3}
     [ "$round" -lt "$cap" ] || { echo "lane $lane review round $round reaches the review round cap $cap" >&2; exit 3; }
@@ -1005,7 +1024,11 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", sw, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief, t.Status, strconv.Itoa(max(t.Round, 1)), t.Phase, o.accept)
+	rework := ""
+	if op == "lane.start" && o.phase != "" && o.phase == t.Phase && o.brief != "" {
+		rework = "1"
+	}
+	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", sw, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief, t.Status, strconv.Itoa(max(t.Round, 1)), t.Phase, o.accept, rework)
 	cmd.Dir = repo
 	raw, err := cmd.CombinedOutput()
 	if err != nil {
