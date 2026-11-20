@@ -71,6 +71,8 @@ gh() {
 # snl_spawn takes the real _snl_spawn_locked arguments; a planned lane is
 # funded through snl_fund_planned, which writes its swe brief first.
 snl_spawn() { : "${1:?lane}" "${2:?phase}" "${3:?brief-file}"; [ -r "$3" ] || return 2; log spawn "$@"; }
+snl_to_review() { log to-review "$@"; }
+snl_to_clean() { log to-clean "$@"; }
 snl_fund_planned() { log fund-planned "$@"; }
 snl_merge_claims() { log claims "$1" "$2"; }
 snl_head_checks() { log head-checks "$1" "$2" "$3"; }
@@ -339,6 +341,71 @@ func TestShadowNoLiveWrites(t *testing.T) {
 	actions, err := os.ReadFile(filepath.Join(intent, "actions.jsonl"))
 	if err != nil || !strings.Contains(string(actions), `"action":"lane.start"`) {
 		t.Fatalf("intent: %s %v", actions, err)
+	}
+}
+
+func TestShadowApprovalOverlayFeedsReady(t *testing.T) {
+	t.Parallel()
+	dir, skill, _ := fixture(t)
+	writeRun(t, dir, "working.hold-advance", "run rule\n")
+	writeRun(t, dir, "working.review.md", "Verdict: pass\nHEAD: abc123\n")
+	// The copied ledger is stale: approval must project the reviewed head before
+	// the following ready read performs its exact-head check.
+	raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = bytes.Replace(raw, []byte(`"pr_head":"abc123","approval_sha":"abc123"`), []byte(`"pr_head":"old","approval_sha":"old"`), 1)
+	writeRun(t, dir, "state.json", string(raw))
+	intent := t.TempDir()
+	if _, err := run(t, dir, skill, "pr", "approve", "7", "--shadow", "--intent-dir", intent); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if out, err := run(t, dir, skill, "pr", "ready", "7", "--shadow", "--intent-dir", intent); err != nil || !strings.Contains(out, "PR #7 ready at abc123") {
+		t.Fatalf("ready out=%q err=%v", out, err)
+	}
+}
+
+func TestShadowFundingOverlayAddsStatusRow(t *testing.T) {
+	t.Parallel()
+	dir, skill, _ := fixture(t)
+	writeRun(t, dir, "new.md", "Cause check: verified\nWork\n")
+	intent := t.TempDir()
+	if _, err := run(t, dir, skill, "lane", "start", "new", "--phase", "swe", "--brief", filepath.Join(dir, "new.md"), "--shadow", "--intent-dir", intent); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+	out, err := run(t, dir, skill, "status", "--shadow", "--intent-dir", intent)
+	if err != nil || !strings.Contains(out, `"ID":"new"`) || !strings.Contains(out, `"Status":"running"`) {
+		t.Fatalf("status out=%q err=%v", out, err)
+	}
+}
+
+func TestFundAndAdvanceByHand(t *testing.T) {
+	t.Parallel()
+	dir, skill, calls := fixture(t)
+	brief := filepath.Join(dir, "new.md")
+	writeRun(t, dir, "new.md", "Cause check: synthetic dependency verified\nWork\n")
+	if _, err := run(t, dir, skill, "lane", "start", "new", "--phase", "swe", "--brief", brief); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+	if !strings.Contains(skillCalls(t, calls), "spawn new swe "+brief) {
+		t.Fatalf("fund did not use skill spawn: %q", skillCalls(t, calls))
+	}
+	writeRun(t, dir, "working.hold-advance", "run rule\n")
+	writeRun(t, dir, "working.swe.md", "Outcome: done\nHEAD: abc123\n")
+	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "review"); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "working.swe.md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "clean"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "phase") {
+		t.Fatalf("advance without verified current report: %v", err)
+	}
+	writeRun(t, dir, "working.swe.md", "Outcome: done\n")
+	writeRun(t, dir, "working.hold", "owner hold\n")
+	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "review"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "held") {
+		t.Fatalf("real hold allowed advance: %v", err)
 	}
 }
 

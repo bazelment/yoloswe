@@ -30,9 +30,9 @@ var (
 
 //nolint:govet // CLI options are grouped by parse concern.
 type options struct {
-	dir, intent, skill, key, reason string
-	shadow                          bool
-	timeout                         time.Duration
+	dir, intent, skill, key, reason, phase, brief, dependsOn string
+	shadow                                                   bool
+	timeout                                                  time.Duration
 }
 
 //nolint:govet // ledger projection follows the run JSON shape.
@@ -86,6 +86,11 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if filepath.IsAbs(o.brief) {
+		if rel, relErr := filepath.Rel(o.dir, o.brief); relErr == nil && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".." {
+			o.brief = rel
+		}
+	}
 	if cmd == "wait" {
 		ctx, cancel := context.WithTimeout(ctx, cmp.Or(o.timeout, Heartbeat))
 		defer cancel()
@@ -101,7 +106,7 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		return mutate(ctx, o, cmd, &task{ID: "run"}, strings.Join(rest, " "), out)
 	}
-	tasks, err := load(o.dir)
+	tasks, err := loadFor(o)
 	if err != nil {
 		return err
 	}
@@ -117,6 +122,18 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 	}
 	i := slices.IndexFunc(tasks, match)
 	if i < 0 {
+		if cmd == "lane.start" && o.phase != "" && o.brief != "" {
+			t := &task{ID: rest[0], Status: "planned", Phase: "", Brief: o.brief}
+			for _, dep := range strings.Split(o.dependsOn, ",") {
+				if dep = strings.TrimSpace(dep); dep != "" {
+					t.DependsOn = append(t.DependsOn, dep)
+				}
+			}
+			if err := validateFunding(o, t, tasks); err != nil {
+				return err
+			}
+			return mutate(ctx, o, cmd, t, "", out)
+		}
 		return refuse("%q is not in this run", rest[0])
 	}
 	t := &tasks[i]
@@ -128,6 +145,11 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		return err
 	case "lane.start", "lane.steer", "lane.stop":
+		if cmd == "lane.start" && o.phase != "" {
+			if err := validateAdvance(ctx, o, t); err != nil {
+				return err
+			}
+		}
 		return mutate(ctx, o, cmd, t, strings.Join(rest[1:], " "), out)
 	case "lane.hold":
 		if isFile(filepath.Join(o.dir, t.ID+".hold-advance")) {
@@ -170,7 +192,7 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 			return refuse("PR #%d is not ready at %s: %v", t.PR, t.PRHead, err)
 		}
 		// ready records the head it passed: the approved head or its base-only update.
-		if tasks, err = load(o.dir); err != nil {
+		if tasks, err = loadFor(o); err != nil {
 			return err
 		}
 		if i = slices.IndexFunc(tasks, func(c task) bool { return c.ID == t.ID }); i < 0 {
@@ -196,6 +218,9 @@ func parse(args []string) (options, []string, error) {
 	fs.StringVar(&o.skill, "skill", os.Getenv("ORCA_SNL_DIR"), "swarm skill scripts directory")
 	fs.StringVar(&o.key, "action-key", "", "idempotency key")
 	fs.StringVar(&o.reason, "reason", "", "lane hold reason")
+	fs.StringVar(&o.phase, "phase", "", "target lane phase")
+	fs.StringVar(&o.brief, "brief", "", "run-local lane brief")
+	fs.StringVar(&o.dependsOn, "depends-on", "", "comma-separated lane dependencies")
 	fs.BoolVar(&o.shadow, "shadow", os.Getenv("ORCA_TOOLBOX_SHADOW") == "1", "record intent only")
 	fs.DurationVar(&o.timeout, "timeout", 0, "wait timeout")
 	var rest []string
@@ -244,6 +269,95 @@ func load(dir string) ([]task, error) {
 	return tasks, nil
 }
 
+func loadFor(o options) ([]task, error) {
+	tasks, err := load(o.dir)
+	if err != nil {
+		return nil, err
+	}
+	if !o.shadow || o.intent == "" {
+		return tasks, nil
+	}
+	raw, err := os.ReadFile(filepath.Join(o.intent, "ledger-overlay.json"))
+	if os.IsNotExist(err) {
+		return tasks, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var rows map[string]task
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("parse shadow ledger overlay: %w", err)
+	}
+	for id := range rows {
+		fields := rows[id]
+		i := slices.IndexFunc(tasks, func(t task) bool { return t.ID == id })
+		if i < 0 {
+			fields.ID, fields.Status = id, cmp.Or(fields.Status, "planned")
+			tasks = append(tasks, fields)
+		} else {
+			tasks[i] = fields
+		}
+		if fields.Hold == "__hold-advance" {
+			j := i
+			if j < 0 {
+				j = len(tasks) - 1
+			}
+			tasks[j].holds = append(tasks[j].holds, id+".hold-advance")
+		}
+	}
+	return tasks, nil
+}
+
+func validateFunding(o options, t *task, tasks []task) error {
+	if !runFile(o.dir, t.Brief) {
+		return refuse("lane %s brief file is missing, empty or outside the run", t.ID)
+	}
+	raw, err := os.ReadFile(filepath.Join(o.dir, t.Brief))
+	if err != nil || !strings.Contains(string(raw), "Cause check:") {
+		return refuse("lane %s brief must contain a Cause check:", t.ID)
+	}
+	for _, dep := range t.DependsOn {
+		i := slices.IndexFunc(tasks, func(d task) bool { return d.ID == dep })
+		if i < 0 {
+			return refuse("lane %s depends on unknown lane %s", t.ID, dep)
+		}
+	}
+	return nil
+}
+
+func validateAdvance(ctx context.Context, o options, t *task) error {
+	if t.Status != "running" || o.phase == "" || t.Phase == o.phase {
+		return refuse("lane %s cannot advance from phase %q to %q", t.ID, t.Phase, o.phase)
+	}
+	advanceHeld := slices.Contains(t.holds, t.ID+".hold-advance")
+	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); err == nil {
+		advanceHeld = true
+	}
+	if !advanceHeld {
+		return refuse("lane %s is not held for hand advance", t.ID)
+	}
+	for _, hold := range t.holds {
+		if hold != t.ID+".hold-advance" {
+			return refuse("lane %s is held: %s", t.ID, hold)
+		}
+	}
+	for _, suffix := range holdFiles {
+		if _, err := os.Stat(filepath.Join(o.dir, t.ID+suffix)); err == nil {
+			return refuse("lane %s is held: %s%s", t.ID, t.ID, suffix)
+		}
+	}
+	for _, name := range []string{t.ID + "." + t.Phase + ".md", filepath.Join("reports", t.ID+"."+t.Phase+".r1.md")} {
+		if !runFile(o.dir, name) {
+			continue
+		}
+		raw, _ := os.ReadFile(filepath.Join(o.dir, name))
+		if strings.Contains(string(raw), "Outcome: done") {
+			return nil
+		}
+	}
+	return refuse("lane %s current phase %q has no verified done report", t.ID, t.Phase)
+}
+
 // validate holds the refusals: host holds, waits and finished lanes win over
 // any dispatcher action, and a live action needs a live current terminal.
 func validate(ctx context.Context, o options, op string, t *task, tasks []task) error {
@@ -256,13 +370,24 @@ func validate(ctx context.Context, o options, op string, t *task, tasks []task) 
 	// .hold-advance stops the watcher advancing and integrating a lane; it
 	// reserves those for the orchestrator, so steering and a hand merge
 	// (pr ready|update|merge) pass it. Every other hold refuses every action.
-	held := slices.Clone(t.holds)
+	held := make([]string, 0, len(t.holds))
+	virtualAdvance := false
+	for _, hold := range t.holds {
+		if hold == t.ID+".hold-advance" {
+			virtualAdvance = true
+			continue
+		}
+		held = append(held, hold)
+	}
 	for _, suffix := range holdFiles {
 		if _, err := os.Stat(filepath.Join(o.dir, t.ID+suffix)); err == nil {
 			held = append(held, t.ID+suffix)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); err == nil && strings.HasPrefix(op, "lane.") && op != "lane.steer" {
+	if _, err := os.Stat(filepath.Join(o.dir, t.ID+".hold-advance")); err == nil {
+		virtualAdvance = true
+	}
+	if virtualAdvance && strings.HasPrefix(op, "lane.") && op != "lane.steer" && !(op == "lane.start" && o.phase != "") {
 		held = append(held, t.ID+".hold-advance")
 	}
 	if len(held) > 0 {
@@ -320,7 +445,11 @@ func validate(ctx context.Context, o options, op string, t *task, tasks []task) 
 
 // runFile reports whether name is a non-empty regular file inside the run.
 func runFile(dir, name string) bool {
-	path, err := filepath.EvalSymlinks(filepath.Join(dir, name))
+	pathName := name
+	if !filepath.IsAbs(pathName) {
+		pathName = filepath.Join(dir, pathName)
+	}
+	path, err := filepath.EvalSymlinks(pathName)
 	if err != nil || !inside(dir, path) {
 		return false
 	}
@@ -330,17 +459,16 @@ func runFile(dir, name string) bool {
 
 // phaseBrief is the run-relative brief the skill stored for the lane's
 // current phase: the copy snl_spawn keeps, else the written phase brief.
-func phaseBrief(dir string, t *task) string {
-	if t.Phase == "" {
-		return ""
-	}
-	for _, name := range []string{t.ID + "." + t.Phase + ".brief.txt", filepath.Join("briefs", t.ID+"."+t.Phase+".md")} {
+func phaseBriefFor(dir, id, phase string) string {
+	for _, name := range []string{id + "." + phase + ".brief.txt", filepath.Join("briefs", id+"."+phase+".md")} {
 		if runFile(dir, name) {
 			return name
 		}
 	}
 	return ""
 }
+
+func phaseBrief(dir string, t *task) string { return phaseBriefFor(dir, t.ID, t.Phase) }
 
 // mutate refuses unsafe actions, then runs the skill once per action key. A
 // pending receipt after a crash refuses a retry whose effect is uncertain.
@@ -388,15 +516,27 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 		return err
 	}
 	if t.ID != "run" { // recheck under the lock against the current ledger
-		tasks, err := load(o.dir)
+		tasks, err := loadFor(o)
 		if err != nil {
 			return err
 		}
+		found := false
 		if i := slices.IndexFunc(tasks, func(c task) bool { return c.ID == t.ID }); i >= 0 {
 			t = &tasks[i]
+			found = true
 		}
-		if err := validate(ctx, o, op, t, tasks); err != nil {
-			return err
+		if found {
+			var validationErr error
+			if op == "lane.start" && o.phase != "" {
+				validationErr = validateAdvance(ctx, o, t)
+			} else {
+				validationErr = validate(ctx, o, op, t, tasks)
+			}
+			if validationErr != nil {
+				return validationErr
+			}
+		} else if !(op == "lane.start" && o.phase != "") {
+			return refuse("lane %s is not in the ledger", t.ID)
 		}
 	}
 	receiptBody := "pending\n" + fingerprint
@@ -409,6 +549,9 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 	result := "shadow: recorded"
 	if o.shadow {
 		err = recordIntent(dir, op, t, text, o.key)
+		if err == nil {
+			err = recordOverlay(o, op, t, text)
+		}
 	} else {
 		result, err = skill(ctx, o, op, t, text)
 	}
@@ -467,9 +610,36 @@ func recordIntent(dir, op string, t *task, text, key string) error {
 	return err
 }
 
+func recordOverlay(o options, op string, t *task, text string) error {
+	path := filepath.Join(o.intent, "ledger-overlay.json")
+	rows := map[string]task{}
+	if raw, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	row := *t
+	switch op {
+	case "pr.approve":
+		row.PRHead, row.ApprovalSHA = text, text
+	case "lane.hold":
+		row.Hold = "__hold-advance"
+	case "lane.start":
+		row.Status, row.Phase, row.Brief = "running", o.phase, t.Brief
+	}
+	rows[t.ID] = row
+	b, err := json.Marshal(rows)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0o600)
+}
+
 // skillOps maps toolbox operations onto the subagent-swarm-nebula scripts.
 const skillOps = `set -eu
-sw=$1; RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7; phase=$8; brief=$9
+sw=$1; RUN=$2; op=$3; lane=$4; sid=$5; tid=$6; text=$7; phase=$8; brief=$9; status=$10
 run=$RUN; [ ! -r "$RUN/env.sh" ] || . "$RUN/env.sh"
 # env.sh names the live run; a shadow copy's skill calls stay in the copy.
 # SW is the scripts directory SkillDir resolved, env.sh's own unless overridden.
@@ -512,7 +682,15 @@ case $op in
   if [ -s "$RUN/$lane.$ph.md" ]; then rep=yes; else rep=no; fi
   snl_nb term screen "$tid" > "$scr" 2>/dev/null || : > "$scr"
   snl_nb term list "$sid" | /usr/bin/env python3 -c "$care" "$tid" "$ph" "$rep" "$scr" ;;
- lane.start) if [ -n "$phase" ]; then snl_spawn "$lane" "$phase" "$RUN/$brief"; else snl_fund_planned "$lane"; fi ;;
+ lane.start) if [ -n "$phase" ]; then
+  if [ "$status" = running ] && type snl_to_review >/dev/null 2>&1 && [ "$phase" = review ]; then snl_to_review "$lane"
+  elif [ "$status" = running ] && type snl_to_clean >/dev/null 2>&1 && [ "$phase" = clean ]; then snl_to_clean "$lane"
+  elif [ "$status" != running ] && type snl_fund_swe >/dev/null 2>&1; then snl_fund_swe "$lane" "$RUN/$brief"
+  else
+    [ "$status" = running ] || python3 "$SW/ledger.py" add "$RUN" --id "$lane" --title "$(basename "$brief")" --branch "${SNL_LANE_BRANCH:-swarm-lane/run/$SNL_RUN_ID/$lane}" --brief "$RUN/$brief" >/dev/null
+    snl_spawn "$lane" "$phase" "$RUN/$brief"
+  fi
+ else snl_fund_planned "$lane"; fi ;;
  lane.steer) snl_nb term send "$tid" --file "$msg" ;;
  lane.stop) snl_nb term stop "$tid" ;;
  pr.rerun) pr=$(snl_task "$lane" pr)
@@ -621,7 +799,12 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 		return "", err
 	}
 	phase, brief := "", ""
-	if op == "lane.start" && t.Status == "running" {
+	if op == "lane.start" && o.phase != "" {
+		phase, brief = o.phase, o.brief
+		if brief == "" {
+			brief = phaseBriefFor(o.dir, t.ID, o.phase)
+		}
+	} else if op == "lane.start" && t.Status == "running" {
 		phase, brief = t.Phase, phaseBrief(o.dir, t)
 	} else if op == "check" {
 		phase = t.Phase
@@ -630,7 +813,7 @@ func skill(ctx context.Context, o options, op string, t *task, text string) (str
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", sw, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief)
+	cmd := exec.CommandContext(ctx, "bash", "-c", skillOps, "orca-toolbox", sw, o.dir, op, t.ID, t.NebulaSession, t.NebulaTerminal, text, phase, brief, t.Status)
 	cmd.Dir = repo
 	raw, err := cmd.CombinedOutput()
 	if err != nil {
