@@ -351,6 +351,17 @@ func TestNeedsSWEAcceptFollowUp(t *testing.T) {
 		t.Fatalf("skill calls=%q", got)
 	}
 
+	shadowDir, shadowSkill, _ := setup(t, 5, "Verdict: needs-swe\nBreaks: cosmetic\nHEAD: "+head+"\n", head, "")
+	shadowIntent := t.TempDir()
+	before, _ := os.ReadFile(filepath.Join(shadowDir, "working.review.md"))
+	if _, err := run(t, shadowDir, shadowSkill, "pr", "approve", "7", "--accept", "cosmetic follow-up", "--shadow", "--intent-dir", shadowIntent); err != nil {
+		t.Fatalf("shadow accept: %v", err)
+	}
+	after, _ := os.ReadFile(filepath.Join(shadowDir, "working.review.md"))
+	if !bytes.Equal(before, after) {
+		t.Fatalf("shadow acceptance rewrote review: before=%q after=%q", before, after)
+	}
+
 	review := "Verdict: needs-swe\nBreaks: cosmetic\nHEAD: " + head + "\n"
 	for _, tc := range []struct {
 		name, override, live, accept string
