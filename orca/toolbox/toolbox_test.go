@@ -624,6 +624,101 @@ func TestHandAdvance(t *testing.T) {
 	}
 }
 
+func TestSweReworkByHand(t *testing.T) {
+	t.Parallel()
+	setup := func(t *testing.T, held, brief bool, round int) (string, string, string) {
+		dir, skill, calls := fixture(t)
+		if held {
+			writeRun(t, dir, "working.hold-advance", "run rule\n")
+		}
+		writeRun(t, dir, "working.swe.md", "Outcome: done\n")
+		if brief {
+			writeRun(t, dir, "rework.md", "Cause check: synthetic gap\nFix it\n")
+		}
+		if round != 1 {
+			raw, _ := os.ReadFile(filepath.Join(dir, "state.json"))
+			writeRun(t, dir, "state.json", strings.Replace(string(raw), `"round":1`, fmt.Sprintf(`"round":%d`, round), 1))
+		}
+		return dir, skill, calls
+	}
+	dir, skill, calls := setup(t, true, true, 1)
+	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "swe", "--brief", "rework.md"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(skillCalls(t, calls), "ledger set working swe 2") {
+		t.Fatalf("rework did not bump round: %q", skillCalls(t, calls))
+	}
+	for _, tc := range []struct {
+		name        string
+		held, brief bool
+		round       int
+	}{{"missing brief", true, false, 1}, {"missing hold", false, true, 1}, {"round cap", true, true, 3}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, skill, calls := setup(t, tc.held, tc.brief, tc.round)
+			args := []string{"lane", "start", "working", "--phase", "swe", "--brief", "rework.md"}
+			if !tc.brief {
+				args = args[:len(args)-2]
+			}
+			if _, err := run(t, dir, skill, args...); !errors.Is(err, ErrRefused) || skillCalls(t, calls) != "" {
+				t.Fatalf("want refusal, err=%v calls=%q", err, skillCalls(t, calls))
+			}
+		})
+	}
+	dir, skill, _ = setup(t, true, true, 1)
+	intent := t.TempDir()
+	if _, err := run(t, dir, skill, "lane", "start", "working", "--phase", "swe", "--brief", "rework.md", "--shadow", "--intent-dir", intent); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(intent, "ledger-overlay.json"))
+	if err != nil || !strings.Contains(string(raw), `"round":2`) {
+		t.Fatalf("overlay=%s err=%v", raw, err)
+	}
+}
+
+func TestSweSamePhaseRestartStaysOnValidateWithoutReworkEvidence(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, args string
+		report     bool
+	}{
+		{name: "new brief without report", args: "--brief m.md"},
+		{name: "done report without brief", report: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, skill, calls := fixture(t)
+			raw, err := os.ReadFile(filepath.Join(dir, "state.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A missing terminal is the restart case accepted by validate. The
+			// stored phase brief is still present for both same-phase starts.
+			raw = bytes.Replace(raw, []byte(`"nebula_terminal":"t1"`), []byte(`"nebula_terminal":""`), 1)
+			writeRun(t, dir, "state.json", string(raw))
+			writeRun(t, dir, "working.swe.brief.txt", "stored mission\n")
+			if tc.report {
+				writeRun(t, dir, "working.swe.md", "Outcome: done\n")
+			} else {
+				writeRun(t, dir, "m.md", "new mission\n")
+			}
+			args := []string{"lane", "start", "working", "--phase", "swe"}
+			if tc.args != "" {
+				args = append(args, strings.Fields(tc.args)...)
+			}
+			if _, err := run(t, dir, skill, args...); err != nil {
+				t.Fatalf("same-phase restart refused: %v", err)
+			}
+			brief := filepath.Join(dir, "working.swe.brief.txt")
+			if !tc.report {
+				brief = filepath.Join(dir, "m.md")
+			}
+			want := "spawn working swe " + brief + "\n"
+			if got := skillCalls(t, calls); got != want {
+				t.Fatalf("skill calls=%q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestAdvanceNeedsCurrentRoundDoneReport(t *testing.T) {
 	t.Parallel()
 	dir, skill, _ := fixture(t)
