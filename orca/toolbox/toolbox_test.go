@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -307,6 +308,64 @@ func TestNeedsSWEMustStillMatchHeadAndGreenCI(t *testing.T) {
 			writeRun(t, skill, "step.sh", tc.override)
 			if _, err := run(t, dir, skill, "pr", "approve", "7", "--action-key", "approve"); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("approval err=%v", err)
+			}
+		})
+	}
+}
+
+func TestNeedsSWEAcceptFollowUp(t *testing.T) {
+	t.Parallel()
+	const head = "0123456789abcdef0123456789abcdef01234567"
+	setup := func(t *testing.T, round int, report, live, override string) (string, string, string) {
+		dir, skill, calls := byHandSkill(t)
+		raw, _ := os.ReadFile(filepath.Join(dir, "state.json"))
+		if round > 1 {
+			raw = bytes.Replace(raw, []byte(`"round":1,"sessions"`), []byte(fmt.Sprintf(`"round":%d,"sessions"`, round)), 1)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "state.json"), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeRun(t, dir, "working.hold-advance", "run rule\n")
+		writeRun(t, dir, "working.review.md", report)
+		f, err := os.OpenFile(filepath.Join(skill, "lane_ops.sh"), os.O_APPEND|os.O_WRONLY, 0o700)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.WriteString("snl_lane_gh() { echo " + live + "; }\n" + override)
+		_ = f.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return dir, skill, calls
+	}
+	dir, skill, calls := setup(t, 5, "Verdict: needs-swe\nBreaks: timing table is built outside its bench gate\nHEAD: "+head+"\n", head, "")
+	out, err := run(t, dir, skill, "pr", "approve", "7", "--accept", "test-only timing nit", "--action-key", "accept-follow-up")
+	if err != nil || !strings.Contains(out, "approved at "+head) {
+		t.Fatalf("accept output=%q err=%v", out, err)
+	}
+	report, _ := os.ReadFile(filepath.Join(dir, "working.review.md"))
+	if got := string(report); !strings.Contains(got, "Verdict: pass (orchestrator: test-only timing nit)") {
+		t.Fatalf("rewritten report=%q", got)
+	}
+	if got := skillCalls(t, calls); !strings.Contains(got, "head-checks working 7 "+head) || !strings.Contains(got, "accept-review working test-only timing nit") {
+		t.Fatalf("skill calls=%q", got)
+	}
+
+	review := "Verdict: needs-swe\nBreaks: cosmetic\nHEAD: " + head + "\n"
+	for _, tc := range []struct {
+		name, override, live, accept string
+		round                        int
+	}{
+		{"round 1", "", head, "reason", 1},
+		{"CI pending", "snl_head_checks() { return 3; }\n", head, "reason", 5},
+		{"head moved", "", "fedcba9876543210fedcba9876543210fedcba98", "reason", 5},
+		{"empty reason", "", head, "", 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, skill, _ := setup(t, tc.round, review, tc.live, tc.override)
+			_, err := run(t, dir, skill, "pr", "approve", "7", "--accept", tc.accept, "--action-key", "reject-"+tc.name)
+			if !errors.Is(err, ErrRefused) {
+				t.Fatalf("accept err=%v", err)
 			}
 		})
 	}
@@ -876,7 +935,9 @@ func byHandSkill(t *testing.T) (dir, skill, calls string) {
 	t.Helper()
 	dir, skill, calls = fixture(t)
 	files := map[string]string{
-		"lane_ops.sh": "snl_lane_own() { :; }\n_snl_host_gate_optional() { return 1; }\n" + realSnlMerge,
+		"lane_ops.sh": "snl_lane_own() { :; }\n_snl_host_gate_optional() { return 1; }\n" + realSnlMerge + `
+snl_accept_review() { log accept-review "$@"; awk -v reason="$2" '{if ($0 == "Verdict: needs-swe") print "Verdict: pass (orchestrator: " reason ")"; else print}' "$RUN/$1.review.md" > "$RUN/$1.review.md.tmp"; mv "$RUN/$1.review.md.tmp" "$RUN/$1.review.md"; }
+`,
 		"pr_merge.sh": `log() { echo "$*" >> "$CALLS"; }; log pr_merge "$@"; for pr; do :; done; echo "merged $pr feed1234"` + "\n",
 		"ledger.py": `import json,sys
 a=sys.argv[1:]; kv=dict(zip(a[2::2],a[3::2])); p=a[1]+"/state.json"; s=json.load(open(p))

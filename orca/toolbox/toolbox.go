@@ -30,9 +30,10 @@ var (
 
 //nolint:govet // CLI options are grouped by parse concern.
 type options struct {
-	dir, intent, skill, key, reason, phase, brief, dependsOn string
-	shadow                                                   bool
-	timeout                                                  time.Duration
+	dir, intent, skill, key, reason, accept, phase, brief, dependsOn string
+	acceptProvided                                                   bool
+	shadow                                                           bool
+	timeout                                                          time.Duration
 }
 
 //nolint:govet // ledger projection follows the run JSON shape.
@@ -193,7 +194,17 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		if err := validate(ctx, o, cmd, t, tasks); err != nil {
 			return err
 		}
-		head, err := skill(ctx, o, "approval", t, "")
+		op, text := "approval", ""
+		if o.acceptProvided {
+			if strings.TrimSpace(o.accept) == "" {
+				return refuse("PR #%d acceptance reason is empty", t.PR)
+			}
+			if t.Round < 2 {
+				return refuse("PR #%d named review Breaks can be accepted only after review round 2", t.PR)
+			}
+			op, text = "accept-review", o.accept
+		}
+		head, err := skill(ctx, o, op, t, text)
 		if err != nil {
 			return refuse("PR #%d has no review PASS at its head: %v", t.PR, err)
 		}
@@ -248,6 +259,7 @@ func parse(args []string) (options, []string, error) {
 	fs.StringVar(&o.skill, "skill", os.Getenv("ORCA_SNL_DIR"), "swarm skill scripts directory")
 	fs.StringVar(&o.key, "action-key", "", "idempotency key")
 	fs.StringVar(&o.reason, "reason", "", "lane hold reason")
+	fs.StringVar(&o.accept, "accept", "", "accept a named review Break as follow-up")
 	fs.StringVar(&o.phase, "phase", "", "target lane phase")
 	fs.StringVar(&o.brief, "brief", "", "run-local lane brief")
 	fs.StringVar(&o.dependsOn, "depends-on", "", "comma-separated lane dependencies")
@@ -263,6 +275,11 @@ func parse(args []string) (options, []string, error) {
 		}
 		rest, args = append(rest, args[0]), args[1:]
 	}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "accept" {
+			o.acceptProvided = true
+		}
+	})
 	if bound := os.Getenv("ORCA_TOOLBOX_DIR"); bound != "" && !(inside(bound, o.dir) && inside(o.dir, bound)) {
 		return o, nil, refuse("session toolbox is bound to its run workspace")
 	}
@@ -862,7 +879,7 @@ EOF
   [ -z "$old" ] || [ $(($(date +%s) - old)) -le 7200 ] ||
    { echo "stale base: the oldest $base commit missing from $text is $((($(date +%s) - old) / 60)) min old (limit 120); orca pr update"; exit 3; } ;;
  lane.hold) [ -e "$RUN/$lane.hold-advance" ] || printf '%s\n' "$text" > "$RUN/$lane.hold-advance"; echo "lane $lane holds advance" ;;
- approval) pr=$(snl_task "$lane" pr); head=$(snl_report_word "$lane" review HEAD); verdict=$(snl_report_word "$lane" review Verdict)
+ approval|accept-review) pr=$(snl_task "$lane" pr); head=$(snl_report_word "$lane" review HEAD); verdict=$(snl_report_word "$lane" review Verdict)
   case "$verdict" in
   pass) ;;
   needs-swe)
@@ -871,13 +888,23 @@ EOF
       seen && /^[[:alnum:] _-]+:/ {exit}
       seen && $0 !~ /^[[:space:]]*$/ {print; exit}
     ' "$RUN/$lane.review.md")
-    [ -z "$breaks" ] || { echo "review needs-swe names Breaks: $breaks"; exit 3; }
+    if [ "$op" = accept-review ]; then
+      [ -n "$breaks" ] || { echo "review needs-swe has no named Breaks"; exit 3; }
+      if ! printf '%s' "$head" | grep -Eq '^[0-9a-fA-F]{40}$'; then
+        echo "review HEAD is not a full commit sha"
+        exit 3
+      fi
+    else
+      [ -z "$breaks" ] || { echo "review needs-swe names Breaks: $breaks"; exit 3; }
+    fi
     ;;
   *) echo "review Verdict is '$verdict', not pass"; exit 3 ;;
   esac
+  [ "$op" != accept-review ] || [ "$verdict" = needs-swe ] || { echo "review Verdict is '$verdict', not needs-swe"; exit 3; }
   new=$(snl_lane_gh "$lane" pr view "$pr" --json headRefOid --jq .headRefOid) || { echo "PR head unreadable"; exit 3; }
   [ -n "$head" ] && [ "$head" = "$new" ] || { echo "review HEAD ${head:-none} is not PR head ${new:-unknown}"; exit 3; }
   [ "$verdict" != needs-swe ] || snl_head_checks "$lane" "$pr" "$head" >/dev/null
+  [ "$op" != accept-review ] || snl_accept_review "$lane" "$text" >/dev/null
   echo "$head" ;;
  pr.approve) python3 "$SW/ledger.py" set "$RUN" --id "$lane" --pr-head "$text" --approval-sha "$text" >/dev/null; echo "PR #$(snl_task "$lane" pr) approved at $text" ;;
  pr.update) ghx api -X PUT "repos/$(snl_lane_slug "$lane")/pulls/$(snl_task "$lane" pr)/update-branch" -f expected_head_sha="$text" >/dev/null ;;
