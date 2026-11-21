@@ -237,6 +237,22 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 		if cmd == "pr.update" {
 			return mutate(ctx, o, cmd, t, t.PRHead, out)
 		}
+		if o.shadow && cmd == "pr.ready" {
+			// Shadow runs perform the same live read-only readiness checks, but
+			// never invoke the skill's gh pr ready mutation.  The mutation path
+			// below records the intent in the shadow ledger instead.
+			if _, err := skill(ctx, o, "ready-check", t, t.PRHead); err != nil {
+				return refuse("PR #%d is not ready at %s: %v", t.PR, t.PRHead, err)
+			}
+			if tasks, err = loadFor(o); err != nil {
+				return err
+			}
+			if i = slices.IndexFunc(tasks, func(c task) bool { return c.ID == t.ID }); i < 0 {
+				return refuse("lane %s left the ledger", t.ID)
+			}
+			t = &tasks[i]
+			return mutate(ctx, o, cmd, t, t.PRHead, out)
+		}
 		readyOp := "ready"
 		if cmd == "pr.merge" {
 			// Merge still performs the ready checks, but a draft PR must remain a
@@ -722,6 +738,9 @@ func mutate(ctx context.Context, o options, op string, t *task, text string, out
 	} else {
 		result, err = skill(ctx, o, op, t, text)
 	}
+	if err == nil && o.shadow && op == "pr.ready" {
+		result = fmt.Sprintf("PR #%d would mark ready at %s", t.PR, text)
+	}
 	if err == nil {
 		done := "done\n" + fingerprint
 		if op == "pr.rerun" {
@@ -760,10 +779,14 @@ func rerunPreflightRefusal(err error) bool {
 // shadow reports and host-diff scorer read.
 func recordIntent(dir, op string, t *task, text, key string) error {
 	id := "shadow-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	reason := "dispatcher toolbox shadow intent"
+	if op == "pr.ready" {
+		reason = "would mark ready"
+	}
 	b, err := json.Marshal(map[string]any{
 		"time": time.Now().UTC().Format(time.RFC3339Nano), "lane": t.ID, "action": op,
 		"arguments":   map[string]string{"action_key": key, "text": text, "phase": t.Phase, "terminal_id": t.NebulaTerminal},
-		"decision_id": id, "event_id": id, "reason": "dispatcher toolbox shadow intent",
+		"decision_id": id, "event_id": id, "reason": reason,
 	})
 	if err != nil {
 		return err
@@ -867,6 +890,45 @@ accept_review_gate() {
   [ "$head" = "$new" ] || { echo "review HEAD $head is not PR head $new"; exit 3; }
   snl_head_checks "$lane" "$pr" "$head" >/dev/null
 }
+head_checks_ignoring_draft() {
+  # Reuse the skill's complete exact-head check and merge-state guard while
+  # masking only isDraft.  This keeps ready's promotion behind the same live
+  # statusCheckRollup and merge checks that follow it.
+	if type head_check_guard >/dev/null 2>&1; then
+		view=$(snl_lane_gh "$lane" pr view "$pr" --json headRefOid,state,isDraft,mergeStateStatus,mergeable,statusCheckRollup) || { echo "PR readiness view unreadable"; return 3; }
+		live_head=$(jq -r '.headRefOid // empty' <<<"$view")
+		[ "$live_head" = "$text" ] || { echo "PR head $live_head does not match approved head $text"; return 3; }
+		[ "$(jq -r '.state // empty' <<<"$view")" = OPEN ] || { echo "PR is not open"; return 3; }
+		merge_state=$(jq -r '.mergeStateStatus // empty' <<<"$view")
+		mergeable=$(jq -r '.mergeable // empty' <<<"$view")
+		case "$merge_state" in
+			CLEAN|UNSTABLE|HAS_HOOKS|BEHIND) ;;
+			*) echo "PR merge state is not ready ($merge_state)"; return 75 ;;
+		esac
+		[ "$mergeable" != CONFLICTING ] || { echo "PR is conflicting"; return 3; }
+		head_check_guard "$(jq -c '.statusCheckRollup // []' <<<"$view")" "$text" "$RUN/EVENTS"
+		return $?
+	fi
+  eval "$(declare -f snl_lane_gh | sed '1s/snl_lane_gh/snl_lane_gh_original/')"
+  snl_lane_gh() {
+    if [ "$2" = pr ] && [ "$3" = view ]; then
+      view=$(snl_lane_gh_original "$@") || return $?
+      if jq -e 'type == "object" and has("isDraft")' <<<"$view" >/dev/null 2>&1; then
+        jq -c '.isDraft = false' <<<"$view"
+      else
+        printf '%s\n' "$view"
+      fi
+    else
+      snl_lane_gh_original "$@"
+    fi
+  }
+  SNL_HEAD_CHECKS_IGNORE_DRAFT=1 snl_head_checks "$lane" "$pr" "$text"
+  rc=$?
+  unset -f snl_lane_gh
+  eval "$(declare -f snl_lane_gh_original | sed '1s/snl_lane_gh_original/snl_lane_gh/')"
+  unset -f snl_lane_gh_original
+  return "$rc"
+}
 case $op in
  state) snl_terminal_agent_state "$sid" "$tid" ;;
  check) echo "terminal=$(snl_terminal_agent_state "$sid" "$tid") remote=$(snl_lane_remote_head "$lane")"
@@ -911,7 +973,7 @@ $ids
 EOF
   fi
   echo "PR #$pr rerun requested at $text" ;;
-ready|merge-check) pr=$(snl_task "$lane" pr); base=origin/${BASE:-main}
+ready|ready-check|merge-check) pr=$(snl_task "$lane" pr); base=origin/${BASE:-main}
   git fetch -q origin "$(snl_task "$lane" branch)" "${BASE:-main}" 2>/dev/null || :
   # After orca pr update the PR head is the approved head plus base merges:
   # carry the approval and record the head as snl_gate does; refuse anything else.
@@ -928,6 +990,13 @@ ready|merge-check) pr=$(snl_task "$lane" pr); base=origin/${BASE:-main}
   old=$(printf '%s\n' "$ages" | tail -1)
   [ -z "$old" ] || [ $(($(date +%s) - old)) -le 7200 ] ||
    { echo "stale base: the oldest $base commit missing from $text is $((($(date +%s) - old) / 60)) min old (limit 120); orca pr update"; exit 3; }
+  if [ "$op" = ready ] || [ "$op" = ready-check ]; then
+    head_checks_ignoring_draft || exit $?
+  fi
+  if [ "$op" = ready-check ]; then
+    echo "PR #$pr ready checks passed at $text"
+    exit 0
+  fi
   if [ "$op" = ready ]; then
     draft=$(snl_lane_gh "$lane" pr view "$pr" --json isDraft --jq .isDraft) || { echo "PR draft state unreadable"; exit 3; }
     if [ "$draft" = true ]; then

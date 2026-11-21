@@ -78,7 +78,7 @@ snl_to_review() { log to-review "$@"; }
 snl_to_clean() { log to-clean "$@"; }
 snl_fund_planned() { log fund-planned "$@"; }
 snl_merge_claims() { log claims "$1" "$2"; }
-snl_head_checks() { log head-checks "$1" "$2" "$3"; }
+snl_head_checks() { [ -z "${DRAFT_STATE:-}" ] || [ "$(cat "$DRAFT_STATE")" = false ] || [ "${SNL_HEAD_CHECKS_IGNORE_DRAFT:-}" = 1 ] || return 1; log head-checks "$1" "$2" "$3"; }
 snl_merge() { log merge "$1"; }
 snl_lane_slug() { echo o/r; }
 ghx() { log ghx "$@"; }
@@ -491,7 +491,7 @@ func TestShadowApprovalOverlayFeedsReady(t *testing.T) {
 	if _, err := run(t, dir, skill, "pr", "approve", "7", "--shadow", "--intent-dir", intent); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	if out, err := run(t, dir, skill, "pr", "ready", "7", "--shadow", "--intent-dir", intent); err != nil || !strings.Contains(out, "PR #7 ready at abc123") {
+	if out, err := run(t, dir, skill, "pr", "ready", "7", "--shadow", "--intent-dir", intent); err != nil || !strings.Contains(out, "PR #7 would mark ready at abc123") {
 		t.Fatalf("ready out=%q err=%v", out, err)
 	}
 }
@@ -1101,7 +1101,7 @@ func draftPRSkill(t *testing.T, dir, skill, live string, onlyBase bool) string {
 	}
 	_, _ = fmt.Fprintf(f, "export DRAFT_STATE=%s\n", shq(draft))
 	_ = f.Close()
-	body := fmt.Sprintf(`snl_lane_gh() { if [ "$2" = pr ] && [ "$3" = view ]; then case "$*" in *isDraft*) cat "$DRAFT_STATE" ;; *) printf '%%s\n' %s ;; esac; elif [ "$2" = pr ] && [ "$3" = ready ]; then echo "pr-ready $4" >> "$CALLS"; printf 'false\n' > "$DRAFT_STATE"; else return 1; fi; }; snl_head_checks() { [ "$(cat "$DRAFT_STATE")" = false ] || return 1; log head-checks "$1" "$2" "$3"; }
+	body := fmt.Sprintf(`snl_lane_gh() { if [ "$2" = pr ] && [ "$3" = view ]; then case "$*" in *isDraft*) cat "$DRAFT_STATE" ;; *) printf '%%s\n' %s ;; esac; elif [ "$2" = pr ] && [ "$3" = ready ]; then echo "pr-ready $4" >> "$CALLS"; printf 'false\n' > "$DRAFT_STATE"; else return 1; fi; }; snl_head_checks() { [ "$(cat "$DRAFT_STATE")" = false ] || [ "${SNL_HEAD_CHECKS_IGNORE_DRAFT:-}" = 1 ] || return 1; log head-checks "$1" "$2" "$3"; }
 `, shq(live))
 	if onlyBase {
 		body += "snl_only_base_merges() { return 1; }\n"
@@ -1161,6 +1161,66 @@ func TestReadyDraftAndHeldFundingInnerLoop(t *testing.T) {
 				t.Fatalf("hold=%s err=%v calls=%q", hold.name, err, skillCalls(t, calls))
 			}
 		})
+	}
+}
+
+func TestReadyDraftChecksBeforePromotionAndShadowRecordsIntent(t *testing.T) {
+	t.Run("failing exact-head check keeps draft", func(t *testing.T) {
+		dir, skill, calls := fixture(t)
+		draftPRSkill(t, dir, skill, "abc123", false)
+		f, err := os.OpenFile(filepath.Join(skill, "lane_ops.sh"), os.O_APPEND|os.O_WRONLY, 0o700)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = f.WriteString("snl_head_checks() { return 1; }\n")
+		_ = f.Close()
+		if _, err := run(t, dir, skill, "pr", "ready", "7"); !errors.Is(err, ErrRefused) {
+			t.Fatalf("ready err=%v", err)
+		}
+		if got := skillCalls(t, calls); strings.Contains(got, "pr-ready 7") {
+			t.Fatalf("promotion reached failing check: %q", got)
+		}
+		if got, err := os.ReadFile(filepath.Join(dir, "draft-state")); err != nil || strings.TrimSpace(string(got)) != "true" {
+			t.Fatalf("draft=%q err=%v", got, err)
+		}
+	})
+	t.Run("shadow records ready intent without promotion", func(t *testing.T) {
+		dir, skill, calls := fixture(t)
+		draftPRSkill(t, dir, skill, "abc123", false)
+		intent := t.TempDir()
+		out, err := run(t, dir, skill, "pr", "ready", "7", "--shadow", "--intent-dir", intent)
+		if err != nil || out != "PR #7 would mark ready at abc123\n" {
+			t.Fatalf("out=%q err=%v", out, err)
+		}
+		if got := skillCalls(t, calls); strings.Contains(got, "pr-ready 7") {
+			t.Fatalf("shadow promoted PR: %q", got)
+		}
+		actions, err := os.ReadFile(filepath.Join(intent, "actions.jsonl"))
+		if err != nil || !strings.Contains(string(actions), `"action":"pr.ready"`) || !strings.Contains(string(actions), `"reason":"would mark ready"`) {
+			t.Fatalf("intent=%q err=%v", actions, err)
+		}
+	})
+}
+
+func TestReadyUsesHeadCheckGuardBeforePromotion(t *testing.T) {
+	dir, skill, calls := fixture(t)
+	draft := draftPRSkill(t, dir, skill, "abc123", false)
+	f, err := os.OpenFile(filepath.Join(skill, "lane_ops.sh"), os.O_APPEND|os.O_WRONLY, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`head_check_guard() { jq -e '.[0].conclusion != "FAILURE"' <<<"$1" >/dev/null; }
+snl_lane_gh() { if [ "$2" = pr ] && [ "$3" = view ]; then printf '%s\n' '{"headRefOid":"abc123","state":"OPEN","isDraft":true,"mergeStateStatus":"CLEAN","mergeable":"MERGEABLE","statusCheckRollup":[{"name":"CI","status":"COMPLETED","conclusion":"FAILURE"}]}' ; elif [ "$2" = pr ] && [ "$3" = ready ]; then echo "pr-ready $4" >> "$CALLS"; printf 'false\n' > "$DRAFT_STATE"; else return 1; fi; }
+`)
+	_ = f.Close()
+	if _, err := run(t, dir, skill, "pr", "ready", "7"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("ready err=%v", err)
+	}
+	if got := skillCalls(t, calls); strings.Contains(got, "pr-ready 7") {
+		t.Fatalf("promoted failing PR: %q", got)
+	}
+	if got, err := os.ReadFile(draft); err != nil || strings.TrimSpace(string(got)) != "true" {
+		t.Fatalf("draft=%q err=%v", got, err)
 	}
 }
 
