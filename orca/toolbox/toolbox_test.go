@@ -1224,6 +1224,28 @@ snl_lane_gh() { if [ "$2" = pr ] && [ "$3" = view ]; then printf '%s\n' '{"headR
 	}
 }
 
+func TestReadyAcceptsDraftMergeStateBeforePromotion(t *testing.T) {
+	dir, skill, calls := fixture(t)
+	draft := draftPRSkill(t, dir, skill, "abc123", false)
+	f, err := os.OpenFile(filepath.Join(skill, "lane_ops.sh"), os.O_APPEND|os.O_WRONLY, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`head_check_guard() { return 0; }
+snl_lane_gh() { if [ "$2" = pr ] && [ "$3" = view ]; then case "$*" in *'--jq .headRefOid'*) printf 'abc123\n' ;; *'--jq .isDraft'*) cat "$DRAFT_STATE" ;; *) printf '%s\n' '{"headRefOid":"abc123","state":"OPEN","isDraft":true,"mergeStateStatus":"DRAFT","mergeable":"MERGEABLE","statusCheckRollup":[{"name":"CI","status":"COMPLETED","conclusion":"SUCCESS"}]}' ;; esac; elif [ "$2" = pr ] && [ "$3" = ready ]; then echo "pr-ready $4" >> "$CALLS"; printf 'false\n' > "$DRAFT_STATE"; else return 1; fi; }
+`)
+	_ = f.Close()
+	if out, err := run(t, dir, skill, "pr", "ready", "7"); err != nil || out != "PR #7 ready at abc123\n" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	if got := skillCalls(t, calls); !strings.Contains(got, "pr-ready 7\n") || !strings.Contains(got, "head-checks working 7 abc123") {
+		t.Fatalf("calls=%q", got)
+	}
+	if got, err := os.ReadFile(draft); err != nil || strings.TrimSpace(string(got)) != "false" {
+		t.Fatalf("draft=%q err=%v", got, err)
+	}
+}
+
 // A held lane has no gate, so snl_merge refuses it: pr merge merges the
 // approved head by hand through pr_merge.sh and records the merge; shadow
 // records intent only.

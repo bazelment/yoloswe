@@ -900,9 +900,11 @@ head_checks_ignoring_draft() {
 		[ "$live_head" = "$text" ] || { echo "PR head $live_head does not match approved head $text"; return 3; }
 		[ "$(jq -r '.state // empty' <<<"$view")" = OPEN ] || { echo "PR is not open"; return 3; }
 		merge_state=$(jq -r '.mergeStateStatus // empty' <<<"$view")
+		is_draft=$(jq -r '.isDraft // false' <<<"$view")
 		mergeable=$(jq -r '.mergeable // empty' <<<"$view")
 		case "$merge_state" in
 			CLEAN|UNSTABLE|HAS_HOOKS|BEHIND) ;;
+			DRAFT) [ "$is_draft" = true ] || { echo "PR merge state is not ready ($merge_state)"; return 75; } ;;
 			*) echo "PR merge state is not ready ($merge_state)"; return 75 ;;
 		esac
 		[ "$mergeable" != CONFLICTING ] || { echo "PR is conflicting"; return 3; }
